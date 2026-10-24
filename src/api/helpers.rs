@@ -342,6 +342,7 @@ pub(super) fn setup_cdc_for_source(
 pub(super) fn cleanup_cdc_for_source(
     source_oid: pg_sys::Oid,
     cdc_mode: CdcMode,
+    slot_name: Option<&str>,
     excluding_pgt_id: Option<i64>,
 ) -> Result<(), PgTrickleError> {
     // Check if any other STs still reference this source. During ALTER flows,
@@ -374,8 +375,8 @@ pub(super) fn cleanup_cdc_for_source(
         // If WAL-based CDC was active (or transitioning), clean up
         // the replication slot and publication first.
         if matches!(cdc_mode, CdcMode::Wal | CdcMode::Transitioning) {
-            let slot_name = wal_decoder::slot_name_for_source(source_oid);
-            wal_decoder::drop_replication_slot(&slot_name)?;
+            let default_slot = wal_decoder::slot_name_for_source(source_oid);
+            wal_decoder::retire_replication_slot(source_oid, slot_name.unwrap_or(&default_slot))?;
             wal_decoder::drop_publication(source_oid)?;
         }
 

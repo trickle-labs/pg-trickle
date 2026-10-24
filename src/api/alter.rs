@@ -897,13 +897,12 @@ fn alter_stream_table_query(
         } else if source_type == "TABLE" {
             let old_dep = old_deps.iter().find(|d| d.source_relid == *source_oid);
             let cdc_mode = old_dep.map(|d| d.cdc_mode).unwrap_or(CdcMode::Trigger);
-            if let Err(e) = cleanup_cdc_for_source(*source_oid, cdc_mode, Some(st.pgt_id)) {
-                pgrx::warning!(
-                    "Failed to clean up CDC for removed source {}: {}",
-                    source_oid.to_u32(),
-                    e
-                );
-            }
+            cleanup_cdc_for_source(
+                *source_oid,
+                cdc_mode,
+                old_dep.and_then(|dep| dep.slot_name.as_deref()),
+                Some(st.pgt_id),
+            )?;
         }
     }
 
@@ -2420,18 +2419,13 @@ pub(crate) fn alter_stream_table_impl(
                         // keeps CDC infrastructure).
                         if new_mode.is_immediate() {
                             for dep in &deps {
-                                if dep.source_type == "TABLE"
-                                    && let Err(e) = cleanup_cdc_for_source(
+                                if dep.source_type == "TABLE" {
+                                    cleanup_cdc_for_source(
                                         dep.source_relid,
                                         dep.cdc_mode,
+                                        dep.slot_name.as_deref(),
                                         Some(st.pgt_id),
-                                    )
-                                {
-                                    pgrx::warning!(
-                                        "Failed to clean up CDC for oid {}: {}",
-                                        dep.source_relid.to_u32(),
-                                        e
-                                    );
+                                    )?;
                                 }
                             }
                         }
@@ -3152,7 +3146,12 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
     // up IVM triggers instead.
     for dep in &deps {
         if !st.refresh_mode.is_immediate() && dep.source_type == "TABLE" {
-            cleanup_cdc_for_source(dep.source_relid, dep.cdc_mode, None)?;
+            cleanup_cdc_for_source(
+                dep.source_relid,
+                dep.cdc_mode,
+                dep.slot_name.as_deref(),
+                None,
+            )?;
         }
         if dep.source_type == "STREAM_TABLE" {
             // ST-ST-1: If this was the last downstream consumer of an

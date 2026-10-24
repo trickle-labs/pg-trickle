@@ -452,6 +452,190 @@ pub fn drop_replication_slot(slot_name: &str) -> Result<(), PgTrickleError> {
     Ok(())
 }
 
+fn locked_capture_owner() -> Result<Option<String>, PgTrickleError> {
+    Spi::get_one::<String>(
+        "SELECT (SELECT instance_id::text FROM pgtrickle.pgt_capture_instance
+         WHERE singleton AND state='ACTIVE'
+           AND database_oid=(SELECT oid FROM pg_database WHERE datname=current_database())
+           AND system_identifier=(SELECT system_identifier::text FROM pg_control_system())
+         FOR SHARE)",
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("WAL retirement capture ownership: {e}")))
+}
+
+/// Enqueue in the same transaction that removes or downgrades its consumers.
+pub fn retire_replication_slot(
+    source_oid: pg_sys::Oid,
+    slot_name: &str,
+) -> Result<(), PgTrickleError> {
+    let exists = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)",
+        &[slot_name.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(true);
+    if !exists {
+        return Ok(());
+    }
+    reserve_slot_cleanup(source_oid, slot_name)
+}
+
+// Also records a committed cleanup obligation before nontransactional creation.
+fn reserve_slot_cleanup(source_oid: pg_sys::Oid, slot_name: &str) -> Result<(), PgTrickleError> {
+    assert_valid_identifier(slot_name, "retiring replication slot")?;
+    let slot = Spi::get_one_with_args::<bool>(
+        "SELECT (SELECT coalesce(plugin='test_decoding' AND database=current_database(),false)
+         FROM pg_replication_slots WHERE slot_name=$1)",
+        &[slot_name.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("retire slot '{slot_name}': {e}")))?;
+    match slot {
+        None => {}
+        Some(false) => {
+            return Err(PgTrickleError::ReplicationSlotError(format!(
+                "refusing to retire slot '{slot_name}': plugin or database does not match"
+            )));
+        }
+        Some(true) => {}
+    }
+    let owner = locked_capture_owner()?.ok_or_else(|| {
+        PgTrickleError::ReplicationSlotError(format!(
+            "slot '{slot_name}' retirement requires active capture ownership"
+        ))
+    })?;
+    let local = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_change_tracking
+                       WHERE source_relid=$1 AND source_placement='local')
+             OR EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements
+                       WHERE source_relid=$1 AND slot_name=$2 AND capture_instance_id=$3)",
+        &[source_oid.into(), slot_name.into(), owner.as_str().into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !local {
+        return Err(PgTrickleError::ReplicationSlotError(format!(
+            "slot '{slot_name}' retirement requires a tracked local source (OID {})",
+            source_oid.to_u32()
+        )));
+    }
+    let reserved = Spi::get_one_with_args::<bool>(
+        "WITH reserved AS (
+         INSERT INTO pgtrickle.pgt_wal_slot_retirements AS pending(slot_name,source_relid,capture_instance_id)
+         VALUES($1,$2,$3) ON CONFLICT(slot_name) DO UPDATE SET queued_at=now()
+         WHERE pending.source_relid=EXCLUDED.source_relid
+           AND pending.capture_instance_id=EXCLUDED.capture_instance_id
+         RETURNING 1) SELECT EXISTS(SELECT 1 FROM reserved)",
+        &[slot_name.into(), source_oid.into(), owner.as_str().into()],
+    ).map_err(|e| PgTrickleError::SpiError(format!("queue retirement of slot '{slot_name}': {e}; upgrade the extension catalog if needed")))?
+    .unwrap_or(false);
+    if !reserved {
+        return Err(PgTrickleError::ReplicationSlotError(format!(
+            "slot '{slot_name}' has a pending reservation for another source or capture owner; retire that slot before retrying"
+        )));
+    }
+    Ok(())
+}
+
+/// Phase 0 only: the scheduler session lock excludes local creation/adoption.
+pub fn drain_retired_replication_slots() -> Result<(), PgTrickleError> {
+    use crate::receipt::{RetiredSlotAction, RetiredSlotState};
+    let Some(owner) = locked_capture_owner()? else {
+        return Ok(());
+    };
+    let pending = Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT source_relid,slot_name FROM pgtrickle.pgt_wal_slot_retirements ORDER BY source_relid,slot_name",
+            None,&[],
+        ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut pending = Vec::new();
+        for row in rows {
+            let source_oid = row
+                .get::<pg_sys::Oid>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("retirement source OID is NULL".into())
+                })?;
+            let slot_name = row
+                .get::<String>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("retirement slot name is NULL".into())
+                })?;
+            pending.push((source_oid, slot_name));
+        }
+        Ok::<_, PgTrickleError>(pending)
+    })?;
+    for (source_oid, slot_name) in pending {
+        let locked = Spi::get_one_with_args::<bool>(
+            "SELECT pg_try_advisory_xact_lock($1)",
+            &[i64::from(source_oid.to_u32()).into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        if !locked {
+            continue;
+        }
+        let queued_owner = Spi::get_one_with_args::<String>(
+            "SELECT (SELECT capture_instance_id::text FROM pgtrickle.pgt_wal_slot_retirements
+             WHERE slot_name=$1 AND source_relid=$2 FOR UPDATE)",
+            &[slot_name.as_str().into(), source_oid.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let Some(queued_owner) = queued_owner else {
+            continue;
+        };
+        let mut active_reference = false;
+        for dep in StDependency::get_all()? {
+            if matches!(dep.cdc_mode, CdcMode::Wal | CdcMode::Transitioning) {
+                // A dropped source cannot resolve a legacy NULL slot name.
+                if dep.slot_name.is_none() && dep.source_relid == source_oid {
+                    active_reference = true;
+                    break;
+                }
+                let expected = dep.slot_name.clone().unwrap_or_else(|| {
+                    dep.source_stable_name
+                        .as_ref()
+                        .map(|stable| format!("pgtrickle_{stable}"))
+                        .unwrap_or_else(|| slot_name_for_source(dep.source_relid))
+                });
+                if expected == slot_name {
+                    active_reference = true;
+                    break;
+                }
+            }
+        }
+        let slot = Spi::get_one_with_args::<bool>(
+            "SELECT (SELECT coalesce(plugin='test_decoding' AND database=current_database(),false)
+             FROM pg_replication_slots WHERE slot_name=$1)",
+            &[slot_name.as_str().into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let state = match slot {
+            None => RetiredSlotState::Absent,
+            Some(true) => RetiredSlotState::Owned,
+            Some(false) => RetiredSlotState::Mismatch,
+        };
+        match crate::receipt::retired_slot_action(queued_owner == owner, active_reference, state) {
+            RetiredSlotAction::Keep => {
+                test_wal_receipt_barrier(source_oid, "slot_retirement_kept", Some(&slot_name))?;
+                continue;
+            }
+            RetiredSlotAction::Drop => {
+                test_wal_receipt_barrier(source_oid, "before_slot_retirement", Some(&slot_name))?;
+                drop_replication_slot(&slot_name)?;
+                test_wal_receipt_barrier(source_oid, "after_slot_retirement", Some(&slot_name))?;
+            }
+            RetiredSlotAction::Forget => {}
+        }
+        Spi::run_with_args(
+            "DELETE FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name=$1",
+            &[slot_name.as_str().into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Get the confirmed flush LSN for a replication slot.
 ///
 /// Returns the LSN up to which the slot consumer has confirmed processing.
@@ -738,51 +922,83 @@ fn is_source_free_transaction(rows: &[WalReceipt]) -> bool {
 
 /// Decode order is commit order; individual row LSNs can precede a prior transaction's commit.
 fn receipt_transaction_ends(receipts: &[WalReceipt]) -> Result<Vec<usize>, PgTrickleError> {
-    let mut ends = Vec::new();
-    let mut start = 0;
-    let mut previous_commit = None;
-    for (index, receipt) in receipts.iter().enumerate() {
-        let invalid = || {
-            PgTrickleError::WalTransitionError(format!(
+    use crate::receipt::FrameError;
+    match crate::receipt::receipt_frame_ends(&BorrowedReceiptFrames(receipts)) {
+        Ok(ends) => Ok(ends),
+        Err(error) => {
+            let index = match error {
+                FrameError::Invalid(index) | FrameError::MalformedLsn(index) => index,
+                FrameError::Incomplete => {
+                    return Err(PgTrickleError::WalTransitionError(
+                        "incomplete WAL receipt transaction".into(),
+                    ));
+                }
+            };
+            let receipt = receipts.get(index).ok_or_else(|| {
+                PgTrickleError::InternalError(
+                    "WAL framing returned an invalid receipt index".into(),
+                )
+            })?;
+            if matches!(error, FrameError::MalformedLsn(_)) {
+                return match lsn_position(&receipt.lsn) {
+                    Err(error) => Err(error),
+                    Ok(_) => Err(PgTrickleError::InternalError(
+                        "WAL framing rejected a valid receipt LSN".into(),
+                    )),
+                };
+            }
+            Err(PgTrickleError::WalTransitionError(format!(
                 "invalid transaction framing at WAL receipt {}",
                 receipt.receipt_id
-            ))
+            )))
+        }
+    }
+}
+
+struct BorrowedReceiptFrames<'a>(&'a [WalReceipt]);
+
+impl crate::receipt::ReceiptFrameSource for BorrowedReceiptFrames<'_> {
+    fn message_count(&self) -> usize {
+        self.0.len()
+    }
+
+    fn check_row(&self, index: usize) -> bool {
+        let row = &self.0[index];
+        row.source_xid.is_some()
+            && row.slot_name == self.0[0].slot_name
+            && (index == 0 || self.0[index - 1].receipt_id < row.receipt_id)
+    }
+
+    fn same_xid(&self, start: usize, index: usize) -> bool {
+        self.0[start].source_xid == self.0[index].source_xid
+    }
+
+    fn marker(&self, index: usize) -> crate::receipt::FrameMarker {
+        use crate::receipt::FrameMarker;
+        let row = &self.0[index];
+        let Some(xid) = row.source_xid.as_deref() else {
+            return FrameMarker::Malformed;
         };
-        let xid = receipt.source_xid.as_deref().ok_or_else(invalid)?;
-        if receipt.slot_name != receipts[0].slot_name
-            || (index > 0 && receipts[index - 1].receipt_id >= receipt.receipt_id)
-        {
-            return Err(invalid());
-        }
-        if index == start {
-            if receipt.data != format!("BEGIN {xid}") {
-                return Err(invalid());
+        if let Some(marker_xid) = row.data.strip_prefix("BEGIN ") {
+            if marker_xid == xid {
+                FrameMarker::Begin
+            } else {
+                FrameMarker::Malformed
             }
-        } else if receipt.source_xid != receipts[start].source_xid {
-            return Err(invalid());
-        } else if receipt.data == format!("COMMIT {xid}") {
-            let commit = lsn_position(&receipt.lsn)?;
-            if previous_commit.is_some_and(|previous| previous >= commit) {
-                return Err(invalid());
+        } else if let Some(marker_xid) = row.data.strip_prefix("COMMIT ") {
+            if marker_xid == xid {
+                FrameMarker::Commit
+            } else {
+                FrameMarker::Malformed
             }
-            for row in &receipts[start..=index] {
-                if lsn_position(&row.lsn)? > commit {
-                    return Err(invalid());
-                }
-            }
-            ends.push(index + 1);
-            start = index + 1;
-            previous_commit = Some(commit);
-        } else if receipt.data.starts_with("BEGIN ") || receipt.data.starts_with("COMMIT ") {
-            return Err(invalid());
+        } else {
+            FrameMarker::Body
         }
     }
-    if start != receipts.len() {
-        return Err(PgTrickleError::WalTransitionError(
-            "incomplete WAL receipt transaction".into(),
-        ));
+
+    fn position(&self, index: usize) -> Option<u64> {
+        crate::version::lsn_to_u64(&self.0[index].lsn).ok()
     }
-    Ok(ends)
 }
 
 fn load_wal_receipts(
@@ -963,6 +1179,10 @@ fn test_wal_receipt_barrier(
         "before_replay" => 2,
         "before_ack" => 3,
         "after_slot_advance" => 4,
+        "before_slot_retirement" => 5,
+        "after_slot_retirement" => 6,
+        "slot_retirement_kept" => 7,
+        "before_slot_adoption" => 8,
         _ => return Ok(()),
     };
     let lock_key = i64::from(source_oid.to_u32()) * 10 + phase_code;
@@ -2185,13 +2405,7 @@ pub fn force_source_to_trigger(
     slot_names.sort_unstable();
     slot_names.dedup();
     for slot_name in slot_names {
-        if let Err(e) = drop_replication_slot(&slot_name) {
-            warning!(
-                "pg_trickle: failed to drop replication slot {} while forcing trigger CDC: {}",
-                slot_name,
-                e
-            );
-        }
+        retire_replication_slot(source_oid, &slot_name)?;
     }
     if let Err(e) = drop_publication(source_oid) {
         warning!(
@@ -2370,6 +2584,7 @@ pub fn advance_wal_transitions_phase1(change_schema: &str) -> Result<Phase1Resul
                 match check_transition_eligible(dep, requested_mode.as_deref().unwrap_or("auto")) {
                     Ok(true) => {
                         let slot_name = slot_name_for_source(dep.source_relid);
+                        reserve_slot_cleanup(dep.source_relid, &slot_name)?;
                         // Check if slot already exists (SPI read — fine in Phase 1)
                         match get_existing_slot_lsn(&slot_name)? {
                             Some(slot_lsn) => {
@@ -2610,12 +2825,39 @@ fn check_transition_eligible(
 /// eligibility check and catalog commit.
 pub fn finish_wal_transition(
     source_oid: pg_sys::Oid,
-    _pgt_id: i64,
+    pgt_id: i64,
     slot_name: &str,
     slot_lsn: &str,
 ) -> Result<(), PgTrickleError> {
     if wal_capture_is_disabled() {
         return Err(wal_capture_unavailable());
+    }
+    test_wal_receipt_barrier(source_oid, "before_slot_adoption", Some(slot_name))?;
+    let owner = locked_capture_owner()?.ok_or_else(|| {
+        PgTrickleError::WalTransitionError(format!(
+            "slot '{slot_name}' adoption requires active capture ownership"
+        ))
+    })?;
+    let reservation = Spi::get_one_with_args::<String>(
+        "SELECT (SELECT capture_instance_id::text FROM pgtrickle.pgt_wal_slot_retirements
+         WHERE slot_name=$1 AND source_relid=$2 FOR UPDATE)",
+        &[slot_name.into(), source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let current_dependency = StDependency::get_for_st(pgt_id)?.iter().any(|dep| {
+        dep.source_relid == source_oid
+            && dep.source_type == "TABLE"
+            && dep.cdc_mode == CdcMode::Trigger
+    });
+    let requested = StDependency::effective_requested_mode_for_source(source_oid)?;
+    if reservation.as_deref() != Some(owner.as_str())
+        || !current_dependency
+        || slot_name_for_source(source_oid) != slot_name
+        || !matches!(requested.as_deref(), Some("auto" | "wal"))
+    {
+        return Err(PgTrickleError::WalTransitionError(format!(
+            "slot '{slot_name}' reservation no longer matches current source, consumer or capture ownership"
+        )));
     }
     // A41-3: Eligibility recheck before committing the TRANSITIONING state.
     //
@@ -2640,16 +2882,7 @@ pub fn finish_wal_transition(
             source_oid.to_u32(),
             reason,
         );
-        // Drop the replication slot that was already created in Phase 2.
-        // If this fails (e.g. slot was already cleaned up), log and continue —
-        // the transition abort is still the correct outcome.
-        if let Err(e) = crate::wal_decoder::drop_replication_slot(slot_name) {
-            log!(
-                "pg_trickle: A41-3: could not drop slot '{}' during abort (non-fatal): {}",
-                slot_name,
-                e,
-            );
-        }
+        // The committed reservation remains available to Phase 0 cleanup.
         // Update catalog to reflect fallback to trigger mode.
         if let Err(e) =
             StDependency::update_cdc_mode_for_source(source_oid, CdcMode::Trigger, None, None)
@@ -2679,6 +2912,11 @@ pub fn finish_wal_transition(
         Some(slot_name),
         Some(slot_lsn),
     )?;
+
+    Spi::run_with_args(
+        "DELETE FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name=$1 AND capture_instance_id=$2",
+        &[slot_name.into(),owner.as_str().into()],
+    ).map_err(|e|PgTrickleError::SpiError(e.to_string()))?;
 
     info!(
         "pg_trickle: started WAL transition for source OID {} \
@@ -3313,6 +3551,82 @@ mod tests {
         let mut wrong_slot = rows.clone();
         wrong_slot[1].slot_name = "other_slot".into();
         assert!(receipt_transaction_ends(&wrong_slot).is_err());
+    }
+
+    #[test]
+    fn test_receipt_framing_adapter_preserves_reserved_markers_and_lazy_lsn_errors() {
+        assert_eq!(receipt_transaction_ends(&[]).unwrap(), Vec::<usize>::new());
+        let rows = decoded_transaction(1, &[("table public.src: INSERT: id[integer]:1", true)]);
+        assert_eq!(receipt_transaction_ends(&rows).unwrap(), vec![3]);
+        for (index, data) in [
+            (0, "BEGIN 2"),
+            (1, "BEGIN 1"),
+            (1, "COMMIT 2"),
+            (2, "COMMIT 2"),
+        ] {
+            let mut malformed = rows.clone();
+            malformed[index].data = data.into();
+            assert_eq!(
+                receipt_transaction_ends(&malformed)
+                    .unwrap_err()
+                    .to_string(),
+                format!(
+                    "WAL transition error: invalid transaction framing at WAL receipt {}",
+                    rows[index].receipt_id
+                ),
+            );
+        }
+        let mut malformed = rows.clone();
+        malformed[0].lsn = "bad-begin".into();
+        malformed[1].lsn = "bad-body".into();
+        assert!(
+            receipt_transaction_ends(&malformed[..2])
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete WAL receipt transaction")
+        );
+        malformed[2].lsn = "bad-commit".into();
+        assert!(
+            receipt_transaction_ends(&malformed)
+                .unwrap_err()
+                .to_string()
+                .contains("malformed WAL LSN 'bad-commit'")
+        );
+        malformed[2].lsn = rows[2].lsn.clone();
+        assert!(
+            receipt_transaction_ends(&malformed)
+                .unwrap_err()
+                .to_string()
+                .contains("malformed WAL LSN 'bad-begin'")
+        );
+        let mut beyond_commit = rows.clone();
+        beyond_commit[1].lsn = "0/19".into();
+        assert!(
+            receipt_transaction_ends(&beyond_commit)
+                .unwrap_err()
+                .to_string()
+                .contains("WAL receipt 102")
+        );
+        let mut absent_xid = rows.clone();
+        absent_xid[1].source_xid = None;
+        assert!(
+            receipt_transaction_ends(&absent_xid)
+                .unwrap_err()
+                .to_string()
+                .contains("WAL receipt 101")
+        );
+        let mut duplicate_id = rows.clone();
+        duplicate_id[1].receipt_id = duplicate_id[0].receipt_id;
+        assert!(receipt_transaction_ends(&duplicate_id).is_err());
+        let mut same_commit = rows.clone();
+        same_commit.extend(decoded_transaction(2, &[]));
+        same_commit[4].lsn = rows[2].lsn.clone();
+        assert!(
+            receipt_transaction_ends(&same_commit)
+                .unwrap_err()
+                .to_string()
+                .contains("WAL receipt 201")
+        );
     }
     use proptest::prelude::*;
 

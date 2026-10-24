@@ -302,6 +302,162 @@ Previously stale consumers need FULL refresh/reinitialization under READ
 COMMITTED. Full cleanup/incarnation/protocol correctness, authenticated build
 provenance, latest-head remote CI and merge approval remain outside acceptance.
 
+## Local WAL slot retirement (#1222 follow-up)
+
+Two independent read-only reviewers examined the bounded specification and
+production paths at frozen backend `f0a8c6439fb11dbc71aefc67f6675a95732e2cd5`.
+Review found and required fixes for optional SPI lookups, physical-slot NULL
+classification, references after source tracking deletion, legacy NULL slot
+names, and stale qualification commands. A later source-name-reuse review
+separated two facts: observed intent reassignment did not prevent old-consumer
+cleanup, while a direct seeded cross-OID worker history did actually remove a
+still-referenced slot. The unsupported cleanup/output-corruption prediction
+was withdrawn. The final reservation check is conservative admission; durable
+stable-name resolution independently repairs the global reference guard.
+
+The direct positive history witnesses the worker Keep barrier with slot and
+intent preserved, then requires actual retirement after removing the old
+consumer. Source replacement separately witnesses conflict rejection, unchanged
+source/owner tuple, successful old-consumer cleanup, actual retirement, retry,
+fresh WAL acknowledgement and exact downstream results.
+
+Completed bounded evidence was accepted for publication: 35/35 WAL-binary
+tests, 15/15 additional core cases, semantic floors 34/34 and 54/54, 2637 units,
+64 Python checks, formatting/lint without warnings, release-contract and
+upgrade-completeness checks. The actual published predecessor upgrade preserves
+an observed TRANSITIONING slot; completed predecessor WAL handoff remains
+unqualified, with its earlier failed setup retained separately.
+
+The proof reviewer reconstructed all 27 executable mutants and checked their
+source/output hashes and intended postcondition failures. Six reexecuted
+baselines pass: LSN 44/0, receipt 5/0, lifecycle 6/0, CDC 4/0, join 6/0 and
+identity 6/0. Receipt declares three functional obligations; the retirement
+theorem covers the shared finite gate, not SQL reference extraction, reservation
+CAS, PostgreSQL locking, durability or complete recovery transitions.
+
+The final evidence reviewer independently checked all 29 frozen input hashes,
+98 complete copied logs, counterexample/positive JSONs, package, generated SQL,
+runtime layer and published predecessor archive. All 55 actual four-file
+installation observations match library SHA-256
+`a7b58da8fb8dd0af867e3c64d423c0cd7e15471b4e87eadbc639dde52eb43303`,
+candidate commit and six bindings. Every bound runtime case has a recorded
+PASS in the final logs. The generated archive-only commit `b73dbf28` preserves
+the SQL-line multiset and exactly matches the packaged install SQL.
+
+Neither reviewer ran project checks or edited files. Acceptance is confined to
+this local-capture publication slice. Remote Citus/dblink, full release
+qualification, authenticated build/named-execution provenance, complete
+prefix/incarnation/protocol proofs, latest-head remote CI and merge approval
+remain outside acceptance. See `verification/slot-retirement-safety.md` and
+`.p2p/work/issue-1222-slot-retirement/ownership/evidence/qualification-manifest.json`.
+
+## Scheduler pause/drain follow-up — #1219
+
+Independent read-only reviewers `review_1220` and `review_1221` examined the
+bounded specification, production admission paths and final backend
+`6d7b97d0df4b2823e5c5693e265a47a1648b9622`. Review required transitive
+IMMEDIATE write membership, moving RR session configuration before the work
+transaction's first snapshot, strict SQLSTATE/outcome checks and waiting for
+both resumed rows and successful RR job completion. Singleton admission follows
+the not-due return but precedes refresh locking and internal rollback scopes.
+Capture maintenance before admission remains outside the paused-publication
+claim. Concurrent IMMEDIATE topology changes require operator serialization.
+
+Four predecessor records retain distinct observed failures: successful drain
+while inline work is blocked, publication by an enqueue committed after pause,
+publication into a paused IMMEDIATE grandchild and actual RR SQLSTATE 25001.
+The broad table-lock and status-only RR attempts were inconclusive; their
+complete failures remain retained. An initial atomicity run timed out waiting
+for its independent control. The corrected fixture forces controller and
+legacy due times transactionally without weakening paused rows/frontier
+assertions. Its older `c68546c6` qualification remains separately attributed;
+all installed phases were executed again against the final backend.
+
+Final bounded evidence was accepted: atomicity 19/19, WAL 35/35, additional
+core 13/13, scheduler/mixed-mode 28/28, observed semantic floors 34/34 and
+54/54, 2637 units, 65 Python checks, formatting/lint with zero warnings,
+release-contract and upgrade-completeness checks. No runtime retries occurred.
+All four positive witness records reach completion, preserve paused rows and
+frontier, and require exact catch-up after resume. RR qualification injects the
+supported persisted job kind; no natural DAG-builder route is claimed.
+
+The proof reviewer checked all six reexecuted kernels and reconstructed the
+27 executable mutant source/output hashes and intended postcondition failures.
+The final evidence reviewer independently checked ten frozen inputs against
+the commit/current files, 69 complete copied logs, four positive and four
+predecessor JSON hashes, the exact four-file package and all 90 matching
+installation observations. Library SHA-256 is
+`4550177c694e7f3ae054244624ae5da2dc01c678c9f977b8a897e0e66df95378`.
+All six bindings agree and every named runtime case has a final recorded PASS.
+The unchanged tracked install archive has the same noncomment SQL-line
+multiset; exact generated payload bytes are separately bound at installation.
+The validator also checks recorded inline frontier/target/control facts and
+rejects retry markers. The final documentation and qualification revision are
+refreshed after recording this review.
+
+Neither reviewer edited files or executed project checks. This accepts the
+bounded publication evidence; no new SQL admission theorem, whole scheduler
+liveness/durability proof, concurrent-topology fence, latest-candidate published
+package upgrade, latest-head remote CI, authenticated build provenance, full
+release qualification or merge approval is claimed. See
+`verification/scheduler-pause-safety.md` and
+`.p2p/work/issue-1219-pause-drain/idle/evidence/qualification-manifest.json`.
+
+## Production receipt transaction framing — #1222
+
+Independent read-only reviewer `review_1221` accepted the preimplementation
+specification, actual shared scan, immutable borrowed adapter and frozen proof
+evidence at backend `830c6a13a1025afe2f505d699ac6b699b5cf18ff`. The theorem
+requires complete successful coverage, BEGIN/body/COMMIT framing, matching
+present XIDs, one slot, strict receipt/commit order and per-span row-LSN bounds.
+It preserves old row LSNs preceding earlier commits, lazy parsing and original
+first-error context. No normalized message vector or payload copy is added;
+the shared proof uses no `assume` or external proof body.
+
+All six suites were executed again: LSN 44/0, receipt 10/0, lifecycle 6/0,
+CDC 4/0, join 6/0 and identity 6/0. The reviewer reconstructed all 28 actual
+mutant source/output hashes and checked kernel/caller/test and pinned tool
+identities. The incomplete-prefix control disables the final completion check
+and directly fails successful-output coverage; all eight receipt mutants are
+9/1 with intended postcondition failures. Prototype syntax, trigger, induction
+and resource-limit attempts remain separate from frozen execution evidence.
+
+The first installed atomicity attempt passed fifteen cases, then timed out
+before pause at an unwitnessed input barrier after an actual NO_DATA refresh;
+three cases were unrun. Review grounded a due-clock/fanout-cache setup race,
+without inferring a pause or framing failure. Qualification-only commit
+`0d9f6824a4ac4e2d1b679a057b6873cb29123830` adds eleven lines that acknowledge
+global drain before each setup batch and resume before each real witness.
+Per-node flags and every semantic assertion remain intact. This test input is
+hashed separately; the backend and proof/package inputs remain `830c6a13`.
+
+Independent final evidence reviewer `review_1220` accepted WAL 35/35, corrected
+atomicity 19/19, core 13/13, scheduler/mixed-mode 28/28, semantic floors 34/34
+and 54/54, units 2638/2638 including the named adapter test, Python 41/41,
+formatting/lint with zero warnings, release-contract and upgrade-completeness
+results. Final nextest runs use zero retries; the failed earlier execution is
+retained. Five frozen changed inputs, the separate fixture, 58 complete copied
+logs, 27 prototype/feasibility artifacts and all bound PASS records match.
+
+All six bindings and 90 actual four-file installation observations match
+library SHA-256
+`945ec0a0fe1500bc71ba952df45b2a4789c7e9dfddb84b275298063c144fd4f9`.
+Final image/base are linux/amd64 and the extracted ELF machine is 62. The
+initial arm64 runtime setup attempt was neither extracted nor run. Generated
+SQL bytes are payload-bound; the unchanged archive's noncomment SQL-line
+multiset agrees. The final validator also requires native result markers and
+the named framing adapter test, beyond package and runtime binding.
+
+Neither reviewer edited files or executed project checks. Acceptance covers
+successful framing soundness under the immutable adapter contract, not total
+acceptance completeness, SQL prefix selection, source incarnation, cleanup,
+reset/restore, replay idempotence or PostgreSQL durability. Trusted build/named-
+execution provenance, prior pause topology/RR-route exclusions, latest-head CI,
+latest-candidate published-package upgrade and full release qualification remain
+outside acceptance; no merge approval is given. See
+`verification/receipt-framing-specification.md` and
+`.p2p/work/issue-1222-receipt-framing/evidence/qualification-manifest.json`.
+
 ## Shared evidence boundary
 
 The reviews identified that candidate binding checks source hashes and

@@ -30,6 +30,14 @@ RECEIPT_CASES = [
     "e2e_wal_receipt_recovery_tests::test_wal_receipt_small_limits_preserve_complete_transactions",
     "e2e_wal_receipt_recovery_tests::test_wal_receipts_do_not_recursively_capture_their_own_payloads",
     "e2e_wal_receipt_recovery_tests::test_wal_receipt_commit_order_preserves_late_old_lsn_transaction",
+    "e2e_wal_receipt_recovery_tests::test_last_wal_consumer_drop_rollback_preserves_slot_and_frontier",
+    "e2e_wal_receipt_recovery_tests::test_deferred_consumer_registration_rollback_preserves_wal_slot",
+    "e2e_wal_receipt_recovery_tests::test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash",
+    "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_active_stale_and_mismatched_slots",
+    "e2e_wal_receipt_recovery_tests::test_dropped_wal_source_retains_retirement_until_last_consumer_commits",
+    "e2e_wal_receipt_recovery_tests::test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash",
+    "e2e_wal_receipt_recovery_tests::test_replacement_source_cannot_reassign_pending_slot_retirement",
+    "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_null_named_reference_across_source_oids",
 ]
 LIFECYCLE_CASES = [
     "e2e_having_transition_tests::test_having_all_nine_truth_transitions_match_postgresql",
@@ -80,9 +88,13 @@ PROOF_CONTRACTS = {
         "cases": EXPECTED_CASES, "inputs": [],
     },
     "receipt": {
-        "schema": "pg-trickle-receipt-verification-v1", "obligations": {"receipt_ack_row_limit", "may_skip_source_free_row"},
-        "cases": RECEIPT_CASES, "inputs": ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"],
-        "mutants": {"off-by-one", "skip-source-row", "skip-unrecognized-table", "skip-other-action"},
+        "schema": "pg-trickle-receipt-verification-v1", "obligations": {"receipt_frame_ends", "receipt_ack_row_limit", "may_skip_source_free_row", "retired_slot_action"},
+        "cases": RECEIPT_CASES, "inputs": [
+            "src/lib.rs", "src/wal_decoder.rs", "src/api/helpers.rs", "src/api/alter.rs",
+            "src/hooks.rs", "src/scheduler/scheduler_loop.rs", "src/config/scheduler.rs",
+            "sql/pg_trickle--0.108.3--0.108.4.sql", "tests/e2e_wal_receipt_recovery_tests.rs", "Cargo.toml", "Cargo.lock",
+        ],
+        "mutants": {"incomplete-prefix", "off-by-one", "skip-source-row", "skip-unrecognized-table", "skip-other-action", "retire-stale-owner", "retire-active-reference", "retire-mismatched-slot"},
     },
     "aggregate_lifecycle": {
         "schema": "pg-trickle-aggregate-lifecycle-verification-v1",
