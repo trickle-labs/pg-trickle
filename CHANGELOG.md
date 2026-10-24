@@ -222,6 +222,11 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Keep archival snapshot rows and frontiers from the same committed refresh.
+  Restoring an older archive retains differential catch-up only when its
+  required history is protected; otherwise the next refresh reinitializes.
+  Cleanup now honors an in-progress restore before deleting consumed history
+  (#1219).
 - Preserve finite SUM/AVG contributions when built-in numeric/float NaN or
   infinity inputs are changed or removed, including private-state updates while
   the displayed value stays infinite (#1217). Recovery uses captured deltas

@@ -5745,7 +5745,7 @@ operation. The main use cases are:
 
 - **Replica bootstrap** — populate a new standby without a full re-scan
 - **PITR alignment** — re-align stream table frontiers after point-in-time
-  recovery so the first refresh is DIFFERENTIAL, not a full re-scan
+  recovery, retaining differential catch-up when required history is protected
 - **Archiving** — preserve a historical snapshot for audit or rollback
 
 ### `pgtrickle.snapshot_stream_table(name, target)`
@@ -5794,8 +5794,12 @@ pgtrickle.restore_from_snapshot(
 After `restore_from_snapshot()` completes:
 
 1. The stream table's rows are replaced with the snapshot contents.
-2. The frontier is set to the snapshot's frontier, so the **next refresh cycle
-   is DIFFERENTIAL** — only changes made after the snapshot are fetched.
+2. The frontier is set to the snapshot's frontier. Differential catch-up is
+   retained when an existing consumer still protects each required table-source
+   cut (or the target already has that exact cut). Otherwise the next refresh
+   performs protected reinitialization, because cleanup may have removed the
+   history needed to replay an older snapshot. Snapshot creation and restore
+   serialize metadata and row copying with refreshes.
 
 The caller must own the destination stream table and have `SELECT` privilege on
 the snapshot. The snapshot relation must still match its cataloged OID,

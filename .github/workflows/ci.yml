@@ -685,13 +685,14 @@ jobs:
             --output .p2p/work/issue-1097-verified-production-lsn/evidence/lsn-candidate-binding.json
 
       - name: Run packaged receipt E2E and bind installed library
+        shell: bash
         env:
           PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
           PGT_RELEASE_ATTESTATION_PATH: target/receipt-full-install-attestation.json
         run: |
           mkdir -p artifacts/lifecycle-histories
           ./scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests --test e2e_refresh_atomicity_tests \
-            -E 'test(=test_wal_receipt_small_limits_preserve_complete_transactions) | test(=test_receipt_prefix_sql_control_rejects_executable_off_by_one) | test(=test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal) | test(=test_snapshot_during_witnessed_cancel_keeps_committed_rows_and_frontier)' \
+            -E 'test(=test_wal_receipt_small_limits_preserve_complete_transactions) | test(=test_receipt_prefix_sql_control_rejects_executable_off_by_one) | test(=test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal) | test(=test_snapshot_during_witnessed_cancel_keeps_committed_rows_and_frontier) | test(=test_restore_after_consumed_history_cleanup_reinitializes_before_catchup) | test(=test_snapshot_waits_for_committed_refresh_before_loading_frontier) | test(=test_restore_source_lock_defers_cleanup_until_rewind_is_visible)' \
             --test-threads 1 --retries 0 2>&1 | tee artifacts/lifecycle-histories/runtime.log
           python3 scripts/check_lsn_candidate_binding.py --proof-kind receipt \
             --proof-record .p2p/work/issue-1222-receipt-prefix/evidence/receipt-verification.json \
