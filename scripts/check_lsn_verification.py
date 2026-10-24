@@ -109,19 +109,26 @@ def check_contract() -> None:
     library = (ROOT / "src/lib.rs").read_text(encoding="utf-8")
     if '#[path = "../verification/lsn.rs"]' not in library:
         raise ValueError("production module does not import the verifier source")
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    if "  lsn-verification:" not in workflow:
-        raise ValueError("CI does not define the required LSN verification job")
-    if "python3 scripts/check_lsn_verification.py" not in workflow:
-        raise ValueError("CI does not invoke the fail-closed proof runner")
-    if "needs: [lsn-verification]" not in workflow:
+    check_ci_contract((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+
+
+def check_ci_contract(workflow: str) -> None:
+    proof_job = re.search(r"^  release-qualification-contract:\n(.*?)(?=^  [\w-]+:|\Z)", workflow, re.M | re.S)
+    package_job = re.search(r"^  light-e2e-package:\n(.*?)(?=^  [\w-]+:|\Z)", workflow, re.M | re.S)
+    if not proof_job or not package_job:
+        raise ValueError("CI is missing the proof or candidate package job")
+    package_header = package_job[1].split("    steps:", 1)[0]
+    if "needs: [release-qualification-contract]" not in package_header or "always()" in package_header:
         raise ValueError("candidate package build is not gated by LSN verification")
-    if f"docker pull {IMAGE}" not in workflow:
-        raise ValueError("CI does not pull the exact pinned Verus image before --pull=never")
-    proof_job = workflow.split("  lsn-verification:", 1)[1].split("  # ── Unit tests", 1)[0]
-    if "if:" in proof_job or "continue-on-error:" in proof_job:
+    proof_header = proof_job[1].split("    steps:", 1)[0]
+    if re.search(r"^    (if|continue-on-error):", proof_header, re.M):
         raise ValueError("CI proof job can be conditionally skipped or ignored")
-    if "run: python3 scripts/check_lsn_verification.py\n" not in proof_job:
+    proof_steps = proof_job[1].partition("      - name: Pull pinned Verus image\n")[2]
+    if f"run: docker pull {IMAGE}\n" not in proof_steps:
+        raise ValueError("CI does not pull the exact pinned Verus image before --pull=never")
+    if "if:" in proof_steps or "continue-on-error:" in proof_steps:
+        raise ValueError("CI proof job can be conditionally skipped or ignored")
+    if "run: python3 scripts/check_lsn_verification.py\n" not in proof_steps:
         raise ValueError("CI proof job does not run the fail-closed verifier command exactly")
 
 

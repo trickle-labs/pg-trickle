@@ -217,6 +217,26 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     )
     .await;
 
+    // Effective mode belongs to the last completed refresh, not the failed attempt.
+    assert!(
+        db.wait_for_condition(
+            "committed no-data baseline before failpoint",
+            &format!(
+                "SELECT COALESCE(effective_refresh_mode = 'NO_DATA', false)
+                   AND EXISTS (
+                       SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                       WHERE h.pgt_id = st.pgt_id AND h.status = 'COMPLETED'
+                         AND h.action = 'NO_DATA' AND h.initiated_by = 'SCHEDULER'
+                   )
+                 FROM pgtrickle.pgt_stream_tables st WHERE pgt_name = '{pgt_name}'"
+            ),
+            Duration::from_secs(60),
+            Duration::from_millis(100),
+        )
+        .await,
+        "scheduler did not establish the committed no-data baseline"
+    );
+
     // Commit real source changes after enabling the scheduler failpoint. The
     // failed scheduler attempt must have pending journaled input to process.
     let cycle = scenario.cycles.first().expect("scenario has a cycle");
@@ -266,7 +286,7 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     .expect("failed to inspect scheduler failure path");
     assert_eq!(requested_mode, "DIFFERENTIAL");
     assert_eq!(refresh_mode, "DIFFERENTIAL");
-    assert_eq!(effective_mode.as_deref(), Some("DIFFERENTIAL"));
+    assert_eq!(effective_mode.as_deref(), Some("NO_DATA"));
     assert!(!needs_reinit);
 
     let suspended = wait_for_suspended(&db, pgt_name, Duration::from_secs(60)).await;

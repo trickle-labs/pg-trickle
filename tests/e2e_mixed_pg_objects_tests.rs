@@ -829,7 +829,8 @@ async fn test_mixed_diamond_with_view_branch() {
         "New hardware product should appear in joined ST"
     );
 
-    // Change a product from hardware to digital
+    // Change a product from hardware to digital. Writer holdback can defer
+    // the deletion past a completed manual refresh; wait for convergence.
     db.execute("UPDATE md_products SET category = 'digital' WHERE name = 'Cable'")
         .await;
     let mut writer = db.pool.begin().await.expect("begin controlled view writer");

@@ -1,4 +1,7 @@
 {
+  "pr_pure": [
+    "e2e_dvm_fuzz_tests"
+  ],
   "pr_full": [
     "e2e_bgworker_tests",
     "e2e_bootstrap_gating_tests",
@@ -20,7 +23,6 @@
     "e2e_drain_mode_tests",
     "e2e_dvm_corpus_tests",
     "e2e_dvm_failpoint_tests",
-    "e2e_dvm_fuzz_tests",
     "e2e_dvm_metamorphic_tests",
     "e2e_dvm_negative_control_tests",
     "e2e_dvm_shrink_tests",
@@ -116,5 +118,61 @@
   "scheduled_cases": {
     "e2e_dvm_metamorphic_tests::test_v08714_live_metamorphic_families": "Nightly/manual dvm-tiers.yml and full ci.yml; exhaustive rewrite families. The batching/multi-source history regression stays in the PR suite.",
     "e2e_dvm_strategy_tests::test_v0876_strategy_variants_converge_for_corpus_cases": "Weekly/manual dvm-tiers.yml and nightly/manual full ci.yml; corpus mode cross-product. The transaction barrier/resource-boundary test stays in the PR suite."
+  },
+  "pr_full_shard_2": [
+    "e2e_cascade_regression_tests",
+    "e2e_circ_imm_tests",
+    "e2e_circular_tests",
+    "e2e_cleanup_chaos_tests",
+    "e2e_columnar_tracking_tests",
+    "e2e_dag_concurrent_tests",
+    "e2e_dag_error_tests",
+    "e2e_dag_topology_tests",
+    "e2e_diamond_tests",
+    "e2e_drain_mode_tests",
+    "e2e_dvm_metamorphic_tests",
+    "e2e_dvm_negative_control_tests",
+    "e2e_dvm_shrink_tests",
+    "e2e_error_state_tests",
+    "e2e_full_join_aggregate_tests",
+    "e2e_graph_keyless_snapshot_tests",
+    "e2e_guc_variation_tests",
+    "e2e_ivm_tests",
+    "e2e_keyless_tests",
+    "e2e_long_txn_visibility_tests",
+    "e2e_lsn_contract_tests",
+    "e2e_mixed_mode_dag_tests",
+    "e2e_mixed_pg_objects_tests",
+    "e2e_mixed_scheduling_tests",
+    "e2e_multi_cycle_dag_tests",
+    "e2e_multi_cycle_tests",
+    "e2e_outbox_tests",
+    "e2e_output_delta_qualification_disabled_tests",
+    "e2e_pg_mdm_compiler_v9_tests",
+    "e2e_predictive_cost_tests",
+    "e2e_preflight_tests",
+    "e2e_profiling_tests",
+    "e2e_property_circular_tests",
+    "e2e_property_snapshot_tests",
+    "e2e_property_zset_tests",
+    "e2e_quota_tests",
+    "e2e_refresh_tests",
+    "e2e_repair_tests",
+    "e2e_scheduler_tests",
+    "e2e_self_monitoring_tests",
+    "e2e_unsafe_boundary_tests",
+    "e2e_v077_tests",
+    "e2e_v08711_snapshot_security_tests",
+    "e2e_v0878_security_tests",
+    "e2e_v098_stability_tests",
+    "e2e_v104_conformance_tests",
+    "e2e_v107_operator_route_tests",
+    "e2e_v107_wal_transition_tests",
+    "e2e_v1150_maintain_grantee_refresh_tests",
+    "e2e_wal_cdc_tests",
+    "e2e_watermark_gating_tests"
+  ],
+  "scheduled_repetitions": {
+    "failure_recovery": "Daily 03:00 UTC/manual ci.yml production-recovery-qualification runs ten isolated passes; sensitive ready PRs retain two passes of every witnessed recovery schedule, plus all permanent full-suite cases. Maintainers own failures."
   }
 }
