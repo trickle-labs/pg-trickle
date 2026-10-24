@@ -2241,10 +2241,19 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let is_scalar_agg = group_by.is_empty();
 
     // Action classification (same COALESCE guards as new_count)
+    // A hidden HAVING group can requalify through an UPDATE with zero net row count.
     let action_case = if is_scalar_agg {
         "\
 CASE
     WHEN st.__pgt_count IS NULL AND (COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0)) > 0 THEN 'I'
+    ELSE 'U'
+END AS __pgt_meta_action"
+            .to_string()
+    } else if use_having_rescan && has_rescan {
+        "\
+CASE
+    WHEN st.__pgt_count IS NULL AND COALESCE(r.__pgt_count, 0) > 0 THEN 'I'
+    WHEN COALESCE(st.__pgt_count, 0) + COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0) <= 0 THEN 'D'
     ELSE 'U'
 END AS __pgt_meta_action"
             .to_string()
