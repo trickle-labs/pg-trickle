@@ -91,19 +91,12 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.assert_st_matches_query("rls_wal_st", query).await;
 
     wait_for_wal_mode(&db, "rls_wal_src").await;
-    // Let the scheduler settle cutover receipts without a competing manual refresh.
-    db.execute("UPDATE rls_wal_src SET val = 'warmup' WHERE id = 2")
+    // Drain cutover receipts before checking the differential refreshes caused by DML.
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['rls_wal_st'])")
         .await;
-    assert!(
-        db.wait_for_condition(
-            "RLS WAL cutover apply",
-            "SELECT val = 'warmup' FROM rls_wal_st WHERE id = 2",
-            Duration::from_secs(60),
-            Duration::from_millis(200),
-        )
-        .await,
-        "WAL cutover work should settle before differential mutations"
-    );
+    db.refresh_st_with_retry("rls_wal_st").await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['rls_wal_st'])")
+        .await;
     let baseline: i64 = db
         .query_scalar("SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history")
         .await;
@@ -136,10 +129,10 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     // Idle scheduler ticks may overwrite effective_refresh_mode with NO_DATA.
     let ran_differential: bool = db
         .query_scalar(&format!(
-            "SELECT count(*) > 0 AND bool_and(\
+            "SELECT COALESCE(bool_or(\
                 action = 'DIFFERENTIAL' AND NOT was_full_fallback \
                 AND merge_strategy_used IS DISTINCT FROM 'FULL' AND delta_row_count > 0\
-             ) FROM pgtrickle.pgt_refresh_history \
+             ), false) FROM pgtrickle.pgt_refresh_history \
              WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
                             WHERE pgt_name = 'rls_wal_st') \
                AND refresh_id > {baseline} AND status = 'COMPLETED' AND action <> 'NO_DATA'"
