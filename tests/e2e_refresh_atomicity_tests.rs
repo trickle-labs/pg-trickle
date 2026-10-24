@@ -192,8 +192,7 @@ async fn run_scheduler_pause_drain_case(immediate: bool) {
     let (mut barrier, blocker) = hold_barrier(&db, id, phase).await;
     db.execute("INSERT INTO pause_drain_source VALUES(2,'pending-inline')")
         .await;
-    db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at=now()-interval '2 hours' WHERE pgt_name='pause_drain_st'")
-        .await;
+    make_scheduler_due(&db, &[stream]).await;
     let witness = wait_for_barrier(&db, id, phase, blocker, Duration::from_secs(90)).await;
     assert_eq!(db.count(stream).await, 1);
     assert_eq!(progress(&db, id).await.frontier, before.frontier);
@@ -275,17 +274,24 @@ async fn run_scheduler_pause_drain_case(immediate: bool) {
     db.assert_st_matches_query(stream, query).await;
     db.execute("INSERT INTO pause_drain_source VALUES(3,'pending-paused')")
         .await;
-    db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at=now()-interval '2 hours' WHERE pgt_name IN ('pause_drain_st','pause_drain_control')")
-        .await;
+    make_scheduler_due(&db, &[stream, "pause_drain_control"]).await;
     let paused = progress(&db, id).await;
-    assert!(
-        db.wait_for_condition(
+    let control_dispatched = db
+        .wait_for_condition(
             "control witnesses another scheduler dispatch while target is paused",
             "SELECT count(*)=3 FROM pause_drain_control",
             Duration::from_secs(30),
-            Duration::from_millis(25)
+            Duration::from_millis(25),
         )
-        .await
+        .await;
+    observation["control_dispatch_observed"] = control_dispatched.into();
+    observation["scheduler_state"] = serde_json::from_str::<serde_json::Value>(&db.query_scalar::<String>(
+        "SELECT jsonb_build_object('metadata',(SELECT jsonb_agg(to_jsonb(s)) FROM pgtrickle.pgt_stream_tables s),'controller',(SELECT jsonb_agg(to_jsonb(c)) FROM pgtrickle.pgt_freshness_controller_state c),'history',(SELECT jsonb_agg(to_jsonb(h)) FROM pgtrickle.pgt_refresh_history h))::text"
+    ).await).unwrap();
+    std::fs::write(&artifact, serde_json::to_vec_pretty(&observation).unwrap()).unwrap();
+    assert!(
+        control_dispatched,
+        "the unpaused control must witness a later dispatch"
     );
     assert_eq!(db.count(stream).await, 2);
     assert_eq!(db.count(target).await, 2);
@@ -328,6 +334,16 @@ async fn configure_scheduler(db: &E2eDb) {
     );
 }
 
+async fn make_scheduler_due(db: &E2eDb, names: &[&str]) {
+    let names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+    let mut transaction = db.pool.begin().await.unwrap();
+    sqlx::query("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at=now()-interval '2 hours' WHERE pgt_name=ANY($1::text[])")
+        .bind(&names).execute(&mut *transaction).await.unwrap();
+    sqlx::query("UPDATE pgtrickle.pgt_freshness_controller_state SET next_due_at=clock_timestamp()-interval '1 second' WHERE pgt_id IN (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name=ANY($1::text[]))")
+        .bind(&names).execute(&mut *transaction).await.unwrap();
+    transaction.commit().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_scheduler_pause_rejects_dispatch_queued_after_pause_returns() {
     run_scheduler_pending_dispatch_case(false).await;
@@ -364,8 +380,7 @@ async fn run_scheduler_pending_dispatch_case(repeatable_read: bool) {
     let (mut barrier, blocker) = hold_barrier(&db, id, "input_boundary").await;
     db.execute("INSERT INTO pause_dispatch_source VALUES(2,'queued-before-pause')")
         .await;
-    db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at=now()-interval '2 hours' WHERE pgt_name='pause_dispatch_st'")
-        .await;
+    make_scheduler_due(&db, &[stream]).await;
     assert!(db.wait_for_condition("scheduler waits to publish already-selected dispatch", &format!(
         "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.application_name='pgt_pause_dispatch:{id}' AND a.datname=current_database() AND {blocker}=ANY(pg_blocking_pids(a.pid)))"
     ),Duration::from_secs(60),Duration::from_millis(20)).await);
