@@ -571,7 +571,10 @@ async fn test_getting_started_step4c_then_4d_combined_regression() {
     // Refresh department_stats (DIFFERENTIAL — L₀ + EC-02 correction handles
     // the combined ST + base-table changes correctly).
     db.refresh_st_with_retry("department_stats").await;
-    db.refresh_st_with_retry("department_report").await;
+    // A completed manual refresh can legitimately stop at a writer-held source
+    // frontier. Require the downstream report to catch up to the committed
+    // defining query instead of assuming one refresh sees the latest cut.
+    db.refresh_st_until_converged("department_report").await;
 
     // Backend must exist with headcount=1 (only Alice remains).
     let (hc, total_sal, avg_sal): (i64, String, String) = sqlx::query_as(

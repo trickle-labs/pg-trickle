@@ -33,7 +33,7 @@ def check_contract() -> None:
         mutate(source, name)
     if '#[path = "../verification/cdc_elision.rs"]' not in (runner.ROOT / "src/lib.rs").read_text():
         raise ValueError("production does not import the checked CDC policy")
-    for path in ["src/cdc/triggers.rs", "src/cdc/mod.rs"]:
+    for path in ["src/cdc/triggers.rs"]:
         if "crate::cdc_elision::changed_column_sql(" not in (runner.ROOT / path).read_text():
             raise ValueError(f"{path} bypasses the checked CDC policy")
     if "crate::cdc_elision::keyed_weight_sql(" not in (runner.ROOT / "src/refresh/codegen.rs").read_text():

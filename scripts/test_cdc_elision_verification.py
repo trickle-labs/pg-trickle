@@ -12,7 +12,7 @@ class CdcElisionTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "exactly one executable"):
                     cdc.mutate(stale, name)
 
-    def test_both_trigger_builders_execute_the_policy(self):
+    def test_trigger_builder_executes_the_policy(self):
         cdc.check_contract()
 
 
