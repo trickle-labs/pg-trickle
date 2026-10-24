@@ -57,7 +57,7 @@ against the unchanged CDC package also passes.
 - Scheduled-size histories: ten seeds/twelve cycles plus cancellation pass,
   no retries. Actual trigger/durability/restart witness additions also pass
   in the final default run.
-- The parent semantic floor is independently 32/34 and 52/54; special SUM/AVG
+- At that baseline the semantic floor was independently 32/34 and 52/54; special SUM/AVG
   and mixed-snapshot division still fail. The original four COUNT/FILTER
   regressions pass. These are not recovery-history successes.
 
@@ -89,3 +89,11 @@ cleanup versus new registration, and pause versus dispatch need their own
 witnessed schedules. Existing premature-cleanup/oracle controls remain;
 they are not an executable production cleanup mutant. No general minimizer,
 whole recovery proof, or merge approval is claimed.
+
+The subsequent [snapshot/restore repair](restore-history-safety.md) addresses
+missing-history recovery, metadata-read versus copy, and cleanup during an
+uncommitted restore. It also strengthens terminal cut/restart assertions and
+fixes CI pipeline failure propagation. Its frozen backend `0ab22465` passes
+the strengthened default and ten-seed/twelve-cycle histories. Capture-mode
+transitions, cleanup versus registration, pause versus dispatch, a general
+minimizer and complete protocol proofs remain outside that follow-up.

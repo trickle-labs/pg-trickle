@@ -20,6 +20,183 @@ use pg_trickle::dvm::parser::{AggExpr, AggFunc, Column, Expr, OpTree, SortExpr};
 use pg_trickle::version::Frontier;
 
 #[tokio::test]
+async fn test_semantic_sql_controls_reject_predicate_count_payload_and_join_mutants() {
+    use sha2::{Digest, Sha256};
+    let digest = |bytes: &[u8]| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+
+    struct Control {
+        name: &'static str,
+        phase: &'static str,
+        source: (&'static str, &'static str),
+        oracle: String,
+        baseline: String,
+        mutant: String,
+    }
+    async fn bag(db: &TestDb, sql: &str) -> Vec<serde_json::Value> {
+        let mut rows: Vec<serde_json::Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT to_jsonb(r) FROM ({sql}) r"
+        )))
+        .fetch_all(&db.pool)
+        .await
+        .expect("SQL setup/execution errors cannot qualify a semantic control");
+        rows.sort_by_cached_key(serde_json::Value::to_string);
+        rows
+    }
+    let db = TestDb::new().await;
+    db.execute("CREATE TYPE control_pair AS (a int,b int)")
+        .await;
+    let mut controls = Vec::new();
+
+    let retraction = lifecycle::having_retraction_sql("p");
+    assert_eq!(retraction.matches("IS NOT TRUE").count(), 1);
+    let input = "WITH t(id,p) AS (VALUES(1,NULL::boolean))";
+    controls.push(Control {
+        name: "wrong-predicate-visibility",
+        phase: "having_retraction",
+        source: ("verification/aggregate_lifecycle.rs", include_str!("../verification/aggregate_lifecycle.rs")),
+        oracle: format!("{input} SELECT id,'D'::text AS action FROM (SELECT id FROM t EXCEPT ALL SELECT id FROM t WHERE p) old_only"),
+        baseline: format!("{input} SELECT id,'D'::text AS action FROM t WHERE {retraction}"),
+        mutant: format!("{input} SELECT id,'D'::text AS action FROM t WHERE {}",retraction.replace("IS NOT TRUE","IS FALSE")),
+    });
+
+    let mut count = count_star("counted");
+    count.function = AggFunc::Count;
+    count.argument = Some(colref("payload"));
+    let (inserts, deletes) =
+        pg_trickle::dvm::operators::aggregate::agg_delta_exprs(&count, &["payload".into()]);
+    let input = "WITH t(__pgt_action,payload) AS (VALUES \
+        ('I',NULL::control_pair),('I',ROW(NULL,NULL)::control_pair), \
+        ('I',ROW(1,NULL)::control_pair),('I',ROW(1,2)::control_pair), \
+        ('D',ROW(NULL,NULL)::control_pair))";
+    let generated = format!("{input} SELECT {inserts} AS inserted,{deletes} AS deleted FROM t");
+    assert_eq!(generated.matches("COUNT(payload)").count(), 2);
+    controls.push(Control {
+        name:"wrong-nonnull-count", phase:"count_argument_nullability",
+        source:("src/dvm/operators/aggregate.rs",include_str!("../src/dvm/operators/aggregate.rs")),
+        oracle:format!("{input} SELECT pg_catalog.count(payload) FILTER(WHERE __pgt_action='I') AS inserted,pg_catalog.count(payload) FILTER(WHERE __pgt_action='D') AS deleted FROM t"),
+        mutant:generated.replace("COUNT(payload)","COUNT(CASE WHEN payload IS NOT NULL THEN 1 END)"),
+        baseline:generated,
+    });
+
+    let raw = "SELECT decode('01','hex') AS __pgt_row_id,'D'::text AS __pgt_action,7 AS id,'{\"value\":1}'::json AS payload \
+        UNION ALL SELECT decode('01','hex'),'I',7,'{\"value\":2}'::json";
+    let generated = cdc_elision::keyed_weight_sql(raw, "id,payload");
+    assert_eq!(
+        generated
+            .matches("PARTITION BY __pgt_row_id,__pgt_image")
+            .count(),
+        1
+    );
+    let apply = |delta: &str| {
+        format!(
+            "SELECT old.id,CASE WHEN d.__pgt_action='I' THEN d.payload ELSE old.payload END AS payload \
+        FROM (SELECT 7 AS id,'{{\"value\":1}}'::json AS payload) old LEFT JOIN {delta} d ON d.id=old.id"
+        )
+    };
+    controls.push(Control {
+        name: "lost-old-payload",
+        phase: "apply_same_key_replacement",
+        source: (
+            "verification/cdc_elision.rs",
+            include_str!("../verification/cdc_elision.rs"),
+        ),
+        oracle: "SELECT 7 AS id,'{\"value\":2}'::json AS payload".into(),
+        baseline: apply(&generated),
+        mutant: apply(&generated.replace(
+            "PARTITION BY __pgt_row_id,__pgt_image",
+            "PARTITION BY __pgt_row_id",
+        )),
+    });
+
+    let insert = join_plan::Term {
+        left_scan: 0,
+        right_scan: 1,
+        left_boundary: join_plan::Boundary::After,
+        right_boundary: join_plan::Boundary::After,
+        retract: false,
+    };
+    let delete = join_plan::Term {
+        left_boundary: join_plan::Boundary::Before,
+        right_boundary: join_plan::Boundary::Before,
+        retract: true,
+        ..insert
+    };
+    let generated = join_plan::endpoint_changes_sql(
+        "old_endpoint",
+        "new_endpoint",
+        &["v".into()],
+        insert,
+        delete,
+    )
+    .unwrap();
+    assert!(generated.contains("new_endpoint"));
+    let input = "WITH old_endpoint AS(SELECT decode('01','hex') AS __pgt_row_id,10 AS v), \
+        new_endpoint AS(SELECT decode('01','hex') AS __pgt_row_id,20 AS v)";
+    controls.push(Control {
+        name:"wrong-join-snapshot",phase:"endpoint_actions",
+        source:("verification/join_plan.rs",include_str!("../verification/join_plan.rs")),
+        oracle:format!("{input} SELECT __pgt_row_id,'D'::text AS __pgt_action,v FROM (SELECT * FROM old_endpoint EXCEPT ALL SELECT * FROM new_endpoint) d \
+            UNION ALL SELECT __pgt_row_id,'I'::text,v FROM (SELECT * FROM new_endpoint EXCEPT ALL SELECT * FROM old_endpoint) i"),
+        baseline:format!("{input} {generated}"),
+        mutant:format!("{input} {}",generated.replace("new_endpoint","old_endpoint")),
+    });
+
+    assert_eq!(
+        controls.len(),
+        4,
+        "the semantic control floor cannot shrink"
+    );
+    let mut observed = Vec::new();
+    for control in controls {
+        assert_ne!(
+            control.baseline, control.mutant,
+            "{}: mutation did not change executable SQL",
+            control.name
+        );
+        let expected = bag(&db, &control.oracle).await;
+        assert!(
+            !expected.is_empty(),
+            "{}: empty native expectation",
+            control.name
+        );
+        let baseline = bag(&db, &control.baseline).await;
+        assert_eq!(
+            baseline, expected,
+            "{}: correct generated baseline must pass",
+            control.name
+        );
+        let mutant = bag(&db, &control.mutant).await;
+        assert_ne!(
+            mutant, expected,
+            "{}: executable SQL mutant escaped its intended bag detector",
+            control.name
+        );
+        observed.push(serde_json::json!({
+            "case":control.name,"expected_failure_class":"MultisetMismatch","failure_class":"MultisetMismatch",
+            "expected_phase":control.phase,"phase":control.phase,"baseline_passed":true,"mutant_executed":true,
+            "source_path":control.source.0,"source_sha256":digest(control.source.1.as_bytes()),
+            "oracle_sql_sha256":digest(control.oracle.as_bytes()),
+            "baseline_sql_sha256":digest(control.baseline.as_bytes()),
+            "mutant_sql_sha256":digest(control.mutant.as_bytes()),
+            "expected":expected,"baseline":baseline,"mutant":mutant
+        }));
+    }
+    let directory = std::path::Path::new(".p2p/work/issue-1218-semantic-controls/evidence");
+    std::fs::create_dir_all(directory).unwrap();
+    std::fs::write(directory.join("semantic-sql-controls.json"),serde_json::to_vec_pretty(&serde_json::json!({
+        "schema":"pg-trickle-semantic-sql-controls-v1","selected":4,"observed":observed,
+        "candidate_commit":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+        "test_source_sha256":digest(include_bytes!("dvm_aggregate_execution_tests.rs")),
+        "boundary":"Generated production-adapter SQL executes in stock PostgreSQL. Mutants alter that SQL; setup/execution errors fail the test rather than qualify a kill."
+    })).unwrap()).unwrap();
+}
+
+#[tokio::test]
 async fn test_nonfinite_aggregate_state_uses_frozen_delta_and_restores_avg_auxiliary() {
     let db = TestDb::new().await;
     for (sql_type, oid, average_type) in [

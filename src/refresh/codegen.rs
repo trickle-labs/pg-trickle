@@ -344,8 +344,8 @@ pub(crate) fn drain_pending_cleanups() {
         let lock_acquired =
             // nosemgrep: rust.spi.query.dynamic-format — oid is a u32 from internal catalog lookup, not user input
             Spi::get_one::<bool>(&format!("SELECT pg_try_advisory_xact_lock({oid}::bigint)"))
-                .unwrap_or(Some(true))
-                .unwrap_or(true);
+                .unwrap_or(Some(false))
+                .unwrap_or(false);
         if !lock_acquired {
             pgrx::debug1!(
                 "[pg_trickle] D-1: cleanup advisory lock contended for OID {}, \
@@ -497,12 +497,26 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
 
     let values_list = source_oids
         .iter()
+        .filter(|&&oid| {
+            // Restore serializes frontier rewinds with both cleanup paths.
+            Spi::get_one_with_args::<bool>(
+                "SELECT pg_try_advisory_xact_lock($1::bigint)",
+                &[i64::from(oid).into()],
+            )
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+        })
         .map(|oid| {
             let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
             format!("({oid}::oid, '{buf_name}')")
         })
         .collect::<Vec<_>>()
         .join(",");
+
+    if values_list.is_empty() {
+        return;
+    }
 
     let metadata = Spi::connect(|client| -> Vec<(u32, bool, Option<String>)> {
         let sql = format!(

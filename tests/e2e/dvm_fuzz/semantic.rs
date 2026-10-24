@@ -48,6 +48,7 @@ fn case(id: &str, query: &str, columns: &[&str], rows: &str, changes: &[(&str, u
             schedule: "24h".to_string(),
             requested_refresh_mode: "DIFFERENTIAL".to_string(),
             require_differential_history: true,
+            observe_numeric_scale: false,
         },
         expected_capability: ExpectedCapability {
             differential: true,
@@ -133,10 +134,10 @@ pub fn cases_for_bags(max_size: usize) -> Vec<Scenario> {
                 &[(&format!("{}; UPDATE $s.input SET v = {new_value}, w = 1 WHERE id = 1; {}", observed(old), observed(new)), 1)]));
         }
     }
-    cases.push(case(
+    let mut numeric = case(
         "numeric_observations",
-        "SELECT id, v, scale(v) AS observed_scale FROM $s.input",
-        &["id", "v", "observed_scale"],
+        "SELECT id, v FROM $s.input",
+        &["id", "v"],
         "INSERT INTO $s.input VALUES (1,1,1.0,NULL)",
         &[
             ("UPDATE $s.input SET v = 1.00 WHERE id = 1", 1),
@@ -145,7 +146,9 @@ pub fn cases_for_bags(max_size: usize) -> Vec<Scenario> {
             ("UPDATE $s.input SET v = 'NaN' WHERE id = 1", 1),
             ("UPDATE $s.input SET v = -0.00 WHERE id = 1", 1),
         ],
-    ));
+    );
+    numeric.execution.observe_numeric_scale = true;
+    cases.push(numeric);
     for (name, expression) in [
         ("filtered_argument", "SUM(100 / v) FILTER (WHERE v <> 0)"),
         (
@@ -228,8 +231,8 @@ pub fn cases_for_bags(max_size: usize) -> Vec<Scenario> {
         };
         let mut consumers = case(
             id,
-            "SELECT id,scale(v) AS observed_scale FROM $s.input",
-            &["id", "observed_scale"],
+            "SELECT id,v FROM $s.input",
+            &["id", "v"],
             "INSERT INTO $s.input VALUES (1,1,1.0,NULL)",
             &[
                 ("UPDATE $s.input SET v=1.00 WHERE id=1", 1),
@@ -238,6 +241,7 @@ pub fn cases_for_bags(max_size: usize) -> Vec<Scenario> {
                 ("UPDATE $s.input SET v=1.00 WHERE id=1", 1),
             ],
         );
+        consumers.execution.observe_numeric_scale = true;
         let create = format!(
             "SELECT pgtrickle.create_stream_table('sem_{id}.all_columns', 'SELECT id,k,v,w FROM sem_{id}.input', '24h', 'DIFFERENTIAL')"
         );
@@ -276,6 +280,15 @@ mod tests {
         assert_eq!(cases.len(), 34);
         assert_eq!(bags_through(3).len(), 35);
         assert_eq!(cases_for_bags(3).len(), 54);
+        let observed: Vec<_> = cases
+            .iter()
+            .filter(|scenario| scenario.execution.observe_numeric_scale)
+            .map(|scenario| scenario.scenario_id.as_str())
+            .collect();
+        assert_eq!(
+            observed,
+            vec!["numeric_observations", "all_first", "narrow_first"]
+        );
         let mut ids = std::collections::BTreeSet::new();
         for scenario in cases {
             assert!(ids.insert(scenario.scenario_id.clone()));
@@ -283,6 +296,10 @@ mod tests {
             let json = serde_json::to_string(&scenario).expect("serialize replay");
             let decoded: Scenario = serde_json::from_str(&json).expect("deserialize replay");
             assert_eq!(decoded.query.defining_query, scenario.query.defining_query);
+            assert_eq!(
+                decoded.execution.observe_numeric_scale,
+                scenario.execution.observe_numeric_scale
+            );
         }
     }
 }
