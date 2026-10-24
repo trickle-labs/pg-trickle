@@ -512,13 +512,13 @@ async fn test_circular_nonconvergence_error_status() {
     // validation failures, then ALTER them into a cycle.
     db.execute(
         "SELECT pgtrickle.create_stream_table('cyc_nc_a', \
-         $SELECT val FROM cyc_nc_seed$, \
+         $$SELECT val FROM cyc_nc_seed$$, \
          '1s', 'DIFFERENTIAL', false)",
     )
     .await;
     db.execute(
         "SELECT pgtrickle.create_stream_table('cyc_nc_b', \
-         $SELECT val FROM cyc_nc_seed$, \
+         $$SELECT val FROM cyc_nc_seed$$, \
          '1s', 'DIFFERENTIAL', false)",
     )
     .await;
@@ -526,14 +526,14 @@ async fn test_circular_nonconvergence_error_status() {
     // Monotonically increasing cycle: A adds 1 to B, B reads from A
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_nc_a', \
-         query => $SELECT val FROM cyc_nc_seed \
+         query => $$SELECT val FROM cyc_nc_seed \
            UNION ALL \
-           SELECT val + 1 FROM cyc_nc_b$)",
+           SELECT val + 1 FROM cyc_nc_b$$)",
     )
     .await;
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_nc_b', \
-         query => $SELECT val FROM cyc_nc_a$)",
+         query => $$SELECT val FROM cyc_nc_a$$)",
     )
     .await;
 
