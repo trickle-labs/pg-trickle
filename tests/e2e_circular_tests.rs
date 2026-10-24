@@ -541,21 +541,14 @@ async fn test_circular_nonconvergence_error_status() {
     // Wait for the scheduler to attempt the cycle and hit the limit.
     // With max_fixpoint_iterations=1, it should fail to converge and mark ERROR.
     let got_error = wait_for_status(&db, "cyc_nc_a", "ERROR", Duration::from_secs(180)).await;
+    assert!(got_error, "cyc_nc_a did not reach ERROR on non-convergence");
 
     // Note: Since each iteration generates new rows unconditionally, it is guaranteed
     // to never converge, making it a reliable test.
-    if got_error {
-        let status_b: String = db
-            .query_scalar(
-                "SELECT status FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_name = 'cyc_nc_b'",
-            )
-            .await;
-        assert_eq!(
-            status_b, "ERROR",
-            "Both SCC members should be ERROR on non-convergence"
-        );
-    }
+    assert!(
+        wait_for_status(&db, "cyc_nc_b", "ERROR", Duration::from_secs(10)).await,
+        "cyc_nc_b did not reach ERROR after cyc_nc_a on non-convergence"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -655,9 +648,6 @@ async fn test_circular_drop_member_clears_scc_id() {
 #[tokio::test]
 async fn test_circular_default_rejects_cycles() {
     let db = E2eDb::new().await.with_extension().await;
-    // Explicitly enforce the default to prevent GUC pollution from other tests
-    // that may have set allow_circular=true via ALTER SYSTEM.
-    db.execute("SET pg_trickle.allow_circular = false").await;
 
     db.execute("CREATE TABLE cyc_def_src (id INT PRIMARY KEY, val INT NOT NULL)")
         .await;
@@ -688,7 +678,8 @@ async fn test_circular_default_rejects_cycles() {
 
     // ALTER B to reference A — this would form a cycle
     let result = db
-        .try_execute(
+        .try_execute_with_config(
+            &["SET pg_trickle.allow_circular = false"],
             "SELECT pgtrickle.alter_stream_table('cyc_def_b', \
              query => $$SELECT a.id, a.val FROM cyc_def_a a$$)",
         )

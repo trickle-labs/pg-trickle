@@ -49,6 +49,11 @@ def targets(root: Path = ROOT) -> list[str]:
         source = (root / "tests" / f"{binary}.rs").read_text()
         if binary not in full or f"fn {test}(" not in source:
             raise ValueError(f"missing scheduled combination: {case}")
+    for case in policy.get("isolated_cases", {}):
+        binary, test = case.split("::")
+        source = (root / "tests" / f"{binary}.rs").read_text()
+        if binary not in full or f"fn {test}(" not in source:
+            raise ValueError(f"missing isolated combination: {case}")
     return full
 
 

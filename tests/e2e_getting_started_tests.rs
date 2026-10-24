@@ -631,9 +631,12 @@ async fn test_getting_started_step4c_then_4d_sequential_regression() {
     // ── Cycle 1: rename Engineering → R&D ────────────────────────────
     db.execute("UPDATE departments SET name = 'R&D' WHERE id = 2")
         .await;
-    db.refresh_st_with_retry("department_tree").await;
-    db.refresh_st_with_retry("department_stats").await;
-    db.refresh_st_with_retry("department_report").await;
+    // Wait for each layer to consume committed CDC input before advancing to
+    // the next cycle. A completed refresh can legitimately see an older
+    // watermark and leave a source mutation pending.
+    db.refresh_st_until_converged("department_tree").await;
+    db.refresh_st_until_converged("department_stats").await;
+    db.refresh_st_until_converged("department_report").await;
 
     // All 7 department rows must exist with correct __pgt_count.
     // (setup_base_tables creates 7 departments — DevOps is added in step 2.4b
@@ -656,8 +659,8 @@ async fn test_getting_started_step4c_then_4d_sequential_regression() {
 
     // ── Cycle 2: delete Bob ──────────────────────────────────────────
     db.execute("DELETE FROM employees WHERE name = 'Bob'").await;
-    db.refresh_st_with_retry("department_stats").await;
-    db.refresh_st_with_retry("department_report").await;
+    db.refresh_st_until_converged("department_stats").await;
+    db.refresh_st_until_converged("department_report").await;
 
     // Backend must still exist with headcount=1 (only Alice remains).
     let (hc, total_sal, avg_sal): (i64, String, String) = sqlx::query_as(

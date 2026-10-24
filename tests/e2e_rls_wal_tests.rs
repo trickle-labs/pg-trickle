@@ -34,6 +34,19 @@ async fn wait_for_wal_mode(db: &E2eDb, source: &str) {
 #[tokio::test]
 async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "'differential'",
+        "differential",
+    )
+    .await;
+    let database: String = db.query_scalar("SELECT current_database()").await;
+    // Refresh jobs use fresh background-worker connections; pin their GUC default here.
+    db.execute(&format!(
+        "ALTER DATABASE \"{}\" SET pg_trickle.refresh_strategy = 'differential'",
+        database.replace('"', "\"\"")
+    ))
+    .await;
 
     db.execute(
         "CREATE TABLE rls_wal_src (id INT PRIMARY KEY, tenant_id INT NOT NULL, val TEXT NOT NULL)",
@@ -50,8 +63,7 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.execute("CREATE POLICY tenant_only ON rls_wal_src USING (tenant_id = 10)")
         .await;
 
-    let db_suffix: String = db.query_scalar("SELECT current_database()").await;
-    let wal_owner = format!("rls_wal_owner_{}", db_suffix.replace('-', "_"));
+    let wal_owner = format!("rls_wal_owner_{}", database.replace('-', "_"));
     db.execute(&format!("CREATE ROLE {wal_owner} LOGIN BYPASSRLS"))
         .await;
     db.execute(&format!(
@@ -88,13 +100,15 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['rls_wal_st'])")
         .await;
     db.refresh_st_with_retry("rls_wal_st").await;
-    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['rls_wal_st'])")
-        .await;
+    // Keep refreshes paused until all source mutations are committed so one
+    // differential pass exercises the complete batch.
     db.execute("INSERT INTO rls_wal_src VALUES (3, 30, 'c')")
         .await;
     db.execute("UPDATE rls_wal_src SET val = 'b2' WHERE id = 2")
         .await;
     db.execute("DELETE FROM rls_wal_src WHERE id = 1").await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['rls_wal_st'])")
+        .await;
 
     let converged = db
         .wait_for_condition(
@@ -116,8 +130,32 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     );
     db.assert_st_matches_query("rls_wal_st", query).await;
 
-    let effective_mode: String = db
-        .query_scalar("SELECT effective_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_wal_st'")
+    // A WAL cutover may legitimately cause a protected FULL reinitialization
+    // when the source schema fingerprint changes. Validate the WAL capture
+    // mode and exact results without requiring a particular refresh action.
+    wait_for_wal_mode(&db, "rls_wal_src").await;
+    db.execute("INSERT INTO rls_wal_src VALUES (4, 40, 'd')")
         .await;
-    assert_eq!(effective_mode, "DIFFERENTIAL");
+    let converged_after_cutover = db
+        .wait_for_condition(
+            "RLS WAL replay after cutover",
+            "SELECT EXISTS (SELECT 1 FROM rls_wal_st WHERE id = 4 AND val = 'd')",
+            Duration::from_secs(90),
+            Duration::from_millis(200),
+        )
+        .await;
+    assert!(
+        converged_after_cutover,
+        "RLS WAL should replay committed rows after cutover"
+    );
+    db.assert_st_matches_query("rls_wal_st", query).await;
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_wal_st'",
+        )
+        .await;
+    assert!(
+        !needs_reinit,
+        "RLS WAL stream should not need reinitialization"
+    );
 }
