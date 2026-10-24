@@ -3,6 +3,13 @@
 This is the first slice of #1222, part of #1225. It does not complete the
 cleanup, incarnation, reset/restore or recovery-transition proof work.
 
+The original raw-stream adapter below describes frozen `c06b7125`. The
+subsequent [feedback repair](receipt-feedback-safety.md) conservatively omits
+source-free ordinary table transactions from persistence and validates their
+place in a freshly peeked exact consuming prefix. Source and unrecognized
+transactions retain complete durable receipts. The arithmetic contract still
+uses the entire consumed raw prefix, including source-free work, as n.
+
 ## Independent contract
 
 For a persisted, applied prefix containing `n` decoder messages and ending at a
@@ -24,7 +31,7 @@ Verus and `src/wal_decoder.rs::acknowledge_receipt_batch`. Its postcondition
 establishes the exact limit and its bounds. Changing the request to `n + 1`
 fails that postcondition; it is not a compile-error mutation control.
 
-## Adapter obligations and separate runtime evidence
+## Original adapter obligations and separate runtime evidence
 
 - `poll_wal_changes` persists the complete decoder output atomically before
   replay or acknowledgement. The decoder includes unrelated table messages;
@@ -69,7 +76,9 @@ executable control are not a proof of the transaction-framing adapter.
 ## Reproduction and CI
 
 Run `python3 scripts/check_receipt_verification.py` for the pinned Verus
-baseline and executable mutation. It reuses the LSN proof runner, compiler and
+baseline and executable mutations. The feedback follow-up adds the source-free
+bookkeeping decision and three guard mutants to the original n+1 control.
+It reuses the LSN proof runner, compiler and
 solver identity collection, summary checks and source digests. Records are in
 `.p2p/work/issue-1222-receipt-prefix/evidence/`. Ordinary Rust boundary tests
 cover the minimum, maximum and rejected count domains. CI executes this proof
@@ -86,7 +95,7 @@ bash scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests \
 
 An arithmetic proof record alone is not source/package/installation binding.
 The existing binding helper's `--proof-kind receipt` mode additionally requires
-matching caller/build-input hashes, the named receipt E2E case and matching
+matching caller/build-input hashes, all three required receipt E2E cases and matching
 packaged/installed library bytes. The existing packaged-candidate CI job runs
 this mode after the receipt test. A configured workflow is not evidence that
 its installed-candidate qualification has run successfully.

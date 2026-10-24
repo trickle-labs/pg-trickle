@@ -536,9 +536,9 @@ const MAX_CONSECUTIVE_WAL_ERRORS: u32 = 20;
 /// Poll WAL changes from a replication slot into the durable receipt table.
 ///
 /// Uses `pg_logical_slot_peek_changes()` with the `test_decoding` plugin to
-/// retrieve decoded WAL changes without acknowledging the slot. Raw rows are
-/// committed to `pgtrickle.pgt_wal_receipts`; a later transaction replays them
-/// into the normal change buffer and acknowledges the exact same rows.
+/// retrieve decoded WAL changes without acknowledging the slot. Complete
+/// transactions are persisted before replay, except source-free receipt
+/// bookkeeping that would recursively capture its own durable payloads.
 ///
 /// The `test_decoding` output format provides structured text output that
 /// we parse to extract action type, column values, and LSN information.
@@ -549,7 +549,7 @@ const MAX_CONSECUTIVE_WAL_ERRORS: u32 = 20;
 /// our expected columns, this function returns `Err(WalTransitionError)`
 /// so the caller can abort the WAL transition and fall back to triggers.
 ///
-/// Returns the number of source changes received and the last peeked LSN.
+/// Returns the number of source changes received and last represented COMMIT LSN.
 pub fn poll_wal_changes(
     source_oid: pg_sys::Oid,
     slot_name: &str,
@@ -591,40 +591,24 @@ pub fn poll_wal_changes(
     // sensitive names, and partition routing (child table arrives instead of root).
     let filter_names = resolve_wal_filter_names(source_oid, source_table_name)?;
 
-    Spi::connect(|client| {
-        let result = client
-            .select(&poll_sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-        for row in result {
-            let lsn = row
-                .get::<String>(1)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .unwrap_or_default();
-            let source_xid = row
-                .get::<String>(2)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            let data = row
-                .get::<String>(3)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .unwrap_or_default();
-
-            // COR-5: OID-based filter via pre-resolved canonical names set.
-            // test_decoding decodes ALL tables. Keep unrelated rows in the
-            // receipt stream so the later acknowledgement can verify the
-            // complete slot sequence, but only replay source rows.
-            let source_change = matches!(
-                extract_table_name_from_test_decoding(&data),
-                Some(name) if filter_names.contains(name)
-            );
-
-            if source_change && let Some(action) = parse_pgoutput_action(&data) {
+    let rows = read_decoded_messages(&poll_sql, slot_name, &filter_names)?;
+    let mut start = 0;
+    for end in receipt_transaction_ends(&rows)? {
+        let transaction = &rows[start..end];
+        start = end;
+        if is_source_free_transaction(transaction) {
+            continue;
+        }
+        for row in transaction {
+            if row.source_change
+                && let Some(action) = parse_pgoutput_action(&row.data)
+            {
                 // Schema-change detection: when pgoutput emits a DML message
                 // whose column set doesn't match our expected columns, a DDL
                 // change likely occurred. Return an error so the caller can
                 // fall back to triggers.
                 if action != 'T' {
-                    let parsed = parse_pgoutput_columns(&data);
+                    let parsed = parse_pgoutput_columns(&row.data);
                     if detect_schema_mismatch(&parsed, columns) {
                         return Err(PgTrickleError::WalTransitionError(format!(
                             "Schema change detected for source OID {} — \
@@ -640,17 +624,14 @@ pub fn poll_wal_changes(
             store_wal_receipt(
                 source_oid,
                 slot_name,
-                &lsn,
-                source_xid.as_deref(),
-                &data,
-                source_change,
+                &row.lsn,
+                row.source_xid.as_deref(),
+                &row.data,
+                row.source_change,
             )?;
-
-            last_lsn = Some(lsn);
         }
-
-        Ok::<(), PgTrickleError>(())
-    })?;
+        last_lsn = transaction.last().map(|row| row.lsn.clone());
+    }
 
     if let Some(ref lsn) = last_lsn {
         update_receipt_watermark(source_oid, "receipt_high_water_lsn", lsn)?;
@@ -668,7 +649,9 @@ fn store_wal_receipt(
     data: &str,
     source_change: bool,
 ) -> Result<(), PgTrickleError> {
-    test_wal_receipt_barrier(source_oid, "before_receipt", Some(data))?;
+    if source_change {
+        test_wal_receipt_barrier(source_oid, "before_receipt", Some(data))?;
+    }
     Spi::run_with_args(
         "INSERT INTO pgtrickle.pgt_wal_receipts \
              (source_relid, slot_name, lsn, source_xid, data, source_change) \
@@ -694,6 +677,63 @@ struct WalReceipt {
     source_xid: Option<String>,
     data: String,
     source_change: bool,
+}
+
+fn read_decoded_messages(
+    sql: &str,
+    slot_name: &str,
+    filter_names: &std::collections::HashSet<String>,
+) -> Result<Vec<WalReceipt>, PgTrickleError> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(sql, None, &[])
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut messages = Vec::new();
+        for row in rows {
+            let data = row
+                .get::<String>(3)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or_default();
+            messages.push(WalReceipt {
+                receipt_id: i64::try_from(messages.len()).map_err(|_| {
+                    PgTrickleError::WalTransitionError("decoded prefix is too large".into())
+                })?,
+                slot_name: slot_name.to_string(),
+                lsn: row
+                    .get::<String>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or_default(),
+                source_xid: row
+                    .get::<String>(2)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                source_change: extract_table_name_from_test_decoding(&data)
+                    .is_some_and(|name| filter_names.contains(name)),
+                data,
+            });
+        }
+        Ok(messages)
+    })
+}
+
+fn same_decoded_messages(left: &[WalReceipt], right: &[WalReceipt]) -> bool {
+    left.iter()
+        .map(|r| (&r.lsn, &r.source_xid, &r.data))
+        .eq(right.iter().map(|r| (&r.lsn, &r.source_xid, &r.data)))
+}
+
+/// Called only after complete framing; replay has no effect for source-free DML.
+fn is_source_free_transaction(rows: &[WalReceipt]) -> bool {
+    rows.get(1..rows.len().saturating_sub(1))
+        .is_some_and(|body| {
+            body.iter().all(|row| {
+                crate::receipt::may_skip_source_free_row(
+                    row.source_change,
+                    extract_table_name_from_test_decoding(&row.data)
+                        .is_some_and(|name| !name.is_empty()),
+                    matches!(parse_pgoutput_action(&row.data), Some('I' | 'U' | 'D')),
+                )
+            })
+        })
 }
 
 /// Decode order is commit order; individual row LSNs can precede a prior transaction's commit.
@@ -1014,119 +1054,112 @@ pub fn replay_pending_wal_receipts(change_schema: &str) -> Result<(), PgTrickleE
     Ok(())
 }
 
-fn slot_has_reached(slot_name: &str, lsn: &str) -> Result<bool, PgTrickleError> {
-    Spi::get_one_with_args::<bool>(
-        "SELECT confirmed_flush_lsn >= $2::pg_lsn \
-           FROM pg_replication_slots \
-          WHERE slot_name = $1 AND database = current_database()",
-        &[slot_name.into(), lsn.into()],
-    )
-    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
-    .map(|value| value.unwrap_or(false))
-}
-
 fn lsn_position(lsn: &str) -> Result<u64, PgTrickleError> {
     crate::version::lsn_to_u64(lsn)
         .map_err(|e| PgTrickleError::WalTransitionError(format!("malformed WAL LSN '{lsn}': {e}")))
 }
 
-fn acknowledge_receipt_batch(
-    source_oid: pg_sys::Oid,
-    receipts: &[WalReceipt],
-) -> Result<(), PgTrickleError> {
-    let transaction_ends = receipt_transaction_ends(receipts)?;
-    let first = receipts.first().ok_or_else(|| {
-        PgTrickleError::InternalError("cannot acknowledge empty WAL batch".into())
-    })?;
-    let through_lsn = receipts
-        .last()
-        .map(|receipt| receipt.lsn.as_str())
-        .ok_or_else(|| {
-            PgTrickleError::InternalError("cannot find WAL batch high-water mark".into())
-        })?;
-    assert_valid_identifier(&first.slot_name, "replication slot name")?;
-
-    if !slot_has_reached(&first.slot_name, through_lsn)? {
-        let confirmed_lsn = get_slot_confirmed_lsn(&first.slot_name)?.ok_or_else(|| {
-            PgTrickleError::WalTransitionError(format!(
-                "WAL slot '{}' disappeared while acknowledging receipts",
-                first.slot_name
-            ))
-        })?;
-        let confirmed_position = lsn_position(&confirmed_lsn)?;
-        let mut first_unconsumed = 0;
-        for end in transaction_ends {
-            if lsn_position(&receipts[end - 1].lsn)? <= confirmed_position {
-                first_unconsumed = end;
-            } else {
-                break;
-            }
-        }
-        let expected = &receipts[first_unconsumed..];
-        if !expected.is_empty() {
-            let max_changes = crate::receipt::receipt_ack_row_limit(expected.len()).ok_or_else(|| {
-                PgTrickleError::WalTransitionError(
-                    "WAL acknowledgement requires a complete transaction within the row-count bound".into(),
-                )
-            })?;
-            let sql = format!(
-                "SELECT lsn::text, xid::text, data \
-                   FROM pg_logical_slot_get_changes('{}', NULL, {})",
-                first.slot_name, max_changes
-            );
-            let actual = Spi::connect(|client| {
-                let rows = client
-                    .select(&sql, None, &[])
-                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-                let mut values = Vec::new();
-                for row in rows {
-                    values.push((
-                        row.get::<String>(1)
-                            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                            .unwrap_or_default(),
-                        row.get::<String>(2)
-                            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
-                        row.get::<String>(3)
-                            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                            .unwrap_or_default(),
-                    ));
-                }
-                Ok::<_, PgTrickleError>(values)
-            })?;
-            let expected_values = expected
-                .iter()
-                .map(|receipt| {
-                    (
-                        receipt.lsn.clone(),
-                        receipt.source_xid.clone(),
-                        receipt.data.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            if actual != expected_values {
-                return Err(PgTrickleError::WalTransitionError(format!(
-                    "WAL receipt acknowledgement mismatch for source OID {}",
-                    source_oid.to_u32()
-                )));
-            }
-            for receipt in expected {
-                test_wal_receipt_barrier(source_oid, "after_slot_advance", Some(&receipt.data))?;
-            }
+fn represented_slot_prefix(
+    raw: &[WalReceipt],
+    applied: &[WalReceipt],
+    confirmed: u64,
+) -> Result<(usize, usize, usize), PgTrickleError> {
+    let applied_ends = receipt_transaction_ends(applied)?;
+    let mut represented = 0;
+    let mut next = 0;
+    for &end in &applied_ends {
+        if lsn_position(&applied[end - 1].lsn)? <= confirmed {
+            represented = end;
+            next += 1;
+        } else {
+            break;
         }
     }
+    let already_confirmed = represented;
+    let mut consumed = 0;
+    let mut start = 0;
+    for end in receipt_transaction_ends(raw)? {
+        let transaction = &raw[start..end];
+        if let Some(&applied_end) = applied_ends.get(next)
+            && same_decoded_messages(transaction, &applied[represented..applied_end])
+        {
+            represented = applied_end;
+            next += 1;
+        } else if !is_source_free_transaction(transaction) {
+            if next < applied_ends.len() {
+                return Err(PgTrickleError::WalTransitionError(
+                    "decoded transaction differs from the next applied WAL receipt".into(),
+                ));
+            }
+            break;
+        }
+        consumed = end;
+        start = end;
+    }
+    Ok((consumed, represented, already_confirmed))
+}
 
-    let through_receipt_id = receipts
-        .last()
-        .map(|receipt| receipt.receipt_id)
-        .ok_or_else(|| {
-            PgTrickleError::InternalError("cannot acknowledge empty WAL batch".into())
+fn acknowledge_receipt_batch(
+    source_oid: pg_sys::Oid,
+    slot_name: &str,
+    receipts: &[WalReceipt],
+) -> Result<(), PgTrickleError> {
+    assert_valid_identifier(slot_name, "replication slot name")?;
+    if receipts
+        .iter()
+        .any(|receipt| receipt.slot_name != slot_name)
+    {
+        return Err(PgTrickleError::WalTransitionError(
+            "applied receipt belongs to another WAL slot".into(),
+        ));
+    }
+    let confirmed = get_slot_confirmed_lsn(slot_name)?.ok_or_else(|| {
+        PgTrickleError::WalTransitionError(format!(
+            "WAL slot '{slot_name}' disappeared while acknowledging receipts"
+        ))
+    })?;
+    let source_name = cdc::get_qualified_table_name(source_oid)?;
+    let filters = resolve_wal_filter_names(source_oid, &source_name)?;
+    let peek_sql = format!(
+        "SELECT lsn::text,xid::text,data FROM pg_logical_slot_peek_changes('{slot_name}',NULL,{})",
+        config::pg_trickle_wal_max_changes_per_poll()
+    );
+    let raw = read_decoded_messages(&peek_sql, slot_name, &filters)?;
+    let (consumed, represented, already_confirmed) =
+        represented_slot_prefix(&raw, receipts, lsn_position(&confirmed)?)?;
+    let expected = &raw[..consumed];
+    if !expected.is_empty() {
+        let max_changes = crate::receipt::receipt_ack_row_limit(expected.len()).ok_or_else(|| {
+            PgTrickleError::WalTransitionError(
+                "WAL acknowledgement requires a complete transaction within the row-count bound".into(),
+            )
         })?;
-    set_receipts_status(source_oid, "APPLIED", "ACKNOWLEDGED", through_receipt_id)?;
-    update_acknowledged_watermark(source_oid, through_lsn)?;
+        let sql = format!(
+            "SELECT lsn::text,xid::text,data FROM pg_logical_slot_get_changes('{}', NULL, {})",
+            slot_name, max_changes
+        );
+        let actual = read_decoded_messages(&sql, slot_name, &filters)?;
+        if !same_decoded_messages(&actual, expected) {
+            return Err(PgTrickleError::WalTransitionError(format!(
+                "WAL receipt acknowledgement mismatch for source OID {}",
+                source_oid.to_u32()
+            )));
+        }
+        for receipt in receipts[already_confirmed..represented]
+            .iter()
+            .filter(|receipt| receipt.source_change)
+        {
+            test_wal_receipt_barrier(source_oid, "after_slot_advance", Some(&receipt.data))?;
+        }
+    }
+    if let Some(last) = receipts[..represented].last() {
+        set_receipts_status(source_oid, "APPLIED", "ACKNOWLEDGED", last.receipt_id)?;
+        update_acknowledged_watermark(source_oid, &last.lsn)?;
+    }
     Ok(())
 }
 
-/// Acknowledge APPLIED receipts only after their exact slot sequence is known.
+/// Acknowledge an exact prefix covered by APPLIED receipts or source-free bookkeeping.
 /// If a worker crashed after PostgreSQL advanced the slot, the confirmed LSN
 /// lets this step finish without consuming the slot a second time.
 pub fn acknowledge_pending_wal_receipts(change_schema: &str) -> Result<(), PgTrickleError> {
@@ -1139,17 +1172,25 @@ pub fn acknowledge_pending_wal_receipts(change_schema: &str) -> Result<(), PgTri
             continue;
         }
         let acknowledge_result = (|| {
+            let locked = Spi::get_one_with_args::<bool>(
+                "SELECT pg_try_advisory_xact_lock($1::bigint)",
+                &[i64::from(dep.source_relid.to_u32()).into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(false);
+            if !locked {
+                return Ok(());
+            }
             let receipt_limit = config::pg_trickle_wal_max_changes_per_poll()
                 .max(1)
                 .min(i32::MAX as i64) as i32;
             let receipts = load_wal_receipts(dep.source_relid, "APPLIED", receipt_limit)?;
-            if receipts.is_empty() {
-                return Ok(());
-            }
             for receipt in receipts.iter().filter(|receipt| receipt.source_change) {
                 test_wal_receipt_barrier(dep.source_relid, "before_ack", Some(&receipt.data))?;
             }
-            acknowledge_receipt_batch(dep.source_relid, &receipts)
+            let default_slot = slot_name_for_source(dep.source_relid);
+            let slot_name = dep.slot_name.as_deref().unwrap_or(&default_slot);
+            acknowledge_receipt_batch(dep.source_relid, slot_name, &receipts)
         })();
         if let Err(error) = acknowledge_result {
             warning!(
@@ -2287,7 +2328,9 @@ pub fn advance_wal_transitions_phase1(change_schema: &str) -> Result<Phase1Resul
     let cdc_mode = config::pg_trickle_cdc_mode();
 
     // Get all dependencies to check their CDC mode
-    let all_deps = StDependency::get_all()?;
+    let mut all_deps = StDependency::get_all()?;
+    // Match restore's source-lock order across a multi-source poll transaction.
+    all_deps.sort_by_key(|dep| dep.source_relid.to_u32());
 
     // Group by source_relid to avoid processing the same source multiple times
     let mut processed_sources = std::collections::HashSet::new();
@@ -3110,6 +3153,138 @@ pub fn write_worker_changes_to_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decoded_transaction(index: i64, body: &[(&str, bool)]) -> Vec<WalReceipt> {
+        let xid = index.to_string();
+        let mut values = vec![(format!("BEGIN {xid}"), false)];
+        values.extend(
+            body.iter()
+                .map(|(data, source)| (data.to_string(), *source)),
+        );
+        values.push((format!("COMMIT {xid}"), false));
+        let count = values.len();
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(row, (data, source_change))| WalReceipt {
+                receipt_id: index * 100 + row as i64,
+                slot_name: "slot".into(),
+                source_xid: Some(xid.clone()),
+                lsn: format!("0/{:X}", index * 16 + if row == count - 1 { 8 } else { 0 }),
+                data,
+                source_change,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_receipt_source_free_skip_rejects_source_unrecognized_and_truncate() {
+        let known = "table pgtrickle.pgt_wal_receipts: UPDATE: data[text]:'payload'";
+        for (body, source, expected) in [
+            (known, false, true),
+            (known, true, false),
+            (
+                "table pgtrickle.pgt_change_tracking: UPDATE: source_relid[oid]:42",
+                false,
+                true,
+            ),
+            ("table public.other: INSERT: id[integer]:1", false, true),
+            ("table public.src: INSERT: id[integer]:1", true, false),
+            ("table : INSERT: id[integer]:1", false, false),
+            (
+                "table pgtrickle.pgt_wal_receipts_extra: INSERT: id[integer]:1",
+                false,
+                true,
+            ),
+            (
+                "table pgtrickle.pgt_wal_receipts: TRUNCATE: (no-flags)",
+                false,
+                false,
+            ),
+            (
+                "message: transactional: 1 prefix: user, sz: 0 content:",
+                false,
+                false,
+            ),
+        ] {
+            let tx = decoded_transaction(1, &[(body, source)]);
+            receipt_transaction_ends(&tx).unwrap();
+            assert_eq!(is_source_free_transaction(&tx), expected, "{body}");
+        }
+        assert!(!is_source_free_transaction(&decoded_transaction(
+            1,
+            &[
+                (known, false),
+                ("table public.src: INSERT: id[integer]:1", true)
+            ]
+        )));
+        assert!(is_source_free_transaction(&decoded_transaction(1, &[])));
+        assert!(is_source_free_transaction(&decoded_transaction(
+            1,
+            &[
+                (known, false),
+                (
+                    "table pgtrickle_changes.changes_42: INSERT: id[integer]:1",
+                    false
+                ),
+                (
+                    "table pgtrickle.pgt_capture_instance: UPDATE: singleton[boolean]:true",
+                    false
+                ),
+            ]
+        )));
+    }
+
+    #[test]
+    fn test_receipt_prefix_covers_applied_transactions_and_stops_before_unknown_work() {
+        let noise1 = decoded_transaction(
+            1,
+            &[(
+                "table pgtrickle.pgt_wal_receipts: UPDATE: data[text]:'first'",
+                false,
+            )],
+        );
+        let source = decoded_transaction(2, &[("table public.src: INSERT: id[integer]:1", true)]);
+        let noise3 = decoded_transaction(
+            3,
+            &[(
+                "table pgtrickle.pgt_change_tracking: UPDATE: source_relid[oid]:42",
+                false,
+            )],
+        );
+        let unknown = decoded_transaction(
+            4,
+            &[(
+                "message: transactional: 1 prefix: user, sz: 0 content:",
+                false,
+            )],
+        );
+        let raw = [noise1.clone(), source.clone(), noise3.clone(), unknown].concat();
+        assert_eq!(
+            represented_slot_prefix(&raw, &source, 0).unwrap(),
+            (9, 3, 0)
+        );
+        assert_eq!(represented_slot_prefix(&raw, &[], 0).unwrap(), (3, 0, 0));
+        assert_eq!(
+            represented_slot_prefix(&noise3, &source, 0x28).unwrap(),
+            (3, 3, 3)
+        );
+        assert_eq!(
+            represented_slot_prefix(&raw, &raw[..9], 0).unwrap(),
+            (9, 9, 0),
+            "legacy bookkeeping receipts remain valid"
+        );
+        let mut changed = source.clone();
+        changed[1].data = "table public.src: INSERT: id[integer]:99".into();
+        assert!(
+            represented_slot_prefix(&raw, &changed, 0).is_err(),
+            "mismatched source work must fail before consuming the slot"
+        );
+        assert!(
+            represented_slot_prefix(&raw[..5], &source, 0).is_err(),
+            "partial raw transactions cannot be acknowledged"
+        );
+    }
 
     #[test]
     fn test_receipt_transactions_preserve_commit_order_and_reject_partial_frames() {

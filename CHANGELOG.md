@@ -222,6 +222,10 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Prevent recursive WAL receipt payloads during continued source activity.
+  Complete source transactions remain durable before acknowledgement; only
+  validated source-free table transactions can advance without another receipt
+  (#1222).
 - Keep archival snapshot rows and frontiers from the same committed refresh.
   Restoring an older archive retains differential catch-up only when its
   required history is protected; otherwise the next refresh reinitializes.

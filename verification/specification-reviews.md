@@ -235,6 +235,40 @@ This accepts the observed repair, not complete recovery/cleanup/incarnation
 proofs, untested schedules, remote CI success, authenticated compilation
 provenance or merge approval.
 
+## Receipt feedback follow-up — #1222
+
+Independent read-only reviewer `review_1220` accepted the source-relative
+contract and implementation at `1bcd6a8ea39a3c9ad7ab957bf1a0793fa77985f6`.
+Complete recognized ordinary-DML transactions may bypass persistence only when
+all rows are unrelated to the current source. Source, unrecognized and
+TRUNCATE work retains the complete transaction. Exact legacy APPLIED matching
+precedes skipping; checked raw-prefix counting and GET comparison remain intact.
+
+The initial whitelist implementation `0e662c12` failed installed qualification
+because replay mixes change-buffer INSERTs and receipt status UPDATEs. Both
+that failure and the predecessor's 81 nested receipts remain retained, along
+with the diagnosed decoded transaction. Source review did not override this
+failure; the revised implementation required a new package and qualification.
+
+Final evidence was independently inspected and accepted: WAL binary 24/24
+(nineteen scenarios and five helpers), additional core 14/14, semantic floors
+34/34 and 54/54, 2636 units and 26 relevant Python checks. Six source cycles
+acknowledge actual source work with zero nested receipts, four additional
+receipts per cycle and maximum payload 87 bytes. All 42 installation observations
+and six bindings match the actual three-file package, library SHA-256
+`d3f7c4709139ac8b40117c7e8faa8846d9b78542f82e3c90f3876ebee80737d4`.
+Receipt Verus baseline is 2/0 with four intended mutant postcondition failures;
+the other five proof records retain matching source/caller hashes. All fourteen
+complete log hashes match. The manifest separates eleven backend-frozen inputs
+from revised documentation instead of labeling documentation edits as frozen
+backend inputs. No runtime retries were used.
+
+The reviewer executed no tests, builds or proofs. This accepts the bounded
+repair and observed evidence. Complete source/partition classification,
+prefix-loop correctness, incarnation, cleanup, durability and full recovery
+proofs remain outside the formal claim. Build/named-execution provenance remains
+trusted runner input; this grants no merge approval.
+
 ## Shared evidence boundary
 
 The reviews identified that candidate binding checks source hashes and

@@ -499,7 +499,7 @@ async fn wait_for_exact(pool: &PgPool, stream: &str, journal: &str) {
 async fn matching_receipts(pool: &PgPool, oid: i64, status: &str, value: &str) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*)::bigint FROM pgtrickle.pgt_wal_receipts
-          WHERE source_relid = $1 AND status = $2 AND data LIKE $3",
+          WHERE source_relid = $1 AND source_change AND status = $2 AND data LIKE $3",
     )
     .bind(oid)
     .bind(status)
@@ -512,7 +512,7 @@ async fn matching_receipts(pool: &PgPool, oid: i64, status: &str, value: &str) -
 async fn matching_receipt_lsn(db: &E2eDb, oid: i64, status: &str, value: &str) -> String {
     sqlx::query_scalar(
         "SELECT lsn::text FROM pgtrickle.pgt_wal_receipts
-          WHERE source_relid = $1 AND status = $2 AND data LIKE $3
+          WHERE source_relid = $1 AND source_change AND status = $2 AND data LIKE $3
           ORDER BY lsn LIMIT 1",
     )
     .bind(oid)
@@ -597,6 +597,62 @@ async fn receipt_slot_reached(db: &E2eDb, slot: &str, oid: i64, value: &str) -> 
     .fetch_one(&db.pool)
     .await
     .expect("inspect WAL slot acknowledgement")
+}
+
+#[tokio::test]
+async fn test_wal_receipts_do_not_recursively_capture_their_own_payloads() {
+    let fixture = setup_wal_fixture("feedback_bound").await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = std::path::Path::new(&directory).join("receipt-feedback.json");
+    let mut history = Vec::new();
+    for cycle in 1..=6 {
+        let value = format!("feedback-{cycle}");
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            cycle + 1,
+            &value,
+        )
+        .await;
+        assert!(fixture.db.wait_for_condition("actual source receipt acknowledged", &format!(
+            "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_receipts WHERE source_relid={} AND source_change AND status='ACKNOWLEDGED' AND data LIKE '%{value}%')",
+            fixture.oid
+        ), WAIT, Duration::from_millis(25)).await);
+        let sample: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_build_object('receipts',count(*),'max_payload_bytes',coalesce(max(octet_length(data)),0),
+                'recursive_receipts',count(*) FILTER(WHERE data LIKE '%table pgtrickle.pgt_wal_receipts:%table pgtrickle.pgt_wal_receipts:%'))
+             FROM pgtrickle.pgt_wal_receipts WHERE source_relid=$1",
+        ).bind(fixture.oid).fetch_one(&fixture.db.pool).await.unwrap();
+        let recursive_transaction: serde_json::Value = sqlx::query_scalar(
+            "SELECT coalesce(jsonb_agg(jsonb_build_object('source_xid',source_xid,'source_change',source_change,'data',left(data,600)) ORDER BY receipt_id),'[]'::jsonb)
+             FROM pgtrickle.pgt_wal_receipts WHERE source_relid=$1 AND source_xid IN (
+               SELECT source_xid FROM pgtrickle.pgt_wal_receipts WHERE source_relid=$1
+               AND data LIKE '%table pgtrickle.pgt_wal_receipts:%table pgtrickle.pgt_wal_receipts:%' LIMIT 1)",
+        ).bind(fixture.oid).fetch_one(&fixture.db.pool).await.unwrap();
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "cycle":cycle,"source_acknowledged":true,"sample":sample,
+                "recursive_transaction":recursive_transaction,
+                "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            }),
+        );
+        assert_eq!(
+            sample["recursive_receipts"],
+            0,
+            "receipt bookkeeping must not become recursively nested durable payloads; {}",
+            path.display()
+        );
+        assert_eq!(
+            cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
+            Some("WAL")
+        );
+    }
+    wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
 }
 
 #[tokio::test]
