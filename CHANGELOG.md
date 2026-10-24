@@ -222,6 +222,9 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Verify the production WAL transaction-boundary scan against complete receipt
+  framing, including XID/slot/order and per-transaction LSN bounds, while keeping
+  persisted formats and lazy error behavior unchanged (#1222).
 - Make scheduler pause wait for admitted inline and worker transactions,
   including synchronous IMMEDIATE descendants, and reject dispatch selected
   before a pause but admitted afterward. Dedicated repeatable-read jobs now

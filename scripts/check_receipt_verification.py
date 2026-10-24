@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the production receipt limit with the existing pinned LSN proof runner."""
+"""Check production receipt framing and gates with the pinned LSN proof runner."""
 
 import argparse
 import json
@@ -10,13 +10,14 @@ import check_lsn_verification as runner
 
 SOURCE = runner.ROOT / "verification/receipt.rs"
 EVIDENCE = runner.ROOT / ".p2p/work/issue-1222-receipt-prefix/evidence"
-OBLIGATIONS = ["receipt_ack_row_limit", "may_skip_source_free_row", "retired_slot_action"]
+OBLIGATIONS = ["receipt_frame_ends", "receipt_ack_row_limit", "may_skip_source_free_row", "retired_slot_action"]
 PRODUCTION_INPUTS = [
     "src/lib.rs", "src/wal_decoder.rs", "src/api/helpers.rs", "src/api/alter.rs",
     "src/hooks.rs", "src/scheduler/scheduler_loop.rs", "src/config/scheduler.rs",
-    "sql/pg_trickle--0.108.3--0.108.4.sql", "Cargo.toml", "Cargo.lock",
+    "sql/pg_trickle--0.108.3--0.108.4.sql", "tests/e2e_wal_receipt_recovery_tests.rs", "Cargo.toml", "Cargo.lock",
 ]
 MUTATIONS = {
+    "incomplete-prefix": ("if start != length { return Err(FrameError::Incomplete); }", "if false { return Err(FrameError::Incomplete); }"),
     "off-by-one": ("Some(message_count as i32)", "Some((message_count + 1) as i32)"),
     "skip-source-row": ("    !source_change && recognized_table && ordinary_dml\n", "    recognized_table && ordinary_dml\n"),
     "skip-unrecognized-table": ("    !source_change && recognized_table && ordinary_dml\n", "    !source_change && ordinary_dml\n"),
@@ -47,6 +48,11 @@ def check_contract() -> None:
         raise ValueError("production bookkeeping classification bypasses the verified decision")
     if "crate::receipt::retired_slot_action(" not in (runner.ROOT / "src/wal_decoder.rs").read_text():
         raise ValueError("production retirement bypasses the verified decision")
+    caller = (runner.ROOT / "src/wal_decoder.rs").read_text()
+    if "crate::receipt::receipt_frame_ends(&BorrowedReceiptFrames(receipts))" not in caller:
+        raise ValueError("production framing bypasses the verified scan")
+    if "impl crate::receipt::ReceiptFrameSource for BorrowedReceiptFrames<'_>" not in caller:
+        raise ValueError("production framing lacks its borrowed immutable adapter")
 
 
 def run_checks() -> None:
@@ -89,7 +95,7 @@ def run_checks() -> None:
             "semantic_mutation": controls["off-by-one"], "semantic_mutations": controls,
         }
         (EVIDENCE / "receipt-verification.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        print("Receipt limit, bookkeeping and retirement gates verified; all executable mutants rejected. "
+        print("Receipt framing, limit, bookkeeping and retirement gates verified; all executable mutants rejected. "
               f"Evidence: {EVIDENCE.relative_to(runner.ROOT)}")
     finally:
         mutant.unlink(missing_ok=True)

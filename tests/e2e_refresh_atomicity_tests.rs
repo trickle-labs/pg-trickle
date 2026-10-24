@@ -186,6 +186,8 @@ async fn run_scheduler_pause_drain_case(immediate: bool) {
     db.create_st("pause_drain_control", query, "1h", "DIFFERENTIAL")
         .await;
     let id = pgt_id(&db, stream).await;
+    // A due update must precede the tick's change-cache snapshot.
+    assert!(db.query_scalar::<bool>("SELECT pgtrickle.drain(30)").await);
     let before = progress(&db, id).await;
     let phase = "input_boundary";
     set_chaos(&db, stream, phase).await;
@@ -193,6 +195,10 @@ async fn run_scheduler_pause_drain_case(immediate: bool) {
     db.execute("INSERT INTO pause_drain_source VALUES(2,'pending-inline')")
         .await;
     make_scheduler_due(&db, &[stream]).await;
+    assert!(
+        db.query_scalar::<bool>("SELECT pgtrickle.resume_after_drain()")
+            .await
+    );
     let witness = wait_for_barrier(&db, id, phase, blocker, Duration::from_secs(90)).await;
     assert_eq!(db.count(stream).await, 1);
     assert_eq!(progress(&db, id).await.frontier, before.frontier);
@@ -272,9 +278,14 @@ async fn run_scheduler_pause_drain_case(immediate: bool) {
         .await
     );
     db.assert_st_matches_query(stream, query).await;
+    assert!(db.query_scalar::<bool>("SELECT pgtrickle.drain(30)").await);
     db.execute("INSERT INTO pause_drain_source VALUES(3,'pending-paused')")
         .await;
     make_scheduler_due(&db, &[stream, "pause_drain_control"]).await;
+    assert!(
+        db.query_scalar::<bool>("SELECT pgtrickle.resume_after_drain()")
+            .await
+    );
     let paused = progress(&db, id).await;
     let control_dispatched = db
         .wait_for_condition(

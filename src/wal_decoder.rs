@@ -922,51 +922,83 @@ fn is_source_free_transaction(rows: &[WalReceipt]) -> bool {
 
 /// Decode order is commit order; individual row LSNs can precede a prior transaction's commit.
 fn receipt_transaction_ends(receipts: &[WalReceipt]) -> Result<Vec<usize>, PgTrickleError> {
-    let mut ends = Vec::new();
-    let mut start = 0;
-    let mut previous_commit = None;
-    for (index, receipt) in receipts.iter().enumerate() {
-        let invalid = || {
-            PgTrickleError::WalTransitionError(format!(
+    use crate::receipt::FrameError;
+    match crate::receipt::receipt_frame_ends(&BorrowedReceiptFrames(receipts)) {
+        Ok(ends) => Ok(ends),
+        Err(error) => {
+            let index = match error {
+                FrameError::Invalid(index) | FrameError::MalformedLsn(index) => index,
+                FrameError::Incomplete => {
+                    return Err(PgTrickleError::WalTransitionError(
+                        "incomplete WAL receipt transaction".into(),
+                    ));
+                }
+            };
+            let receipt = receipts.get(index).ok_or_else(|| {
+                PgTrickleError::InternalError(
+                    "WAL framing returned an invalid receipt index".into(),
+                )
+            })?;
+            if matches!(error, FrameError::MalformedLsn(_)) {
+                return match lsn_position(&receipt.lsn) {
+                    Err(error) => Err(error),
+                    Ok(_) => Err(PgTrickleError::InternalError(
+                        "WAL framing rejected a valid receipt LSN".into(),
+                    )),
+                };
+            }
+            Err(PgTrickleError::WalTransitionError(format!(
                 "invalid transaction framing at WAL receipt {}",
                 receipt.receipt_id
-            ))
+            )))
+        }
+    }
+}
+
+struct BorrowedReceiptFrames<'a>(&'a [WalReceipt]);
+
+impl crate::receipt::ReceiptFrameSource for BorrowedReceiptFrames<'_> {
+    fn message_count(&self) -> usize {
+        self.0.len()
+    }
+
+    fn check_row(&self, index: usize) -> bool {
+        let row = &self.0[index];
+        row.source_xid.is_some()
+            && row.slot_name == self.0[0].slot_name
+            && (index == 0 || self.0[index - 1].receipt_id < row.receipt_id)
+    }
+
+    fn same_xid(&self, start: usize, index: usize) -> bool {
+        self.0[start].source_xid == self.0[index].source_xid
+    }
+
+    fn marker(&self, index: usize) -> crate::receipt::FrameMarker {
+        use crate::receipt::FrameMarker;
+        let row = &self.0[index];
+        let Some(xid) = row.source_xid.as_deref() else {
+            return FrameMarker::Malformed;
         };
-        let xid = receipt.source_xid.as_deref().ok_or_else(invalid)?;
-        if receipt.slot_name != receipts[0].slot_name
-            || (index > 0 && receipts[index - 1].receipt_id >= receipt.receipt_id)
-        {
-            return Err(invalid());
-        }
-        if index == start {
-            if receipt.data != format!("BEGIN {xid}") {
-                return Err(invalid());
+        if let Some(marker_xid) = row.data.strip_prefix("BEGIN ") {
+            if marker_xid == xid {
+                FrameMarker::Begin
+            } else {
+                FrameMarker::Malformed
             }
-        } else if receipt.source_xid != receipts[start].source_xid {
-            return Err(invalid());
-        } else if receipt.data == format!("COMMIT {xid}") {
-            let commit = lsn_position(&receipt.lsn)?;
-            if previous_commit.is_some_and(|previous| previous >= commit) {
-                return Err(invalid());
+        } else if let Some(marker_xid) = row.data.strip_prefix("COMMIT ") {
+            if marker_xid == xid {
+                FrameMarker::Commit
+            } else {
+                FrameMarker::Malformed
             }
-            for row in &receipts[start..=index] {
-                if lsn_position(&row.lsn)? > commit {
-                    return Err(invalid());
-                }
-            }
-            ends.push(index + 1);
-            start = index + 1;
-            previous_commit = Some(commit);
-        } else if receipt.data.starts_with("BEGIN ") || receipt.data.starts_with("COMMIT ") {
-            return Err(invalid());
+        } else {
+            FrameMarker::Body
         }
     }
-    if start != receipts.len() {
-        return Err(PgTrickleError::WalTransitionError(
-            "incomplete WAL receipt transaction".into(),
-        ));
+
+    fn position(&self, index: usize) -> Option<u64> {
+        crate::version::lsn_to_u64(&self.0[index].lsn).ok()
     }
-    Ok(ends)
 }
 
 fn load_wal_receipts(
@@ -3519,6 +3551,82 @@ mod tests {
         let mut wrong_slot = rows.clone();
         wrong_slot[1].slot_name = "other_slot".into();
         assert!(receipt_transaction_ends(&wrong_slot).is_err());
+    }
+
+    #[test]
+    fn test_receipt_framing_adapter_preserves_reserved_markers_and_lazy_lsn_errors() {
+        assert_eq!(receipt_transaction_ends(&[]).unwrap(), Vec::<usize>::new());
+        let rows = decoded_transaction(1, &[("table public.src: INSERT: id[integer]:1", true)]);
+        assert_eq!(receipt_transaction_ends(&rows).unwrap(), vec![3]);
+        for (index, data) in [
+            (0, "BEGIN 2"),
+            (1, "BEGIN 1"),
+            (1, "COMMIT 2"),
+            (2, "COMMIT 2"),
+        ] {
+            let mut malformed = rows.clone();
+            malformed[index].data = data.into();
+            assert_eq!(
+                receipt_transaction_ends(&malformed)
+                    .unwrap_err()
+                    .to_string(),
+                format!(
+                    "WAL transition error: invalid transaction framing at WAL receipt {}",
+                    rows[index].receipt_id
+                ),
+            );
+        }
+        let mut malformed = rows.clone();
+        malformed[0].lsn = "bad-begin".into();
+        malformed[1].lsn = "bad-body".into();
+        assert!(
+            receipt_transaction_ends(&malformed[..2])
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete WAL receipt transaction")
+        );
+        malformed[2].lsn = "bad-commit".into();
+        assert!(
+            receipt_transaction_ends(&malformed)
+                .unwrap_err()
+                .to_string()
+                .contains("malformed WAL LSN 'bad-commit'")
+        );
+        malformed[2].lsn = rows[2].lsn.clone();
+        assert!(
+            receipt_transaction_ends(&malformed)
+                .unwrap_err()
+                .to_string()
+                .contains("malformed WAL LSN 'bad-begin'")
+        );
+        let mut beyond_commit = rows.clone();
+        beyond_commit[1].lsn = "0/19".into();
+        assert!(
+            receipt_transaction_ends(&beyond_commit)
+                .unwrap_err()
+                .to_string()
+                .contains("WAL receipt 102")
+        );
+        let mut absent_xid = rows.clone();
+        absent_xid[1].source_xid = None;
+        assert!(
+            receipt_transaction_ends(&absent_xid)
+                .unwrap_err()
+                .to_string()
+                .contains("WAL receipt 101")
+        );
+        let mut duplicate_id = rows.clone();
+        duplicate_id[1].receipt_id = duplicate_id[0].receipt_id;
+        assert!(receipt_transaction_ends(&duplicate_id).is_err());
+        let mut same_commit = rows.clone();
+        same_commit.extend(decoded_transaction(2, &[]));
+        same_commit[4].lsn = rows[2].lsn.clone();
+        assert!(
+            receipt_transaction_ends(&same_commit)
+                .unwrap_err()
+                .to_string()
+                .contains("WAL receipt 201")
+        );
     }
     use proptest::prelude::*;
 
