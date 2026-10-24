@@ -58,26 +58,6 @@ async fn wait_for_refresh(db: &E2eDb, pgt_name: &str, timeout: Duration) -> bool
     }
 }
 
-/// Wait until a stream table reaches the given status.
-async fn wait_for_status(db: &E2eDb, pgt_name: &str, status: &str, timeout: Duration) -> bool {
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > timeout {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let current: String = db
-            .query_scalar(&format!(
-                "SELECT status FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_name = '{pgt_name}'"
-            ))
-            .await;
-        if current == status {
-            return true;
-        }
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 1: Monotone cycle creation + scheduler convergence
 // ═══════════════════════════════════════════════════════════════════════════
@@ -540,22 +520,17 @@ async fn test_circular_nonconvergence_error_status() {
 
     // Wait for the scheduler to attempt the cycle and hit the limit.
     // With max_fixpoint_iterations=1, it should fail to converge and mark ERROR.
-    let got_error = wait_for_status(&db, "cyc_nc_a", "ERROR", Duration::from_secs(180)).await;
-
-    // Note: Since each iteration generates new rows unconditionally, it is guaranteed
-    // to never converge, making it a reliable test.
-    if got_error {
-        let status_b: String = db
-            .query_scalar(
-                "SELECT status FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_name = 'cyc_nc_b'",
-            )
-            .await;
-        assert_eq!(
-            status_b, "ERROR",
-            "Both SCC members should be ERROR on non-convergence"
-        );
-    }
+    assert!(
+        db.wait_for_condition(
+            "both SCC members reach ERROR after non-convergence",
+            "SELECT count(*) = 2 AND bool_and(status = 'ERROR') \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name IN ('cyc_nc_a', 'cyc_nc_b')",
+            Duration::from_secs(180),
+            Duration::from_millis(100),
+        )
+        .await,
+        "Both SCC members must reach ERROR on non-convergence"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -657,7 +632,8 @@ async fn test_circular_default_rejects_cycles() {
     let db = E2eDb::new().await.with_extension().await;
     // Explicitly enforce the default to prevent GUC pollution from other tests
     // that may have set allow_circular=true via ALTER SYSTEM.
-    db.execute("SET pg_trickle.allow_circular = false").await;
+    db.alter_system_set_and_wait("pg_trickle.allow_circular", "false", "off")
+        .await;
 
     db.execute("CREATE TABLE cyc_def_src (id INT PRIMARY KEY, val INT NOT NULL)")
         .await;

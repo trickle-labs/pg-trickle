@@ -37,6 +37,11 @@ on:
     - cron: '0 3 * * *'  # Daily 03:00 UTC — full matrix
   workflow_dispatch:
     inputs:
+      compare_pr_allocations:
+        description: Only replay the before/after PR allocations on identical sources
+        required: false
+        type: boolean
+        default: false
       run_benchmark_regression:
         description: Compare benchmarks against benchmark_base (defaults to main)
         required: false
@@ -49,7 +54,8 @@ on:
 
 concurrency:
   # Pushes to main must not cancel the longer nightly qualification run.
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  # Paired experiments retain their evidence when another comparison is dispatched.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.compare_pr_allocations && github.run_id || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -58,9 +64,18 @@ env:
   PG_VERSION: "18"
 
 jobs:
+  allocation-comparison:
+    if: github.event_name == 'workflow_dispatch' && inputs.compare_pr_allocations
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    uses: ./.github/workflows/ci-allocation-comparison.yml
+
   # Keep contracts on every selected PR, including .github/workflows/release.yml and
   # tests/release/** changes; job selection only defers expensive runtime work.
   release-qualification-contract:
+    if: ${{ !inputs.compare_pr_allocations }}
     name: Release evidence contract and checked LSN proof
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -763,6 +778,7 @@ jobs:
   # Lightweight: validates that the upgrade SQL script covers all objects
   # in the pgrx-generated full install script. No Docker needed.
   upgrade-check:
+    if: ${{ !inputs.compare_pr_allocations }}
     name: Upgrade completeness
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -14,6 +14,7 @@ from unittest.mock import patch
 import check_ci_results
 import check_lsn_verification
 import ci_pr_suite
+import run_ci_allocation
 
 
 class AllocationTests(unittest.TestCase):
@@ -28,6 +29,51 @@ class AllocationTests(unittest.TestCase):
             "e2e_monitoring_tests", "e2e_stmt_cdc_tests",
         ):
             self.assertIn(name, full)
+
+    def test_sensitive_cases_are_run_serially_on_both_allocations(self):
+        expected = [
+            "./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0",
+            "--no-fail-fast", "--test-threads", "1", "--test", "e2e_rls_wal_tests",
+            "--test", "e2e_wal_receipt_recovery_tests", "--test", "e2e_v043_tests",
+            "--test", "e2e_v107_wal_transition_tests", "--test", "e2e_lsn_contract_tests",
+            "--test", "e2e_property_circular_tests", "--test", "e2e_dag_autorefresh_tests",
+            "--test", "e2e_refresh_tests", "--test", "e2e_v0878_security_tests", "-E",
+            "test(=test_rls_bypassrls_owner_differential_wal_matches_query) | "
+            "test(=test_wal_recovery_before_receipt_commit_preserves_committed_changes) | "
+            "test(=test_wal_recovery_after_receipt_commit_before_ack_converges_once) | "
+            "test(=test_wal_recovery_after_apply_before_ack_does_not_reapply) | "
+            "test(=test_wal_recovery_after_slot_advance_finishes_acknowledgement) | "
+            "test(=test_wal_trigger_fallback_received_receipt_requires_rebaseline) | "
+            "test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline) | "
+            "test(=test_wal_recovery_semantic_controls_are_detected) | "
+            "test(=test_t_a44_10_insert_correctness) | "
+            "test(=test_v107_auto_wal_transition_captures_changes) | "
+            "test(=test_lsn_manual_refresh_fixed_snapshots_preserve_frontier) | "
+            "test(=test_lsn_scheduler_cdc_holdback_recovers_after_long_writer) | "
+            "test(=test_prop_monotone_cycle_small_graph_converges) | "
+            "test(=test_autorefresh_no_spurious_3_layer) | "
+            "test(=test_stddev_samp_differential_mode) | "
+            "test(=test_v0878_revoked_source_preserves_state_and_stages)",
+        ]
+        with patch("sys.argv", ["ci_pr_suite.py"]), patch(
+            "ci_pr_suite.subprocess.run", side_effect=[SimpleNamespace(returncode=0)] * 5,
+        ) as run:
+            self.assertEqual(ci_pr_suite.main(), 0)
+        self.assertIn(
+            "not (binary(=e2e_rls_wal_tests) & test(=test_rls_bypassrls_owner_differential_wal_matches_query))",
+            run.call_args_list[0].args[0][-1],
+        )
+        self.assertIn(
+            "not (binary(=e2e_refresh_tests) & test(=test_stddev_samp_differential_mode))",
+            run.call_args_list[0].args[0][-1],
+        )
+        self.assertEqual(run.call_args_list[4].args[0], expected)
+
+        before = run_ci_allocation.commands("before", "full")
+        after = run_ci_allocation.commands("after", "full")
+        self.assertIn("not (binary(=e2e_rls_wal_tests)", before[0][-1])
+        self.assertEqual(before[2], expected)
+        self.assertEqual(after[0][1:3], ["scripts/ci_pr_suite.py", "--no-fail-fast"])
 
     def fixture(self, root):
         (root / "tests").mkdir()
@@ -50,16 +96,21 @@ class AllocationTests(unittest.TestCase):
                 selected = []
                 for call in run.call_args_list:
                     command = call.args[0]
-                    selected.extend(command[i + 1] for i, arg in enumerate(command) if arg == "--test")
+                    if "--no-fail-fast" not in command:
+                        selected.extend(command[i + 1] for i, arg in enumerate(command) if arg == "--test")
+                    else:
+                        self.assertIn("--test-threads", command)
                     self.assertEqual(command[command.index("--retries") + 1], "0")
-                self.assertEqual(len(run.call_args_list), 2 if shard == 1 else 3)
+                self.assertEqual(len(run.call_args_list), 3 if shard == 1 else 4)
                 if shard == 2:
                     for call in run.call_args_list[1:]:
                         command = call.args[0]
                         self.assertEqual(command[command.index("--test-threads") + 1], "1")
                         self.assertEqual(command[command.index("--retries") + 1], "0")
                     self.assertCountEqual(
-                        [call.args[0][call.args[0].index("--test") + 1] for call in run.call_args_list[1:]],
+                        [call.args[0][call.args[0].index("--test") + 1]
+                         for call in run.call_args_list[1:]
+                         if "--no-fail-fast" not in call.args[0]],
                         ["e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests"],
                     )
                 shards.append(selected)
@@ -315,6 +366,31 @@ class DiskPreparationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("only supported", result.stderr)
+
+
+    def test_atomicity_runs_isolated_without_retries_and_propagates_failure(self):
+        for status in (0, 1, 130):
+            with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
+                "ci_pr_suite.subprocess.run"
+            ) as run:
+                run.side_effect = [SimpleNamespace(returncode=value) for value in (0, 0, 0, status, 0)]
+                self.assertEqual(ci_pr_suite.main(), status)
+                self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
+                self.assertEqual(run.call_args_list[3].args[0], [
+                    "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
+                    "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
+                ])
+                if status == 0:
+                    self.assertIn("--no-fail-fast", run.call_args_list[4].args[0])
+
+    def test_comparison_collects_all_selected_failures_without_changing_result(self):
+        for status in (0, 1, 130):
+            with self.subTest(status=status), patch(
+                "sys.argv", ["ci_pr_suite.py", "--no-fail-fast"]
+            ), patch("ci_pr_suite.subprocess.run") as run:
+                run.return_value.returncode = status
+                self.assertEqual(ci_pr_suite.main(), status)
+                self.assertIn("--no-fail-fast", run.call_args_list[0].args[0])
 
 
 class VerdictTests(unittest.TestCase):

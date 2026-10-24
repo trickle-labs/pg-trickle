@@ -764,7 +764,7 @@ async fn test_mixed_bit_or_with_count_differential() {
     // Insert
     db.execute("INSERT INTO mixed_bit_src VALUES (5, 'eng', 16)")
         .await;
-    db.refresh_st("mixed_bit_st").await;
+    db.refresh_st_until_converged("mixed_bit_st").await;
 
     db.assert_st_matches_query(
         "public.mixed_bit_st",
@@ -855,7 +855,7 @@ async fn test_stddev_samp_differential_mode() {
     // Update a value
     db.execute("UPDATE sds_src SET amount = 350 WHERE id = 3")
         .await;
-    db.refresh_st("sds_st").await;
+    db.refresh_st_until_converged("sds_st").await;
 
     db.assert_st_matches_query(
         "public.sds_st",

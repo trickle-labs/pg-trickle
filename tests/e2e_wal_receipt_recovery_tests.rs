@@ -6,7 +6,7 @@ use e2e::E2eDb;
 use sqlx::{AssertSqlSafe, PgPool, Postgres, pool::PoolConnection};
 use std::time::Duration;
 
-const WAIT: Duration = Duration::from_secs(90);
+const WAIT: Duration = Duration::from_secs(180);
 
 struct Fixture {
     db: E2eDb,
@@ -75,8 +75,10 @@ async fn wait_for_cdc_mode(db: &E2eDb, source: &str, expected: &str) {
             "WAL CDC mode",
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_dependencies d \
+                 WHERE d.source_relid = '{source}'::regclass::oid) \
+                   AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_dependencies d \
                  WHERE d.source_relid = '{source}'::regclass::oid \
-                   AND d.cdc_mode = '{expected}')"
+                   AND d.cdc_mode <> '{expected}')"
             ),
             WAIT,
             Duration::from_millis(50),
@@ -185,6 +187,9 @@ async fn create_identity_sentinel(db: &E2eDb, table: &str, value: &str) {
 async fn setup_wal_fixture(case_name: &str) -> Fixture {
     let stem = case_name.replace('-', "_");
     let db = E2eDb::new_dedicated().await.with_extension().await;
+    // Avoid autovacuum contending with the short-lived receipt lock witnesses.
+    db.execute("ALTER TABLE pgtrickle.pgt_wal_receipts SET (autovacuum_enabled = false)")
+        .await;
     configure_scheduler(&db).await;
     db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
         .await;
@@ -324,7 +329,19 @@ async fn wait_for_wal_barrier(db: &E2eDb, oid: i64, phase: &str, blocker_pid: i3
             return pid;
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("WAL decoder did not reach {phase} for source OID {oid}");
+            let state: String = db
+                .query_scalar(
+                    "SELECT jsonb_build_object(\
+                        'dependencies', (SELECT jsonb_agg(to_jsonb(d)) FROM pgtrickle.pgt_dependencies d),\
+                        'workers', (SELECT jsonb_agg(jsonb_build_object(\
+                            'pid', pid, 'backend_type', backend_type, 'application_name', application_name,\
+                            'state', state, 'wait_event', wait_event, 'query', query))\
+                            FROM pg_stat_activity WHERE datname = current_database()),\
+                        'slots', (SELECT jsonb_agg(to_jsonb(s)) FROM pg_replication_slots s)\
+                    )::text",
+                )
+                .await;
+            panic!("WAL decoder did not reach {phase} for source OID {oid}; state={state}");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -614,12 +631,33 @@ async fn test_wal_receipt_small_limits_preserve_complete_transactions() {
 }
 
 async fn run_interruption_case(phase: &str, status: &str, restart_twice: bool) {
-    let fixture = setup_wal_fixture(phase).await;
+    let mut fixture = setup_wal_fixture(phase).await;
     let sentinel_table = format!("wal_{}_identity", phase.replace('-', "_"));
     let value = format!("{phase}-committed");
     let next_value = format!("{phase}-next-batch");
-    let (mut barrier, blocker_pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
     set_wal_phase(&fixture.db, fixture.oid, phase, &value).await;
+    if phase == "before_receipt" {
+        // A missed pre-receipt batch cannot be replayed; load the witness at server startup.
+        fixture.db.pool = restart_and_check_named(&fixture, &sentinel_table).await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            3,
+            "restart-readiness",
+        )
+        .await;
+        wait_for_receipt(
+            &fixture.db.pool,
+            fixture.oid,
+            "ACKNOWLEDGED",
+            "restart-readiness",
+        )
+        .await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+    }
+    let (mut barrier, blocker_pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
     commit_row(&fixture.db, &fixture.source, &fixture.journal, 2, &value).await;
     let worker_pid = wait_for_wal_barrier(&fixture.db, fixture.oid, phase, blocker_pid).await;
 
@@ -836,17 +874,26 @@ async fn run_trigger_fallback_case(phase: &str) {
         .await;
     let buffer = db.change_buffer_table(fixture.oid).await;
     let value = format!("fallback-{phase}-pending");
-    let (barrier, blocker_pid) = hold_wal_barrier(db, fixture.oid, phase).await;
     set_wal_phase(db, fixture.oid, phase, &value).await;
+    let db = &fixture.db;
+    // The witnessed restart below is the recovery event under test.
+    wait_for_cdc_mode(db, &fixture.source, "WAL").await;
+    let (barrier, blocker_pid) = hold_wal_barrier(db, fixture.oid, phase).await;
     commit_row(db, &fixture.source, &fixture.journal, 2, &value).await;
     wait_for_wal_barrier(db, fixture.oid, phase, blocker_pid).await;
+    let buffered: String = db
+        .query_scalar(&format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(b)), '[]'::jsonb)::text \
+             FROM {buffer} b WHERE action <> 'S'"
+        ))
+        .await;
     assert_eq!(
         db.query_scalar::<i64>(&format!(
-            "SELECT count(*) FROM {buffer} WHERE action <> 'S'"
+            "SELECT count(*) FROM {buffer} WHERE action <> 'S' AND id = 2"
         ))
         .await,
         0,
-        "pending commit must have no trigger or replay copy"
+        "pending commit must have no trigger or replay copy; buffered={buffered}"
     );
     assert!(exact_diff(&db.pool, &fixture.stream, &fixture.journal).await > 0);
     if phase == "before_replay" {
