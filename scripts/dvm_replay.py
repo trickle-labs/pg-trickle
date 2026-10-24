@@ -206,7 +206,7 @@ def changed_route_check(scenario: dict, database: str | None, previous: int) -> 
 def captured_source_cuts(scenario: dict, database: str | None) -> list[tuple[int, str]]:
     name = scenario["query"]["stream_table"].replace("'", "''")
     sources = json.loads(psql(database,
-        "SELECT coalesce(json_agg(json_build_array(d.source_relid::bigint, "
+        "LOAD 'pg_trickle'; SELECT coalesce(json_agg(json_build_array(d.source_relid::bigint, "
         "format('%I.%I',current_setting('pg_trickle.change_buffer_schema'),"
         "'changes_' || ct.source_stable_name))), '[]') "
         "FROM pgtrickle.pgt_dependencies d JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) "

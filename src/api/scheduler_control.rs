@@ -84,8 +84,7 @@ pub(crate) fn admit_scheduler_targets(pgt_ids: &[i64]) -> bool {
     )
     .unwrap_or_else(|error| pgrx::error!("scheduler write closure for {pgt_ids:?}: {error}"))
     .unwrap_or_else(|| pgrx::error!("scheduler write closure returned no membership"));
-    // SAFETY: admission runs in a connected scheduler or refresh worker backend.
-    let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
+    let database_oid = current_database_oid().unwrap_or_else(|error| pgrx::error!("{error}"));
     let paused = || {
         targets
             .iter()

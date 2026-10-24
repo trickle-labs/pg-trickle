@@ -139,7 +139,12 @@ fn resolve_expr_for_child(expr: &Expr, child_cols: &[String]) -> String {
 ///
 /// The delta columns are renamed inside the subquery, while the source side
 /// uses the original GROUP BY expressions so joins keep their qualifiers.
-fn build_group_filter(delta_cte: &str, group_by: &[Expr], group_output: &[String]) -> String {
+fn build_group_filter(
+    delta_cte: &str,
+    group_by: &[Expr],
+    group_output: &[String],
+    delta_filter: Option<&str>,
+) -> String {
     let delta_cols = group_output
         .iter()
         .enumerate()
@@ -159,7 +164,26 @@ fn build_group_filter(delta_cte: &str, group_by: &[Expr], group_output: &[String
         })
         .collect::<Vec<_>>()
         .join(" AND ");
-    format!("EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_cols}) WHERE {conditions})")
+    let delta_filter = delta_filter
+        .map(|filter| format!(" AND ({filter})"))
+        .unwrap_or_default();
+    format!(
+        "EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_cols}) WHERE {conditions}{delta_filter})"
+    )
+}
+
+fn special_aggregate_delta_filter(aggregates: &[AggExpr]) -> Option<String> {
+    let filters: Vec<String> = aggregates
+        .iter()
+        .filter(|agg| matches!(agg.function, AggFunc::Sum | AggFunc::Avg) && !agg.is_distinct)
+        .map(|agg| {
+            format!(
+                "COALESCE(__pgt_d2.{}, 0) > 0",
+                quote_ident(&format!("__special_{}", agg.alias))
+            )
+        })
+        .collect();
+    (!filters.is_empty()).then(|| filters.join(" OR "))
 }
 
 fn internal_group_columns(group_output: &[String]) -> Vec<String> {
@@ -814,7 +838,7 @@ fn build_intermediate_agg_delta(
     let group_filter = if group_output.is_empty() {
         String::new()
     } else {
-        build_group_filter(delta_cte, group_by, group_output)
+        build_group_filter(delta_cte, group_by, group_output, None)
     };
 
     // A root Filter adds WHERE after the reconstructed FROM fragment, even
@@ -1159,6 +1183,12 @@ FROM {new_rescan_cte} n",
 /// re-aggregates those groups.
 ///
 /// Returns `Some(cte_name)` if a rescan CTE was created, `None` otherwise.
+struct RescanConfig<'a> {
+    force_all_aggs: bool,
+    include_special_aggs: bool,
+    special_value_filter: Option<&'a str>,
+}
+
 fn build_rescan_cte(
     ctx: &mut DiffContext,
     child: &OpTree,
@@ -1166,14 +1196,14 @@ fn build_rescan_cte(
     group_output: &[String],
     aggregates: &[AggExpr],
     delta_cte: &str,
-    force_all_aggs: bool,
+    config: &RescanConfig<'_>,
 ) -> Option<String> {
     // Include group-rescan aggregates AND MIN/MAX (which need rescan
     // when the old extremum is deleted).
     // When `force_all_aggs` is true (HAVING context), include ALL aggregates
     // so that the merge CTE can use the correct full aggregate value for
     // groups that were absent from the ST (below the HAVING threshold).
-    let rescan_aggs: Vec<&AggExpr> = if force_all_aggs {
+    let rescan_aggs: Vec<&AggExpr> = if config.force_all_aggs {
         aggregates.iter().collect()
     } else {
         aggregates
@@ -1182,6 +1212,9 @@ fn build_rescan_cte(
                 a.is_distinct
                     || a.function.is_group_rescan()
                     || matches!(a.function, AggFunc::Min | AggFunc::Max)
+                    || (config.include_special_aggs
+                        && matches!(a.function, AggFunc::Sum | AggFunc::Avg)
+                        && !a.is_distinct)
                 // P2-2: SUM over a FULL JOIN child no longer needs a rescan CTE.
                 // The __pgt_aux_nonnull_* auxiliary column provides algebraic
                 // NULL-transition correction without rescanning source data.
@@ -1192,8 +1225,108 @@ fn build_rescan_cte(
         return None;
     }
 
-    let rescan_cte = ctx.next_cte_name("agg_rescan");
     let source_from = child_to_from_sql_in_context(child, ctx, false);
+
+    if let (Some(from_sql), Some(special_filter)) =
+        (source_from.as_deref(), config.special_value_filter)
+    {
+        let special_groups_cte = ctx.next_cte_name("agg_special_groups");
+        let delta_group_aliases = group_output
+            .iter()
+            .enumerate()
+            .map(|(index, _)| quote_ident(&format!("__pgt_group_{index}")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let delta_from = if group_output.is_empty() {
+            format!("{delta_cte} AS __pgt_d2")
+        } else {
+            format!("{delta_cte} AS __pgt_d2({delta_group_aliases})")
+        };
+        let special_group_selects = if group_output.is_empty() {
+            "1 AS __pgt_group_marker".to_string()
+        } else {
+            group_output
+                .iter()
+                .enumerate()
+                .map(|(index, output)| {
+                    format!(
+                        "__pgt_d2.{} AS {}",
+                        quote_ident(&format!("__pgt_group_{index}")),
+                        quote_ident(output)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        ctx.add_cte(
+            special_groups_cte.clone(),
+            format!("SELECT {special_group_selects} FROM {delta_from} WHERE ({special_filter})"),
+        );
+
+        let mut lateral_selects = Vec::new();
+        let mut rescan_selects = Vec::new();
+        for agg in &rescan_aggs {
+            let alias = quote_ident(&agg.alias);
+            lateral_selects.push(format!("{} AS {alias}", agg_to_rescan_sql(agg)));
+            rescan_selects.push(format!("__pgt_sr.{alias} AS {alias}"));
+            if matches!(agg.function, AggFunc::Avg) && !agg.is_distinct {
+                let aux_alias = quote_ident(&format!("__pgt_aux_sum_{}", agg.alias));
+                lateral_selects.push(format!("{} AS {aux_alias}", agg_sum_rescan_sql(agg)));
+                rescan_selects.push(format!("__pgt_sr.{aux_alias} AS {aux_alias}"));
+            }
+        }
+        let group_selects = group_output
+            .iter()
+            .map(|output| {
+                format!(
+                    "__pgt_sg.{} AS {}",
+                    quote_ident(output),
+                    quote_ident(output)
+                )
+            })
+            .collect::<Vec<_>>();
+        let group_conditions = group_by
+            .iter()
+            .zip(group_output)
+            .map(|(expr, output)| {
+                format!(
+                    "{} IS NOT DISTINCT FROM __pgt_sg.{}",
+                    expr.to_sql(),
+                    quote_ident(output)
+                )
+            })
+            .collect::<Vec<_>>();
+        let correlated_filter = if group_conditions.is_empty() {
+            "__pgt_sg.__pgt_group_marker = 1".to_string()
+        } else {
+            group_conditions.join(" AND ")
+        };
+        let where_connector = if child_from_has_outer_where(child) {
+            " AND "
+        } else {
+            " WHERE "
+        };
+        let special_rescan_cte = ctx.next_cte_name("agg_special_sum_rescan");
+        let group_selects = if group_selects.is_empty() {
+            String::new()
+        } else {
+            format!("{}, ", group_selects.join(", "))
+        };
+        ctx.add_cte(
+            special_rescan_cte.clone(),
+            format!(
+                "SELECT {group_selects}{rescan_selects} \
+                 FROM {special_groups_cte} AS __pgt_sg \
+                 CROSS JOIN LATERAL (SELECT {lateral_selects} \
+                                     FROM {from_sql}{where_connector}{correlated_filter}) AS __pgt_sr",
+                rescan_selects = rescan_selects.join(", "),
+                lateral_selects = lateral_selects.join(", "),
+            ),
+        );
+        return Some(special_rescan_cte);
+    }
+
+    let rescan_cte = ctx.next_cte_name("agg_rescan");
     let can_rescan_sum_nonnull = source_from.is_some();
 
     // Build SELECT list: group columns + rescan aggregate calls
@@ -1217,7 +1350,7 @@ fn build_rescan_cte(
     // When rescanning for HAVING threshold crossings, also compute the
     // correct row count so the ST's __pgt_count is set correctly for
     // groups entering the view for the first time.
-    if force_all_aggs {
+    if config.force_all_aggs {
         selects.push("COUNT(*) AS __pgt_count".to_string());
     }
     for agg in &rescan_aggs {
@@ -1226,7 +1359,7 @@ fn build_rescan_cte(
             agg_to_rescan_sql(agg),
             quote_ident(&agg.alias),
         ));
-        if force_all_aggs && agg.needs_nonfinite_state(child) {
+        if config.force_all_aggs && agg.needs_nonfinite_state(child) {
             let argument = agg
                 .argument
                 .as_ref()
@@ -1243,7 +1376,7 @@ fn build_rescan_cte(
                 quote_ident(&format!("__pgt_aux_special_{}", agg.alias))
             ));
         }
-        if force_all_aggs && matches!(agg.function, AggFunc::Avg) && !agg.is_distinct {
+        if config.force_all_aggs && matches!(agg.function, AggFunc::Avg) && !agg.is_distinct {
             for (function, suffix) in [(AggFunc::Sum, "sum"), (AggFunc::Count, "count")] {
                 let mut auxiliary = (*agg).clone();
                 auxiliary.function = function;
@@ -1254,7 +1387,14 @@ fn build_rescan_cte(
                 ));
             }
         }
-        if force_all_aggs
+        if config.include_special_aggs && matches!(agg.function, AggFunc::Avg) && !agg.is_distinct {
+            selects.push(format!(
+                "{} AS {}",
+                agg_sum_rescan_sql(agg),
+                quote_ident(&format!("__pgt_aux_sum_{}", agg.alias)),
+            ));
+        }
+        if config.force_all_aggs
             && matches!(agg.function, AggFunc::Sum)
             && !agg.is_distinct
             && can_rescan_sum_nonnull
@@ -1280,9 +1420,19 @@ fn build_rescan_cte(
         // Direct source reconstruction: more efficient since we can push
         // the group filter into the WHERE clause before aggregation.
         let group_filter = if group_output.is_empty() {
-            String::new()
+            config
+                .special_value_filter
+                .map(|filter| {
+                    format!("EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2 WHERE ({filter}))")
+                })
+                .unwrap_or_default()
         } else {
-            build_group_filter(delta_cte, group_by, group_output)
+            build_group_filter(
+                delta_cte,
+                group_by,
+                group_output,
+                config.special_value_filter,
+            )
         };
 
         // A root Filter already added WHERE to the reconstructed FROM clause.
@@ -1327,14 +1477,25 @@ fn build_rescan_cte(
         };
 
         let where_clause = if group_output.is_empty() {
-            String::new()
+            config
+                .special_value_filter
+                .map(|filter| {
+                    format!(
+                        "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2 WHERE ({filter}))"
+                    )
+                })
+                .unwrap_or_default()
         } else if group_output.len() == 1 {
             // Use EXISTS with IS NOT DISTINCT FROM instead of IN to
             // correctly match NULL group-key values (NULL IN (...) → NULL).
             let delta_col = &group_output[0];
             let dq_col = dq_col_name(delta_col);
             format!(
-                "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_aliases}) WHERE __pgt_dq.{dqc} IS NOT DISTINCT FROM __pgt_d2.{d2c})",
+                "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_aliases}) WHERE __pgt_dq.{dqc} IS NOT DISTINCT FROM __pgt_d2.{d2c}{delta_filter})",
+                delta_filter = config
+                    .special_value_filter
+                    .map(|filter| format!(" AND ({filter})"))
+                    .unwrap_or_default(),
                 delta_aliases = group_output
                     .iter()
                     .map(|column| quote_ident(column))
@@ -1361,8 +1522,12 @@ fn build_rescan_cte(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_aliases}) WHERE {})",
+                "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_aliases}) WHERE {}{delta_filter})",
                 corr.join(" AND "),
+                delta_filter = config
+                    .special_value_filter
+                    .map(|filter| format!(" AND ({filter})"))
+                    .unwrap_or_default(),
             )
         };
 
@@ -1418,6 +1583,20 @@ fn agg_nonnull_count_rescan_sql(agg: &AggExpr) -> String {
         .map(|expr| format!(" FILTER (WHERE {})", expr.to_sql()))
         .unwrap_or_default();
     format!("COUNT({argument}){filter}")
+}
+
+fn agg_sum_rescan_sql(agg: &AggExpr) -> String {
+    let argument = agg
+        .argument
+        .as_ref()
+        .map(Expr::to_sql)
+        .unwrap_or_else(|| "NULL".to_string());
+    let filter = agg
+        .filter
+        .as_ref()
+        .map(|expr| format!(" FILTER (WHERE {})", expr.to_sql()))
+        .unwrap_or_default();
+    format!("SUM({argument}){filter}")
 }
 
 /// Check if a Scan → Aggregate tree qualifies for the P5 direct bypass.
@@ -1749,6 +1928,18 @@ fn generate_direct_agg_delta(
             quote_ident(&format!("__del_{}", agg.alias)),
         ));
 
+        if matches!(agg.function, AggFunc::Sum | AggFunc::Avg) && !agg.is_distinct {
+            let argument = case_rewrites
+                .get(&agg.alias)
+                .cloned()
+                .unwrap_or_else(|| direct_agg_argument_expr(agg));
+            select_exprs.push(format!(
+                "{} AS {}",
+                special_value_delta_expr("c.action", &argument, None),
+                quote_ident(&format!("__special_{}", agg.alias)),
+            ));
+        }
+
         // SUM needs a qualifying non-NULL count so the algebraic merge can
         // restore PostgreSQL's NULL result when the last value disappears.
         if agg.needs_nonfinite_state(scan) {
@@ -1996,6 +2187,23 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 }
             }
 
+            if matches!(agg.function, AggFunc::Sum | AggFunc::Avg) && !agg.is_distinct {
+                let argument = agg
+                    .argument
+                    .as_ref()
+                    .map(|expr| resolve_expr_for_child(expr, child_cols))
+                    .unwrap_or_else(|| "NULL".to_string());
+                let filter = agg
+                    .filter
+                    .as_ref()
+                    .map(|expr| resolve_expr_for_child(expr, child_cols));
+                delta_selects.push(format!(
+                    "{} AS {}",
+                    special_value_delta_expr("__pgt_action", &argument, filter.as_deref()),
+                    quote_ident(&format!("__special_{}", agg.alias)),
+                ));
+            }
+
             // AVG/STDDEV/VAR algebraic path: also track non-NULL counts for
             // the argument so the merge can update __pgt_aux_count_{alias}.
             if is_algebraic_via_aux(agg) {
@@ -2115,6 +2323,23 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // that groups crossing the threshold upward (absent from the ST) receive
     // the correct full aggregate value rather than just the per-cycle delta.
     let use_having_rescan = ctx.having_filter;
+    let has_other_rescan_aggregate = aggregates.iter().any(|agg| {
+        agg.is_distinct
+            || agg.function.is_group_rescan()
+            || matches!(agg.function, AggFunc::Min | AggFunc::Max)
+    });
+    let special_value_filter = if use_having_rescan || has_other_rescan_aggregate {
+        None
+    } else {
+        special_aggregate_delta_filter(aggregates)
+    };
+    let rescan_config = RescanConfig {
+        force_all_aggs: use_having_rescan,
+        include_special_aggs: aggregates
+            .iter()
+            .any(|agg| matches!(agg.function, AggFunc::Sum | AggFunc::Avg) && !agg.is_distinct),
+        special_value_filter: special_value_filter.as_deref(),
+    };
     let rescan_cte = build_rescan_cte(
         ctx,
         child,
@@ -2122,7 +2347,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         &group_columns,
         aggregates,
         &delta_cte,
-        use_having_rescan,
+        &rescan_config,
     );
     let has_rescan = rescan_cte.is_some();
 
@@ -2196,15 +2421,9 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     // Per-aggregate new values + old values for G-S1 change detection
     for (aggregate_index, agg) in aggregates.iter().enumerate() {
-        // Every non-DISTINCT SUM uses nonnull-count aux for algebraic
-        // NULL-transition correction. SUM is never routed through rescan.
+        // SUM also uses a rescan when special-value deltas require it.
         let agg_has_nonnull_aux = matches!(agg.function, AggFunc::Sum) && !agg.is_distinct;
-        let agg_has_rescan = if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
-            // SUM is always algebraic — never use the rescan path
-            false
-        } else {
-            has_rescan
-        };
+        let agg_has_rescan = has_rescan;
         let mut new_val_expr = agg_merge_expr_mapped(
             agg,
             agg_has_rescan,
@@ -2322,6 +2541,13 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                     "COALESCE(st.{aux_sum}, 0) + COALESCE(d.{ins_sum}, 0) - COALESCE(d.{del_sum}, 0)"
                 ),
             );
+            if matches!(agg.function, AggFunc::Avg) && has_rescan {
+                sum = format!(
+                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {sum} END",
+                    quote_ident(&format!("__special_{}", agg.alias)),
+                    quote_ident(&format!("__pgt_aux_sum_{}", agg.alias)),
+                );
+            }
             if let Some((guard, special_sum)) = &special {
                 sum = format!("CASE WHEN {guard} THEN {special_sum} ELSE {sum} END");
             }
@@ -2936,6 +3162,16 @@ fn agg_nonnull_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, Str
     )
 }
 
+fn special_value_delta_expr(action: &str, argument: &str, filter: Option<&str>) -> String {
+    let count_special = format!(
+        "CASE WHEN ({argument})::text IN ('Infinity', '-Infinity', 'NaN') THEN 1 ELSE 0 END"
+    );
+    let count_value = filter
+        .map(|filter| format!("CASE WHEN {filter} THEN {count_special} ELSE 0 END"))
+        .unwrap_or(count_special);
+    format!("SUM(CASE WHEN {action} IN ('I', 'D') THEN {count_value} ELSE 0 END)::bigint")
+}
+
 /// Generate cross-product delta expressions for CORR/COVAR/REGR_* (P3-2).
 ///
 /// Returns `(insert_exprs, delete_exprs)` where each is a tuple of 5 SQL
@@ -3112,6 +3348,14 @@ fn agg_merge_expr_mapped(
                 let value =
                     initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
                 let new_nonnull = sum_nonnull_count_expr(alias, st_col, having_rescan);
+                let value = if has_rescan {
+                    format!(
+                        "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
+                        quote_ident(&format!("__special_{alias}")),
+                    )
+                } else {
+                    value
+                };
                 crate::aggregate_lifecycle::aggregate_value_sql(true, &new_nonnull, &value)
             } else if has_rescan {
                 // Rescan CTE available (HAVING context):
@@ -3156,7 +3400,15 @@ fn agg_merge_expr_mapped(
                 "(COALESCE(st.{aux_sum_col}, 0) + COALESCE(d.{ins_sum}, 0) - COALESCE(d.{del_sum}, 0)) \
                  / NULLIF(COALESCE(st.{aux_count_col}, 0) + COALESCE(d.{ins_cnt}, 0) - COALESCE(d.{del_cnt}, 0), 0)",
             );
-            initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic)
+            let value = initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
+            if has_rescan {
+                format!(
+                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
+                    quote_ident(&format!("__special_{alias}")),
+                )
+            } else {
+                value
+            }
         }
         // STDDEV/VAR: algebraic via sum, sum-of-squares, and count auxiliaries.
         //   n = old_count + ins_count - del_count
@@ -3526,10 +3778,10 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
 
         assert!(result.columns.contains(&"total".to_string()));
-        // A44-10 (D+I schema): P5 direct bypass uses c.action filtering, no LATERAL VALUES
+        // A44-10 (D+I schema): P5 uses c.action directly, not LATERAL VALUES.
         assert_sql_contains(&sql, "c.action = 'I'");
         assert_sql_contains(&sql, "c.action = 'D'");
-        assert_sql_not_contains(&sql, "LATERAL");
+        assert_sql_not_contains(&sql, "LATERAL VALUES");
     }
 
     #[test]
@@ -3660,6 +3912,42 @@ mod tests {
         let (ins, del) = agg_delta_exprs(&agg, &child_cols);
         assert!(ins.contains("amount"));
         assert!(del.contains("amount"));
+    }
+
+    #[test]
+    fn test_sum_and_avg_special_values_trigger_scoped_rescan() {
+        let special_delta = special_value_delta_expr("__pgt_action", "amount", None);
+        assert!(special_delta.contains("__pgt_action IN ('I', 'D')"));
+        assert!(special_delta.contains("(amount)::text IN ('Infinity', '-Infinity', 'NaN')"));
+
+        let avg = avg_col("amount", "average");
+        let special_filter =
+            special_aggregate_delta_filter(&[sum_col("amount", "total"), avg.clone()]).unwrap();
+        assert!(special_filter.contains("__special_total"));
+        assert!(special_filter.contains("__special_average"));
+        let group_filter = build_group_filter(
+            "agg_delta",
+            &[colref("grp")],
+            &["grp".to_string()],
+            Some(&special_filter),
+        );
+        assert!(group_filter.contains("grp IS NOT DISTINCT FROM __pgt_d2.\"__pgt_group_0\""));
+        assert!(group_filter.contains("__pgt_d2.\"__special_total\""));
+
+        let merge = agg_merge_expr_mapped(
+            &sum_col("amount", "total"),
+            true,
+            false,
+            true,
+            "total",
+            None,
+        );
+        assert!(merge.contains("d.\"__special_total\""));
+        assert!(merge.contains("r.\"total\""));
+
+        let avg_merge = agg_merge_expr_mapped(&avg, true, false, false, "average", None);
+        assert!(avg_merge.contains("d.\"__special_average\""));
+        assert!(avg_merge.contains("r.\"average\""));
     }
 
     #[test]
@@ -5335,11 +5623,12 @@ mod tests {
             sql.contains("COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0)"),
             "COUNT should use algebraic merge: {sql}",
         );
-        // STDDEV_POP is now algebraic — no rescan needed
+        // No unrestricted rescan is needed; special SUM deltas are scoped.
         assert!(
             !sql.contains("agg_rescan"),
-            "All aggregates are algebraic, no rescan CTE needed: {sql}",
+            "no unrestricted rescan CTE should be needed: {sql}",
         );
+        assert_sql_contains(&sql, "agg_special_groups");
         assert!(
             sql.contains("SQRT"),
             "STDDEV_POP should use algebraic SQRT formula: {sql}",
@@ -5608,10 +5897,10 @@ mod tests {
         );
     }
 
-    // ── A-1: Verify rescan CTE does not leak into algebraic aggregate SQL ─────
+    // ── A-1: Verify special-value rescan stays scoped to affected groups ────
 
     #[test]
-    fn test_no_rescan_cte_for_sum() {
+    fn test_sum_rescan_is_scoped_to_special_deltas() {
         let mut ctx = test_ctx_with_st("public", "st");
         let child = scan(1, "t", "public", "t", &["region", "amount"]);
         let tree = aggregate(
@@ -5622,6 +5911,7 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
         assert_sql_not_contains(&sql, "agg_rescan");
+        assert_sql_contains(&sql, "agg_special_groups");
     }
 
     #[test]
@@ -5650,8 +5940,8 @@ mod tests {
     }
 
     #[test]
-    fn test_no_rescan_cte_for_sum_count_avg_combined() {
-        // All three (SUM, COUNT, AVG) are algebraic — no rescan needed
+    fn test_combined_algebraic_aggs_scope_special_sum_rescan() {
+        // SUM, COUNT, AVG are algebraic; only special SUM deltas are rescanned.
         let mut ctx = test_ctx_with_st("public", "st");
         let child = scan(1, "t", "public", "t", &["region", "amount"]);
         let tree = aggregate(
@@ -5666,6 +5956,7 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
         assert_sql_not_contains(&sql, "agg_rescan");
+        assert_sql_contains(&sql, "agg_special_groups");
     }
 
     #[test]
@@ -5715,9 +6006,8 @@ mod tests {
 
     #[test]
     fn test_p2_2_sum_full_join_uses_nonnull_aux_not_rescan() {
-        // P2-2: SUM above a FULL OUTER JOIN should use the __pgt_aux_nonnull_*
-        // auxiliary column for algebraic NULL-transition correction instead of
-        // a full-group rescan CTE.
+        // P2-2: SUM above a FULL OUTER JOIN uses __pgt_aux_nonnull_* for NULL
+        // correction; only special-value deltas use the scoped rescan.
         let mut ctx = test_ctx_with_st("public", "st");
         let left = scan(1, "l", "public", "l", &["id", "amount"]);
         let right = scan(2, "r", "public", "r", &["id", "value"]);
@@ -5735,11 +6025,12 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // Must NOT produce a rescan CTE (P2-2: nonnull-count replaces rescan)
+        // Must not produce an unrestricted rescan CTE.
         assert!(
             !sql.contains("agg_rescan"),
-            "P2-2: SUM above FULL JOIN should not use rescan CTE, got:\n{sql}"
+            "P2-2: SUM above FULL JOIN should not use an unrestricted rescan CTE, got:\n{sql}"
         );
+        assert_sql_contains(&sql, "agg_special_groups");
 
         // Must track nonnull delta in the delta CTE
         assert_sql_contains(&sql, "__ins_nonnull_total");
@@ -5776,11 +6067,12 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // No rescan CTE — plain scan, purely algebraic
+        // No unrestricted rescan; only groups with special-value deltas rescan.
         assert!(
             !sql.contains("agg_rescan"),
-            "SUM above plain scan should not use rescan CTE:\n{sql}"
+            "SUM above plain scan should not use an unrestricted rescan CTE:\n{sql}"
         );
+        assert_sql_contains(&sql, "agg_special_groups");
 
         assert_sql_contains(&sql, "__ins_nonnull_total");
         assert_sql_contains(&sql, "__del_nonnull_total");
@@ -5861,8 +6153,8 @@ mod tests {
         //
         // For bare SUM (no COALESCE wrapper at the Project level), when all
         // argument values are NULL (nonnull = 0), the result should be NULL.
-        // COALESCE-wrapped SUM queries use the algebraic formula in the ELSE
-        // branch (communicated via ctx.agg_sum_coalesce_defaults by diff_project).
+        // The special-value rescan is nested inside the nonnull guard; the
+        // algebraic branch remains available only while non-NULL rows remain.
         let mut ctx = test_ctx_with_st("public", "st");
         let left = scan(1, "l", "public", "l", &["id", "score"]);
         let right = scan(2, "r", "public", "r", &["id", "score"]);
@@ -5885,11 +6177,11 @@ mod tests {
 
         // For bare SUM (no COALESCE wrapper), ELSE must return NULL so the ST
         // stores NULL when all argument values become NULL.
-        assert_sql_contains(&sql, "ELSE NULL");
         assert!(
-            !sql.contains("ELSE COALESCE("),
-            "P2-2 bare SUM ELSE branch should return NULL, not COALESCE formula,\
-             got:\n{sql}"
+            sql.contains(
+                "THEN CASE WHEN COALESCE(d.\"__special_sum_score\", 0) > 0 THEN r.\"sum_score\""
+            ) && sql.contains("END ELSE NULL END"),
+            "bare SUM must keep its NULL transition guard around the special-value rescan:\n{sql}"
         );
 
         // Delta CTE nonnull tracking

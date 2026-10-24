@@ -2785,11 +2785,12 @@ fn build_changed_cols_bitmask_stmt_expr(
     }
     let parts: Vec<String> = columns
         .iter()
-        .map(|(col_name, _)| {
+        .map(|(col_name, type_name)| {
             let qcol = col_name.replace('"', "\"\"");
-            crate::cdc_elision::changed_column_sql(
-                &format!("o.\"{qcol}\""),
+            triggers::changed_col_bit_expr(
                 &format!("n.\"{qcol}\""),
+                &format!("o.\"{qcol}\""),
+                type_name,
             )
         })
         .collect();
@@ -3849,6 +3850,21 @@ mod tests {
         );
         assert!(expr.contains("NEW."), "should reference NEW: {expr}");
         assert!(expr.contains("OLD."), "should reference OLD: {expr}");
+    }
+
+    #[test]
+    fn test_statement_bitmask_compares_numeric_scale_representation() {
+        let pk = vec!["id".to_string()];
+        let cols = vec![
+            ("id".to_string(), "integer".to_string()),
+            ("amount".to_string(), "numeric(12, 2)".to_string()),
+        ];
+        let expr = build_changed_cols_bitmask_stmt_expr(&pk, &cols).unwrap();
+        assert!(
+            expr.contains("n.\"amount\" IS DISTINCT FROM o.\"amount\" OR")
+                && expr.contains("scale(n.\"amount\") IS DISTINCT FROM scale(o.\"amount\")"),
+            "statement changed_cols must observe numeric scale changes: {expr}"
+        );
     }
 
     #[test]
