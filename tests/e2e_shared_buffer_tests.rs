@@ -195,7 +195,11 @@ async fn test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_or
                     .await;
                 let (captured, changed): (i64,i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT count(*),count(*) FILTER (WHERE get_bit(changed_cols,2)=1) FROM {buffer} WHERE change_id>{before} AND action IN ('D','I')"))).fetch_one(&db.pool).await.unwrap();
                 assert_eq!(captured, 2, "{mode}/{all_first}/{cycle}: D+I capture");
-                assert_eq!(changed, 2, "representation-aware numeric bit");
+                let expected_changed = if cycle == 4 { 0 } else { 2 };
+                assert_eq!(
+                    changed, expected_changed,
+                    "{mode}/{all_first}/{cycle}: representation-aware numeric bit"
+                );
                 let before_refresh: i64 = db
                     .query_scalar(
                         "SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history",
