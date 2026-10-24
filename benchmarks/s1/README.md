@@ -38,6 +38,38 @@ resource limits remain unchanged. A measured failure still fails qualification.
 Historical 10-CPU results remain bound to their original sources and images and
 cannot substitute for a new current-source run on either profile.
 
+## PR #1191 current-source ARM64 qualification — 2026-10-24
+
+Candidate source `587783847edaaa447437a2391083239e2b09ca62` was built from the
+PR head after merging current `main` `6ce9d0a462cb71cece3c255da16d9a2958d4796b`.
+It was paired with the approved control source
+`1c0345791979907e2c1418b0008ea15d58311cb9` and the same pinned MDM, React and
+PostgreSQL inputs. Both images were built and run sequentially on the approved
+10-CPU Linux ARM64 Docker profile. The exact images, build inputs, commands,
+complete observations, vectors, server logs and resource samples are retained
+in `qualification/local-arm64-1191-5877838/`.
+
+The candidate completed all 300 admissions, 1,200 source rows and 300 case
+vectors with zero future receipts. It measured **54.667334705546196
+cases/minute**; the frozen raw harness still records exit 1 for missing the
+60/minute target. The exact checker accepts that throughput-only failure under
+the owner-approved 50/minute floor as `PASS_OWNER_APPROVED_FLOOR`. All 27 other
+S1 checks passed. Due-burst p95 was **76.18806 seconds**, maximum **81.128345
+seconds**, conservative storage **3,362,758,099 bytes**, and peak sampled memory
+**1,901,506,560 bytes**.
+
+The paired control completed the same vectors at **26.933175465423115
+cases/minute**. Its raw below-target exit 1 and `BASELINE_COMPLETE` status are
+preserved; this is a complete control result, not a 60/minute pass. The
+candidate's measured rate was **2.03x** the control rate with matching MDM,
+React binaries and SQL hashes.
+
+The run also caught a join identity error for PostgreSQL `name` values. The
+candidate now serializes selected unsupported join-key fields as a JSON row
+before typed encoding. The regression test and the full v0.48 live/security
+fixtures pass. `just fmt`, `just lint` and `just test-unit` passed (2,631 tests);
+the exact-image bootstrap and MDM grant/JIT checks passed.
+
 
 Run the frozen R53 joint-stack workload from [issue #1168](https://github.com/trickle-labs/pg-trickle/issues/1168)
 against exact control and candidate Docker images. The candidate contains the

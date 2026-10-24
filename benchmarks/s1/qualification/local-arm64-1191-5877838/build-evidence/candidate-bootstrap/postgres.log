@@ -1,0 +1,88 @@
+2026-10-24T20:26:19.825609969Z The files belonging to this database system will be owned by user "postgres".
+2026-10-24T20:26:19.825628927Z This user must also own the server process.
+2026-10-24T20:26:19.825630010Z 
+2026-10-24T20:26:19.825630719Z The database cluster will be initialized with locale "en_US.utf8".
+2026-10-24T20:26:19.825631469Z The default database encoding has accordingly been set to "UTF8".
+2026-10-24T20:26:19.825632219Z The default text search configuration will be set to "english".
+2026-10-24T20:26:19.825633177Z 
+2026-10-24T20:26:19.825633885Z Data page checksums are enabled.
+2026-10-24T20:26:19.825634635Z 
+2026-10-24T20:26:19.825636969Z fixing permissions on existing directory /var/lib/postgresql/18/docker ... ok
+2026-10-24T20:26:19.831547719Z creating subdirectories ... ok
+2026-10-24T20:26:19.831675510Z selecting dynamic shared memory implementation ... posix
+2026-10-24T20:26:19.843888135Z selecting default "max_connections" ... 100
+2026-10-24T20:26:19.859323594Z selecting default "shared_buffers" ... 128MB
+2026-10-24T20:26:19.866527052Z selecting default time zone ... Etc/UTC
+2026-10-24T20:26:19.867182094Z creating configuration files ... ok
+2026-10-24T20:26:19.948935552Z running bootstrap script ... ok
+2026-10-24T20:26:20.160350385Z performing post-bootstrap initialization ... ok
+2026-10-24T20:26:20.233239261Z syncing data to disk ... ok
+2026-10-24T20:26:20.233249594Z 
+2026-10-24T20:26:20.233250344Z 
+2026-10-24T20:26:20.233251011Z Success. You can now start the database server using:
+2026-10-24T20:26:20.233253969Z 
+2026-10-24T20:26:20.233254844Z     pg_ctl -D /var/lib/postgresql/18/docker -l logfile start
+2026-10-24T20:26:20.233255636Z 
+2026-10-24T20:26:20.255150927Z waiting for server to start....2026-10-24 20:26:20.255 UTC [56] LOG:  too many background workers
+2026-10-24T20:26:20.255160344Z 2026-10-24 20:26:20.255 UTC [56] DETAIL:  Up to 0 background workers can be registered with the current settings.
+2026-10-24T20:26:20.255163011Z 2026-10-24 20:26:20.255 UTC [56] HINT:  Consider increasing the configuration parameter "max_worker_processes".
+2026-10-24T20:26:20.255562261Z 2026-10-24 20:26:20.255 UTC [56] LOG:  too many background workers
+2026-10-24T20:26:20.255564761Z 2026-10-24 20:26:20.255 UTC [56] DETAIL:  Up to 0 background workers can be registered with the current settings.
+2026-10-24T20:26:20.255565552Z 2026-10-24 20:26:20.255 UTC [56] HINT:  Consider increasing the configuration parameter "max_worker_processes".
+2026-10-24T20:26:20.255566802Z 2026-10-24 20:26:20.255 UTC [56] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-10-24T20:26:20.259985219Z 2026-10-24 20:26:20.259 UTC [56] LOG:  starting PostgreSQL 18.4 (Debian 18.4-1.pgdg12+1) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
+2026-10-24T20:26:20.260541594Z 2026-10-24 20:26:20.260 UTC [56] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-10-24T20:26:20.265602427Z 2026-10-24 20:26:20.265 UTC [62] LOG:  database system was shut down at 2026-10-24 20:26:20 UTC
+2026-10-24T20:26:20.267985469Z 2026-10-24 20:26:20.267 UTC [56] LOG:  database system is ready to accept connections
+2026-10-24T20:26:20.353635511Z  done
+2026-10-24T20:26:20.353642344Z server started
+2026-10-24T20:26:20.388291969Z 
+2026-10-24T20:26:20.388306302Z /usr/local/bin/s1-entrypoint.sh: running /docker-entrypoint-initdb.d/10-pg-react.sql
+2026-10-24T20:26:20.487100802Z CREATE EXTENSION
+2026-10-24T20:26:21.175225428Z CREATE EXTENSION
+2026-10-24T20:26:21.175803969Z 
+2026-10-24T20:26:21.175806344Z 
+2026-10-24T20:26:21.175807094Z /usr/local/bin/s1-entrypoint.sh: running /docker-entrypoint-initdb.d/20-observe.sql
+2026-10-24T20:26:21.196278803Z COPY 1
+2026-10-24T20:26:21.196782011Z 
+2026-10-24T20:26:21.196784844Z 
+2026-10-24T20:26:21.197440803Z waiting for server to shut down....2026-10-24 20:26:21.197 UTC [56] LOG:  received fast shutdown request
+2026-10-24T20:26:21.198631636Z 2026-10-24 20:26:21.198 UTC [56] LOG:  aborting any active transactions
+2026-10-24T20:26:21.200247761Z 2026-10-24 20:26:21.200 UTC [60] LOG:  shutting down
+2026-10-24T20:26:21.200885886Z 2026-10-24 20:26:21.200 UTC [60] LOG:  checkpoint starting: shutdown immediate
+2026-10-24T20:26:21.547049386Z 2026-10-24 20:26:21.546 UTC [60] LOG:  checkpoint complete: wrote 487 buffers (47.6%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=0.018 s, sync=0.327 s, total=0.347 s; sync files=802, longest=0.010 s, average=0.001 s; distance=23805 kB, estimate=23805 kB; lsn=0/2E96760, redo lsn=0/2E96760
+2026-10-24T20:26:21.552722094Z 2026-10-24 20:26:21.552 UTC [56] LOG:  database system is shut down
+2026-10-24T20:26:21.598808970Z  done
+2026-10-24T20:26:21.598814136Z server stopped
+2026-10-24T20:26:21.599429011Z 
+2026-10-24T20:26:21.599432720Z PostgreSQL init process complete; ready for start up.
+2026-10-24T20:26:21.599434261Z 
+2026-10-24T20:26:19.812038302Z ********************************************************************************
+2026-10-24T20:26:19.812063177Z WARNING: POSTGRES_HOST_AUTH_METHOD has been set to "trust". This will allow
+2026-10-24T20:26:19.812064219Z          anyone with access to the Postgres port to access your database without
+2026-10-24T20:26:19.812064927Z          a password, even if POSTGRES_PASSWORD is set. See PostgreSQL
+2026-10-24T20:26:19.812065635Z          documentation about "trust":
+2026-10-24T20:26:19.812066885Z          https://www.postgresql.org/docs/current/auth-trust.html
+2026-10-24T20:26:19.812067635Z          In Docker's default configuration, this is effectively any other
+2026-10-24T20:26:19.812068302Z          container on the same system.
+2026-10-24T20:26:19.812068927Z 
+2026-10-24T20:26:19.812069594Z          It is not recommended to use POSTGRES_HOST_AUTH_METHOD=trust. Replace
+2026-10-24T20:26:19.812070260Z          it with "-e POSTGRES_PASSWORD=password" instead to set a password in
+2026-10-24T20:26:19.812070927Z          "docker run".
+2026-10-24T20:26:19.812071844Z ********************************************************************************
+2026-10-24T20:26:20.233227594Z initdb: warning: enabling "trust" authentication for local connections
+2026-10-24T20:26:20.233246302Z initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-10-24T20:26:21.608883136Z 2026-10-24 20:26:21.608 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-10-24T20:26:21.612544220Z 2026-10-24 20:26:21.612 UTC [1] LOG:  starting PostgreSQL 18.4 (Debian 18.4-1.pgdg12+1) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
+2026-10-24T20:26:21.612714678Z 2026-10-24 20:26:21.612 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-10-24T20:26:21.612718053Z 2026-10-24 20:26:21.612 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-10-24T20:26:21.613772136Z 2026-10-24 20:26:21.613 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-10-24T20:26:21.616374428Z 2026-10-24 20:26:21.616 UTC [123] LOG:  database system was shut down at 2026-10-24 20:26:21 UTC
+2026-10-24T20:26:21.619033678Z 2026-10-24 20:26:21.618 UTC [1] LOG:  database system is ready to accept connections
+2026-10-24T20:26:21.804389928Z 2026-10-24 20:26:21.804 UTC [1] LOG:  received fast shutdown request
+2026-10-24T20:26:21.805226720Z 2026-10-24 20:26:21.805 UTC [1] LOG:  aborting any active transactions
+2026-10-24T20:26:21.807053178Z 2026-10-24 20:26:21.806 UTC [1] LOG:  background worker "logical replication launcher" (PID 127) exited with exit code 1
+2026-10-24T20:26:21.807431261Z 2026-10-24 20:26:21.807 UTC [121] LOG:  shutting down
+2026-10-24T20:26:21.807998303Z 2026-10-24 20:26:21.807 UTC [121] LOG:  checkpoint starting: shutdown immediate
+2026-10-24T20:26:21.811277053Z 2026-10-24 20:26:21.811 UTC [121] LOG:  checkpoint complete: wrote 15 buffers (1.5%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.004 s; sync files=8, longest=0.001 s, average=0.001 s; distance=115 kB, estimate=115 kB; lsn=0/2EB3438, redo lsn=0/2EB3438
+2026-10-24T20:26:21.816471261Z 2026-10-24 20:26:21.816 UTC [1] LOG:  database system is shut down

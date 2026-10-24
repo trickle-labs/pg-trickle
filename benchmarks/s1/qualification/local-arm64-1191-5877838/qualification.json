@@ -1,0 +1,83 @@
+{
+  "purpose": "PR #1191 current-source exact-image S1 qualification",
+  "qualified_at_utc": "2026-10-24T20:28:15Z",
+  "candidate_source_commit": "587783847edaaa447437a2391083239e2b09ca62",
+  "candidate_base_main_commit": "6ce9d0a462cb71cece3c255da16d9a2958d4796b",
+  "control_source_commit": "1c0345791979907e2c1418b0008ea15d58311cb9",
+  "mdm_source_commit": "eef7937180d504e62ce1076074bbeed8cef5d5a7",
+  "react_source_commit": "f19d9b2c5f3d947705ea26aa1619a989f08ae1dc",
+  "host": {
+    "chip": "Apple M1 Pro",
+    "architecture": "aarch64",
+    "docker_platform": "linux/arm64",
+    "docker_cpus": 10,
+    "docker_memory_bytes": 8319504384,
+    "docker_server": "29.9.2",
+    "storage_driver": "overlayfs"
+  },
+  "sdk": {
+    "image": "sha256:de453c245823bdb68c341e5b648a08f008e7cf67a336615a753baadd8c1f9150",
+    "rust": "1.98.0",
+    "cargo_pgrx": "0.18.0",
+    "postgres_runtime": "18.4-bookworm"
+  },
+  "images": {
+    "candidate": "sha256:d6289aa5c868fe7a5882bbe5901ec625bdc5f8044d38f5f4313f77f2762d7f46",
+    "control": "sha256:c33e9035e5d5a30a9f66abf5b5baa621ef2a84ff5d78c8ac6fd2c8040348e99c",
+    "candidate_pg_trickle_sha256": "0233b194a951d6c16d0189a21b27d4874755f9da4019ba923ccdcdb268189e2a",
+    "control_pg_trickle_sha256": "9f3bdfb6de3dee4dae9bb369ccd9f747fd770a09f20b8798a0d2c76115884dab",
+    "mdm_react_and_react_sql_hashes_match": true
+  },
+  "workload": {
+    "offered_target_cases_per_minute": 60,
+    "owner_approved_candidate_floor_cases_per_minute": 50,
+    "candidate": {
+      "admissions": 300,
+      "source_rows": 1200,
+      "case_vectors": 300,
+      "future_receipts": 0,
+      "cases_per_minute": 54.667334705546196,
+      "due_p95_seconds": 76.18806,
+      "due_max_seconds": 81.128345,
+      "conservative_used_bytes": 3362758099,
+      "peak_memory_bytes": 1901506560,
+      "measurement_errors": [],
+      "supervision_error": null,
+      "raw_harness_exit_code": 1,
+      "raw_failure": "60 cases/minute target only",
+      "throughput_gate": "owner_approved_50_to_60",
+      "result": "PASS_OWNER_APPROVED_FLOOR"
+    },
+    "control": {
+      "admissions": 300,
+      "source_rows": 1200,
+      "case_vectors": 300,
+      "future_receipts": 0,
+      "cases_per_minute": 26.933175465423115,
+      "due_p95_seconds": 111.12005,
+      "due_max_seconds": 116.226038,
+      "conservative_used_bytes": 3436865677,
+      "peak_memory_bytes": 1882693632,
+      "measurement_errors": [],
+      "supervision_error": null,
+      "raw_harness_exit_code": 1,
+      "raw_failure": "60 cases/minute baseline target only",
+      "throughput_gate": "failed_below_60",
+      "result": "BASELINE_COMPLETE"
+    },
+    "candidate_checks_passed": 27,
+    "candidate_checks_total": 28,
+    "candidate_only_failed_check": "1000-case-due-burst-and-60-per-minute-churn"
+  },
+  "exact_image_checks": {
+    "candidate_temporary_server_bootstrap": "PASS",
+    "candidate_mdm_grants_and_jit_scope": "PASS",
+    "source_and_case_vectors": "PASS",
+    "complete_comparable_control": "PASS"
+  },
+  "evidence": {
+    "build_and_source": "build-evidence/",
+    "complete_runs": "runs.tar.gz",
+    "checksum_manifest": "SHA256SUMS"
+  }
+}
