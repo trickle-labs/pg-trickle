@@ -182,6 +182,101 @@ async fn test_agg_sum_differential() {
 }
 
 #[tokio::test]
+async fn test_agg_sum_special_numeric_values_rescan_affected_groups() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE agg_special_sum (id INT PRIMARY KEY, grp TEXT, val NUMERIC)")
+        .await;
+    db.execute(
+        "INSERT INTO agg_special_sum VALUES \
+         (1,'pos','Infinity'),(2,'pos',1), \
+         (3,'pos_delete','Infinity'),(4,'pos_delete',1), \
+         (5,'neg','-Infinity'),(6,'neg',2), \
+         (7,'nan','NaN'),(8,'nan',3), \
+         (9,'null',NULL),(10,'null',NULL), \
+         (11,'finite',0),(12,'finite',4)",
+    )
+    .await;
+
+    let queries = [
+        (
+            "agg_special_sum_numeric",
+            "SELECT grp, SUM(val) AS total FROM agg_special_sum GROUP BY grp",
+        ),
+        (
+            "agg_special_sum_expression",
+            "SELECT grp, SUM(val + 0::numeric) AS total \
+             FROM agg_special_sum GROUP BY grp",
+        ),
+        (
+            "agg_special_sum_float",
+            "SELECT grp, SUM(val::double precision) AS total \
+             FROM agg_special_sum GROUP BY grp",
+        ),
+        (
+            "agg_special_avg_numeric",
+            "SELECT grp, AVG(val) AS average FROM agg_special_sum GROUP BY grp",
+        ),
+        (
+            "agg_special_avg_float",
+            "SELECT grp, AVG(val::double precision) AS average \
+             FROM agg_special_sum GROUP BY grp",
+        ),
+    ];
+    for (name, query) in queries {
+        db.create_st(name, query, "1m", "DIFFERENTIAL").await;
+        db.assert_st_matches_query(name, query).await;
+    }
+
+    for mutation in [
+        "DELETE FROM agg_special_sum WHERE id=3", // +Infinity deletion leaves finite 1
+        "UPDATE agg_special_sum SET val=5 WHERE id=1", // +Infinity → finite
+        "UPDATE agg_special_sum SET val=3 WHERE id=5", // -Infinity → finite
+        "UPDATE agg_special_sum SET val=0 WHERE id=7", // NaN → zero
+        "INSERT INTO agg_special_sum VALUES \
+         (13,'competing','Infinity'),(14,'competing','-Infinity'),(15,'competing',7)",
+        "DELETE FROM agg_special_sum WHERE id=13", // competing infinities → -Infinity
+        "DELETE FROM agg_special_sum WHERE id=14", // -Infinity removal recovers 7
+        "UPDATE agg_special_sum SET val=8 WHERE id=12", // finite update
+        "UPDATE agg_special_sum SET val=0 WHERE id=12", // zero
+        "UPDATE agg_special_sum SET val=NULL WHERE id=12", // zero → NULL
+        "DELETE FROM agg_special_sum WHERE grp='null'", // all-NULL group removed
+        "DELETE FROM agg_special_sum WHERE grp='finite'", // empty group removed
+        "DELETE FROM agg_special_sum",             // empty input
+        "INSERT INTO agg_special_sum VALUES (16,'again',0)", // repopulate
+    ] {
+        db.execute(mutation).await;
+        for (name, query) in queries {
+            db.try_execute_with_config(
+                &[
+                    "SET pg_trickle.refresh_strategy = 'differential'",
+                    "SET pg_trickle.differential_max_change_ratio = 0",
+                ],
+                &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{name}: differential refresh failed after {mutation}: {error}")
+            });
+            db.assert_st_matches_query(name, query).await;
+            let differential_completed: bool = db
+                .query_scalar(&format!(
+                    "SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' \
+                     AND NOT h.was_full_fallback \
+                     FROM pgtrickle.pgt_refresh_history h \
+                     JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                     WHERE st.pgt_name = '{name}' \
+                     ORDER BY h.refresh_id DESC LIMIT 1"
+                ))
+                .await;
+            assert!(
+                differential_completed,
+                "{name}: no differential refresh after {mutation}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_agg_avg_differential() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE agg_avg (id SERIAL PRIMARY KEY, grp TEXT, val NUMERIC)")
