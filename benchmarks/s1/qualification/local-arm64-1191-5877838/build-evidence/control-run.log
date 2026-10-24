@@ -1,0 +1,1 @@
+{"image": "sha256:c33e9035e5d5a30a9f66abf5b5baa621ef2a84ff5d78c8ac6fd2c8040348e99c", "exit_code": 1, "stop_reason": null, "measurement_errors": [], "exited_container_samples": [], "supervision_error": null, "peak_memory_bytes": 1882693632, "elapsed_seconds": 953.319294875022, "conservative_used_bytes": 3436865677}

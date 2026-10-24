@@ -11,6 +11,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Keep the WAL receipt phase-barrier witness serial without removing it from PR coverage.
+WAL_SERIAL_CASE = ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_received_receipt_requires_rebaseline")
+
 
 def targets(root: Path = ROOT) -> list[str]:
     policy = json.loads((root / ".github/ci-suites.json").read_text())
@@ -84,6 +87,9 @@ def main() -> int:
     for case in cases:
         binary, test = case.split("::")
         excluded.append(f"not (binary(={binary}) & test(={test}))")
+    if WAL_SERIAL_CASE[0] in selected:
+        binary, test = WAL_SERIAL_CASE
+        excluded.append(f"not (binary(={binary}) & test(={test}))")
     if excluded:
         command.extend(["-E", " & ".join(excluded)])
     status = subprocess.run(command, cwd=ROOT).returncode
@@ -96,12 +102,21 @@ def main() -> int:
         ], cwd=ROOT).returncode
         if status:
             return status
-    if "e2e_refresh_atomicity_tests" not in selected:
+    if "e2e_refresh_atomicity_tests" in selected:
+        # Keep witnessed barriers isolated from parallel E2E container load.
+        status = subprocess.run([
+            "./scripts/run_e2e_tests.sh", "--profile", "ci",
+            "--test", "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
+        ], cwd=ROOT).returncode
+        if status:
+            return status
+    if WAL_SERIAL_CASE[0] not in selected:
         return 0
-    # Keep witnessed barriers isolated from the parallel suite's container load.
+    binary, test = WAL_SERIAL_CASE
     return subprocess.run([
         "./scripts/run_e2e_tests.sh", "--profile", "ci",
-        "--test", "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
+        "--test", binary, "-E", f"test(={test})",
+        "--test-threads", "1", "--retries", "0",
     ], cwd=ROOT).returncode
 
 

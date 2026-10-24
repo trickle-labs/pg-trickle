@@ -1038,12 +1038,10 @@ fn acknowledge_receipt_batch(
     let first = receipts.first().ok_or_else(|| {
         PgTrickleError::InternalError("cannot acknowledge empty WAL batch".into())
     })?;
-    let through_lsn = receipts
-        .last()
-        .map(|receipt| receipt.lsn.as_str())
-        .ok_or_else(|| {
-            PgTrickleError::InternalError("cannot find WAL batch high-water mark".into())
-        })?;
+    let through = receipts.last().ok_or_else(|| {
+        PgTrickleError::InternalError("cannot find WAL batch high-water mark".into())
+    })?;
+    let through_lsn = through.lsn.as_str();
     assert_valid_identifier(&first.slot_name, "replication slot name")?;
 
     if !slot_has_reached(&first.slot_name, through_lsn)? {

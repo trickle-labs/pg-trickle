@@ -1,0 +1,470 @@
+# S1 graph-refresh qualification
+
+## Owner-approved throughput acceptance amendment — revised 2026-10-22
+
+The owner has revised the **minimum candidate acceptance rate from 59 to 50 cases/minute**
+to accommodate performance variation between approved execution environments.
+The earlier 59/min approval is preserved as policy history. The frozen workload
+still offers **60 cases/minute** as its engineering performance target, not the
+new binary release minimum. This change does not retroactively convert any
+original raw 60/minute harness failure into a raw pass.
+
+For an observed rate in **[50, 60)**, the frozen harness continues to report
+its original throughput-only failure and exit 1. The current S1 acceptance
+checker can return `PASS_OWNER_APPROVED_FLOOR` only with the exact sole
+throughput failure, all 300 admissions, 1,200 source rows, 300 case vectors,
+zero future receipts and every original authorization, due-burst, resource
+and supervision assertion passing. Rates **below 50**, any unrelated failure,
+or missing/inconsistent evidence still fail. The slower control retains its
+separate documented baseline exception; all historical raw runs are immutable.
+
+This amendment **does not waive exact-current-source qualification**: archived
+59.363743/minute source `2d102645ccc6779c508514ee22b4a55603bdc281`
+is not the latest PR #1191 source. Current candidate and corrected control
+must be built and measured on an approved ARM64 profile, with complete paired
+correctness, latency, resource, source/binary hashes and results. A 4-CPU hosted artifact check is
+not an actual current-head benchmark. React #12's separately required signed
+operating envelope, restore/clone, mixed-backlog and other release gates remain
+unapproved.
+
+## Owner-approved hosted ARM64 profile — 2026-10-22
+
+The owner also approved using the GitHub-hosted **4-CPU ARM64** runner as an
+alternative to this laptop's 10-CPU ARM64 Docker profile. The workflow now builds
+and measures the exact current candidate and corrected control on that runner;
+the CPU gate requires at least 4 CPUs. The **50/minute acceptance floor**, frozen
+300 admissions, complete vectors, zero future receipts, latency, supervision and
+resource limits remain unchanged. A measured failure still fails qualification.
+Historical 10-CPU results remain bound to their original sources and images and
+cannot substitute for a new current-source run on either profile.
+
+## PR #1191 current-source ARM64 qualification — 2026-10-24
+
+Candidate source `587783847edaaa447437a2391083239e2b09ca62` was built from the
+PR head after merging current `main` `6ce9d0a462cb71cece3c255da16d9a2958d4796b`.
+It was paired with the approved control source
+`1c0345791979907e2c1418b0008ea15d58311cb9` and the same pinned MDM, React and
+PostgreSQL inputs. Both images were built and run sequentially on the approved
+10-CPU Linux ARM64 Docker profile. The exact images, build inputs, commands,
+complete observations, vectors, server logs and resource samples are retained
+in `qualification/local-arm64-1191-5877838/`.
+
+The candidate completed all 300 admissions, 1,200 source rows and 300 case
+vectors with zero future receipts. It measured **54.667334705546196
+cases/minute**; the frozen raw harness still records exit 1 for missing the
+60/minute target. The exact checker accepts that throughput-only failure under
+the owner-approved 50/minute floor as `PASS_OWNER_APPROVED_FLOOR`. All 27 other
+S1 checks passed. Due-burst p95 was **76.18806 seconds**, maximum **81.128345
+seconds**, conservative storage **3,362,758,099 bytes**, and peak sampled memory
+**1,901,506,560 bytes**.
+
+The paired control completed the same vectors at **26.933175465423115
+cases/minute**. Its raw below-target exit 1 and `BASELINE_COMPLETE` status are
+preserved; this is a complete control result, not a 60/minute pass. The
+candidate's measured rate was **2.03x** the control rate with matching MDM,
+React binaries and SQL hashes.
+
+The run also caught a join identity error for PostgreSQL `name` values. The
+candidate now serializes selected unsupported join-key fields as a JSON row
+before typed encoding. The regression test and the full v0.48 live/security
+fixtures pass. `just fmt`, `just lint` and `just test-unit` passed (2,631 tests);
+the exact-image bootstrap and MDM grant/JIT checks passed.
+
+
+Run the frozen R53 joint-stack workload from [issue #1168](https://github.com/trickle-labs/pg-trickle/issues/1168)
+against exact control and candidate Docker images. The candidate contains the
+graph-refresh optimizations merged in #1169 and the keyless-delta fix in #1171.
+The follow-up avoids JIT compilation within owner-executed graph applies below 100 source changes when
+`planner_aggressive` is enabled. The caller's JIT setting is restored on exit.
+The LEFT JOIN-only diagnostic reduced row expansion but compiled more JIT
+functions and ran slower; that change was dropped and its measurement is retained,
+and does not qualify the throughput gate.
+
+## PR #1191 exact-head ARM64 run
+
+The exact candidate source `2d102645ccc6779c508514ee22b4a55603bdc281` and
+approved control source `1c0345791979907e2c1418b0008ea15d58311cb9` were built
+and run sequentially on the Apple M1 Pro's native ARM64 Docker profile (10 CPUs).
+Candidate and control dependency binaries match; only `pg_trickle.so` differs.
+The complete run and build evidence is under
+`qualification/local-arm64-1191/`.
+
+| Measurement | Candidate | Corrected control |
+| --- | ---: | ---: |
+| Admissions/minute | 59.363743 | 26.771501 |
+| Complete admissions | 300 | 300 |
+| Source/case vectors | 1,200 / 300 | 1,200 / 300 |
+| Future receipts | 0 | 0 |
+| Due-burst p95 / maximum | 109.629 / 114.516 s | 80.128 / 85.169 s |
+| Conservative storage | 3,434,478,459 bytes | 3,476,631,101 bytes |
+| Peak sampled memory | 2,072,399,872 bytes | 2,025,267,200 bytes |
+| Raw result | 60/min throughput failed; harness exit 1 | 60/min throughput failed; harness exit 1 |
+
+The frozen workload still offers 60 admissions/minute. Under the **2026-10-22
+owner-approved minimum of 50**, the current checker explicitly labels an
+otherwise-valid sole subtarget rate failure `PASS_OWNER_APPROVED_FLOOR`.
+The original evidence's `PASS_WITH_RATE_TOLERANCE` label is historical and
+retained unchanged. An archive from another candidate source cannot prove the
+current candidate, even if that archive is valid under the new floor and its
+host profile is approved.
+
+## Previous merged-head native ARM64 qualification
+
+On 2026-10-20, the exact PR-head candidate from source
+`7642630ba121b3dfb85eb71f75041085d9246c63` passed the full qualification on
+the separately approved ARM64 Docker profile: Apple M1 Pro, Docker Desktop,
+10 CPUs and 7.75 GiB of Docker-reported memory. Its image was
+`sha256:5a8ea79af5c57798e14293bb53cef9aaefe3a26ce119e3063fd9a931790c9cc6`.
+The complete corrected control remains the approved source
+`1c0345791979907e2c1418b0008ea15d58311cb9`, image
+`sha256:671cd2c7f21a3973cfe554b0a9c460b603c32bbcfec599b7b028784e871cefc7`.
+Both images use the same corrected MDM grant patch and pinned React/MDM sources.
+
+| Measurement | Candidate | Corrected control |
+| --- | --- | --- |
+| Admissions/minute | **60.0018300558167** | 27.209718099565716 |
+| Complete admissions | 300 | 300 |
+| Source/case vectors | 1,200 / 300, exact | 1,200 / 300, exact |
+| Future receipts | 0 | 0 |
+| Due-burst p95 / maximum | 109.030465 / 113.924526 s | 109.627996 / 114.512779 s |
+| Conservative storage | 3,413,170,045 bytes | 3,418,885,308 bytes |
+| Peak sampled memory | 2,020,134,912 bytes | 1,948,774,400 bytes |
+| Strict result | **PASS, raw exit 0** | BASELINE_COMPLETE; rate failed, raw exit 1 |
+
+Every candidate correctness, permission, worker-health, latency and resource
+gate passed; supervision recorded no measurement errors or stop reason. The
+complete merged-head vectors, observations, timestamped logs, image identities
+and checksums remain under `target/issue1168-completion/native-arm64-764-head/`.
+The exact-head [GitHub-hosted diagnostic run](https://github.com/trickle-labs/pg-trickle/actions/runs/39405849795)
+used native Linux ARM64 with a 4-core Neoverse-N2 runner and 15.57 GiB Docker
+memory. It completed all 300 admissions and vectors; correctness, latency and
+resource checks passed, but throughput was 53.063326/min against the unchanged
+60/min gate. Its due-burst p95 / maximum were 120.034429 / 125.504278 seconds,
+storage growth was 95,606,259 bytes, and peak sampled memory was 1,859,428,352
+bytes. This is retained separately under
+`target/issue1168-completion/gha-39405849795/`; the verified artifact has 105
+checksummed files. It does not replace the approved 10-CPU Docker result.
+
+When this result was recorded, the workflow marked a runner with fewer than 10
+Docker CPUs `SKIPPED_UNQUALIFIED_PROFILE`. Historical checks now diagnose archive
+provenance only; current source must be rebuilt and measured on an approved
+profile. This earlier candidate was only
+0.0018 cases per minute above 60, so its narrow margin remains part of the
+history. The earlier native amd64 failure remains retained separately.
+
+## Archived earlier native ARM64 qualification
+
+The recorded result below applies to its exact archived images. A subsequent
+bootstrap correction disables background workers only in Docker's temporary
+initialization server, avoiding its shutdown race. Both control and candidate
+receive the same entrypoint correction; the final server receives the original
+arguments and worker settings. CI verifies temporary-server isolation and the
+unchanged runtime settings on both images before running qualification. This
+changes image identities and does not transfer the archived throughput score
+to the rebuilt images. The workload, readiness bound and rate gates are unchanged.
+
+The subsequent parser correction preserves `JOIN ... USING` predicates in
+differential plans and SQL rewrites. It fixes the compiler-v9 graph's extra
+rows after a composite-key insert. This changes compiled extension inputs;
+the archived result below does not qualify this new candidate.
+
+Native amd64 run 39375497790 completed both images after the bootstrap fix.
+The control completed at 23.057896203519824/minute under the approved baseline
+policy. Candidate `sha256:cb37bdd19af6251d78c82d2e354e21faba4c9befefc8ab8fad0734f469822490`
+failed throughput at 49.79070394611743/minute, with the other recorded gates
+passing. Its raw exit 1 and all 102 verified artifact hashes remain retained
+under `target/issue1168-completion/native-d221d05/`. This failure is not
+accepted by the candidate checker or replaced by the archived ARM64 score.
+
+The exact candidate from source `a89347261896efa26162e707c782d1c2a2e9d28b`, image
+`sha256:3a84aac71ae8b0f1ed73a7480dcb85205d14f7e948b864200da52e58ba04f316`,
+passes the unchanged strict candidate checker with raw exit 0. The explicitly
+approved corrected control is complete; its raw below-60 failure and exit 1
+remain preserved under the control-only baseline policy.
+
+| Measurement | Candidate | Corrected control |
+| --- | --- | --- |
+| Admissions/minute | **60.02924744994256** | 27.092425905801132 |
+| Complete admissions | 300 | 300 |
+| Source/case vectors | 1,200 / 300, exact | 1,200 / 300, exact |
+| Future receipts | 0 | 0 |
+| Due-burst p95 / maximum | 76.069447 / 80.866423 s | 109.314041 / 114.155216 s |
+| Conservative storage | 3,317,364,733 bytes | 3,415,481,585 bytes |
+| Peak sampled memory | 1,965,625,344 bytes | 1,764,052,992 bytes |
+| Strict result | PASS | BASELINE_COMPLETE; rate failed |
+
+All correctness, permission, worker-health and resource gates pass. Candidate
+supervision recorded no measurement errors or stop reason. The initial Docker
+inventory was empty; host-start receipts contain only its two exact-image
+containers. Local tests, builds and compression were stopped during timing.
+
+The [qualification record](arm64-qualification.json) retains source/image pins,
+commands, explicit control/profile approvals, archive hashes and the manifest
+of full local observations, vectors, logs and resource measurements under
+`target/issue1168-completion/`. Both runnable images and the exact candidate
+source are archived there. Earlier failures remain unchanged below and in
+their retained run directories; unchanged images were not rerun to replace
+an unfavorable rate.
+
+This result qualifies the approved Linux ARM64 Docker profile. Native amd64
+performance has not qualified. The harness paces admissions at 60/minute, so
+this result does not establish capacity above that offered rate. Formatting,
+zero-warning lint, 2,618 Docker units, 49 focused graph/ownership/atomicity/
+conformance checks and actual MDM/JIT guards pass for the exact candidate.
+Full local integration/E2E, TPC-H and dbt suites were not run; one known
+standalone PostgreSQL error-stub unit is excluded.
+
+The follow-up also reuses parsed query trees and resolved CDC buffer OIDs.
+Incremental refresh admission uses fresh resolved volatility analysis without
+creating an output-schema probe view whose column information is discarded.
+CREATE/ALTER still inspect exact output types and typmods where needed.
+Pure string cost classification does not switch execution roles. Source-commit
+buffer discovery uses direct joins for base and stream-table dependencies,
+retaining identical buffers, timestamp calculations and safe-bound filters.
+The retained 73-table catalog diagnostic found identical complete vectors and
+reduced aggregate lookup execution from 43.182 ms to 11.354 ms; this is not a
+qualification score. The regression checks oldest timestamps from both kinds
+of dependency.
+For immutable pointwise inner joins with at most three table inputs, a completed reconciled baseline permits
+ordinary differential maintenance without another complete comparison.
+Eligible large graph joins use the required multiset comparison to produce the
+apply delta directly, retaining duplicate occurrences and bigint scalar-aggregate state.
+Constraint triggers, rules and row security keep the existing UPDATE path.
+Graph statistics cover the bounded stages and materialized delta actually read.
+Graph refresh also reuses the metadata already validated in each contract snapshot
+and loads manual-refresh upstream metadata once. Eligible exact replacement deltas
+without hidden counts can feed split downstream capture directly.
+For supported boolean, bytea, integer, text, varchar, UUID and temporal outputs
+with deterministic collations, native comparison operates on complete multisets
+before encoding changed row identities. Plain replacements group signed weights;
+counted intermediates retain `EXCEPT ALL`. Other types retain the existing comparison.
+The focused regressions check complete typed output deltas, NULL duplicates,
+multi-cycle changes, rollback, foreign-key cascades and owner privileges.
+
+Normalized pointwise deltas can also feed split downstream capture, with joins
+requiring the guarded exact baseline, avoiding another pre/post snapshot. This requires
+the existing weight-normalization wrapper and excludes hidden count state.
+The regression checks duplicate occurrences, NULLs, cancellation and absence
+of the redundant pre-snapshot within the refresh transaction.
+
+Small immutable computed projections with a reconciled baseline can reuse their
+mandatory comparison too. Native full-value matching retains the actual stored
+row identity and physical deletion target, including duplicate NULL occurrences.
+A record hash narrows incomplete-identity joins; full NULL-safe equality verifies
+every match. Complete identities retain direct identity matching.
+The regression changes the caller's timezone and checks complete temporal deltas.
+
+The workload offers 60 admissions/minute and requires 300 admissions, complete
+case/source vectors, zero future receipts, and a 1,000-case due burst with
+p95 <=150 seconds and maximum <=180 seconds. Whole-run storage must remain
+below 10 GiB. The supervisor stops at 9 GiB sampled storage, 4 GiB sampled
+container memory, 45 minutes, or less than 10 GiB host free space. These are
+sampled limits, not a per-operation memory guarantee.
+The owner-approved release minimum is 50/minute, with the offered workload
+and performance target still 60/minute. For [50, 60), throughput must be the
+sole raw failure, and the acceptance result must identify the amended floor.
+The supervisor uses the bounded PostgreSQL restart handling described below
+because the frozen worker-health checks restart the server. Persistent
+failures, timeouts and other errors stop the run.
+
+The GitHub workflow builds and runs both images on the approved 4-CPU native
+ARM64 runner. A runner exposing fewer than 4 Docker CPUs can only inspect the
+historical archive and fails current-source qualification. Neither path implies
+a native amd64 throughput result.
+
+On 2026-10-19 the user explicitly approved accepting a slower **complete
+control** as the comparison baseline. `check_result.py --baseline` accepts only
+the frozen harness's sole below-60 rate failure after all 300 admissions,
+complete vectors and every other gate pass. It retains the raw failure and
+exit status and labels the summary `BASELINE_COMPLETE`, with the failed rate
+gate visible. Other control failures remain comparison blockers. The default
+candidate checker requires >=50/minute under the revised dated owner approval, and
+only permits a 50–<60/minute raw failure if it is solely the target-rate gate;
+every other gate must pass.
+
+The builder cleans the pg-trickle package before compiling either source tree,
+retaining dependency caches. Run 39255297739 exposed a stale Cargo artifact:
+the candidate reused the control library despite a different source checkout.
+Those native candidate observations do not measure the JIT optimization.
+Qualification now requires different pg-trickle library hashes, identical
+MDM/React hashes, and a runtime JIT-scope regression on the actual candidate.
+The supervisor retains full timestamped container logs and includes their bytes
+in the storage budget; it replays Docker's retained logs when an intentional
+restart ends a follow stream. A failed log capture fails supervision.
+Run 39268153170 passed the library and actual-binary guards, then both images
+were stopped by `du` racing with deleted PostgreSQL temporary relations. These
+remain explicit supervision failures. Disk sampling now retries only that exact
+temporary-relation ENOENT condition, at most four times 200 ms apart; permission,
+other missing-file, timeout and persistent errors still stop the run.
+
+Run 39275675630 then expired the five-attempt SQL metric retry while PostgreSQL
+was intentionally starting or stopping. The supervisor now continues sampling
+physical PGDATA and cgroup memory during recognized connection restart errors,
+retains prior SQL counters, and records every unavailable SQL sample. A gap of
+60 seconds fails supervision. Other SQL errors still fail immediately. This
+does not change the frozen harness's readiness checks, workload or limits.
+
+The complete ARM64 candidate from source `17c49e7e52c0e15ef155adbf4c1608725a5c55f1`,
+image `sha256:29d448459fa81c35c5d85558061f984b023345b5f89320da93a747932faf8df4`,
+failed the rate gate at 59.369956913836965/minute. Its complete 1,200 source and
+300 case vectors matched, with zero future receipts. A cgroup read raced with
+container teardown and was also retained as a measurement error; the default
+complete-result checker rejected the run. Earlier complete candidates at
+57.6127, 59.1360 and 59.0177/minute remain failures as well.
+
+A metadata fillfactor-50 prototype completed at 59.4198/minute, with all vectors
+and other gates passing. Despite fewer new-page updates in a temporary-table
+diagnostic, it did not materially improve the full workload and was discarded.
+Its source `ca4c5faba9c0c5198c5442ba25b20946e747a6c4`, exact image
+`sha256:36ee69d30e83a17a08314cad2b99b8bb2a633679eea1db05e9da4d905a9bf7f1`,
+raw failure, complete observations and portable image remain retained.
+
+The subsequent pointwise/projection candidate, source
+`6d12294d4079ff9cb5f30db9ee8b7fd5c29fe09e`, image
+`sha256:2e1439bcd726e7c50ef2a852ed1b782ebfb0cb88305fae7077361948cca3103b`,
+completed at 59.97136027709061/minute and remains a failure. All 1,200 source
+and 300 case vectors matched, with zero future receipts and all other gates
+passing. Due-burst p95/max were 77.284419/82.261 seconds; conservative storage
+was 3,408,026,079 bytes and peak sampled memory 2,076,282,880 bytes. The raw
+exit, official checker rejection, full vectors, logs and runnable archive are
+retained. An admission-to-admission partial rate omitted the initial timing
+offset; only the unchanged official SQL window determines the final rate.
+
+Direct identity matching, source `f1c7b373f347ff6bd8ff76bde7b4de893fd0bd0c`,
+image `sha256:19963a62f001cca4be118f770b73d6c3e2580c39b1bb7cb6aafbaf15448a9bb6`,
+then completed at 59.90644968878966/minute and also remains a failure. Its
+complete vectors and all other gates passed: due p95/max 76.085647/80.941095
+seconds, conservative storage 3,428,191,327 bytes, peak memory 1,890,263,040
+bytes. The exact image, full observations and official rejection are retained.
+
+Memory sampling now handles a confirmed stopped/removed container consistently
+with the existing SQL/disk sampling paths: it records an explicit
+`exited_container_samples` receipt and retains previous memory/storage peaks.
+A failed memory read from a running container still stops supervision. Fault
+injection verifies both paths and preservation of the preceding resource sample.
+The failed run above remains unchanged. Workload, candidate rate, readiness,
+sampling interval, resource limits and complete-vector requirements are unchanged.
+
+Run 39294113404 completed its corrected control at 23.3414/minute with only
+the approved rate failure. The candidate then failed the frozen fresh-server
+60-second readiness check while the Docker initialization server was shutting
+down; it admitted no churn cases. Supervision itself recorded no errors.
+This is retained as a startup failure, with no candidate throughput score.
+
+Run 39304244497 likewise completed its corrected native amd64 control at
+21.0940/minute, then failed candidate fresh-server readiness before churn.
+Its complete artifact has 66 verified file hashes; no candidate rate is inferred.
+
+The complete ARM64 candidate from source `a75c10ff71642f6fa7483610ed6f5ed5863b7f43`,
+image `sha256:b3d768acb3e2ae962543d68b363b7948256daf1890be1d6dd88989e957955d3a`,
+failed only the throughput gate at 45.0327/minute. All 300 admissions, 1,200
+source-row vectors and 300 case vectors passed, with zero future receipts.
+Due-burst p95/max were 76.631159/81.643393 seconds, conservative storage was
+3,549,250,675 bytes and peak sampled memory was 2,009,587,712 bytes.
+Raw exit 1, full observations, logs, resource accounting, exact compiled-source
+proof and the runnable image archive remain under `target/issue1168-completion/`.
+This failed candidate is never accepted using the control-only baseline policy.
+
+The user approved a separate native Linux ARM64 Docker profile on 2026-10-19.
+It uses the same source pins, MDM correction, workload and limits. Its image
+identities, compiler manifest, host and observations are retained separately
+from amd64; a passing ARM64 result is specific to that declared platform.
+
+The user also approved `mdm-grants.patch` for **both** images after native run
+39255297739 deadlocked on admission 236. MDM had reissued GRANT on every graph
+table before each refresh; its catalog writes can deadlock with ANALYZE while
+graph refresh waits for a SHARE storage lock. The patch checks existing SELECT
+access and locks storage before granting missing access. `test_grant_analyze.py`
+reproduces the old lock cycle in PostgreSQL 18.4 and checks both corrected paths.
+`test_mdm_grants.py` runs the actual MDM binary after bootstrap, checks that
+repeat refresh leaves graph-storage catalog rows unchanged, and verifies that
+revoked SELECT is restored. Only this isolated catalog-write regression disables
+autovacuum to exclude unrelated statistics writes; S1 keeps its frozen settings.
+The original MDM source remains pinned; the exact patch is retained with the
+qualification source and applied explicitly by the Dockerfile. The failed run
+remains a failure, with no complete throughput or paired speedup score.
+
+## Fixed inputs
+
+| Component | Source |
+| --- | --- |
+| Corrected control | pg-trickle `1c0345791979907e2c1418b0008ea15d58311cb9` |
+| Candidate | Exact PR head (or manually selected workflow ref) |
+| MDM | pg-mdm `eef7937180d504e62ce1076074bbeed8cef5d5a7` |
+| React | pg-react `f19d9b2c5f3d947705ea26aa1619a989f08ae1dc` |
+| PostgreSQL | 18.4, pinned image digest in `Dockerfile` |
+| Harness | Retained R53 files listed with original SHA-256 values in `frozen-harness.json` |
+
+The old runnable joint-stack images were removed during host cleanup. Their
+React package had admitted pg-trickle 0.108.3; the pinned React source still
+admits only 0.108.0. The Dockerfile explicitly replaces that exact patch-version
+pin in the 0.46.0/0.46.1 install SQL. Isolation, trigger CDC, scheduler settings,
+change-ratio and Graph/Delta capability checks remain intact. Both images use
+the same reconstructed React package; its installed SQL hashes are retained.
+
+The user approved the separately identified corrected control on 2026-10-19.
+The original exact control `sha256:1fdfeb8e1c08b049491583612f7e34cd4c0e27c7d789084a627ce3089e04d981`
+completed two admissions and deadlocked on admission 3. Its retained
+investigation and complete copied server log are in `historical-control/`.
+The corrected control does not turn that failed attempt into a successful
+comparison. Each new pair must complete on its own images and environment.
+
+## Running and retaining evidence
+
+The `S1 exact-image qualification` workflow runs for changes to this directory
+or its workflow and can also be dispatched manually after the workflow is on
+the default branch. Its artifact contains exact source snapshots (including
+lockfiles), build logs, host configuration, image/library identities,
+complete observations and vectors, resource samples, failures, and hashes.
+Download artifacts before their 90-day expiration for long-term retention.
+
+Local supervision checks need only Python's standard library:
+
+```sh
+python3 benchmarks/s1/check_frozen_harness.py
+python3 benchmarks/s1/test_bootstrap_compat.py
+python3 benchmarks/s1/test_check_result.py
+python3 benchmarks/s1/qualification/run_bounded.py --self-check
+python3 benchmarks/s1/qualification/test_supervisor.py
+```
+
+For a locally built exact joint-stack image:
+
+```sh
+PGREACT_S1_BATCH_SIZE=32 python3 benchmarks/s1/qualification/run_bounded.py \
+  sha256:<full-image-id> candidate-300
+```
+
+For the approved native ARM64 profile, prepare the same source checkouts as
+the workflow, build `Dockerfile.arm64-sdk` with `--platform linux/arm64`, then
+build both images with the shared `Dockerfile`, `--platform linux/arm64` and
+`--build-arg S1_BUILDER=<that-local-sdk-tag>`. Set `TRICKLE_SOURCE=_s1/control`
+only for the control build. Retain `/sdk-manifest.txt` from the SDK and its image
+identity. The SDK uses Rust 1.98.0 and pgrx 0.18.0; its installed PostgreSQL 18
+header/package versions are recorded in that manifest. The runtime remains the
+pinned PostgreSQL 18.4 image. Cargo build caches are separated by architecture.
+Run the full supervisor and complete-result checker sequentially for both
+exact image IDs on the same idle Docker host.
+Set `DOCKER_DEFAULT_PLATFORM=linux/arm64` for the ARM64 supervisor invocation;
+the frozen harness inherits this explicit platform selection for Docker runs.
+
+Run names must be new; existing observations are never overwritten. The
+supervisor directly invokes Docker instead of requiring the original host's
+`rtk proxy` wrapper. S1 workload, SQL fixtures, and thresholds retain their saved
+values. The bootstrap adapter retains the original MDM fixture and its hash,
+then changes only two setup assertions: a one-record insert/delete may use the
+exact affected-record resolver added by #1171 as well as the historical full
+invalidation path. The helper-mutation checks remain mandatory. Both images
+use the same adapter, and its input patterns must match exactly once.
+`frozen-harness.json` records the original and adapted file hashes.
+Diagnostic case-count overrides do not qualify the throughput gate.
+
+`check_result.py <run-directory>` independently requires all S1 gates and
+complete source/case vectors. An input-blocked harness that exits zero is
+rejected, as are diagnostics, incomplete runs, future receipts, or resource
+limit failures.
+
+A passing S1 run covers this upstream throughput issue. React owner-outcome,
+outage/recovery, and signed operating-envelope release gates remain separate;
+the frozen harness reports those broader inputs as unresolved even after an
+S1 performance pass.

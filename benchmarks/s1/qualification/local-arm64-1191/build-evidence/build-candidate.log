@@ -1,0 +1,285 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 4.11kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/s1-arm64-sdk:qualification
+#3 DONE 0.0s
+
+#4 [compiler 1/2] FROM docker.io/library/s1-arm64-sdk:qualification@sha256:de453c245823bdb68c341e5b648a08f008e7cf67a336615a753baadd8c1f9150
+#4 resolve docker.io/library/s1-arm64-sdk:qualification@sha256:de453c245823bdb68c341e5b648a08f008e7cf67a336615a753baadd8c1f9150 0.0s done
+#4 DONE 0.0s
+
+#5 [stage-4  1/12] FROM docker.io/library/postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf
+#5 resolve docker.io/library/postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf 0.0s done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 7.04MB 0.1s
+#6 transferring context: 22.30MB 0.3s done
+#6 DONE 0.3s
+
+#7 [compiler 2/2] RUN rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
+#7 CACHED
+
+#8 [react 1/4] WORKDIR /build
+#8 CACHED
+
+#9 [trickle 5/9] COPY ./benches/ benches/
+#9 CACHED
+
+#10 [trickle 3/9] COPY ./src/ src/
+#10 CACHED
+
+#11 [trickle 6/9] COPY ./sql/ sql/
+#11 CACHED
+
+#12 [trickle 7/9] COPY scripts/gen_test_schema.py scripts/gen_test_schema.py
+#12 CACHED
+
+#13 [trickle 2/9] COPY ./Cargo.toml ./Cargo.lock ./build.rs ./pg_trickle.control ./
+#13 CACHED
+
+#14 [trickle 4/9] COPY ./verification/ verification/
+#14 CACHED
+
+#15 [trickle 8/9] COPY .cargo/config.toml .cargo/config.toml
+#15 CACHED
+
+#16 [trickle 9/9] RUN --mount=type=cache,id=s1-arm64-registry,sharing=locked,target=/usr/local/cargo/registry     --mount=type=cache,id=s1-arm64-git,sharing=locked,target=/usr/local/cargo/git     --mount=type=cache,id=s1-arm64-trickle,target=/build/target     sha256sum Cargo.lock > /tmp/lock.sha256 &&     cargo clean -p pg_trickle --release &&     CARGO_BUILD_JOBS=2 cargo pgrx package --pg-config /usr/bin/pg_config --out-dir /package &&     sha256sum -c /tmp/lock.sha256
+#16 0.170      Removed 23 files, 196.3MiB total
+#16 0.398 [32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/usr/bin/pg_config[39m
+#16 0.402 [32m[1m    Building[0m[39m extension with features [36mpg18[39m
+#16 0.402 [32m[1m     Running[0m[39m command [36m"/usr/local/rustup/toolchains/1.98.0-aarch64-unknown-linux-gnu/bin/cargo" "build" "--lib" "--release" "--features" "pg18" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+#16 0.579    Compiling pg_trickle v0.108.3 (/build)
+#16 137.8     Finished `release` profile [optimized] target(s) in 2m 17s
+#16 137.9 [32m[1m  Installing[0m[39m extension
+#16 137.9 [32m[1m     Copying[0m[39m control file to [36m/package/usr/share/postgresql/18/extension/pg_trickle.control[39m
+#16 138.1 [32m[1m     Copying[0m[39m shared library to [36m/package/usr/lib/postgresql/18/lib/pg_trickle.so[39m
+#16 138.1 [32m[1m  Discovered[0m[39m [36m[1m187[0m[39m SQL entities: [36m[1m1[0m[39m schemas ([36m[1m1[0m[39m unique), [36m[1m169[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m17[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m0[0m[39m triggers
+#16 138.1 [32m[1m     Writing[0m[39m SQL entities to /package/usr/share/postgresql/18/extension/pg_trickle--0.108.3.sql
+#16 138.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.84.0--0.85.0.sql[39m
+#16 138.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.21.0--0.22.0.sql[39m
+#16 138.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.96.0--0.97.0.sql[39m
+#16 138.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.78.0--0.79.0.sql[39m
+#16 138.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.43.0--0.48.0.sql[39m
+#16 138.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.7.0--0.8.0.sql[39m
+#16 138.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.80.0--0.81.0.sql[39m
+#16 138.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.11.0--0.12.0.sql[39m
+#16 138.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.18.0--0.19.0.sql[39m
+#16 138.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.65.0--0.66.0.sql[39m
+#16 138.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.81.0--0.81.1.sql[39m
+#16 138.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.10.0--0.11.0.sql[39m
+#16 138.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.8--0.87.9.sql[39m
+#16 138.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.27.0--0.28.0.sql[39m
+#16 138.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.95.0--0.96.0.sql[39m
+#16 138.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.35.0--0.36.0.sql[39m
+#16 138.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.64.0--0.65.0.sql[39m
+#16 138.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.32.0--0.33.0.sql[39m
+#16 138.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.7--0.87.8.sql[39m
+#16 138.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.50.0--0.51.0.sql[39m
+#16 138.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.42.0--0.49.0.sql[39m
+#16 138.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.41.0--0.49.0.sql[39m
+#16 138.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.85.0--0.86.0.sql[39m
+#16 138.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.106.1--0.107.0.sql[39m
+#16 138.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.12.0--0.13.0.sql[39m
+#16 138.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.40.0--0.48.0.sql[39m
+#16 138.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.107.0--0.108.0.sql[39m
+#16 138.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.104.0--0.105.0.sql[39m
+#16 138.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.102.0--0.103.0.sql[39m
+#16 138.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.0--0.87.1.sql[39m
+#16 138.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.82.0--0.83.0.sql[39m
+#16 138.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.2.3--0.3.0.sql[39m
+#16 138.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.49.1--0.50.0.sql[39m
+#16 138.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.2--0.87.3.sql[39m
+#16 138.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.44.0--0.48.0.sql[39m
+#16 138.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.9.0--0.10.0.sql[39m
+#16 138.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.41.0--0.48.0.sql[39m
+#16 138.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.54.0--0.55.0.sql[39m
+#16 138.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.59.0--0.60.0.sql[39m
+#16 138.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.14--0.87.15.sql[39m
+#16 138.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.3.0--0.4.0.sql[39m
+#16 138.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.83.0--0.84.0.sql[39m
+#16 138.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.33.0--0.34.0.sql[39m
+#16 138.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.66.0--0.67.0.sql[39m
+#16 138.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.69.0--0.70.0.sql[39m
+#16 138.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.42.0--0.47.0.sql[39m
+#16 138.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.76.0--0.77.0.sql[39m
+#16 138.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.13.0--0.14.0.sql[39m
+#16 138.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.23.0--0.24.0.sql[39m
+#16 138.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.105.0--0.105.1.sql[39m
+#16 138.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.6--0.87.7.sql[39m
+#16 138.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.19.0--0.20.0.sql[39m
+#16 138.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.63.0--0.64.0.sql[39m
+#16 138.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.99.0--0.100.0.sql[39m
+#16 138.7 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.46.0--0.48.0.sql[39m
+#16 138.7 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.46.0--0.49.0.sql[39m
+#16 138.7 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.24.0--0.25.0.sql[39m
+#16 138.7 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.62.0--0.63.0.sql[39m
+#16 138.7 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.15--0.87.16.sql[39m
+#16 138.7 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.67.0--0.68.0.sql[39m
+#16 138.7 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.75.0--0.76.0.sql[39m
+#16 138.7 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.105.3--0.106.0.sql[39m
+#16 138.7 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.47.0--0.48.0.sql[39m
+#16 138.7 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.48.0--0.49.0.sql[39m
+#16 138.8 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.46.0--0.47.0.sql[39m
+#16 138.8 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.61.0--0.62.0.sql[39m
+#16 138.8 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.81.1--0.82.0.sql[39m
+#16 138.8 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.6.0--0.7.0.sql[39m
+#16 138.8 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.31.0--0.32.0.sql[39m
+#16 138.8 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.56.0--0.57.0.sql[39m
+#16 138.8 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.106.0--0.106.1.sql[39m
+#16 138.8 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.20.0--0.21.0.sql[39m
+#16 138.8 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.100.0--0.101.0.sql[39m
+#16 138.8 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.4--0.87.5.sql[39m
+#16 138.8 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.60.0--0.61.0.sql[39m
+#16 138.9 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.1.3--0.2.0.sql[39m
+#16 138.9 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.40.0--0.49.0.sql[39m
+#16 138.9 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.40.0--0.47.0.sql[39m
+#16 138.9 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.53.0--0.54.0.sql[39m
+#16 138.9 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.37.0--0.38.0.sql[39m
+#16 138.9 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.97.0--0.98.0.sql[39m
+#16 138.9 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.15.0--0.16.0.sql[39m
+#16 138.9 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.51.0--0.52.0.sql[39m
+#16 138.9 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.58.0--0.59.0.sql[39m
+#16 138.9 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.89.0--0.90.0.sql[39m
+#16 139.0 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.41.0--0.47.0.sql[39m
+#16 139.0 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.9--0.87.10.sql[39m
+#16 139.0 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.29.0--0.30.0.sql[39m
+#16 139.0 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.55.0--0.56.0.sql[39m
+#16 139.0 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.103.0--0.104.0.sql[39m
+#16 139.0 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.26.0--0.27.0.sql[39m
+#16 139.0 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.17.0--0.18.0.sql[39m
+#16 139.0 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.2.0--0.2.1.sql[39m
+#16 139.0 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.13--0.87.14.sql[39m
+#16 139.0 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.2.2--0.2.3.sql[39m
+#16 139.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.22.0--0.23.0.sql[39m
+#16 139.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.25.0--0.26.0.sql[39m
+#16 139.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.72.0--0.73.0.sql[39m
+#16 139.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.47.0--0.49.0.sql[39m
+#16 139.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.14.0--0.15.0.sql[39m
+#16 139.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.88.0--0.89.0.sql[39m
+#16 139.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.2.1--0.2.2.sql[39m
+#16 139.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.68.0--0.69.0.sql[39m
+#16 139.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.108.0--0.108.1.sql[39m
+#16 139.1 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.36.0--0.37.0.sql[39m
+#16 139.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.73.0--0.74.0.sql[39m
+#16 139.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.45.0--0.46.0.sql[39m
+#16 139.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.90.0--0.91.0.sql[39m
+#16 139.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.10--0.87.11.sql[39m
+#16 139.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.86.0--0.87.0.sql[39m
+#16 139.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.91.0--0.92.0.sql[39m
+#16 139.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.1--0.87.2.sql[39m
+#16 139.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.49.0--0.49.1.sql[39m
+#16 139.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.16.0--0.17.0.sql[39m
+#16 139.2 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.16--0.87.17.sql[39m
+#16 139.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.28.0--0.29.0.sql[39m
+#16 139.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.93.0--0.94.0.sql[39m
+#16 139.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.77.0--0.78.0.sql[39m
+#16 139.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.8.0--0.9.0.sql[39m
+#16 139.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.98.0--0.98.1.sql[39m
+#16 139.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.57.0--0.58.0.sql[39m
+#16 139.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.30.0--0.31.0.sql[39m
+#16 139.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.105.2--0.105.3.sql[39m
+#16 139.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.44.0--0.47.0.sql[39m
+#16 139.3 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.44.0--0.49.0.sql[39m
+#16 139.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.108.1--0.108.2.sql[39m
+#16 139.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.108.2--0.108.3.sql[39m
+#16 139.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.38.0--0.39.0.sql[39m
+#16 139.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.39.0--0.40.0.sql[39m
+#16 139.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.70.0--0.71.0.sql[39m
+#16 139.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.94.0--0.95.0.sql[39m
+#16 139.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.98.1--0.99.0.sql[39m
+#16 139.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.5--0.87.6.sql[39m
+#16 139.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.74.0--0.75.0.sql[39m
+#16 139.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.79.0--0.80.0.sql[39m
+#16 139.4 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.17--0.88.0.sql[39m
+#16 139.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.11--0.87.12.sql[39m
+#16 139.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.12--0.87.13.sql[39m
+#16 139.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.87.3--0.87.4.sql[39m
+#16 139.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.43.0--0.47.0.sql[39m
+#16 139.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.5.0--0.6.0.sql[39m
+#16 139.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.43.0--0.49.0.sql[39m
+#16 139.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.71.0--0.72.0.sql[39m
+#16 139.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.42.0--0.48.0.sql[39m
+#16 139.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.105.1--0.105.2.sql[39m
+#16 139.5 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.52.0--0.53.0.sql[39m
+#16 139.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.4.0--0.5.0.sql[39m
+#16 139.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.108.1--0.108.3.sql[39m
+#16 139.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.34.0--0.35.0.sql[39m
+#16 139.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.92.0--0.93.0.sql[39m
+#16 139.6 [32m[1m     Copying[0m[39m extension schema upgrade file to [36m/package/usr/share/postgresql/18/extension/pg_trickle--0.101.0--0.102.0.sql[39m
+#16 139.6 [32m[1m    Finished[0m[39m installing pg_trickle
+#16 139.6 Cargo.lock: OK
+#16 DONE 139.7s
+
+#17 [mdm 4/5] RUN git apply /tmp/mdm-grants.patch
+#17 CACHED
+
+#18 [mdm 2/5] COPY _s1/mdm/ ./
+#18 CACHED
+
+#19 [mdm 3/5] COPY benchmarks/s1/mdm-grants.patch /tmp/mdm-grants.patch
+#19 CACHED
+
+#5 [stage-4  1/12] FROM docker.io/library/postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf
+#5 CACHED
+
+#20 [mdm 5/5] RUN --mount=type=cache,id=s1-arm64-registry,sharing=locked,target=/usr/local/cargo/registry     --mount=type=cache,id=s1-arm64-mdm,target=/build/target     sha256sum Cargo.lock > /tmp/lock.sha256 &&     CARGO_BUILD_JOBS=2 cargo pgrx package --pg-config /usr/bin/pg_config --out-dir /package &&     sha256sum -c /tmp/lock.sha256
+#20 CACHED
+
+#21 [react 3/4] COPY _s1/react/src/ src/
+#21 CACHED
+
+#22 [react 2/4] COPY _s1/react/Cargo.toml _s1/react/Cargo.lock ./
+#22 CACHED
+
+#23 [react 4/4] RUN --mount=type=cache,id=s1-arm64-registry,sharing=locked,target=/usr/local/cargo/registry     --mount=type=cache,id=s1-arm64-react,target=/build/target     cargo build --locked --release --jobs 2 --no-default-features --features pg18 &&     cp target/release/libpg_react.so /libpg_react.so
+#23 CACHED
+
+#24 [stage-4  2/12] COPY --from=trickle /package/usr/ /usr/
+#24 DONE 0.0s
+
+#25 [stage-4  3/12] COPY --from=mdm /package/usr/ /usr/
+#25 DONE 0.0s
+
+#26 [stage-4  4/12] COPY --from=react /libpg_react.so /usr/lib/postgresql/18/lib/pg_react.so
+#26 DONE 0.0s
+
+#27 [stage-4  5/12] COPY _s1/react/pg_react.control _s1/react/sql/ /usr/share/postgresql/18/extension/
+#27 DONE 0.1s
+
+#28 [stage-4  6/12] COPY _s1/mdm/sql/archive/pg_mdm--0.1.0.sql _s1/mdm/sql/archive/pg_mdm--0.2.0.sql /usr/share/postgresql/18/extension/
+#28 DONE 0.0s
+
+#29 [stage-4  7/12] COPY _s1/mdm/tests/e2e.sql _s1/mdm/tests/e2e_policy.sql /tests/
+#29 DONE 0.0s
+
+#30 [stage-4  8/12] COPY _s1/mdm/sql/configure_helper.sql /sql/configure_helper.sql
+#30 DONE 0.0s
+
+#31 [stage-4  9/12] COPY _s1/react/bin/pg-reactd /usr/local/bin/pg-reactd
+#31 DONE 0.0s
+
+#32 [stage-4 10/12] COPY _s1/react/docker/00-pg-trickle.sql /docker-entrypoint-initdb.d/10-pg-react.sql
+#32 DONE 0.0s
+
+#33 [stage-4 11/12] RUN sed -i 's/0\.108\.0/0.108.3/g'     /usr/share/postgresql/18/extension/pg_react--0.46.0.sql     /usr/share/postgresql/18/extension/pg_react--0.46.1.sql
+#33 DONE 0.1s
+
+#34 [stage-4 12/12] COPY --chmod=755 benchmarks/s1/docker-entrypoint.sh /usr/local/bin/s1-entrypoint.sh
+#34 DONE 0.0s
+
+#35 exporting to image
+#35 exporting layers
+#35 exporting layers 1.4s done
+#35 exporting manifest sha256:065ada321676b2bd99b9d41834c31c2e66a86bfb0d912f4cb45b745ea594c0e5 done
+#35 exporting config sha256:0df1b90e4190fc4b674e331d28af0632dda13cdf323edfb6d436a5b81a3d59f7 done
+#35 naming to docker.io/library/s1-candidate:qualification done
+#35 unpacking to docker.io/library/s1-candidate:qualification
+#35 unpacking to docker.io/library/s1-candidate:qualification 0.3s done
+#35 DONE 1.8s
