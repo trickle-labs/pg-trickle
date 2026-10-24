@@ -61,6 +61,59 @@ async fn trigger_old_table(db: &E2eDb, trigger_name: &str) -> String {
     .await
 }
 
+async fn last_buffer_events(db: &E2eDb, buffer: &str, limit: usize) -> String {
+    db.query_scalar(&format!(
+        "SELECT COALESCE(string_agg(action::text || ':' || COALESCE(changed_cols::text, 'NULL'), ',' ORDER BY change_id), '') \
+         FROM (SELECT change_id, action, changed_cols FROM {buffer} \
+               WHERE action IN ('D', 'I') ORDER BY change_id DESC LIMIT {limit}) recent"
+    ))
+    .await
+}
+
+async fn refresh_differential_and_assert(db: &E2eDb, name: &str, query: &str) {
+    let refresh = format!("SELECT pgtrickle.refresh_stream_table('{name}')");
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+        ],
+        &refresh,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{name}: differential refresh failed: {error}"));
+    let differential_completed: bool = db
+        .query_scalar(&format!(
+            "SELECT COALESCE((SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' \
+             AND NOT COALESCE(h.was_full_fallback, FALSE) \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = '{name}' ORDER BY h.refresh_id DESC LIMIT 1), FALSE)"
+        ))
+        .await;
+    assert!(
+        differential_completed,
+        "{name}: refresh was not differential or used a full fallback"
+    );
+    db.assert_st_matches_query(name, query).await;
+}
+
+async fn refresh_scale_consumers(
+    db: &E2eDb,
+    all_name: &str,
+    all_query: &str,
+    scale_name: &str,
+    scale_query: &str,
+    all_first: bool,
+) {
+    if all_first {
+        refresh_differential_and_assert(db, all_name, all_query).await;
+        refresh_differential_and_assert(db, scale_name, scale_query).await;
+    } else {
+        refresh_differential_and_assert(db, scale_name, scale_query).await;
+        refresh_differential_and_assert(db, all_name, all_query).await;
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 /// Default GUC creates a `FOR EACH STATEMENT` trigger with transition table
@@ -655,4 +708,143 @@ async fn test_stmt_cdc_mixed_dml_in_transaction() {
     db.refresh_st("mixed_dml_st").await;
     db.assert_st_matches_query("public.mixed_dml_st", "SELECT id, val FROM mixed_dml")
         .await;
+}
+
+#[tokio::test]
+async fn test_stmt_cdc_numeric_scale_changes_reach_shared_consumers() {
+    let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
+
+    for (case, trigger_mode, all_first) in [
+        (0, "row", true),
+        (1, "row", false),
+        (2, "statement", true),
+        (3, "statement", false),
+    ] {
+        let source = format!("numeric_scale_src_{case}");
+        let all_name = format!("numeric_scale_all_{case}");
+        let scale_name = format!("numeric_scale_only_{case}");
+        let all_query = format!("SELECT id, amount, pad FROM {source}");
+        let scale_query = format!("SELECT id, scale(amount) AS amount_scale FROM {source}");
+
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, amount NUMERIC, pad TEXT)"
+        ))
+        .await;
+        db.execute(&format!("INSERT INTO {source} VALUES (1, 1.0, 'seed')"))
+            .await;
+
+        let create_all = format!(
+            "SELECT pgtrickle.create_stream_table('{all_name}', $${all_query}$$, '1m', 'DIFFERENTIAL')"
+        );
+        let create_scale = format!(
+            "SELECT pgtrickle.create_stream_table('{scale_name}', $${scale_query}$$, '1m', 'DIFFERENTIAL')"
+        );
+        let set_cdc_mode = format!("SET pg_trickle.cdc_trigger_mode = '{trigger_mode}'");
+        if all_first {
+            db.execute_seq(&[
+                "SET pg_trickle.cdc_mode = 'trigger'",
+                &set_cdc_mode,
+                &create_all,
+                &create_scale,
+            ])
+            .await;
+        } else {
+            db.execute_seq(&[
+                "SET pg_trickle.cdc_mode = 'trigger'",
+                &set_cdc_mode,
+                &create_scale,
+                &create_all,
+            ])
+            .await;
+        }
+
+        let source_oid = db.table_oid(&source).await as i64;
+        let stable_name: String = db
+            .query_scalar(&format!(
+                "SELECT source_stable_name FROM pgtrickle.pgt_change_tracking WHERE source_relid = {source_oid}"
+            ))
+            .await;
+        let update_trigger = if trigger_mode == "row" {
+            format!("pg_trickle_cdc_{stable_name}")
+        } else {
+            format!("pg_trickle_cdc_upd_{stable_name}")
+        };
+        assert_eq!(
+            trigger_row_bit(&db, &update_trigger).await,
+            if trigger_mode == "row" { 1 } else { 0 },
+            "case {case} did not install the requested {trigger_mode} UPDATE trigger"
+        );
+
+        db.assert_st_matches_query(&all_name, &all_query).await;
+        db.assert_st_matches_query(&scale_name, &scale_query).await;
+        let buffer = db.change_buffer_table(source_oid).await;
+        let mutations = [
+            (
+                format!("UPDATE {source} SET amount = 1.00 WHERE id = 1"),
+                "D:010,I:010",
+                2,
+                all_first,
+            ),
+            (
+                format!("UPDATE {source} SET amount = 1.0 WHERE id = 1"),
+                "D:010,I:010",
+                2,
+                !all_first,
+            ),
+            (
+                format!("UPDATE {source} SET amount = amount WHERE id = 1"),
+                "D:000,I:000",
+                2,
+                all_first,
+            ),
+            (
+                format!("UPDATE {source} SET amount = NULL WHERE id = 1"),
+                "D:010,I:010",
+                2,
+                !all_first,
+            ),
+            (
+                format!("UPDATE {source} SET amount = 2.00 WHERE id = 1"),
+                "D:010,I:010",
+                2,
+                all_first,
+            ),
+            (
+                format!("UPDATE {source} SET amount = 3.00 WHERE id = 1"),
+                "D:010,I:010",
+                2,
+                !all_first,
+            ),
+            (
+                format!("INSERT INTO {source} VALUES (2, 3.00, 'inserted')"),
+                "I:NULL",
+                1,
+                !all_first,
+            ),
+            (
+                format!("DELETE FROM {source} WHERE id = 2"),
+                "D:NULL",
+                1,
+                all_first,
+            ),
+        ];
+        for (mutation, expected_mask, latest_rows, refresh_all_first) in mutations {
+            db.execute(&mutation).await;
+            assert_eq!(
+                last_buffer_events(&db, &buffer, latest_rows).await,
+                expected_mask,
+                "case {case}: unexpected changed_cols after {mutation}"
+            );
+            refresh_scale_consumers(
+                &db,
+                &all_name,
+                &all_query,
+                &scale_name,
+                &scale_query,
+                refresh_all_first,
+            )
+            .await;
+        }
+    }
 }
