@@ -40,6 +40,12 @@ internal subtransaction. Shared pause flags are checked again after lock
 acquisition. This includes descendants of inline singleton, atomic and SCC
 roots, and does not rely on dynamic job membership alone.
 
+Inline singleton admission follows the not-due return and precedes refresh
+locking, avoiding recursive scans and admission locks for idle tables.
+Pre-admission checks may perform capture/CDC maintenance or mark the root for
+reinitialization; they do not publish root rows/frontier or maintain its
+synchronous IMMEDIATE descendants.
+
 Dynamic REPEATABLE READ jobs configure their dedicated worker session in a
 preceding transaction. The following work transaction therefore takes its
 first snapshot at the requested isolation. Setting transaction isolation at

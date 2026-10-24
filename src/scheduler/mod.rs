@@ -3154,9 +3154,6 @@ fn refresh_single_st(
     drift_counter: Option<&mut i32>,
     spill_counters: &mut HashMap<i64, i32>,
 ) {
-    if !crate::api::scheduler_control::admit_scheduler_targets(&[pgt_id]) {
-        return;
-    }
     let st = match load_st_by_id(pgt_id) {
         Some(st) => st,
         None => return,
@@ -3232,6 +3229,10 @@ fn refresh_single_st(
 
     let needs_refresh = check_schedule(&st, dag_ref);
     if !needs_refresh && !st.needs_reinit {
+        return;
+    }
+
+    if !crate::api::scheduler_control::admit_scheduler_targets(&[pgt_id]) {
         return;
     }
 
