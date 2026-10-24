@@ -230,6 +230,7 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 - Reconstruct nested joins from keyless stream-table changes using the pre-change snapshot, preserving exact downstream deletions during graph refresh.
 - Preserve empty exact output batches when explicit differential DML writes no rows.
 - Preserve duplicate multiplicity in keyless snapshots and scope delta lookups by source relation when UNION branches reuse aliases.
+- Keep differential SUM and AVG correct when changes include `Infinity`, `-Infinity`, or `NaN`, rescanning only affected groups (#1209).
 
 Future changes will be listed here.
 
