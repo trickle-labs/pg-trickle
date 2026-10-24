@@ -105,7 +105,7 @@ async fn commit_row(db: &E2eDb, source: &str, journal: &str, id: i32, value: &st
     .execute(&mut *tx)
     .await
     .expect("independent journal operation should commit");
-    let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+    let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::xid::text")
         .fetch_one(&mut *tx)
         .await
         .expect("record committed input transaction identity");
@@ -572,7 +572,7 @@ async fn test_wal_receipt_small_limits_preserve_complete_transactions() {
             .await
             .unwrap();
         }
-        let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::xid::text")
             .fetch_one(&mut *tx)
             .await
             .unwrap();
