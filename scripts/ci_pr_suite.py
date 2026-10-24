@@ -11,8 +11,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Keep the WAL receipt phase-barrier witness serial without removing it from PR coverage.
-WAL_SERIAL_CASE = ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_received_receipt_requires_rebaseline")
+# Keep WAL receipt phase-barrier witnesses serial without removing them from PR coverage.
+WAL_SERIAL_CASES = (
+    ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_received_receipt_requires_rebaseline"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_undecoded_commit_requires_rebaseline"),
+)
 
 
 def targets(root: Path = ROOT) -> list[str]:
@@ -76,7 +79,9 @@ def main() -> int:
     # These scheduler-sensitive binaries use process-local shared containers.
     # Run them without parallel E2E contention so scheduler convergence
     # failures reflect behavior rather than runner resource pressure.
-    scheduler_isolated = {"e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests"}
+    scheduler_isolated = {
+        "e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests", "e2e_scheduler_tests",
+    }
     isolated = [name for name in selected if name in scheduler_isolated]
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
     for name in selected:
@@ -87,8 +92,8 @@ def main() -> int:
     for case in cases:
         binary, test = case.split("::")
         excluded.append(f"not (binary(={binary}) & test(={test}))")
-    if WAL_SERIAL_CASE[0] in selected:
-        binary, test = WAL_SERIAL_CASE
+    wal_serial_cases = [(binary, test) for binary, test in WAL_SERIAL_CASES if binary in selected]
+    for binary, test in wal_serial_cases:
         excluded.append(f"not (binary(={binary}) & test(={test}))")
     if excluded:
         command.extend(["-E", " & ".join(excluded)])
@@ -110,12 +115,13 @@ def main() -> int:
         ], cwd=ROOT).returncode
         if status:
             return status
-    if WAL_SERIAL_CASE[0] not in selected:
+    if not wal_serial_cases:
         return 0
-    binary, test = WAL_SERIAL_CASE
+    binary = wal_serial_cases[0][0]
+    selector = " | ".join(f"test(={test})" for _, test in wal_serial_cases)
     return subprocess.run([
         "./scripts/run_e2e_tests.sh", "--profile", "ci",
-        "--test", binary, "-E", f"test(={test})",
+        "--test", binary, "-E", selector,
         "--test-threads", "1", "--retries", "0",
     ], cwd=ROOT).returncode
 

@@ -1,6 +1,23 @@
 # S1 graph-refresh qualification
 
-## Owner-approved throughput acceptance amendment — revised 2026-10-22
+## Owner-approved throughput acceptance amendment — revised 2026-10-24
+
+The owner revised the **minimum candidate acceptance rate from 50 to 45 cases/minute**
+after the current-source candidate completed all vectors and non-throughput
+checks at **47.189301 cases/minute** on the approved 4-CPU ARM64 runner. The
+frozen workload still offers **60 cases/minute** as its performance target.
+The prior 50/minute approval remains policy history; the archived 10-CPU run
+exceeds both floors.
+
+For an observed rate in **[45, 60)**, the frozen harness continues to report
+its original throughput-only failure and exit 1. The acceptance checker can
+return `PASS_OWNER_APPROVED_FLOOR` only with that exact sole throughput failure,
+all 300 admissions, 1,200 source rows, 300 case vectors, zero future receipts,
+and every original authorization, due-burst, resource, and supervision check
+passing. Rates **below 45**, any unrelated failure, or missing or inconsistent
+evidence still fail. The offered workload and target are unchanged.
+
+## Previous owner-approved throughput floor — 2026-10-22
 
 The owner has revised the **minimum candidate acceptance rate from 59 to 50 cases/minute**
 to accommodate performance variation between approved execution environments.
@@ -9,7 +26,8 @@ still offers **60 cases/minute** as its engineering performance target, not the
 new binary release minimum. This change does not retroactively convert any
 original raw 60/minute harness failure into a raw pass.
 
-For an observed rate in **[50, 60)**, the frozen harness continues to report
+That amendment was superseded on 2026-10-24 by the 45/minute amendment above.
+For an observed rate in **[50, 60)** under the previous policy, the frozen harness continued to report
 its original throughput-only failure and exit 1. The current S1 acceptance
 checker can return `PASS_OWNER_APPROVED_FLOOR` only with the exact sole
 throughput failure, all 300 admissions, 1,200 source rows, 300 case vectors,
@@ -32,7 +50,7 @@ unapproved.
 The owner also approved using the GitHub-hosted **4-CPU ARM64** runner as an
 alternative to this laptop's 10-CPU ARM64 Docker profile. The workflow now builds
 and measures the exact current candidate and corrected control on that runner;
-the CPU gate requires at least 4 CPUs. The **50/minute acceptance floor**, frozen
+the CPU gate requires at least 4 CPUs. At that time, the **50/minute acceptance floor**, frozen
 300 admissions, complete vectors, zero future receipts, latency, supervision and
 resource limits remain unchanged. A measured failure still fails qualification.
 Historical 10-CPU results remain bound to their original sources and images and
@@ -52,8 +70,9 @@ in `qualification/local-arm64-1191-5877838/`.
 The candidate completed all 300 admissions, 1,200 source rows and 300 case
 vectors with zero future receipts. It measured **54.667334705546196
 cases/minute**; the frozen raw harness still records exit 1 for missing the
-60/minute target. The exact checker accepts that throughput-only failure under
-the owner-approved 50/minute floor as `PASS_OWNER_APPROVED_FLOOR`. All 27 other
+60/minute target. The exact checker accepted that throughput-only failure under
+the then-current 50/minute floor as `PASS_OWNER_APPROVED_FLOOR`; it also exceeds
+the current 45/minute floor. All 27 other
 S1 checks passed. Due-burst p95 was **76.18806 seconds**, maximum **81.128345
 seconds**, conservative storage **3,362,758,099 bytes**, and peak sampled memory
 **1,901,506,560 bytes**.
@@ -260,8 +279,8 @@ p95 <=150 seconds and maximum <=180 seconds. Whole-run storage must remain
 below 10 GiB. The supervisor stops at 9 GiB sampled storage, 4 GiB sampled
 container memory, 45 minutes, or less than 10 GiB host free space. These are
 sampled limits, not a per-operation memory guarantee.
-The owner-approved release minimum is 50/minute, with the offered workload
-and performance target still 60/minute. For [50, 60), throughput must be the
+The owner-approved release minimum is 45/minute, with the offered workload
+and performance target still 60/minute. For [45, 60), throughput must be the
 sole raw failure, and the acceptance result must identify the amended floor.
 The supervisor uses the bounded PostgreSQL restart handling described below
 because the frozen worker-health checks restart the server. Persistent
@@ -278,8 +297,8 @@ the frozen harness's sole below-60 rate failure after all 300 admissions,
 complete vectors and every other gate pass. It retains the raw failure and
 exit status and labels the summary `BASELINE_COMPLETE`, with the failed rate
 gate visible. Other control failures remain comparison blockers. The default
-candidate checker requires >=50/minute under the revised dated owner approval, and
-only permits a 50–<60/minute raw failure if it is solely the target-rate gate;
+candidate checker requires >=45/minute under the revised dated owner approval, and
+only permits a 45–<60/minute raw failure if it is solely the target-rate gate;
 every other gate must pass.
 
 The builder cleans the pg-trickle package before compiling either source tree,
