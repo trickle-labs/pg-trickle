@@ -1,6 +1,7 @@
 //! #1095: durable WAL receipt recovery, replay, and shared-source cleanup.
 
 mod e2e;
+#[allow(dead_code)] // This binary uses selected receipt kernels for its controls.
 #[path = "../verification/receipt.rs"]
 mod receipt_limit;
 

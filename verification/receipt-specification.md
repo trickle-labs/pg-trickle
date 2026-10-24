@@ -10,6 +10,12 @@ place in a freshly peeked exact consuming prefix. Source and unrecognized
 transactions retain complete durable receipts. The arithmetic contract still
 uses the entire consumed raw prefix, including source-free work, as n.
 
+The [framing follow-up](receipt-framing-specification.md) moves the actual
+transaction-boundary scan into the shared verified module. Its successful-
+output theorem covers complete framing under an immutable borrowed-message
+adapter contract; String classification, SQL selection and durability remain
+separate obligations. This extends the arithmetic slice without changing it.
+
 ## Independent contract
 
 For a persisted, applied prefix containing `n` decoder messages and ending at a

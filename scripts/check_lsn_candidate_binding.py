@@ -88,13 +88,13 @@ PROOF_CONTRACTS = {
         "cases": EXPECTED_CASES, "inputs": [],
     },
     "receipt": {
-        "schema": "pg-trickle-receipt-verification-v1", "obligations": {"receipt_ack_row_limit", "may_skip_source_free_row", "retired_slot_action"},
+        "schema": "pg-trickle-receipt-verification-v1", "obligations": {"receipt_frame_ends", "receipt_ack_row_limit", "may_skip_source_free_row", "retired_slot_action"},
         "cases": RECEIPT_CASES, "inputs": [
             "src/lib.rs", "src/wal_decoder.rs", "src/api/helpers.rs", "src/api/alter.rs",
             "src/hooks.rs", "src/scheduler/scheduler_loop.rs", "src/config/scheduler.rs",
-            "sql/pg_trickle--0.108.3--0.108.4.sql", "Cargo.toml", "Cargo.lock",
+            "sql/pg_trickle--0.108.3--0.108.4.sql", "tests/e2e_wal_receipt_recovery_tests.rs", "Cargo.toml", "Cargo.lock",
         ],
-        "mutants": {"off-by-one", "skip-source-row", "skip-unrecognized-table", "skip-other-action", "retire-stale-owner", "retire-active-reference", "retire-mismatched-slot"},
+        "mutants": {"incomplete-prefix", "off-by-one", "skip-source-row", "skip-unrecognized-table", "skip-other-action", "retire-stale-owner", "retire-active-reference", "retire-mismatched-slot"},
     },
     "aggregate_lifecycle": {
         "schema": "pg-trickle-aggregate-lifecycle-verification-v1",
