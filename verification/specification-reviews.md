@@ -351,6 +351,58 @@ prefix/incarnation/protocol proofs, latest-head remote CI and merge approval
 remain outside acceptance. See `verification/slot-retirement-safety.md` and
 `.p2p/work/issue-1222-slot-retirement/ownership/evidence/qualification-manifest.json`.
 
+## Scheduler pause/drain follow-up — #1219
+
+Independent read-only reviewers `review_1220` and `review_1221` examined the
+bounded specification, production admission paths and final backend
+`6d7b97d0df4b2823e5c5693e265a47a1648b9622`. Review required transitive
+IMMEDIATE write membership, moving RR session configuration before the work
+transaction's first snapshot, strict SQLSTATE/outcome checks and waiting for
+both resumed rows and successful RR job completion. Singleton admission follows
+the not-due return but precedes refresh locking and internal rollback scopes.
+Capture maintenance before admission remains outside the paused-publication
+claim. Concurrent IMMEDIATE topology changes require operator serialization.
+
+Four predecessor records retain distinct observed failures: successful drain
+while inline work is blocked, publication by an enqueue committed after pause,
+publication into a paused IMMEDIATE grandchild and actual RR SQLSTATE 25001.
+The broad table-lock and status-only RR attempts were inconclusive; their
+complete failures remain retained. An initial atomicity run timed out waiting
+for its independent control. The corrected fixture forces controller and
+legacy due times transactionally without weakening paused rows/frontier
+assertions. Its older `c68546c6` qualification remains separately attributed;
+all installed phases were executed again against the final backend.
+
+Final bounded evidence was accepted: atomicity 19/19, WAL 35/35, additional
+core 13/13, scheduler/mixed-mode 28/28, observed semantic floors 34/34 and
+54/54, 2637 units, 65 Python checks, formatting/lint with zero warnings,
+release-contract and upgrade-completeness checks. No runtime retries occurred.
+All four positive witness records reach completion, preserve paused rows and
+frontier, and require exact catch-up after resume. RR qualification injects the
+supported persisted job kind; no natural DAG-builder route is claimed.
+
+The proof reviewer checked all six reexecuted kernels and reconstructed the
+27 executable mutant source/output hashes and intended postcondition failures.
+The final evidence reviewer independently checked ten frozen inputs against
+the commit/current files, 69 complete copied logs, four positive and four
+predecessor JSON hashes, the exact four-file package and all 90 matching
+installation observations. Library SHA-256 is
+`4550177c694e7f3ae054244624ae5da2dc01c678c9f977b8a897e0e66df95378`.
+All six bindings agree and every named runtime case has a final recorded PASS.
+The unchanged tracked install archive has the same noncomment SQL-line
+multiset; exact generated payload bytes are separately bound at installation.
+The validator also checks recorded inline frontier/target/control facts and
+rejects retry markers. The final documentation and qualification revision are
+refreshed after recording this review.
+
+Neither reviewer edited files or executed project checks. This accepts the
+bounded publication evidence; no new SQL admission theorem, whole scheduler
+liveness/durability proof, concurrent-topology fence, latest-candidate published
+package upgrade, latest-head remote CI, authenticated build provenance, full
+release qualification or merge approval is claimed. See
+`verification/scheduler-pause-safety.md` and
+`.p2p/work/issue-1219-pause-drain/idle/evidence/qualification-manifest.json`.
+
 ## Shared evidence boundary
 
 The reviews identified that candidate binding checks source hashes and

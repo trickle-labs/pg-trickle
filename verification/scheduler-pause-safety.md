@@ -83,7 +83,7 @@ control requests.
 ## Qualification boundary
 
 The inline tests witness admitted work, require timeout while it remains
-blocked, permits the admitted transaction to finish, witnesses another control
+blocked, permit the admitted transaction to finish, witness another control
 dispatch while the target stays paused, and then requires exact catch-up after
 resume. The transitive IMMEDIATE variant separately observes the predecessor
 publishing one additional row into the paused grandchild after releasing its
@@ -102,7 +102,49 @@ wait diagnostics remain retained separately.
 PostgreSQL advisory-lock lifetime, shared-state synchronization, complete unit
 membership and stable dependency definitions during admission, plus trusted
 installed/named-execution provenance, are adapter
-assumptions. There is no new Verus theorem for these SQL operations. Completed
-candidate results and independent review will be recorded after qualification;
-neither passing structural contracts nor earlier package evidence qualifies
-this repair.
+assumptions. There is no new Verus theorem for these SQL operations.
+
+## Completed candidate qualification
+
+Frozen backend `6d7b97d0df4b2823e5c5693e265a47a1648b9622` uses image
+`pg_trickle_1219:pause-6d7b97d` and package `target/pause-idle-candidate`.
+Its actual extracted and installed library SHA-256 is
+`4550177c694e7f3ae054244624ae5da2dc01c678c9f977b8a897e0e66df95378`.
+All four witness records reach `phase=complete` against this candidate.
+
+The complete atomicity binary passes 19/19, WAL binary 35/35, additional core
+selection 13/13 and scheduler/mixed-mode binaries 28/28. The generated semantic
+floors observe 34/34 and 54/54 admitted exact differential cases. No runtime
+retries are used. Units pass 2637/2637, Python checks 65/65, formatting/lint
+with zero warnings, and release-contract/upgrade-completeness checks pass.
+
+All six pinned finite Verus suites were executed again: LSN 44/0, receipt 5/0,
+lifecycle 6/0, CDC 4/0, join 6/0 and identity 6/0. All 27 executable semantic
+mutants fail their intended postconditions. These remain existing kernels;
+their execution does not prove the new SQL admission protocol. Six bindings
+match the current kernel/caller inputs and all named runtime cases.
+
+The final validator checks 90 actual four-file package/install observations,
+10 backend-frozen input hashes, four positive records, four predecessor
+counterexample records and 69 complete copied logs. Exact generated install
+SQL bytes are bound in every payload observation. Noncomment SQL-line multisets
+match the unchanged tracked 0.108.4 archive; no schema or migration is added.
+See `.p2p/work/issue-1219-pause-drain/idle/evidence/qualification-manifest.json`.
+
+Earlier prototype and `c68546c6` executions retain their own backend identity.
+The first complete atomicity run passed fourteen cases and timed out while
+waiting for its independent control: the fixture forced legacy refresh time
+but omitted controller due time. The corrected fixture transactionally forces
+both, captures controller/catalog/history state, and preserves the paused-row
+and frontier assertions. It qualified the older package before all installed
+phases ran again against `6d7b97d0`. An initial unit run's three sandbox socket
+failures and successful host rerun remain separately retained.
+
+This is bounded installed qualification, with no latest-candidate published
+package upgrade, latest-head remote CI, full release qualification,
+authenticated build provenance or merge-readiness claim. The earlier
+slot-retirement upgrade evidence retains its predecessor candidate identity.
+
+Independent read-only source/proof and final installed-evidence reviews accept
+this bounded publication slice. The review record describes the required
+repairs, inspected evidence and exclusions in `specification-reviews.md`.
