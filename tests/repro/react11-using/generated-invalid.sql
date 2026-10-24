@@ -1,0 +1,26 @@
+SELECT * FROM (SELECT "policy_case"."case_key", "policy_case"."due_at" AS deadline FROM (SELECT policy_case.case_key,
+    policy_case.entity_name::text AS entity_name,
+    case_identity_map.case_identity,
+    policy_case.status,
+    policy_case.severity,
+    policy_case.reason_code,
+    policy_case.approved_metadata::text AS approved_metadata,
+    policy_case.assigned_queue::text AS assigned_queue,
+    policy_case.due_at,
+    policy_case.escalation_level,
+    policy_case.manual_assignment_protected,
+    policy_case.opened_at,
+    policy_case.opened_at_source,
+    policy_case.resolved_at,
+    policy_case.review_version,
+    policy_case.definition_version,
+    policy_case.publication_revision,
+    policy_case.stewardship_epoch,
+    policy_case.evidence_basis_digest,
+    policy_case.action_revision,
+    policy_case.pending_stewardship,
+    policy_case.last_observed_at
+   FROM mdm_steward.policy_cases_v1 policy_case
+     JOIN pgreact_mdm.policy_intent_bindings binding ON binding.entity_name = policy_case.entity_name AND binding.enabled
+     JOIN pgreact_mdm.policy_intent_runtime runtime USING (binding_id)
+     JOIN pgreact_mdm.intent_case_identities case_identity_map ON case_identity_map.entity_name = policy_case.entity_name AND case_identity_map.case_key = policy_case.case_key) AS policy_case JOIN s1_audit.source selected_case) AS candidate

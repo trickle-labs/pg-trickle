@@ -1,0 +1,412 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:cb43d674a85ac5509938ae407256a5de18eb56b3c2d282654d397e354228260a",
+  "claims": [
+    {
+      "id": "claim_cc04e4d3dae1408f97df86744bfe2eee",
+      "statement": "Development guidelines require Testcontainers rather than local PostgreSQL for integration/E2E tests, and require just fmt followed by just lint with zero warnings after code changes.",
+      "evidence": [
+        {
+          "resource": "repo://AGENTS.md#L10-L14",
+          "version": "repo-lines-v1:sha256:c216a4d2cf13e6932796ac61d991d7ad3d7754cee7247ccc8a3526e0156d5e04:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiN2Y3ZjZiOTk4MjhmYWZkY2ExN2UxYzliMjNiYjdmZTFjNzU3ZjMwMmI2YTg0MGQ0MWI4ZmExNjY3MDg5ZDMyOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZTk1ZjU1Zjk3NzMwYjdhMDE2ZDBjODc1NWUwNmZmN2NlNzFiOGM1YjZiZjExZDQ5ZGUzNDJiNDQwNDEwNmFlNCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNmY1OTNlMWI5MjYyN2ZhNjhiY2RhMGMxYTFkOTc3ZTZjYzAxZTk4ZTYxYmZmMWVkMWQwOWU5Y2Q2ZjA4ZjcxMyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNjNkMDM4M2Q2MjdmNTIxMzAwOTA3Mzg2NWY1ZmQzY2Q2MDFmZWQ5NjY4MjgwNjk4MjVlZWY5N2RlZTQxOTQ4NSJ9"
+        },
+        {
+          "resource": "repo://AGENTS.md#L71-L99",
+          "version": "repo-lines-v1:sha256:8118932108f38f5c020a78544f0cc4e5574a8a58af0aa43dcd0440afbc5aff77:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk1ZTg2ZjY4N2VhMWVhMDRiYTk2Y2M4NzlmMmZmOTI5MjgwNDU4NWVmYTU4NmU3NjA3ODYwNzg4NWVjOTMwMjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMxOTk2Yzg4NzI4ZDJhZGQ3ZmMxN2VlMzcxZGI1YjA0ODVkMGNlZGQxYTNmZTAyMGI3MWNlYTE0N2FhYzUyYjUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjNiZmY4YjQ2MTgyZTdlYTE0NDJmMjYwODNhYTZhOGFjOTY1NGRjZmYzODJkOGE2MzA0MTI2ZTYzNWQwZmJlOGQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImJhNDllMzczNzBkYmYxNDc5YTVhYzA5NTc2ZWVjMDNkYmM5ZGUyMzBjOGU1YzJhMGY5OTBlNjc3MDI3NDRmYTEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_94b08f588bef4de9afab0ca0d6e5aa0a",
+      "statement": "The unit runner preloads a C stub to satisfy PostgreSQL symbols for pure Rust library tests; its default cargo path runs single-threaded and does not constitute backend execution evidence.",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_unit_tests.sh",
+          "version": "repo-file-v1:sha256:35b8c99ada0b85ebe71b409335ef550b6332ad30db51d24a47a122e3c71b2b76"
+        }
+      ]
+    },
+    {
+      "id": "claim_81699cbdbea5477ab567f0f03e937df7",
+      "statement": "test-integration selects named catalog/workflow/property targets, while TestDb starts stock PostgreSQL and optionally installs generated catalog DDL without loading the extension shared library.",
+      "evidence": [
+        {
+          "resource": "repo://justfile#L210-L223",
+          "version": "repo-lines-v1:sha256:d1c9120264c45bd9babdfd9b3ae80df4721a4e3ed0597840173745b4047a8e2e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjljMjExMjAyMjlmYzY1MjBlZjg5MDczY2M0MTFlNTA5NmE3OWEzNjJkODJiNzFiNmNmYmQzM2U3MjJjYjMzOTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRjMWE0ODhlYzRlMTZlNzBkOTJiNWQzN2VkNzg1YmYzNzIyMDhmODdlZjFkYjQzMTgwZDY2MDE4ZTIwMDBhNWYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMxNzQyYTA1MGE2YmQyYjlhZTljZTdkMDI3YWJmYjgwNjczZmM5MjFhYTU0ODY3ZjQ2YzQ5NzA4ZjdkNjUxOTIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkxOWI0NDgzZWMwY2Q5NDRkODUzY2Y1MzRhZGY3Yjg5NWM3ZTAyNTE1N2RhMTA4MjVmNmQ3YzRiYmU5YzE1YTcifQ"
+        },
+        {
+          "resource": "repo://tests/common/mod.rs#L8-L103",
+          "version": "repo-lines-v1:sha256:93fc6ca3648f85c837e61e6c820a310e915222bf1705ecf83ffd9c41cf09222b:eyJzZWxlY3RlZExpbmVDb3VudCI6OTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFhZDcyMWFmOTVhYzNkNTJkNGY3YjljNTMyNmM3MGIzNmZlZDM2MmRhNDEzZDZhMjMxYjlhYTg1YjVkNGEyMWYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY3NjVkYjE2YTBlOTFmYjA4MzFhZGQ0N2Y2ZDc5NmQ4ZmE0NTgwODcxZTcwMDkyMWU1M2NmMWIyZmM1YjRiMzYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMxNWQxMzk5YmVhNzgxNTZhYjQwNTc2Zjc5MjFjZjAwMDRkMTI3ZjVjYTM0YjIyNTNhNDY5OWExODM5MjQ1ZTgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e18f533523bf44e78340ce14361d7fa9",
+      "statement": "test-dvm is a separate execution-backed tier using pure Rust DiffContext logic, pg_stub linking, and sqlx against Testcontainers; its standalone BYTEA identity helpers are substitutes rather than the production encoder.",
+      "evidence": [
+        {
+          "resource": "repo://justfile#L204-L208",
+          "version": "repo-lines-v1:sha256:b49e91cd203f5d5917363268321e0252343f0f5bc926e7d6db14bd8b7a4bdca0:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjc1MTA4MmIwMTU1YjFhZWViZDkyZmUzODU0Mjg1ODAyM2RiZjMyMDJlNThmNDBlNGIzYWEyMTgzM2ZmNzdjMyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFhYWNhNDYxMTJhYzAxYzAxZGU4OWQ5OTBiMzgwZTE3OTJjYzljNWU4OTQxNTlmNTA2ZmRiZjExNWYxMjkzNSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZWUzZTVjYzMxZDllMjUxMDk4NTFkNWE4M2Q4ZTZkMGMxOWI3Y2RkMmYzYThlNmI3NjYwODAxYmJmZjZlMGMyOSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYmM1MWE0ODcyZGZjNDI1MGQ1YjI5ZDRjMDY4MjhiYzhiNDM1NDcxODdmOWM4OGMxZmU1NGQyNmM5ZTI3NWI4NSJ9"
+        },
+        {
+          "resource": "repo://scripts/run_dvm_integration_tests.sh#L1-L20",
+          "version": "repo-lines-v1:sha256:e5ff0062ae353fe36cd23c68478517c649f27561433e2c258d12fc6e8cbefd0b:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFkOTVmYzA0YTgwYzk1MmY0OWNlNDE4ODYyN2M1M2IwZmJlOGM0NDA0MWI5NTJkNTkyYWNkMWRlOTk4NjE0NjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc2ZTYyOWI2MTU3NmE1YWNhYTNmOWZiODdjNjU5OTlhZjY3ZTZmNWUwZGFjOTE2MjgyOGJlZDNiOTA4YWFjNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImExOTg0ZjI4NTg4NzhjMzQwMjJjYzU0NDQ0NjVjNGY1NjczYTE0ZGVhNGE1N2E1NmRiZTdmOTA2M2E2ODQwYzgifQ"
+        },
+        {
+          "resource": "repo://tests/common/mod.rs#L46-L86",
+          "version": "repo-lines-v1:sha256:806738db3098cc9ccd2682b1554f5dba9cb402dcd9d8969a97a09960824c5740:eyJzZWxlY3RlZExpbmVDb3VudCI6NDEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMzNjI5MzRhM2RkMTc1YTNhMmIxYzRkNTE0YWNjMWQ0YzYxOGFjYTEzOTJlODlkYzM5Y2Y0MWZhYmRlYTMzZDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZmNDcyMDE2NGZhYzhkYjNkMjllN2U1OTRmMDdhY2EwZTZmZDNjNmMwNmY0YTAxYzZlOTcyNjQzNzYyYzMyMGIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ4YzE0MTViMTI2ZjJhYTM3MTE4ZThkYzA5YThkMGFkN2Q3MmZmMmYyZDU3ODRmMWQzM2NkNTg2NjVkYjkxODciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjllYmJkZWExYzI3YzlmOGE5YzU0YTFjNWRjNTYyMzcyOGZiNWEwN2NkZmJhMGExYTI3OTIzZDI0ODNjYjYyZWQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_5e478446386949c6b83eadea5181b5e3",
+      "statement": "Light E2E loads a packaged extension on stock PostgreSQL without preload, workers, scheduler, or extension shared memory, whereas the default full E2E harness uses a custom preloaded image supporting those facilities.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e/light.rs#L1-L33",
+          "version": "repo-lines-v1:sha256:676f8c045ad5c49b4e3ff0e45104ad1d8090e72dbd687522587865c2f9d3c972:eyJzZWxlY3RlZExpbmVDb3VudCI6MzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE3MTUwODgwYTlmZmIyYzYzYjUzZWI1YmJiNWFmYTk5NzQxMWU3MmM1OGM1ZmUxZDljNjc5OTI2ZjE5NTUzODkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMwYzExNzViZDIwNjY3ZjNmN2Q5ZDBhNjU2M2Q3YjNkOGUxZGM3ZTVhMGI4ZmJkMzIwYjA1N2M1OWY4MjY0ZTQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImMwYjEwZDZjZDBmMDVlNTZhNzQ5MzczYjVjNDlkNTQ4NDliNDY3MGM5NmVjMTQ0MjFjMzU1OGQxMTdmNDdiOTQifQ"
+        },
+        {
+          "resource": "repo://tests/e2e/mod.rs#L1-L32",
+          "version": "repo-lines-v1:sha256:9ad05b52a1176bae5f1517902e53cda21b9911ecd92246ec5e28e5a7094e7ddb:eyJzZWxlY3RlZExpbmVDb3VudCI6MzIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY1NGIxMDc4YmY2YjQ2NDlhODc4MTE0YjkzNTJlNWY5YTRkMTI2ZTkzYWM3NjIzOWM3NmU0ZDc3MzJhNzE0M2IiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRmMGVhNzJiMTdmM2NkNzNmNzg4ZjgxNmNhYzkxZDA5ZjUyMTc1MzcxN2MyOWJkNzFlYTU4Nzc2NWYxZDFmYmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYxZjQyNmRmNzk3MmY2MjFkMTNlZGZiNWNlY2VkYjNmMDllMTU1Mzg4NGJiNTVkMDQ4ZjgxOWJjMTBjZDA2ODUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_3637f1e93ce5469e95d3d2c7b7ac148b",
+      "statement": "The light runner selects a curated allowlist by default but accepts explicit test targets without allowlist validation; it installs candidate files before starting a shared stock PostgreSQL postmaster and enables the light-e2e feature.",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_light_e2e_tests.sh#L361-L379",
+          "version": "repo-lines-v1:sha256:72f5a34cb5dd923caa58d893dd74d19827da0d2b11db3562c59eb663b2684565:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkwZjA3NTRlZDQyNGE4MWM4NDdiYWI2Mjc2ZTA2NTI1Nzk1NTAyYzAxZGJhNjllODZjODFhMGJjMDQ0MTIwZGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3NjlkMjM3Y2Q0MjBiOWQzOGI5ODFhMGE0ZjY3NzAxOTBhNGE4M2RjYTFmZTU2YzRmNWJhMWUyY2JjMGVmNzYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVlMTA5MzM4MGViNTRhNzZmNjMwNGE2NWE2ODMwNmRiNDkyNzg5OTE1YmYzMThhMDM4ODVjMzU1NzZlZTVmNjEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFkZWViOTJlZDI4NzUwNDBjNjM4MThhMjE1NTk3NDM3NWY0NWRhNTY1MTc5MDkwNDdlNGVlMWRmYzdlZjg3MmYifQ"
+        },
+        {
+          "resource": "repo://scripts/run_light_e2e_tests.sh#L419-L485",
+          "version": "repo-lines-v1:sha256:dbcb83fffd1cda4912e0cf43b22f71cf2638781459c504bd9b2abb0b49df7073:eyJzZWxlY3RlZExpbmVDb3VudCI6NjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNlMTc1OWQ3OWJlMjY0M2I1NzVkNzg4MDczZDQ2MDEwZTlmYTBmOWZlMjljZGVjZmY4MTkwZjgwYWYxOWJjNjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdmZjk0ZWM4YTAyYTUyN2JlNDg0ZDdiYjNhZDY5ZmM3YTM4MjFjYTMzNDUwNTA2NWEwNzgzNGM1YmM0MTQ3NjUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAxZjU2YjdjN2UxMTM3MjM1MTc3ZDA5NjI2MGFmMTliOTIwM2Q1YWEzNGYxZWY4YWRhYWQ5ZGUyNWM1NmFjMzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZmZTQ5MjM2M2YyOTY4N2E2ZWY1ZmNjZjA0OTdiMmUxMTRjZmQwODVlYjRkZDFmY2MxYWFjMDAwYzE4NTdmMzgifQ"
+        },
+        {
+          "resource": "repo://scripts/run_light_e2e_tests.sh#L50-L149",
+          "version": "repo-lines-v1:sha256:8505ad500ed026ed33673aa06abad0c52165c379c27127cc5feb2676995a05a9:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIwZDhiMTk4ODcyMzhiM2E2ODMwYjhhNzhmNDkyYmEyOTcxOGRkMDI2MjFmZTNjNDMwYjNkZmMzNTU3ZWEwZDgzIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJmYWZiYTA1MjdjMzk1M2M0YjZlMGU1YjU3MzliYTgzNjEyZjgwNTNiY2RjOTQ2NjczMDE5M2NkMWQ1OTBiNDA4IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIwNmU1NDAwNzVmNjBhZjU0OGQxM2Q4YTIyNTQwNDE2OTliMGUzNzY3NzAzMDc1NGY3ZmVmYTYxMDU3MWIwMjZlIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIyNGI0OTQzMDgzNTlkMTg3NDhhYTZjM2U0Njg5ZmFiODkzOWI3ZjEzNDhlZjkyYmVjM2NjOWE1ZTlmODFmNmE5In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_d3776063f8004f1993a707d8b163acb1",
+      "statement": "test-light-e2e forces packaging, light-fast can reuse a valid but stale package and only auto-packages when none is valid, and non-Linux packaging uses a Linux Docker builder.",
+      "evidence": [
+        {
+          "resource": "repo://justfile#L256-L270",
+          "version": "repo-lines-v1:sha256:82a389e8c605adb6afc8dfdbd580f04f6c66cc40ac37c97c738cb49a7f83d8d5:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ3MjI4NzliZDU2YzZiNTNlNTgyYTVkZTU0NjU2NDJmYTMxNjBlNGM4M2I2MjEwNDg3NjRkYjc3ZDUyNzUzY2MiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ5ODFkNzA2NjAwOWVkMDQ4YWRjM2ZmYzlkZTFhODcxOGJjMjRkMWIxNWY1NDM1OWFjNTc5OWMwNmVjNTlhYzIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg1OThhOTAxM2EwZjFmYzNhNzZlYmRjN2QzYTk1ZTA5MWU5NWJkZDY0NTg2YmNkZDljMTgxYjc0MzU1OWE0MDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI1NTcwY2EyZDU5MTY2ZTZlMzM5NjlhNDRhM2I1MTBlZDJkY2UxNjQwOWNiYmE2ZTkxNzZlYzZmNGFlM2YwYzkifQ"
+        },
+        {
+          "resource": "repo://scripts/run_light_e2e_tests.sh#L225-L265",
+          "version": "repo-lines-v1:sha256:4fee75cfcac009b44d354a9a531de72b4853e2009ae257e8e955909e169a2af8:eyJzZWxlY3RlZExpbmVDb3VudCI6NDEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI5NWIxZDEyMTkxMGNhMjY5OTU1ZjA0ZDY5YWE4MjNlNjllNzY2NWI5OWJlMTU0NjQ4YjM0ODk0MjdmZjJiMzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUyZWFjMjU5YjRhNjEyZDA0OWRkZDg4YzU0MmQ5MmYxYjY2YmIwMzFiNWExNjRhZWYyMWE4ZTNiYWQ3Mjk0NTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFkMjIxMGMwYTQ3ZWJkNjhhY2I0M2ZhNTBjMDJhNmE3MTQ2YWM3NzViN2E5YWQ5ZTVlYzM3Zjc1MWUxOGY4NjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjliYWE3ZTcxMDI5YTczNzJlYWM0MzIzZGNlYzNkMjg3M2JjZDkzODVjN2Y2OTQ2Y2M1ZmU3ZDU2NTE0MWZmYTYifQ"
+        },
+        {
+          "resource": "repo://scripts/run_light_e2e_tests.sh#L388-L397",
+          "version": "repo-lines-v1:sha256:3cfc61be3781146179836066e4e141eb1b13073f616b35048058b4b9663b8c75:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQyNWExMDQ4OTVmMDQ1YmI4YjUyYjUyMmZlNTk3ZjE5NDg2MGI1NjVhYzJiODYyMWQwNmU4YzIyODYxMWIwMTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3NjlkMjM3Y2Q0MjBiOWQzOGI5ODFhMGE0ZjY3NzAxOTBhNGE4M2RjYTFmZTU2YzRmNWJhMWUyY2JjMGVmNzYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImIyZTg1NDA4YWVlNzlmNDdjMTU1NGVjOGQ5YTFjYmUwNTgwZGM4MjdhNGZjNmFiMDk3YjIyMDFlYWJjYzQyYTYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBlM2VhZjQ5NDQzZGI2NDNlNWE2NTZhOGZiMzlkZTFmY2VlODhkMWM5Njk4MWIwMDBlNWM2NDU1MzY4MjVjNGIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1da3b27342ef4a98aeab8f7e6e33e875",
+      "statement": "test-e2e rebuilds its custom image while test-e2e-fast skips that build; test-all includes unit, named integration, full E2E and pgrx but does not include test-dvm or separate dbt and ignored TPC-H tiers.",
+      "evidence": [
+        {
+          "resource": "repo://AGENTS.md#L75-L95",
+          "version": "repo-lines-v1:sha256:6c3887c782b2ea13145595b74cda0b596ff1dd899b482389456419b75600de97:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUyZWUyNTIzNWIxMzIxMDAyNDg2ZDIwNzJhMDhiMzhiYWNkZGNkODNiNGRmM2JkNzk3ZjBmODNiYTgwOTNiMzUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRkYzhiZmZkY2I0MDlkZDUwMGM2OWVmY2RjN2I0Y2UyYjY3ZWEzOTZiM2QyMjI0OTEzYzEwYzhhZWEzMmZlODciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYwMjQzOTIwYzc5MGY0NWU1OTkzNGQ3ZmEyZjk5NGI5Y2FlNzljYzI0ZTEzMWI1OTM5NGVjZDA5MGJjNjMzNGYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM2NjE1ODQxMGE0MTdiM2FhNDhkY2IxN2MyOGJhODM4ZjVlNDNlNDU2ODM2M2E1ZmQ4MGI3NmFmN2FjMzI1M2QifQ"
+        },
+        {
+          "resource": "repo://justfile#L197-L299",
+          "version": "repo-lines-v1:sha256:525d4524d4464530cf89d3965c87c3ea32ad4c9dc29defd8aaf7e6d15e6653c0:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAzLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJjZjMwNzU3MzMxNjUxYjhhZjZiMDZkYjkwNTVkM2Q4YzdjOTQxZjhkZTQ5N2M4OGJkZTYyYzU4ZTMzMmVmMWY0IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiIzNDk1Mjc5NzgzMjk3Y2JlY2U5ZDc5Y2Y1NjM3Y2M4ZTI2ZDQyYjZkMjNhNmJhMWY1ZmNiOGFmMmY4ZTczMjY3IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI2YTNjZjUxOTIzNTRmNzE2MTVhYzUxMDM0YjNlOTdjMjBlZGE5OTY0M2ZjYWY1YmJlNmQ0MWFkNTliZDEyMTY3IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJmZjA3NDQxNmQ2NjAxZTA5ZTk0ZGI0YjRkMjk2M2Q5MjNjMWQ0OTcyZDAxODAzMWNkMTI0MTliM2UxNTBjYjdkIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_bf9cc0e97068420b859fb2bc4e6ea882",
+      "statement": "The pgrx recipe runs cargo pgrx test for the selected PostgreSQL version; the inspected pg_regress fixture only creates the extension and is not wired as a separate justfile/CI regression tier.",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml",
+          "version": "repo-file-v1:sha256:b1d88a1851134a062a834e615b7be45a7d8a11549be0d103f3c01f40ab5f651c"
+        },
+        {
+          "resource": "repo://justfile#L292-L299",
+          "version": "repo-lines-v1:sha256:9cd977da5500040d27e5742c9acfb9c57bbffb7896ad658d57c7c4f318a491cf:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMGU4MDE2ZDJlZjdkNWQ0MTY4NjcyZDBmZWJhMGUyMjI0ZDkzYWViMTMzNmMwM2JlNWMxNmQzOTM0ZWQ2ZDMyOSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzQ5NTI3OTc4MzI5N2NiZWNlOWQ3OWNmNTYzN2NjOGUyNmQ0MmI2ZDIzYTZiYTFmNWZjYjhhZjJmOGU3MzI2NyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNTYzZGY0YTExNTgyZjZjNzk1OGJlOWEyMzM4MjNhM2E4ODk4M2I4YzgzYTRiZDBiMjUxNzU2ZGJmZGZjNDYxMCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZmYwNzQ0MTZkNjYwMWUwOWU5NGRiNGI0ZDI5NjNkOTIzYzFkNDk3MmQwMTgwMzFjZDEyNDE5YjNlMTUwY2I3ZCJ9"
+        },
+        {
+          "resource": "repo://tests/pg_regress/sql/setup.sql",
+          "version": "repo-file-v1:sha256:0fab88b1335401b8bc2ae246f3854688fdd07ed72013876f14605c3d5cc0944a"
+        }
+      ]
+    },
+    {
+      "id": "claim_9504fb0cdb0a44cb8e8a4db127392e73",
+      "statement": "TPC-H and dbt require explicit tiers: test-tpch rebuilds its image and runs ignored workload coverage with TPCH_CYCLES control, while test-dbt-fast skips the dbt image rebuild.",
+      "evidence": [
+        {
+          "resource": "repo://AGENTS.md#L82-L95",
+          "version": "repo-lines-v1:sha256:208dea4ade45727e5430e8d724aa7993d170b5c115e0d965b58f832833a17e9a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM5MmE1Yzg3NWE5ODcyNTYyYTg5NGY0ZjJlZmM2ODBhODQ2OWNjODZiNDFhZjE0OWI4MzFlNDRiMzlmNjFlMDciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRkYzhiZmZkY2I0MDlkZDUwMGM2OWVmY2RjN2I0Y2UyYjY3ZWEzOTZiM2QyMjI0OTEzYzEwYzhhZWEzMmZlODciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQzOWI0NGRlZmIzMWVjZjQyMjBmMjUxODZiMDNmODAxNzZiOTAxYzdjOGEyY2U3MjY1YzU5NDM4NmI3MDhmNDciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM2NjE1ODQxMGE0MTdiM2FhNDhkY2IxN2MyOGJhODM4ZjVlNDNlNDU2ODM2M2E1ZmQ4MGI3NmFmN2FjMzI1M2QifQ"
+        },
+        {
+          "resource": "repo://justfile",
+          "version": "repo-file-v1:sha256:3037791481d228bc4746ad49497c87ce6451bb492159b7ecbd428e3a684f09d2"
+        }
+      ]
+    },
+    {
+      "id": "claim_f84aa4785af64504ba1f6e9eae0a1619",
+      "statement": "The exact E2E oracle compares schema signatures and multiset contents using symmetric EXCEPT ALL, provides row diffs and fail-closed comparison errors, and exposes an effective-refresh-mode assertion to distinguish differential execution from FULL fallback.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e/oracle.rs",
+          "version": "repo-file-v1:sha256:205edf581ada33d4da5df4dff2000dd20f1c2305a54de8b3ca999f3483cc4d8d"
+        }
+      ]
+    },
+    {
+      "id": "claim_e27613dd5ccd49b6bfce9a54c7fc401a",
+      "statement": "Sensitivity baseline tests deliberately exercise same-count wrong content, duplicate multiplicity and schema/missing-column mismatches to check that the oracle detects them.",
+      "evidence": [
+        {
+          "resource": "repo://scripts/v0_108_3_release_gate.py#L21-L25",
+          "version": "repo-lines-v1:sha256:b79a78cbfdfa91c9365334d4dcef69a6f84542473eed9a002a6907c69e7e244e:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMmU2NmMwYTc2ZDMwNmE1NmZjOTRjNzcwMmQxNzA2NWJkODkzMmEzOGNlMTZmMWQ3YjZjMmNjN2E3YWM3YzY4MyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYTk3YjgxNzg3NzMyYmNlNmVlYWJmZmNiYmFkNWFkN2U0YTI3MTFiOTgzMDBjMDdlOTc0MWU0Nzk3NWExNmY5NCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZThhNDdjMmZlNjlkYjAyODAxZDliMzhlMjVkZWRlM2U0ODZlMzA4N2RhYTZkYmJkMDkyMTBkYzJlY2NjZDA5MiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMmJlMTNiZjEzZTQyOGI1ZWUwNTM2Nzc3OTcyNmQ1YWNjYjE4ZTlkMDU5MjI2ZTMyYTljOThkMTQzMjc5OTcyOSJ9"
+        },
+        {
+          "resource": "repo://tests/e2e_sensitivity_baseline_tests.rs",
+          "version": "repo-file-v1:sha256:5daae28c5f8d39f590ed08af5b4bd458c08fd7adbdf4d4dde801f980c318fd12"
+        }
+      ]
+    },
+    {
+      "id": "claim_abf30044eab046449555e869b77607c6",
+      "statement": "Multi-cycle and property suites exercise histories beyond initial population, and the metamorphic batching test compares split and batched multi-source histories against both each other and the defining query while asserting differential mode.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_dvm_metamorphic_tests.rs#L40-L83",
+          "version": "repo-lines-v1:sha256:0a3983fec3614ce73a55fb54068618e14bd775a9f0836a507bedcb2d8f5afdf5:eyJzZWxlY3RlZExpbmVDb3VudCI6NDQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFiMjY1M2UzNGRiNDRiMTUzY2UyMDExMWJmZTFiNWMyYzEyN2FiNTZmM2RhOTAzOTc2ZmFlNjE1ODIzNmFiN2MiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY1ZjNmZmEyZTMxY2JhNzdlODg2NTdjZjMyNzM5MjNjNjBlNzk0MzlmNDA4MDk4ZWY0MDhmZjgxMmI4OTk5NDUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImFhNjdlMWZlNjcxZThjZjlmMTdhNjFmZmZmNmVhZmIxMGRiOTE1ZDI5NGVjZjA1NmIxNmVmOWQxMTcxZDU3NWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjJjZDYyZjYzNzdhMTM0MGU4NDM4YzhlZjUxODc1M2FjYTM5NjlhNTg3YjNkYjBlNDUzOTVjN2IzZDE0MjUwYTIifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_dvm_strategy_tests.rs",
+          "version": "repo-file-v1:sha256:44fddc433e99e334b9e046400a7276d0f64266079173db992c7983d494fc1a99"
+        },
+        {
+          "resource": "repo://tests/e2e_multi_cycle_tests.rs",
+          "version": "repo-file-v1:sha256:c388c0502469659d7b68ffc27b5d15e08985d83fbf6c80dbb9d4052dd741236d"
+        },
+        {
+          "resource": "repo://tests/e2e_property_tests.rs",
+          "version": "repo-file-v1:sha256:bed0b9ef5d707153ff9f4d8422fc3c89fae98b99fce86a8da8060d547c31bee9"
+        }
+      ]
+    },
+    {
+      "id": "claim_6fc95e02c54f4c2ba7df7a4bbc700eed",
+      "statement": "Versioned DVM scenarios persist generator/format versions, seed, schema, data, query, cycles, execution settings and expected capability; replay failures identify invariant, class, phase and cycle/mutation, and permanent corpus tests replay explicitly selected JSON without regenerating it.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e/dvm_fuzz/mod.rs#L15-L97",
+          "version": "repo-lines-v1:sha256:053779cb66b27945917e19feba4880d43e68b73c259516289285e0a0e9305039:eyJzZWxlY3RlZExpbmVDb3VudCI6ODMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE5ZjcxMzI5ZDI1YWFjYWJkYzY2ZTAzNDllMTU4OWRkYTU5NjIzNGM0YWYwYTMwMjQwOTcyNGYwZTMzZWFmNDkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjU5OWYxZDZhZTMxY2M5YzQyZjQ3ODA2NmM0MGU1MDkwODhjMDQ5MWUwMGEwYmQwOThhMmZmM2NmOTQzOTZlN2MiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZlOTcyNTgwNmFjNzMyYWNlMTg2ZGVkZDQ5YzI2NzBiYjFmYTYzZDMwYmU3MzIwMThjNWQzZGFlOGU2ZjE2MTYifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_dvm_corpus_tests.rs",
+          "version": "repo-file-v1:sha256:190bcb43a9bdc95cec8559335c4d37bda94da528d4ca3ee7da9f13b0f768c6dd"
+        }
+      ]
+    },
+    {
+      "id": "claim_95549b1bf9524840bac88c5f23715fd6",
+      "statement": "The in-process shrinker removes cycles and individual mutations only while its failure predicate remains true; the Python shrinker additionally reduces initial-data rows, and negative-control release checks require declared failure classes rather than arbitrary errors.",
+      "evidence": [
+        {
+          "resource": "repo://scripts/dvm_release_gate.py",
+          "version": "repo-file-v1:sha256:b79a215d8ae45bbcf38c3b31159221f8f59925b1d4e5c983fd40f8373c720e32"
+        },
+        {
+          "resource": "repo://scripts/dvm_replay.py",
+          "version": "repo-file-v1:sha256:8f1309a7af0a8025dbde3da42285111653a9a52e92993ad865abaf5dcba68e61"
+        },
+        {
+          "resource": "repo://scripts/dvm_shrink.py",
+          "version": "repo-file-v1:sha256:3a6093e5b056018d53f8ca5fb3cd3f438d7b74f7c88e10de69bafcc89cbef131"
+        },
+        {
+          "resource": "repo://tests/e2e/dvm_fuzz/shrink.rs#L1-L58",
+          "version": "repo-lines-v1:sha256:15d6dff5eb9ff3cd3c681199123067b42c70c6d48bf7e90d2f9fd45880c4e891:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRhNTRiYzJlNWRjNTU4ODQwY2U5ZGVkNjUzNDM4YTMxNjU0NTQwYjllN2I3NGUyNWU2YTBjNTViYmVmY2I4ZGQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdiYzk4ZDZiMGRjNDkyYzUwMTZkZjEwODA1YTNhNTRlYjljMTg0YTVhNjEzN2U3ZjRiZWNmYTBjMjIwNTUwZDAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1e26852062a44611b247098206d5f919",
+      "statement": "Refresh atomicity tests coordinate advisory-lock barriers at input_boundary, after_apply and during_finalize, observe blocking backends, and compare output plus frontier/timestamp/population/history and delta progress to committed checkpoints across failure and rollback schedules.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_refresh_atomicity_tests.rs",
+          "version": "repo-file-v1:sha256:caba8c2e7ed39674304900251e634f2ea9dfcc7a644d36bfa1f843f1aecc2393"
+        }
+      ]
+    },
+    {
+      "id": "claim_1c224c5008cd4349814bf0200d67c84c",
+      "statement": "The DVM failpoint regression uses a retained corpus scenario to assert last-committed-result preservation, scheduler failure evidence and subsequent recovery.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_dvm_failpoint_tests.rs",
+          "version": "repo-file-v1:sha256:b1c4980c24e844e740f6cc9fc52398348a8933f94cea2de72850e3c99e8d576b"
+        }
+      ]
+    },
+    {
+      "id": "claim_da0e5e86dc5d43e0a51c0c7d7ba73ca2",
+      "statement": "WAL receipt recovery tests track sentinel, system identifier, database OID, container and volume identity across coordinated receipt/replay/ack phases; publication recovery tests separately check publisher/subscriber identity, restart and catch-up.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_publication_crash_recovery_tests.rs",
+          "version": "repo-file-v1:sha256:45d76540c517eda5961004611822bab234b407c6decd829c6c86af7e776fb9b9"
+        },
+        {
+          "resource": "repo://tests/e2e_wal_receipt_recovery_tests.rs",
+          "version": "repo-file-v1:sha256:940bce715a9233826e06c89bd97a7d4e9efee82caef890261a333bb422064199"
+        }
+      ]
+    },
+    {
+      "id": "claim_8bb53611d366447ca1de5b4dc83da3c1",
+      "statement": "Role-based security coverage includes RLS, ownership and exact-target MAINTAIN refresh authorization, rather than only superuser execution.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_ownership_tests.rs",
+          "version": "repo-file-v1:sha256:6c0467654b96e3c1397d2a90e4d8fbad88a0a598e3ebeb049d6f7f52e6dc6dc6"
+        },
+        {
+          "resource": "repo://tests/e2e_rls_tests.rs",
+          "version": "repo-file-v1:sha256:ad2d2486ec3b1f161b7c5e2d6afa5987ef148969eb14645b8772110788e17ce7"
+        },
+        {
+          "resource": "repo://tests/e2e_v1150_maintain_grantee_refresh_tests.rs",
+          "version": "repo-file-v1:sha256:4f8a7ff1f925a3e7df533c9d2f74a61ff97939a5b0d6abfc12626936e5096cab"
+        }
+      ]
+    },
+    {
+      "id": "claim_b5b04015f5f64551b78c294e05a17d53",
+      "statement": "Upgrade coverage distinguishes fresh-install schema stability from migration-chain function parity and surviving stream tables; reusable conformance clients exercise graph refresh and delta registration, resnapshot and acknowledgement APIs.",
+      "evidence": [
+        {
+          "resource": "repo://justfile#L272-L280",
+          "version": "repo-lines-v1:sha256:1dd49f13e5884e9db421da120805c3875e53058e51a53da8b08a9c982787aa62:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZGQyOTk0MDc0MDYzMjRkZjZlYjE4NjczODFjNzkwOGY1NDRlYTI2YTE3YTZkODZjY2YyZDlkMzI3NDZjMzMxMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZjY5MTkzMGE4YThhNTcwZDQ3ZmE4MThjNzg5NmE0YTFlYTk1ZTVkMTZiY2U1MmU4MmExMDU4N2E1ZjgzZDgyMSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNmE2MDkyOTljNDJhMGViNmY2ZDkyZDE0NGU1ODFiZTI0ZWFkYWI0MzlkN2UzMzBlNTZkZWNmNmNlMWMxMjFkNSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYmM5MDBkZWVhNjgyYzFkZDZmNDg3MmMzZDA1MGM3ODNlOGE5NDlmNDI1Yjc1MDQ5ZTlkZWQyNDcyMmM1NDUzMyJ9"
+        },
+        {
+          "resource": "repo://tests/conformance/reference_clients.rs",
+          "version": "repo-file-v1:sha256:9b9277137b7bf31d41ee520b63a8ded800fdcea06b456f427c8a6bbc9f0d8dea"
+        },
+        {
+          "resource": "repo://tests/e2e_upgrade_tests.rs",
+          "version": "repo-file-v1:sha256:e0c85076c3821c8010218dd09b9345c11480006d9aa3b16255a4c0bbcf78c136"
+        }
+      ]
+    },
+    {
+      "id": "claim_62889ac24d8e44f990531fdc9423c36d",
+      "statement": "The production LSN source is imported from verification/lsn.rs; its specified verification scope covers byte grammar, unsigned packing/order and canonical formatting roundtrip, but excludes allocation/UTF-8 construction, WAL durability, scheduling and whole-extension correctness.",
+      "evidence": [
+        {
+          "resource": "repo://src/lib.rs#L63-L64",
+          "version": "repo-lines-v1:sha256:098e6e115c7d9d800d53fca30187ec6de2ad317469036232a0e55ed2212f0357:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMGQyYWU0MTk2OTYyYjY3NmNhODFiYjZmZjVjYzA5NjhjMDczNjIyZjg5YWQ5M2MwZjk3OWY2ZTE2NWZmYWNhYyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiY2YzNjJhYmYxZGI4ZGVkZjVhZWZlNjBjZDQzZGM4NTI5NDQ4N2NiYjM4Y2MxMjE1ZWU4NGE5NzdkZTllZjc1YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNWFlMDU3YTI3MDZkYzRhMmI3NGEwMzczZjI3ZTY0Mjc3N2ZhMTczMTkyYWQ2NTJlZmNkMTBkMWYzY2YxZDU1MSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZjU1YzcxMjQ4ZDBlMjEwYjlkZDE2MTBkMWJlYmI5MjhhM2U5OGIzZWIzNTM1MzliZWU3N2JjZjVmODUxYTExZCJ9"
+        },
+        {
+          "resource": "repo://verification/lsn-specification.md#L3-L29",
+          "version": "repo-lines-v1:sha256:2a9a94e7907e86c7384c4a8feb67c517a1e6117f505f193b1334f752eab006ed:eyJzZWxlY3RlZExpbmVDb3VudCI6MjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJmZWVjOGNiMzkzMTY1ZTk1MTgxMTk3ZWJlZmVjYTQ0YTQyNTZiZWY2ZjRjZmMxMGRlNjg4NDMxMzVkMWVjYjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJmNWFjMmI5NDE4YTg0ZmU3YzMwZWJiZWUwZGMyMWZmMmUxM2RiNmE2NTczODZhNTFmYjQ1YTE3MWRmYzJhM2UiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjoyLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQxYTBiMGRkMGJlYjUwNWUwODcwODY3YmZkOTkwNjMwZTU1ZTExNGM3MGEyZTA2MzE5NjgxYzEzYjFiMjA2NjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE4ZThkZGQ2ZDgxOWU4NzI5NTY3MmE3MmM5NDM4MTM1MWU0YjhkZTliZDZlM2Y2OGE2MDYxYTUzYTU1Y2ZlMTUifQ"
+        },
+        {
+          "resource": "repo://verification/lsn.rs",
+          "version": "repo-file-v1:sha256:42bbc75b3196415731a5388bc87ccbe50de37294ed442a61ab510aefc7492621"
+        }
+      ]
+    },
+    {
+      "id": "claim_62ac308c06e14057a77ab48798aefbb8",
+      "statement": "LSN verification uses pinned Verus, requires named obligations and a zero-error summary, and requires rejection of a semantic pack_halves mutation; the specification records independent review as pending and requires successful verification before claiming proof.",
+      "evidence": [
+        {
+          "resource": "repo://scripts/check_lsn_verification.py",
+          "version": "repo-file-v1:sha256:559887ed7a19bcb5cf908d30824459af9132c268a0d0af608e0b1c76332db4b7"
+        },
+        {
+          "resource": "repo://verification/lsn-specification.md#L31-L75",
+          "version": "repo-lines-v1:sha256:20c9ddb2fb490c7b474b65e398883d05f9929aaab230930c8b36fd90bfebda23:eyJzZWxlY3RlZExpbmVDb3VudCI6NDUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE2MjMwYmM3OWU2YmQyYWNmYWU3NGQ0NTZhZDEzMjJiMmMyNTYxZTIzN2ExZjRjOTA2ZTBjODcwNmQzMDRmYTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFlOTcxNWY0ODQ3ZmZhMWYxZGIzZGQwOWI3YTM2NjA2NzA2YTA3MjFkYTZkZGEwMjAzOGQ1ZWEzMzFhMTgzMjEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwODQwNzRlODU0MGIyZTNmMTNhMjFmZmJhODNkNzkzZTA4ZWI0ZmMxNzFiMWJkYTI3ZjY2MDY1NGViNjRlNzQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7a2c7ac1025646e9b17c6d51b82d4cef",
+      "statement": "CI supplements LSN proof machinery with packaged/full runtime contract cases and candidate binding between proof records, candidate artifacts and installed-library attestations.",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml#L497-L565",
+          "version": "repo-lines-v1:sha256:6ee1b9c4a28d8f72afea86fd77b13380ac3317ff7c708853808288ad8003c747:eyJzZWxlY3RlZExpbmVDb3VudCI6NjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg4MDVlMGIwYmQ0ODhhMWM0OGY3NzE2OGU3NmNiYzY0N2NmMjAzZDlkZmNmODcyZTNmY2ZkNDBlYTkxYjU5YjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE4M2ZhOTczZDlkMzI3NTg3YzJjM2MxNzk1OGY1ODE0YWVkNjk4ZDhlYmViNzM0YTFjODkxNzY4MGNiOTZlZjQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjkyZmY1ODNiMGIzNjVhZWE5OWFjZTAzZjY4M2IyOWViMmQzODM5MzFmMjI2ZjQwM2RmMmUwMGMwZTdiNWMyNmMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImJhMmIwM2RkOWQ0ZTdkOTU1NjFhYTY0ZmY2MTliYzIzZTgwNzBhYjc4ZjcwNTdkMGQwMTFhNzQ3ZDgyNDA3OTUifQ"
+        },
+        {
+          "resource": "repo://scripts/check_lsn_candidate_binding.py",
+          "version": "repo-file-v1:sha256:38d66027d96713d0458c5ea267298f93354a1c0fbd711a230049b106f239cf87"
+        }
+      ]
+    },
+    {
+      "id": "claim_f1cc0633feab4dbe8b325f3186be6310",
+      "statement": "The deep DVM workflow runs bounded nightly corpus/composition/metamorphic/shrink checks, while weekly adds strategy, failpoints, negative controls, ignored workload combinations and extended fuzzing.",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/dvm-tiers.yml",
+          "version": "repo-file-v1:sha256:7839f2f0e4505dda6e04e3c658a573d0704967583bb22925f4c4472bb67c632e"
+        }
+      ]
+    },
+    {
+      "id": "claim_b6da8bda2bb64c28a06e156aeaa13ed4",
+      "statement": "Stability tests are daily/manual and separate from PR/merge gating, running soak, multi-database isolation and Citus chaos with their own final gate.",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/stability-tests.yml",
+          "version": "repo-file-v1:sha256:f4a9b86c6a302cb9148bfe5f94075e8bfb3119ddbdf58026fd63d0c528285117"
+        }
+      ]
+    },
+    {
+      "id": "claim_4885b57d2e624b25bfec294ca9631599",
+      "statement": "Release workflow invokes DVM, identity and versioned gates; the DVM gate without --database only structurally checks or skips database-dependent work, while the v0.108.3 gate requires named sensitivity, atomicity, recovery, publication and upgrade cases.",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/release.yml",
+          "version": "repo-file-v1:sha256:3ff1e676bfa1966c53c84e91c7fce663193e22a63d180c538b1e77df0bb91bac"
+        },
+        {
+          "resource": "repo://scripts/dvm_release_gate.py",
+          "version": "repo-file-v1:sha256:b79a215d8ae45bbcf38c3b31159221f8f59925b1d4e5c983fd40f8373c720e32"
+        },
+        {
+          "resource": "repo://scripts/v0_108_3_release_gate.py#L21-L58",
+          "version": "repo-lines-v1:sha256:d6b1d25d69de1d6d09eae795bdaadeb113bd55aeef23d0a0380a1fbfcbab24bc:eyJzZWxlY3RlZExpbmVDb3VudCI6MzgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJlNjZjMGE3NmQzMDZhNTZmYzk0Yzc3MDJkMTcwNjViZDg5MzJhMzhjZTE2ZjFkN2I2YzJjYzdhN2FjN2M2ODMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU4YTQ3YzJmZTY5ZGIwMjgwMWQ5YjM4ZTI1ZGVkZTNlNDg2ZTMwODdkYWE2ZGJiZDA5MjEwZGMyZWNjY2QwOTIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ3NmY2Y2ViNzZlYTgyYjI1MmU0ZWQwNmFkM2MwZDQ5NjI4Njk0Y2Q3NjU5ZmVhZGUwMTEzY2IzMmUwNDIwYTAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_368ee986af2d43328780afa8237a3e3e",
+      "statement": "The guidelines recommend manual CI dispatch before merging DVM, refresh or CDC changes, with actual triggers and coverage determined from the workflows.",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml",
+          "version": "repo-file-v1:sha256:b1d88a1851134a062a834e615b7be45a7d8a11549be0d103f3c01f40ab5f651c"
+        },
+        {
+          "resource": "repo://AGENTS.md#L96-L99",
+          "version": "repo-lines-v1:sha256:cde15ceb92c902ec780d18557af89416601359267b1a14493a3edd96476fc3c5:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTE0ODUwMTNmZTdlODBjODk2Y2UwZmEyODRlZWY3ZjkwY2Q2MTc1OTRiODU0NzU0YTFiZjgyNmQ5Y2VmNjQ3ZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzE5OTZjODg3MjhkMmFkZDdmYzE3ZWUzNzFkYjViMDQ4NWQwY2VkZDFhM2ZlMDIwYjcxY2VhMTQ3YWFjNTJiNSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMzc1NTcwMGJkOWY1ZDNlNzZlMzUwODc0NjE5NjhmN2ZjZWVlNDBhMWYyYjhlMTU5OGJmNDAwMjE3NzM2ODEzNiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYmE0OWUzNzM3MGRiZjE0NzlhNWFjMDk1NzZlZWMwM2RiYzlkZTIzMGM4ZTVjMmEwZjk5MGU2NzcwMjc0NGZhMSJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.7.2",
+    "at": "2026-10-21T18:25:47.780Z"
+  }
+}

@@ -662,7 +662,17 @@ fn deparse_from_item_with_view_subs(
             _ => "JOIN",
         };
 
-        if join.isNatural || join.quals.is_null() {
+        if !join.usingClause.is_null() {
+            let columns = join_using_columns(join)?;
+            let columns: Vec<String> = columns
+                .iter()
+                .map(|column| crate::api::quote_identifier(column))
+                .collect();
+            Ok(format!(
+                "{left} {join_type} {right} USING ({})",
+                columns.join(", ")
+            ))
+        } else if join.isNatural || join.quals.is_null() {
             Ok(format!("{left} {join_type} {right}"))
         } else {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.

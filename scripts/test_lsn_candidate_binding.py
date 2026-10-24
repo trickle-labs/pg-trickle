@@ -59,6 +59,28 @@ class CandidateBindingTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def test_receipt_binding_checks_production_inputs_and_installed_bytes(self) -> None:
+        self.source = binding.ROOT / "verification/receipt.rs"
+        self.proof.update({
+            "schema": "pg-trickle-receipt-verification-v1",
+            "source_sha256": binding.digest(self.source),
+            "obligations": ["receipt_ack_row_limit"],
+            "production_inputs": {
+                path: binding.digest(binding.ROOT / path)
+                for path in ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"]
+            },
+        })
+        arguments = dict(
+            proof=self.proof, source=self.source, package_dir=self.package,
+            installation=self.installation, runtime_cases=binding.RECEIPT_CASES,
+            candidate_commit="fixture-commit", proof_kind="receipt",
+        )
+        self.assertEqual(binding.validate_binding(**arguments)["schema"],
+                         "pg-trickle-receipt-candidate-binding-v1")
+        self.proof["production_inputs"]["src/wal_decoder.rs"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "production input differs"):
+            binding.validate_binding(**arguments)
+
     def test_lsn_candidate_binding_accepts_matching_source_package_and_install(self) -> None:
         record = binding.validate_binding(
             proof=self.proof,

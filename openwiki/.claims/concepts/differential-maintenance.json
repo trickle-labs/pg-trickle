@@ -1,0 +1,340 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:bd00ef11108cbee8ffabb2678fd734fa89e126e35119ff3ca400de16973501b6",
+  "claims": [
+    {
+      "id": "claim_597acc3b7cc6457998897c091f4b623e",
+      "statement": "The API query rewrite pipeline inlines views first, then lifts nested windows, rewrites DISTINCT ON and grouping sets, rewrites scalar subqueries, iterates De Morgan/SubLinks-in-OR at most three times, and finally rewrites ROWS FROM; nested-window rewrite metadata affects mode handling.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/mod.rs#L1165-L1191",
+          "version": "repo-lines-v1:sha256:19ca53d2dc88b904e948f2ae6ae5eab5335fc7275d1876e651078e18451a7c23:eyJzZWxlY3RlZExpbmVDb3VudCI6MjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNkZjBiNTRhZDRmMDczZmNlY2VhOWI3MTM0NWFkMzZjODA0OWU4ZTFjMWZhZWZhZDhhMDVlMDY4N2M3NzY5NDYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijk5OWJkZWZlZWFjYTYzNDBlMDI5MGRjODZlODg5Yzg5ZDVlMTg5YWE1YmE0NGI1ODViM2I3MDczNGY0YTYyZDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdhNzQ2YzVkNGNlMTE3ZTZlNjhlMTg1MDE2NDdhODBiNTNmNWJhZmMyOWE3MGZkMmVjZWQ4Y2Q3MzQxNWQ2NmMifQ"
+        },
+        {
+          "resource": "repo://src/api/mod.rs#L682-L735",
+          "version": "repo-lines-v1:sha256:77aa2d0a3494a9544e1e647b4bb489c1a14b2755638b648246b241b010fc8e21:eyJzZWxlY3RlZExpbmVDb3VudCI6NTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQwYmM1ZmMxMWYxMWQ0NDY5ZmY5MjMzMmM1MTE5Zjc2Zjg0ZmQyM2Y0ZTdlYjUxZTdmNzEyMWU2YmM4MjZkZmMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY0NzVlOTRhOTA0YWM0OWIzMTU0ZDQ2NzJhNjZlODYyOWI4NmRhYzc0ZTNlMjkzN2JlNjkyN2FlM2RhMTFjNTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBhNGI1MTU5ODNjNmJhNTViYTY2OWVmOTI3ZjRiNGM1ODRkODBiMWE1YzdjMmI1M2QwNmU5YTY4NGM0ZTFjMmEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_db2f778f40b64bc9a1554cce12bf4b20",
+      "statement": "Query validation detects TopK before ordinary LIMIT/OFFSET rejection and builds an OpTree plus CTE registry for incremental non-TopK queries; SQL rejection and AUTO downgrade are separate branches, not a universal fallback for validation errors.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/mod.rs#L1013-L1269",
+          "version": "repo-lines-v1:sha256:0a3e19ab69815a5712099d37a01b9b1c350e336aff5b787e80a04ca9cfc6bceb:eyJzZWxlY3RlZExpbmVDb3VudCI6MjU3LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIxMWNiODEyZjQ0MmQyOTI5MDNhNTI5M2E5ZmFhYmFhMWFlYmQxOWE1YjY3ZjI0OTI0OTc3NTRjODRhNjU0MGQxIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJkMmVmMTgwZGI2YWY5NzBmNDNhNTYzYWU5N2ViZGRlODdjMWI3YTc0ZjlkNTcyMTY0MGQ3OGIxN2ZlZmFhY2M0IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJjODA4Njg0MGQ4YmEzMzdiNjljYWEwMzU2OTIxYzZmODQzOGE5OTI4ZjY4OWE1NWNmMzlmYzQ5OGM5YzY1ZjNlIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI5YmJmM2Y2M2UwZDJlOTMwYjk4ZGM4YjkxZTlkZThkZDQ1MWY3ZmVmZjc0MGQ2NmZiZWUwYjA5NjJhOGUwNWFkIn0"
+        },
+        {
+          "resource": "repo://src/dvm/parser/sublinks/mod.rs#L1423-L1430",
+          "version": "repo-lines-v1:sha256:6ab604e58af790c0ba783a96d90246b545a6fa2c6f6e07bce9bef99ca18836b1:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNWZhNzg2MGUxNDU3MDIzMWM3ZDQ0ZDA1OGU2ZWJkMjgzODIxZTdlOTBjYzlkNDMzNTY5MjM1ZWJkZDNjOWY5NyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNjZiOGMxZTEyN2UxNjNhNzRhMGMwN2Y1OGEzNzBmOTA3ZDhlODM5OTM4ZjZkZWM4ZGNkYzg5YzkyYTMxMTg2MiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTk2ZjIzYzRiODY4YmJkNjBkZWMxOTVkN2I0NTgxMjNlNzczOWVjZDNlMDgxOTBkZmU2YzFkNWVlODVmODVhZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYWY3ZmViNjFlZmUwMzY3YTc4MThlNTBmNzI5NzhmMTY5NGI2NmU5YThmNjUwNTE0YzRkY2ZiZTQ0ZjU2MmFhOCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_ad675738cbec4946884b7f1f09af0c43",
+      "statement": "Incremental admission checks the main tree and registered CTE bodies, rejects refresh-dependent STABLE/VOLATILE expressions for incremental use, and resolves unproven forms to FULL for AUTO but an error for explicit incremental modes.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/parser/validation.rs#L34-L129",
+          "version": "repo-lines-v1:sha256:c9107f3175d881f199d337d888b4ff81e397e5ea5f1870ab6c501b58bc595ca3:eyJzZWxlY3RlZExpbmVDb3VudCI6OTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRlODQyYjIzZjhjNTM3NzNiNTQ5M2MxZjM5ODEyNTcwOTQ4MWE3M2ZmMzllNGI2NDdhYjY4YmYzMDRmNWE4NTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjJhN2ZhNWZlZjA5YzM3MDJiZWNiNmMyNmE2NTQ0ZDhiNjY4NDk2MTkwMGY5MjBjNjY3OGI3MDAyNzAxODE3NjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImYyNGRiMmViNTc4MWU2YTZhNzk3YTBmNzkwZTQxNWQ2ZWQ5Yjc3MjhjODc3ODY1MTgzMTM2YmNiODA3M2YwN2IifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_be5523fb2a534b74ae84d3a21d3cf12e",
+      "statement": "INTERSECT and EXCEPT remain fail-closed for incremental admission despite having delta generators and private state; private branch-count state is populated with FULL refresh and kept separate from visible result rows.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/operators/intersect.rs#L18-L85",
+          "version": "repo-lines-v1:sha256:c93a70272833c6304106e48ebec97e94d4ca400404bde21839c4db2dfc7110ce:eyJzZWxlY3RlZExpbmVDb3VudCI6NjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZjNjNkZjQyZTFhOTgzYmE3NzMwOGYwMjljOWVhMDk3Y2Y4ZDQ4Y2ZlMGQ1NzMyN2YzOTY2M2Y5MTNlYzhmMzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0ZTQyMDhjZDZmZmI4YzRhMzU0N2IyZjU0YWRhMTk5NzhjM2YzNjVlNzhmOTUwMmVmNTE0NWNkZDJhYTg1NDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMzYTc5MmEzMmRkOGIwNTg5MmVkYWE1OTc1NGVhYTZkYTE4MDhmN2RjNjg5MWI0Yzc0ZjA0MjA0OTAyN2U5ZGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM1Mzg4YTdmMGVhOWQyNTYzMWJjYmZmNGM2ODBjMTk3NTcyM2EyNTNlNTEyMjUwNmI2NzVkMjhkYzQ0M2JlYjAifQ"
+        },
+        {
+          "resource": "repo://src/dvm/parser/validation.rs#L132-L155",
+          "version": "repo-lines-v1:sha256:7ae5b5d8a5e6cc5e467ef9e9c64f156c36fa87b271f5f02095504b963da9e6b9:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYyNWNmM2EwY2Q0MDhiMTczYjgwMWY3OWI2Njg4MTg2ODYzNWUwMjQ1NDQ1NTA0NWRlOTQwNzAzMjQxZDk5NDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlkMDJiNzA4NTNiNjQzNmUwMWNhMmE2ZWE4OTI0NzYxOWQwYjNkOWFiM2U2ZDNiYzc1OWRkYWEyYTU5MjZiOWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjljZWE2ODI4ZGRjMmNmNWYxMmZlNDliM2QzMzllMmQ4Mjk0YzdhMjk4MWRlNzZlNGEwOTUwMzkyNjAxNzIzNzQifQ"
+        },
+        {
+          "resource": "repo://src/setop_state.rs#L1-L28",
+          "version": "repo-lines-v1:sha256:623f38a054903d0c8079473a9692a4dcc669fc1328fd9997ecafa4535ecb0244:eyJzZWxlY3RlZExpbmVDb3VudCI6MjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ1Y2U0YmNhZTA4NWJmOTU4YmI2NzA2Y2FkNDMzZTkxOGVmN2ZkMjhlYjI3YTgxNWQxNDEyMjg0NTVlODRlMDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI5OTVjM2JjZDZkMjJkMTkwYjczY2Q5MDliM2E4MTI5OTM0MTU5MTYxNzkzMjYyOGU5ZDA1ZDQ4ODgzMjk2MmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZkZGYyMTc5OGQxYTJhMGI5MDU5YWU4ODE3ZjQ3NmY5ZjMxMGJjNTY4ZGI1ODVlZjFjM2RiZmYzM2M2MThkODUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_4d92e2c010394fe88f2727c18466b2e6",
+      "statement": "The delta planner's candidate inner-join reorder is shadow-only: reported rules are unselected and the chosen plan preserves the original order.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/planner.rs#L527-L643",
+          "version": "repo-lines-v1:sha256:d0418e5796d2c6eb3c23ba4b1982ff84ecebbee6b740380a564507bf81ff6490:eyJzZWxlY3RlZExpbmVDb3VudCI6MTE3LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJlMTg3NTQ5YWMzYjlhYzkyZjhhNjYzOGQ0NDNjNzFkYjQ3ZThjYzA3NTJkODAzZjdiNGU5MTI5M2E0MDZhYjhjIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0ODkzZjQwZTM3ODFlYjg5NmM4MmQwNDZhMDgwNjdhMTFlMzVjZGYyZjFkZmFmMjZmZWE5MGI4ZGI2Njc2NDEzIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJjMTlmM2MwYWExNGEwMjE3ZDdhNGVjYmIzYmZlMDVlZmFhMDhjNmRlZWI2NGQ2MDlmOGQyM2I5NTNlZDM2ZTY4IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJhNDg0ODliMzhiNDYyNDhmMWVlNjUwNzA5M2E2MmZlZDZjZDQ1MGQxYTY0ZDQyNjJkMzNmOTM3OGE1MGFmZjQ0In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_b05150734fcd462b91adab96fce734fe",
+      "statement": "Delta query generation reparses SQL, collects tree and CTE source OIDs, optionally reclassifies vector aggregates, validates IVM support and row-ID schema, and configures DiffContext with target, CDC, routing and staging metadata before differentiation.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/mod.rs#L701-L821",
+          "version": "repo-lines-v1:sha256:03e096a1e6dcf8dc3dcb9a40abea0ea5b4bf94ff9a0a9a980d2be8881863678a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIxLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI5MmQyZGJlMmNiMjY1ZjEwMDliZjAxOTMxMTk0YWYzZGJiMTRlMzViODQ1MGE0NDYxZTRhYzAxM2Y1NTAzMjJkIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI2MGI0OTExZGIzNTcxZDlhNGQwNjkxN2ZiNWVjNDRjOTdmOWYyMDQ4NmIyMTE2OWM1NzkzYWY0MjczNzE0MzViIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJkZWJjMTI2NmE4YjYxZWZhZTBiMTM3YzY1YWIwZDNiNGFkNjc1NzgwZjNlMjcwZjFlOTVjMDFiMTU4YzU3MWNmIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJhMzk0NmJiOThmZjViZjkyZmZlMDE5OGQ2MjljMmU4M2EyZTk5NzU3NmFhMTI3NTZiZmIxNzYzN2U3ZDdlMTJlIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_56932d43df954f75be33571e9b57f0b7",
+      "statement": "Differentiation emits CTE SQL with identity, action, user and auxiliary columns, returns deduplication and key-change metadata, checks schema-column agreement, and isolates intermediate subtrees from final-target state assumptions.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/diff.rs#L54-L73",
+          "version": "repo-lines-v1:sha256:1273990b45fc6a74d0e4e03afa2bc30b70c989a48ff7f47c3ddb966dd1707c8c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxMjAyNjY1YTJmOTlhYWU0MTMwOWY5YzIxODMzYTYyYmQ0MzQzZTdjOWYwMGFjYzVhZDQ4ZTM1Zjc4MjQxZTAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImIxYmQ4N2JmYjM2ZGYzNjE3YzUyOGUyNzNkNGMxOTYwMWI1M2E2ZDhjM2Q5ZTAyODNmMjVkMmFkYjE5NmQxZDAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBjYWE1MTEzYjA0YjIxMWM2MGQ2ZjNhNTViNGJkZGM1ODAyNjAwMGU3YzdjMjFhNmU2YWYyYTFhNGRhZjc0MGYifQ"
+        },
+        {
+          "resource": "repo://src/dvm/diff.rs#L918-L1008",
+          "version": "repo-lines-v1:sha256:0d3939026672c5f54de615bbcfb3a9de1a8ddbf4e2483d841de8ea957e2cc00d:eyJzZWxlY3RlZExpbmVDb3VudCI6OTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIyNTI0NTBmMjk4MzA1NmExZmIxYmNhOGJjMTkyNjdlNTNmN2I0NjNkOGE3Y2I0YjBjYjJhMzZiMmE5YmRhYzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM1ZGY0NTZlZDA3MDA2YWZhZjk1ODQxM2RkNjI0NmQyOTI4ZTI1Y2M3ZmMxYmU0YjA2N2Q5M2VkYzVkYmY1NDQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVhODI5MDZjNzMzNzQwOTBjYzdjNWI2OWNhOGJjODllYTdkOTM0NTY1ZWNhMWU0N2EyMDljOGI2NGZiNjJkZmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY5MjAyNGVhMzc0MDZjOGFiZWU4MjgxNWU1YWExZWI2ZWNkNDI5ODE5YjcwZmI2ZmE5MjRjNGFjOGY3MzA0YzcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_8cd47c2295994ac7bebd58cbfc86c530",
+      "statement": "The cached delta route binds frontier placeholders for base and stream-table sources and errors on unresolved tokens; deferred scan intervals are previous-exclusive/new-inclusive, whereas IMMEDIATE has a transition-table delta source.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/diff.rs#L21-L43",
+          "version": "repo-lines-v1:sha256:f4fb4d78130cd1ac4add4c1b3b25efa0593d2cc35249e0c87c69ee9e32781c81:eyJzZWxlY3RlZExpbmVDb3VudCI6MjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFhMTFiZDQyOTM5MTlkMzA3MDgxMTI0OGUzOTYzNWZmZWFjNzcyMGU1NzY4NThhNjA5MmI2MTIzMmNhNjQ3ZWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM2Y2E1ZGYwZTRkNzUxZWFmOGY5ODc2YzM1ZTVlNWI4YzUyNDU4MjU5Njc5ZjVjN2M2NDdkYWVlNDU1ODcyNTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZjZTgxMzU5ZDJkMzI5ZjRiMDBjYzVlYzg5YWE1ZDMyOTNmNWYzZGFiZTVhMjcyNzg5MDc3OTQ4Nzg2ZjZlODkifQ"
+        },
+        {
+          "resource": "repo://src/dvm/mod.rs#L274-L398",
+          "version": "repo-lines-v1:sha256:a983d86d2896260efc73dc35aec0d3e56a8042bd052bfaea626d36af9c6b952a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTI1LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJiMzY1ZmY1MTcxYWE4NGU4MmIxNzZlYjE5NzdkZDU2ODlkYTJkNDJjYWQ0NmUwNDg5YmNjNWJhNTk5OTg1MGE1IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJhOGQ3YzVlMjMzOTczYjQyMWYwYzg0ZTk1MDVjZDM2YzUyNTU4N2YzOTc1YzZjMzMzYmQzODA5ZjU2NzkwNGEzIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIzNWY2ZjQ2NmU1OWNmYzMwNzAzYzQ1ZjcyYWY2NWRlNTRhYzM2M2QzNTRjYzFhMzMzMDM1MGFjZDQ1MjQzNGM0IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIwZTk2MTBjM2QxMzI0MTI2NzY0YjY2NDg5ZmRkYzllZDMwNTc4NDFlMDk4ZGMwMDdiNGM0OThmZTllZmI1MjdlIn0"
+        },
+        {
+          "resource": "repo://src/dvm/mod.rs#L845-L855",
+          "version": "repo-lines-v1:sha256:3064fceaa02527eae90336fc8062182bf4b5727d094bfd05425ddce9bf1a8689:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc2OGI1MWQ5ZDhlOGU2NDgxYzkyN2UyMzY3M2JkNjY5MTAxYzE4NTJmOWNiNGUzOTMwNzVhMzMzY2ZjNjhhNWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg5MGE1YWI0NzYyMDQxNDg2MTdjYzFjMWI1ZTAxYWM0ODhkZTcxZTQ0NjVmOTAyNzc3ZWZhN2NmMjRmNWNjYWEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYwNjNjNGQxYWY4Y2Q4OWJiMGJkZDc2NTdmZmNiZjY4MDZhNjEwZDc5ZDZjOGQ0YzMwN2MyNDFkZjM5MDA1MjIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQzMTg5MDUzM2I3NzJlZjhhMmQ2YmE3ZDcxZGNkNDM5M2I3MzNjOWJkMDM5MDc3NzEzOGJiY2JhNTIyODhlMDYifQ"
+        },
+        {
+          "resource": "repo://src/dvm/operators/scan.rs#L332-L332",
+          "version": "repo-lines-v1:sha256:b10a2193e7226f04f9df09fe5c56a3e53dcf63913e7175b8c367fa6733f9bbe5:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYjEwYTIxOTNlNzIyNmYwNGY5ZGYwOWZlNWM1NmEzZTUzZGNmNjM5MTNlNzE3NWI4YzM2N2ZhNjczM2Y5YmJlNSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYjEwYTIxOTNlNzIyNmYwNGY5ZGYwOWZlNWM1NmEzZTUzZGNmNjM5MTNlNzE3NWI4YzM2N2ZhNjczM2Y5YmJlNSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNmY0MDBhYmE2MDFmNmMwOWM2MDI2NjFhODFlM2I1YWJhYWJhMDFhNzJlNjlkZDFlODYxM2U0YzE0MmY0YzgzOCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiY2VlZmMwMWZlYmU3ODk2M2FkMTgyNGZlODMwN2I3Y2RhZjU2MGJhYzk3MGI5MWZhZjk0YTBjODhiNWI2N2UyZSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_91eefab677ee4760b5707df66b974915",
+      "statement": "Result correctness preserves bag multiplicities through signed insert/delete contributions rather than distinct-row equality; keyless duplicate occurrences can share identity and counted deletion removes only the required number using statement-local physical tuple selection.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/operators/intersect.rs#L44-L61",
+          "version": "repo-lines-v1:sha256:b4b4bea25e6887b68a9a6a431d2fc362ac1a8d321c37991a0d08c1661379f4fc:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBjYWI5ZDg1YzgyMWY4YTQ4ZmIyYTI4NGY2NmJkOGRmNmJmYWVlZWU0YmRiMTg1YjdiODcyNDg3NGRjOGQxOTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk5NmJiMGQ5NmJhNDdjYjI1NjA5YjQ0MzA4NDM0Y2FlN2UyYzVjMzY2NTNjNzhlZmQzNTc5ZDNlMGJkNTUyZjMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVmZDVjMTJhNmI5YzJkMzBkZjc3OGJhODU2NjMwY2E2NjU2MzhjMTU5MGNiMTBmZWQ5MDNjYzczM2JjMWEyNjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFiMTdjNWZlZDY3ZWJmNDk5YTU5YWFkMzM2ZGEzMTI1ZmJmODI5MGQ0ZDkzNzU2MWFhZTQ1MzE2MTEwZWE2OWYifQ"
+        },
+        {
+          "resource": "repo://src/refresh/codegen.rs#L2023-L2063",
+          "version": "repo-lines-v1:sha256:0988b731ca8e8e93c1a32ab23894bc820c9739856c382d7fd1bef8bfd595b82e:eyJzZWxlY3RlZExpbmVDb3VudCI6NDEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFiYTY4ZmYyZjMxNGJkODJiOGI1YWQ1ZmJhZDUwZTkxNzdkZjFjNmM3NjUxOTI4ZDViYjMxYjU1YjliY2NjYjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU5NmY4Y2IwODNmYTgwMGE0ZGNkMjk2OTcyMmQ3YjkyNjg2YWRkOWViZTM2NTU0OTJmYTY3MmIxYTdjZWQyNDIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjljMjcxMzc3NjY2ZjRiNWNiMDAzNDM1MWY4OWVkMDI3MTk5MGYyM2EzNWYwMzdmYTA4YjdlZjgyZTEwODU2YzUifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_keyless_duplicate_tests.rs#L18-L121",
+          "version": "repo-lines-v1:sha256:fba5ae9ee06cefadfbe4385e21a9fd5d400ea63fff063160625a7ee97bc4f3e4:eyJzZWxlY3RlZExpbmVDb3VudCI6MTA0LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI1MTk0ODRlZWRmMzY0ZmI4YzEyZjFlYjk4ZmJmNmE5YjRmNjUwZjQyNzg3NGE4ZDczNTkwMTBhYWRlNDMxYmM4IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJmOGU1MzNhZTA1ZDEzZTg3N2JhZTJjYTc4Y2JhM2E3NzRmODNjZTEyMjJjZTc5OTVkN2NjZWZkNzMwNzYzYjQ2IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIyNGEzM2JiYjBmMDM2OWM4MzBmMmQ5ZjE2NzgzMmM3ZWZiMWExNmU1Y2JmMDliMzIyZDI2MmQ3NjljNDU3MzNhIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI5ZDUzYjIxYjM0OWNlMTk5YTZjMGUwMDVhZjIzZDVlMWQ2ODliNTNlNzc0NTcyNWJjMzMyZjI5NGMwODBjMmMyIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_cb886e3f45874c17a999b07217a1a97e",
+      "statement": "Aggregate maintenance distinguishes NULL-safe group matching, total row counts, and nonnull argument counts; AVG auxiliaries and explicit COALESCE(SUM) metadata preserve semantics that blanket zero substitution would lose.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/diff.rs#L168-L181",
+          "version": "repo-lines-v1:sha256:a0ac4e98c23fa6593109f2c26f08ec57082b5cf218f5de94b3301bfe8746654e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQwNDRiYjZiYjU3ODc2YzVkYTczNTlhNDVhMDY2ZDdmMTZiZjczNTFkNTlkYjViN2Q0YTYzNjI2M2M0ODk3YjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI0ZWFlYzBmMGVhOWQ2ZGIzMzA1NTk4OTNjYzcxYmM1MWNkNjI2MmI4OTg5Yjg5ODg4YWRjN2U2ZGJjMmY1NzEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjJkYmI2YjU3NDRkZTJkYjc5NDRiMTE2MmI4NDFhMzUzNTlhOTg5ZTZjMTRkNWNhNWE1NWM3MTUwYjE4YjUxOGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkwMmUxYWU1MzRmNTk3YmNmZmE5MTQzOTM4Y2Q0YmEyMmNkZmNmYjBhNDU2NTRkZjA4OWY3NTMxNTdkYTQ1ZTgifQ"
+        },
+        {
+          "resource": "repo://src/dvm/operators/aggregate.rs#L127-L153",
+          "version": "repo-lines-v1:sha256:246c0e5398c1305c0fce703e566c049068549a7817d127caddb7038cc8fcbb13:eyJzZWxlY3RlZExpbmVDb3VudCI6MjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4YzExYTVlYWYyZDU0NDcxNDVkZjY0OGMyMWU3NDdlOGJjMDAyZGE1MzBjM2JmN2ZhY2ZhODNhNWJiYWYyNTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4MmJjNWExYjFiNTUyNmZiOWNlOTM4MmFlNDQ5NDhmMTYxZTBhNTUxNjFkNDNkM2M3Njk1OTlhMTMxYmEzNWMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk5Yjk5YTU1YzFhMGE3NDdhZGE1MWRhYzA4ZTYyMGZiNGU0ZmU1YjkzNGRlOWNhYWFhZWU2MjI2NTMxNWZjY2UifQ"
+        },
+        {
+          "resource": "repo://src/dvm/operators/aggregate.rs#L2131-L2210",
+          "version": "repo-lines-v1:sha256:321142fe42b433830c21a2deaa607ee342d3e4ed2fd30f617635b4745e31e02a:eyJzZWxlY3RlZExpbmVDb3VudCI6ODAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ3MmM1MWI3Y2EyYTE1MDdjZTlhNzQyNTAxM2VlNGMxYTJlMmMyYTdjOGFhYzNkMDEzZmY5MDc0NzQ2OTVhNzciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ1MDY5YWM3ZDRkMjk2YTI1MjdmNDJkMzMzZjgwZjY3ZDQ4MDkyMGYyOTFiMzJiY2FlZWRjYjkxYTA5ZGRlOGYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJiOWQ0YjEyMDU5ZDNhNmI5NzlmYWQ4M2FkOTk3Yzc3NzljYzMxZDdkMzRiZTI2NDFhZjdkM2U1NzUwZjRkZjkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIzZGNhZjhiMDIzNzJjYmI4NDA0MGQxNmE4YmE0Mjk5YjUwZTM4OGM5M2E3MzcxYmI5MzE1ZmQ5YzIxODM4NTkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_48d8cb280bd74bdd98ce0513649241e4",
+      "statement": "When exact pre-change left state is available, inner joins use ΔL joined with post-change right plus pre-change left joined with ΔR, and explicitly disable the old right-snapshot delete split to avoid an additional cross-term error.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/operators/join.rs#L335-L450",
+          "version": "repo-lines-v1:sha256:16ecb5192c98cabb4ca972132d08a2edb594896ce9a016ed417f9817fc34a48b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTE2LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJiZjEyMjM2NGUyZGM2NGJmODdiYmYzNjc1MzhkMGNhMWIxZDdiYTAxZmJjZjkzMzkwNmI1MWU4ZWQyYWVjYWY5IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJhZDllMTI1NDY0MjU1NzZkM2RlYWU4YzliOWRiZjEyOGQ1ZDZkZGFmNWQ3ZmU4NTc5MzQ5MjdkZWZmYTNiOWRkIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI5YzM1Mzg2NjI2NTRjMzNlOWQ3MGU1NDk0MTI3ZTljY2MwMmQwZTk4N2UwYjVkYTcwMDA4ZmM2ZThjZDVkZjI1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJhNWQzNTU5NWM0OWQ2ZTcxMDU5NzFkNTVjMjUxNWJiZjllOTJkNTUyYmEwMmVkNDhjNmQxYzI4ODU1NmI0MzRhIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_265f8433b3594ab7a80e68621aa1fa7d",
+      "statement": "Snapshot planning distinguishes exact per-leaf, exact combined, post-change correction, and unsupported reconstruction; semijoin context changes nested-join snapshot choice, while set, window, recursive and lateral forms can be unsupported by the generic snapshot mechanism without implying universal query rejection.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/operators/join.rs#L341-L403",
+          "version": "repo-lines-v1:sha256:7e1da58255ab4e05c71220dadc75c010151836ffde3d69cdf5070d71204eb190:eyJzZWxlY3RlZExpbmVDb3VudCI6NjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBkYjA5MmNiNDFiZTk3YTllZjY0ZTE4ZDY5YzA2ZmE2MjllNmNlZjM4ODAzMDZiYzFiNDZkZTU2YTQ5NWNhNDMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE0YmMwM2Q5ZjgyOGNiMzEwNWE5NDZiZTU3NzhjZTdmZTc3OGIxY2RlOGUzOWZlYmMzNDc3MDRmZTAwODdhYTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI2MjE2NjhiMzc1ZTcxYTY1ZjBiMTA1Zjc4ZTM0NDQ3YmY0ZTkwNmRlYTZlNzc1MWRjMDQ1ZDg5MjVmNzYwOTIifQ"
+        },
+        {
+          "resource": "repo://src/dvm/snapshot.rs#L126-L180",
+          "version": "repo-lines-v1:sha256:10b6a5d5ca69d089c70d885dcaa7ac885ab9192aec39b5776143cead437e4925:eyJzZWxlY3RlZExpbmVDb3VudCI6NTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEyOWI1NGIyNzAzZDk5ZWRhNjMyY2Q0NzE2NjBkOGZmZWUyN2MwMDVlYWI2ZjY3YjEzNzE4Nzc3OTIxZWZmMDciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MjJjNDJjZDE5YzZkMDNkODA4YzQ1MjcyMDU1MjgyNWI3ZWExYzViNDkxYjIxODUxMWNhYzc0MTVjZjlkOWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYxYzJhYzU0NTYyMjhlMGRlN2JiNmM4NjQ1NTUwNmZiY2E0MTFiOTJlZGU1ZmRlOWMwZGVjYTc3MGQ1YzNmNTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc0MzdiMjY3NDVhZTQxZjI1OWYyYzQ0NzRiOGZhY2RmN2E5NDBkZmE0MjRiYzg5MmEzYTcxMjRiOTY1NDA5NDQifQ"
+        },
+        {
+          "resource": "repo://src/dvm/snapshot.rs#L26-L78",
+          "version": "repo-lines-v1:sha256:28bb628830623be6e2f7d75d4f847b0be4fafaa2325e63402c4b7ef3829e6ae5:eyJzZWxlY3RlZExpbmVDb3VudCI6NTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQzNzBmZTIzODIyZjM4ZWZkMWIwZTIxNmEzOTI4YTU0NjA3ZmNhMDMxZjg5ZDg2YjEyZTg5YzI2MTFkOThmYTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI2NWViZWU0OTQ1NjhlNzVmMDFlMGEzOTk0MzBiNzMxMzQ0YjljODRhZGRmZDc3NzE1YWFiODg2YjlkMGZlNGMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_65474603926742fd8524594acebc0f72",
+      "statement": "Outer-join differentiation maintains NULL-padded rows when first/last matches change and uses action-sensitive snapshots and corrections; FULL JOIN maintains transitions on both sides.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/operators/full_join.rs#L3-L49",
+          "version": "repo-lines-v1:sha256:4e80225d194e9b678d17f667ee5043d8e5821a451b6751b55be5220c925de646:eyJzZWxlY3RlZExpbmVDb3VudCI6NDcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMzOGVmZGU3OTZlMmY3ZDUwNTJiMThkNDY1ZDhlYTU1YzhkZjYyYjk5OTg3Yjk0NzQyYWIzYjE3M2MxZGI0NmEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFlNmM5NjU4MTAxODk3NDA2NWE4M2QxNjNlZThjZDc1NTk5NGFlMzA2MTVhMGMxZTJmYzI1YmFmM2JkYjRlNzgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjoyLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjViYzFlMjk0Yzk5ZmRlZjgwMWY0ZTBlZjQ5NDM0YmVkZmMzZjM3OWFhNGI3ZTI0NTI5NGY2MDk5YWMyY2U1NTQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYyYzRjM2U4NWM3M2JhZmQ4ZWU2MWIyMDI1MDY3MTk0NWE4ZWYyMjRkYjUzOTNmNmIzMGQ3MmUzYTgxYTkxMTYifQ"
+        },
+        {
+          "resource": "repo://src/dvm/operators/outer_join.rs#L1-L36",
+          "version": "repo-lines-v1:sha256:cfedc1c81bbf23686331408d9d642e0a40e42015259761cbf1b86f2c3b352209:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4ZjcyNTViMzRjYWVkMDM3ODk2YWJjMDI3YzNmMzRjMjViNWQ4ZWZhYWRiNjk1YzgyNDU5YTVkNmE4NjUxNDciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJmYTY2MTlhOWNkZDllYWIxYTdhY2VlODdhZWQ2ZjAyOTJjODY0MTI3NmJlZGI3MjRkOTA2ZmU0MjUwZDUyMjUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM4ZWQ0ZjliNDIwNjkyYjA0NzU2ZWE0OTAzMDhlMWY4OTI4OGVlNmM4MzliNDA4ZTI0YWM0MDdjYTQ1NmE5OGIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_db963c1d894044f99dc6f68b6a30d49c",
+      "statement": "Aggregate strategy is context-dependent: stored auxiliaries support algebraic maintenance, intermediate/noninvertible paths can rescan affected groups, and HAVING requires handling groups absent from final storage.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/diff.rs#L145-L166",
+          "version": "repo-lines-v1:sha256:f9ff62ecb9247ba2aaa49047baf907bc9df02d806616fc61ed56babb5bfcfe2a:eyJzZWxlY3RlZExpbmVDb3VudCI6MjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImExNmU0OTYxNTZmNTMwYjkxZDQzOTY4YTc1YzQ3MzZmNDA4YTEwNGQ2Nzk0ODM0NGVkZTdiMTEzMTVhMzE0NTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRmNjA3OGZmYzc5YzU1NzhjZmM1MGE5Y2NjMDczYTNlZmIyNzkwMjRlMjhjYzZiZjQ1NDdlMDA0MzAxYzcxODIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVlM2NmOTA2OGVhNjIwMWIyMGE4ZTEzYjc0Njc4YTE3MzY1OGFlMzVlMDUzMmUxMmUxZTdmMzczYThmNzRjZDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ3MzhjNDllZmE0NjM1MjVmMTdlYTc5NjRjNWVlMmNlMDFmMTNiOWMwMmFhNGQyOGQyMDk1ODg0NGM2MTIwZDEifQ"
+        },
+        {
+          "resource": "repo://src/dvm/operators/aggregate.rs#L2161-L2179",
+          "version": "repo-lines-v1:sha256:469770760d366e9c939f426838271d7db775e3ba6dd0babbcecff91dd174d0c8:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFiNzhjOGY0MTVjYzI4MjdkNjUyZDNhODc5YjE4NDJhZjliNmRiZWY5OWIxNTA2YjMyNDMwYjE3MDk4OGViNGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZkNTIzYzhkYzliZDM1ZTg5MjQwOTc5MGRkYjY2NDM4NmZkYmM0Nzg0NmE1MjNjOTQxYzY1NmFhOTgwOGUxYzkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZkYjhiM2M4YzVjMWY4YjljY2U4MmRkOTJkZTNkZGU5NjZhZmY4NTJlYTAwNmQyN2JjNDk1NTNiNGYzMWVmNzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg4NWNlZDVhYmNiNjdhYjAzMjI2YTk2ZjllNmQ3Y2QzNjdhYmMzOWU3ODQwNDhkNjc0MTQ5NTMzYzdhZjVhNDMifQ"
+        },
+        {
+          "resource": "repo://src/dvm/operators/aggregate.rs#L660-L751",
+          "version": "repo-lines-v1:sha256:8716bc1674202ead4e9f050851f7cb8a1fa1e86c1a163ecdc3ccdc0a70600a81:eyJzZWxlY3RlZExpbmVDb3VudCI6OTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3YjdhMjIyYTAzOWFkOTlmMDFlZmVkMjUyZGM4ZDNhZmIxZTgyODRkZTM3OWY1MWU0ODBjZTFlY2UxMWNlMmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjljOTFmNGE1OGQyYTQxOWQxZWIyMzE0NjBkYmE2YTQxNWY0YTdlZjY0ZDZiNmZmY2RlNzBiMmNhYzRjOWMxZmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY3ZjZjOGYzYWZjMzVlNzhiZjZkMDUyMmM4YTRiYTExZDNhNTk5MDlmYjBmZWUxMzkyNjdmNmZiZDk5Y2NlODkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjY0MDhjMmJkZTYxMDg1MjFlNTFkNDg4NGZhOWMyYjRlMWUwYmNmNGIyNTg4Y2IyNDhhZjFhZGU4YTc3NDc0ODEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0f5715a0dfaf4703b61ad5f1e18372c5",
+      "statement": "Production windows use partition recomputation with identity-aware output differencing or partition replacement; state-backed candidates are runtime-disabled even when eligible, and their private lifecycle status alone does not enable execution.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/operators/window.rs#L1-L15",
+          "version": "repo-lines-v1:sha256:128ac0863d8f21c86ca6cbeb6900a9097666ede7e51496a69b89c6cb73f027c4:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIxMWQ4NjBhNDA2Y2RmYThmZjQyMDU5NTYxNmMyMDUwMjMxM2U2Y2M2ODFlMTY0M2ZmNWJjNTliYWFmMWU2YzIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFjMTY3MzgyYWNiYWZmNTM0Y2VkOWZlNGExZWY1Nzg1NjI2ZTM4YjJiZjY2YzYzZmM1Mzc3ZWZjY2ExY2FjM2IiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVjOTUzZDFkODQ1OWUyNWUyMzhmM2Q2ZWIxODAxNTFjYTJjYmNmZjg4OGUxMTJkZmNlOTZhOGRiNGFmNjgxMjgifQ"
+        },
+        {
+          "resource": "repo://src/dvm/parser/window_plan.rs#L297-L338",
+          "version": "repo-lines-v1:sha256:0d26301aef86a63dd785c15c7647d2ddb4eb21ce6aa7d44426e121d4de55a6e3:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRmNWM0YWRjMTk5NTA4MGQ4YTFhMTZlNTM3YzJlN2NmNmIyMjgyN2MzYTI4ZDBmMTcxM2M3M2VkNGRkZTgyYTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNhOTAzN2Q1MTRmNjk1OWNjYjQ3ODI1Njc1ZDdkYmViNzdhYzIzMzIwOTI0ZTNiODJjYTE4MmY0OGUxZGFiMWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUifQ"
+        },
+        {
+          "resource": "repo://src/window_state.rs#L18-L43",
+          "version": "repo-lines-v1:sha256:2ac301a97ac8159dd9dbd3b39fa5a002688cc424060d220031a881dd675a9436:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU3MTZhZjcwOWZlZDM0OWNiNzdjYjRkYTYyZjk2ZjI3NTEyMmE4MzEzMTRlNGM1NmNkZjdlOGI4ZmZhNDFjZTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJjZGZhMTUxODgxZWMxNjE5NGMyYzRhYjZjYmQ5OTcwMjAxMTUwZjdhMWQxZjRiNTdkYmY2M2E4N2I5OGY5YjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_989fce8398214183b8cb2aebab4348e8",
+      "statement": "Recursive delta generation rejects multiple self-references, chooses recomputation on storage-column mismatch or nonmonotone recursive terms, and otherwise selects semi-naive insertion propagation or DRed including rederivation for mixed changes, subject to admission.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/operators/recursive_cte.rs#L95-L199",
+          "version": "repo-lines-v1:sha256:63db0d6740e58f7c59307a6f5700225b49937e8d1cf77c68f7b5efdd89acf016:eyJzZWxlY3RlZExpbmVDb3VudCI6MTA1LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI2ZjFkM2YxMTIxZWJjMTMzNTJjYzBhZWFiZjQwYTM3OGFiM2I1MDM2MzZkZDFmNDY3Y2E0MDhjOTQ4N2FmYWMxIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0ODkzZjQwZTM3ODFlYjg5NmM4MmQwNDZhMDgwNjdhMTFlMzVjZGYyZjFkZmFmMjZmZWE5MGI4ZGI2Njc2NDEzIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI3MjllZTZiODMwNmQ1ZmFjMDM3NWNjYzgzMGU3NjNmYzY0NzhiZGU5OTlmODdmOGM4ZmI5ZGEwZThhMDljNjQyIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJlNTkxZDk5Y2I4MGY3ZWRiMWRiZTk2Yjg1MGMzMjIxYjIzMGUxMTRlYjc4M2QxZTliY2JkN2ZlYWYyYTVkMWQ5In0"
+        },
+        {
+          "resource": "repo://src/dvm/parser/validation.rs#L80-L129",
+          "version": "repo-lines-v1:sha256:212f5ba4d93d5ccafbda0c8223d279ff4cb37cd034a383ef86db0825f402cbf2:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgyNWZhN2FkOWZlMDgzODRhYWU3MDI3YThiMzM0MDM5MTY5YTU3NzRlZTIzY2U4ZjIyYjEyM2E5NmY5Y2I2YjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdmZGNmNjA0NTQ2YjcwYjM4ZjQzOTg0NzQ0ZjVmZDljMzYxZTUwNTk5ZDc3YTdhYWY2OGUyZTk0ZGY5YWU2ZTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImYyNGRiMmViNTc4MWU2YTZhNzk3YTBmNzkwZTQxNWQ2ZWQ5Yjc3MjhjODc3ODY1MTgzMTM2YmNiODA3M2YwN2IifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_337139a66af74f3f99525f259fe32983",
+      "statement": "Current generated row identities use typed domain-separated V3 canonical bytes despite legacy hash helper names; V2 remains immutable and V3 introduces corrected bpchar canonicalization with explicit tuple framing and NULL markers.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/operators/scan.rs#L915-L927",
+          "version": "repo-lines-v1:sha256:2706c3313ba1eb37ca61eb40605e1846893a6184daa5bda7f27c0499371b7f70:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZlOTNkMGFlN2IzMWE2YjI2ZTczOWIwYzRjYjRjOTBiZTc3ZTQ0ZmJiNjQ4ZDQwNTQzZWU0ZjNjOGRmMWQxMjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE1MjE2MDRiMzVmYzQwYWYwMGNiYTRlZWEyZmQ1ZTJjM2FmMTg2M2IzOTExODVkN2JmNGJiMDllNzJkMGM4YjMifQ"
+        },
+        {
+          "resource": "repo://src/dvm/row_id_v2.rs#L12-L49",
+          "version": "repo-lines-v1:sha256:9283b686e05cba20cd0893c44b8bf28b19465e64df5907adbdb4cf586c3bad1f:eyJzZWxlY3RlZExpbmVDb3VudCI6MzgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRkZWE2ZDg0NTEzNTlkODhlNzU2NDgzMzY2YzQ3ZWI5MGJjZTc4YTllNjk0NTI2NmYzZWMwZTMyNjZmMDIwYzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY2MjM2NWVmN2IxM2NmMmI0ZGM2N2MyNjM1YTY2NmJjZGJmNTI1MWVjZWZiMDJkMzMyMmZjNzg4NzkxY2ZiMDAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRiYzE1ZjdiNDc5MDQ1ZWRiY2JmN2ZkOTc2ZWJlYWI5ZDhhMDc5NGYxOTQ3YTYyYTZkMGVlOGE2ODYzZjMwM2IiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI5ZDUyNjUyNGU0ZGI2MjI1M2QwMDNhNTI0YTYxYTg0NzRjYjhkY2IxOWZkMDhmMzRiNDIxOWRmOWM1OTdjOTQifQ"
+        },
+        {
+          "resource": "repo://src/dvm/row_id_v2.rs#L682-L760",
+          "version": "repo-lines-v1:sha256:973e48d7d1d934432a1c315997cd4cb6b96063adab9c9829926f15a148db872d:eyJzZWxlY3RlZExpbmVDb3VudCI6NzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU4MjljOGY5NGQ2ZTgyYWJmZWVkZjMwNjczZGI0MmNhODQ4ZTA5NjRjODJlZGJhOTBkNTliN2I4MjUwOTBhNDMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJmNzI5ZWNkNGY1OTU2ZGUyMjBkYTQzMzU2ZDE5OThkYWIxODY1MTIzNWM5OTQ1MzA0MDgwOGVhMGZlN2E1M2MiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFmMmQ4ODRhZTM4NDMyMGYwZmUxYWI3ZmM3OTQ1NzA3ZjFmOTMwYTA2ZjliYmUxMDA4ZGU5MDlhMjU2NDY1YjMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b20d59bbf1b74276b7791d81a3250d0f",
+      "statement": "row_probe_v1 returns short identities unchanged or a 128-byte prefix plus XXH3-128 digest for long identities; lookup predicates must also compare complete identity bytes, and unsupported identity metadata/type/collation is an error rather than a text fallback.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/row_id_v2.rs#L146-L170",
+          "version": "repo-lines-v1:sha256:9f7a3d2b6c898aed3b8217f7d67efa043a79c370b806d55967ee4ca81cbc3628:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU2YjFlNjU5Y2RhZmRkY2ViNzg3YjNkOTJmYzBkOWY1ZDY0NDY5M2NlMGNjNWViZDk3MzAwYWJjMTQ0MzRmZjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1YjcxNGMxZjUxNThkOTM4NTNhMDk1MjAzZDA3YWQwYmUzZmFkN2NiYTlhZDcyMTIwMzE1YWJkZWNjZDIwOTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFiMWI0NGI5ZGYzN2JlNzNiNjE4MDFiZDI4NDNmODA1ZWNlYzRmMzY1ZTllNDVjMDc5YjgzZTllNTNhODVhNzcifQ"
+        },
+        {
+          "resource": "repo://src/dvm/row_id_v2.rs#L1518-L1529",
+          "version": "repo-lines-v1:sha256:5873713f4aead86cdd7e526537032e6e3227f3e67f71168a39ee200085e44aee:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVhZjczNDJkOWM5NTUzZjc5ZjcwN2UyOWM2MGE2OGUxNTBlM2YwNzJiMjgzM2ZmYTFiYzAwYWZjYzhiYWFkZjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUxNWI0Y2RiYjMyNjIwNDA0NmYwMzhkYjZlOTg3NzgwMzc3MWMwYTkyM2VhYjYxZTgwNWY0NjQxMGMzYzkxZjAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM1ZjZmNDY2ZTU5Y2ZjMzA3MDNjNDVmNzJhZjY1ZGU1NGFjMzYzZDM1NGNjMWEzMzMwMzUwYWNkNDUyNDM0YzQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM5M2Q5MzkzYWY3MDc3MTE3MDc2OWZiMGQxZmM3M2RiOTZjNWFiOWQ5ZTMzNWM0YjAwNDdlNDJkNjk2NmEzNDgifQ"
+        },
+        {
+          "resource": "repo://src/refresh/codegen.rs#L2226-L2232",
+          "version": "repo-lines-v1:sha256:08941c5bc0ce535c26b65f53f9429e4b72e4b112f89b3f38dea64046b5aa8e31:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNDE1Mjk3MDFiMDhjY2IzMzcyZGFhMGY1ZGJmZTNkOGFkMTVmNjVlMGY1MDI4YzhhYzdmY2MzYTU4OGQxMTc1OSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZmRhOGE4NWRlZGY1NWI4ZmI5NTQzOTk2Y2Q4YjFlYTg2NTI0MjJiM2Y1M2Y2OWVkMDgwYjg2OGY4NDIxOTUxMCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_a3cccc6eabd843528ffd70bd54f5eff0",
+      "statement": "RowIdSchema checks structural compatibility of keyed/all-column/group/composed/pass-through/derived operator identities, independently of actual byte equality and duplicate multiplicity.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/row_id.rs#L107-L200",
+          "version": "repo-lines-v1:sha256:f596def260f606b9dc7676cc22ed85805e233863109b6c93495ee2cbc89d4386:eyJzZWxlY3RlZExpbmVDb3VudCI6OTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0YjIwNWM5YTljNjkyYzRlM2VkYjM5YmJhYzYwYzViMTFkN2ZjOTVkOGIxZDk2NzY1MDY5NGZiMzNlOGY0NGYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMyZTE5ZDk5MjM4YTZlNTlmYzU5MzU4NTFjZmQ5MWEwYTU5MTg3YjU2ZjU4ODZlYjNkNjM1MWU2NTU4ZDJkMWMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdjODQ3MDAzNGI2YzgwZDJmMjdmNGJiODM2M2Q2ZDExZmI3YTE4Mjg5MWRkOWEyMGJiZmNkMDgyZTBmMmM4NWYifQ"
+        },
+        {
+          "resource": "repo://src/dvm/row_id.rs#L52-L103",
+          "version": "repo-lines-v1:sha256:747e4774672cc9765df79669d3d0f298624194e1205e40330b0d0768c3a615d3:eyJzZWxlY3RlZExpbmVDb3VudCI6NTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk1YzZjZDkzMmU2ZGQ3ZmFhZDg3YzU2YWY3YzI1MTI3NDg5ZDc5ZTQ1ODBhMzQzZWI1NjdiYmVmMDdjNTBhMjciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUwNzFjNmU5MjJkNjRlM2MyZDEyZDFiNDAwODRjMzFjYzRlNzgwN2ZiNDJlN2Y3MjI5Y2M4ODYwNWU3ZmM4YjUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE1Mzg2YjE3YWZlZjA2ZmU0YzFjODM1ZTlhYTJkOWRjY2ZiYzM2MzI0NWVkNzJiOTRkNGVmNWUwNzE1YjE2ZDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b3a944a3779c42f1b51c499461aaacb7",
+      "statement": "Current deferred cross-cycle reconciliation is gated on join-bearing nonrecursive, non-deduplicated, nonpartitioned plans without active user triggers, compares result multisets rather than enforcing multiplicity one, and marks downstream consumers for reinitialization when repair exceeds the bounded delta.",
+      "evidence": [
+        {
+          "resource": "repo://plans/adrs/ADR-003.md#L83-L109",
+          "version": "repo-lines-v1:sha256:c743736befef4b249a6f043adf123f90a76e1f654b2172738362a34b5588fa53:eyJzZWxlY3RlZExpbmVDb3VudCI6MjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4YzQ3MzU3ODEwOThiNmQxNTQyMzhlNjY2MjZkZjFkYzQ1YTAyMmQxYWUwZDdmMjI3M2UzNDM5ZjZiOGMzMzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBiYzM0MjUzNGQwOTQ3NzdjZjg2M2Q1MGNmY2E5NmY4ZjFiMWE3ZDBiY2VkNWIxOGU3YTI2MDA4MWVlZGY2YWMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEifQ"
+        },
+        {
+          "resource": "repo://src/refresh/merge/mod.rs#L3453-L3506",
+          "version": "repo-lines-v1:sha256:dba44c9cc3a2dab837eba0b72210970b4b684a8ee492ff365d58ee949f3c766d:eyJzZWxlY3RlZExpbmVDb3VudCI6NTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZjN2ZlMzA2MDIxYjhiZjA1MTVjZGEwMTkxYTFmZDYwMThjZmQyNjg3OGMzYzI3YTdhYWExMjg4MWFiMWNiZWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU0ODNhNWFiYjM2ZDhhOTUxZjMzYTA5YjBhYTEwZGIwMzRkMDhiMzE1MTZhYTIyZThhNzJjNTI4NzIzYjhlNzQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjU1YTU3MGRhYWM5NmVkYzkwMmRkM2JhNWQ2MWVhNzYzYjNlMTMwZmY0ZTEzOTU2MmVlM2VjYTc1YzViMDhmZTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNiZmY1ZTBjZmQ0ZjhiZmY1ZjQ2NzE3NmYzMDU3OTA0MGE2YTc2ZGYyZDgyYmZhZGU3Zjg1YmM3YTkxY2U1ZDYifQ"
+        },
+        {
+          "resource": "repo://src/refresh/phd1.rs#L17-L63",
+          "version": "repo-lines-v1:sha256:e6f7d1d6f9fb76b24945e322963f74fe8255463cb4e8e98d3be53eab063a54ab:eyJzZWxlY3RlZExpbmVDb3VudCI6NDcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk1Nzg3YmVmNDY4ZTdjZDMxNTNjYTkxOTE3MjdkMjI4ZDk2NjQ0MWJkZTJiMTYwNzgxMDAxOWMxYmNkYTQyODIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjZmMTgyNzg1YTY0NGRiZjU2YzViODg0NWM0MWE5MDllYTE2NjQ5MjhkMWQ5OTc4OGQxZGQ1NDE5ZTUxMTVkZWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjY0MjY4YjcyNGE1MzQ3ZjAzOTg1NTY0ZmE0ZWM1NzUyYTM2Y2VjNjliMGE3OGNjYzg4MGI5MGNkZjQzNDYxY2MifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_09e63e8ef3e541f4ac06fda030f25c59",
+      "statement": "Focused correctness tests include duplicate-row delete/update and aggregate multiplicities, operator/full-query equivalence with a mode-label assertion accepting DIFFERENTIAL/APPEND_ONLY/TOP_K, and a mandatory composition matrix covering generated shapes and schemas; a mode label alone does not prove absence of internal recomputation.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_diff_full_equivalence_tests.rs",
+          "version": "repo-file-v1:sha256:b10d2e3f9cb1c634193f8bf93b2f49f9dd62e5a08c3dd38f93c201e6cfb3d3a8"
+        },
+        {
+          "resource": "repo://tests/e2e_diff_full_equivalence_tests.rs#L26-L49",
+          "version": "repo-lines-v1:sha256:d777dcb139713acec790f1c4d69c612aa559f5e82c1769bcafaef43e7690c99f:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlmYmZkNTFmYjQ1MGFiOTUyMTM1YjY0NDIwN2UzZTM5NzY5NjJkYjUxNjFkYjA0NGJmMTNjYzkyOWI4ODRmOTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0ZTQyMDhjZDZmZmI4YzRhMzU0N2IyZjU0YWRhMTk5NzhjM2YzNjVlNzhmOTUwMmVmNTE0NWNkZDJhYTg1NDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNjMzg2YzFlMTEzZWQ4NzYxODdhYjU4MmU1YTc2ZmIxNGI5ZTRkN2U1OTlkNDFjZmM3NTcwMTY0MGVkN2QzMGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjlkNTNiMjFiMzQ5Y2UxOTlhNmMwZTAwNWFmMjNkNWUxZDY4OWI1M2U3NzQ1NzI1YmMzMzJmMjk0YzA4MGMyYzIifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_dvm_composition_tests.rs",
+          "version": "repo-file-v1:sha256:466fa4811317ce40e6b617eb6ff03bea362758220c1f4fcf3d2a1036bb5d67b9"
+        },
+        {
+          "resource": "repo://tests/e2e_keyless_duplicate_tests.rs#L18-L121",
+          "version": "repo-lines-v1:sha256:fba5ae9ee06cefadfbe4385e21a9fd5d400ea63fff063160625a7ee97bc4f3e4:eyJzZWxlY3RlZExpbmVDb3VudCI6MTA0LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI1MTk0ODRlZWRmMzY0ZmI4YzEyZjFlYjk4ZmJmNmE5YjRmNjUwZjQyNzg3NGE4ZDczNTkwMTBhYWRlNDMxYmM4IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJmOGU1MzNhZTA1ZDEzZTg3N2JhZTJjYTc4Y2JhM2E3NzRmODNjZTEyMjJjZTc5OTVkN2NjZWZkNzMwNzYzYjQ2IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIyNGEzM2JiYjBmMDM2OWM4MzBmMmQ5ZjE2NzgzMmM3ZWZiMWExNmU1Y2JmMDliMzIyZDI2MmQ3NjljNDU3MzNhIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI5ZDUzYjIxYjM0OWNlMTk5YTZjMGUwMDVhZjIzZDVlMWQ2ODliNTNlNzc0NTcyNWJjMzMyZjI5NGMwODBjMmMyIn0"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.7.2",
+    "at": "2026-10-21T18:25:47.780Z"
+  }
+}

@@ -1,0 +1,42 @@
+[
+  {
+    "name": "direct_mdm_projection",
+    "query": "SELECT case_key, due_at FROM pgreact_mdm.intent_deployer_policy_cases_v1",
+    "caller": "postgres (producer reduction only)",
+    "exit": 0,
+    "stdout": "\nt\n",
+    "stderr": "NOTICE:  00000: publication \"pgtrickle_cdc_fc95610fe09d1826\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_65da9bb261506db2\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_409934bc10a68525\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_88d416c90441286b\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nINFO:  00000: Stream table s1_audit.reduction created (pgt_id=170, mode=DIFFERENTIAL, initialized=true)\nLOCATION:  pg_trickle::api::alter::create_stream_table_impl, alter.rs:2056\n"
+  },
+  {
+    "name": "simple_on_join",
+    "query": "SELECT c.case_key, c.due_at FROM pgreact_mdm.intent_deployer_policy_cases_v1 c JOIN s1_audit.source s ON c.case_key = s.case_key",
+    "caller": "postgres (producer reduction only)",
+    "exit": 0,
+    "stdout": "\nt\n",
+    "stderr": "NOTICE:  00000: publication \"pgtrickle_cdc_fc95610fe09d1826\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_65da9bb261506db2\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_409934bc10a68525\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_88d416c90441286b\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_0886c42544d3bc2c\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nINFO:  00000: Stream table s1_audit.reduction created (pgt_id=171, mode=DIFFERENTIAL, initialized=true)\nLOCATION:  pg_trickle::api::alter::create_stream_table_impl, alter.rs:2056\n"
+  },
+  {
+    "name": "simple_using_join",
+    "query": "SELECT c.case_key, c.due_at FROM pgreact_mdm.intent_deployer_policy_cases_v1 c JOIN s1_audit.source s USING (case_key)",
+    "caller": "postgres (producer reduction only)",
+    "exit": 0,
+    "stdout": "\nt\n",
+    "stderr": "NOTICE:  00000: publication \"pgtrickle_cdc_fc95610fe09d1826\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_65da9bb261506db2\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_409934bc10a68525\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_88d416c90441286b\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_0886c42544d3bc2c\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nINFO:  00000: Stream table s1_audit.reduction created (pgt_id=172, mode=DIFFERENTIAL, initialized=true)\nLOCATION:  pg_trickle::api::alter::create_stream_table_impl, alter.rs:2056\n"
+  },
+  {
+    "name": "aliased_due_timestamp",
+    "query": "SELECT c.case_key, c.due_at AS deadline FROM pgreact_mdm.intent_deployer_policy_cases_v1 c JOIN s1_audit.source s ON c.case_key = s.case_key",
+    "caller": "postgres (producer reduction only)",
+    "exit": 0,
+    "stdout": "\nt\n",
+    "stderr": "NOTICE:  00000: publication \"pgtrickle_cdc_fc95610fe09d1826\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_65da9bb261506db2\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_409934bc10a68525\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_88d416c90441286b\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_0886c42544d3bc2c\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nINFO:  00000: Stream table s1_audit.reduction created (pgt_id=173, mode=DIFFERENTIAL, initialized=true)\nLOCATION:  pg_trickle::api::alter::create_stream_table_impl, alter.rs:2056\n"
+  },
+  {
+    "name": "original_composed_view",
+    "query": "SELECT * FROM s1_audit.candidate",
+    "caller": "postgres (producer reduction only)",
+    "exit": 0,
+    "stdout": "\nt\n",
+    "stderr": "WARNING:  01000: [pg_trickle] SELECT_STAR: The defining query uses SELECT *, so source schema changes can require reinitialization. HINT: List output columns explicitly for a more stable stream-table schema.\nLOCATION:  pg_trickle::api::emit_creation_warnings, mod.rs:996\nNOTICE:  00000: publication \"pgtrickle_cdc_fc95610fe09d1826\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_65da9bb261506db2\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_409934bc10a68525\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_88d416c90441286b\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nNOTICE:  00000: publication \"pgtrickle_cdc_0886c42544d3bc2c\" does not exist, skipping\nLOCATION:  does_not_exist_skipping, dropcmds.c:521\nINFO:  00000: Stream table s1_audit.reduction created (pgt_id=174, mode=DIFFERENTIAL, initialized=true)\nLOCATION:  pg_trickle::api::alter::create_stream_table_impl, alter.rs:2056\n"
+  }
+]

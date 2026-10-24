@@ -3943,7 +3943,23 @@ unsafe fn parse_from_item_inner(
             };
         }
 
-        let condition = if join.quals.is_null() {
+        let condition = if !join.usingClause.is_null() {
+            let mut conditions = Vec::new();
+            for column in join_using_columns(join)? {
+                conditions.push(Expr::BinaryOp {
+                    op: "=".into(),
+                    left: Box::new(join_using_column(&left, &column)?),
+                    right: Box::new(join_using_column(&right, &column)?),
+                });
+            }
+            Expr::Raw(
+                conditions
+                    .iter()
+                    .map(Expr::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(" AND "),
+            )
+        } else if join.quals.is_null() {
             Expr::Literal("TRUE".into())
         } else {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
@@ -6048,14 +6064,25 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
             pg_sys::JoinType::JOIN_RIGHT => "RIGHT JOIN",
             _ => "JOIN",
         };
-        let condition = if join.quals.is_null() {
-            "TRUE".to_string()
+        if !join.usingClause.is_null() {
+            let columns: Vec<String> = join_using_columns(join)?
+                .iter()
+                .map(|column| crate::api::quote_identifier(column))
+                .collect();
+            Ok(format!(
+                "{left} {join_type} {right} USING ({})",
+                columns.join(", ")
+            ))
         } else {
-            // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = safe_node_to_expr(join.quals)?;
-            expr.to_sql()
-        };
-        Ok(format!("{left} {join_type} {right} ON {condition}"))
+            let condition = if join.quals.is_null() {
+                "TRUE".to_string()
+            } else {
+                // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
+                let expr = safe_node_to_expr(join.quals)?;
+                expr.to_sql()
+            };
+            Ok(format!("{left} {join_type} {right} ON {condition}"))
+        }
     } else if let Some(sub) = cast_node!(node, T_RangeSubselect, pg_sys::RangeSubselect) {
         if sub.subquery.is_null()
             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.

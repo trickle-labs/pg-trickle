@@ -1,0 +1,54 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.57s
+     Running tests/e2e_v1150_maintain_grantee_refresh_tests.rs (target/debug/deps/e2e_v1150_maintain_grantee_refresh_tests-941da0da5c11f556)
+
+running 16 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test test_v1150_delegated_refresh_executes_as_stream_owner ... ok
+test test_v1150_delegated_refresh_preserves_owner_rls ... ok
+test test_v1150_delegated_refresh_uses_captured_search_path ... ok
+test test_v1150_exact_maintain_grantee_can_refresh_without_ownership ... ok
+test test_v1150_graph_member_authorization_fails_before_mutation ... ok
+test test_v1150_maintain_does_not_authorize_lifecycle_operations ... ok
+test test_v1150_maintain_grantee_can_inspect_graph_contract ... ok
+test test_v1150_maintain_grantee_can_strictly_refresh_graph ... ok
+test test_v1150_maintain_grantee_refreshes_without_source_select ... ok
+test test_v1150_owner_can_refresh_stream_table ... ok
+test test_v1150_revoked_maintain_blocks_graph_admission ... ok
+test test_v1150_unrelated_maintain_does_not_authorize_target ... ok
+test test_v1150_write_and_refresh_maintain_grantee_without_source_select ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.12s
+
+     Running tests/e2e_view_tests.rs (target/debug/deps/e2e_view_tests-acc3f83b6c96a4d0)
+
+running 21 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test test_view_inline_column_renamed ... ok
+test test_view_inline_dependency_registered ... ok
+test test_view_inline_diff_basic ... ok
+test test_view_inline_diff_two_views ... ok
+test test_view_inline_diff_update_delete ... ok
+test test_view_inline_diff_with_aggregation ... ok
+test test_view_inline_diff_with_filter ... ok
+test test_view_inline_diff_with_join ... ok
+test test_view_inline_full_mode ... ok
+test test_view_inline_matview_allowed_in_full ... ok
+test test_view_inline_matview_rejected ... ok
+test test_view_inline_nested_view ... ok
+test test_view_inline_original_query_stored ... ok
+test test_view_inline_truncate_base ... ok
+test test_view_inline_using_preserves_results_privileges_and_rollback ... ok
+test test_view_inline_using_quoted_key_preserves_outer_join_results ... ok
+test test_view_inline_view_dropped ... ok
+test test_view_inline_view_replaced ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.26s
+

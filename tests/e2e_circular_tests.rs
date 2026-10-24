@@ -588,13 +588,18 @@ async fn test_circular_drop_member_clears_scc_id() {
          SELECT b.id, b.val FROM cyc_drop_b b$$)",
     )
     .await;
-    // ALTER B to reference A (completes the cycle)
+    // ALTER B to reference A (completes the cycle). The GUC must be
+    // enabled on the same connection as ALTER: a pooled session SET may
+    // apply to a different backend and reject the cycle. SET LOCAL in an
+    // explicit transaction also avoids leaking the setting to other tests.
     db.execute_seq(&[
-        "SET pg_trickle.allow_circular = true",
+        "BEGIN",
+        "SET LOCAL pg_trickle.allow_circular = true",
         "SELECT pgtrickle.alter_stream_table('cyc_drop_b', \
          query => $$SELECT id, val FROM cyc_drop_src \
          UNION ALL \
          SELECT a.id, a.val FROM cyc_drop_a a$$)",
+        "COMMIT",
     ])
     .await;
 
