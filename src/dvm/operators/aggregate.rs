@@ -1978,12 +1978,9 @@ fn direct_agg_delta_exprs(agg: &AggExpr, _has_value_only: bool) -> (String, Stri
                 .map(|e| format!("c.{}", quote_ident(&e.output_name())))
                 .unwrap_or_else(|| "1".to_string());
             (
-                format!(
-                    "SUM(CASE WHEN c.action = 'I' AND {col} IS NOT NULL THEN 1 ELSE 0 END)::bigint"
-                ),
-                format!(
-                    "SUM(CASE WHEN c.action = 'D' AND {col} IS NOT NULL THEN 1 ELSE 0 END)::bigint"
-                ),
+                // COUNT checks the datum null flag; IS NOT NULL tests composite fields.
+                format!("COUNT({col}) FILTER (WHERE c.action = 'I')"),
+                format!("COUNT({col}) FILTER (WHERE c.action = 'D')"),
             )
         }
         AggFunc::Sum => {
@@ -2753,13 +2750,13 @@ WHERE m.__pgt_meta_action IN ('I', 'D')
     })
 }
 
-/// Generate SUM expressions for INSERT/DELETE tracking in the delta CTE.
+/// Generate aggregate expressions for INSERT/DELETE tracking in the delta CTE.
 ///
 /// Aggregate arguments are stripped of table qualifiers because the child
 /// CTE (e.g. join delta) outputs unqualified column names.
 ///
 /// When a FILTER clause is present, its condition is added as an additional
-/// AND guard in all CASE WHEN expressions, so only rows passing the filter
+/// AND guard in the action condition, so only rows passing the filter
 /// contribute to the aggregate delta.
 pub fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String) {
     if agg.is_distinct {
@@ -2790,12 +2787,9 @@ pub fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String)
                 .map(|e| resolve_expr_for_child(e, child_cols))
                 .unwrap_or("*".into());
             (
-                format!(
-                    "SUM(CASE WHEN __pgt_action = 'I' AND {col} IS NOT NULL{filter_and} THEN 1 ELSE 0 END)"
-                ),
-                format!(
-                    "SUM(CASE WHEN __pgt_action = 'D' AND {col} IS NOT NULL{filter_and} THEN 1 ELSE 0 END)"
-                ),
+                // Preserve COUNT's datum null semantics, including composite arguments.
+                format!("COUNT({col}) FILTER (WHERE __pgt_action = 'I'{filter_and})"),
+                format!("COUNT({col}) FILTER (WHERE __pgt_action = 'D'{filter_and})"),
             )
         }
         AggFunc::Sum => {
@@ -3810,8 +3804,24 @@ mod tests {
         let agg = count_col("name", "name_count");
         let child_cols = vec!["name".to_string()];
         let (ins, del) = agg_delta_exprs(&agg, &child_cols);
-        assert!(ins.contains("IS NOT NULL"));
-        assert!(del.contains("IS NOT NULL"));
+        assert_eq!(ins, "COUNT(name) FILTER (WHERE __pgt_action = 'I')");
+        assert_eq!(del, "COUNT(name) FILTER (WHERE __pgt_action = 'D')");
+    }
+
+    #[test]
+    fn test_agg_delta_exprs_count_expression_with_filter() {
+        let mut agg = count_col("payload", "cnt");
+        agg.argument = Some(Expr::Raw("ROW(a, b)".to_string()));
+        agg.filter = Some(binop("=", colref("active"), lit("true")));
+        let (ins, del) = agg_delta_exprs(&agg, &[]);
+        assert_eq!(
+            ins,
+            "COUNT(ROW(a, b)) FILTER (WHERE __pgt_action = 'I' AND (active = true))"
+        );
+        assert_eq!(
+            del,
+            "COUNT(ROW(a, b)) FILTER (WHERE __pgt_action = 'D' AND (active = true))"
+        );
     }
 
     #[test]
@@ -6731,14 +6741,8 @@ mod tests {
             statistical_support: None,
         };
         let (ins, del) = direct_agg_delta_exprs(&agg, true);
-        assert!(
-            !ins.contains("'V'"),
-            "COUNT(col) insert should not include 'V': {ins}"
-        );
-        assert!(
-            !del.contains("'V'"),
-            "COUNT(col) delete should not include 'V': {del}"
-        );
+        assert_eq!(ins, "COUNT(c.\"id\") FILTER (WHERE c.action = 'I')");
+        assert_eq!(del, "COUNT(c.\"id\") FILTER (WHERE c.action = 'D')");
     }
 
     #[test]
