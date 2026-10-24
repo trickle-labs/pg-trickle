@@ -934,6 +934,24 @@ fn is_safe_equi_join_condition(
                 has_builtin_type_for_column(left_schema, left_tree, right_column)
                     && has_builtin_type_for_column(right_schema, right_tree, left_column)
             }
+            (
+                Expr::ColumnRef {
+                    table_alias: Some(alias),
+                    column_name,
+                },
+                Expr::Literal(_),
+            )
+            | (
+                Expr::Literal(_),
+                Expr::ColumnRef {
+                    table_alias: Some(alias),
+                    column_name,
+                },
+            ) => match alias.as_str() {
+                "__pgt_left" => has_builtin_type_for_column(left_schema, left_tree, column_name),
+                "__pgt_right" => has_builtin_type_for_column(right_schema, right_tree, column_name),
+                _ => false,
+            },
             _ => false,
         },
         _ => false,
@@ -1258,6 +1276,28 @@ mod tests {
         assert!(result.columns.contains(&"o__cust_id".to_string()));
         assert!(result.columns.contains(&"c__id".to_string()));
         assert!(result.columns.contains(&"c__name".to_string()));
+    }
+
+    #[test]
+    fn test_builtin_column_literal_equality_uses_algebraic_delta() {
+        for condition in [
+            binop("=", qcolref("m", "id"), Expr::Literal("1".into())),
+            binop("=", Expr::Literal("1".into()), qcolref("m", "id")),
+        ] {
+            let mut ctx = test_ctx();
+            let tree = inner_join(
+                condition,
+                scan(1, "items", "public", "i", &["id"]),
+                scan(2, "metadata", "public", "m", &["id"]),
+            );
+            let result = diff_inner_join(&mut ctx, &tree).unwrap();
+            let sql = ctx.build_with_query(&result.cte_name);
+
+            assert!(
+                !sql.contains("join_endpoint"),
+                "built-in column/literal equality should use the algebraic path: {sql}"
+            );
+        }
     }
 
     #[test]
