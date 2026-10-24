@@ -6,6 +6,13 @@ import v0_108_4_release_gate as gate
 
 
 class RetirementContractTests(unittest.TestCase):
+    def test_requires_pause_cases_in_recovery_suite_and_shard(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.108.4-qualification.json").read_text())
+        self.assertTrue(gate.PAUSE_CASES <= set(contract["required_cases"]))
+        for section, identity in [("required_shards", "failure-recovery"), ("required_suites", "recovery")]:
+            selected = next(item for item in contract[section] if item["id"] == identity)
+            self.assertTrue(gate.PAUSE_CASES <= set(selected["required_cases"]))
+
     def test_requires_runtime_cases_and_published_predecessor(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.108.4-qualification.json").read_text())
         gate.check_retirement_contract(contract)

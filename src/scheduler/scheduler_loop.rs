@@ -1798,6 +1798,17 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 // inside is done through SPI (which handles its own C-level exception
                 // boundaries), so a Rust-visible panic from this block is not
                 // expected.
+                let member_ids: Vec<i64> = group
+                    .members
+                    .iter()
+                    .filter_map(|member| match member {
+                        NodeId::StreamTable(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                if !crate::api::scheduler_control::admit_scheduler_targets(&member_ids) {
+                    continue;
+                }
                 let subtxn = SubTransaction::begin();
 
                 let mut group_ok = true;

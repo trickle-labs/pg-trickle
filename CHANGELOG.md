@@ -222,6 +222,10 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Make scheduler pause wait for admitted inline and worker transactions,
+  including synchronous IMMEDIATE descendants, and reject dispatch selected
+  before a pause but admitted afterward. Dedicated repeatable-read jobs now
+  set isolation before their first work snapshot (#1219).
 - Retire local WAL slots only after consumer removal or trigger fallback commits.
   Caller rollback preserves the original slot; durable cleanup reservations also
   cover interrupted creation and restart after physical removal. This requires

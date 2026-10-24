@@ -21,6 +21,17 @@ CASES = {
 }
 
 
+PAUSE_CASES = {
+    "e2e_refresh_atomicity_tests::" + name
+    for name in (
+        "test_scheduler_pause_drain_waits_for_witnessed_inline_refresh",
+        "test_scheduler_pause_drain_protects_transitive_immediate_descendant",
+        "test_scheduler_pause_rejects_dispatch_queued_after_pause_returns",
+        "test_scheduler_repeatable_read_job_rechecks_pause_before_refresh",
+    )
+}
+
+
 def check_retirement_contract(contract: dict) -> None:
     release_gate = next(item for item in contract["required_suites"] if item["id"] == "release-gate")
     prior.shared.require(
@@ -49,7 +60,7 @@ def main() -> None:
     prior.PREVIOUS_VERSION = "0.108.3"
     prior.SOURCE_VERSIONS = ["0.108.3", "0.106.1"]
     prior.GATE_SCRIPT = "v0_108_4_release_gate.py"
-    prior.REQUIRED_CASES = prior.REQUIRED_CASES | CASES
+    prior.REQUIRED_CASES = prior.REQUIRED_CASES | CASES | PAUSE_CASES
     prior.REQUIRED_SHARDS = prior.REQUIRED_SHARDS | {"wal-retirement"}
     prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {"wal-retirement", "wal-retirement-upgrade"}
     contract = json.loads((prior.ROOT / "tests/release/v0.108.4-qualification.json").read_text())
