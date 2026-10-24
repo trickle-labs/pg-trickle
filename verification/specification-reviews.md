@@ -403,6 +403,61 @@ release qualification or merge approval is claimed. See
 `verification/scheduler-pause-safety.md` and
 `.p2p/work/issue-1219-pause-drain/idle/evidence/qualification-manifest.json`.
 
+## Production receipt transaction framing — #1222
+
+Independent read-only reviewer `review_1221` accepted the preimplementation
+specification, actual shared scan, immutable borrowed adapter and frozen proof
+evidence at backend `830c6a13a1025afe2f505d699ac6b699b5cf18ff`. The theorem
+requires complete successful coverage, BEGIN/body/COMMIT framing, matching
+present XIDs, one slot, strict receipt/commit order and per-span row-LSN bounds.
+It preserves old row LSNs preceding earlier commits, lazy parsing and original
+first-error context. No normalized message vector or payload copy is added;
+the shared proof uses no `assume` or external proof body.
+
+All six suites were executed again: LSN 44/0, receipt 10/0, lifecycle 6/0,
+CDC 4/0, join 6/0 and identity 6/0. The reviewer reconstructed all 28 actual
+mutant source/output hashes and checked kernel/caller/test and pinned tool
+identities. The incomplete-prefix control disables the final completion check
+and directly fails successful-output coverage; all eight receipt mutants are
+9/1 with intended postcondition failures. Prototype syntax, trigger, induction
+and resource-limit attempts remain separate from frozen execution evidence.
+
+The first installed atomicity attempt passed fifteen cases, then timed out
+before pause at an unwitnessed input barrier after an actual NO_DATA refresh;
+three cases were unrun. Review grounded a due-clock/fanout-cache setup race,
+without inferring a pause or framing failure. Qualification-only commit
+`0d9f6824a4ac4e2d1b679a057b6873cb29123830` adds eleven lines that acknowledge
+global drain before each setup batch and resume before each real witness.
+Per-node flags and every semantic assertion remain intact. This test input is
+hashed separately; the backend and proof/package inputs remain `830c6a13`.
+
+Independent final evidence reviewer `review_1220` accepted WAL 35/35, corrected
+atomicity 19/19, core 13/13, scheduler/mixed-mode 28/28, semantic floors 34/34
+and 54/54, units 2638/2638 including the named adapter test, Python 41/41,
+formatting/lint with zero warnings, release-contract and upgrade-completeness
+results. Final nextest runs use zero retries; the failed earlier execution is
+retained. Five frozen changed inputs, the separate fixture, 58 complete copied
+logs, 27 prototype/feasibility artifacts and all bound PASS records match.
+
+All six bindings and 90 actual four-file installation observations match
+library SHA-256
+`945ec0a0fe1500bc71ba952df45b2a4789c7e9dfddb84b275298063c144fd4f9`.
+Final image/base are linux/amd64 and the extracted ELF machine is 62. The
+initial arm64 runtime setup attempt was neither extracted nor run. Generated
+SQL bytes are payload-bound; the unchanged archive's noncomment SQL-line
+multiset agrees. The final validator also requires native result markers and
+the named framing adapter test, beyond package and runtime binding.
+
+Neither reviewer edited files or executed project checks. Acceptance covers
+successful framing soundness under the immutable adapter contract, not total
+acceptance completeness, SQL prefix selection, source incarnation, cleanup,
+reset/restore, replay idempotence or PostgreSQL durability. Trusted build/named-
+execution provenance, prior pause topology/RR-route exclusions, latest-head CI,
+latest-candidate published-package upgrade and full release qualification remain
+outside acceptance; no merge approval is given. See
+`verification/receipt-framing-specification.md` and
+`.p2p/work/issue-1222-receipt-framing/evidence/qualification-manifest.json`.
+
 ## Shared evidence boundary
 
 The reviews identified that candidate binding checks source hashes and
