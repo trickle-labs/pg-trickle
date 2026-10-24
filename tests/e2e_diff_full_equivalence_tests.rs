@@ -817,6 +817,113 @@ async fn test_diff_full_equivalence_having_clause() {
     db.assert_st_matches_query("dfe_hav_st", q).await;
 }
 
+#[tokio::test]
+async fn test_diff_full_equivalence_having_unknown_transitions() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE dfe_hav_unknown (id INT PRIMARY KEY, grp INT, val INT)")
+        .await;
+    db.execute(
+        "INSERT INTO dfe_hav_unknown VALUES \
+         (1,1,1),(2,2,-1),(3,3,NULL),(4,4,2),(5,4,2)",
+    )
+    .await;
+
+    let query = "SELECT grp, SUM(val) AS s FROM dfe_hav_unknown \
+                 GROUP BY grp HAVING SUM(val) > 0";
+    db.create_st("dfe_hav_sum", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("dfe_hav_sum", query).await;
+
+    for mutation in [
+        "UPDATE dfe_hav_unknown SET val=NULL WHERE id=1", // TRUE → UNKNOWN
+        "INSERT INTO dfe_hav_unknown VALUES (6,2,3)",     // FALSE → TRUE
+        "UPDATE dfe_hav_unknown SET val=-5 WHERE id=2",   // TRUE → FALSE
+        "UPDATE dfe_hav_unknown SET val=NULL WHERE id=6", // still FALSE
+        "UPDATE dfe_hav_unknown SET val=NULL WHERE id=2", // FALSE → UNKNOWN
+        "UPDATE dfe_hav_unknown SET val=-1 WHERE id=6",   // UNKNOWN → FALSE
+        "UPDATE dfe_hav_unknown SET val=NULL WHERE id=6", // FALSE → UNKNOWN
+        "UPDATE dfe_hav_unknown SET val=3 WHERE id=3",    // UNKNOWN → TRUE
+        "UPDATE dfe_hav_unknown SET grp=5 WHERE id=3",    // move a qualifying group
+        "DELETE FROM dfe_hav_unknown WHERE grp=4",        // remove a qualifying group
+        "UPDATE dfe_hav_unknown SET val=NULL",            // TRUE → UNKNOWN
+        "DELETE FROM dfe_hav_unknown",                    // empty input
+        "INSERT INTO dfe_hav_unknown VALUES (6,6,5)",     // repopulate
+    ] {
+        db.execute(mutation).await;
+        db.refresh_st("dfe_hav_sum").await;
+        db.assert_st_matches_query("dfe_hav_sum", query).await;
+        assert_differential_mode(&db, "dfe_hav_sum").await;
+        let differential_completed: bool = db
+            .query_scalar(
+                "SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' \
+                 AND NOT h.was_full_fallback \
+                 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                 WHERE st.pgt_name = 'dfe_hav_sum' \
+                 ORDER BY h.refresh_id DESC LIMIT 1",
+            )
+            .await;
+        assert!(
+            differential_completed,
+            "no differential refresh after {mutation}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_diff_full_equivalence_having_unknown_aggregate_shapes() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE dfe_hav_shapes (id INT PRIMARY KEY, grp INT, val INT)")
+        .await;
+    db.execute(
+        "INSERT INTO dfe_hav_shapes VALUES \
+         (1,1,1),(2,2,-1),(3,3,NULL),(4,4,2),(5,4,2)",
+    )
+    .await;
+
+    let queries = [
+        (
+            "dfe_hav_avg",
+            "SELECT grp, AVG(val) AS a FROM dfe_hav_shapes \
+             GROUP BY grp HAVING AVG(val) > 0",
+        ),
+        (
+            "dfe_hav_and_or",
+            "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM dfe_hav_shapes \
+             GROUP BY grp \
+             HAVING (SUM(val) > 0 AND COUNT(*) > 0) OR COUNT(*) >= 2",
+        ),
+    ];
+    for (name, query) in queries {
+        db.create_st(name, query, "1m", "DIFFERENTIAL").await;
+        db.assert_st_matches_query(name, query).await;
+    }
+
+    db.execute("UPDATE dfe_hav_shapes SET val=NULL WHERE id=1")
+        .await;
+    for (name, query) in queries {
+        db.refresh_st(name).await;
+        db.assert_st_matches_query(name, query).await;
+        assert_differential_mode(&db, name).await;
+    }
+
+    db.execute("CREATE TABLE dfe_hav_scalar_unknown (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO dfe_hav_scalar_unknown VALUES (1,1)")
+        .await;
+    let scalar_query = "SELECT SUM(val) AS s FROM dfe_hav_scalar_unknown HAVING SUM(val) > 0";
+    db.create_st("dfe_hav_scalar", scalar_query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("dfe_hav_scalar", scalar_query)
+        .await;
+    db.execute("UPDATE dfe_hav_scalar_unknown SET val=NULL")
+        .await;
+    db.refresh_st("dfe_hav_scalar").await;
+    db.assert_st_matches_query("dfe_hav_scalar", scalar_query)
+        .await;
+    assert_differential_mode(&db, "dfe_hav_scalar").await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // THREE-TABLE JOIN
 // ═══════════════════════════════════════════════════════════════════════

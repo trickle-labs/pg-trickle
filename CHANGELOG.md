@@ -230,6 +230,10 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
   upgrading, rebuild the auxiliary state of existing filtered
   AVG/statistical/covariance stream tables whose initialization ignored their
   filters.
+- Recompute affected old and new inner-join endpoint bags for non-equality
+  predicates, preventing errors from transient cross-snapshot row pairs while
+  preserving exact duplicate counts and the algebraic path for simple
+  equijoins (#1211).
 - Prevent manual DIFFERENTIAL refreshes from skipping trigger-captured changes
   when source transactions commit out of LSN order (#1158).
 - Add versioned V3 row identities whose `bpchar` canonicalization matches PostgreSQL equality; V2 bytes remain unchanged. V2-backed stream tables require protected FULL reinitialization after upgrade.
@@ -238,6 +242,7 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 - Reconstruct nested joins from keyless stream-table changes using the pre-change snapshot, preserving exact downstream deletions during graph refresh.
 - Preserve empty exact output batches when explicit differential DML writes no rows.
 - Preserve duplicate multiplicity in keyless snapshots and scope delta lookups by source relation when UNION branches reuse aliases.
+- Keep differential SUM and AVG correct when changes include `Infinity`, `-Infinity`, or `NaN`, rescanning only affected groups (#1209).
 
 Future changes will be listed here.
 
