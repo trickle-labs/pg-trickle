@@ -6120,6 +6120,13 @@ SELECT pgtrickle.pause_scheduler(ARRAY['public.order_totals', 'public.customer_s
 - Raises `ERROR` if any name in `nodes` does not exist in `pgtrickle.pgt_stream_tables`.
 - Safe to call on already-paused nodes (idempotent).
 - Returns `'OK'` on success.
+- Drains admitted inline and worker units through transaction completion.
+  A unit containing any paused member cannot begin refresh work. Dispatch
+  selected before pause may finish recording a skipped/retryable job afterward.
+- A drain timeout raises `ERROR`; the target nodes remain paused. Manual
+  refresh remains available. Concurrent pause/resume calls should be coordinated.
+- Serialize creation or alteration of IMMEDIATE dependency edges with pause
+  operations; pause admission does not fence concurrent topology changes.
 
 ---
 

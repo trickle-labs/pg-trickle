@@ -154,6 +154,170 @@ async fn clear_chaos(db: &E2eDb) {
     .await;
 }
 
+#[tokio::test]
+async fn test_scheduler_pause_drain_waits_for_witnessed_inline_refresh() {
+    run_scheduler_pause_drain_case(false).await;
+}
+
+#[tokio::test]
+async fn test_scheduler_pause_drain_protects_transitive_immediate_descendant() {
+    run_scheduler_pause_drain_case(true).await;
+}
+
+async fn run_scheduler_pause_drain_case(immediate: bool) {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.scheduler_drain_timeout", "1", "1")
+        .await;
+    db.execute("CREATE TABLE pause_drain_source(id int PRIMARY KEY,value text)")
+        .await;
+    db.execute("INSERT INTO pause_drain_source VALUES(1,'baseline')")
+        .await;
+    let query = "SELECT id,value FROM pause_drain_source";
+    let stream = "pause_drain_st";
+    db.create_st(stream, query, "1h", "DIFFERENTIAL").await;
+    let target = if immediate {
+        db.execute("SELECT pgtrickle.create_stream_table('pause_drain_child','SELECT id,value FROM pause_drain_st',NULL,'IMMEDIATE')").await;
+        db.execute("SELECT pgtrickle.create_stream_table('pause_drain_leaf','SELECT id,value FROM pause_drain_child',NULL,'IMMEDIATE')").await;
+        "pause_drain_leaf"
+    } else {
+        stream
+    };
+    db.create_st("pause_drain_control", query, "1h", "DIFFERENTIAL")
+        .await;
+    let id = pgt_id(&db, stream).await;
+    let before = progress(&db, id).await;
+    let phase = "input_boundary";
+    set_chaos(&db, stream, phase).await;
+    let (mut barrier, blocker) = hold_barrier(&db, id, phase).await;
+    db.execute("INSERT INTO pause_drain_source VALUES(2,'pending-inline')")
+        .await;
+    make_scheduler_due(&db, &[stream]).await;
+    let witness = wait_for_barrier(&db, id, phase, blocker, Duration::from_secs(90)).await;
+    assert_eq!(db.count(stream).await, 1);
+    assert_eq!(progress(&db, id).await.frontier, before.frontier);
+    let started = std::time::Instant::now();
+    let pause = tokio::time::timeout(
+        Duration::from_secs(10),
+        sqlx::query("SELECT pgtrickle.pause_scheduler($1::text[])")
+            .bind(vec![target.to_string()])
+            .execute(&db.pool),
+    )
+    .await
+    .expect("pause drain must have a bounded outcome");
+    let elapsed = started.elapsed().as_millis();
+    let still_blocked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND $2=ANY(pg_blocking_pids(pid)))",
+    )
+    .bind(witness.pid)
+    .bind(blocker)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    let artifact = std::path::Path::new(&directory).join(if immediate {
+        "scheduler-pause-immediate-drain.json"
+    } else {
+        "scheduler-pause-inline-drain.json"
+    });
+    let mut observation = serde_json::json!({
+        "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+        "phase":"drain","pgt_id":id,"scheduler_pid":witness.pid,
+        "application_name":witness.application_name,"wait_event":witness.wait_event,
+        "blockers":witness.blockers,"still_blocked":still_blocked,
+        "pause_error":pause.as_ref().err().map(ToString::to_string),"elapsed_ms":elapsed,
+        "frontier_before":before.frontier,"frontier_at_pause":progress(&db,id).await.frontier,
+        "rows_at_pause":db.count(stream).await,
+        "paused_target":target,"target_rows_at_pause":db.count(target).await,
+    });
+    std::fs::write(&artifact, serde_json::to_vec_pretty(&observation).unwrap()).unwrap();
+    assert!(
+        still_blocked,
+        "the witnessed inline refresh must remain in flight"
+    );
+    if immediate && pause.is_ok() {
+        clear_chaos(&db).await;
+        release_barrier(&mut barrier, id, phase).await;
+        assert!(
+            db.wait_for_condition(
+                "observe immediate descendant after unsuccessful drain",
+                "SELECT count(*)=2 FROM pause_drain_leaf",
+                Duration::from_secs(30),
+                Duration::from_millis(25)
+            )
+            .await
+        );
+        observation["phase"] = "published-after-successful-pause".into();
+        observation["target_rows_after_pause"] = db.count(target).await.into();
+        std::fs::write(&artifact, serde_json::to_vec_pretty(&observation).unwrap()).unwrap();
+    }
+    assert!(
+        pause
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("pause_scheduler timed out")),
+        "pause cannot report a successful drain while its inline refresh is blocked: {pause:?}"
+    );
+    clear_chaos(&db).await;
+    release_barrier(&mut barrier, id, phase).await;
+    assert!(
+        db.wait_for_condition(
+            "admitted inline refresh finishes after pause timeout",
+            "SELECT count(*)=2 FROM pause_drain_st",
+            Duration::from_secs(30),
+            Duration::from_millis(25)
+        )
+        .await
+    );
+    db.assert_st_matches_query(stream, query).await;
+    db.execute("INSERT INTO pause_drain_source VALUES(3,'pending-paused')")
+        .await;
+    make_scheduler_due(&db, &[stream, "pause_drain_control"]).await;
+    let paused = progress(&db, id).await;
+    let control_dispatched = db
+        .wait_for_condition(
+            "control witnesses another scheduler dispatch while target is paused",
+            "SELECT count(*)=3 FROM pause_drain_control",
+            Duration::from_secs(30),
+            Duration::from_millis(25),
+        )
+        .await;
+    observation["control_dispatch_observed"] = control_dispatched.into();
+    observation["scheduler_state"] = serde_json::from_str::<serde_json::Value>(&db.query_scalar::<String>(
+        "SELECT jsonb_build_object('metadata',(SELECT jsonb_agg(to_jsonb(s)) FROM pgtrickle.pgt_stream_tables s),'controller',(SELECT jsonb_agg(to_jsonb(c)) FROM pgtrickle.pgt_freshness_controller_state c),'history',(SELECT jsonb_agg(to_jsonb(h)) FROM pgtrickle.pgt_refresh_history h))::text"
+    ).await).unwrap();
+    std::fs::write(&artifact, serde_json::to_vec_pretty(&observation).unwrap()).unwrap();
+    assert!(
+        control_dispatched,
+        "the unpaused control must witness a later dispatch"
+    );
+    assert_eq!(db.count(stream).await, 2);
+    assert_eq!(db.count(target).await, 2);
+    assert_eq!(progress(&db, id).await, paused);
+    sqlx::query("SELECT pgtrickle.resume_scheduler($1::text[])")
+        .bind(vec![target.to_string()])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        db.wait_for_condition(
+            "resumed inline target catches up",
+            "SELECT count(*)=3 FROM pause_drain_st",
+            Duration::from_secs(30),
+            Duration::from_millis(25)
+        )
+        .await
+    );
+    db.assert_st_matches_query(stream, query).await;
+    observation["phase"] = "complete".into();
+    db.assert_st_matches_query(target, query).await;
+    observation["rows_after_resume"] = db.count(stream).await.into();
+    observation["frontier_after_resume"] = progress(&db, id).await.frontier.into();
+    std::fs::write(&artifact, serde_json::to_vec_pretty(&observation).unwrap()).unwrap();
+}
+
 async fn configure_scheduler(db: &E2eDb) {
     for (setting, value, expected) in [
         ("pg_trickle.scheduler_interval_ms", "100", "100"),
@@ -168,6 +332,125 @@ async fn configure_scheduler(db: &E2eDb) {
         db.wait_for_scheduler(Duration::from_secs(90)).await,
         "pg_trickle scheduler did not appear"
     );
+}
+
+async fn make_scheduler_due(db: &E2eDb, names: &[&str]) {
+    let names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+    let mut transaction = db.pool.begin().await.unwrap();
+    sqlx::query("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at=now()-interval '2 hours' WHERE pgt_name=ANY($1::text[])")
+        .bind(&names).execute(&mut *transaction).await.unwrap();
+    sqlx::query("UPDATE pgtrickle.pgt_freshness_controller_state SET next_due_at=clock_timestamp()-interval '1 second' WHERE pgt_id IN (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name=ANY($1::text[]))")
+        .bind(&names).execute(&mut *transaction).await.unwrap();
+    transaction.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_scheduler_pause_rejects_dispatch_queued_after_pause_returns() {
+    run_scheduler_pending_dispatch_case(false).await;
+}
+
+#[tokio::test]
+async fn test_scheduler_repeatable_read_job_rechecks_pause_before_refresh() {
+    run_scheduler_pending_dispatch_case(true).await;
+}
+
+async fn run_scheduler_pending_dispatch_case(repeatable_read: bool) {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "'on'", "on")
+        .await;
+    db.execute("CREATE TABLE pause_dispatch_source(id int PRIMARY KEY,value text)")
+        .await;
+    db.execute("INSERT INTO pause_dispatch_source VALUES(1,'baseline')")
+        .await;
+    let stream = "pause_dispatch_st";
+    let query = "SELECT id,value FROM pause_dispatch_source";
+    db.create_st(stream, query, "1h", "DIFFERENTIAL").await;
+    let id = pgt_id(&db, stream).await;
+    let before = progress(&db, id).await;
+    let unit_override = if repeatable_read {
+        "NEW.unit_kind='repeatable_read_group';"
+    } else {
+        ""
+    };
+    db.execute(&format!("CREATE FUNCTION pgtrickle.pause_dispatch_barrier() RETURNS trigger LANGUAGE plpgsql AS $body$ BEGIN IF NEW.root_pgt_id={id} THEN {unit_override} PERFORM set_config('application_name','pgt_pause_dispatch:{id}',true); PERFORM pg_advisory_xact_lock({id}::integer,1); END IF; RETURN NEW; END $body$"))
+        .await;
+    db.execute("CREATE TRIGGER pause_dispatch_barrier BEFORE INSERT ON pgtrickle.pgt_scheduler_jobs FOR EACH ROW EXECUTE FUNCTION pgtrickle.pause_dispatch_barrier()")
+        .await;
+    let (mut barrier, blocker) = hold_barrier(&db, id, "input_boundary").await;
+    db.execute("INSERT INTO pause_dispatch_source VALUES(2,'queued-before-pause')")
+        .await;
+    make_scheduler_due(&db, &[stream]).await;
+    assert!(db.wait_for_condition("scheduler waits to publish already-selected dispatch", &format!(
+        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.application_name='pgt_pause_dispatch:{id}' AND a.datname=current_database() AND {blocker}=ANY(pg_blocking_pids(a.pid)))"
+    ),Duration::from_secs(60),Duration::from_millis(20)).await);
+    let scheduler: i32 = db.query_scalar(&format!("SELECT pid FROM pg_stat_activity WHERE backend_type='pg_trickle scheduler' AND datname=current_database() AND {blocker}=ANY(pg_blocking_pids(pid))")).await;
+    let pending: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_scheduler_jobs WHERE status IN ('QUEUED','RUNNING')").await;
+    assert_eq!(pending, 0, "dispatch has not committed its job row yet");
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['pause_dispatch_st'])")
+        .await;
+    assert_eq!(db.count(stream).await, 1);
+    release_barrier(&mut barrier, id, "input_boundary").await;
+    assert!(db.wait_for_condition("selected dispatch finishes after successful pause", &format!(
+        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_scheduler_jobs WHERE {id}=ANY(member_pgt_ids) AND status NOT IN ('QUEUED','RUNNING'))"
+    ),Duration::from_secs(60),Duration::from_millis(25)).await);
+    let rows = db.count(stream).await;
+    let after = progress(&db, id).await;
+    let jobs: String = db
+        .query_scalar("SELECT jsonb_agg(to_jsonb(j))::text FROM pgtrickle.pgt_scheduler_jobs j")
+        .await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    let artifact = std::path::Path::new(&directory).join(if repeatable_read {
+        "scheduler-pause-repeatable-read-dispatch.json"
+    } else {
+        "scheduler-pause-pending-dispatch.json"
+    });
+    let mut observation = serde_json::json!({
+        "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+        "phase":"post-dispatch","pgt_id":id,"scheduler_pid":scheduler,"blocker":blocker,
+        "injected_repeatable_read_job":repeatable_read,
+        "pending_jobs_at_pause":pending,"pause_returned_success":true,
+        "rows_after_dispatch":rows,"frontier_before":before.frontier,
+        "frontier_after_dispatch":after.frontier,"jobs":serde_json::from_str::<serde_json::Value>(&jobs).unwrap(),
+    });
+    std::fs::write(&artifact, serde_json::to_vec_pretty(&observation).unwrap()).unwrap();
+    if repeatable_read {
+        let logs = tokio::process::Command::new("docker")
+            .args(["logs", db.container_id()])
+            .output()
+            .await
+            .unwrap();
+        std::fs::write(
+            std::path::Path::new(&directory).join("repeatable-read-postgres.log"),
+            [logs.stdout, logs.stderr].concat(),
+        )
+        .unwrap();
+        assert!(db.query_scalar::<bool>(&format!("SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_scheduler_jobs WHERE {id}=ANY(member_pgt_ids) AND unit_kind='repeatable_read_group' AND status='RETRYABLE_FAILED' AND outcome_sqlstate IS NULL AND outcome_detail IS NULL)")).await,
+            "a valid repeatable-read job must reach paused admission rather than fail isolation setup");
+    }
+    assert_eq!(
+        rows, 1,
+        "a dispatch selected before pause must not refresh after successful pause"
+    );
+    assert_eq!(after.frontier, before.frontier);
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['pause_dispatch_st'])")
+        .await;
+    assert!(
+        db.wait_for_condition(
+            "resumed pending dispatch catches up",
+            &format!("SELECT (SELECT count(*)=2 FROM pause_dispatch_st) AND (NOT {repeatable_read} OR EXISTS(SELECT 1 FROM pgtrickle.pgt_scheduler_jobs WHERE {id}=ANY(member_pgt_ids) AND unit_kind='repeatable_read_group' AND status='SUCCEEDED'))"),
+            Duration::from_secs(60),
+            Duration::from_millis(25)
+        )
+        .await
+    );
+    db.assert_st_matches_query(stream, query).await;
+    observation["phase"] = "complete".into();
+    observation["rows_after_resume"] = db.count(stream).await.into();
+    observation["frontier_after_resume"] = progress(&db, id).await.frontier.into();
+    std::fs::write(&artifact, serde_json::to_vec_pretty(&observation).unwrap()).unwrap();
 }
 
 async fn hold_barrier(db: &E2eDb, id: i64, phase: &str) -> (PoolConnection<Postgres>, i32) {

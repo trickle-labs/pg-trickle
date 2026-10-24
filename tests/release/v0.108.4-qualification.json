@@ -46,7 +46,11 @@
     "e2e_wal_receipt_recovery_tests::test_dropped_wal_source_retains_retirement_until_last_consumer_commits",
     "e2e_wal_receipt_recovery_tests::test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash",
     "e2e_wal_receipt_recovery_tests::test_replacement_source_cannot_reassign_pending_slot_retirement",
-    "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_null_named_reference_across_source_oids"
+    "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_null_named_reference_across_source_oids",
+    "e2e_refresh_atomicity_tests::test_scheduler_pause_drain_protects_transitive_immediate_descendant",
+    "e2e_refresh_atomicity_tests::test_scheduler_pause_drain_waits_for_witnessed_inline_refresh",
+    "e2e_refresh_atomicity_tests::test_scheduler_pause_rejects_dispatch_queued_after_pause_returns",
+    "e2e_refresh_atomicity_tests::test_scheduler_repeatable_read_job_rechecks_pause_before_refresh"
   ],
   "required_shards": [
     {
@@ -79,7 +83,11 @@
         "e2e_refresh_atomicity_tests::test_refresh_concurrent_writer_preserves_next_batch",
         "e2e_refresh_atomicity_tests::test_refresh_auxiliary_state_failure_rolls_back",
         "e2e_refresh_atomicity_tests::test_refresh_partial_finalization_control_is_detected",
-        "e2e_refresh_atomicity_tests::test_refresh_early_progress_control_is_detected"
+        "e2e_refresh_atomicity_tests::test_refresh_early_progress_control_is_detected",
+        "e2e_refresh_atomicity_tests::test_scheduler_pause_drain_protects_transitive_immediate_descendant",
+        "e2e_refresh_atomicity_tests::test_scheduler_pause_drain_waits_for_witnessed_inline_refresh",
+        "e2e_refresh_atomicity_tests::test_scheduler_pause_rejects_dispatch_queued_after_pause_returns",
+        "e2e_refresh_atomicity_tests::test_scheduler_repeatable_read_job_rechecks_pause_before_refresh"
       ]
     },
     {
@@ -263,7 +271,11 @@
         "e2e_refresh_atomicity_tests::test_refresh_concurrent_writer_preserves_next_batch",
         "e2e_refresh_atomicity_tests::test_refresh_auxiliary_state_failure_rolls_back",
         "e2e_refresh_atomicity_tests::test_refresh_partial_finalization_control_is_detected",
-        "e2e_refresh_atomicity_tests::test_refresh_early_progress_control_is_detected"
+        "e2e_refresh_atomicity_tests::test_refresh_early_progress_control_is_detected",
+        "e2e_refresh_atomicity_tests::test_scheduler_pause_drain_protects_transitive_immediate_descendant",
+        "e2e_refresh_atomicity_tests::test_scheduler_pause_drain_waits_for_witnessed_inline_refresh",
+        "e2e_refresh_atomicity_tests::test_scheduler_pause_rejects_dispatch_queued_after_pause_returns",
+        "e2e_refresh_atomicity_tests::test_scheduler_repeatable_read_job_rechecks_pause_before_refresh"
       ],
       "workload": "witnessed timeout, lock, cancellation, and scheduler failpoint recovery against the candidate package"
     },
