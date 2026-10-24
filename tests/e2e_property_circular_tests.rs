@@ -133,6 +133,9 @@ async fn test_prop_monotone_cycle_small_graph_converges() {
 async fn run_convergence_trace(seed: u64) {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
     configure_circular_scheduler(&db).await;
+    // Build the complete cycle before allowing scheduler refreshes.
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
 
     let mut rng = SeededRng::new(seed);
 
@@ -180,6 +183,9 @@ async fn run_convergence_trace(seed: u64) {
            SELECT DISTINCT a.id, a.val FROM prop_conv_a a$$)",
     )
     .await;
+
+    db.alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
 
     // Wait for the first scheduler refresh (signals the fixpoint is running).
     assert!(
