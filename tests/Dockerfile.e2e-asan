@@ -7,6 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PGRX_HOME=/root/.pgrx \
     PATH=/usr/local/pgsql/bin:/root/.cargo/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/pgsql/lib \
+    CARGO_BUILD_JOBS=2 \
     ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,7 +26,7 @@ RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
     LDFLAGS='' ./configure --prefix=/usr/local/pgsql \
       --enable-cassert --with-icu --with-llvm=no --with-openssl && \
     printf '%s\n' 'CFLAGS += -fsanitize=address' 'LDFLAGS += -fsanitize=address' >> src/Makefile.global && \
-    make -j"$(nproc)" && make install && \
+    make -j2 && make install && \
     sed -i '/^CFLAGS += -fsanitize=address$/d' src/Makefile.global && \
     make -C src/bin/pg_config clean all install && \
     rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
