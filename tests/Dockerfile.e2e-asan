@@ -28,10 +28,10 @@ RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
     printf '%s\n' 'CFLAGS += -fsanitize=address' 'LDFLAGS += -fsanitize=address' >> src/Makefile.global && \
     make -j2 && \
     sed -i '/^CFLAGS += -fsanitize=address$/d' src/Makefile.global && \
-    make -C src/port clean all && \
-    make -C src/common clean all && \
-    make -C src/bin/pg_config clean all install && \
-    make -C src/timezone clean all && \
+    make -C src/port clean all LDFLAGS='' && \
+    make -C src/common clean all LDFLAGS='' && \
+    make -C src/bin/pg_config clean all install LDFLAGS='' && \
+    make -C src/timezone clean all LDFLAGS='' && \
     make install && \
     rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
 
@@ -56,7 +56,7 @@ COPY pg_trickle.control ./
 RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 \
       CARGO_PROFILE_RELEASE_LTO=thin \
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 && \
-    cargo +"${RUST_NIGHTLY}" pgrx package --features pg18,e2e-unsafe-test-hooks \
+    cargo +"${RUST_NIGHTLY}" pgrx package --debug --features pg18,e2e-unsafe-test-hooks \
       --pg-config /usr/local/pgsql/bin/pg_config \
       --target x86_64-unknown-linux-gnu && \
     RUSTFLAGS='-Zsanitizer=address -Cforce-frame-pointers=yes' \
@@ -64,8 +64,8 @@ RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 \
         --features pg18,e2e-unsafe-test-hooks --no-default-features \
         --target x86_64-unknown-linux-gnu && \
     cp target/x86_64-unknown-linux-gnu/release/libpg_trickle.so \
-      target/x86_64-unknown-linux-gnu/release/pg_trickle-pg18/usr/local/pgsql/lib/pg_trickle.so && \
-    cp -a target/x86_64-unknown-linux-gnu/release/pg_trickle-pg18/usr/. /usr/local/pgsql/
+      target/x86_64-unknown-linux-gnu/debug/pg_trickle-pg18/usr/local/pgsql/lib/pg_trickle.so && \
+    cp -a target/x86_64-unknown-linux-gnu/debug/pg_trickle-pg18/usr/. /usr/local/pgsql/
 
 COPY tests/fixtures/asan_probe.c /tmp/asan_probe.c
 COPY tests/fixtures/initdb-asan-wrapper.sh /tmp/initdb-asan-wrapper.sh
