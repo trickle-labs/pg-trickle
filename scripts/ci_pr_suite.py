@@ -73,7 +73,11 @@ def main() -> int:
     # These scheduler-sensitive binaries use process-local shared containers.
     # Run them without parallel E2E contention so scheduler convergence
     # failures reflect behavior rather than runner resource pressure.
-    scheduler_isolated = {"e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests"}
+    scheduler_isolated = {
+        "e2e_mixed_mode_dag_tests",
+        "e2e_mixed_scheduling_tests",
+        "e2e_scheduler_tests",
+    }
     isolated = [name for name in selected if name in scheduler_isolated]
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
     for name in selected:

@@ -15,7 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config python3-dev zlib1g-dev ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSLo /tmp/postgresql.tar.bz2 \
+# Configure runs instrumented probe binaries; keep runtime sanitizer options for tests only.
+RUN unset ASAN_OPTIONS && \
+    curl -fsSLo /tmp/postgresql.tar.bz2 \
       "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" && \
     mkdir -p /tmp/postgresql && tar -xjf /tmp/postgresql.tar.bz2 --strip-components=1 -C /tmp/postgresql && \
     cd /tmp/postgresql && \
