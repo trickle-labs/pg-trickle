@@ -402,7 +402,7 @@ pub(crate) fn prepare_owner_temp_table(
     let owner = crate::sql_builder::ident(&stream_owner_name(st)?);
     // nosemgrep: rust.spi.run.dynamic-format — table and owner are quoted identifiers.
     Spi::run(&format!(
-        "GRANT SELECT, INSERT, TRUNCATE ON TABLE {table} TO {owner}"
+        "GRANT SELECT, INSERT, TRUNCATE, MAINTAIN ON TABLE {table} TO {owner}"
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     Ok(table)

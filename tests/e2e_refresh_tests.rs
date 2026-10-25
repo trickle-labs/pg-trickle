@@ -33,6 +33,11 @@ async fn test_refresh_picks_up_inserts() {
     // write under the writer-holdback watermark; do not treat that as a
     // permanent missing insert. Require eventual *exact multiset* equality
     // with the defining query, not merely the expected row count.
+    // Keep the manual refresh from being skipped by an in-flight scheduler refresh.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_ins_st'])")
+        .await;
+
     db.execute("INSERT INTO rf_ins VALUES (3, 'c'), (4, 'd')")
         .await;
     db.refresh_st_until_converged("rf_ins_st").await;

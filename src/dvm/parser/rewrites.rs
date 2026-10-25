@@ -3992,22 +3992,7 @@ fn rewrite_from_item_rows_from(node: *mut pg_sys::Node) -> Result<String, PgTric
     } else if let Some(join) = cast_node!(node, T_JoinExpr, pg_sys::JoinExpr) {
         let left = rewrite_from_item_rows_from(join.larg)?;
         let right = rewrite_from_item_rows_from(join.rarg)?;
-        let join_type = match join.jointype {
-            pg_sys::JoinType::JOIN_LEFT => "LEFT JOIN",
-            pg_sys::JoinType::JOIN_FULL => "FULL JOIN",
-            pg_sys::JoinType::JOIN_RIGHT => "RIGHT JOIN",
-            pg_sys::JoinType::JOIN_INNER if join.quals.is_null() => "CROSS JOIN",
-            pg_sys::JoinType::JOIN_INNER => "JOIN",
-            _ => "JOIN",
-        };
-        let on_clause = if join.quals.is_null() {
-            String::new()
-        } else {
-            // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let cond = unsafe { node_to_expr(join.quals)? };
-            format!(" ON {}", cond.to_sql())
-        };
-        Ok(format!("{left} {join_type} {right}{on_clause}"))
+        deparse_join_sql(join, &left, &right)
     } else {
         // Not a ROWS FROM — deparse normally using existing helper.
         // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
@@ -4750,22 +4735,7 @@ fn from_item_to_sql(node: *mut pg_sys::Node, cte_names: &[&str]) -> Result<Strin
         } else {
             from_item_to_sql(join.rarg, cte_names)?
         };
-        let join_type = match join.jointype {
-            pg_sys::JoinType::JOIN_LEFT => "LEFT JOIN",
-            pg_sys::JoinType::JOIN_FULL => "FULL JOIN",
-            pg_sys::JoinType::JOIN_RIGHT => "RIGHT JOIN",
-            pg_sys::JoinType::JOIN_INNER if join.quals.is_null() => "CROSS JOIN",
-            pg_sys::JoinType::JOIN_INNER => "JOIN",
-            _ => "JOIN",
-        };
-        let on_clause = if join.quals.is_null() {
-            String::new()
-        } else {
-            // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let cond = unsafe { node_to_expr(join.quals)? };
-            format!(" ON {}", cond.to_sql())
-        };
-        Ok(format!("{left} {join_type} {right}{on_clause}"))
+        deparse_join_sql(join, &left, &right)
     } else if let Some(sub) = cast_node!(node, T_RangeSubselect, pg_sys::RangeSubselect) {
         if sub.subquery.is_null()
             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.

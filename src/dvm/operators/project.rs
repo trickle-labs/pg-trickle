@@ -486,7 +486,10 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
 /// `"table__col"`. A qualified reference like `ColumnRef("l", "id")`
 /// becomes `"l__id"` if that name exists in `child_cols`. Unqualified
 /// references and non-ColumnRef expressions pass through unchanged.
-fn prune_unreferenced_false_left_joins<'a>(child: &'a OpTree, expressions: &[Expr]) -> &'a OpTree {
+pub(crate) fn prune_unreferenced_false_left_joins<'a>(
+    child: &'a OpTree,
+    expressions: &[Expr],
+) -> &'a OpTree {
     let mut current = child;
     while let OpTree::LeftJoin {
         condition,

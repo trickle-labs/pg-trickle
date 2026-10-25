@@ -809,6 +809,11 @@ async fn test_mixed_diamond_with_view_branch() {
     // Widget=9.99, Cable=4.99
     assert_eq!(db.count("public.md_st_hw_priced").await, 2);
 
+    // Manual refreshes can be skipped while a scheduler owns the same node.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.md_st_hw_products', 'public.md_st_prices', 'public.md_st_hw_priced'])")
+        .await;
+
     // Add a new hardware product with price
     db.execute("INSERT INTO md_products VALUES (4, 'Bolt', 'hardware')")
         .await;
@@ -831,6 +836,8 @@ async fn test_mixed_diamond_with_view_branch() {
         .await;
     db.refresh_st_until_converged("md_st_hw_products").await;
     db.refresh_st_until_converged("md_st_hw_priced").await;
+    db.assert_st_matches_query("md_st_hw_products", "SELECT id, name FROM md_v_hardware")
+        .await;
 
     assert_eq!(
         db.count("public.md_st_hw_priced").await,

@@ -3952,9 +3952,7 @@ unsafe fn parse_from_item_inner(
                     right: Box::new(join_using_column(&right, &column)?),
                 });
             }
-            // Retain the typed equality/provenance tree rather than
-            // flattening to Raw SQL; a later USING join must be able to prove
-            // whether a key exposed by both nested inputs is truly merged.
+            // Retain the typed equality/provenance tree so later USING joins can prove merged keys.
             let mut predicates = conditions.into_iter();
             let first = predicates.next().ok_or_else(|| {
                 PgTrickleError::QueryParseError("USING clause has no columns".into())
@@ -6062,32 +6060,7 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
         let left = unsafe { deparse_from_item_to_sql(join.larg)? };
         // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
         let right = unsafe { deparse_from_item_to_sql(join.rarg)? };
-        let join_type = match join.jointype {
-            pg_sys::JoinType::JOIN_INNER => "JOIN",
-            pg_sys::JoinType::JOIN_LEFT => "LEFT JOIN",
-            pg_sys::JoinType::JOIN_FULL => "FULL JOIN",
-            pg_sys::JoinType::JOIN_RIGHT => "RIGHT JOIN",
-            _ => "JOIN",
-        };
-        if !join.usingClause.is_null() {
-            let columns: Vec<String> = join_using_columns(join)?
-                .iter()
-                .map(|column| crate::api::quote_identifier(column))
-                .collect();
-            Ok(format!(
-                "{left} {join_type} {right} USING ({})",
-                columns.join(", ")
-            ))
-        } else {
-            let condition = if join.quals.is_null() {
-                "TRUE".to_string()
-            } else {
-                // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = safe_node_to_expr(join.quals)?;
-                expr.to_sql()
-            };
-            Ok(format!("{left} {join_type} {right} ON {condition}"))
-        }
+        deparse_join_sql(join, &left, &right)
     } else if let Some(sub) = cast_node!(node, T_RangeSubselect, pg_sys::RangeSubselect) {
         if sub.subquery.is_null()
             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
