@@ -1,0 +1,19 @@
+{
+  "control_image": "sha256:1fdfeb8e1c08b049491583612f7e34cd4c0e27c7d789084a627ce3089e04d981",
+  "failure_log": "historical-control/results/postgres-s1-server.log",
+  "failure_log_sha256": "0e20e54bae63521497b339c5dddab78f588bc1b5c69ffc7931816c9397a5bee2",
+  "failure_time_utc": "2026-10-17 13:54:16.620",
+  "completed_admissions": 2,
+  "failed_admission": 3,
+  "admission_process": 1482,
+  "managed_cycle_process": 28,
+  "cycle": [
+    "Admission process 1482 waits for worker 28's advisory ExclusiveLock [22294,1347634,2944222336,1].",
+    "Worker 28 waits for transaction 5202 held by process 1482 while updating pgt_capture_instance.last_seen_at."
+  ],
+  "candidate_behavior": "The merged prerequisite retains FOR UPDATE SKIP LOCKED for heartbeat telemetry; the final image passes the locked-row heartbeat regression.",
+  "control_changed_or_rerun": false,
+  "comparable_complete_control_available": false,
+  "paired_speedup_claim": null,
+  "comparison_status": "BLOCKED; retain the failed control rather than replacing it with historical rates."
+}

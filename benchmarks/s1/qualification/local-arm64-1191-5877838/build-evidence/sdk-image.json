@@ -1,0 +1,149 @@
+[
+    {
+        "Id": "sha256:de453c245823bdb68c341e5b648a08f008e7cf67a336615a753baadd8c1f9150",
+        "RepoTags": [
+            "s1-1213-sdk:751fcb1d",
+            "s1-1213-sdk:c1d723b1",
+            "s1-1213-sdk:e76ebc20",
+            "s1-1213-sdk:f207274a",
+            "s1-1213-sdk:ff46402",
+            "s1-arm64-sdk:1168-078389ba1ff1",
+            "s1-arm64-sdk:qualification"
+        ],
+        "RepoDigests": [
+            "s1-1213-sdk@sha256:de453c245823bdb68c341e5b648a08f008e7cf67a336615a753baadd8c1f9150",
+            "s1-arm64-sdk@sha256:de453c245823bdb68c341e5b648a08f008e7cf67a336615a753baadd8c1f9150"
+        ],
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2026-10-19T13:49:44.508851508Z",
+        "Config": {
+            "User": "root",
+            "ExposedPorts": {
+                "5432/tcp": {}
+            },
+            "Env": [
+                "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/postgresql/18/bin",
+                "GOSU_VERSION=1.19",
+                "LANG=en_US.utf8",
+                "PG_MAJOR=18",
+                "PG_VERSION=18.4-1.pgdg12+1",
+                "PGDATA=/var/lib/postgresql/18/docker",
+                "CARGO_HOME=/usr/local/cargo",
+                "RUSTUP_HOME=/usr/local/rustup"
+            ],
+            "Entrypoint": [
+                "docker-entrypoint.sh"
+            ],
+            "Cmd": [
+                "postgres"
+            ],
+            "Volumes": {
+                "/var/lib/postgresql": {}
+            },
+            "StopSignal": "SIGINT"
+        },
+        "Architecture": "arm64",
+        "Os": "linux",
+        "Size": 3369316963,
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:5e34d05421f9491747bc11c68b1a7f5029b0aefb18eb9166935ac52be45fb299",
+                "sha256:c916902ed5f41ad035538987e949fedcc57796b9318469b4169820f31807059a",
+                "sha256:5c50eca83966c60a24063e326308435a0ad79743f452456470a66d7db33b56f5",
+                "sha256:efc233be53f0ef9c5d27272ba5062770481fd04a89b061f4bf3e94a4785c6cf2",
+                "sha256:5135d7b695ce0698611149051a28f6c96b47f71321ebcf0ab2cf4c6774e37d9f",
+                "sha256:72998b082f3a6fb47ada8e9020c5aa256675692f33986f1e29317a9a9a90dd9e",
+                "sha256:952868bcdccfe0ee48abe21a1223d4f0ac2d902682603c7afcfc80daa8d21169",
+                "sha256:bdc654e5bb776a6a6dded5b6c09a35cf6c6ea3e2fb8a89e1514276e86bb35df0",
+                "sha256:6e89d4b0160f2b7c10a282513059888b84796ff5a8233529b6d3ab7156891ec8",
+                "sha256:839308df920536d4fb3c4f00b4e07df94c8d05f7ef4a043edfe73f250f3b0c45",
+                "sha256:6800bbd49370360d031a3b699a4fcf29683f0e043bda6b2bdcaf6d8784770504",
+                "sha256:5d73c1a1b10e1c1b8a652dc79d08a2e5150a36c32f0a80be3e3f69326bb11505",
+                "sha256:298884d1c15592bf5a69d6e3a583d20355fdec29710bcf701b83048e5bddda8b",
+                "sha256:6a2bd0aff3821309c8370837b40ca503460b926ce87dee6476e0197d0e925a73",
+                "sha256:44401186306484911ffdde8bbcd3923f16d9c98a45f1e26a21629c2d4fdc491a",
+                "sha256:03dc4c292091d841cde30233c490af21bedfc2a978ab7692232ca8753842d7cf",
+                "sha256:4aedbb248b5d7181c68223dfeb9cb26e66e1617be7e27d823c9cf0a1f1f5c8d6"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-10-24T19:24:58.893884292Z"
+        },
+        "Descriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:de453c245823bdb68c341e5b648a08f008e7cf67a336615a753baadd8c1f9150",
+            "size": 3535,
+            "annotations": {
+                "config.digest": "sha256:2708aae915d7775a2d8ba7479a9837418b9193cd988745d2d6fb1b6cad8e25f9"
+            }
+        },
+        "Identity": {
+            "Pull": [
+                {
+                    "Repository": "docker.io/library/pg-trickle-1168"
+                },
+                {
+                    "Repository": "docker.io/library/s1-1213-sdk"
+                },
+                {
+                    "Repository": "docker.io/library/s1-arm64-sdk"
+                }
+            ],
+            "Build": [
+                {
+                    "Ref": "933r0y1jglnfocnysl3oqiyyy",
+                    "CreatedAt": "2026-10-22T11:52:59.226398051Z"
+                },
+                {
+                    "Ref": "9v021hoov0qdl6ur8fjjr03cp",
+                    "CreatedAt": "2026-10-24T19:24:58.900134917Z"
+                },
+                {
+                    "Ref": "dhy06genlu244tpmcdy6vv11l",
+                    "CreatedAt": "2026-10-23T15:03:28.260401547Z"
+                },
+                {
+                    "Ref": "grrjt4wh9yrjcepmdikawhfqo",
+                    "CreatedAt": "2026-10-19T13:50:23.689681762Z"
+                },
+                {
+                    "Ref": "gt87o41kz4ryw5vum0qy81mm9",
+                    "CreatedAt": "2026-10-22T11:42:21.602296172Z"
+                },
+                {
+                    "Ref": "k8zomfdh04grjnsfvpmqnspew",
+                    "CreatedAt": "2026-10-22T17:14:19.819666638Z"
+                },
+                {
+                    "Ref": "kcs2bww6mhqgfvnmlrkq45ap0",
+                    "CreatedAt": "2026-10-23T15:21:38.61679601Z"
+                },
+                {
+                    "Ref": "qba0h6de2pdxwwgz0hy30xjqa",
+                    "CreatedAt": "2026-10-21T05:57:46.764824879Z"
+                },
+                {
+                    "Ref": "rgqbhhc0o3ug0se2qws2clbvz",
+                    "CreatedAt": "2026-10-22T17:16:40.200382342Z"
+                },
+                {
+                    "Ref": "u4qw2owy9ugx5qljkn65k7u2t",
+                    "CreatedAt": "2026-10-22T13:50:18.212504753Z"
+                },
+                {
+                    "Ref": "w51q6ov52dqnucr2k0g6m7gcv",
+                    "CreatedAt": "2026-10-22T12:29:43.631342918Z"
+                },
+                {
+                    "Ref": "wi6zayimciznonfb4idyhvzpg",
+                    "CreatedAt": "2026-10-23T19:48:22.275520296Z"
+                },
+                {
+                    "Ref": "y3flv9he37omg5in7r3wtjzwp",
+                    "CreatedAt": "2026-10-22T14:17:50.098129087Z"
+                }
+            ]
+        }
+    }
+]
