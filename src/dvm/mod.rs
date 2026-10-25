@@ -1845,16 +1845,20 @@ pub fn row_id_expr_for_query_and_complete_output(
     output_columns: &[String],
 ) -> (String, bool) {
     let tree = parse_defining_query(defining_query).ok();
-    let covers_output = tree.as_ref().is_some_and(|tree| {
-        row_identity_domain(tree) != "WINDOW_KEY"
-            && tree
-                .row_id_key_columns()
-                .is_some_and(|keys| row_id_keys_match_output(&keys, output_columns))
-    });
+    let covers_output = tree
+        .as_ref()
+        .is_some_and(|tree| row_id_covers_output(tree, output_columns));
     (
         row_id_expr_for_tree(defining_query, tree.as_ref()),
         covers_output,
     )
+}
+
+pub(crate) fn row_id_covers_output(tree: &parser::OpTree, output_columns: &[String]) -> bool {
+    row_identity_domain(tree) != "WINDOW_KEY"
+        && tree
+            .row_id_key_columns()
+            .is_some_and(|keys| row_id_keys_match_output(&keys, output_columns))
 }
 
 fn row_id_keys_match_output(key_columns: &[String], output_columns: &[String]) -> bool {
@@ -1868,7 +1872,7 @@ fn row_id_keys_match_output(key_columns: &[String], output_columns: &[String]) -
     key_columns == output_columns
 }
 
-fn row_id_expr_for_tree(defining_query: &str, tree: Option<&parser::OpTree>) -> String {
+pub(crate) fn row_id_expr_for_tree(defining_query: &str, tree: Option<&parser::OpTree>) -> String {
     let key_cols = tree.and_then(parser::OpTree::row_id_key_columns);
     let domain = tree.map(row_identity_domain).unwrap_or("SCAN_KEY");
     match key_cols {

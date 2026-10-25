@@ -1,0 +1,12 @@
+Code validation at candidate source commit 587783847edaaa447437a2391083239e2b09ca62:
+
+- `just fmt` — passed.
+- `just lint` — passed with zero warnings (GNU Bash and Python 3.12 on this macOS host).
+- `just test-unit` — 2,631 passed, 0 failed.
+- `benchmarks/s1/check_result.py` on the exact candidate image — PASS_OWNER_APPROVED_FLOOR; 54.667334705546196 cases/minute, all 300 cases and vectors exact, with throughput as the sole raw failure against 60/minute.
+- `benchmarks/s1/check_result.py --baseline` on the exact paired control image — BASELINE_COMPLETE; 26.933175465423115 cases/minute, same complete vectors, with only the expected baseline throughput failure.
+- Candidate image bootstrap isolation — passed.
+- Candidate MDM repeated grant, missing SELECT repair, and JIT scope checks — passed.
+- Candidate full preflight — all v0.47/v0.48 and S1 fixture gates passed, including v0.48 live and security.
+
+The project’s broader integration, E2E, TPC-H, and dbt suites were not run.

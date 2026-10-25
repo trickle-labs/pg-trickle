@@ -3944,24 +3944,20 @@ unsafe fn parse_from_item_inner(
         }
 
         let condition = if !join.usingClause.is_null() {
-            let mut conditions = Vec::new();
-            for column in join_using_columns(join)? {
-                conditions.push(Expr::BinaryOp {
+            let mut predicates = join_using_columns(join)?
+                .into_iter()
+                .map(|column_name| Expr::BinaryOp {
                     op: "=".into(),
-                    left: Box::new(join_using_column(&left, &column)?),
-                    right: Box::new(join_using_column(&right, &column)?),
-                });
-            }
-            match conditions.as_slice() {
-                // Keep single-key USING bindings available to endpoint admission.
-                [condition] => condition.clone(),
-                _ => Expr::Raw(
-                    conditions
-                        .iter()
-                        .map(Expr::to_sql)
-                        .collect::<Vec<_>>()
-                        .join(" AND "),
-                ),
+                    left: Box::new(using_column_expr(&left, &column_name)),
+                    right: Box::new(using_column_expr(&right, &column_name)),
+                })
+                .collect::<Vec<_>>();
+            if predicates.len() == 1 {
+                predicates.pop().ok_or_else(|| {
+                    PgTrickleError::InternalError("USING predicate disappeared".into())
+                })?
+            } else {
+                super::rewrites::join_and_predicates(predicates)?
             }
         } else if join.quals.is_null() {
             Expr::Literal("TRUE".into())
@@ -6061,32 +6057,7 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
         let left = unsafe { deparse_from_item_to_sql(join.larg)? };
         // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
         let right = unsafe { deparse_from_item_to_sql(join.rarg)? };
-        let join_type = match join.jointype {
-            pg_sys::JoinType::JOIN_INNER => "JOIN",
-            pg_sys::JoinType::JOIN_LEFT => "LEFT JOIN",
-            pg_sys::JoinType::JOIN_FULL => "FULL JOIN",
-            pg_sys::JoinType::JOIN_RIGHT => "RIGHT JOIN",
-            _ => "JOIN",
-        };
-        if !join.usingClause.is_null() {
-            let columns: Vec<String> = join_using_columns(join)?
-                .iter()
-                .map(|column| crate::api::quote_identifier(column))
-                .collect();
-            Ok(format!(
-                "{left} {join_type} {right} USING ({})",
-                columns.join(", ")
-            ))
-        } else {
-            let condition = if join.quals.is_null() {
-                "TRUE".to_string()
-            } else {
-                // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = safe_node_to_expr(join.quals)?;
-                expr.to_sql()
-            };
-            Ok(format!("{left} {join_type} {right} ON {condition}"))
-        }
+        deparse_join_sql(join, &left, &right)
     } else if let Some(sub) = cast_node!(node, T_RangeSubselect, pg_sys::RangeSubselect) {
         if sub.subquery.is_null()
             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.

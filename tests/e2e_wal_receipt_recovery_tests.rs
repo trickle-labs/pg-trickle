@@ -871,6 +871,40 @@ async fn test_wal_recovery_after_slot_advance_finishes_acknowledgement() {
 }
 
 #[tokio::test]
+async fn test_wal_receipts_acknowledge_transaction_larger_than_poll_limit() {
+    let fixture = setup_wal_fixture("large_transaction").await;
+    let db = &fixture.db;
+    db.alter_system_set_and_wait("pg_trickle.wal_max_changes_per_poll", "100", "100")
+        .await;
+    db.execute(&format!(
+        "WITH inserted AS (\
+             INSERT INTO public.{} (id, value) \
+             SELECT id, 'large-transaction-' || id FROM generate_series(2, 251) id \
+             RETURNING id, value\
+         ) INSERT INTO public.{} SELECT id, value FROM inserted",
+        fixture.source, fixture.journal
+    ))
+    .await;
+    assert!(
+        db.wait_for_condition(
+            "complete oversized WAL transaction acknowledged",
+            &format!(
+                "SELECT count(*) = 250 FROM pgtrickle.pgt_wal_receipts \
+                 WHERE source_relid = {} AND source_change \
+                   AND status = 'ACKNOWLEDGED' AND data LIKE '%large-transaction-%'",
+                fixture.oid
+            ),
+            WAIT,
+            Duration::from_millis(50),
+        )
+        .await,
+        "every source change must be acknowledged despite the smaller poll limit"
+    );
+    assert_eq!(cdc_mode(db, &fixture.source).await.as_deref(), Some("WAL"));
+    wait_for_exact(&db.pool, &fixture.stream, &fixture.journal).await;
+}
+
+#[tokio::test]
 async fn test_wal_recovery_identity_rejects_fresh_volume() {
     let retained = E2eDb::new_dedicated().await;
     let sentinel: String = retained

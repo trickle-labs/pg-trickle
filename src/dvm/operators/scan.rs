@@ -491,8 +491,7 @@ fn diff_scan_change_buffer(
             "\
 -- INSERT events: +1 per content hash
 SELECT {pk_hash_expr} AS content_hash{payload_identity_select},
-       1 AS delta_sign,
-       {col_refs}
+       1 AS delta_sign{col_refs}
 FROM {change_table} c
 WHERE {lsn_filter} AND c.action = 'I'
 
@@ -500,11 +499,14 @@ UNION ALL
 
 -- DELETE events: -1 per content hash
 SELECT {pk_hash_expr} AS content_hash{payload_identity_select},
-       -1 AS delta_sign,
-       {col_refs}
+       -1 AS delta_sign{col_refs}
 FROM {change_table} c
 WHERE {lsn_filter} AND c.action = 'D'",
-            col_refs = col_refs_raw.join(",\n       "),
+            col_refs = if col_refs_raw.is_empty() {
+                String::new()
+            } else {
+                format!(",\n       {}", col_refs_raw.join(",\n       "))
+            },
         );
         ctx.add_cte(decomp_cte.clone(), decomp_sql);
 
@@ -514,11 +516,9 @@ WHERE {lsn_filter} AND c.action = 'D'",
             "\
 -- Net inserts: output identities with net_count > 0
 SELECT {output_identity} AS __pgt_row_id,
-       'I'::TEXT AS __pgt_action,
-       {sub_cols}
+       'I'::TEXT AS __pgt_action{sub_cols}
 FROM (
-    SELECT content_hash{payload_identity_group},
-           {max_cols},
+    SELECT content_hash{payload_identity_group}{max_cols},
            SUM(delta_sign)::INT AS net_count
     FROM {decomp_cte}
     GROUP BY content_hash{payload_identity_group}
@@ -530,19 +530,25 @@ UNION ALL
 
 -- Net deletes: output identities with net_count < 0
 SELECT {output_identity} AS __pgt_row_id,
-       'D'::TEXT AS __pgt_action,
-       {sub_cols}
+       'D'::TEXT AS __pgt_action{sub_cols}
 FROM (
-    SELECT content_hash{payload_identity_group},
-           {max_cols},
+    SELECT content_hash{payload_identity_group}{max_cols},
            SUM(delta_sign)::INT AS net_count
     FROM {decomp_cte}
     GROUP BY content_hash{payload_identity_group}
     HAVING SUM(delta_sign) < 0
 ) sub
 CROSS JOIN generate_series(1, -sub.net_count) gs",
-            sub_cols = sub_col_refs.join(",\n       "),
-            max_cols = max_col_refs.join(",\n           "),
+            sub_cols = if sub_col_refs.is_empty() {
+                String::new()
+            } else {
+                format!(",\n       {}", sub_col_refs.join(",\n       "))
+            },
+            max_cols = if max_col_refs.is_empty() {
+                String::new()
+            } else {
+                format!(",\n           {}", max_col_refs.join(",\n           "))
+            },
         );
         ctx.add_cte(cte_name.clone(), sql);
 
@@ -1335,6 +1341,26 @@ mod tests {
         assert_sql_contains(&sql, "sub.content_hash AS __pgt_row_id");
         assert_sql_contains(&sql, "GROUP BY content_hash");
         assert!(!sql.contains("payload_identity"));
+    }
+
+    #[test]
+    fn test_diff_scan_keyless_without_payload_keeps_valid_select_lists() {
+        for stream_table in [false, true] {
+            let mut ctx = test_ctx();
+            if stream_table {
+                ctx.set_st_source_pgt_ids(std::collections::HashMap::from([(100, 42)]));
+            }
+            let result = diff_scan(&mut ctx, &scan(100, "orders", "public", "o", &[])).unwrap();
+            let sql = ctx.build_with_query(&result.cte_name);
+            assert!(
+                !sql.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains(", FROM")
+            );
+            assert_sql_contains(&sql, "SUM(delta_sign)");
+            assert_sql_contains(&sql, "generate_series");
+        }
     }
 
     #[test]

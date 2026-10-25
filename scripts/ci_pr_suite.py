@@ -11,6 +11,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Keep WAL receipt phase-barrier witnesses serial without removing them from PR coverage.
+WAL_SERIAL_CASES = (
+    ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_received_receipt_requires_rebaseline"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_undecoded_commit_requires_rebaseline"),
+)
+
 
 def targets(root: Path = ROOT) -> list[str]:
     policy = json.loads((root / ".github/ci-suites.json").read_text())
@@ -70,12 +76,14 @@ def main() -> int:
         for name in json.loads((ROOT / ".github/ci-suites.json").read_text())["pr_pure"]:
             command.extend(["--test", name])
         return subprocess.run(command + ["--", "--test-threads=1"], cwd=ROOT).returncode
-    # These suites are sensitive to runner contention; run them by themselves.
+    # Isolate suites that depend on scheduler timing or WAL progress.
     isolated_binaries = {
+        "e2e_dag_autorefresh_tests",
         "e2e_mixed_mode_dag_tests",
         "e2e_mixed_scheduling_tests",
         "e2e_scheduler_tests",
         "e2e_v078_tests",
+        "e2e_v107_wal_transition_tests",
     }
     isolated = [name for name in selected if name in isolated_binaries]
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
@@ -86,6 +94,9 @@ def main() -> int:
     excluded = []
     for case in cases:
         binary, test = case.split("::")
+        excluded.append(f"not (binary(={binary}) & test(={test}))")
+    wal_serial_cases = [(binary, test) for binary, test in WAL_SERIAL_CASES if binary in selected]
+    for binary, test in wal_serial_cases:
         excluded.append(f"not (binary(={binary}) & test(={test}))")
     if excluded:
         command.extend(["-E", " & ".join(excluded)])
@@ -99,12 +110,22 @@ def main() -> int:
         ], cwd=ROOT).returncode
         if status:
             return status
-    if "e2e_refresh_atomicity_tests" not in selected:
+    if "e2e_refresh_atomicity_tests" in selected:
+        # Keep witnessed barriers isolated from parallel E2E container load.
+        status = subprocess.run([
+            "./scripts/run_e2e_tests.sh", "--profile", "ci",
+            "--test", "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
+        ], cwd=ROOT).returncode
+        if status:
+            return status
+    if not wal_serial_cases:
         return 0
-    # Keep witnessed barriers isolated from the parallel suite's container load.
+    binary = wal_serial_cases[0][0]
+    selector = " | ".join(f"test(={test})" for _, test in wal_serial_cases)
     return subprocess.run([
         "./scripts/run_e2e_tests.sh", "--profile", "ci",
-        "--test", "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
+        "--test", binary, "-E", selector,
+        "--test-threads", "1", "--retries", "0",
     ], cwd=ROOT).returncode
 
 

@@ -17,6 +17,8 @@ dbt-pgtrickle/
 cnpg/
 tests/*
 scripts/
+!scripts/
+!scripts/gen_test_schema.py
 
 # Misc large/noisy files
 *.log
