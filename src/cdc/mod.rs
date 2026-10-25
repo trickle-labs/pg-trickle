@@ -2856,8 +2856,9 @@ pub fn get_slot_positions_at_bound(
     }
     let mut positions = HashMap::new();
     for oid in source_oids {
+        // WAL appears before its first decoder checkpoint, so do not treat it as trigger/immediate here.
         let wal_position = Spi::get_one_with_args::<String>(
-            "SELECT CASE WHEN cdc_mode = 'WAL' THEN decoder_confirmed_lsn::text \
+            "SELECT CASE WHEN cdc_mode = 'WAL' THEN COALESCE(decoder_confirmed_lsn, '0/0'::pg_lsn)::text \
                     WHEN cdc_mode = 'TRANSITIONING' \
                       THEN LEAST(COALESCE(decoder_confirmed_lsn, '0/0'::pg_lsn), \
                                 COALESCE(cutover_lsn, $1::pg_lsn))::text \
@@ -2872,15 +2873,7 @@ pub fn get_slot_positions_at_bound(
             reason: e.to_string(),
         })?;
         let position = match wal_position {
-            Some(lsn) if is_valid_lsn(&lsn) && lsn != "0/0" => lsn,
-            Some(_) => {
-                return Err(PgTrickleError::CdcStateInvalid {
-                    pgt_id: 0,
-                    source_name: format!("OID {}", oid.to_u32()),
-                    buffer: "WAL decoder position".to_string(),
-                    reason: "required committed decoder position is unavailable".to_string(),
-                });
-            }
+            Some(lsn) => confirmed_wal_position(*oid, &lsn)?,
             None if !Spi::get_one_with_args::<bool>(
                 "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_change_tracking \
                                 WHERE source_relid = $1)",
@@ -2926,6 +2919,24 @@ pub fn get_slot_positions_at_bound(
         positions.insert(oid.to_u32(), position);
     }
     Ok(positions)
+}
+
+fn confirmed_wal_position(source_oid: pg_sys::Oid, lsn: &str) -> Result<String, PgTrickleError> {
+    if !is_valid_lsn(lsn) {
+        return Err(PgTrickleError::CdcStateInvalid {
+            pgt_id: 0,
+            source_name: format!("OID {}", source_oid.to_u32()),
+            buffer: "WAL decoder position".to_string(),
+            reason: "required committed decoder position is invalid".to_string(),
+        });
+    }
+    if lsn == "0/0" {
+        return Err(PgTrickleError::SafeFrontierUnavailable {
+            context: format!("source OID {}", source_oid.to_u32()),
+            reason: "WAL decoder has not confirmed a committed position yet".to_string(),
+        });
+    }
+    Ok(lsn.to_string())
 }
 
 /// No-op: with trigger-based CDC, changes are written directly to buffer
@@ -3566,6 +3577,32 @@ mod tests {
 
     fn transition(state: &mut FrontierProbeState, probe: &FrontierProbe) -> SafeFrontierDecision {
         transition_writer_fences(state, probe).expect("valid test LSN")
+    }
+
+    #[test]
+    fn wal_frontier_waits_for_first_confirmed_decoder_position() {
+        let error = confirmed_wal_position(pg_sys::Oid::from(42), "0/0").unwrap_err();
+        assert!(matches!(
+            &error,
+            PgTrickleError::SafeFrontierUnavailable { .. }
+        ));
+        assert!(error.is_retryable());
+        assert!(!error.requires_reinitialize());
+    }
+
+    #[test]
+    fn wal_frontier_accepts_confirmed_decoder_position() {
+        assert_eq!(
+            confirmed_wal_position(pg_sys::Oid::from(42), "0/10").unwrap(),
+            "0/10"
+        );
+    }
+
+    #[test]
+    fn wal_frontier_rejects_malformed_decoder_position() {
+        let error = confirmed_wal_position(pg_sys::Oid::from(42), "not-an-lsn").unwrap_err();
+        assert!(matches!(&error, PgTrickleError::CdcStateInvalid { .. }));
+        assert!(error.requires_reinitialize());
     }
 
     #[test]
