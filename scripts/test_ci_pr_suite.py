@@ -52,7 +52,7 @@ class AllocationTests(unittest.TestCase):
                     command = call.args[0]
                     selected.extend(command[i + 1] for i, arg in enumerate(command) if arg == "--test")
                     self.assertEqual(command[command.index("--retries") + 1], "0")
-                self.assertEqual(len(run.call_args_list), 2 if shard == 1 else 3)
+                self.assertEqual(len(run.call_args_list), 2 if shard == 1 else 4)
                 if shard == 2:
                     for call in run.call_args_list[1:]:
                         command = call.args[0]
@@ -60,7 +60,7 @@ class AllocationTests(unittest.TestCase):
                         self.assertEqual(command[command.index("--retries") + 1], "0")
                     self.assertCountEqual(
                         [call.args[0][call.args[0].index("--test") + 1] for call in run.call_args_list[1:]],
-                        ["e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests"],
+                        ["e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests", "e2e_scheduler_tests"],
                     )
                 shards.append(selected)
         self.assertCountEqual(shards[0] + shards[1], ci_pr_suite.targets())
@@ -233,10 +233,10 @@ class AllocationTests(unittest.TestCase):
             with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
                 "ci_pr_suite.subprocess.run"
             ) as run:
-                run.side_effect = [SimpleNamespace(returncode=value) for value in (0, 0, 0, status)]
+                run.side_effect = [SimpleNamespace(returncode=value) for value in (0, 0, 0, 0, status)]
                 self.assertEqual(ci_pr_suite.main(), status)
                 self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
-                self.assertEqual(len(run.call_args_list), 4)
+                self.assertEqual(len(run.call_args_list), 5)
                 self.assertEqual(run.call_args_list[-1].args[0], [
                     "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
                     "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
