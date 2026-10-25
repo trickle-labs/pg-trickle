@@ -121,10 +121,8 @@ async fn assert_clock_dependent_refresh(mode: &str, schedule_kind: &str) {
         control_action, "NO_DATA",
         "source-only FULL must stay cheap"
     );
-    // Manual FULL is a control, evaluated only after recording scheduled output.
-    db.refresh_st("clock_st").await;
-    db.assert_st_matches_query("clock_st", query).await;
     assert!(refreshed, "scheduled output stayed stale: {witness}");
+    db.assert_st_matches_query("clock_st", query).await;
     let action: String = db.query_scalar("SELECT h.action FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'clock_st' AND h.status = 'COMPLETED' ORDER BY h.refresh_id LIMIT 1").await;
     assert_eq!(action, "FULL", "{witness}");
 }

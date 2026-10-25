@@ -70,18 +70,17 @@ def main() -> int:
         for name in json.loads((ROOT / ".github/ci-suites.json").read_text())["pr_pure"]:
             command.extend(["--test", name])
         return subprocess.run(command + ["--", "--test-threads=1"], cwd=ROOT).returncode
-    # These scheduler-sensitive binaries use process-local shared containers.
-    # Run them without parallel E2E contention so scheduler convergence
-    # failures reflect behavior rather than runner resource pressure.
-    scheduler_isolated = {
+    # These suites are sensitive to runner contention; run them by themselves.
+    isolated_binaries = {
         "e2e_mixed_mode_dag_tests",
         "e2e_mixed_scheduling_tests",
         "e2e_scheduler_tests",
+        "e2e_v078_tests",
     }
-    isolated = [name for name in selected if name in scheduler_isolated]
+    isolated = [name for name in selected if name in isolated_binaries]
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
     for name in selected:
-        if name != "e2e_refresh_atomicity_tests" and name not in scheduler_isolated:
+        if name != "e2e_refresh_atomicity_tests" and name not in isolated_binaries:
             command.extend(["--test", name])
     cases = json.loads((ROOT / ".github/ci-suites.json").read_text())["scheduled_cases"]
     excluded = []
