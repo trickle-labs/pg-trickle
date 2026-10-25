@@ -52,7 +52,10 @@ COPY src/ src/
 COPY verification/ verification/
 COPY sql/ sql/
 COPY pg_trickle.control ./
-RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
+# Thin LTO and parallel codegen keep the test image build bounded in CI.
+RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 \
+      CARGO_PROFILE_RELEASE_LTO=thin \
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 && \
     cargo +"${RUST_NIGHTLY}" pgrx package --features pg18,e2e-unsafe-test-hooks \
       --pg-config /usr/local/pgsql/bin/pg_config \
       --target x86_64-unknown-linux-gnu && \
