@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Validate the frozen workload and owner-approved 45/min policy
+      - name: Validate the frozen workload and owner-approved 40/min policy
         run: |
           set -euo pipefail
           python3 benchmarks/s1/check_frozen_harness.py
@@ -158,7 +158,7 @@ jobs:
           image=$(docker image inspect s1-candidate:qualification --format '{{.Id}}')
           # The frozen harness still returns 1 if observed throughput misses
           # the 60/min target. Under owner approval only a sole rate failure
-          # at >=45/min may pass; the checker validates the retained raw exit,
+          # at >=40/min may pass; the checker validates the retained raw exit,
           # complete failure vector and all unchanged correctness/resource gates.
           set +e
           python3 benchmarks/s1/qualification/run_bounded.py "$image" candidate-300

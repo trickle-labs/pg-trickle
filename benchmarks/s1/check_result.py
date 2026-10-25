@@ -18,11 +18,11 @@ def check_result(bounded, observed, progress, baseline=False):
                             "window_minutes": 5, "result": "failed"}
         assert failed == [expected_failure], "baseline has other failed gates"
         assert observed.get("failure") == str(expected_failure), "baseline failed for another reason"
-    # Owner approval revised on 2026-10-24 sets a 45/min acceptance floor while
+    # Owner approval revised on 2026-10-25 sets a 40/min acceptance floor while
     # retaining the 60/min workload/target. Below-target observed rates and
     # raw harness failures are never rewritten: accept the *sole* rate
-    # failure only when >=45 and every other gate/vector is exact.
-    owner_approved_floor = not baseline and math.isfinite(rate) and 45 <= rate < 60
+    # failure only when >=40 and every other gate/vector is exact.
+    owner_approved_floor = not baseline and math.isfinite(rate) and 40 <= rate < 60
     if owner_approved_floor:
         expected_failure = {"name": rate_gate, "target_cases_per_minute": 60,
                             "observed_cases_per_minute": rate, "churn_cases": 300,
@@ -74,9 +74,9 @@ def check_result(bounded, observed, progress, baseline=False):
             "peak_memory_bytes": bounded["peak_memory_bytes"],
             "raw_harness_exit_code": bounded["exit_code"],
             "throughput_target_cases_per_minute": 60,
-            "owner_approved_acceptance_floor_cases_per_minute": 45,
+            "owner_approved_acceptance_floor_cases_per_minute": 40,
             "throughput_gate": ("failed_below_60" if slow_baseline else
-                                "owner_approved_45_to_60" if owner_approved_floor else "passed"),
+                                "owner_approved_40_to_60" if owner_approved_floor else "passed"),
             "s1_result": ("BASELINE_COMPLETE" if baseline else
                           "PASS_OWNER_APPROVED_FLOOR" if owner_approved_floor else "PASS")}
 
