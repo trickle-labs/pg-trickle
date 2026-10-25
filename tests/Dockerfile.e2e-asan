@@ -28,10 +28,12 @@ RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
     printf '%s\n' 'CFLAGS += -fsanitize=address' 'LDFLAGS += -fsanitize=address' >> src/Makefile.global && \
     make -j2 && \
     sed -i '/^CFLAGS += -fsanitize=address$/d' src/Makefile.global && \
-    make -C src/port clean all LDFLAGS='' && \
-    make -C src/common clean all LDFLAGS='' && \
-    make -C src/bin/pg_config clean all install LDFLAGS='' && \
-    make -C src/timezone clean all LDFLAGS='' && \
+    sed -i '/^LDFLAGS += -fsanitize=address$/d' src/Makefile.global && \
+    make -C src/port clean all && \
+    make -C src/common clean all && \
+    make -C src/bin/pg_config clean all install && \
+    make -C src/timezone clean all && \
+    printf '%s\n' 'LDFLAGS += -fsanitize=address' >> src/Makefile.global && \
     make install && \
     rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
 
