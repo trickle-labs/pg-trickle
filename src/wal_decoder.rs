@@ -568,7 +568,21 @@ pub fn poll_wal_changes(
     // We use test_decoding which produces text output
     // in the format: "table schema.table: ACTION: col[type]:val ..."
     // A44-3: Read max changes per poll from GUC (default 10 000, previously hardcoded).
-    let max_changes_per_poll = crate::config::pg_trickle_wal_max_changes_per_poll();
+    // If a prior bounded peek persisted only an open transaction prefix, extend
+    // this peek enough to get past that prefix and reach its COMMIT.
+    let configured_limit = crate::config::pg_trickle_wal_max_changes_per_poll();
+    let pending_prefix_count = Spi::get_one_with_args::<i64>(
+        "SELECT CASE WHEN (SELECT data FROM pgtrickle.pgt_wal_receipts \
+                          WHERE source_relid = $1 AND slot_name = $2 AND status = 'RECEIVED' \
+                          ORDER BY receipt_id DESC LIMIT 1) LIKE 'COMMIT %' \
+                    THEN 0 ELSE count(*) END \
+           FROM pgtrickle.pgt_wal_receipts \
+          WHERE source_relid = $1 AND slot_name = $2 AND status = 'RECEIVED'",
+        &[source_oid.into(), slot_name.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(0);
+    let max_changes_per_poll = wal_poll_limit(configured_limit, pending_prefix_count);
     assert_valid_identifier(slot_name, "replication slot name")?;
     let poll_sql = format!(
         "SELECT lsn::text, xid::text, data \
@@ -819,6 +833,11 @@ fn load_wal_receipts(
                 .get::<bool>(1)
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap_or(false);
+            if pending && status == "RECEIVED" {
+                // A bounded peek can leave a durable prefix until a later poll
+                // extends it through COMMIT. Keep WAL capture active meanwhile.
+                return Ok(receipts);
+            }
             if pending {
                 return Err(PgTrickleError::WalTransitionError(format!(
                     "incomplete {status} WAL receipt transaction for source OID {}",
@@ -839,6 +858,13 @@ fn load_wal_receipts(
         }
         Ok(receipts)
     })
+}
+
+fn wal_poll_limit(configured: i64, pending_prefix_count: i64) -> i32 {
+    configured
+        .max(1)
+        .saturating_add(pending_prefix_count.max(0))
+        .min(i32::MAX as i64) as i32
 }
 
 fn set_receipts_status(
@@ -3116,6 +3142,14 @@ pub fn write_worker_changes_to_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_wal_poll_limit_extends_only_for_pending_prefix() {
+        assert_eq!(wal_poll_limit(100, 0), 100);
+        assert_eq!(wal_poll_limit(100, 100), 200);
+        assert_eq!(wal_poll_limit(1, -1), 1);
+        assert_eq!(wal_poll_limit(i64::MAX, i64::MAX), i32::MAX);
+    }
 
     #[test]
     fn test_receipt_transactions_preserve_commit_order_and_reject_partial_frames() {

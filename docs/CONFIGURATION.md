@@ -3181,8 +3181,9 @@ SELECT pg_reload_conf();
 | **Type** | `int4` |
 | **Default** | `10000` |
 
-Maximum number of decoded WAL messages peeked into the durable receipt table per
-source and scheduler cycle.
+Target number of decoded WAL messages peeked into the durable receipt table per
+source and scheduler cycle. A poll may exceed this target to finish a
+transaction prefix already persisted in the receipt table.
 
 ### pg_trickle.wal_max_lag_bytes
 

@@ -80,7 +80,8 @@ def main() -> int:
     # Run them without parallel E2E contention so scheduler convergence
     # failures reflect behavior rather than runner resource pressure.
     scheduler_isolated = {
-        "e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests", "e2e_scheduler_tests",
+        "e2e_dag_autorefresh_tests", "e2e_mixed_mode_dag_tests",
+        "e2e_mixed_scheduling_tests", "e2e_scheduler_tests",
     }
     isolated = [name for name in selected if name in scheduler_isolated]
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
