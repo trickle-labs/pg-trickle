@@ -304,6 +304,39 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     );
 }
 
+async fn wait_for_refresh_cycle_after(
+    db: &E2eDb,
+    pgt_name: &str,
+    initial: &str,
+    timeout: std::time::Duration,
+) -> String {
+    let start = std::time::Instant::now();
+    let mut last_nudge = start - std::time::Duration::from_secs(5);
+    loop {
+        if start.elapsed() > timeout {
+            panic!(
+                "Timed out waiting for scheduler cycle of '{pgt_name}' \
+                 (initial last_refresh_at = {initial})"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let current: String = db
+            .query_scalar(&format!(
+                "SELECT COALESCE(last_refresh_at::text, 'never') \
+                 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{pgt_name}'"
+            ))
+            .await;
+        if current != initial {
+            return current;
+        }
+        if last_nudge.elapsed() >= std::time::Duration::from_secs(5) {
+            // The launcher can retain a stale scan attempt after a scheduler exits.
+            db.nudge_launcher_rescan().await;
+            last_nudge = std::time::Instant::now();
+        }
+    }
+}
+
 // ── Test 3: 0-row DIFFERENTIAL must not bump data_timestamp ─────────────────
 
 /// Regression: A DIFFERENTIAL refresh that finds zero rows in the current
@@ -348,30 +381,13 @@ async fn test_zero_row_differential_preserves_data_timestamp() {
 
     // Wait for the first scheduler cycle (last_refresh_at will advance when
     // the scheduler runs, even if it finds no new rows — NoData path).
-    // Loaded CI runners can need a launcher retry and scheduler poll before
-    // the first cycle. Keep the progress assertion, but allow that bounded
-    // retry window before declaring a scheduler liveness failure.
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > std::time::Duration::from_secs(90) {
-            panic!(
-                "Timed out waiting for first scheduler cycle \
-                 (initial last_refresh_at = {})",
-                initial_last_refresh
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let lr: String = db
-            .query_scalar(
-                "SELECT COALESCE(last_refresh_at::text, 'never') \
-                 FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_name = 'ts_st'",
-            )
-            .await;
-        if lr != initial_last_refresh {
-            break;
-        }
-    }
+    let _ = wait_for_refresh_cycle_after(
+        &db,
+        "ts_st",
+        &initial_last_refresh,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
 
     // Record data_timestamp and last_refresh_at after the first scheduler cycle.
     let ts_after_first_cycle: String = db
@@ -389,27 +405,13 @@ async fn test_zero_row_differential_preserves_data_timestamp() {
         .await;
 
     // Wait for a SECOND scheduler cycle (no changes in source this time)
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > std::time::Duration::from_secs(30) {
-            panic!(
-                "Timed out waiting for second scheduler cycle \
-                 (lr_after_first_cycle = {})",
-                lr_after_first_cycle
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let lr: String = db
-            .query_scalar(
-                "SELECT COALESCE(last_refresh_at::text, 'never') \
-                 FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_name = 'ts_st'",
-            )
-            .await;
-        if lr != lr_after_first_cycle {
-            break;
-        }
-    }
+    let _ = wait_for_refresh_cycle_after(
+        &db,
+        "ts_st",
+        &lr_after_first_cycle,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
 
     // data_timestamp must NOT have advanced on the second (noop) cycle
     let ts_after_second_cycle: String = db
@@ -508,27 +510,13 @@ async fn test_no_spurious_cascade_after_noop_upstream_refresh() {
              WHERE pgt_name = 'noop_report'",
         )
         .await;
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > std::time::Duration::from_secs(30) {
-            panic!(
-                "Timed out waiting for 1st noop_report scheduler cycle \
-                 (lr_initial = {})",
-                lr_initial
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let lr: String = db
-            .query_scalar(
-                "SELECT COALESCE(last_refresh_at::text, 'never') \
-                 FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_name = 'noop_report'",
-            )
-            .await;
-        if lr != lr_initial {
-            break;
-        }
-    }
+    let _ = wait_for_refresh_cycle_after(
+        &db,
+        "noop_report",
+        &lr_initial,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
 
     // Record timestamps after first scheduler cycle (buffer is now clean)
     let report_ts_after_cycle1: String = db
@@ -546,27 +534,13 @@ async fn test_no_spurious_cascade_after_noop_upstream_refresh() {
         .await;
 
     // Wait for second scheduler cycle (no DML changes)
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > std::time::Duration::from_secs(30) {
-            panic!(
-                "Timed out waiting for 2nd noop_report scheduler cycle \
-                 (lr_after_cycle1 = {})",
-                lr_after_cycle1
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let lr: String = db
-            .query_scalar(
-                "SELECT COALESCE(last_refresh_at::text, 'never') \
-                 FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_name = 'noop_report'",
-            )
-            .await;
-        if lr != lr_after_cycle1 {
-            break;
-        }
-    }
+    let _ = wait_for_refresh_cycle_after(
+        &db,
+        "noop_report",
+        &lr_after_cycle1,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
 
     // data_timestamp must be stable — no spurious cascade
     let report_ts_after_cycle2: String = db

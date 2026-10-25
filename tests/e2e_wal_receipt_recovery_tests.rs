@@ -105,7 +105,7 @@ async fn commit_row(db: &E2eDb, source: &str, journal: &str, id: i32, value: &st
     .execute(&mut *tx)
     .await
     .expect("independent journal operation should commit");
-    let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+    let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::xid::text")
         .fetch_one(&mut *tx)
         .await
         .expect("record committed input transaction identity");
@@ -528,10 +528,10 @@ async fn test_wal_receipt_commit_order_preserves_late_old_lsn_transaction() {
     )
     .await;
     wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
-    assert_eq!(
-        cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
-        Some("WAL")
-    );
+    // Receipt acknowledgement may precede completion of the asynchronous
+    // TRIGGER-to-WAL handoff. Verify eventual WAL mode rather than sampling
+    // the transient state at the exact moment the data converges.
+    wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
     let rows: i64 = fixture
         .db
         .query_scalar(&format!("SELECT count(*) FROM {}", fixture.stream))
@@ -572,7 +572,7 @@ async fn test_wal_receipt_small_limits_preserve_complete_transactions() {
             .await
             .unwrap();
         }
-        let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::xid::text")
             .fetch_one(&mut *tx)
             .await
             .unwrap();
@@ -836,8 +836,7 @@ async fn run_trigger_fallback_case(phase: &str) {
         .await;
     let buffer = db.change_buffer_table(fixture.oid).await;
     let value = format!("fallback-{phase}-pending");
-    // Only rows from the pending transaction must be absent: older history
-    // can legitimately be retained for another consumer.
+    // Ignore older CDC rows retained for other consumers.
     let pending_start_lsn: String = db.query_scalar("SELECT pg_current_wal_lsn()::text").await;
     let (barrier, blocker_pid) = hold_wal_barrier(db, fixture.oid, phase).await;
     set_wal_phase(db, fixture.oid, phase, &value).await;

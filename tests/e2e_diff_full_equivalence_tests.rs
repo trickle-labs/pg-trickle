@@ -50,6 +50,142 @@ async fn assert_differential_mode(db: &E2eDb, st_name: &str) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// AGGREGATE FILTER
+// ═══════════════════════════════════════════════════════════════════════
+
+const AGG_FILTER_CONFIG: &[&str] = &[
+    "LOAD 'pg_trickle'",
+    "SET pg_trickle.cdc_mode = 'trigger'",
+    "SET pg_trickle.refresh_strategy = 'differential'",
+    "SET pg_trickle.differential_max_change_ratio = 0",
+];
+
+#[tokio::test]
+async fn test_diff_aggregate_filter_excluded_arguments_match_native() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE dfe_filter_args (id INT PRIMARY KEY, v INT, w INT, keep BOOLEAN)")
+        .await;
+    db.execute("INSERT INTO dfe_filter_args VALUES (1,0,0,FALSE),(2,2,2,TRUE),(3,0,0,NULL)")
+        .await;
+
+    let queries = [
+        (
+            "dfe_filter_count",
+            "SELECT count(100/v) FILTER (WHERE v<>0) n FROM dfe_filter_args",
+        ),
+        (
+            "dfe_filter_sum",
+            "SELECT sum((100/v)::numeric(12,2)) FILTER (WHERE v<>0) s FROM dfe_filter_args",
+        ),
+        (
+            "dfe_filter_aux",
+            "SELECT count(100/v) FILTER (WHERE keep) n, \
+            sum((100/v)::numeric(12,2)) FILTER (WHERE keep) s, \
+            avg((100/v)::numeric) FILTER (WHERE keep) a, \
+            var_pop((100/v)::numeric) FILTER (WHERE keep) p, \
+            regr_count(100/v,100/w) FILTER (WHERE keep) r, \
+            bool_and(100/v > 0) FILTER (WHERE keep) b FROM public.dfe_filter_args",
+        ),
+    ];
+    for (name, query) in queries {
+        db.try_execute_with_config(
+            AGG_FILTER_CONFIG,
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{name}', '{}', '1m', 'DIFFERENTIAL')",
+                query.replace('\'', "''")
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("create {name}: {error:?}; query: {query}"));
+        db.assert_st_matches_query(name, query).await;
+    }
+
+    for mutation in [
+        "DELETE FROM dfe_filter_args WHERE id=1",
+        "INSERT INTO dfe_filter_args VALUES (4,0,0,FALSE),(5,0,0,NULL)",
+        "UPDATE dfe_filter_args SET keep=FALSE WHERE id=3",
+        "INSERT INTO dfe_filter_args VALUES (6,4,4,TRUE),(7,NULL,NULL,TRUE)",
+        "UPDATE dfe_filter_args SET v=0,w=0,keep=NULL WHERE id=2",
+        "UPDATE dfe_filter_args SET v=2,w=2,keep=TRUE WHERE id=4",
+        "DELETE FROM dfe_filter_args WHERE id IN (4,6)",
+        "DELETE FROM dfe_filter_args",
+        "INSERT INTO dfe_filter_args VALUES (8,2,2,TRUE),(9,0,0,NULL)",
+    ] {
+        db.execute(mutation).await;
+        for (name, query) in queries {
+            db.try_execute_with_config(
+                AGG_FILTER_CONFIG,
+                &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+            )
+            .await
+            .expect("refresh filtered aggregate");
+            db.assert_st_matches_query(name, query).await;
+            assert_differential_mode(&db, name).await;
+            let ran_differential: bool = db
+                .query_scalar(&format!(
+                    "SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' \
+                    AND NOT h.was_full_fallback AND h.delta_row_count > 0 \
+                 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                 WHERE st.pgt_name = '{name}' ORDER BY h.refresh_id DESC LIMIT 1"
+                ))
+                .await;
+            assert!(
+                ran_differential,
+                "{name}: no nonempty differential refresh after {mutation}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_filter_included_invalid_arguments_raise_native_error() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE dfe_filter_error (id INT PRIMARY KEY, v INT, keep BOOLEAN)")
+        .await;
+    db.execute("INSERT INTO dfe_filter_error VALUES (1,2,TRUE)")
+        .await;
+    let aggregates = [
+        ("dfe_error_count", "count(100/v)", "1"),
+        ("dfe_error_sum", "sum((100/v)::numeric(12,2))", "50.00"),
+    ];
+    for (name, aggregate, _) in aggregates {
+        let query = format!("SELECT {aggregate} FILTER (WHERE keep) a FROM dfe_filter_error");
+        db.try_execute_with_config(
+            AGG_FILTER_CONFIG,
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{name}', '{}', '1m', 'DIFFERENTIAL')",
+                query.replace('\'', "''")
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("create {name}: {error:?}; query: {query}"));
+    }
+    db.execute("INSERT INTO dfe_filter_error VALUES (2,0,TRUE)")
+        .await;
+    for (name, aggregate, expected) in aggregates {
+        for sql in [
+            format!("SELECT {aggregate} FILTER (WHERE keep) FROM dfe_filter_error"),
+            format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+        ] {
+            let error = db
+                .try_execute_with_config(AGG_FILTER_CONFIG, &sql)
+                .await
+                .expect_err("included division by zero must fail");
+            assert_eq!(
+                error.as_database_error().and_then(|e| e.code()).as_deref(),
+                Some("22012"),
+                "{sql}: {error}"
+            );
+        }
+        let stored: String = db
+            .query_scalar(&format!("SELECT a::text FROM {name}"))
+            .await;
+        assert_eq!(stored, expected, "failed refresh must preserve stored data");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // INNER JOIN
 // ═══════════════════════════════════════════════════════════════════════
 

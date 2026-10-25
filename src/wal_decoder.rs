@@ -1069,9 +1069,12 @@ fn acknowledge_receipt_batch(
                     "WAL acknowledgement requires a complete transaction within the row-count bound".into(),
                 )
             })?;
+            // Order receipt LSNs, retaining decoder order within each LSN.
             let sql = format!(
                 "SELECT lsn::text, xid::text, data \
-                   FROM pg_logical_slot_get_changes('{}', NULL, {})",
+                   FROM pg_logical_slot_get_changes('{}', NULL, {}) \
+                        WITH ORDINALITY AS decoded \
+                  ORDER BY decoded.lsn, decoded.ordinality",
                 first.slot_name, max_changes
             );
             let actual = Spi::connect(|client| {
