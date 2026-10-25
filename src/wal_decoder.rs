@@ -1891,7 +1891,7 @@ pub fn check_and_complete_transition(
         ))
     })? {
         // Decoder has committed the exact handoff LSN — complete the transition.
-        complete_wal_transition(source_oid, pgt_id, change_schema)?;
+        complete_wal_transition(source_oid, pgt_id, change_schema, slot_name, &confirmed_lsn)?;
         return Ok(());
     }
 
@@ -1979,6 +1979,8 @@ fn complete_wal_transition(
     source_oid: pg_sys::Oid,
     _pgt_id: i64,
     change_schema: &str,
+    slot_name: &str,
+    confirmed_lsn: &str,
 ) -> Result<(), PgTrickleError> {
     let oid_u32 = source_oid.to_u32();
     // COR-003: Use the source OID as the advisory lock key.  A negative
@@ -2005,7 +2007,13 @@ fn complete_wal_transition(
     // After this point the scheduler knows the source is in WAL mode.  Any
     // concurrent DML that fires before DROP TRIGGER takes effect will write
     // through both trigger and WAL (dedup at refresh) — this is the safe side.
-    if let Err(e) = StDependency::update_cdc_mode_for_source(source_oid, CdcMode::Wal, None, None) {
+    // Keep the slot's proven checkpoint; an unset WAL position stalls refresh.
+    if let Err(e) = StDependency::update_cdc_mode_for_source(
+        source_oid,
+        CdcMode::Wal,
+        Some(slot_name),
+        Some(confirmed_lsn),
+    ) {
         let _ = Spi::run_with_args("SELECT pg_advisory_unlock($1)", &[lock_key.into()]);
         return Err(e);
     }
