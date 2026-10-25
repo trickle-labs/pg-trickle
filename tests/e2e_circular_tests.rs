@@ -586,8 +586,6 @@ async fn test_circular_drop_member_clears_scc_id() {
          '1m', 'DIFFERENTIAL', false)",
     )
     .await;
-
-    // ALTER A to reference B
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_drop_a', \
          query => $$SELECT id, val FROM cyc_drop_src \

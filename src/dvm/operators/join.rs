@@ -1102,20 +1102,23 @@ fn collect_equijoin_keys(
     match expr {
         Expr::BinaryOp { op, left, right } if op == "=" => {
             // Found an equality — determine which side belongs to which table.
-            let left_stripped = left.strip_qualifier().to_sql();
-            let right_stripped = right.strip_qualifier().to_sql();
-
             let left_belongs_to = classify_column_side(left, left_alias, right_alias);
             let right_belongs_to = classify_column_side(right, left_alias, right_alias);
 
             match (left_belongs_to, right_belongs_to) {
                 (ColumnSide::Left, ColumnSide::Right) => {
                     // Normal order: left_of_= is left-table, right_of_= is right-table
-                    keys.push((left_stripped, right_stripped));
+                    keys.push((
+                        quote_ident(&left.strip_qualifier().output_name()),
+                        quote_ident(&right.strip_qualifier().output_name()),
+                    ));
                 }
                 (ColumnSide::Right, ColumnSide::Left) => {
                     // Swapped: left_of_= is right-table, right_of_= is left-table
-                    keys.push((right_stripped, left_stripped));
+                    keys.push((
+                        quote_ident(&right.strip_qualifier().output_name()),
+                        quote_ident(&left.strip_qualifier().output_name()),
+                    ));
                 }
                 _ => {
                     // Both same side or unknown — skip this key pair
@@ -1371,7 +1374,7 @@ mod tests {
         assert_sql_contains(&sql, "EXCEPT ALL");
         assert_sql_contains(&sql, "__pgt_cte_join_endpoint_new_");
         assert_sql_contains(&sql, "__pgt_cte_join_endpoint_old_");
-        assert_sql_contains(&sql, "l.id IN (SELECT id FROM");
+        assert_sql_contains(&sql, "l.\"id\" IN (SELECT \"id\" FROM");
         assert!(
             !sql.contains("Part 1:"),
             "unsafe predicate used algebraic delta: {sql}"
@@ -1450,6 +1453,26 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_equijoin_keys_quotes_identifiers() {
+        let cond = eq_cond("l", "Case Key", "r", "Case Key");
+        let keys = extract_equijoin_keys(&cond, "l", "r");
+
+        assert_eq!(
+            keys,
+            vec![(quote_ident("Case Key"), quote_ident("Case Key"))]
+        );
+        let sql = build_semijoin_subquery(
+            "\"public\".\"right_table\"",
+            &keys,
+            "__pgt_delta",
+            JoinSide::Right,
+        );
+        assert!(
+            sql.contains("WHERE \"Case Key\" IN (SELECT DISTINCT \"Case Key\" FROM __pgt_delta)")
+        );
+    }
+
+    #[test]
     fn test_extract_equijoin_keys_and_condition() {
         let cond = binop(
             "AND",
@@ -1519,6 +1542,18 @@ mod tests {
         let exprs = build_base_table_key_exprs(&node, "r");
         assert!(exprs.iter().any(|e| e.contains("r.\"id\"")));
         assert!(exprs.iter().any(|e| e.contains("r.\"name\"")));
+    }
+
+    #[test]
+    fn test_build_base_table_key_exprs_serializes_unsupported_types() {
+        let mut node = scan_not_null(1, "orders", "public", "o", &["id", "name"]);
+        if let OpTree::Scan { columns, .. } = &mut node {
+            columns[1].type_oid = 19;
+        }
+        assert_eq!(
+            build_base_table_key_exprs(&node, "r"),
+            vec!["row_to_json(ROW(r.\"id\", r.\"name\"))::text"]
+        );
     }
 
     #[test]
@@ -1655,8 +1690,8 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
         let outer_cte_marker = format!("{} AS", result.cte_name);
         let outer_sql = sql.split(&outer_cte_marker).last().unwrap_or("");
-        assert_sql_contains(outer_sql, "WHERE id IN (SELECT DISTINCT a__id FROM");
-        assert_sql_contains(outer_sql, "WHERE a__id IN (SELECT DISTINCT id FROM");
+        assert_sql_contains(outer_sql, "WHERE \"id\" IN (SELECT DISTINCT \"a__id\" FROM");
+        assert_sql_contains(outer_sql, "WHERE \"a__id\" IN (SELECT DISTINCT \"id\" FROM");
         assert!(sql.lines().any(|line| {
             line.starts_with("__pgt_cte_join_") && line.ends_with(" AS NOT MATERIALIZED (")
         }));

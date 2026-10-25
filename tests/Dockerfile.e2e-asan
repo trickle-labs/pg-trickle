@@ -7,7 +7,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PGRX_HOME=/root/.pgrx \
     PATH=/usr/local/pgsql/bin:/root/.cargo/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/pgsql/lib \
-    CARGO_BUILD_JOBS=2 \
     ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,7 +25,7 @@ RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
     LDFLAGS='' ./configure --prefix=/usr/local/pgsql \
       --enable-cassert --with-icu --with-llvm=no --with-openssl && \
     printf '%s\n' 'CFLAGS += -fsanitize=address' 'LDFLAGS += -fsanitize=address' >> src/Makefile.global && \
-    make -j2 && \
+    make -j"$(nproc)" && \
     sed -i '/^CFLAGS += -fsanitize=address$/d' src/Makefile.global && \
     sed -i '/^LDFLAGS += -fsanitize=address$/d' src/Makefile.global && \
     make -C src/port clean all && \
@@ -43,8 +42,7 @@ RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
     rustup component add rust-src --toolchain "${RUST_NIGHTLY}" && \
     cargo install cargo-pgrx --version 0.18.0 --locked && \
     /usr/local/pgsql/bin/pg_config --version && \
-    mkdir -p "$PGRX_HOME" && \
-    printf '[configs]\npg18 = "/usr/local/pgsql/bin/pg_config"\n' > "$PGRX_HOME/config.toml"
+    cargo pgrx init --pg18 /usr/local/pgsql/bin/pg_config
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./

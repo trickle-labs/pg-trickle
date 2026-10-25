@@ -972,8 +972,10 @@ async fn test_upgrade_quick_health_reports_broken_immediate_cascades() {
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
     let to_version =
         std::env::var("PGS_UPGRADE_TO").unwrap_or_else(|_| CURRENT_PG_TRICKLE_VERSION.into());
-    assert_eq!(from_version, "0.108.0");
-    assert_eq!(to_version, CURRENT_PG_TRICKLE_VERSION);
+    if from_version != "0.108.0" || to_version != CURRENT_PG_TRICKLE_VERSION {
+        eprintln!("SKIP: requires the 0.108.0 -> {CURRENT_PG_TRICKLE_VERSION} upgrade image");
+        return;
+    }
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -989,12 +991,22 @@ async fn test_upgrade_quick_health_reports_broken_immediate_cascades() {
         .await;
     db.execute("INSERT INTO upgrade_qh_src VALUES (1, 10)")
         .await;
-    db.create_st(
-        "upgrade_qh_imm",
-        "SELECT id, val FROM upgrade_qh_src",
-        "1m",
-        "IMMEDIATE",
-    )
+    // Seed the old catalog without calling the current binary's V3-only API.
+    db.execute_seq(&[
+        "CREATE TABLE upgrade_qh_imm (__pgt_row_id BYTEA PRIMARY KEY, id INT, val INT)",
+        "INSERT INTO upgrade_qh_imm \
+         SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(id)), id, val FROM upgrade_qh_src",
+        "INSERT INTO pgtrickle.pgt_stream_tables \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, original_query, \
+          refresh_mode, requested_refresh_mode, status, is_populated, defining_search_path, \
+          row_identity_version, row_probe_version) \
+         VALUES ('public.upgrade_qh_imm'::regclass, 'upgrade_qh_imm', 'public', \
+                 'SELECT id, val FROM upgrade_qh_src', 'SELECT id, val FROM upgrade_qh_src', \
+                 'IMMEDIATE', 'IMMEDIATE', 'ACTIVE', true, 'public, pg_catalog', 2, 1)",
+        "INSERT INTO pgtrickle.pgt_dependencies (pgt_id, source_relid, source_type, columns_used) \
+         SELECT pgt_id, 'public.upgrade_qh_src'::regclass, 'TABLE', ARRAY['id', 'val'] \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'upgrade_qh_imm'",
+    ])
     .await;
 
     db.execute(&format!(
@@ -1028,6 +1040,14 @@ async fn test_upgrade_quick_health_reports_broken_immediate_cascades() {
         privilege_retained,
         "CREATE OR REPLACE VIEW must retain grants"
     );
+    let missing_before_repair: i64 = db
+        .query_scalar("SELECT broken_immediate_tables FROM pgtrickle.quick_health")
+        .await;
+    assert_eq!(missing_before_repair, 1);
+    db.execute("SELECT pgtrickle.repair_stream_table('upgrade_qh_imm')")
+        .await;
+    db.assert_st_matches_query("upgrade_qh_imm", "SELECT id, val FROM upgrade_qh_src")
+        .await;
     let healthy_count: i64 = db
         .query_scalar("SELECT broken_immediate_tables FROM pgtrickle.quick_health")
         .await;

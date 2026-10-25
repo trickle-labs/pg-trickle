@@ -29,6 +29,11 @@ async fn test_refresh_picks_up_inserts() {
     .await;
     assert_eq!(db.count("public.rf_ins_st").await, 2);
 
+    // Keep the manual refresh from being skipped by an in-flight scheduler refresh.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_ins_st'])")
+        .await;
+
     // Insert new rows
     db.execute("INSERT INTO rf_ins VALUES (3, 'c'), (4, 'd')")
         .await;

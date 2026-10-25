@@ -95,6 +95,88 @@ macro_rules! cast_node {
     }};
 }
 
+fn join_using_columns(join: &pg_sys::JoinExpr) -> Result<Vec<String>, PgTrickleError> {
+    pg_list::<pg_sys::Node>(join.usingClause)
+        .iter_ptr()
+        .map(|node| {
+            let value = cast_node!(node, T_String, pg_sys::String).ok_or_else(|| {
+                PgTrickleError::QueryParseError("JOIN USING contains a non-column name".into())
+            })?;
+            Ok(pg_cstr_to_str(value.sval)?.to_string())
+        })
+        .collect()
+}
+
+fn using_column_expr(tree: &OpTree, column: &str) -> Expr {
+    match tree {
+        OpTree::FullJoin { left, right, .. }
+            if left.output_columns().iter().any(|name| name == column)
+                && right.output_columns().iter().any(|name| name == column) =>
+        {
+            Expr::FuncCall {
+                func_name: "COALESCE".into(),
+                args: vec![
+                    using_column_expr(left, column),
+                    using_column_expr(right, column),
+                ],
+            }
+        }
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. } => {
+            let source = if left.output_columns().iter().any(|name| name == column) {
+                left
+            } else {
+                right
+            };
+            using_column_expr(source, column)
+        }
+        OpTree::Filter { child, .. } => using_column_expr(child, column),
+        OpTree::LateralFunction { child, .. } | OpTree::LateralSubquery { child, .. }
+            if child.output_columns().iter().any(|name| name == column) =>
+        {
+            using_column_expr(child, column)
+        }
+        _ => Expr::ColumnRef {
+            table_alias: Some(tree.alias().to_string()),
+            column_name: column.to_string(),
+        },
+    }
+}
+
+fn deparse_join_sql(
+    join: &pg_sys::JoinExpr,
+    left: &str,
+    right: &str,
+) -> Result<String, PgTrickleError> {
+    let join_type = match join.jointype {
+        pg_sys::JoinType::JOIN_LEFT => "LEFT JOIN",
+        pg_sys::JoinType::JOIN_FULL => "FULL JOIN",
+        pg_sys::JoinType::JOIN_RIGHT => "RIGHT JOIN",
+        pg_sys::JoinType::JOIN_INNER
+            if join.quals.is_null() && join.usingClause.is_null() && !join.isNatural =>
+        {
+            "CROSS JOIN"
+        }
+        _ => "JOIN",
+    };
+    let clause = if !join.usingClause.is_null() {
+        let columns = join_using_columns(join)?
+            .iter()
+            .map(|column| crate::sql_builder::ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" USING ({columns})")
+    } else if !join.quals.is_null() {
+        // SAFETY: quals belongs to this live raw-parser JoinExpr.
+        format!(" ON {}", unsafe { node_to_expr(join.quals)? }.to_sql())
+    } else {
+        String::new()
+    };
+    let natural = if join.isNatural { "NATURAL " } else { "" };
+    Ok(format!("{left} {natural}{join_type} {right}{clause}"))
+}
+
 /// Parse a SQL string into a list of `RawStmt` nodes.
 ///
 /// Must be called within a PostgreSQL backend with a valid memory context.
@@ -196,42 +278,6 @@ pub use sublinks::*;
 pub use types::*;
 pub use validation::*;
 pub use window_plan::*;
-
-fn join_using_columns(join: &pg_sys::JoinExpr) -> Result<Vec<String>, PgTrickleError> {
-    pg_list::<pg_sys::Node>(join.usingClause)
-        .iter_ptr()
-        .map(|node| {
-            let name = cast_node!(node, T_String, pg_sys::String).ok_or_else(|| {
-                PgTrickleError::QueryParseError("Invalid USING column name".into())
-            })?;
-            Ok(pg_cstr_to_str(name.sval)?.to_string())
-        })
-        .collect()
-}
-
-fn join_using_column(tree: &OpTree, column: &str) -> Result<Expr, PgTrickleError> {
-    // shortcut: nested merged USING keys require explicit ON until merged-column provenance is represented.
-    match tree {
-        OpTree::InnerJoin { left, right, .. }
-        | OpTree::LeftJoin { left, right, .. }
-        | OpTree::FullJoin { left, right, .. } => {
-            match (
-                left.output_columns().iter().any(|name| name == column),
-                right.output_columns().iter().any(|name| name == column),
-            ) {
-                (true, false) => join_using_column(left, column),
-                (false, true) => join_using_column(right, column),
-                _ => Err(PgTrickleError::UnsupportedOperator(format!(
-                    "USING column '{column}' must resolve to one input in a nested join; use an explicit JOIN ... ON condition"
-                ))),
-            }
-        }
-        _ => Ok(Expr::ColumnRef {
-            table_alias: Some(tree.alias().to_string()),
-            column_name: column.to_string(),
-        }),
-    }
-}
 
 // ── SAF-2: Safe façades for common unsafe FFI operations ──────────────────
 //
@@ -488,6 +534,26 @@ fn query_has_recursive_cte_inner(query: &str) -> Result<bool, PgTrickleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_using_column_expr_resolves_nested_outer_join_keys() {
+        use crate::dvm::operators::test_helpers::*;
+        let left = scan(1, "left_source", "public", "l", &["id"]);
+        let right = scan(2, "right_source", "public", "r", &["id", "right_only"]);
+        let inner = inner_join(lit("true"), left.clone(), right.clone());
+        let outer = left_join(lit("true"), left.clone(), right.clone());
+        let full = full_join(lit("true"), left, right);
+        assert_eq!(using_column_expr(&inner, "id").to_sql(), "\"l\".\"id\"");
+        assert_eq!(using_column_expr(&outer, "id").to_sql(), "\"l\".\"id\"");
+        assert_eq!(
+            using_column_expr(&full, "id").to_sql(),
+            "COALESCE(\"l\".\"id\", \"r\".\"id\")"
+        );
+        assert_eq!(
+            using_column_expr(&full, "right_only").to_sql(),
+            "\"r\".\"right_only\""
+        );
+    }
 
     // ── Helper constructors ─────────────────────────────────────────
 
@@ -4084,23 +4150,6 @@ mod tests {
             pk_columns: vec![],
             alias: alias.to_string(),
         }
-    }
-
-    #[test]
-    fn test_using_column_resolves_nested_input_and_rejects_ambiguous_input() {
-        let mut tree = OpTree::InnerJoin {
-            condition: Expr::Literal("TRUE".into()),
-            left: Box::new(make_scan(1, "cases", "c", &["case_key"])),
-            right: Box::new(make_scan(2, "bindings", "b", &["binding_id"])),
-        };
-        assert_eq!(
-            join_using_column(&tree, "binding_id").unwrap().to_sql(),
-            "\"b\".\"binding_id\""
-        );
-        if let OpTree::InnerJoin { left, .. } = &mut tree {
-            **left = make_scan(1, "cases", "c", &["binding_id"]);
-        }
-        assert!(join_using_column(&tree, "binding_id").is_err());
     }
 
     #[test]
