@@ -2858,7 +2858,8 @@ pub fn get_slot_positions_at_bound(
     for oid in source_oids {
         // WAL appears before its first decoder checkpoint, so do not treat it as trigger/immediate here.
         let wal_position = Spi::get_one_with_args::<String>(
-            "SELECT CASE WHEN cdc_mode = 'WAL' THEN COALESCE(decoder_confirmed_lsn, '0/0'::pg_lsn)::text \
+            "SELECT CASE WHEN cdc_mode = 'WAL' \
+                      THEN LEAST(COALESCE(decoder_confirmed_lsn, '0/0'::pg_lsn), $1::pg_lsn)::text \
                     WHEN cdc_mode = 'TRANSITIONING' \
                       THEN LEAST(COALESCE(decoder_confirmed_lsn, '0/0'::pg_lsn), \
                                 COALESCE(cutover_lsn, $1::pg_lsn))::text \
