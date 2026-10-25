@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config python3-dev zlib1g-dev ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Build-time PostgreSQL helpers are instrumented too; keep leak scans for runtime only.
+# Strip ASan only for install-time helpers; the runtime binaries are linked above.
 RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
     curl -fsSLo /tmp/postgresql.tar.bz2 \
       "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" && \
@@ -26,10 +26,12 @@ RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
     LDFLAGS='' ./configure --prefix=/usr/local/pgsql \
       --enable-cassert --with-icu --with-llvm=no --with-openssl && \
     printf '%s\n' 'CFLAGS += -fsanitize=address' 'LDFLAGS += -fsanitize=address' >> src/Makefile.global && \
-    make -j2 && make install && \
-    sed -i '/^CFLAGS += -fsanitize=address$/d' src/Makefile.global && \
+    make -j2 && \
+    sed -i '/^CFLAGS += -fsanitize=address$/d; /^LDFLAGS += -fsanitize=address$/d' src/Makefile.global && \
     make -C src/port clean all && \
     make -C src/bin/pg_config clean all install && \
+    make -C src/timezone clean all && \
+    make install && \
     rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
 
 RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
