@@ -222,6 +222,9 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Count non-NULL composite values containing NULL fields correctly during
+  differential refresh, including filtered counts (#1203). Existing affected
+  stream tables need a FULL refresh to correct previously stored undercounts.
 - Compare WAL acknowledgements in the same order as persisted receipts,
   avoiding unnecessary trigger fallback and full reinitialization when
   concurrent transactions emit changes out of LSN order.

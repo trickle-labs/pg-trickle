@@ -539,6 +539,11 @@ async fn settle_auto_invariants(
     // refresh timestamp transition. A scheduled NO_DATA cycle, or a refresh
     // completed before our first read, need not advance last_refresh_at.
     // A deadline violation still reports the exact public row differences.
+    // Under contention the launcher can retain a stale per-database scan
+    // attempt after a scheduler worker exits. Periodically invalidate its
+    // scan cache so the automatic scheduler can resume without a manual
+    // stream-table refresh masking this regression.
+    let mut last_nudge = std::time::Instant::now();
     loop {
         if check_auto_invariants(db).await {
             return;
@@ -546,6 +551,10 @@ async fn settle_auto_invariants(
         if std::time::Instant::now() >= deadline {
             assert_st_query_invariants(db, &AUTO_INVARIANTS, seed, cycle, step).await;
             panic!("auto-refresh invariants did not converge by deadline");
+        }
+        if last_nudge.elapsed() >= Duration::from_secs(5) {
+            db.nudge_launcher_rescan().await;
+            last_nudge = std::time::Instant::now();
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }

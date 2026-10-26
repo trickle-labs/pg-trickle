@@ -1978,12 +1978,9 @@ fn direct_agg_delta_exprs(agg: &AggExpr, _has_value_only: bool) -> (String, Stri
                 .map(|e| format!("c.{}", quote_ident(&e.output_name())))
                 .unwrap_or_else(|| "1".to_string());
             (
-                format!(
-                    "SUM(CASE WHEN c.action = 'I' AND {col} IS NOT NULL THEN 1 ELSE 0 END)::bigint"
-                ),
-                format!(
-                    "SUM(CASE WHEN c.action = 'D' AND {col} IS NOT NULL THEN 1 ELSE 0 END)::bigint"
-                ),
+                // COUNT checks the datum null flag; IS NOT NULL tests composite fields.
+                format!("COUNT({col}) FILTER (WHERE c.action = 'I')"),
+                format!("COUNT({col}) FILTER (WHERE c.action = 'D')"),
             )
         }
         AggFunc::Sum => {
@@ -2753,15 +2750,14 @@ WHERE m.__pgt_meta_action IN ('I', 'D')
     })
 }
 
-/// Generate SUM expressions for INSERT/DELETE tracking in the delta CTE.
+/// Generate aggregate expressions for INSERT/DELETE tracking in the delta CTE.
 ///
 /// Aggregate arguments are stripped of table qualifiers because the child
 /// CTE (e.g. join delta) outputs unqualified column names.
 ///
-/// When a FILTER clause is present, its condition is added as an additional
-/// guard in the outer CASE WHEN, so excluded rows never evaluate arguments.
-/// Argument-dependent NULL checks must stay inside that CASE, since SQL AND
-/// does not guarantee evaluation order.
+/// Keep argument expressions inside the selected CASE branch because SQL AND
+/// does not guarantee evaluation order. COUNT then checks the datum's null flag,
+/// preserving composite values whose fields contain NULL.
 pub fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String) {
     if agg.is_distinct {
         return (
@@ -2791,12 +2787,8 @@ pub fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String)
                 .map(|e| resolve_expr_for_child(e, child_cols))
                 .unwrap_or("*".into());
             (
-                format!(
-                    "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {col} IS NOT NULL THEN 1 ELSE 0 END ELSE 0 END)"
-                ),
-                format!(
-                    "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {col} IS NOT NULL THEN 1 ELSE 0 END ELSE 0 END)"
-                ),
+                format!("COUNT(CASE WHEN __pgt_action = 'I'{filter_and} THEN {col} ELSE NULL END)"),
+                format!("COUNT(CASE WHEN __pgt_action = 'D'{filter_and} THEN {col} ELSE NULL END)"),
             )
         }
         AggFunc::Sum => {
@@ -3811,8 +3803,30 @@ mod tests {
         let agg = count_col("name", "name_count");
         let child_cols = vec!["name".to_string()];
         let (ins, del) = agg_delta_exprs(&agg, &child_cols);
-        assert!(ins.contains("IS NOT NULL"));
-        assert!(del.contains("IS NOT NULL"));
+        assert_eq!(
+            ins,
+            "COUNT(CASE WHEN __pgt_action = 'I' THEN name ELSE NULL END)"
+        );
+        assert_eq!(
+            del,
+            "COUNT(CASE WHEN __pgt_action = 'D' THEN name ELSE NULL END)"
+        );
+    }
+
+    #[test]
+    fn test_agg_delta_exprs_count_expression_with_filter() {
+        let mut agg = count_col("payload", "cnt");
+        agg.argument = Some(Expr::Raw("ROW(a, b)".to_string()));
+        agg.filter = Some(binop("=", colref("active"), lit("true")));
+        let (ins, del) = agg_delta_exprs(&agg, &[]);
+        assert_eq!(
+            ins,
+            "COUNT(CASE WHEN __pgt_action = 'I' AND (active = true) THEN ROW(a, b) ELSE NULL END)"
+        );
+        assert_eq!(
+            del,
+            "COUNT(CASE WHEN __pgt_action = 'D' AND (active = true) THEN ROW(a, b) ELSE NULL END)"
+        );
     }
 
     #[test]
@@ -4360,8 +4374,8 @@ mod tests {
             for (ins, del) in exprs {
                 for (action, sql) in [("I", ins), ("D", del)] {
                     assert!(
-                        sql.starts_with(&format!(
-                            "SUM(CASE WHEN __pgt_action = '{action}' AND keep THEN "
+                        sql.contains(&format!(
+                            "CASE WHEN __pgt_action = '{action}' AND keep THEN "
                         )),
                         "FILTER must guard every argument-dependent expression: {sql}"
                     );
@@ -6809,14 +6823,8 @@ mod tests {
             statistical_support: None,
         };
         let (ins, del) = direct_agg_delta_exprs(&agg, true);
-        assert!(
-            !ins.contains("'V'"),
-            "COUNT(col) insert should not include 'V': {ins}"
-        );
-        assert!(
-            !del.contains("'V'"),
-            "COUNT(col) delete should not include 'V': {del}"
-        );
+        assert_eq!(ins, "COUNT(c.\"id\") FILTER (WHERE c.action = 'I')");
+        assert_eq!(del, "COUNT(c.\"id\") FILTER (WHERE c.action = 'D')");
     }
 
     #[test]
