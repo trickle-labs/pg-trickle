@@ -547,7 +547,9 @@ async fn test_graph_using_composite_keys_preserve_differential_rows() {
                 .await
                 .expect_err("nested outer USING must fail closed");
             assert!(
-                error.to_string().contains("USING column 'id' must resolve to one input"),
+                error
+                    .to_string()
+                    .contains("USING column 'id' must resolve to one input"),
                 "join={join_type}: unexpected rejection: {error}"
             );
             continue;
