@@ -503,7 +503,9 @@ async fn test_concurrent_refresh_same_st_no_corruption() {
     let _ = r1.expect("task1 panicked");
     let _ = r2.expect("task2 panicked");
 
-    // After both complete, row count must be exactly correct — no duplicates
+    // A concurrent invocation may be skipped by the advisory lock. Complete
+    // a stabilizing refresh before asserting the exact result multiset.
+    db.refresh_st_until_converged("cc_lock_st").await;
     db.assert_st_matches_query("cc_lock_st", "SELECT id, val FROM cc_lock_src")
         .await;
 }
