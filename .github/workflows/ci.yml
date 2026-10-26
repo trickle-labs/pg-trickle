@@ -974,7 +974,8 @@ jobs:
             if [ "$first" = true ]; then first=false; else items="$items,"; fi
             items="$items{\"from\":\"$from\",\"to\":\"$to\"}"
           done
-          items="$items]"
+          # Exercise the health-view migration with the current binary/catalog.
+          items="$items,{\"from\":\"0.108.0\",\"to\":\"$current_version\"}]"
           echo "matrix={\"include\":$items}" >> "$GITHUB_OUTPUT"
           echo "Discovered upgrade pairs: $items"
 
@@ -1770,9 +1771,11 @@ jobs:
     name: Unsafe boundary ASan qualification
     needs: release-qualification-contract
     if: >
-      github.event_name == 'pull_request' && !github.event.pull_request.draft &&
-      needs.release-qualification-contract.outputs.runtime == 'true' &&
-      needs.release-qualification-contract.outputs.unsafe_boundary_changed == 'true'
+      !cancelled() &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+        needs.release-qualification-contract.outputs.runtime == 'true' &&
+        needs.release-qualification-contract.outputs.unsafe_boundary_changed == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -1783,6 +1786,8 @@ jobs:
 
       - name: Build and run the required instrumented slice
         run: |
+          # Bookworm's ASan runtime can hang at startup with 32-bit mmap randomization.
+          sudo sysctl -w vm.mmap_rnd_bits=28
           docker build --platform=linux/amd64 \
             -f tests/Dockerfile.e2e-asan \
             -t pg_trickle_e2e_asan:contract .

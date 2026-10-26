@@ -582,6 +582,7 @@ async fn test_scheduler_logs_skip_when_source_gated() {
     db.wait_for_setting("pg_trickle.load_shed_threshold", "0")
         .await;
     db.wait_for_setting("pg_trickle.auto_backoff", "off").await;
+    db.nudge_launcher_rescan().await;
 
     let sched_ok = db.wait_for_scheduler(Duration::from_secs(90)).await;
     assert!(sched_ok, "pg_trickle scheduler must be running");

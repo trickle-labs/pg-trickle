@@ -550,10 +550,18 @@ async fn test_auto_refresh_updates_catalog_metadata() {
     // Insert data and wait for auto-refresh
     db.execute("INSERT INTO meta_src VALUES (2)").await;
 
+    // The scheduler can refresh between the INSERT and a timestamp-based
+    // wait's first read. Wait for the observable post-insert row instead:
+    // it proves the committed source change reached the stream table.
     let refreshed = db
-        .wait_for_auto_refresh("meta_st", Duration::from_secs(60))
+        .wait_for_condition(
+            "post-insert row reaches meta_st",
+            "SELECT EXISTS (SELECT 1 FROM meta_st WHERE id = 2)",
+            Duration::from_secs(60),
+            Duration::from_millis(250),
+        )
         .await;
-    assert!(refreshed, "Scheduler should auto-refresh");
+    assert!(refreshed, "Scheduler should apply the inserted row");
 
     // Verify timestamps advanced
     let new_refresh_at: Option<String> = db

@@ -105,7 +105,7 @@ async fn commit_row(db: &E2eDb, source: &str, journal: &str, id: i32, value: &st
     .execute(&mut *tx)
     .await
     .expect("independent journal operation should commit");
-    let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+    let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::xid::text")
         .fetch_one(&mut *tx)
         .await
         .expect("record committed input transaction identity");
@@ -679,10 +679,10 @@ async fn test_wal_receipt_commit_order_preserves_late_old_lsn_transaction() {
     )
     .await;
     wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
-    assert_eq!(
-        cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
-        Some("WAL")
-    );
+    // Receipt acknowledgement may precede completion of the asynchronous
+    // TRIGGER-to-WAL handoff. Verify eventual WAL mode rather than sampling
+    // the transient state at the exact moment the data converges.
+    wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
     let rows: i64 = fixture
         .db
         .query_scalar(&format!("SELECT count(*) FROM {}", fixture.stream))
@@ -723,7 +723,7 @@ async fn test_wal_receipt_small_limits_preserve_complete_transactions() {
             .await
             .unwrap();
         }
-        let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::xid::text")
             .fetch_one(&mut *tx)
             .await
             .unwrap();
@@ -850,6 +850,40 @@ async fn test_wal_recovery_after_apply_before_ack_does_not_reapply() {
 #[tokio::test]
 async fn test_wal_recovery_after_slot_advance_finishes_acknowledgement() {
     run_interruption_case("after_slot_advance", "APPLIED", false).await;
+}
+
+#[tokio::test]
+async fn test_wal_receipts_acknowledge_transaction_larger_than_poll_limit() {
+    let fixture = setup_wal_fixture("large_transaction").await;
+    let db = &fixture.db;
+    db.alter_system_set_and_wait("pg_trickle.wal_max_changes_per_poll", "100", "100")
+        .await;
+    db.execute(&format!(
+        "WITH inserted AS (\
+             INSERT INTO public.{} (id, value) \
+             SELECT id, 'large-transaction-' || id FROM generate_series(2, 251) id \
+             RETURNING id, value\
+         ) INSERT INTO public.{} SELECT id, value FROM inserted",
+        fixture.source, fixture.journal
+    ))
+    .await;
+    assert!(
+        db.wait_for_condition(
+            "complete oversized WAL transaction acknowledged",
+            &format!(
+                "SELECT count(*) = 250 FROM pgtrickle.pgt_wal_receipts \
+                 WHERE source_relid = {} AND source_change \
+                   AND status = 'ACKNOWLEDGED' AND data LIKE '%large-transaction-%'",
+                fixture.oid
+            ),
+            WAIT,
+            Duration::from_millis(50),
+        )
+        .await,
+        "every source change must be acknowledged despite the smaller poll limit"
+    );
+    assert_eq!(cdc_mode(db, &fixture.source).await.as_deref(), Some("WAL"));
+    wait_for_exact(&db.pool, &fixture.stream, &fixture.journal).await;
 }
 
 #[tokio::test]

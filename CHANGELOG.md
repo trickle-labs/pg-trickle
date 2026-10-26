@@ -222,6 +222,21 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Count non-NULL composite values containing NULL fields correctly during
+  differential refresh, including filtered counts (#1203). Existing affected
+  stream tables need a FULL refresh to correct previously stored undercounts.
+- Compare WAL acknowledgements in the same order as persisted receipts,
+  avoiding unnecessary trigger fallback and full reinitialization when
+  concurrent transactions emit changes out of LSN order.
+- Keep aggregate `FILTER` predicates ahead of argument evaluation during
+  differential refresh and auxiliary-state initialization (#1204). After
+  upgrading, rebuild the auxiliary state of existing filtered
+  AVG/statistical/covariance stream tables whose initialization ignored their
+  filters.
+- Recompute affected old and new inner-join endpoint bags for non-equality
+  predicates, preventing errors from transient cross-snapshot row pairs while
+  preserving exact duplicate counts and the algebraic path for simple
+  equijoins (#1211).
 - Preserve explicit NULL values in WAL-captured updates while retaining the old
   row for differential refresh (#1172).
 - Prevent manual DIFFERENTIAL refreshes from skipping trigger-captured changes
@@ -229,9 +244,17 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 - Add versioned V3 row identities whose `bpchar` canonicalization matches PostgreSQL equality; V2 bytes remain unchanged. V2-backed stream tables require protected FULL reinitialization after upgrade.
 - Require an explicit rebuild of dependent stream tables when WAL capture falls back to triggers, preserving committed changes still pending in WAL or unapplied receipts (#1159).
 - Reduce differential-refresh work by pruning empty graph CDC stages, filtering nested join snapshots to affected keys, and avoiding reconciliation scratch tables when stored results already match the defining query.
+- Avoid JIT compilation during small graph-delta applies when planner hints are enabled; restore the caller's JIT setting before returning.
+- Reuse the owner-resolved defining-query tree for DISTINCT bounds, apply strategy and join reconciliation within each differential refresh.
+- Validate CDC control columns using the already resolved buffer relation OID, avoiding repeated catalog joins while preserving schema and durability checks.
+- Reuse graph-join reconciliation as the exact apply delta for eligible large immutable joins, and retain differential maintenance for reconciled pointwise inner joins. Preserve duplicate LATERAL inputs, aggregate count state, and foreign-key UPDATE behavior.
+- Analyze bounded graph stages and materialized deltas instead of unrelated persistent change buffers.
 - Reconstruct nested joins from keyless stream-table changes using the pre-change snapshot, preserving exact downstream deletions during graph refresh.
 - Preserve empty exact output batches when explicit differential DML writes no rows.
 - Preserve duplicate multiplicity in keyless snapshots and scope delta lookups by source relation when UNION branches reuse aliases.
+- Keep differential SUM and AVG correct when changes include `Infinity`, `-Infinity`, or `NaN`, rescanning only affected groups (#1209).
+- Keep differential STDDEV/VAR correct after non-finite values are removed, rescanning affected groups and rebuilding their sum and sum-of-squares state (#1206).
+- Preserve numeric scale changes in CDC masks so scale-dependent consumers stay current in row and statement trigger modes (#1210).
 
 Future changes will be listed here.
 

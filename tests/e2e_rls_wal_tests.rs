@@ -34,18 +34,12 @@ async fn wait_for_wal_mode(db: &E2eDb, source: &str) {
 #[tokio::test]
 async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    // Exercise WAL differential execution without adaptive FULL selection.
     db.alter_system_set_and_wait(
         "pg_trickle.refresh_strategy",
         "'differential'",
         "differential",
     )
-    .await;
-    let database: String = db.query_scalar("SELECT current_database()").await;
-    // Refresh jobs use fresh background-worker connections; pin their GUC default here.
-    db.execute(&format!(
-        "ALTER DATABASE \"{}\" SET pg_trickle.refresh_strategy = 'differential'",
-        database.replace('"', "\"\"")
-    ))
     .await;
 
     db.execute(
@@ -96,12 +90,15 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.assert_st_matches_query("rls_wal_st", query).await;
 
     wait_for_wal_mode(&db, "rls_wal_src").await;
-    // Drain cutover work before establishing the baseline for differential mutations.
+    // Drain cutover receipts before checking the differential refreshes caused by DML.
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['rls_wal_st'])")
         .await;
     db.refresh_st_with_retry("rls_wal_st").await;
     // Keep refreshes paused until all source mutations are committed so one
     // differential pass exercises the complete batch.
+    let baseline: i64 = db
+        .query_scalar("SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history")
+        .await;
     db.execute("INSERT INTO rls_wal_src VALUES (3, 30, 'c')")
         .await;
     db.execute("UPDATE rls_wal_src SET val = 'b2' WHERE id = 2")
@@ -130,32 +127,39 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     );
     db.assert_st_matches_query("rls_wal_st", query).await;
 
-    // A WAL cutover may legitimately cause a protected FULL reinitialization
-    // when the source schema fingerprint changes. Validate the WAL capture
-    // mode and exact results without requiring a particular refresh action.
-    wait_for_wal_mode(&db, "rls_wal_src").await;
-    db.execute("INSERT INTO rls_wal_src VALUES (4, 40, 'd')")
+    // Idle scheduler ticks may overwrite effective_refresh_mode with NO_DATA.
+    let ran_differential: bool = db
+        .query_scalar(&format!(
+            "SELECT COALESCE(bool_or(\
+                action = 'DIFFERENTIAL' AND NOT was_full_fallback \
+                AND merge_strategy_used IS DISTINCT FROM 'FULL' AND delta_row_count > 0\
+             ), false) FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                            WHERE pgt_name = 'rls_wal_st') \
+               AND refresh_id > {baseline} AND status = 'COMPLETED' AND action <> 'NO_DATA'"
+        ))
         .await;
-    let converged_after_cutover = db
-        .wait_for_condition(
-            "RLS WAL replay after cutover",
-            "SELECT EXISTS (SELECT 1 FROM rls_wal_st WHERE id = 4 AND val = 'd')",
-            Duration::from_secs(90),
-            Duration::from_millis(200),
-        )
-        .await;
-    assert!(
-        converged_after_cutover,
-        "RLS WAL should replay committed rows after cutover"
-    );
-    db.assert_st_matches_query("rls_wal_st", query).await;
-    let needs_reinit: bool = db
+    let history: String = db
         .query_scalar(
-            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_wal_st'",
+            "SELECT jsonb_agg(jsonb_build_object(\
+                'action', action, 'reason', refresh_reason, \
+                'fallback', was_full_fallback, 'delta', delta_row_count, \
+                'status', status, 'error', error_message\
+             ) ORDER BY refresh_id)::text \
+             FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                            WHERE pgt_name = 'rls_wal_st')",
         )
         .await;
     assert!(
-        !needs_reinit,
-        "RLS WAL stream should not need reinitialization"
+        ran_differential,
+        "expected nonempty differential WAL refreshes: {history}"
     );
+    let cdc_mode: String = db
+        .query_scalar(
+            "SELECT cdc_mode FROM pgtrickle.pgt_dependencies \
+             WHERE source_relid = 'rls_wal_src'::regclass AND source_type = 'TABLE'",
+        )
+        .await;
+    assert_eq!(cdc_mode, "WAL", "CDC must stay on WAL: {history}");
 }
