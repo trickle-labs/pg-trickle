@@ -2451,6 +2451,12 @@ async fn test_slot_retirement_keeps_null_named_reference_across_source_oids() {
         .await;
     let replacement_oid = i64::from(fixture.db.table_oid(&fixture.source).await);
     assert_ne!(replacement_oid, fixture.oid);
+    // Exercise the legacy catalog shape explicitly; a dropped source normally
+    // retains its original slot_name until retirement is committed.
+    fixture.db.execute(&format!(
+        "UPDATE pgtrickle.pgt_dependencies SET slot_name=NULL WHERE source_relid={}::oid",
+        fixture.oid
+    )).await;
     assert!(fixture.db.query_scalar::<bool>(&format!("SELECT cdc_mode='WAL' AND slot_name IS NULL AND source_stable_name IS NOT NULL FROM pgtrickle.pgt_dependencies WHERE source_relid={}::oid",fixture.oid)).await);
     // Qualify the reassigned-intent shape observed on e0008f1 independently of new admission.
     fixture.db.execute(&format!("UPDATE pgtrickle.pgt_wal_slot_retirements SET source_relid={replacement_oid}::oid WHERE slot_name='{}'",fixture.slot)).await;
