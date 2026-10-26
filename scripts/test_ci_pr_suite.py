@@ -59,12 +59,16 @@ class AllocationTests(unittest.TestCase):
                             )):
                         selected.extend(command[i + 1] for i, arg in enumerate(command) if arg == "--test")
                     self.assertEqual(command[command.index("--retries") + 1], "0")
-                self.assertEqual(len(run.call_args_list), 5 if shard == 1 else 5)
+                self.assertEqual(len(run.call_args_list), 5)
                 if shard == 1:
-                    command = run.call_args_list[1].args[0]
-                    self.assertEqual(command[command.index("--test") + 1], "e2e_dag_autorefresh_tests")
-                    self.assertEqual(command[command.index("--test-threads") + 1], "1")
-                    self.assertEqual(command[command.index("--retries") + 1], "0")
+                    isolated_commands = [call.args[0] for call in run.call_args_list[1:3]]
+                    self.assertCountEqual(
+                        [command[command.index("--test") + 1] for command in isolated_commands],
+                        ["e2e_bootstrap_gating_tests", "e2e_dag_autorefresh_tests"],
+                    )
+                    for command in isolated_commands:
+                        self.assertEqual(command[command.index("--test-threads") + 1], "1")
+                        self.assertEqual(command[command.index("--retries") + 1], "0")
                 if shard == 2:
                     for call in run.call_args_list[1:]:
                         command = call.args[0]
@@ -266,11 +270,14 @@ class AllocationTests(unittest.TestCase):
                 run.side_effect = [SimpleNamespace(returncode=x) for x in (0, 0, 0, 0, status)]
                 self.assertEqual(ci_pr_suite.main(), status)
                 self.assertEqual(len(run.call_args_list), 5)
-                main_command, dag_command, gating_command, atomicity_command, serial_command = (
+                main_command, first_isolated, second_isolated, atomicity_command, serial_command = (
                     call.args[0] for call in run.call_args_list
                 )
-                self.assertIn("e2e_dag_autorefresh_tests", dag_command)
-                self.assertIn("e2e_bootstrap_gating_tests", gating_command)
+                self.assertCountEqual(
+                    [first_isolated[first_isolated.index("--test") + 1],
+                     second_isolated[second_isolated.index("--test") + 1]],
+                    ["e2e_bootstrap_gating_tests", "e2e_dag_autorefresh_tests"],
+                )
                 for case in cases:
                     self.assertIn(
                         "not (binary(=e2e_wal_receipt_recovery_tests) & "
