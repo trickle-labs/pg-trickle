@@ -2451,20 +2451,7 @@ async fn test_slot_retirement_keeps_null_named_reference_across_source_oids() {
         .await;
     let replacement_oid = i64::from(fixture.db.table_oid(&fixture.source).await);
     assert_ne!(replacement_oid, fixture.oid);
-    // Retirement metadata is updated by the scheduler. Observe the stable
-    // NULL-named reference before introducing a cross-OID retirement intent.
-    assert!(
-        fixture.db.wait_for_condition(
-            "retired source retains its NULL-named WAL reference",
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_dependencies WHERE source_relid={}::oid AND cdc_mode='WAL' AND slot_name IS NULL AND source_stable_name IS NOT NULL)",
-                fixture.oid
-            ),
-            WAIT,
-            Duration::from_millis(50),
-        ).await,
-        "retired source did not retain its NULL-named WAL reference"
-    );
+    assert!(fixture.db.query_scalar::<bool>(&format!("SELECT cdc_mode='WAL' AND slot_name IS NULL AND source_stable_name IS NOT NULL FROM pgtrickle.pgt_dependencies WHERE source_relid={}::oid",fixture.oid)).await);
     // Qualify the reassigned-intent shape observed on e0008f1 independently of new admission.
     fixture.db.execute(&format!("UPDATE pgtrickle.pgt_wal_slot_retirements SET source_relid={replacement_oid}::oid WHERE slot_name='{}'",fixture.slot)).await;
     let phase = "slot_retirement_kept";
