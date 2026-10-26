@@ -778,8 +778,7 @@ async fn test_scheduler_resumes_after_watermark_alignment() {
     // complete its refresh before we enter the wait on a fast runner.
     let baseline_timestamp: Option<String> = db
         .query_scalar_opt(
-            "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables \\
-             WHERE pgt_name = 'res_report'",
+            "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'res_report'",
         )
         .await;
     db.execute("INSERT INTO res_a VALUES (99, 'a99')").await;
