@@ -416,6 +416,132 @@ async fn test_refresh_resolves_private_dependencies_for_stream_owner() {
     db.execute(&format!("DROP ROLE {runtime}, {runner}")).await;
 }
 
+/// #1250: A FULL refresh must snapshot and propagate changes to downstream
+/// stream tables even when the upstream storage owner cannot read private catalogs.
+#[tokio::test]
+async fn test_full_refresh_non_superuser_owner_with_downstream() {
+    let db = E2eDb::new().await.with_extension().await;
+    let suffix = std::process::id();
+    let owner = format!("r1250_owner_{suffix}");
+    let schema = format!("r1250_{suffix}");
+    let source = format!("{schema}.ev");
+    let upstream = format!("{schema}.st1");
+    let downstream = format!("{schema}.st2");
+
+    db.execute(&format!("CREATE ROLE {owner} LOGIN")).await;
+    db.execute(&format!("GRANT pgtrickle_admin, pgtrickle_operator TO {owner}"))
+        .await;
+    db.execute(&format!("CREATE SCHEMA {schema} AUTHORIZATION {owner}"))
+        .await;
+
+    db.try_execute_with_role(
+        &format!("SET ROLE {owner}"),
+        &format!(
+            "CREATE TABLE {source} (id BIGINT PRIMARY KEY, org TEXT NOT NULL, usr TEXT NOT NULL)"
+        ),
+        "RESET ROLE",
+    )
+    .await
+    .expect("stream owner creates its source table");
+
+    db.try_execute_with_role(
+        &format!("SET ROLE {owner}"),
+        &format!(
+            "SELECT pgtrickle.create_stream_table(\
+                 name => '{upstream}', \
+                 query => 'SELECT org, usr, count(*) AS n FROM {source} GROUP BY org, usr', \
+                 schedule => '1h', refresh_mode => 'FULL')"
+        ),
+        "RESET ROLE",
+    )
+    .await
+    .expect("owner creates FULL upstream stream table");
+
+    db.try_execute_with_role(
+        &format!("SET ROLE {owner}"),
+        &format!(
+            "SELECT pgtrickle.create_stream_table(\
+                 name => '{downstream}', \
+                 query => 'SELECT org, sum(n)::bigint AS n, count(*) AS users \
+                           FROM {upstream} GROUP BY org', \
+                 schedule => 'calculated', refresh_mode => 'DIFFERENTIAL')"
+        ),
+        "RESET ROLE",
+    )
+    .await
+    .expect("owner creates downstream consumer");
+
+    for private_catalog in ["pgt_dependencies", "pgt_stream_tables"] {
+        let can_select: bool = db
+            .query_scalar(&format!(
+                "SELECT has_table_privilege('{owner}', \
+                 'pgtrickle.{private_catalog}', 'SELECT')"
+            ))
+            .await;
+        assert!(
+            !can_select,
+            "the stream owner must not need SELECT on {private_catalog}"
+        );
+    }
+
+    db.try_execute_with_role(
+        &format!("SET ROLE {owner}"),
+        &format!(
+            "INSERT INTO {source} VALUES \
+             (1, 'a', 'u1'), (2, 'a', 'u2')"
+        ),
+        "RESET ROLE",
+    )
+    .await
+    .expect("owner inserts initial source rows");
+
+    for name in [&upstream, &downstream] {
+        db.try_execute_with_role(
+            &format!("SET ROLE {owner}"),
+            &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+            "RESET ROLE",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("owner refresh of {name} failed: {e}"));
+    }
+
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT org, n, users FROM {downstream} ORDER BY org"
+    )))
+    .fetch_all(&db.pool)
+    .await
+    .expect("read downstream aggregate after first FULL refresh");
+    assert_eq!(rows, vec![("a".to_string(), 2, 2)]);
+
+    // Exercise a second FULL replacement: a changed existing aggregate row
+    // must produce a D/I pair for the differential downstream consumer.
+    db.try_execute_with_role(
+        &format!("SET ROLE {owner}"),
+        &format!("INSERT INTO {source} VALUES (3, 'a', 'u1')"),
+        "RESET ROLE",
+    )
+    .await
+    .expect("owner inserts a second row for an existing group");
+
+    for name in [&upstream, &downstream] {
+        db.try_execute_with_role(
+            &format!("SET ROLE {owner}"),
+            &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+            "RESET ROLE",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("second owner refresh of {name} failed: {e}"));
+    }
+
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT org, n, users FROM {downstream} ORDER BY org"
+    )))
+    .fetch_all(&db.pool)
+    .await
+    .expect("read downstream aggregate after second FULL refresh");
+    assert_eq!(rows, vec![("a".to_string(), 3, 2)]);
+}
+
 /// #903: The elevated creation API must not grant its owner privileges to the
 /// defining query; PostgreSQL should return a normal permission error instead.
 #[tokio::test]
