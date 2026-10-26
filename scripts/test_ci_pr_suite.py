@@ -59,7 +59,7 @@ class AllocationTests(unittest.TestCase):
                             )):
                         selected.extend(command[i + 1] for i, arg in enumerate(command) if arg == "--test")
                     self.assertEqual(command[command.index("--retries") + 1], "0")
-                self.assertEqual(len(run.call_args_list), 4 if shard == 1 else 5)
+                self.assertEqual(len(run.call_args_list), 5 if shard == 1 else 6)
                 if shard == 1:
                     command = run.call_args_list[1].args[0]
                     self.assertEqual(command[command.index("--test") + 1], "e2e_dag_autorefresh_tests")
@@ -75,6 +75,7 @@ class AllocationTests(unittest.TestCase):
                         [
                             "e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests",
                             "e2e_scheduler_tests", "e2e_v107_wal_transition_tests",
+                            "e2e_watermark_gating_tests",
                         ],
                     )
                 shards.append(selected)
@@ -229,7 +230,7 @@ class AllocationTests(unittest.TestCase):
                 self.assertEqual(command[command.index("--retries") + 1], "0")
 
     def test_isolated_scheduler_failure_propagates_without_retries(self):
-        for failed_phase in (1, 2, 3, 4):
+        for failed_phase in (1, 2, 3, 4, 5):
             with self.subTest(failed_phase=failed_phase), patch(
                 "sys.argv", ["ci_pr_suite.py", "--shard", "2"]
             ), patch("ci_pr_suite.subprocess.run") as run:
@@ -248,11 +249,11 @@ class AllocationTests(unittest.TestCase):
             with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
                 "ci_pr_suite.subprocess.run"
             ) as run:
-                run.side_effect = [SimpleNamespace(returncode=value) for value in (0, 0, 0, 0, 0, 0, status, 0)]
+                run.side_effect = [SimpleNamespace(returncode=value) for value in (0, 0, 0, 0, 0, 0, 0, 0, status, 0)]
                 self.assertEqual(ci_pr_suite.main(), status)
                 self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
-                self.assertEqual(len(run.call_args_list), 8 if status == 0 else 7)
-                self.assertEqual(run.call_args_list[6].args[0], [
+                self.assertEqual(len(run.call_args_list), 10 if status == 0 else 9)
+                self.assertEqual(run.call_args_list[8].args[0], [
                     "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
                     "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
                 ])
@@ -263,13 +264,14 @@ class AllocationTests(unittest.TestCase):
             with self.subTest(status=status), patch(
                 "sys.argv", ["ci_pr_suite.py", "--shard", "1"]
             ), patch("ci_pr_suite.subprocess.run") as run:
-                run.side_effect = [SimpleNamespace(returncode=x) for x in (0, 0, 0, status)]
+                run.side_effect = [SimpleNamespace(returncode=x) for x in (0, 0, 0, 0, status)]
                 self.assertEqual(ci_pr_suite.main(), status)
-                self.assertEqual(len(run.call_args_list), 4)
-                main_command, dag_command, atomicity_command, serial_command = (
+                self.assertEqual(len(run.call_args_list), 5)
+                main_command, dag_command, rls_command, atomicity_command, serial_command = (
                     call.args[0] for call in run.call_args_list
                 )
                 self.assertIn("e2e_dag_autorefresh_tests", dag_command)
+                self.assertIn("e2e_rls_wal_tests", rls_command)
                 for case in cases:
                     self.assertIn(
                         "not (binary(=e2e_wal_receipt_recovery_tests) & "
