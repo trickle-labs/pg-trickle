@@ -1218,8 +1218,7 @@ fn build_rescan_cte(
                 a.is_distinct
                     || a.function.is_group_rescan()
                     || matches!(a.function, AggFunc::Min | AggFunc::Max)
-                    || (config.include_special_aggs
-                        && needs_special_value_rescan(a))
+                    || (config.include_special_aggs && needs_special_value_rescan(a))
                 // P2-2: SUM over a FULL JOIN child no longer needs a rescan CTE.
                 // The __pgt_aux_nonnull_* auxiliary column provides algebraic
                 // NULL-transition correction without rescanning source data.
