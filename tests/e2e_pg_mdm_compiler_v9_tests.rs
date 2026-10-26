@@ -538,9 +538,23 @@ async fn test_graph_using_composite_keys_preserve_differential_rows() {
         .expect("create composite USING sources");
         let query = format!("SELECT l.id, l.tenant_key, l.value, r.label, r.id AS right_id, r.tenant_key AS right_tenant_key
             FROM using_left l {join_type} JOIN using_right r USING (id, tenant_key) JOIN using_dim d USING (id, tenant_key)");
+        // Nested USING on a NULL-extending join does not have a single
+        // provable input key. Do not silently choose one side: these queries
+        // must use explicit ON predicates until merged-key provenance is
+        // represented for outer joins.
+        if join_type != "INNER" {
+            let error = create_stream(&db, "using_graph", query.clone())
+                .await
+                .expect_err("nested outer USING must fail closed");
+            assert!(
+                error.to_string().contains("USING column 'id' must resolve to one input"),
+                "join={join_type}: unexpected rejection: {error}"
+            );
+            continue;
+        }
         create_stream(&db, "using_graph", query.clone())
             .await
-            .expect("create USING graph");
+            .expect("create proven INNER USING graph");
         let root = "public.using_graph";
         let digest = reference_clients::graph_digest(&db.pool, root).await;
         strict_refresh_result(&db.pool, root, &digest, "ALLOW").await;
