@@ -1212,18 +1212,16 @@ fn acknowledge_receipt_batch(
                 )
             })?;
             // Order receipt LSNs, retaining decoder order within each LSN.
-            // Parameterize slot identity while retaining decoder order for equal LSNs.
-            let sql = "SELECT lsn::text, xid::text, data \\
-                   FROM pg_logical_slot_get_changes($1::name, NULL, $2::integer) \\
-                        WITH ORDINALITY AS decoded \\
-                  ORDER BY decoded.lsn, decoded.ordinality";
+            let sql = format!(
+                "SELECT lsn::text, xid::text, data \
+                   FROM pg_logical_slot_get_changes('{}', NULL, {}) \
+                        WITH ORDINALITY AS decoded \
+                  ORDER BY decoded.lsn, decoded.ordinality",
+                first.slot_name, max_changes
+            );
             let actual = Spi::connect(|client| {
                 let rows = client
-                    .select(
-                        sql,
-                        None,
-                        &[first.slot_name.as_str().into(), max_changes.into()],
-                    )
+                    .select(&sql, None, &[])
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 let mut values = Vec::new();
                 for row in rows {
