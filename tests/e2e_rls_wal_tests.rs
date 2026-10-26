@@ -57,6 +57,7 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.execute("CREATE POLICY tenant_only ON rls_wal_src USING (tenant_id = 10)")
         .await;
 
+    let database: String = db.query_scalar("SELECT current_database()").await;
     let wal_owner = format!("rls_wal_owner_{}", database.replace('-', "_"));
     db.execute(&format!("CREATE ROLE {wal_owner} LOGIN BYPASSRLS"))
         .await;
