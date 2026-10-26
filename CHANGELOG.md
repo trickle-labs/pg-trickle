@@ -222,6 +222,9 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Count non-NULL composite values containing NULL fields correctly during
+  differential refresh, including filtered counts (#1203). Existing affected
+  stream tables need a FULL refresh to correct previously stored undercounts.
 - Compare WAL acknowledgements in the same order as persisted receipts,
   avoiding unnecessary trigger fallback and full reinitialization when
   concurrent transactions emit changes out of LSN order.
@@ -248,6 +251,7 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 - Preserve empty exact output batches when explicit differential DML writes no rows.
 - Preserve duplicate multiplicity in keyless snapshots and scope delta lookups by source relation when UNION branches reuse aliases.
 - Keep differential SUM and AVG correct when changes include `Infinity`, `-Infinity`, or `NaN`, rescanning only affected groups (#1209).
+- Keep differential STDDEV/VAR correct after non-finite values are removed, rescanning affected groups and rebuilding their sum and sum-of-squares state (#1206).
 - Preserve numeric scale changes in CDC masks so scale-dependent consumers stay current in row and statement trigger modes (#1210).
 
 Future changes will be listed here.

@@ -633,6 +633,7 @@ impl E2eDb {
     /// container. This helper therefore resets server config, creates a fresh
     /// per-test database, and holds a process-local guard for the test's
     /// lifetime so parallel tests in the same binary cannot interfere.
+    /// Load-aware deferral is disabled so polling cannot suppress scheduled work.
     pub async fn new_on_postgres_db() -> Self {
         let shared_scheduler_test_guard = SHARED_POSTGRES_DB_LOCK.clone().lock_owned().await;
         let shared = shared_container().await;
@@ -656,8 +657,6 @@ impl E2eDb {
             _shared_scheduler_test_guard: Some(shared_scheduler_test_guard),
             _container: ContainerLease::Shared { _shared: shared },
         };
-        // Tests of scheduled progress must not be deferred by host load.
-        // The per-test server configuration is reset for the next fixture.
         db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
             .await;
         db
