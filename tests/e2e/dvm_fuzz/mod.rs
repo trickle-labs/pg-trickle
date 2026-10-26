@@ -11,6 +11,7 @@ pub mod coverage;
 pub mod metamorphic;
 pub mod mutation;
 pub mod query;
+pub mod semantic;
 
 pub const SCENARIO_FORMAT_VERSION: u32 = 1;
 
@@ -27,6 +28,8 @@ pub struct Scenario {
     pub execution: ExecutionSettings,
     pub expected_capability: ExpectedCapability,
     pub features: FeatureVector,
+    #[serde(default)]
+    pub preserve_sql_boundaries: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +65,8 @@ pub struct Mutation {
 pub struct ExecutionSettings {
     pub schedule: String,
     pub requested_refresh_mode: String,
+    #[serde(default)]
+    pub require_differential_history: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,19 +254,24 @@ async fn execute_traced(
     mutation: Option<usize>,
 ) -> Result<(), ReplayFailure> {
     let phase = phase.into();
-    db.try_execute_with_config(&["SET pg_trickle.dvm_decision_trace = on"], sql)
-        .await
-        .map_err(|e| {
-            failure(
-                scenario,
-                "I-05",
-                "ProductFailure",
-                phase,
-                cycle,
-                mutation,
-                format!("{e}\nSQL: {sql}"),
-            )
-        })
+    let mut config = vec!["SET pg_trickle.dvm_decision_trace = on"];
+    if scenario.execution.require_differential_history {
+        config.extend([
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+        ]);
+    }
+    db.try_execute_with_config(&config, sql).await.map_err(|e| {
+        failure(
+            scenario,
+            "I-05",
+            "ProductFailure",
+            phase,
+            cycle,
+            mutation,
+            format!("{e}\nSQL: {sql}"),
+        )
+    })
 }
 
 async fn compare(
@@ -372,8 +382,16 @@ async fn replay_inner(db: &E2eDb, scenario: &Scenario) -> Result<(), ReplayFailu
     compare(db, scenario, "initial exact comparison", None).await?;
 
     for (cycle_index, cycle) in scenario.cycles.iter().enumerate() {
+        let previous_refresh: i64 = if scenario.execution.require_differential_history {
+            db.query_scalar(
+                "SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history",
+            )
+            .await
+        } else {
+            0
+        };
         for (mutation_index, mutation) in cycle.mutations.iter().enumerate() {
-            let result = sqlx::query(sqlx::AssertSqlSafe(mutation.sql.clone()))
+            let result = sqlx::raw_sql(sqlx::AssertSqlSafe(mutation.sql.clone()))
                 .execute(&db.pool)
                 .await
                 .map_err(|e| {
@@ -432,6 +450,29 @@ async fn replay_inner(db: &E2eDb, scenario: &Scenario) -> Result<(), ReplayFailu
                 None,
                 product_failure.reason,
             ));
+        }
+        if scenario.execution.require_differential_history {
+            let witnessed: bool = db
+                .query_scalar(&format!(
+                    "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s ON s.pgt_id = h.pgt_id \
+                 WHERE s.pgt_schema || '.' || s.pgt_name = '{}' \
+                 AND h.refresh_id > {previous_refresh} AND h.status = 'COMPLETED' \
+                 AND h.action = 'DIFFERENTIAL' AND NOT h.was_full_fallback)",
+                    scenario.query.stream_table
+                ))
+                .await;
+            if !witnessed {
+                return Err(failure(
+                    scenario,
+                    "I-04",
+                    "SilentFallback",
+                    format!("{} changed-data route", cycle.name),
+                    Some(cycle_index),
+                    None,
+                    "no fresh completed differential history without fallback",
+                ));
+            }
         }
         compare(
             db,
@@ -495,6 +536,12 @@ pub fn render_replay_sql(scenario: &Scenario) -> String {
     }
     for statement in &scenario.initial_data {
         let _ = writeln!(sql, "{statement};");
+    }
+    if scenario.execution.require_differential_history {
+        let _ = writeln!(
+            sql,
+            "SET pg_trickle.refresh_strategy = 'differential';\nSET pg_trickle.differential_max_change_ratio = 0;"
+        );
     }
     let _ = writeln!(
         sql,

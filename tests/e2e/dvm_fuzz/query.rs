@@ -117,7 +117,7 @@ impl AggregateKind {
             Self::Count => Ok((ScalarType::BigInt, false)),
             Self::Sum => match input.map(|column| column.data_type) {
                 Some(ScalarType::Int) => Ok((ScalarType::BigInt, true)),
-                Some(ScalarType::BigInt) => Ok((ScalarType::Numeric, true)),
+                Some(ScalarType::BigInt | ScalarType::Numeric) => Ok((ScalarType::Numeric, true)),
                 Some(other) => Err(format!("SUM does not accept {}", other.sql())),
                 None => Err("SUM requires an input column".to_string()),
             },
@@ -141,7 +141,7 @@ impl AggregateKind {
 
     fn sql(self, input: Option<&str>) -> String {
         match self {
-            Self::Count => "COUNT(*)".to_string(),
+            Self::Count => format!("COUNT({})", input.unwrap_or("*")),
             Self::StringAgg => format!(
                 "STRING_AGG({}, ',' ORDER BY {})",
                 input.unwrap_or("''"),
@@ -636,5 +636,15 @@ mod tests {
         };
         assert!(join.schema().is_err());
         assert!(join.render_sql().is_err());
+    }
+
+    #[test]
+    fn count_distinguishes_star_from_nullable_argument() {
+        assert_eq!(AggregateKind::Count.sql(None), "COUNT(*)");
+        assert_eq!(AggregateKind::Count.sql(Some("value")), "COUNT(value)");
+        assert_eq!(
+            AggregateKind::Sum.output_type(Some(&Column::new("n", ScalarType::Numeric, true))),
+            Ok((ScalarType::Numeric, true))
+        );
     }
 }
