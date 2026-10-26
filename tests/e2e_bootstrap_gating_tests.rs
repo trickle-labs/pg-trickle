@@ -651,12 +651,18 @@ async fn test_scheduler_logs_skip_when_source_gated() {
         "scheduler should write a SKIPPED/SKIP record to pgt_refresh_history when source is gated"
     );
 
-    // After ungating the source, the scheduler should resume normal refreshes.
+    // Check the materialized result, not a timestamp sampled after the ungate:
+    // a fast scheduler can already have refreshed before the wait starts.
     db.execute("SELECT pgtrickle.ungate_source('sched_gate_src')")
         .await;
 
     let resumed = db
-        .wait_for_auto_refresh("sched_gate_st", Duration::from_secs(60))
+        .wait_for_condition(
+            "sched_gate_st contains the previously gated row",
+            "SELECT EXISTS (SELECT 1 FROM public.sched_gate_st WHERE id = 3 AND val = 'world')",
+            Duration::from_secs(60),
+            Duration::from_millis(200),
+        )
         .await;
     assert!(
         resumed,
