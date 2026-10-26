@@ -784,11 +784,7 @@ async fn test_scheduler_resumes_after_watermark_alignment() {
     db.execute("INSERT INTO res_a VALUES (99, 'a99')").await;
 
     let refreshed = db
-        .wait_for_auto_refresh_since(
-            "res_report",
-            baseline_timestamp,
-            Duration::from_secs(60),
-        )
+        .wait_for_auto_refresh_since("res_report", baseline_timestamp, Duration::from_secs(60))
         .await;
     assert!(refreshed, "initial auto-refresh should complete");
 
