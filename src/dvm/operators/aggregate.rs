@@ -175,7 +175,7 @@ fn build_group_filter(
 fn special_aggregate_delta_filter(aggregates: &[AggExpr]) -> Option<String> {
     let filters: Vec<String> = aggregates
         .iter()
-        .filter(|agg| matches!(agg.function, AggFunc::Sum | AggFunc::Avg) && !agg.is_distinct)
+        .filter(|agg| needs_special_value_rescan(agg))
         .map(|agg| {
             format!(
                 "COALESCE(__pgt_d2.{}, 0) > 0",
@@ -184,6 +184,12 @@ fn special_aggregate_delta_filter(aggregates: &[AggExpr]) -> Option<String> {
         })
         .collect();
     (!filters.is_empty()).then(|| filters.join(" OR "))
+}
+
+fn needs_special_value_rescan(agg: &AggExpr) -> bool {
+    !agg.is_distinct
+        && (matches!(agg.function, AggFunc::Sum | AggFunc::Avg)
+            || agg.function.needs_sum_of_squares())
 }
 
 fn internal_group_columns(group_output: &[String]) -> Vec<String> {
@@ -1213,8 +1219,7 @@ fn build_rescan_cte(
                     || a.function.is_group_rescan()
                     || matches!(a.function, AggFunc::Min | AggFunc::Max)
                     || (config.include_special_aggs
-                        && matches!(a.function, AggFunc::Sum | AggFunc::Avg)
-                        && !a.is_distinct)
+                        && needs_special_value_rescan(a))
                 // P2-2: SUM over a FULL JOIN child no longer needs a rescan CTE.
                 // The __pgt_aux_nonnull_* auxiliary column provides algebraic
                 // NULL-transition correction without rescanning source data.
@@ -1273,6 +1278,14 @@ fn build_rescan_cte(
                 let aux_alias = quote_ident(&format!("__pgt_aux_sum_{}", agg.alias));
                 lateral_selects.push(format!("{} AS {aux_alias}", agg_sum_rescan_sql(agg)));
                 rescan_selects.push(format!("__pgt_sr.{aux_alias} AS {aux_alias}"));
+            }
+            if agg.function.needs_sum_of_squares() && !agg.is_distinct {
+                let aux_alias = quote_ident(&format!("__pgt_aux_sum_{}", agg.alias));
+                lateral_selects.push(format!("{} AS {aux_alias}", agg_sum_rescan_sql(agg)));
+                rescan_selects.push(format!("__pgt_sr.{aux_alias} AS {aux_alias}"));
+                let aux_sum2_alias = quote_ident(&format!("__pgt_aux_sum2_{}", agg.alias));
+                lateral_selects.push(format!("{} AS {aux_sum2_alias}", agg_sum2_rescan_sql(agg)));
+                rescan_selects.push(format!("__pgt_sr.{aux_sum2_alias} AS {aux_sum2_alias}"));
             }
         }
         let group_selects = group_output
@@ -1597,6 +1610,24 @@ fn agg_sum_rescan_sql(agg: &AggExpr) -> String {
         .map(|expr| format!(" FILTER (WHERE {})", expr.to_sql()))
         .unwrap_or_default();
     format!("SUM({argument}){filter}")
+}
+
+fn agg_sum2_rescan_sql(agg: &AggExpr) -> String {
+    let argument = agg
+        .argument
+        .as_ref()
+        .map(Expr::to_sql)
+        .unwrap_or_else(|| "1".to_string());
+    let cast_type = agg
+        .statistical_accumulator_type()
+        .map(|ty| ty.sql.as_str())
+        .unwrap_or("numeric");
+    let filter = agg
+        .filter
+        .as_ref()
+        .map(|expr| format!(" FILTER (WHERE {})", expr.to_sql()))
+        .unwrap_or_default();
+    format!("COALESCE(SUM(({argument})::{cast_type} * ({argument})::{cast_type}){filter}, 0)")
 }
 
 /// Check if a Scan → Aggregate tree qualifies for the P5 direct bypass.
@@ -1928,7 +1959,7 @@ fn generate_direct_agg_delta(
             quote_ident(&format!("__del_{}", agg.alias)),
         ));
 
-        if matches!(agg.function, AggFunc::Sum | AggFunc::Avg) && !agg.is_distinct {
+        if needs_special_value_rescan(agg) {
             let argument = case_rewrites
                 .get(&agg.alias)
                 .cloned()
@@ -2187,7 +2218,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 }
             }
 
-            if matches!(agg.function, AggFunc::Sum | AggFunc::Avg) && !agg.is_distinct {
+            if needs_special_value_rescan(agg) {
                 let argument = agg
                     .argument
                     .as_ref()
@@ -2335,9 +2366,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     };
     let rescan_config = RescanConfig {
         force_all_aggs: use_having_rescan,
-        include_special_aggs: aggregates
-            .iter()
-            .any(|agg| matches!(agg.function, AggFunc::Sum | AggFunc::Avg) && !agg.is_distinct),
+        include_special_aggs: aggregates.iter().any(needs_special_value_rescan),
         special_value_filter: special_value_filter.as_deref(),
     };
     let rescan_cte = build_rescan_cte(
@@ -2541,7 +2570,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                     "COALESCE(st.{aux_sum}, 0) + COALESCE(d.{ins_sum}, 0) - COALESCE(d.{del_sum}, 0)"
                 ),
             );
-            if matches!(agg.function, AggFunc::Avg) && has_rescan {
+            if needs_special_value_rescan(agg) && has_rescan {
                 sum = format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {sum} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
@@ -2578,8 +2607,20 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             let ins_sum2 = quote_ident(&format!("__ins_sum2_{}", agg.alias));
             let del_sum2 = quote_ident(&format!("__del_sum2_{}", agg.alias));
 
+            let algebraic = format!(
+                "COALESCE(st.{aux_sum2}, 0) + COALESCE(d.{ins_sum2}, 0) - COALESCE(d.{del_sum2}, 0)"
+            );
+            let value = if has_rescan {
+                format!(
+                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {algebraic} END",
+                    quote_ident(&format!("__special_{}", agg.alias)),
+                    quote_ident(&format!("__pgt_aux_sum2_{}", agg.alias)),
+                )
+            } else {
+                algebraic
+            };
             merge_selects.push(format!(
-                "COALESCE(st.{aux_sum2}, 0) + COALESCE(d.{ins_sum2}, 0) - COALESCE(d.{del_sum2}, 0) AS {}",
+                "{value} AS {}",
                 quote_ident(&format!("new___pgt_aux_sum2_{}", agg.alias)),
             ));
         }
@@ -3454,7 +3495,15 @@ fn agg_merge_expr_mapped(
                 var_expr
             };
 
-            format!("CASE WHEN {null_guard} THEN NULL ELSE {body} END")
+            let algebraic = format!("CASE WHEN {null_guard} THEN NULL ELSE {body} END");
+            if has_rescan {
+                format!(
+                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {algebraic} END",
+                    quote_ident(&format!("__special_{alias}")),
+                )
+            } else {
+                algebraic
+            }
         }
         // P3-2: CORR/COVAR/REGR_* — algebraic via cross-product auxiliaries.
         //   n   = old_count + ins_count - del_count
