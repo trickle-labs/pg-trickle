@@ -49,10 +49,25 @@ async fn test_inner_join_erroring_non_equi_uses_coherent_endpoint_snapshots() {
 
     // The old left value equals the new right value, so the algebraic delta
     // would form a zero denominator although both committed endpoints are safe.
-    db.execute("UPDATE err_join_left SET val = 3 WHERE id = 1")
-        .await;
-    db.execute("UPDATE err_join_right SET val = 2 WHERE id = 10")
-        .await;
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE err_join_left SET val = 3 WHERE id = 1",
+        "UPDATE err_join_right SET val = 2 WHERE id = 10",
+        "COMMIT",
+    ])
+    .await;
+    refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
+
+    // Reverse the transition and update each row twice before the next refresh.
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE err_join_left SET val = 4 WHERE id = 1",
+        "UPDATE err_join_right SET val = 3 WHERE id = 10",
+        "UPDATE err_join_left SET val = 2 WHERE id = 1",
+        "UPDATE err_join_right SET val = 1 WHERE id = 10",
+        "COMMIT",
+    ])
+    .await;
     refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
 
     db.execute("UPDATE err_join_left SET val = 5 WHERE id = 2")
@@ -64,10 +79,13 @@ async fn test_inner_join_erroring_non_equi_uses_coherent_endpoint_snapshots() {
     db.execute("UPDATE err_join_left SET grp = 2 WHERE id = 1")
         .await;
     refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
-    db.execute("INSERT INTO err_join_left VALUES (4, 1, 8)")
-        .await;
-    refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
-    db.execute("DELETE FROM err_join_right WHERE id = 11").await;
+    db.execute_seq(&[
+        "BEGIN",
+        "INSERT INTO err_join_left VALUES (4, 1, 8)",
+        "DELETE FROM err_join_right WHERE id = 11",
+        "COMMIT",
+    ])
+    .await;
     refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
     db.execute("UPDATE err_join_left SET val = 7 WHERE id = 3")
         .await;
@@ -76,7 +94,7 @@ async fn test_inner_join_erroring_non_equi_uses_coherent_endpoint_snapshots() {
     refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
 
     // A real new-endpoint division error must still surface as PostgreSQL 22012.
-    db.execute("UPDATE err_join_left SET val = 2 WHERE id = 4")
+    db.execute("UPDATE err_join_left SET val = 1 WHERE id = 4")
         .await;
     let error = db
         .try_execute_with_config(
@@ -99,7 +117,7 @@ async fn test_inner_join_erroring_non_equi_uses_coherent_endpoint_snapshots() {
     .fetch_all(&db.pool)
     .await
     .expect("failed refresh preserves the last committed stream-table rows");
-    assert_eq!(stored_rows, vec![(1, 8, 2), (2, 7, 5)]);
+    assert_eq!(stored_rows, vec![(1, 8, 1), (2, 7, 5)]);
     db.pool.close().await;
 }
 
