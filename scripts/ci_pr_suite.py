@@ -92,6 +92,7 @@ def main() -> int:
         "e2e_v107_wal_transition_tests",
         # Scheduler and WAL progress assertions need an uncontended Docker host.
         "e2e_rls_wal_tests", "e2e_watermark_gating_tests",
+        "e2e_bootstrap_gating_tests",
     }
     isolated = [name for name in selected if name in scheduler_isolated]
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
