@@ -25,6 +25,11 @@ async fn test_manual_refresh_records_initiated_by_manual() {
     db.create_st("erg_st", "SELECT id, val FROM erg_src", "1m", "FULL")
         .await;
 
+    // A busy scheduler makes the manual API return a NOTICE without recording history.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.erg_st'])")
+        .await;
+
     // Manual refresh
     db.refresh_st("erg_st").await;
 
@@ -58,6 +63,10 @@ async fn test_manual_refresh_records_completed_status() {
         "FULL",
     )
     .await;
+
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.erg_status_st'])")
+        .await;
 
     db.refresh_st("erg_status_st").await;
 
@@ -99,6 +108,10 @@ async fn test_manual_differential_refresh_records_history() {
         "DIFFERENTIAL",
     )
     .await;
+
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.erg_diff_st'])")
+        .await;
 
     // First manual refresh (will be FULL since no frontier yet)
     db.refresh_st("erg_diff_st").await;

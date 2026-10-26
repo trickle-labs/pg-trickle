@@ -1567,7 +1567,7 @@ pub(crate) fn validate_incremental_mode_for_query(
     if mode == RefreshMode::Full {
         return Ok(());
     }
-    let (_, query_volatility) = validate_defining_query(defining_query)?;
+    let query_volatility = helpers::defining_query_volatility(defining_query)?;
     let result = crate::dvm::parse_defining_query_full(defining_query)?;
     crate::dvm::check_ivm_support_with_registry(&result)?;
     let mut source_oids = result.tree.source_oids();
@@ -3660,6 +3660,25 @@ mod tests {
         let pos = find_top_level_keyword(sql, "FROM").unwrap();
         // Should skip the 'FROM' string literal and find the real FROM
         assert!(pos > 20, "found FROM inside string at {}", pos);
+    }
+
+    #[test]
+    fn test_find_top_level_keyword_ignores_quoted_and_unicode_identifiers() {
+        let sql = r#"SELECT "FROM", "escaped""WHERE", caféFROM FROM source"#;
+        assert_eq!(
+            find_top_level_keyword(sql, "FROM"),
+            sql.find(" FROM source").map(|pos| pos + 1)
+        );
+        assert_eq!(find_top_level_keyword(sql, "WHERE"), None);
+        let sql = r#"SELECT "LEFT JOIN" FROM source LEFT JOIN other ON false"#;
+        assert_eq!(
+            find_top_level_keyword(sql, "LEFT JOIN"),
+            sql.rfind("LEFT JOIN")
+        );
+        assert_eq!(
+            inject_pgt_count(r#"SELECT count(*) AS "FROM" FROM source"#),
+            r#"SELECT count(*) AS "FROM", COUNT(*) AS __pgt_count FROM source"#
+        );
     }
 
     #[test]

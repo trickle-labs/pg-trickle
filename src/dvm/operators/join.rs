@@ -92,6 +92,9 @@ use crate::dvm::parser::{Expr, OpTree};
 use crate::dvm::snapshot::SnapshotPlan;
 use crate::error::PgTrickleError;
 
+// PostgreSQL reserves lower OIDs for built-in catalog types and operators.
+const FIRST_NORMAL_OBJECT_ID: u32 = 16_384;
+
 // A44-1 (v0.43.0): Part 3 correction term scan count limit is now controlled
 // by the `pg_trickle.part3_max_scan_count` GUC (default 5, previously hardcoded).
 // The default value of 5 was chosen to cover 6-table semi-join chains.
@@ -291,6 +294,37 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
         "__pgt_left",
         "__pgt_right",
     );
+
+    // Cross-epoch pairs in the algebraic delta can fail while PostgreSQL
+    // evaluates the join predicate, before their signed rows cancel. For
+    // anything beyond direct cross-side equality keys, compare only affected
+    // old and new endpoint joins instead.
+    let rewritten_condition =
+        rewrite_expr_for_join(condition, left, "__pgt_left", right, "__pgt_right");
+    if !is_safe_equi_join_condition(
+        &rewritten_condition,
+        &left_result.schema,
+        &right_result.schema,
+        left,
+        right,
+    ) {
+        let safe_scope_keys = equi_keys
+            .iter()
+            .filter(|(left_key, right_key)| {
+                has_builtin_type_for_sql_column(&left_result.schema, left, left_key)
+                    && has_builtin_type_for_sql_column(&right_result.schema, right, right_key)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        return diff_inner_join_by_endpoints(
+            ctx,
+            op,
+            &left_result,
+            &right_result,
+            &safe_scope_keys,
+        );
+    }
+
     if !equi_keys.is_empty() {
         // Key probes add references; keep unused child identity expressions prunable.
         ctx.mark_cte_not_materialized(&left_result.cte_name);
@@ -667,6 +701,359 @@ JOIN {delta_right} dr ON {join_cond_part2}{correction_sql}",
     })
 }
 
+/// Recompute the affected output bag at each coherent endpoint, then subtract
+/// the old bag from the new one. This keeps erroring ON expressions away from
+/// cross-snapshot row combinations while preserving duplicate multiplicities.
+fn diff_inner_join_by_endpoints(
+    ctx: &mut DiffContext,
+    op: &OpTree,
+    left_result: &DiffResult,
+    right_result: &DiffResult,
+    equi_keys: &[EquiKeyPair],
+) -> Result<DiffResult, PgTrickleError> {
+    let OpTree::InnerJoin {
+        condition,
+        left,
+        right,
+    } = op
+    else {
+        return Err(PgTrickleError::InternalError(
+            "endpoint delta called on non-InnerJoin node".into(),
+        ));
+    };
+    let left_prefix = left.alias();
+    let right_prefix = right.alias();
+
+    for (side, tree) in [("left", left), ("right", right)] {
+        let plan = SnapshotPlan::for_tree(tree);
+        if !plan.uses_pre_change() {
+            return Err(PgTrickleError::UnsupportedOperator(format!(
+                "error-safe inner join delta requires an exact pre-change {side} snapshot; planner selected {}",
+                plan.kind()
+            )));
+        }
+    }
+
+    let left_old = ctx.get_or_register_snapshot_cte(left);
+    let right_old = ctx.get_or_register_snapshot_cte(right);
+    let left_new = build_snapshot_sql(left);
+    let right_new = build_snapshot_sql(right);
+    let left_cols = &left_result.columns;
+    let right_cols = &right_result.columns;
+    let left_output_cols: Vec<String> = left_cols
+        .iter()
+        .map(|column| snapshot_join_column_name(left_prefix, column))
+        .collect();
+    let right_output_cols: Vec<String> = right_cols
+        .iter()
+        .map(|column| snapshot_join_column_name(right_prefix, column))
+        .collect();
+    let output_cols = [left_output_cols.as_slice(), right_output_cols.as_slice()].concat();
+
+    let scope = endpoint_scope_condition(
+        equi_keys,
+        left_cols,
+        right_cols,
+        &left_result.cte_name,
+        &right_result.cte_name,
+    );
+    let mut hash_args = build_base_table_key_exprs(left, "l");
+    hash_args.extend(build_base_table_key_exprs(right, "r"));
+    let row_id = crate::hash::build_composite_hash_expr(&hash_args);
+    let selected_cols = left_cols
+        .iter()
+        .map(|column| {
+            format!(
+                "l.{} AS {}",
+                quote_ident(column),
+                quote_ident(&snapshot_join_column_name(left_prefix, column))
+            )
+        })
+        .chain(right_cols.iter().map(|column| {
+            format!(
+                "r.{} AS {}",
+                quote_ident(column),
+                quote_ident(&snapshot_join_column_name(right_prefix, column))
+            )
+        }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let condition_sql = rewrite_join_condition(condition, left, "l", right, "r");
+    let endpoint = |left_source: &str, right_source: &str| {
+        format!(
+            "SELECT {row_id} AS __pgt_row_id, {selected_cols} \
+             FROM {left_source} l JOIN {right_source} r ON {condition_sql} \
+             WHERE {scope}"
+        )
+    };
+
+    let new_cte = ctx.next_cte_name("join_endpoint_new");
+    ctx.add_materialized_cte(new_cte.clone(), endpoint(&left_new, &right_new));
+    let old_cte = ctx.next_cte_name("join_endpoint_old");
+    ctx.add_materialized_cte(old_cte.clone(), endpoint(&left_old, &right_old));
+
+    let selected_output_cols = output_cols
+        .iter()
+        .map(|column| quote_ident(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let inserted_cols = output_cols
+        .iter()
+        .map(|column| format!("__pgt_inserted.{}", quote_ident(column)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let deleted_cols = output_cols
+        .iter()
+        .map(|column| format!("__pgt_deleted.{}", quote_ident(column)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT __pgt_inserted.__pgt_row_id, 'I'::CHAR(1) AS __pgt_action, {inserted_cols} \
+         FROM (SELECT __pgt_row_id, {selected_output_cols} FROM {new_cte} \
+               EXCEPT ALL \
+               SELECT __pgt_row_id, {selected_output_cols} FROM {old_cte}) __pgt_inserted \
+         UNION ALL \
+         SELECT __pgt_deleted.__pgt_row_id, 'D'::CHAR(1) AS __pgt_action, {deleted_cols} \
+         FROM (SELECT __pgt_row_id, {selected_output_cols} FROM {old_cte} \
+               EXCEPT ALL \
+               SELECT __pgt_row_id, {selected_output_cols} FROM {new_cte}) __pgt_deleted"
+    );
+    let cte_name = ctx.next_cte_name("join");
+    ctx.add_cte(cte_name.clone(), sql);
+
+    let schema = left_result
+        .schema
+        .renamed(&left_output_cols)
+        .concat(&right_result.schema.renamed(&right_output_cols));
+    Ok(DiffResult {
+        cte_name,
+        columns: output_cols,
+        schema,
+        is_deduplicated: false,
+        has_key_changed: false,
+    })
+}
+
+/// Restrict endpoint recomputation to join-key values touched by either child.
+/// Non-equi joins without equality keys are restricted to changed child rows.
+fn endpoint_scope_condition(
+    equi_keys: &[EquiKeyPair],
+    left_cols: &[String],
+    right_cols: &[String],
+    delta_left: &str,
+    delta_right: &str,
+) -> String {
+    if !equi_keys.is_empty() {
+        let left_changed = equi_keys
+            .iter()
+            .map(|(left_key, right_key)| {
+                format!("l.{left_key} IN (SELECT {right_key} FROM {delta_right})")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let right_changed = equi_keys
+            .iter()
+            .map(|(left_key, right_key)| {
+                format!("r.{right_key} IN (SELECT {left_key} FROM {delta_left})")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        return format!("(({left_changed}) OR ({right_changed}))");
+    }
+
+    let changed_rows = |alias: &str, columns: &[String], delta: &str| {
+        let endpoint_row = columns
+            .iter()
+            .map(|column| format!("{alias}.{}", quote_ident(column)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let changed_row = columns
+            .iter()
+            .map(|column| format!("__pgt_changed.{}", quote_ident(column)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "EXISTS (SELECT 1 FROM {delta} __pgt_changed \
+             WHERE row_to_json(ROW({endpoint_row}))::text = \
+                   row_to_json(ROW({changed_row}))::text)"
+        )
+    };
+    format!(
+        "({} OR {})",
+        changed_rows("l", left_cols, delta_left),
+        changed_rows("r", right_cols, delta_right)
+    )
+}
+
+fn is_safe_equi_join_condition(
+    condition: &Expr,
+    left_schema: &crate::dvm::schema::RelationSchema,
+    right_schema: &crate::dvm::schema::RelationSchema,
+    left_tree: &OpTree,
+    right_tree: &OpTree,
+) -> bool {
+    match condition {
+        Expr::BinaryOp {
+            op,
+            left: left_expr,
+            right: right_expr,
+        } if op.eq_ignore_ascii_case("AND") => {
+            is_safe_equi_join_condition(left_expr, left_schema, right_schema, left_tree, right_tree)
+                && is_safe_equi_join_condition(
+                    right_expr,
+                    left_schema,
+                    right_schema,
+                    left_tree,
+                    right_tree,
+                )
+        }
+        Expr::BinaryOp { op, left, right } if op == "=" => match (&**left, &**right) {
+            (
+                Expr::ColumnRef {
+                    table_alias: Some(left_alias),
+                    column_name: left_column,
+                },
+                Expr::ColumnRef {
+                    table_alias: Some(right_alias),
+                    column_name: right_column,
+                },
+            ) if left_alias == "__pgt_left" && right_alias == "__pgt_right" => {
+                has_builtin_type_for_column(left_schema, left_tree, left_column)
+                    && has_builtin_type_for_column(right_schema, right_tree, right_column)
+            }
+            (
+                Expr::ColumnRef {
+                    table_alias: Some(left_alias),
+                    column_name: left_column,
+                },
+                Expr::ColumnRef {
+                    table_alias: Some(right_alias),
+                    column_name: right_column,
+                },
+            ) if left_alias == "__pgt_right" && right_alias == "__pgt_left" => {
+                has_builtin_type_for_column(left_schema, left_tree, right_column)
+                    && has_builtin_type_for_column(right_schema, right_tree, left_column)
+            }
+            (
+                Expr::ColumnRef {
+                    table_alias: Some(alias),
+                    column_name,
+                },
+                Expr::Literal(_),
+            )
+            | (
+                Expr::Literal(_),
+                Expr::ColumnRef {
+                    table_alias: Some(alias),
+                    column_name,
+                },
+            ) => match alias.as_str() {
+                "__pgt_left" => has_builtin_type_for_column(left_schema, left_tree, column_name),
+                "__pgt_right" => has_builtin_type_for_column(right_schema, right_tree, column_name),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn has_builtin_type_for_column(
+    schema: &crate::dvm::schema::RelationSchema,
+    tree: &OpTree,
+    column_name: &str,
+) -> bool {
+    schema
+        .0
+        .iter()
+        .find(|column| column.name == column_name)
+        .map(|column| column.type_oid)
+        .filter(|oid| *oid > 0)
+        .or_else(|| output_column_type_oid(tree, column_name))
+        .is_some_and(|oid| oid < FIRST_NORMAL_OBJECT_ID)
+}
+
+fn has_builtin_type_for_sql_column(
+    schema: &crate::dvm::schema::RelationSchema,
+    tree: &OpTree,
+    column_sql: &str,
+) -> bool {
+    schema
+        .0
+        .iter()
+        .find(|column| column.name == column_sql || quote_ident(&column.name) == column_sql)
+        .map(|column| (column.name.as_str(), column.type_oid))
+        .and_then(|(name, oid)| {
+            (oid > 0)
+                .then_some(oid)
+                .or_else(|| output_column_type_oid(tree, name))
+        })
+        .or_else(|| {
+            tree.output_columns()
+                .iter()
+                .find(|name| **name == column_sql || quote_ident(name) == column_sql)
+                .and_then(|name| output_column_type_oid(tree, name))
+        })
+        .is_some_and(|oid| oid < FIRST_NORMAL_OBJECT_ID)
+}
+
+fn output_column_type_oid(tree: &OpTree, name: &str) -> Option<u32> {
+    match tree {
+        OpTree::Scan { columns, .. } => columns
+            .iter()
+            .find(|column| column.name == name)
+            .map(|column| column.type_oid),
+        OpTree::CteScan { body, .. } => {
+            let body = body.as_deref()?;
+            let index = tree
+                .output_columns()
+                .iter()
+                .position(|column| column == name)?;
+            let body_columns = body.output_columns();
+            let source_name = body_columns.get(index)?;
+            output_column_type_oid(body, source_name)
+        }
+        OpTree::Aggregate {
+            group_by, child, ..
+        } => {
+            let expression = group_by.iter().find(|expr| expr.output_name() == name)?;
+            let Expr::ColumnRef { column_name, .. } = expression else {
+                return None;
+            };
+            output_column_type_oid(child, column_name)
+        }
+        OpTree::Project {
+            expressions,
+            aliases,
+            child,
+        } => {
+            let index = aliases.iter().position(|alias| alias == name)?;
+            let Expr::ColumnRef { column_name, .. } = expressions.get(index)? else {
+                return None;
+            };
+            output_column_type_oid(child, column_name)
+        }
+        OpTree::Subquery {
+            column_aliases,
+            child,
+            ..
+        } if !column_aliases.is_empty() => {
+            let index = tree
+                .output_columns()
+                .iter()
+                .position(|column| column == name)?;
+            let child_columns = child.output_columns();
+            let source_name = child_columns.get(index)?;
+            output_column_type_oid(child, source_name)
+        }
+        OpTree::Filter { child, .. }
+        | OpTree::Subquery { child, .. }
+        | OpTree::Distinct { child }
+        | OpTree::Window { child, .. } => output_column_type_oid(child, name),
+        _ => None,
+    }
+}
+
 /// Which side of the join we are filtering.
 enum JoinSide {
     /// We are filtering the left base table using right-side delta keys.
@@ -715,20 +1102,23 @@ fn collect_equijoin_keys(
     match expr {
         Expr::BinaryOp { op, left, right } if op == "=" => {
             // Found an equality — determine which side belongs to which table.
-            let left_stripped = left.strip_qualifier().to_sql();
-            let right_stripped = right.strip_qualifier().to_sql();
-
             let left_belongs_to = classify_column_side(left, left_alias, right_alias);
             let right_belongs_to = classify_column_side(right, left_alias, right_alias);
 
             match (left_belongs_to, right_belongs_to) {
                 (ColumnSide::Left, ColumnSide::Right) => {
                     // Normal order: left_of_= is left-table, right_of_= is right-table
-                    keys.push((left_stripped, right_stripped));
+                    keys.push((
+                        quote_ident(&left.strip_qualifier().output_name()),
+                        quote_ident(&right.strip_qualifier().output_name()),
+                    ));
                 }
                 (ColumnSide::Right, ColumnSide::Left) => {
                     // Swapped: left_of_= is right-table, right_of_= is left-table
-                    keys.push((right_stripped, left_stripped));
+                    keys.push((
+                        quote_ident(&right.strip_qualifier().output_name()),
+                        quote_ident(&left.strip_qualifier().output_name()),
+                    ));
                 }
                 _ => {
                     // Both same side or unknown — skip this key pair
@@ -892,6 +1282,28 @@ mod tests {
     }
 
     #[test]
+    fn test_builtin_column_literal_equality_uses_algebraic_delta() {
+        for condition in [
+            binop("=", qcolref("m", "id"), Expr::Literal("1".into())),
+            binop("=", Expr::Literal("1".into()), qcolref("m", "id")),
+        ] {
+            let mut ctx = test_ctx();
+            let tree = inner_join(
+                condition,
+                scan(1, "items", "public", "i", &["id"]),
+                scan(2, "metadata", "public", "m", &["id"]),
+            );
+            let result = diff_inner_join(&mut ctx, &tree).unwrap();
+            let sql = ctx.build_with_query(&result.cte_name);
+
+            assert!(
+                !sql.contains("join_endpoint"),
+                "built-in column/literal equality should use the algebraic path: {sql}"
+            );
+        }
+    }
+
+    #[test]
     fn test_diff_inner_join_two_parts() {
         let mut ctx = test_ctx();
         let left = scan(1, "orders", "public", "o", &["id", "cust_id"]);
@@ -923,6 +1335,10 @@ mod tests {
 
         // Part 2 should use L₀ via NOT EXISTS anti-join (DI-2).
         // R₀ is NOT used when L₀ is available (standard formula is exact).
+        assert!(
+            !sql.contains("join_endpoint"),
+            "simple equijoin left fast path: {sql}"
+        );
         assert_sql_contains(&sql, "NOT EXISTS");
         assert_sql_contains(&sql, "__pgt_action = 'D'");
         // Only L₀ needs NOT EXISTS (no R₀ split).
@@ -931,6 +1347,66 @@ mod tests {
             ne_count >= 1,
             "expected ≥1 NOT EXISTS (L₀), got {ne_count}\n{sql}"
         );
+    }
+
+    #[test]
+    fn test_diff_inner_join_erroring_predicate_uses_endpoint_bag_difference() {
+        let mut ctx = test_ctx();
+        let left = scan(1, "review_l", "public", "l", &["id", "v"]);
+        let right = scan(2, "review_r", "public", "r", &["id", "v"]);
+        let cond = binop(
+            "AND",
+            eq_cond("l", "id", "r", "id"),
+            binop(
+                ">",
+                binop(
+                    "/",
+                    Expr::Literal("10".to_string()),
+                    binop("-", qcolref("l", "v"), qcolref("r", "v")),
+                ),
+                Expr::Literal("0".to_string()),
+            ),
+        );
+        let tree = inner_join(cond, left, right);
+        let result = diff_inner_join(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "EXCEPT ALL");
+        assert_sql_contains(&sql, "__pgt_cte_join_endpoint_new_");
+        assert_sql_contains(&sql, "__pgt_cte_join_endpoint_old_");
+        assert_sql_contains(&sql, "l.\"id\" IN (SELECT \"id\" FROM");
+        assert!(
+            !sql.contains("Part 1:"),
+            "unsafe predicate used algebraic delta: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_custom_type_equality_uses_endpoint_and_row_image_scope() {
+        let mut ctx = test_ctx();
+        let scan = |oid, table: &str, alias: &str| OpTree::Scan {
+            table_oid: oid,
+            table_name: table.to_string(),
+            schema: "public".to_string(),
+            columns: vec![crate::dvm::parser::Column {
+                name: "id".to_string(),
+                type_oid: FIRST_NORMAL_OBJECT_ID,
+                is_nullable: false,
+            }],
+            pk_columns: vec!["id".to_string()],
+            alias: alias.to_string(),
+        };
+        let tree = inner_join(
+            eq_cond("l", "id", "r", "id"),
+            scan(1, "custom_l", "l"),
+            scan(2, "custom_r", "r"),
+        );
+        let result = diff_inner_join(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "join_endpoint_new");
+        assert_sql_contains(&sql, "row_to_json(ROW(l.\"id\"))::text");
+        assert!(!sql.contains("l.id IN (SELECT id FROM"));
     }
 
     #[test]
@@ -974,6 +1450,26 @@ mod tests {
         // Should be normalized: (left_table_key, right_table_key)
         assert!(keys[0].0.contains("cust_id"));
         assert!(keys[0].1.contains("id"));
+    }
+
+    #[test]
+    fn test_extract_equijoin_keys_quotes_identifiers() {
+        let cond = eq_cond("l", "Case Key", "r", "Case Key");
+        let keys = extract_equijoin_keys(&cond, "l", "r");
+
+        assert_eq!(
+            keys,
+            vec![(quote_ident("Case Key"), quote_ident("Case Key"))]
+        );
+        let sql = build_semijoin_subquery(
+            "\"public\".\"right_table\"",
+            &keys,
+            "__pgt_delta",
+            JoinSide::Right,
+        );
+        assert!(
+            sql.contains("WHERE \"Case Key\" IN (SELECT DISTINCT \"Case Key\" FROM __pgt_delta)")
+        );
     }
 
     #[test]
@@ -1046,6 +1542,18 @@ mod tests {
         let exprs = build_base_table_key_exprs(&node, "r");
         assert!(exprs.iter().any(|e| e.contains("r.\"id\"")));
         assert!(exprs.iter().any(|e| e.contains("r.\"name\"")));
+    }
+
+    #[test]
+    fn test_build_base_table_key_exprs_serializes_unsupported_types() {
+        let mut node = scan_not_null(1, "orders", "public", "o", &["id", "name"]);
+        if let OpTree::Scan { columns, .. } = &mut node {
+            columns[1].type_oid = 19;
+        }
+        assert_eq!(
+            build_base_table_key_exprs(&node, "r"),
+            vec!["row_to_json(ROW(r.\"id\", r.\"name\"))::text"]
+        );
     }
 
     #[test]
@@ -1182,8 +1690,8 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
         let outer_cte_marker = format!("{} AS", result.cte_name);
         let outer_sql = sql.split(&outer_cte_marker).last().unwrap_or("");
-        assert_sql_contains(outer_sql, "WHERE id IN (SELECT DISTINCT a__id FROM");
-        assert_sql_contains(outer_sql, "WHERE a__id IN (SELECT DISTINCT id FROM");
+        assert_sql_contains(outer_sql, "WHERE \"id\" IN (SELECT DISTINCT \"a__id\" FROM");
+        assert_sql_contains(outer_sql, "WHERE \"a__id\" IN (SELECT DISTINCT \"id\" FROM");
         assert!(sql.lines().any(|line| {
             line.starts_with("__pgt_cte_join_") && line.ends_with(" AS NOT MATERIALIZED (")
         }));

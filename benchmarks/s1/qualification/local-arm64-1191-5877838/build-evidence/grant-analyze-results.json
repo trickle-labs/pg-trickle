@@ -1,0 +1,29 @@
+[
+  {
+    "label": "repeated-grant",
+    "deadlock": true,
+    "first_exit": 1,
+    "second_exit": 0,
+    "stderr": "ERROR:  deadlock detected\nDETAIL:  Process 118 waits for ShareLock on relation 16385 of database 5; blocked by process 126.\nProcess 126 waits for ShareLock on transaction 754; blocked by process 118.\nHINT:  See server log for query details.\n",
+    "xmin_before": "753",
+    "xmin_after": "753"
+  },
+  {
+    "label": "already-authorized",
+    "deadlock": false,
+    "first_exit": 0,
+    "second_exit": 0,
+    "stderr": "",
+    "xmin_before": "753",
+    "xmin_after": "753"
+  },
+  {
+    "label": "missing-grant",
+    "deadlock": false,
+    "first_exit": 0,
+    "second_exit": 0,
+    "stderr": "",
+    "xmin_before": "757",
+    "xmin_after": "758"
+  }
+]
