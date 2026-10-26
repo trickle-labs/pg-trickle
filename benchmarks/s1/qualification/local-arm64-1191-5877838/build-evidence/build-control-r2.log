@@ -1,0 +1,116 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 4.11kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/s1-arm64-sdk:1168-078389ba1ff1
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf
+#3 DONE 0.0s
+
+#4 [compiler 1/2] FROM docker.io/library/s1-arm64-sdk:1168-078389ba1ff1@sha256:de453c245823bdb68c341e5b648a08f008e7cf67a336615a753baadd8c1f9150
+#4 resolve docker.io/library/s1-arm64-sdk:1168-078389ba1ff1@sha256:de453c245823bdb68c341e5b648a08f008e7cf67a336615a753baadd8c1f9150 0.0s done
+#4 DONE 0.0s
+
+#5 [stage-4  1/12] FROM docker.io/library/postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf
+#5 resolve docker.io/library/postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf 0.0s done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 10.16MB 0.1s
+#6 transferring context: 102.34MB 0.9s done
+#6 DONE 0.9s
+
+#7 [trickle 7/9] COPY scripts/gen_test_schema.py scripts/gen_test_schema.py
+#7 CACHED
+
+#8 [mdm 2/5] COPY _s1/mdm/ ./
+#8 CACHED
+
+#9 [mdm 5/5] RUN --mount=type=cache,id=s1-arm64-registry,sharing=locked,target=/usr/local/cargo/registry     --mount=type=cache,id=s1-arm64-mdm,target=/build/target     sha256sum Cargo.lock > /tmp/lock.sha256 &&     CARGO_BUILD_JOBS=2 cargo pgrx package --pg-config /usr/bin/pg_config --out-dir /package &&     sha256sum -c /tmp/lock.sha256
+#9 CACHED
+
+#10 [react 4/4] RUN --mount=type=cache,id=s1-arm64-registry,sharing=locked,target=/usr/local/cargo/registry     --mount=type=cache,id=s1-arm64-react,target=/build/target     cargo build --locked --release --jobs 2 --no-default-features --features pg18 &&     cp target/release/libpg_react.so /libpg_react.so
+#10 CACHED
+
+#11 [trickle 5/9] COPY _s1/control/benches/ benches/
+#11 CACHED
+
+#12 [trickle 8/9] COPY .cargo/config.toml .cargo/config.toml
+#12 CACHED
+
+#13 [stage-4  9/12] COPY _s1/react/bin/pg-reactd /usr/local/bin/pg-reactd
+#13 CACHED
+
+#14 [react 1/4] WORKDIR /build
+#14 CACHED
+
+#15 [mdm 3/5] COPY benchmarks/s1/mdm-grants.patch /tmp/mdm-grants.patch
+#15 CACHED
+
+#16 [trickle 3/9] COPY _s1/control/src/ src/
+#16 CACHED
+
+#17 [stage-4  6/12] COPY _s1/mdm/sql/archive/pg_mdm--0.1.0.sql _s1/mdm/sql/archive/pg_mdm--0.2.0.sql /usr/share/postgresql/18/extension/
+#17 CACHED
+
+#18 [trickle 9/9] RUN --mount=type=cache,id=s1-arm64-registry,sharing=locked,target=/usr/local/cargo/registry     --mount=type=cache,id=s1-arm64-git,sharing=locked,target=/usr/local/cargo/git     --mount=type=cache,id=s1-arm64-trickle,target=/build/target     sha256sum Cargo.lock > /tmp/lock.sha256 &&     cargo clean -p pg_trickle --release &&     CARGO_BUILD_JOBS=2 cargo pgrx package --pg-config /usr/bin/pg_config --out-dir /package &&     sha256sum -c /tmp/lock.sha256
+#18 CACHED
+
+#19 [mdm 4/5] RUN git apply /tmp/mdm-grants.patch
+#19 CACHED
+
+#20 [stage-4  4/12] COPY --from=react /libpg_react.so /usr/lib/postgresql/18/lib/pg_react.so
+#20 CACHED
+
+#21 [trickle 6/9] COPY _s1/control/sql/ sql/
+#21 CACHED
+
+#22 [stage-4 10/12] COPY _s1/react/docker/00-pg-trickle.sql /docker-entrypoint-initdb.d/10-pg-react.sql
+#22 CACHED
+
+#23 [react 2/4] COPY _s1/react/Cargo.toml _s1/react/Cargo.lock ./
+#23 CACHED
+
+#24 [trickle 2/9] COPY _s1/control/Cargo.toml _s1/control/Cargo.lock _s1/control/build.rs _s1/control/pg_trickle.control ./
+#24 CACHED
+
+#25 [compiler 2/2] RUN rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
+#25 CACHED
+
+#26 [react 3/4] COPY _s1/react/src/ src/
+#26 CACHED
+
+#27 [stage-4  7/12] COPY _s1/mdm/tests/e2e.sql _s1/mdm/tests/e2e_policy.sql /tests/
+#27 CACHED
+
+#28 [stage-4  3/12] COPY --from=mdm /package/usr/ /usr/
+#28 CACHED
+
+#29 [stage-4  2/12] COPY --from=trickle /package/usr/ /usr/
+#29 CACHED
+
+#30 [trickle 4/9] COPY _s1/control/verification/ verification/
+#30 CACHED
+
+#31 [stage-4  8/12] COPY _s1/mdm/sql/configure_helper.sql /sql/configure_helper.sql
+#31 CACHED
+
+#32 [stage-4  5/12] COPY _s1/react/pg_react.control _s1/react/sql/ /usr/share/postgresql/18/extension/
+#32 CACHED
+
+#33 [stage-4 11/12] RUN sed -i 's/0\.108\.0/0.108.3/g'     /usr/share/postgresql/18/extension/pg_react--0.46.0.sql     /usr/share/postgresql/18/extension/pg_react--0.46.1.sql
+#33 CACHED
+
+#34 [stage-4 12/12] COPY --chmod=755 benchmarks/s1/docker-entrypoint.sh /usr/local/bin/s1-entrypoint.sh
+#34 DONE 0.1s
+
+#35 exporting to image
+#35 exporting layers 0.0s done
+#35 exporting manifest sha256:c33e9035e5d5a30a9f66abf5b5baa621ef2a84ff5d78c8ac6fd2c8040348e99c done
+#35 exporting config sha256:378f3be2e44bda63e55d971d5a82ee4b9804aa6c47a4d863c2457beafdd50993 done
+#35 naming to docker.io/library/s1-1168-control:078389ba1ff1-r2 done
+#35 unpacking to docker.io/library/s1-1168-control:078389ba1ff1-r2 0.0s done
+#35 DONE 0.1s

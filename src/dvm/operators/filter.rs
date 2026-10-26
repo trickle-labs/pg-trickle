@@ -148,7 +148,7 @@ pub fn diff_filter(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
              -- but the row IS in the ST → emit DELETE to remove stale row\n\
              SELECT __pgt_row_id, 'D' AS __pgt_action, {cols}\n\
              FROM {child_cte}\n\
-             WHERE NOT ({predicate})\n\
+             WHERE ({predicate}) IS NOT TRUE\n\
                AND __pgt_action = 'I'\n\
                AND EXISTS (\n\
                    SELECT 1 FROM {st_table} st\n\
@@ -615,6 +615,22 @@ mod tests {
         assert_sql_contains(&sql, "\"id\"");
         assert_sql_contains(&sql, "\"name\"");
         assert_eq!(result.columns, vec!["id", "name", "status"]);
+    }
+
+    #[test]
+    fn test_having_unknown_emits_delete_for_existing_group() {
+        let mut ctx = test_ctx_with_st("public", "having_st");
+        let child = aggregate(
+            vec![colref("grp")],
+            vec![sum_col("v", "total")],
+            scan(1, "t", "public", "t", &["grp", "v"]),
+        );
+        let tree = filter(binop(">", colref("total"), lit("0")), child);
+        let result = diff_filter(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "WHERE ((\"total\" > 0)) IS NOT TRUE");
+        assert!(!sql.contains("WHERE NOT (\"total\" > 0)"));
     }
 
     #[test]

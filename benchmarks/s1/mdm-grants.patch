@@ -1,0 +1,31 @@
+--- a/src/api/refresh.rs
++++ b/src/api/refresh.rs
+@@ -542,6 +542,28 @@
+             )
+             .map_err(|error| MdmError::Spi(error.to_string()))?;
+         for relation_name in &access.relations {
++            let has_select = client
++                .select(
++                    "SELECT pg_catalog.has_table_privilege($1::oid, $2::regclass, 'SELECT')",
++                    Some(1),
++                    &[helper_owner.oid.into(), relation_name.clone().into()],
++                )
++                .map_err(|error| MdmError::Spi(error.to_string()))?
++                .first()
++                .get::<bool>(1)
++                .map_err(|error| MdmError::Spi(error.to_string()))?
++                .unwrap_or(false);
++            if has_select {
++                continue;
++            }
++            // Lock storage before the ACL write, which can otherwise deadlock with ANALYZE.
++            client
++                .update(
++                    &format!("LOCK TABLE {relation_name} IN SHARE MODE"),
++                    None,
++                    &[],
++                )
++                .map_err(|error| MdmError::Spi(error.to_string()))?;
+             client
+                 .update(
+                     &format!(

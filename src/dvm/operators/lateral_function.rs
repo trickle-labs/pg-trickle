@@ -81,7 +81,7 @@ pub fn diff_lateral_function(
     // ── CTE 1: Find source rows that changed ───────────────────────────
     let changed_sources_cte = ctx.next_cte_name("lat_changed");
     let changed_sources_sql = format!(
-        "SELECT DISTINCT \"__pgt_row_id\", \"__pgt_action\", {child_col_list}\n\
+        "SELECT \"__pgt_row_id\", \"__pgt_action\", {child_col_list}\n\
          FROM {child_delta}",
         child_col_list = col_list(child_cols),
         child_delta = child_result.cte_name,

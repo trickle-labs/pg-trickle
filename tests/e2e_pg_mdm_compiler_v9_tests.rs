@@ -522,6 +522,68 @@ async fn mutate_refresh_and_compare(fixture: &Fixture, mutation: &str) {
 }
 
 #[tokio::test]
+async fn test_graph_using_composite_keys_preserve_differential_rows() {
+    for join_type in ["INNER", "LEFT", "FULL"] {
+        let db = E2eDb::new().await.with_extension().await;
+        sqlx::raw_sql(
+            "CREATE TABLE using_left (id int, tenant_key text, value text, PRIMARY KEY (id, tenant_key));
+            CREATE TABLE using_right (id int, tenant_key text, label text, PRIMARY KEY (id, tenant_key));
+            CREATE TABLE using_dim (id int, tenant_key text, PRIMARY KEY (id, tenant_key));
+            INSERT INTO using_dim VALUES (1,'A'), (1,'B'), (2,'A'), (1,'C');
+            INSERT INTO using_left VALUES (1,'A','left A'), (1,'B','left B');
+            INSERT INTO using_right VALUES (1,'A','right A'), (1,'B','right B')",
+        )
+        .execute(&db.pool)
+        .await
+        .expect("create composite USING sources");
+        let query = format!("SELECT l.id, l.tenant_key, l.value, r.label, r.id AS right_id, r.tenant_key AS right_tenant_key
+            FROM using_left l {join_type} JOIN using_right r USING (id, tenant_key) JOIN using_dim d USING (id, tenant_key)");
+        create_stream(&db, "using_graph", query.clone())
+            .await
+            .expect("create USING graph");
+        let root = "public.using_graph";
+        let digest = reference_clients::graph_digest(&db.pool, root).await;
+        strict_refresh_result(&db.pool, root, &digest, "ALLOW").await;
+        for (mutation, inserted) in [
+            (
+                "INSERT INTO using_left VALUES (2,'A','new left'); INSERT INTO using_right VALUES (2,'A','new right')",
+                Some(1),
+            ),
+            (
+                "INSERT INTO using_left VALUES (1,'C','left C'); INSERT INTO using_right VALUES (1,'C','right C')",
+                Some(1),
+            ),
+            (
+                "INSERT INTO using_right VALUES (3,'A','right only'); INSERT INTO using_dim VALUES (3,'A')",
+                // Reconciliation can rewrite unchanged rows; the complete bag is checked below.
+                None,
+            ),
+        ] {
+            sqlx::raw_sql(mutation)
+                .execute(&db.pool)
+                .await
+                .expect("mutate composite USING sources");
+            let result = strict_refresh_result(&db.pool, root, &digest, "ERROR").await;
+            assert_refresh_is_differential(&result);
+            db.assert_st_matches_query("using_graph", &query).await;
+            for node in result.as_object().expect("one node result").values() {
+                let Some(inserted) = inserted else {
+                    continue;
+                };
+                assert_eq!(
+                    node["rows_inserted"], inserted,
+                    "join={join_type}, {mutation}: {result}"
+                );
+                assert_eq!(
+                    node["rows_deleted"], 0,
+                    "join={join_type}, {mutation}: {result}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_pg_mdm_compiler_v9_bootstrap_and_mutations_match_full_without_fallback() {
     let fixture = setup_fixture().await;
     let initial_pairs = relation_count(&fixture, "pairs/person").await;

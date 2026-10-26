@@ -49,10 +49,39 @@ pub(super) fn is_pgvector_type(type_name: &str) -> bool {
     )
 }
 
+pub(super) fn is_numeric_type(type_name: &str) -> bool {
+    matches!(
+        type_name
+            .split('(')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .trim_matches('"'),
+        "numeric" | "decimal"
+    )
+}
+
+pub(super) fn changed_col_bit_expr(new_value: &str, old_value: &str, type_name: &str) -> String {
+    let comparison = if is_pgvector_type(type_name) {
+        format!("{new_value}::text IS DISTINCT FROM {old_value}::text")
+    } else if is_numeric_type(type_name) {
+        format!(
+            "{new_value} IS DISTINCT FROM {old_value} OR \
+             scale({new_value}) IS DISTINCT FROM scale({old_value})"
+        )
+    } else {
+        format!("{new_value} IS DISTINCT FROM {old_value}")
+    };
+    format!("(CASE WHEN {comparison} THEN B'1' ELSE B'0' END)::varbit")
+}
+
 /// Build the VARBIT bitmask expression for `changed_cols` in UPDATE triggers.
 ///
-/// Each non-PK column gets a `CASE WHEN NEW.col IS DISTINCT FROM OLD.col THEN
-/// B'1' ELSE B'0' END)::varbit` bit that is concatenated with `||`.
+/// Each non-PK column gets a changed bit; numeric columns also compare scale,
+/// which PostgreSQL expressions can observe even when numeric equality holds.
 ///
 /// Returns `None` for keyless tables (`pk_columns` empty): all columns
 /// contribute to the content hash and must always be present.
@@ -70,20 +99,11 @@ pub fn build_changed_cols_bitmask_expr(
         .iter()
         .map(|(col_name, type_name)| {
             let qcol = col_name.replace('"', "\"\"");
-            // pgvector types (vector, halfvec, sparsevec) do not define an '='
-            // operator, so IS DISTINCT FROM (which uses '=') would fail.
-            // Cast to text for comparison — text always supports equality.
-            if is_pgvector_type(type_name) {
-                format!(
-                    "(CASE WHEN NEW.\"{qcol}\"::text IS DISTINCT FROM OLD.\"{qcol}\"::text \
-                     THEN B'1' ELSE B'0' END)::varbit"
-                )
-            } else {
-                format!(
-                    "(CASE WHEN NEW.\"{qcol}\" IS DISTINCT FROM OLD.\"{qcol}\" \
-                     THEN B'1' ELSE B'0' END)::varbit"
-                )
-            }
+            changed_col_bit_expr(
+                &format!("NEW.\"{qcol}\""),
+                &format!("OLD.\"{qcol}\""),
+                type_name,
+            )
         })
         .collect();
     Some(parts.join(" ||\n        "))
@@ -161,6 +181,24 @@ mod tests {
         assert!(
             qualified_expr.contains("NEW.\"embedding\"::text"),
             "schema-qualified pgvector col should cast to text: {qualified_expr}"
+        );
+    }
+
+    #[test]
+    fn test_build_changed_cols_bitmask_expr_numeric_compares_scale_representation() {
+        let pk = vec!["id".to_string()];
+        let cols = vec![
+            ("id".to_string(), "integer".to_string()),
+            (
+                "amount".to_string(),
+                "pg_catalog.numeric(12, 2)".to_string(),
+            ),
+        ];
+        let expr = build_changed_cols_bitmask_expr(&pk, &cols).unwrap();
+        assert!(
+            expr.contains("NEW.\"amount\" IS DISTINCT FROM OLD.\"amount\" OR")
+                && expr.contains("scale(NEW.\"amount\") IS DISTINCT FROM scale(OLD.\"amount\")"),
+            "numeric changed_cols must observe scale changes: {expr}"
         );
     }
 }
