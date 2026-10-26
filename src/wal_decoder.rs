@@ -1219,7 +1219,11 @@ fn acknowledge_receipt_batch(
                   ORDER BY decoded.lsn, decoded.ordinality";
             let actual = Spi::connect(|client| {
                 let rows = client
-                    .select(sql, None, &[first.slot_name.as_str().into(), max_changes.into()])
+                    .select(
+                        sql,
+                        None,
+                        &[first.slot_name.as_str().into(), max_changes.into()],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 let mut values = Vec::new();
                 for row in rows {
