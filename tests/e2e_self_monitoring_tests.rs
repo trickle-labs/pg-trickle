@@ -81,9 +81,33 @@ async fn test_self_monitoring_teardown_drops_all_stream_tables() {
         .await;
     assert_eq!(before, 6);
 
-    // Teardown.
-    db.execute("SELECT pgtrickle.teardown_self_monitoring()")
-        .await;
+    // Concurrent scheduler DDL can transiently deadlock a teardown attempt.
+    // PostgreSQL aborts that statement's transaction (40P01), so retry the
+    // complete teardown; any other error must still fail this regression.
+    for attempt in 0..3 {
+        match db
+            .try_execute("SELECT pgtrickle.teardown_self_monitoring()")
+            .await
+        {
+            Ok(()) => break,
+            Err(error) => {
+                let deadlock = error
+                    .as_database_error()
+                    .and_then(|database_error| database_error.code())
+                    .as_deref()
+                    == Some("40P01");
+                assert!(
+                    deadlock && attempt < 2,
+                    "self-monitoring teardown failed on attempt {}: {error}",
+                    attempt + 1
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    100 * (attempt + 1),
+                ))
+                .await;
+            }
+        }
+    }
 
     let after: i64 = db
         .query_scalar(
