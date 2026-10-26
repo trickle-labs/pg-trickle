@@ -101,10 +101,7 @@ async fn test_self_monitoring_teardown_drops_all_stream_tables() {
                     "self-monitoring teardown failed on attempt {}: {error}",
                     attempt + 1
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    100 * (attempt + 1),
-                ))
-                .await;
+                tokio::time::sleep(std::time::Duration::from_millis(100 * (attempt + 1))).await;
             }
         }
     }
