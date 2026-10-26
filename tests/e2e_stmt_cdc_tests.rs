@@ -793,6 +793,12 @@ async fn test_stmt_cdc_numeric_scale_changes_reach_shared_consumers() {
                 !all_first,
             ),
             (
+                format!("UPDATE {source} SET amount = 1.000 WHERE id = 1"),
+                "D:010,I:010",
+                2,
+                all_first,
+            ),
+            (
                 format!("UPDATE {source} SET amount = amount WHERE id = 1"),
                 "D:000,I:000",
                 2,
@@ -846,5 +852,67 @@ async fn test_stmt_cdc_numeric_scale_changes_reach_shared_consumers() {
             )
             .await;
         }
+    }
+}
+
+#[tokio::test]
+async fn test_stmt_cdc_numeric_scale_changes_survive_trigger_rebuild() {
+    let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
+
+    db.execute("CREATE TABLE numeric_rebuild_src (id INT PRIMARY KEY, amount NUMERIC, pad TEXT)")
+        .await;
+    db.execute("INSERT INTO numeric_rebuild_src VALUES (1, 1.0, 'seed')")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_mode = 'trigger'",
+        "SET pg_trickle.cdc_trigger_mode = 'row'",
+        "SELECT pgtrickle.create_stream_table(\
+            'numeric_rebuild_st', \
+            'SELECT id, scale(amount) AS amount_scale, pad FROM numeric_rebuild_src', \
+            '1m', 'DIFFERENTIAL')",
+    ])
+    .await;
+
+    let source_oid = db.table_oid("numeric_rebuild_src").await as i64;
+    let stable_name: String = db
+        .query_scalar(&format!(
+            "SELECT source_stable_name FROM pgtrickle.pgt_change_tracking WHERE source_relid = {source_oid}"
+        ))
+        .await;
+    assert_eq!(
+        trigger_row_bit(&db, &format!("pg_trickle_cdc_{stable_name}")).await,
+        1,
+        "source should initially have a row-level trigger"
+    );
+
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_trigger_mode = 'statement'",
+        "SELECT pgtrickle.rebuild_cdc_triggers()",
+    ])
+    .await;
+    assert_eq!(
+        trigger_row_bit(&db, &format!("pg_trickle_cdc_upd_{stable_name}")).await,
+        0,
+        "rebuild should replace the existing source trigger with statement-level capture"
+    );
+
+    let query = "SELECT id, scale(amount) AS amount_scale, pad FROM numeric_rebuild_src";
+    let buffer = db.change_buffer_table(source_oid).await;
+    for (value, expected_scale) in [("1.00", 2), ("1.000", 3)] {
+        db.execute(&format!(
+            "UPDATE numeric_rebuild_src SET amount = {value} WHERE id = 1"
+        ))
+        .await;
+        assert_eq!(
+            last_buffer_events(&db, &buffer, 2).await,
+            "D:010,I:010",
+            "rebuild should retain the numeric scale change in both CDC events"
+        );
+        refresh_differential_and_assert(&db, "numeric_rebuild_st", query).await;
+        let actual_scale: i32 = db
+            .query_scalar("SELECT amount_scale FROM public.numeric_rebuild_st WHERE id = 1")
+            .await;
+        assert_eq!(actual_scale, expected_scale);
     }
 }

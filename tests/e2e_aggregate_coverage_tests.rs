@@ -20,6 +20,34 @@ async fn latest_merge_strategy(db: &E2eDb, stream_table: &str) -> String {
     .await
 }
 
+async fn refresh_differential(db: &E2eDb, stream_table: &str) {
+    let refresh = format!("SELECT pgtrickle.refresh_stream_table('{stream_table}')");
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+        ],
+        &refresh,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{stream_table}: differential refresh failed: {error}"));
+
+    let differential_completed: bool = db
+        .query_scalar(&format!(
+            "SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' \
+             AND NOT h.was_full_fallback \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = '{stream_table}' \
+             ORDER BY h.refresh_id DESC LIMIT 1"
+        ))
+        .await;
+    assert!(
+        differential_completed,
+        "{stream_table}: no differential refresh"
+    );
+}
+
 async fn refresh_vector_st(db: &E2eDb, stream_table: &str) {
     let refresh = format!("SELECT pgtrickle.refresh_stream_table('{stream_table}')");
     db.execute_seq(&[
@@ -255,7 +283,11 @@ async fn test_agg_sum_special_numeric_values_rescan_affected_groups() {
          (5,'neg','-Infinity'),(6,'neg',2), \
          (7,'nan','NaN'),(8,'nan',3), \
          (9,'null',NULL),(10,'null',NULL), \
-         (11,'finite',0),(12,'finite',4)",
+         (11,'finite',0),(12,'finite',4), \
+         (17,'repeat','Infinity'),(18,'repeat','Infinity'),(19,'repeat',1), \
+         (20,'to_null','Infinity'),(21,'to_null',NULL), \
+         (22,'nan_delete','NaN'),(23,'nan_delete',3), \
+         (24,'to_empty','Infinity')",
     )
     .await;
 
@@ -290,14 +322,21 @@ async fn test_agg_sum_special_numeric_values_rescan_affected_groups() {
     }
 
     for mutation in [
+        "DELETE FROM agg_special_sum WHERE id=2", // finite deletion while +Infinity remains
         "DELETE FROM agg_special_sum WHERE id=3", // +Infinity deletion leaves finite 1
         "UPDATE agg_special_sum SET val=5 WHERE id=1", // +Infinity → finite
         "UPDATE agg_special_sum SET val=3 WHERE id=5", // -Infinity → finite
         "UPDATE agg_special_sum SET val=0 WHERE id=7", // NaN → zero
+        "DELETE FROM agg_special_sum WHERE id=22", // NaN deletion leaves finite 3
         "INSERT INTO agg_special_sum VALUES \
          (13,'competing','Infinity'),(14,'competing','-Infinity'),(15,'competing',7)",
         "DELETE FROM agg_special_sum WHERE id=13", // competing infinities → -Infinity
         "DELETE FROM agg_special_sum WHERE id=14", // -Infinity removal recovers 7
+        "DELETE FROM agg_special_sum WHERE id=17", // repeated +Infinity still sums to +Infinity
+        "DELETE FROM agg_special_sum WHERE id=18", // remaining +Infinity removal recovers 1
+        "UPDATE agg_special_sum SET val=NULL WHERE id=20", // +Infinity → all-NULL group
+        "DELETE FROM agg_special_sum WHERE id=21", // all-NULL group becomes empty
+        "DELETE FROM agg_special_sum WHERE id=24", // special-only group becomes empty
         "UPDATE agg_special_sum SET val=8 WHERE id=12", // finite update
         "UPDATE agg_special_sum SET val=0 WHERE id=12", // zero
         "UPDATE agg_special_sum SET val=NULL WHERE id=12", // zero → NULL
@@ -336,6 +375,80 @@ async fn test_agg_sum_special_numeric_values_rescan_affected_groups() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn test_agg_sum_special_numeric_global_and_batched_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE agg_global_special (id INT PRIMARY KEY, val NUMERIC)")
+        .await;
+    db.execute("INSERT INTO agg_global_special VALUES (1,'Infinity'),(2,1)")
+        .await;
+    let query = "SELECT SUM(val) AS total FROM agg_global_special";
+    db.create_st("agg_global_special_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("agg_global_special_st", query)
+        .await;
+
+    db.execute("DELETE FROM agg_global_special WHERE id=1")
+        .await;
+    refresh_differential(&db, "agg_global_special_st").await;
+    db.assert_st_matches_query("agg_global_special_st", query)
+        .await;
+
+    db.execute("UPDATE agg_global_special SET val='Infinity' WHERE id=2")
+        .await;
+    db.execute("UPDATE agg_global_special SET val=2 WHERE id=2")
+        .await;
+    db.execute("INSERT INTO agg_global_special VALUES (3,5)")
+        .await;
+    refresh_differential(&db, "agg_global_special_st").await;
+    db.assert_st_matches_query("agg_global_special_st", query)
+        .await;
+
+    db.execute("DELETE FROM agg_global_special").await;
+    refresh_differential(&db, "agg_global_special_st").await;
+    db.assert_st_matches_query("agg_global_special_st", query)
+        .await;
+
+    db.execute("INSERT INTO agg_global_special VALUES (4,NULL)")
+        .await;
+    refresh_differential(&db, "agg_global_special_st").await;
+    db.assert_st_matches_query("agg_global_special_st", query)
+        .await;
+}
+
+#[tokio::test]
+async fn test_agg_statistical_special_numeric_rescans_auxiliaries() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE agg_stat_special (id INT PRIMARY KEY, grp TEXT, val NUMERIC)")
+        .await;
+    db.execute(
+        "INSERT INTO agg_stat_special VALUES \
+         (1,'x','Infinity'),(2,'x',1),(3,'x',3), \
+         (4,'y','-Infinity'),(5,'y',2), \
+         (6,'all_null','Infinity'),(7,'all_null',NULL)",
+    )
+    .await;
+
+    let query = "SELECT grp, STDDEV_POP(val) AS sd, VAR_POP(val) AS variance \
+                 FROM public.agg_stat_special GROUP BY grp";
+    db.create_st("agg_stat_special_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("agg_stat_special_st", query)
+        .await;
+
+    db.execute("UPDATE agg_stat_special SET val=NULL WHERE id=6")
+        .await;
+    refresh_differential(&db, "agg_stat_special_st").await;
+    db.assert_st_matches_query("agg_stat_special_st", query)
+        .await;
+
+    db.execute("DELETE FROM agg_stat_special WHERE id IN (1,4)")
+        .await;
+    refresh_differential(&db, "agg_stat_special_st").await;
+    db.assert_st_matches_query("agg_stat_special_st", query)
+        .await;
 }
 
 #[tokio::test]

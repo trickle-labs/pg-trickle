@@ -15,17 +15,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config python3-dev zlib1g-dev ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Keep configure probes uninstrumented; build PostgreSQL itself with ASan afterward.
-RUN \
+# Leave install helpers uninstrumented; keep ASan linkage for server relinks.
+RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
     curl -fsSLo /tmp/postgresql.tar.bz2 \
       "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" && \
     mkdir -p /tmp/postgresql && tar -xjf /tmp/postgresql.tar.bz2 --strip-components=1 -C /tmp/postgresql && \
     cd /tmp/postgresql && \
-    ./configure --prefix=/usr/local/pgsql \
+    CFLAGS='-O1 -g -fno-omit-frame-pointer' \
+    LDFLAGS='' ./configure --prefix=/usr/local/pgsql \
       --enable-cassert --with-icu --with-llvm=no --with-openssl && \
-    make -j"$(nproc)" \
-      CFLAGS='-O1 -g -fsanitize=address -fno-omit-frame-pointer' \
-      LDFLAGS='-fsanitize=address' && \
+    printf '%s\n' 'CFLAGS += -fsanitize=address' 'LDFLAGS += -fsanitize=address' >> src/Makefile.global && \
+    make -j"$(nproc)" && \
+    sed -i '/^CFLAGS += -fsanitize=address$/d' src/Makefile.global && \
+    sed -i '/^LDFLAGS += -fsanitize=address$/d' src/Makefile.global && \
+    make -C src/port clean all && \
+    make -C src/common clean all && \
+    make -C src/bin/pg_config clean all install && \
+    make -C src/timezone clean all && \
+    printf '%s\n' 'LDFLAGS += -fsanitize=address' >> src/Makefile.global && \
     make install && \
     rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
 
@@ -45,8 +52,11 @@ COPY src/ src/
 COPY verification/ verification/
 COPY sql/ sql/
 COPY pg_trickle.control ./
-RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
-    cargo +"${RUST_NIGHTLY}" pgrx package --features pg18,e2e-unsafe-test-hooks \
+# Thin LTO and parallel codegen keep the test image build bounded in CI.
+RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 \
+      CARGO_PROFILE_RELEASE_LTO=thin \
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 && \
+    cargo +"${RUST_NIGHTLY}" pgrx package --debug --features pg18,e2e-unsafe-test-hooks \
       --pg-config /usr/local/pgsql/bin/pg_config \
       --target x86_64-unknown-linux-gnu && \
     RUSTFLAGS='-Zsanitizer=address -Cforce-frame-pointers=yes' \
@@ -54,8 +64,8 @@ RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
         --features pg18,e2e-unsafe-test-hooks --no-default-features \
         --target x86_64-unknown-linux-gnu && \
     cp target/x86_64-unknown-linux-gnu/release/libpg_trickle.so \
-      target/x86_64-unknown-linux-gnu/release/pg_trickle-pg18/usr/local/pgsql/lib/pg_trickle.so && \
-    cp -a target/x86_64-unknown-linux-gnu/release/pg_trickle-pg18/usr/. /usr/local/pgsql/
+      target/x86_64-unknown-linux-gnu/debug/pg_trickle-pg18/usr/local/pgsql/lib/pg_trickle.so && \
+    cp -a target/x86_64-unknown-linux-gnu/debug/pg_trickle-pg18/usr/. /usr/local/pgsql/
 
 COPY tests/fixtures/asan_probe.c /tmp/asan_probe.c
 COPY tests/fixtures/initdb-asan-wrapper.sh /tmp/initdb-asan-wrapper.sh
