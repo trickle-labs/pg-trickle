@@ -14,9 +14,9 @@ mod e2e;
 
 use e2e::E2eDb;
 
-/// #1250 and #1263: a FULL upstream can feed cast and uncast aggregates
-/// without granting its owner access to the extension's private catalogs.
-async fn check_full_owner_downstream_sum(include_cast: bool) {
+/// #1263: a changed upstream group must update cast and uncast SUM results.
+#[tokio::test]
+async fn test_full_owner_downstream_cast_sum_matches_query() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE ROLE r1263_owner LOGIN").await;
     db.execute("GRANT pgtrickle_admin, pgtrickle_operator TO r1263_owner")
@@ -31,9 +31,6 @@ async fn check_full_owner_downstream_sum(include_cast: bool) {
     as_owner("CREATE TABLE r1263.ev (id bigint PRIMARY KEY, org text, usr text)").await;
     as_owner("SELECT pgtrickle.create_stream_table('r1263.st1', 'SELECT org, usr, count(*) AS n FROM r1263.ev GROUP BY org, usr', '1h', refresh_mode => 'FULL')").await;
     for (name, sum) in [("casted", "sum(n)::bigint"), ("control", "sum(n)")] {
-        if name == "casted" && !include_cast {
-            continue;
-        }
         as_owner(&format!("SELECT pgtrickle.create_stream_table('r1263.{name}', 'SELECT org, {sum} AS n, count(*) AS users FROM r1263.st1 GROUP BY org', 'calculated', refresh_mode => 'DIFFERENTIAL')")).await;
     }
     for catalog in ["pgt_dependencies", "pgt_stream_tables"] {
@@ -44,39 +41,27 @@ async fn check_full_owner_downstream_sum(include_cast: bool) {
             .await;
         assert!(!allowed, "owner must not read {catalog}");
     }
-    for insert in ["(1, 'a', 'u1'), (2, 'a', 'u2')", "(3, 'a', 'u1')"] {
-        as_owner(&format!("INSERT INTO r1263.ev VALUES {insert}")).await;
+    for mutation in [
+        "INSERT INTO r1263.ev VALUES (1, 'a', 'u1'), (2, 'a', 'u2')",
+        "INSERT INTO r1263.ev VALUES (3, 'a', 'u1')",
+        "DELETE FROM r1263.ev WHERE id = 3",
+        "UPDATE r1263.ev SET org = 'b' WHERE id = 2",
+    ] {
+        as_owner(mutation).await;
         for table in ["st1", "casted", "control"] {
-            if table == "casted" && !include_cast {
-                continue;
-            }
             as_owner(&format!(
                 "SELECT pgtrickle.refresh_stream_table('r1263.{table}')"
             ))
             .await;
         }
         for table in ["control", "casted"] {
-            if table == "casted" && !include_cast {
-                continue;
-            }
             let matches: bool = db.query_scalar(&format!("SELECT NOT EXISTS ((SELECT org, n::bigint, users FROM r1263.{table} EXCEPT ALL SELECT org, sum(n)::bigint, count(*) FROM r1263.st1 GROUP BY org) UNION ALL (SELECT org, sum(n)::bigint, count(*) FROM r1263.st1 GROUP BY org EXCEPT ALL SELECT org, n::bigint, users FROM r1263.{table}))")).await;
             assert!(
                 matches,
-                "{table} must match its defining query after {insert}"
+                "{table} must match its defining query after {mutation}"
             );
         }
     }
-}
-
-#[tokio::test]
-async fn test_full_owner_downstream_sum_matches_query() {
-    check_full_owner_downstream_sum(false).await;
-}
-
-#[tokio::test]
-#[ignore = "#1263: casted SUM remains stale after an upstream group changes"]
-async fn test_full_owner_downstream_cast_sum_matches_query() {
-    check_full_owner_downstream_sum(true).await;
 }
 
 /// Helper: create the two test roles and a source table owned by sec1_owner.
