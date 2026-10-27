@@ -23,10 +23,16 @@ DIFFERENTIAL history row and must cover the captured committed source cut.
 
 Restoring the fast consumer requires its original rows/frontier pair. Its
 next differential refresh must exactly catch up from history protected by the
-slow consumer. PostgreSQL is then killed with SIGKILL and restarted in the
-same container/data volume. The test checks system identifier, database OID,
-persisted sentinel, volume identity and changed postmaster start time; the
-fast result must survive and the lagging consumer must catch up exactly.
+slow consumer. The history then transitions from trigger capture to WAL and
+uses one of four witnessed interruption points: before receipt persistence,
+before replay, before acknowledgement, and after slot advance. The last case
+also commits a second source/journal row after the slot advances. PostgreSQL is
+killed with SIGKILL and restarted in the same container/data volume. The test
+checks system identifier, database OID, persisted sentinel, volume identity
+and changed postmaster start time. After receipt recovery, the fast and slow
+consumers must take the same differential, full, or reinitialization path, and
+both must match the committed journal exactly. The post-slot-advance row must
+have an acknowledged receipt or force a shared-consumer reinitialization.
 `fsync`, `synchronous_commit` and `full_page_writes` are witnessed as on.
 
 Boundary observations read rows and frontier together in one SQL statement;
@@ -55,8 +61,8 @@ against the unchanged CDC package also passes.
 - Formatting/lint: zero warnings.
 - Default new histories plus cancellation: two test cases pass, no retries.
 - Scheduled-size histories: ten seeds/twelve cycles plus cancellation pass,
-  no retries. Actual trigger/durability/restart witness additions also pass
-  in the final default run.
+  no retries. The expanded restore history also passes all four WAL
+  interruption phases across ten seeds and twelve cycles.
 - The parent semantic floor is independently 32/34 and 52/54; special SUM/AVG
   and mixed-snapshot division still fail. The original four COUNT/FILTER
   regressions pass. These are not recovery-history successes.
@@ -82,10 +88,9 @@ set. No remote CI success is claimed.
 
 ## Open boundaries
 
-This does not yet combine capture-mode transitions or WAL interruption with
-the generated restore histories. It does not establish recovery after required
-history has already been removed. Snapshot metadata-read versus copy,
-cleanup versus new registration, and pause versus dispatch need their own
-witnessed schedules. Existing premature-cleanup/oracle controls remain;
-they are not an executable production cleanup mutant. No general minimizer,
-whole recovery proof, or merge approval is claimed.
+This does not establish recovery after required history has already been
+removed. Snapshot metadata-read versus copy, cleanup versus new registration,
+and pause versus dispatch need their own witnessed schedules. Existing
+premature-cleanup/oracle controls remain; they are not an executable production
+cleanup mutant. No general minimizer, whole recovery proof, or merge approval
+is claimed.
