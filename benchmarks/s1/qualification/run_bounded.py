@@ -67,11 +67,10 @@ def capture_logs(name, path, previous=None):
 
 
 def disk_metrics(args):
-    # Temporary relations and pg_internal.init can disappear during PostgreSQL
-    # maintenance/restarts while du walks the data directory. Retry these
-    # specific ENOENT paths, never arbitrary missing files or permission errors.
+    # Relation files and pg_internal.init can disappear during maintenance while du walks PGDATA.
+    # Retry only these specific ENOENT paths, never permission errors or other missing files.
     vanished = (r"du: cannot access '.*/base/[0-9]+/(?:"
-                r"t[0-9]+_[0-9]+(?:_(?:fsm|vm|init))?(?:\.[0-9]+)?"
+                r"(?:t[0-9]+_[0-9]+|[0-9]+)(?:_(?:fsm|vm|init))?(?:\.[0-9]+)?"
                 r"|pg_internal\.init)': No such file or directory")
     for attempt in range(5):
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)

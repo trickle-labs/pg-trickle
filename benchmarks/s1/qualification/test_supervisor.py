@@ -173,13 +173,15 @@ for persists in (False, True):
             assert "PostgreSQL metrics unavailable for 60 seconds" in receipt["supervision_error"]
 
 vanished = subprocess.CompletedProcess([], 1, "1024 /data\n", "du: cannot access '/data/base/22293/t1_61725': No such file or directory\n")
+vanished_fork = subprocess.CompletedProcess([], 1, "1024 /data\n", "du: cannot access '/data/base/22293/42048_fsm': No such file or directory\n")
 healthy = subprocess.CompletedProcess([], 0, "1024 /data\n", "")
-for failures, expected_calls in ((2, 3), (5, 5)):
-    with patch.object(bounded.subprocess, "run", side_effect=[vanished] * failures + [healthy]) as run_mock, \
-         patch.object(bounded.time, "sleep"):
-        result = bounded.disk_metrics([])
-    assert run_mock.call_count == expected_calls
-    assert result is (healthy if failures == 2 else vanished)
+for missing_relation in (vanished, vanished_fork):
+    for failures, expected_calls in ((2, 3), (5, 5)):
+        with patch.object(bounded.subprocess, "run", side_effect=[missing_relation] * failures + [healthy]) as run_mock, \
+             patch.object(bounded.time, "sleep"):
+            result = bounded.disk_metrics([])
+        assert run_mock.call_count == expected_calls
+        assert result is (healthy if failures == 2 else missing_relation)
 vanished_internal = subprocess.CompletedProcess(
     [], 1, "1024 /data\n",
     "du: cannot access '/var/lib/postgresql/18/docker/base/27081/pg_internal.init': No such file or directory\n")
