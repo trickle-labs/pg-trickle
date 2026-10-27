@@ -488,6 +488,9 @@ async fn test_circular_convergence_records_iterations() {
 #[tokio::test]
 async fn test_circular_nonconvergence_error_status() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    // Keep the scheduler from observing the partially constructed cycle.
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
     db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
@@ -498,10 +501,6 @@ async fn test_circular_nonconvergence_error_status() {
     db.execute("ALTER SYSTEM SET pg_trickle.max_fixpoint_iterations = 1")
         .await;
     db.reload_config_and_wait().await;
-    assert!(
-        db.wait_for_scheduler(Duration::from_secs(90)).await,
-        "pg_trickle scheduler did not appear within 90s"
-    );
 
     // Source data that ensures the cycle generates new rows each iteration uniformly.
     // A monotonically increasing counter guarantees non-convergence.
@@ -538,24 +537,23 @@ async fn test_circular_nonconvergence_error_status() {
     )
     .await;
 
+    db.alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    assert!(
+        db.wait_for_scheduler(Duration::from_secs(90)).await,
+        "pg_trickle scheduler did not appear within 90s"
+    );
+
     // Wait for the scheduler to attempt the cycle and hit the limit.
     // With max_fixpoint_iterations=1, it should fail to converge and mark ERROR.
-    let got_error = wait_for_status(&db, "cyc_nc_a", "ERROR", Duration::from_secs(180)).await;
-
-    // Note: Since each iteration generates new rows unconditionally, it is guaranteed
-    // to never converge, making it a reliable test.
-    if got_error {
-        let status_b: String = db
-            .query_scalar(
-                "SELECT status FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_name = 'cyc_nc_b'",
-            )
-            .await;
-        assert_eq!(
-            status_b, "ERROR",
-            "Both SCC members should be ERROR on non-convergence"
-        );
-    }
+    assert!(
+        wait_for_status(&db, "cyc_nc_a", "ERROR", Duration::from_secs(180)).await,
+        "cyc_nc_a should reach ERROR on non-convergence"
+    );
+    assert!(
+        wait_for_status(&db, "cyc_nc_b", "ERROR", Duration::from_secs(180)).await,
+        "cyc_nc_b should reach ERROR on non-convergence"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -566,8 +564,9 @@ async fn test_circular_nonconvergence_error_status() {
 /// scc_id cleared if they are no longer in a cycle.
 #[tokio::test]
 async fn test_circular_drop_member_clears_scc_id() {
-    let db = E2eDb::new().await.with_extension().await;
-    db.execute("SET pg_trickle.allow_circular = true").await;
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.allow_circular", "true", "on")
+        .await;
 
     db.execute("CREATE TABLE cyc_drop_src (id INT PRIMARY KEY, val INT NOT NULL)")
         .await;
@@ -587,8 +586,6 @@ async fn test_circular_drop_member_clears_scc_id() {
          '1m', 'DIFFERENTIAL', false)",
     )
     .await;
-
-    // ALTER A to reference B
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_drop_a', \
          query => $$SELECT id, val FROM cyc_drop_src \
@@ -596,13 +593,19 @@ async fn test_circular_drop_member_clears_scc_id() {
          SELECT b.id, b.val FROM cyc_drop_b b$$)",
     )
     .await;
-    // ALTER B to reference A (completes the cycle)
-    db.execute(
+    // ALTER B to reference A (completes the cycle). The GUC must be
+    // enabled on the same connection as ALTER: a pooled session SET may
+    // apply to a different backend and reject the cycle. SET LOCAL in an
+    // explicit transaction also avoids leaking the setting to other tests.
+    db.execute_seq(&[
+        "BEGIN",
+        "SET LOCAL pg_trickle.allow_circular = true",
         "SELECT pgtrickle.alter_stream_table('cyc_drop_b', \
          query => $$SELECT id, val FROM cyc_drop_src \
          UNION ALL \
          SELECT a.id, a.val FROM cyc_drop_a a$$)",
-    )
+        "COMMIT",
+    ])
     .await;
 
     // Verify both have scc_id
@@ -649,10 +652,11 @@ async fn test_circular_drop_member_clears_scc_id() {
 /// that forms a cycle should be rejected.
 #[tokio::test]
 async fn test_circular_default_rejects_cycles() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
     // Explicitly enforce the default to prevent GUC pollution from other tests
     // that may have set allow_circular=true via ALTER SYSTEM.
-    db.execute("SET pg_trickle.allow_circular = false").await;
+    db.alter_system_set_and_wait("pg_trickle.allow_circular", "false", "off")
+        .await;
 
     db.execute("CREATE TABLE cyc_def_src (id INT PRIMARY KEY, val INT NOT NULL)")
         .await;
@@ -683,7 +687,8 @@ async fn test_circular_default_rejects_cycles() {
 
     // ALTER B to reference A — this would form a cycle
     let result = db
-        .try_execute(
+        .try_execute_with_config(
+            &["SET pg_trickle.allow_circular = false"],
             "SELECT pgtrickle.alter_stream_table('cyc_def_b', \
              query => $$SELECT a.id, a.val FROM cyc_def_a a$$)",
         )

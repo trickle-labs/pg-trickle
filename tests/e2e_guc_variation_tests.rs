@@ -44,7 +44,7 @@ async fn mutate_and_verify(db: &E2eDb) {
     db.execute("UPDATE guc_src SET val = 100 WHERE grp = 'b' AND val = 30")
         .await;
     db.execute("DELETE FROM guc_src WHERE grp = 'c'").await;
-    db.refresh_st("guc_st").await;
+    db.refresh_st_with_retry("guc_st").await;
     db.assert_st_matches_query("guc_st", GUC_QUERY).await;
 }
 

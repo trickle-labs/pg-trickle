@@ -534,14 +534,18 @@ fn validate_one_change_buffer(
             registry.1
         )));
     }
-    let relpersistence = Spi::get_one_with_args::<String>(
-        "SELECT c.relpersistence::text FROM pg_class c \
+    let relation = Spi::get_two_with_args::<pg_sys::Oid, String>(
+        "SELECT c.oid, c.relpersistence::text FROM pg_class c \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')",
         &[change_schema.into(), buffer_name.into()],
     )
-    .map_err(|e| invalid(format!("relation lookup failed: {e}")))?
-    .ok_or_else(|| invalid("buffer relation missing or has invalid relkind".into()))?;
+    .map_err(|e| invalid(format!("relation lookup failed: {e}")))?;
+    let (Some(relation_oid), Some(relpersistence)) = relation else {
+        return Err(invalid(
+            "buffer relation missing or has invalid relkind".into(),
+        ));
+    };
     let expected_persistence = if durability == config::ChangeBufferDurability::Unlogged {
         "u"
     } else {
@@ -561,11 +565,9 @@ fn validate_one_change_buffer(
                     ('__pgt_row_id', 'bytea'::regtype))) = 4 \
            AND COALESCE(BOOL_AND(a.attname <> '__pgt_row_id' OR a.attnotnull), false) \
            FROM pg_attribute a \
-         JOIN pg_class c ON c.oid = a.attrelid \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 \
+         WHERE a.attrelid = $1 AND a.attnum > 0 \
            AND NOT a.attisdropped AND a.attname::text IN ('change_id', 'lsn', 'action', '__pgt_row_id')",
-        &[change_schema.into(), buffer_name.into()],
+        &[relation_oid.into()],
     )
     .map_err(|e| invalid(format!("buffer schema lookup failed: {e}")))?
     .unwrap_or(false);
@@ -2742,8 +2744,8 @@ fn build_pk_hash_stmt_expr(
 
 /// WB-1: Build the `changed_cols` VARBIT expression for statement-level UPDATE triggers.
 ///
-/// Uses `n."col" IS DISTINCT FROM o."col"` (transition table aliases) instead
-/// of `NEW."col" IS DISTINCT FROM OLD."col"`.
+/// Uses the same typed representation comparison as row-level triggers, with
+/// transition-table aliases for statement-level UPDATEs.
 /// Bit at position `i` (leftmost = 0) is B'1' when column `i` changed.
 fn build_changed_cols_bitmask_stmt_expr(
     pk_columns: &[String],
@@ -2756,20 +2758,11 @@ fn build_changed_cols_bitmask_stmt_expr(
         .iter()
         .map(|(col_name, type_name)| {
             let qcol = col_name.replace('"', "\"\"");
-            // pgvector types (vector, halfvec, sparsevec) do not define an '='
-            // operator, so IS DISTINCT FROM (which uses '=') would fail.
-            // Cast to text for comparison — text always supports equality.
-            if triggers::is_pgvector_type(type_name) {
-                format!(
-                    "(CASE WHEN n.\"{qcol}\"::text IS DISTINCT FROM o.\"{qcol}\"::text \
-                     THEN B'1' ELSE B'0' END)::varbit"
-                )
-            } else {
-                format!(
-                    "(CASE WHEN n.\"{qcol}\" IS DISTINCT FROM o.\"{qcol}\" \
-                     THEN B'1' ELSE B'0' END)::varbit"
-                )
-            }
+            triggers::changed_col_bit_expr(
+                &format!("n.\"{qcol}\""),
+                &format!("o.\"{qcol}\""),
+                type_name,
+            )
         })
         .collect();
     Some(parts.join(" ||\n\t\t        "))
@@ -2863,8 +2856,10 @@ pub fn get_slot_positions_at_bound(
     }
     let mut positions = HashMap::new();
     for oid in source_oids {
+        // WAL appears before its first decoder checkpoint, so do not treat it as trigger/immediate here.
         let wal_position = Spi::get_one_with_args::<String>(
-            "SELECT CASE WHEN cdc_mode = 'WAL' THEN decoder_confirmed_lsn::text \
+            "SELECT CASE WHEN cdc_mode = 'WAL' \
+                      THEN LEAST(COALESCE(decoder_confirmed_lsn, '0/0'::pg_lsn), $1::pg_lsn)::text \
                     WHEN cdc_mode = 'TRANSITIONING' \
                       THEN LEAST(COALESCE(decoder_confirmed_lsn, '0/0'::pg_lsn), \
                                 COALESCE(cutover_lsn, $1::pg_lsn))::text \
@@ -2879,15 +2874,7 @@ pub fn get_slot_positions_at_bound(
             reason: e.to_string(),
         })?;
         let position = match wal_position {
-            Some(lsn) if is_valid_lsn(&lsn) && lsn != "0/0" => lsn,
-            Some(_) => {
-                return Err(PgTrickleError::CdcStateInvalid {
-                    pgt_id: 0,
-                    source_name: format!("OID {}", oid.to_u32()),
-                    buffer: "WAL decoder position".to_string(),
-                    reason: "required committed decoder position is unavailable".to_string(),
-                });
-            }
+            Some(lsn) => confirmed_wal_position(*oid, &lsn)?,
             None if !Spi::get_one_with_args::<bool>(
                 "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_change_tracking \
                                 WHERE source_relid = $1)",
@@ -2933,6 +2920,24 @@ pub fn get_slot_positions_at_bound(
         positions.insert(oid.to_u32(), position);
     }
     Ok(positions)
+}
+
+fn confirmed_wal_position(source_oid: pg_sys::Oid, lsn: &str) -> Result<String, PgTrickleError> {
+    if !is_valid_lsn(lsn) {
+        return Err(PgTrickleError::CdcStateInvalid {
+            pgt_id: 0,
+            source_name: format!("OID {}", source_oid.to_u32()),
+            buffer: "WAL decoder position".to_string(),
+            reason: "required committed decoder position is invalid".to_string(),
+        });
+    }
+    if lsn == "0/0" {
+        return Err(PgTrickleError::SafeFrontierUnavailable {
+            context: format!("source OID {}", source_oid.to_u32()),
+            reason: "WAL decoder has not confirmed a committed position yet".to_string(),
+        });
+    }
+    Ok(lsn.to_string())
 }
 
 /// No-op: with trigger-based CDC, changes are written directly to buffer
@@ -3576,6 +3581,32 @@ mod tests {
     }
 
     #[test]
+    fn wal_frontier_waits_for_first_confirmed_decoder_position() {
+        let error = confirmed_wal_position(pg_sys::Oid::from(42), "0/0").unwrap_err();
+        assert!(matches!(
+            &error,
+            PgTrickleError::SafeFrontierUnavailable { .. }
+        ));
+        assert!(error.is_retryable());
+        assert!(!error.requires_reinitialize());
+    }
+
+    #[test]
+    fn wal_frontier_accepts_confirmed_decoder_position() {
+        assert_eq!(
+            confirmed_wal_position(pg_sys::Oid::from(42), "0/10").unwrap(),
+            "0/10"
+        );
+    }
+
+    #[test]
+    fn wal_frontier_rejects_malformed_decoder_position() {
+        let error = confirmed_wal_position(pg_sys::Oid::from(42), "not-an-lsn").unwrap_err();
+        assert!(matches!(&error, PgTrickleError::CdcStateInvalid { .. }));
+        assert!(error.requires_reinitialize());
+    }
+
+    #[test]
     fn writer_fences_hold_first_unknown_writer() {
         let mut state = FrontierProbeState::default();
         assert_eq!(
@@ -3813,6 +3844,21 @@ mod tests {
         );
         assert!(expr.contains("NEW."), "should reference NEW: {expr}");
         assert!(expr.contains("OLD."), "should reference OLD: {expr}");
+    }
+
+    #[test]
+    fn test_statement_bitmask_compares_numeric_scale_representation() {
+        let pk = vec!["id".to_string()];
+        let cols = vec![
+            ("id".to_string(), "integer".to_string()),
+            ("amount".to_string(), "numeric(12, 2)".to_string()),
+        ];
+        let expr = build_changed_cols_bitmask_stmt_expr(&pk, &cols).unwrap();
+        assert!(
+            expr.contains("n.\"amount\" IS DISTINCT FROM o.\"amount\" OR")
+                && expr.contains("scale(n.\"amount\") IS DISTINCT FROM scale(o.\"amount\")"),
+            "statement changed_cols must observe numeric scale changes: {expr}"
+        );
     }
 
     #[test]

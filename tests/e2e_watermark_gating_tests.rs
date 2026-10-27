@@ -774,12 +774,17 @@ async fn test_scheduler_resumes_after_watermark_alignment() {
     )
     .await;
 
-    // Trigger CDC so the scheduler has changes to process for the auto-refresh.
+    // Capture the timestamp before the source write. The scheduler can
+    // complete its refresh before we enter the wait on a fast runner.
+    let baseline_timestamp: Option<String> = db
+        .query_scalar_opt(
+            "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'res_report'",
+        )
+        .await;
     db.execute("INSERT INTO res_a VALUES (99, 'a99')").await;
 
-    // Wait for initial COMPLETED refresh.
     let refreshed = db
-        .wait_for_auto_refresh("res_report", Duration::from_secs(60))
+        .wait_for_auto_refresh_since("res_report", baseline_timestamp, Duration::from_secs(60))
         .await;
     assert!(refreshed, "initial auto-refresh should complete");
 

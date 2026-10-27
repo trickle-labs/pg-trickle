@@ -809,15 +809,20 @@ async fn test_mixed_diamond_with_view_branch() {
     // Widget=9.99, Cable=4.99
     assert_eq!(db.count("public.md_st_hw_priced").await, 2);
 
+    // Manual refreshes can be skipped while a scheduler owns the same node.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.md_st_hw_products', 'public.md_st_prices', 'public.md_st_hw_priced'])")
+        .await;
+
     // Add a new hardware product with price
     db.execute("INSERT INTO md_products VALUES (4, 'Bolt', 'hardware')")
         .await;
     db.execute("INSERT INTO md_prices VALUES (4, 1.99)").await;
 
-    // Refresh both branches then the join
-    db.refresh_st("md_st_hw_products").await;
-    db.refresh_st("md_st_prices").await;
-    db.refresh_st("md_st_hw_priced").await;
+    // Require each branch to converge before refreshing the dependent join.
+    db.refresh_st_until_converged("md_st_hw_products").await;
+    db.refresh_st_until_converged("md_st_prices").await;
+    db.refresh_st_until_converged("md_st_hw_priced").await;
 
     assert_eq!(
         db.count("public.md_st_hw_priced").await,
@@ -825,11 +830,14 @@ async fn test_mixed_diamond_with_view_branch() {
         "New hardware product should appear in joined ST"
     );
 
-    // Change a product from hardware to digital
+    // Change a product from hardware to digital. Writer holdback can defer
+    // the deletion past a completed manual refresh; wait for convergence.
     db.execute("UPDATE md_products SET category = 'digital' WHERE name = 'Cable'")
         .await;
-    db.refresh_st("md_st_hw_products").await;
-    db.refresh_st("md_st_hw_priced").await;
+    db.refresh_st_until_converged("md_st_hw_products").await;
+    db.refresh_st_until_converged("md_st_hw_priced").await;
+    db.assert_st_matches_query("md_st_hw_products", "SELECT id, name FROM md_v_hardware")
+        .await;
 
     assert_eq!(
         db.count("public.md_st_hw_priced").await,
@@ -1701,7 +1709,7 @@ async fn test_mixed_upsert_on_conflict_through_view() {
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
     )
     .await;
-    db.refresh_st("mu_st_kv").await;
+    db.refresh_st_until_converged("mu_st_kv").await;
 
     assert_eq!(
         db.count("public.mu_st_kv").await,
@@ -1721,7 +1729,7 @@ async fn test_mixed_upsert_on_conflict_through_view() {
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
     )
     .await;
-    db.refresh_st("mu_st_kv").await;
+    db.refresh_st_until_converged("mu_st_kv").await;
 
     assert_eq!(db.count("public.mu_st_kv").await, 5);
     db.assert_st_matches_query("mu_st_kv", "SELECT key, value FROM mu_v_kv")

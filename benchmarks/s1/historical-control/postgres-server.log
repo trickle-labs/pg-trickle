@@ -1,0 +1,1000 @@
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:08.964 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:08.964 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:08.964 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:08.964 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.557 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.557 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.560 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.560 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.561 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.561 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.562 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.562 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.562 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.562 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.563 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.563 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.564 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.564 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.565 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.565 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.565 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.565 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.566 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.566 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.567 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.567 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.567 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.567 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.568 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.568 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.568 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.568 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.569 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.569 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.570 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.570 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.571 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.571 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.572 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.572 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.572 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.572 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.573 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.573 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.574 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.574 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.575 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.575 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.576 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.576 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.576 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.576 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.577 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.577 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.577 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.577 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.578 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.578 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.578 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.578 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.579 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.579 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.580 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.580 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.580 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.580 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:14.581 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:14.581 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.610 UTC [1482] LOG:  process 1482 detected deadlock while waiting for ExclusiveLock on advisory lock [22294,1347634,2944222336,1] after 1002.223 ms
+2026-10-17 13:54:16.610 UTC [1482] DETAIL:  Process holding the lock: 28. Wait queue: .
+2026-10-17 13:54:16.610 UTC [1482] CONTEXT:  SQL statement "SELECT pg_catalog.pg_advisory_xact_lock(5788046901200000)"
+	PL/pgSQL function pgreact_internal.binding_ddl_lock() line 6 at PERFORM
+	SQL statement "CREATE TEMPORARY VIEW pg_temp."__pgt_validate_output_1482_0" AS SELECT 'policy'::text AS source_name, pgtrickle.encode_row_id_v2('SCAN_KEY', ROW((SELECT entity_id FROM mdm_graph.source_identity_map WHERE entity_name = 'policy_qualification' AND source_name = 'policy'), (SELECT source_identity_id FROM mdm_graph.source_identity_map WHERE entity_name = 'policy_qualification' AND source_name = 'policy'), "id")) AS source_record_key, "email_address" AS "email", 'present'::text AS "email_state", "display_name" AS "name", 'present'::text AS "name_state", "updated_at" AS row_changed_at
+	FROM public.policy_qualification_source"
+	SQL statement "SELECT contract_version, graph_refresh_id, graph_digest, source_boundary, source_boundary_digest, node_results FROM pgtrickle.refresh_graph_strict(ARRAY[$1::regclass], $2::bytea, $3::text)"
+	PL/pgSQL function s1_audit.admit_churn_case(integer) line 34 at assignment
+2026-10-17 13:54:16.610 UTC [1482] STATEMENT:  SET SESSION AUTHORIZATION mdm_legacy_login; SET ROLE mdm_legacy_administrator; SELECT s1_audit.admit_churn_case(3); RESET ROLE; RESET SESSION AUTHORIZATION
+2026-10-17 13:54:16.611 UTC [28] LOG:  process 28 still waiting for ShareLock on transaction 5202 after 1007.075 ms
+2026-10-17 13:54:16.611 UTC [28] DETAIL:  Process holding the lock: 1482. Wait queue: 28.
+2026-10-17 13:54:16.611 UTC [28] CONTEXT:  while updating tuple (0,9) in relation "pgt_capture_instance"
+	SQL statement "UPDATE pgtrickle.pgt_capture_instance SET last_seen_at = now() WHERE singleton"
+	SQL statement "SELECT pgtrickle.refresh_stream_table(version_row.match_name)"
+	PL/pgSQL function pgreact_internal.refresh_rule(uuid) line 11 at PERFORM
+	SQL statement "SELECT pgreact_internal.refresh_rule(target_version_id)"
+	PL/pgSQL function pgreact_internal.refresh_rule_m7(uuid) line 4 at PERFORM
+	SQL statement "SELECT pgreact_internal.refresh_rule_m7(target_version_id)"
+	PL/pgSQL function pgreact.refresh_rule(uuid) line 13 at PERFORM
+	SQL statement "SELECT pgreact.refresh_rule(rule_row.rule_version_id)"
+	PL/pgSQL function pgreact_internal.run_m14(timestamp with time zone) line 55 at PERFORM
+	PL/pgSQL function pgreact_internal.run_m16(timestamp with time zone) line 5 at assignment
+	PL/pgSQL function pgreact_internal.run_m22(timestamp with time zone) line 10 at RETURN
+	PL/pgSQL function pgreact_internal.run_m23(timestamp with time zone) line 4 at assignment
+	PL/pgSQL function pgreact_internal.run_m24(timestamp with time zone) line 5 at assignment
+	PL/pgSQL function pgreact_internal.run_m25(timestamp with time zone) line 4 at assignment
+	PL/pgSQL function pgreact_api.run_m30_global(timestamp with time zone) line 5 at assignment
+	PL/pgSQL function pgreact_internal.m31_run_m30_global(timestamp with time zone) line 3 at RETURN
+	PL/pgSQL function pgreact_api.run_m31_global(timestamp with time zone) line 10 at assignment
+	SQL function "run" statement 1
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 45 at assignment
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.620 UTC [1482] ERROR:  deadlock detected
+2026-10-17 13:54:16.620 UTC [1482] DETAIL:  Process 1482 waits for ExclusiveLock on advisory lock [22294,1347634,2944222336,1]; blocked by process 28.
+	Process 28 waits for ShareLock on transaction 5202; blocked by process 1482.
+2026-10-17 13:54:16.620 UTC [1482] HINT:  See server log for query details.
+2026-10-17 13:54:16.620 UTC [1482] CONTEXT:  PL/pgSQL function s1_audit.admit_churn_case(integer) line 34 at assignment
+2026-10-17 13:54:16.620 UTC [1482] STATEMENT:  SET SESSION AUTHORIZATION mdm_legacy_login; SET ROLE mdm_legacy_administrator; SELECT s1_audit.admit_churn_case(3); RESET ROLE; RESET SESSION AUTHORIZATION
+2026-10-17 13:54:16.622 UTC [28] LOG:  process 28 acquired ShareLock on transaction 5202 after 1018.316 ms
+2026-10-17 13:54:16.622 UTC [28] CONTEXT:  while updating tuple (0,9) in relation "pgt_capture_instance"
+	SQL statement "UPDATE pgtrickle.pgt_capture_instance SET last_seen_at = now() WHERE singleton"
+	SQL statement "SELECT pgtrickle.refresh_stream_table(version_row.match_name)"
+	PL/pgSQL function pgreact_internal.refresh_rule(uuid) line 11 at PERFORM
+	SQL statement "SELECT pgreact_internal.refresh_rule(target_version_id)"
+	PL/pgSQL function pgreact_internal.refresh_rule_m7(uuid) line 4 at PERFORM
+	SQL statement "SELECT pgreact_internal.refresh_rule_m7(target_version_id)"
+	PL/pgSQL function pgreact.refresh_rule(uuid) line 13 at PERFORM
+	SQL statement "SELECT pgreact.refresh_rule(rule_row.rule_version_id)"
+	PL/pgSQL function pgreact_internal.run_m14(timestamp with time zone) line 55 at PERFORM
+	PL/pgSQL function pgreact_internal.run_m16(timestamp with time zone) line 5 at assignment
+	PL/pgSQL function pgreact_internal.run_m22(timestamp with time zone) line 10 at RETURN
+	PL/pgSQL function pgreact_internal.run_m23(timestamp with time zone) line 4 at assignment
+	PL/pgSQL function pgreact_internal.run_m24(timestamp with time zone) line 5 at assignment
+	PL/pgSQL function pgreact_internal.run_m25(timestamp with time zone) line 4 at assignment
+	PL/pgSQL function pgreact_api.run_m30_global(timestamp with time zone) line 5 at assignment
+	PL/pgSQL function pgreact_internal.m31_run_m30_global(timestamp with time zone) line 3 at RETURN
+	PL/pgSQL function pgreact_api.run_m31_global(timestamp with time zone) line 10 at assignment
+	SQL function "run" statement 1
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 45 at assignment
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.709 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.709 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.710 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.710 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.711 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.711 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.711 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.711 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.712 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.712 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.713 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.713 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.713 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.713 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.714 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.714 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.714 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.714 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.715 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.715 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.715 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.715 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.716 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.716 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.717 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.717 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.717 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.717 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.718 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.718 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.719 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.719 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.720 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.720 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.720 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.720 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.721 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.721 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.722 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.722 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.722 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.722 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.723 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.723 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.723 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.723 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.724 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.724 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.725 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.725 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.725 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.725 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.726 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.726 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.726 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.726 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.727 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.727 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.728 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.728 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.729 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.729 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"
+2026-10-17 13:54:16.730 UTC [28] WARNING:  registered-S1 callback entry rule_id=1fe28759-4312-466d-aa83-4b0fdae6988e session_user=mdm_s1_runtime current_user=mdm_s1_runner
+2026-10-17 13:54:16.730 UTC [28] CONTEXT:  PL/pgSQL function s1_audit.deliver(pgreact.activation_context,s1_audit.candidate) line 4 at RAISE
+	SQL function "dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate" statement 1
+	SQL statement "SELECT pgreact_runtime.dispatch_m2_5075d6e5b49941818607a78ecbc0d9c2_activate($1, $2, $3)"
+	PL/pgSQL function pgreact_internal.execute_claimed_episode_m7(bigint,text,uuid) line 164 at EXECUTE
+	PL/pgSQL function pgreact.execute_claimed_episode_m31_base(bigint,text,uuid) line 8 at RETURN
+	PL/pgSQL function pgreact.execute_claimed_episode(bigint,text,uuid) line 50 at RETURN
+	SQL function "execute" statement 1
+	SQL statement "SELECT pgreact_api.execute(
+	                claimed.episode_id, worker, claimed.lease_token)"
+	PL/pgSQL function pgreact_internal.managed_cycle_m44(integer) line 68 at PERFORM
+	PL/pgSQL function pgreact_internal.managed_cycle(integer) line 32 at RETURN
+	SQL function "managed_cycle" statement 1
+	SQL statement "SELECT pgreact_api.managed_cycle()"

@@ -155,8 +155,10 @@ async fn clear_chaos(db: &E2eDb) {
 }
 
 async fn configure_scheduler(db: &E2eDb) {
+    // Observer polling must not defer the scheduled fault witness on small CI hosts.
     for (setting, value, expected) in [
         ("pg_trickle.scheduler_interval_ms", "100", "100"),
+        ("pg_trickle.load_shed_threshold", "0", "0"),
         ("pg_trickle.min_schedule_seconds", "1", "1"),
         ("pg_trickle.auto_backoff", "off", "off"),
         ("pg_trickle.max_consecutive_errors", "1", "1"),
@@ -467,6 +469,11 @@ async fn run_apply_or_finalize_failure_pair(phase: &str) {
 
     // The scheduled fixture starts at the current committed source result.
     db.create_st(&scheduler, &query, "1h", "DIFFERENTIAL").await;
+    // Drain any no-data tick before making the faulted mutation due.
+    db.execute(&format!(
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.{scheduler}'])"
+    ))
+    .await;
     db.refresh_st(&scheduler).await;
     let scheduler_id = pgt_id(&db, &scheduler).await;
     let scheduler_checkpoint = format!("public.{scheduler}_checkpoint");
@@ -497,14 +504,38 @@ async fn run_apply_or_finalize_failure_pair(phase: &str) {
         .commit()
         .await
         .expect("commit scheduler setup transaction");
-    let scheduler_witness = wait_for_barrier(
+    db.execute(&format!(
+        "SELECT pgtrickle.resume_scheduler(ARRAY['public.{scheduler}'])"
+    ))
+    .await;
+    let witness = wait_for_barrier(
         &db,
         scheduler_id,
         phase,
         scheduler_blocker,
         Duration::from_secs(90),
-    )
-    .await;
+    );
+    tokio::pin!(witness);
+    let scheduler_witness = loop {
+        tokio::select! {
+            result = &mut witness => break result,
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                // A pre-resume watermark can finish an empty tick; keep the pending change due.
+                sqlx::query(
+                    "WITH due AS (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                         WHERE pgt_id = $1 AND last_refresh_at > now() - interval '1 hour' \
+                         FOR UPDATE SKIP LOCKED) \
+                     UPDATE pgtrickle.pgt_stream_tables st \
+                         SET last_refresh_at = now() - interval '2 hours' \
+                         FROM due WHERE st.pgt_id = due.pgt_id",
+                )
+                .bind(scheduler_id)
+                .execute(&db.pool)
+                .await
+                .expect("keep scheduler fixture due without waiting on its row lock");
+            }
+        }
+    };
     // Keep the barrier held beyond the former 100ms lock deadline.
     tokio::time::sleep(Duration::from_millis(250)).await;
     // Compare rollback to the last committed boundary; a no-data scheduler tick may finish first.

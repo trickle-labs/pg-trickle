@@ -29,6 +29,11 @@ async fn test_refresh_picks_up_inserts() {
     .await;
     assert_eq!(db.count("public.rf_ins_st").await, 2);
 
+    // Keep the manual refresh from being skipped by an in-flight scheduler refresh.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_ins_st'])")
+        .await;
+
     // Insert new rows
     db.execute("INSERT INTO rf_ins VALUES (3, 'c'), (4, 'd')")
         .await;
@@ -268,7 +273,10 @@ async fn test_refresh_join_after_insert() {
     db.execute("INSERT INTO rf_cust VALUES (2, 'Bob')").await;
     db.execute("INSERT INTO rf_ord VALUES (2, 2, 200)").await;
 
-    db.refresh_st("rf_join_st").await;
+    // A concurrent scheduler refresh can return a busy NOTICE without a
+    // completed manual attempt. Require a completed refresh and exact
+    // defining-query convergence before asserting the post-insert result.
+    db.refresh_st_until_converged("rf_join_st").await;
 
     assert_eq!(db.count("public.rf_join_st").await, 2);
 }

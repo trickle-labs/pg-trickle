@@ -10,6 +10,11 @@ failure_schedule_repetition() {
     local summary="${artifact_dir}/summary.tsv"
     local status=0
 
+    if [[ ! "$attempts" =~ ^[1-9][0-9]*$ ]]; then
+        echo "FAILURE_RECOVERY_ATTEMPTS must be a positive integer" >&2
+        return 1
+    fi
+
     mkdir -p "$artifact_dir"
     printf 'attempt\tstatus\tlog\n' >"$summary"
 

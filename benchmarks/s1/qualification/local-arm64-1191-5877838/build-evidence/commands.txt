@@ -1,0 +1,21 @@
+Host profile: linux/arm64, 10 Docker CPUs; MDM and React source checkouts are the pinned archives in this directory.
+
+Build the corrected control:
+DOCKER_DEFAULT_PLATFORM=linux/arm64 docker build --platform linux/arm64 --provenance=false -f benchmarks/s1/Dockerfile --build-arg S1_BUILDER=s1-arm64-sdk:1168-078389ba1ff1 --build-arg TRICKLE_SOURCE=_s1/control -t s1-1168-control:078389ba1ff1-r2 .
+
+Build the exact candidate source commit 587783847edaaa447437a2391083239e2b09ca62:
+DOCKER_DEFAULT_PLATFORM=linux/arm64 docker build --platform linux/arm64 --provenance=false -f benchmarks/s1/Dockerfile --build-arg S1_BUILDER=s1-arm64-sdk:1168-078389ba1ff1 -t s1-1168-candidate:5877838 .
+
+Capture exact installed library and React SQL hashes:
+DOCKER_DEFAULT_PLATFORM=linux/arm64 docker run --rm --entrypoint sha256sum s1-1168-control:078389ba1ff1-r2 /usr/lib/postgresql/18/lib/pg_trickle.so /usr/lib/postgresql/18/lib/pg_mdm.so /usr/lib/postgresql/18/lib/pg_react.so /usr/share/postgresql/18/extension/pg_react--0.46.0.sql /usr/share/postgresql/18/extension/pg_react--0.46.1.sql
+DOCKER_DEFAULT_PLATFORM=linux/arm64 docker run --rm --entrypoint sha256sum s1-1168-candidate:5877838 /usr/lib/postgresql/18/lib/pg_trickle.so /usr/lib/postgresql/18/lib/pg_mdm.so /usr/lib/postgresql/18/lib/pg_react.so /usr/share/postgresql/18/extension/pg_react--0.46.0.sql /usr/share/postgresql/18/extension/pg_react--0.46.1.sql
+
+Run the complete paired qualification sequentially:
+DOCKER_DEFAULT_PLATFORM=linux/arm64 PGREACT_S1_BATCH_SIZE=32 python3.12 benchmarks/s1/qualification/run_bounded.py sha256:c33e9035e5d5a30a9f66abf5b5baa621ef2a84ff5d78c8ac6fd2c8040348e99c current-078389ba1ff1-control-300
+python3.12 benchmarks/s1/check_result.py benchmarks/s1/qualification/current-078389ba1ff1-control-300 --baseline
+DOCKER_DEFAULT_PLATFORM=linux/arm64 PGREACT_S1_BATCH_SIZE=32 python3.12 benchmarks/s1/qualification/run_bounded.py sha256:d6289aa5c868fe7a5882bbe5901ec625bdc5f8044d38f5f4313f77f2762d7f46 current-5877838-candidate-300
+python3.12 benchmarks/s1/check_result.py benchmarks/s1/qualification/current-5877838-candidate-300
+
+Verify the final candidate image:
+DOCKER_DEFAULT_PLATFORM=linux/arm64 python3.12 benchmarks/s1/test_docker_bootstrap.py sha256:d6289aa5c868fe7a5882bbe5901ec625bdc5f8044d38f5f4313f77f2762d7f46 _s1/evidence/bootstrap-candidate-5877838
+DOCKER_DEFAULT_PLATFORM=linux/arm64 python3.12 benchmarks/s1/test_mdm_grants.py sha256:d6289aa5c868fe7a5882bbe5901ec625bdc5f8044d38f5f4313f77f2762d7f46 _s1/evidence/mdm-grants-candidate-5877838
