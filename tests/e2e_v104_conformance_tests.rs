@@ -11,9 +11,27 @@ use sqlx::Row;
 const CREATE_STREAM_ARGS: &str = "text, text, text, text, boolean, text, text, text, boolean, boolean, \
      text, integer, double precision, text, boolean, text, integer, text, text";
 
+async fn disable_scheduler(db: &E2eDb) {
+    db.execute(
+        "DO $$ BEGIN \
+           EXECUTE format('ALTER DATABASE %I SET pg_trickle.enabled = off', current_database()); \
+         END $$",
+    )
+    .await;
+    db.execute(
+        "SELECT pg_terminate_backend(pid) \
+         FROM pg_stat_activity \
+         WHERE datname = current_database() \
+           AND backend_type = 'pg_trickle scheduler' \
+           AND pid <> pg_backend_pid()",
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn test_refresh_source_commit_timestamp_tracks_base_and_stream_dependencies() {
     let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
     sqlx::raw_sql("CREATE TABLE commit_a(id int PRIMARY KEY);
         CREATE TABLE commit_b(id int PRIMARY KEY);
         SELECT pgtrickle.create_stream_table(name => 'commit_leaf', query => 'SELECT id FROM commit_b', schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => true);
@@ -43,11 +61,11 @@ async fn test_refresh_source_commit_timestamp_tracks_base_and_stream_dependencie
         }
         db.execute("SELECT pgtrickle.refresh_stream_table('commit_root')")
             .await;
-        let correct: bool = sqlx::query_scalar("SELECT source_commit_at = $1::timestamptz FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'commit_root' AND h.status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1")
-            .bind(oldest).fetch_one(&db.pool).await.expect("read oldest admitted source commit");
+        let actual: Option<String> = sqlx::query_scalar("SELECT source_commit_at::text FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'commit_root' AND h.status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1")
+            .fetch_one(&db.pool).await.expect("read oldest admitted source commit");
         assert!(
-            correct,
-            "oldest source commit must include both dependency kinds"
+            actual.as_deref() == Some(oldest),
+            "oldest source commit must include both dependency kinds; expected {oldest}, got {actual:?}"
         );
         db.assert_st_matches_query(
             "commit_root",

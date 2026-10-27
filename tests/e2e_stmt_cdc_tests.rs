@@ -860,9 +860,9 @@ async fn test_stmt_cdc_numeric_scale_changes_survive_trigger_rebuild() {
     let db = E2eDb::new().await.with_extension().await;
     disable_scheduler(&db).await;
 
-    db.execute("CREATE TABLE numeric_rebuild_src (id INT PRIMARY KEY, amount NUMERIC, pad TEXT)")
+    db.execute("CREATE TABLE numeric_rebuild_src (id INT PRIMARY KEY, amount NUMERIC, pad INT)")
         .await;
-    db.execute("INSERT INTO numeric_rebuild_src VALUES (1, 1.0, 'seed')")
+    db.execute("INSERT INTO numeric_rebuild_src VALUES (1, 1.0, 7)")
         .await;
     db.execute_seq(&[
         "SET pg_trickle.cdc_mode = 'trigger'",

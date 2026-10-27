@@ -1,7 +1,13 @@
 """Keep the old bootstrap's helper audit valid with exact keyless deltas (#1171)."""
 
 
-def adapt_bootstrap(source):
+def adapt_bootstrap(source, extension_version=None):
+    if extension_version is not None:
+        old = b"CREATE EXTENSION pg_trickle VERSION '0.108.3';"
+        new = f"CREATE EXTENSION pg_trickle VERSION '{extension_version}';".encode()
+        if source.count(old) != 1:
+            raise ValueError("bootstrap pg_trickle version pin changed")
+        source = source.replace(old, new)
     for total in (4, 3):
         old = (
             "    IF result->>'resolver_strategy' IS DISTINCT FROM 'full'\n"

@@ -1406,6 +1406,18 @@ fn build_rescan_cte(
                 quote_ident(&format!("__pgt_aux_sum_{}", agg.alias)),
             ));
         }
+        if config.include_special_aggs && agg.function.needs_sum_of_squares() && !agg.is_distinct {
+            selects.push(format!(
+                "{} AS {}",
+                agg_sum_rescan_sql(agg),
+                quote_ident(&format!("__pgt_aux_sum_{}", agg.alias)),
+            ));
+            selects.push(format!(
+                "{} AS {}",
+                agg_sum2_rescan_sql(agg),
+                quote_ident(&format!("__pgt_aux_sum2_{}", agg.alias)),
+            ));
+        }
         if config.force_all_aggs
             && matches!(agg.function, AggFunc::Sum)
             && !agg.is_distinct

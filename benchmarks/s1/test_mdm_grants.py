@@ -37,7 +37,8 @@ try:
         raise AssertionError('PostgreSQL did not start')
     original = subprocess.check_output(['docker', 'exec', container, 'cat', '/tests/e2e.sql'])
     assert hashlib.sha256(original).hexdigest() == 'b72d8aa270369db31dfc2333c120ea6873eaa6d15fad0ac3398800c9b9d607f0'
-    (output / 'bootstrap.log').write_text(sql(adapt_bootstrap(original).decode(), 'postgres'))
+    version = sql("SELECT default_version FROM pg_available_extensions WHERE name = 'pg_trickle'", 'postgres')
+    (output / 'bootstrap.log').write_text(sql(adapt_bootstrap(original, version).decode(), 'postgres'))
     refresh = "SET SESSION AUTHORIZATION mdm_legacy_login; SET ROLE mdm_legacy_administrator; SELECT mdm.refresh('policy_qualification','ALLOW'); RESET ROLE; RESET SESSION AUTHORIZATION;"
     sql(refresh)
     snapshot = "SELECT jsonb_object_agg(c.oid::text,c.xmin::text) FROM pg_class c WHERE c.oid IN (SELECT relation_oid FROM mdm_internal.graph_members)"
