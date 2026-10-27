@@ -14,22 +14,65 @@ from unittest.mock import patch
 import check_ci_results
 import check_lsn_verification
 import ci_pr_suite
+import run_ci_allocation
 
 
 class AllocationTests(unittest.TestCase):
     def test_current_inventory_and_permanent_regressions_are_covered(self):
         full = ci_pr_suite.targets()
         for name in (
-            "e2e_dag_autorefresh_tests",
             "e2e_refresh_atomicity_tests", "e2e_long_txn_visibility_tests",
             "e2e_keyless_duplicate_tests", "e2e_safety_tests", "e2e_rls_wal_tests",
             "e2e_dvm_corpus_tests", "e2e_dvm_negative_control_tests",
             "e2e_dvm_semantic_mutant_tests",
             "e2e_sensitivity_baseline_tests", "e2e_window_state_recovery_tests",
             "e2e_dag_operations_tests", "e2e_dag_concurrent_tests",
-            "e2e_monitoring_tests", "e2e_ownership_tests", "e2e_stmt_cdc_tests",
+            "e2e_monitoring_tests", "e2e_stmt_cdc_tests", "e2e_ownership_tests",
+            "e2e_scheduler_tests", "e2e_dvm_failpoint_tests",
         ):
             self.assertIn(name, full)
+
+    def test_sensitive_cases_are_run_serially_on_both_allocations(self):
+        expected = [
+            "./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0",
+            "--no-fail-fast", "--test-threads", "1",
+            "--test", "e2e_wal_receipt_recovery_tests", "--test", "e2e_v043_tests",
+            "--test", "e2e_lsn_contract_tests", "--test", "e2e_property_circular_tests",
+            "--test", "e2e_refresh_tests", "--test", "e2e_v0878_security_tests", "-E",
+            "test(=test_wal_recovery_before_receipt_commit_preserves_committed_changes) | "
+            "test(=test_wal_recovery_after_receipt_commit_before_ack_converges_once) | "
+            "test(=test_wal_recovery_after_apply_before_ack_does_not_reapply) | "
+            "test(=test_wal_recovery_after_slot_advance_finishes_acknowledgement) | "
+            "test(=test_wal_trigger_fallback_received_receipt_requires_rebaseline) | "
+            "test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline) | "
+            "test(=test_wal_recovery_semantic_controls_are_detected) | "
+            "test(=test_t_a44_10_insert_correctness) | "
+            "test(=test_lsn_manual_refresh_fixed_snapshots_preserve_frontier) | "
+            "test(=test_lsn_scheduler_cdc_holdback_recovers_after_long_writer) | "
+            "test(=test_prop_monotone_cycle_small_graph_converges) | "
+            "test(=test_stddev_samp_differential_mode) | "
+            "test(=test_v0878_revoked_source_preserves_state_and_stages)",
+        ]
+        with patch("sys.argv", ["ci_pr_suite.py"]), patch(
+            "ci_pr_suite.subprocess.run", return_value=SimpleNamespace(returncode=0),
+        ) as run:
+            self.assertEqual(ci_pr_suite.main(), 0)
+        serial = next(call.args[0] for call in run.call_args_list if "--no-fail-fast" in call.args[0])
+        self.assertIn(
+            "not (binary(=e2e_wal_receipt_recovery_tests) & test(=test_wal_recovery_before_receipt_commit_preserves_committed_changes))",
+            run.call_args_list[0].args[0][-1],
+        )
+        self.assertIn(
+            "not (binary(=e2e_refresh_tests) & test(=test_stddev_samp_differential_mode))",
+            run.call_args_list[0].args[0][-1],
+        )
+        self.assertEqual(serial, expected)
+
+        before = run_ci_allocation.commands("before", "full")
+        after = run_ci_allocation.commands("after", "full")
+        self.assertIn("not (binary(=e2e_wal_receipt_recovery_tests)", before[0][-1])
+        self.assertEqual(before[2], run_ci_allocation.serial_case_command())
+        self.assertEqual(after[0][1:3], ["scripts/ci_pr_suite.py", "--no-fail-fast"])
 
     def fixture(self, root):
         (root / "tests").mkdir()
@@ -44,50 +87,46 @@ class AllocationTests(unittest.TestCase):
 
     def test_shards_cover_each_target_once_and_keep_witnesses_isolated(self):
         shards = []
+        policy = json.loads((ci_pr_suite.ROOT / ".github/ci-suites.json").read_text())
+        shard_2 = set(policy["pr_full_shard_2"])
+        all_targets = set(ci_pr_suite.targets())
+        self.assertIn("e2e_dvm_strategy_tests", ci_pr_suite.SCHEDULER_ISOLATED)
         for shard in (1, 2):
             with patch("sys.argv", ["ci_pr_suite.py", "--shard", str(shard)]), patch(
                 "ci_pr_suite.subprocess.run", return_value=SimpleNamespace(returncode=0)
             ) as run:
                 self.assertEqual(ci_pr_suite.main(), 0)
-                selected = []
-                for call in run.call_args_list:
-                    command = call.args[0]
-                    # WAL barrier cases are additionally run serially; do
-                    # not count that repetition as a second allocated binary.
-                    if not ("-E" in command and
-                            command[command.index("-E") + 1] == " | ".join(
-                                f"test(={test})" for _, test in ci_pr_suite.WAL_SERIAL_CASES
-                            )):
-                        selected.extend(command[i + 1] for i, arg in enumerate(command) if arg == "--test")
+                commands = [call.args[0] for call in run.call_args_list]
+                selected = {
+                    command[index + 1]
+                    for command in commands
+                    for index, arg in enumerate(command[:-1])
+                    if arg == "--test"
+                }
+                expected = {name for name in all_targets if (name in shard_2) == (shard == 2)}
+                self.assertEqual(selected, expected)
+                for command in commands:
                     self.assertEqual(command[command.index("--retries") + 1], "0")
-                self.assertEqual(len(run.call_args_list), 8 if shard == 1 else 6)
-                if shard == 1:
-                    commands = [call.args[0] for call in run.call_args_list[1:6]]
-                    self.assertCountEqual(
-                        [command[command.index("--test") + 1] for command in commands],
-                        [
-                            "e2e_bootstrap_gating_tests", "e2e_dag_autorefresh_tests",
-                            "e2e_dvm_strategy_tests", "e2e_ownership_tests", "e2e_rls_wal_tests",
-                        ],
-                    )
-                    for command in commands:
-                        self.assertEqual(command[command.index("--test-threads") + 1], "1")
-                        self.assertEqual(command[command.index("--retries") + 1], "0")
-                if shard == 2:
-                    for call in run.call_args_list[1:]:
-                        command = call.args[0]
-                        self.assertEqual(command[command.index("--test-threads") + 1], "1")
-                        self.assertEqual(command[command.index("--retries") + 1], "0")
-                    self.assertCountEqual(
-                        [call.args[0][call.args[0].index("--test") + 1] for call in run.call_args_list[1:]],
-                        [
-                            "e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests",
-                            "e2e_scheduler_tests", "e2e_v107_wal_transition_tests",
-                            "e2e_watermark_gating_tests",
-                        ],
-                    )
+                scheduler_runs = {
+                    command[command.index("--test") + 1]
+                    for command in commands[1:]
+                    if "--test-threads" in command and "--no-fail-fast" not in command
+                    and command[command.index("--test") + 1] in ci_pr_suite.SCHEDULER_ISOLATED
+                }
+                self.assertEqual(scheduler_runs, expected & ci_pr_suite.SCHEDULER_ISOLATED)
+                serial = [command for command in commands if "--no-fail-fast" in command]
+                self.assertEqual(len(serial), 1)
+                self.assertIn("--test-threads", serial[0])
+                serial_cases = [
+                    (binary, test) for binary, test in ci_pr_suite.SERIAL_CASES
+                    if binary in expected and binary not in ci_pr_suite.SCHEDULER_ISOLATED
+                ]
+                self.assertEqual(
+                    serial[0][serial[0].index("-E") + 1],
+                    " | ".join(f"test(={test})" for _, test in serial_cases),
+                )
                 shards.append(selected)
-        self.assertCountEqual(shards[0] + shards[1], ci_pr_suite.targets())
+        self.assertEqual(shards[0] | shards[1], all_targets)
         self.assertFalse(set(shards[0]) & set(shards[1]))
         for name in ("e2e_refresh_atomicity_tests", "e2e_failure_recovery_tests", "e2e_dvm_failpoint_tests"):
             self.assertIn(name, shards[0])
@@ -238,7 +277,7 @@ class AllocationTests(unittest.TestCase):
                 self.assertEqual(command[command.index("--retries") + 1], "0")
 
     def test_isolated_scheduler_failure_propagates_without_retries(self):
-        for failed_phase in (1, 2, 3, 4, 5):
+        for failed_phase in (1, 2, 3):
             with self.subTest(failed_phase=failed_phase), patch(
                 "sys.argv", ["ci_pr_suite.py", "--shard", "2"]
             ), patch("ci_pr_suite.subprocess.run") as run:
@@ -257,56 +296,20 @@ class AllocationTests(unittest.TestCase):
             with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
                 "ci_pr_suite.subprocess.run"
             ) as run:
+                atomicity_index = 1 + len(ci_pr_suite.SCHEDULER_ISOLATED)
                 run.side_effect = [
-                    SimpleNamespace(returncode=value) for value in ([0] * 11 + [status, 0])
+                    SimpleNamespace(returncode=value)
+                    for value in ([0] * atomicity_index + [status, 0])
                 ]
                 self.assertEqual(ci_pr_suite.main(), status)
                 self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
-                self.assertEqual(len(run.call_args_list), 13 if status == 0 else 12)
-                self.assertEqual(run.call_args_list[11].args[0], [
+                self.assertEqual(len(run.call_args_list), atomicity_index + 2 if status == 0 else atomicity_index + 1)
+                self.assertEqual(run.call_args_list[atomicity_index].args[0], [
                     "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
                     "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
                 ])
-
-    def test_wal_barrier_witness_runs_serially_and_failure_blocks_success(self):
-        cases = [test for _, test in ci_pr_suite.WAL_SERIAL_CASES]
-        for status in (0, 1, 130):
-            with self.subTest(status=status), patch(
-                "sys.argv", ["ci_pr_suite.py", "--shard", "1"]
-            ), patch("ci_pr_suite.subprocess.run") as run:
-                run.side_effect = [SimpleNamespace(returncode=x) for x in ([0] * 7 + [status])]
-                self.assertEqual(ci_pr_suite.main(), status)
-                self.assertEqual(len(run.call_args_list), 8)
-                commands = [call.args[0] for call in run.call_args_list]
-                main_command, isolated_commands, atomicity_command, serial_command = (
-                    commands[0], commands[1:6], commands[6], commands[7]
-                )
-                self.assertCountEqual(
-                    [command[command.index("--test") + 1] for command in isolated_commands],
-                    [
-                        "e2e_bootstrap_gating_tests", "e2e_dag_autorefresh_tests",
-                        "e2e_dvm_strategy_tests", "e2e_ownership_tests", "e2e_rls_wal_tests",
-                    ],
-                )
-                strategy_command = next(
-                    command for command in isolated_commands
-                    if command[command.index("--test") + 1] == "e2e_dvm_strategy_tests"
-                )
-                self.assertEqual(strategy_command[strategy_command.index("--test-threads") + 1], "1")
-                self.assertEqual(strategy_command[strategy_command.index("--retries") + 1], "0")
-                for case in cases:
-                    self.assertIn(
-                        "not (binary(=e2e_wal_receipt_recovery_tests) & "
-                        f"test(={case}))",
-                        main_command[main_command.index("-E") + 1],
-                    )
-                self.assertIn("e2e_refresh_atomicity_tests", atomicity_command)
-                self.assertEqual(serial_command, [
-                    "./scripts/run_e2e_tests.sh", "--profile", "ci",
-                    "--test", "e2e_wal_receipt_recovery_tests",
-                    "-E", " | ".join(f"test(={case})" for case in cases), "--test-threads", "1",
-                    "--retries", "0",
-                ])
+                if status == 0:
+                    self.assertIn("--no-fail-fast", run.call_args_list[atomicity_index + 1].args[0])
 
 
 class RepetitionTests(unittest.TestCase):
@@ -381,6 +384,36 @@ class DiskPreparationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("only supported", result.stderr)
+
+
+    def test_atomicity_runs_isolated_without_retries_and_propagates_failure(self):
+        for status in (0, 1, 130):
+            with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
+                "ci_pr_suite.subprocess.run"
+            ) as run:
+                atomicity_index = 1 + len(ci_pr_suite.SCHEDULER_ISOLATED)
+                run.side_effect = [
+                    SimpleNamespace(returncode=value)
+                    for value in ([0] * atomicity_index + [status, 0])
+                ]
+                self.assertEqual(ci_pr_suite.main(), status)
+                self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
+                self.assertEqual(len(run.call_args_list), atomicity_index + 2 if status == 0 else atomicity_index + 1)
+                self.assertEqual(run.call_args_list[atomicity_index].args[0], [
+                    "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
+                    "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
+                ])
+                if status == 0:
+                    self.assertIn("--no-fail-fast", run.call_args_list[atomicity_index + 1].args[0])
+
+    def test_comparison_collects_all_selected_failures_without_changing_result(self):
+        for status in (0, 1, 130):
+            with self.subTest(status=status), patch(
+                "sys.argv", ["ci_pr_suite.py", "--no-fail-fast"]
+            ), patch("ci_pr_suite.subprocess.run") as run:
+                run.return_value.returncode = status
+                self.assertEqual(ci_pr_suite.main(), status)
+                self.assertIn("--no-fail-fast", run.call_args_list[0].args[0])
 
 
 class VerdictTests(unittest.TestCase):

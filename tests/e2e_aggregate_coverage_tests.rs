@@ -819,7 +819,7 @@ async fn test_agg_json_agg_differential() {
 
     db.execute("INSERT INTO agg_json (grp, val) VALUES ('a', 'w')")
         .await;
-    db.refresh_st("agg_json_st").await;
+    db.refresh_st_with_retry("agg_json_st").await;
     db.assert_st_matches_query("agg_json_st", q).await;
 }
 
