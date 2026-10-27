@@ -198,7 +198,30 @@ async fn test_reinitialize_expands_cdc_after_trigger_mode_change() {
         .query_scalar("SELECT coalesce(frontier::text, 'null') FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'r1263_row_st'")
         .await;
     println!("r1263 mode-change frontier before refresh: {before}");
+    let before_lsn: String = db
+        .query_scalar(&format!("SELECT frontier->'sources'->'{oid}'->>'lsn' FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'r1263_row_st'"))
+        .await;
+    let mut writer = db.pool.begin().await.expect("begin buffer writer");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "LOCK TABLE {buffer} IN ROW EXCLUSIVE MODE"
+    )))
+    .execute(&mut *writer)
+    .await
+    .expect("hold the change-buffer writer lock");
     db.refresh_st("r1263_row_st").await;
+    let held_lsn: String = db
+        .query_scalar(&format!("SELECT frontier->'sources'->'{oid}'->>'lsn' FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'r1263_row_st'"))
+        .await;
+    assert_eq!(
+        held_lsn, before_lsn,
+        "a held-back refresh must not advance the frontier"
+    );
+    let held_total: i64 = db
+        .query_scalar("SELECT total FROM r1263_row_st WHERE grp = 'a'")
+        .await;
+    assert_eq!(held_total, 1, "the pending update must remain held back");
+    writer.commit().await.expect("release buffer writer lock");
+    db.refresh_st_until_converged("r1263_row_st").await;
     let diagnostic: String = db.query_scalar("SELECT row_to_json(s)::text FROM pgtrickle.pgt_stream_tables s WHERE pgt_name = 'r1263_row_st'").await;
     println!("r1263 mode-change catalog after refresh: {diagnostic}");
     db.assert_st_matches_query(
