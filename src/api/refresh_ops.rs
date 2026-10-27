@@ -224,6 +224,27 @@ fn refresh_stream_table_impl(
         )));
     }
 
+    // Validate before catalog locks or refresh-history writes can mask this
+    // isolation error with a serialization failure.
+    if st.refresh_mode == RefreshMode::Differential
+        && st.topk_limit.is_none()
+        && !manual_requires_whole_query_full(&st)
+        && refresh::current_safe_bound().is_none()
+    {
+        let read_committed = Spi::get_one::<bool>(
+            "SELECT current_setting('transaction_isolation') = 'read committed'",
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        if !read_committed {
+            return Err(PgTrickleError::SafeFrontierUnavailable {
+                context: format!("manual refresh of {schema}.{table_name}"),
+                reason: "manual differential writer-lock proof requires READ COMMITTED isolation"
+                    .to_string(),
+            });
+        }
+    }
+
     // ── Fast no-op exit for DIFFERENTIAL mode ────────────────────────
     // Before acquiring the advisory lock, check if any source table has
     // pending changes. If not, skip the entire refresh pipeline (lock,
@@ -993,16 +1014,6 @@ fn execute_manual_differential_refresh(
     // IMMEDIATE upstreams capture their IVM row deltas into the same durable
     // stream-table buffer consumed by this path. If that buffer is missing,
     // create it and establish a fresh baseline with one FULL refresh.
-    if upstream_immediate_source_requires_full(st)? {
-        refresh::ensure_full_policy(st, "IMMEDIATE upstream change buffer is missing")?;
-        pgrx::info!(
-            "Stream table {}.{}: IMMEDIATE upstream change buffer was missing; using FULL refresh to establish its baseline",
-            schema,
-            table_name,
-        );
-        return execute_manual_full_refresh(st, schema, table_name, source_oids);
-    }
-
     if let Some(reason) = upstream_st_source_requires_full(st)? {
         refresh::ensure_full_policy(st, reason)?;
         pgrx::info!(
@@ -1193,8 +1204,11 @@ fn upstream_st_source_positions(
         .collect()
 }
 
-fn upstream_immediate_source_requires_full(st: &StreamTableMeta) -> Result<bool, PgTrickleError> {
+fn upstream_st_source_requires_full(
+    st: &StreamTableMeta,
+) -> Result<Option<&'static str>, PgTrickleError> {
     let change_schema = crate::config::pg_trickle_change_buffer_schema();
+    let mut upstreams = Vec::new();
     for dependency in StDependency::get_for_st(st.pgt_id)? {
         if dependency.source_type != "STREAM_TABLE" {
             continue;
@@ -1208,20 +1222,11 @@ fn upstream_immediate_source_requires_full(st: &StreamTableMeta) -> Result<bool,
                 dependency.source_relid,
                 &change_schema,
             )?;
-            return Ok(true);
+            return Ok(Some("IMMEDIATE upstream change buffer is missing"));
         }
+        upstreams.push(upstream);
     }
-    Ok(false)
-}
-
-fn upstream_st_source_requires_full(
-    st: &StreamTableMeta,
-) -> Result<Option<&'static str>, PgTrickleError> {
-    for dependency in StDependency::get_for_st(st.pgt_id)? {
-        if dependency.source_type != "STREAM_TABLE" {
-            continue;
-        }
-        let upstream = StreamTableMeta::get_by_relid(dependency.source_relid)?;
+    for upstream in upstreams {
         if upstream.topk_limit.is_some()
             || upstream
                 .window_strategy

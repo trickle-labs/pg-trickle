@@ -26,8 +26,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Verify frozen production and test sources
-        run: git diff --exit-code 1ed8d756114bc9a9b381b568befc2a8ae6f5c3a6 -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
+      - name: Verify matching checked-out candidate and clean source inputs
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain -- src tests verification Cargo.toml Cargo.lock pg_trickle.control)"
       - name: Free runner space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
       - name: Read the builder image from GHCR
@@ -86,8 +88,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Verify frozen production and test sources
-        run: git diff --exit-code 1ed8d756114bc9a9b381b568befc2a8ae6f5c3a6 -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
+      - name: Verify matching checked-out candidate and clean source inputs
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain -- src tests verification Cargo.toml Cargo.lock pg_trickle.control)"
       - name: Free runner space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
       - uses: actions/download-artifact@v8
@@ -129,8 +133,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Verify frozen production and test sources
-        run: git diff --exit-code 1ed8d756114bc9a9b381b568befc2a8ae6f5c3a6 -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
+      - name: Verify matching checked-out candidate and clean source inputs
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain -- src tests verification Cargo.toml Cargo.lock pg_trickle.control)"
       - name: Free runner space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
       - uses: actions/download-artifact@v8

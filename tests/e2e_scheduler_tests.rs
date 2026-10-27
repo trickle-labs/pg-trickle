@@ -155,6 +155,9 @@ async fn test_scheduler_clock_auto_interval_expires_without_writes() {
 async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstream: bool) {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
     configure_fast_scheduler(&db).await;
+    // Keep quiet upstream work in the same tick as load-shed-exempt reinitialization.
+    db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+        .await;
     db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
         .await;
     db.alter_system_set_and_wait(

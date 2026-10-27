@@ -97,5 +97,18 @@ class PairedReportTests(unittest.TestCase):
             self.assertFalse(compare_ci_allocations.compare(run, jobs, root)['valid'])
 
 
+    def test_comparison_checks_the_actual_candidate_source_tree(self):
+        workflow = (Path(__file__).resolve().parent.parent
+                    / '.github/workflows/ci-allocation-comparison.yml').read_text()
+        self.assertEqual(
+            workflow.count('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"'), 3,
+        )
+        self.assertEqual(
+            workflow.count('git status --porcelain -- src tests verification '
+                           'Cargo.toml Cargo.lock pg_trickle.control'), 3,
+        )
+        self.assertNotIn('git diff --exit-code 1ed8d756', workflow)
+
+
 if __name__ == '__main__':
     unittest.main()

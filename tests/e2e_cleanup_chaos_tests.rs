@@ -141,6 +141,30 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     db.execute("INSERT INTO chaos_src VALUES (4, 'delta'), (5, 'epsilon')")
         .await;
 
+    // WAL capture is asynchronous. A scheduler tick with an empty buffer can
+    // legitimately select NO_DATA, and the failpoint would suspend the stream
+    // before the test has exercised a differential refresh. Wait for both
+    // committed INSERTs to reach CDC before arming the failure.
+    let source_oid: i64 = db
+        .query_scalar("SELECT 'public.chaos_src'::regclass::oid::bigint")
+        .await;
+    let change_buffer = db.change_buffer_table(source_oid).await;
+    let captured = db
+        .wait_for_condition(
+            "chaos source inserts captured",
+            &format!(
+                "SELECT count(DISTINCT id) = 2 FROM {change_buffer} \
+                 WHERE action = 'I' AND id IN (4, 5)"
+            ),
+            Duration::from_secs(60),
+            Duration::from_millis(100),
+        )
+        .await;
+    assert!(
+        captured,
+        "both pending INSERTs must be CDC-visible before injecting the refresh failure"
+    );
+
     // A tick can retain an empty change snapshot from before pause. Let it fail
     // before fresh ticks witness the pending differential work and reach the limit.
     db.alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "'chaos_st'", "chaos_st")

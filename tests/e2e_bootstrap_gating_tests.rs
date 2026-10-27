@@ -566,6 +566,9 @@ async fn test_scheduler_logs_skip_when_source_gated() {
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
         .await;
+    // This test asserts scheduled work, so CI load must not defer its refresh.
+    db.execute("ALTER SYSTEM SET pg_trickle.load_shed_threshold = 0")
+        .await;
     // Disable auto-backoff so 1-second schedules never get stretched in slow
     // CI containers — the default (true since v0.10.0) would double the
     // effective interval once a refresh takes > 950 ms.
@@ -576,7 +579,10 @@ async fn test_scheduler_logs_skip_when_source_gated() {
         .await;
     db.wait_for_setting("pg_trickle.min_schedule_seconds", "1")
         .await;
+    db.wait_for_setting("pg_trickle.load_shed_threshold", "0")
+        .await;
     db.wait_for_setting("pg_trickle.auto_backoff", "off").await;
+    db.nudge_launcher_rescan().await;
 
     let sched_ok = db.wait_for_scheduler(Duration::from_secs(90)).await;
     assert!(sched_ok, "pg_trickle scheduler must be running");

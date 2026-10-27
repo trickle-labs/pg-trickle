@@ -1,0 +1,14 @@
+2537407ec35fa9735117f719113d80183e1a9cf363014a87061c3413a470b63a  ./build-evidence/build-candidate.log
+088be55e46eeb9d71a45706337de0b8916ad871a64db4432eca4d07c75498f7e  ./build-evidence/build-control.log
+4610f797ae45f4eacb35435d6dfdfe44673142732470460b522deb1c1628f13f  ./build-evidence/candidate-commit.txt
+90d9adc097fc6a4201b51045f67f37a270a77f468af2f83d508dc04c8e69d76b  ./build-evidence/candidate-image.json
+b2a8b13ad8f3f2226bae45bcb16927589e909b0edbb606df7b4159bb664b11f1  ./build-evidence/candidate-libraries.sha256
+192f2981e5f1a0ecc2c015b7904e777fad5b0b3f796ede25489eafbb96a770f0  ./build-evidence/compiled-inputs.sha256
+7c68f751cf7e2d122381f000b504e8faa9c65d3bc89ecc0d78db7d934e85dc98  ./build-evidence/control-image.json
+c5cc209e26648398b803e8866f6a5ca863a2dea9ab07debefafeee73a021d286  ./build-evidence/control-libraries.sha256
+b8fe0bb4c49341e092b166f80fa25ab6eb90d7bbefa38dd0072020a0742c4bdb  ./build-evidence/docker-host.txt
+8dd03856ad10a3c882b4fa2335d9fb331a6ae2f00f938ed00caa390ee71ad0a8  ./build-evidence/mdm-commit.txt
+36d2226cdce3d1378aef55d0a521e898756bd852dd8722599d5712c1ef44116c  ./build-evidence/react-commit.txt
+07710c78f737d9eb75480db9708a8a92b0e3aa074946df64d5b05979dcaf9c48  ./build-evidence/sdk-manifest.txt
+4148d04a521fa83899a0e4bdf7ffd368f4535b4abcea44da7728b4aff3babf1f  ./qualification.json
+4755f3d6cc186a6acefe21b8eee5a9483a7402cb161efd716dcd14f1b9978b52  ./runs.tar.gz

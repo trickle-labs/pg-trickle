@@ -197,9 +197,9 @@ async fn test_consecutive_errors_tracked_and_reset() {
         "DIFFERENTIAL",
     )
     .await;
-    // The test calls the manual refresh API three times; stop scheduler ticks
-    // from claiming one of those refresh windows and returning a success NOTICE.
-    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['err_cnt_st'])")
+    // Keep scheduler refreshes from turning manual attempts into busy notices.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.err_cnt_st'])")
         .await;
 
     // Now add the bad row — any subsequent DIFFERENTIAL refresh will hit denom=0.
@@ -218,7 +218,13 @@ async fn test_consecutive_errors_tracked_and_reset() {
         let result = db
             .try_execute("SELECT pgtrickle.refresh_stream_table('err_cnt_st')")
             .await;
-        assert!(result.is_err(), "Refresh attempt {i} should fail");
+        let error = result.expect_err(&format!("Refresh attempt {i} should fail"));
+        assert!(
+            error
+                .as_database_error()
+                .is_some_and(|error| error.code().as_deref() == Some("22012")),
+            "Refresh attempt {i} should fail with division by zero: {error}"
+        );
     }
 
     // Simulate scheduler tracking errors

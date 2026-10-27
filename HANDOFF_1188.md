@@ -2,6 +2,20 @@
 
 This handoff covers the follow-up work for GitHub issue [#1188](https://github.com/trickle-labs/pg-trickle/issues/1188), which remains open. The original PR [#1190](https://github.com/trickle-labs/pg-trickle/pull/1190) is already merged at `0cbd84dc`; the comparison and fixture follow-up is on `ci/1188-cost-comparison` and has not been merged. The required matched before/after CI comparison is still inconclusive, so do not record a speedup or close #1188 yet.
 
+## 2026-10-27 merge reconciliation (supersedes old head/source pins below)
+
+The PR was reconciled with newer main changes, including the WAL NULL-decoding
+and E2E fixture fixes. The comparison no longer rejects a valid candidate merely
+because its source tree differs from the October 23 frozen commit: all three
+comparison phases now check that checkout HEAD matches the workflow's `GITHUB_SHA`
+and that the source inputs are unchanged. The existing before/after source-tree,
+package and image identity checks still fail closed on mismatches.
+
+The full before/after comparison has **not** produced a valid matched pair for
+the reconciled candidate. Do not claim time savings, close #1188, or treat any
+prior failing full run as passing. Recheck PR CI and dispatch a fresh matched
+comparison on the final candidate before updating benchmark conclusions.
+
 ## Current repository state
 
 - Repository: `/Users/grove/projects/pg-trickle2`

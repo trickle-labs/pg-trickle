@@ -68,6 +68,11 @@ def targets(root: Path = ROOT) -> list[str]:
         source = (root / "tests" / f"{binary}.rs").read_text()
         if binary not in full or f"fn {test}(" not in source:
             raise ValueError(f"missing scheduled combination: {case}")
+    for case in policy.get("isolated_cases", {}):
+        binary, test = case.split("::")
+        source = (root / "tests" / f"{binary}.rs").read_text()
+        if binary not in full or f"fn {test}(" not in source:
+            raise ValueError(f"missing isolated combination: {case}")
     for binary, test in SERIAL_CASES:
         source = (root / "tests" / f"{binary}.rs").read_text()
         if binary not in full or f"fn {test}(" not in source:
@@ -97,7 +102,12 @@ def main() -> int:
     # These scheduler-sensitive binaries use process-local shared containers.
     # Run them without parallel E2E contention so scheduler convergence
     # failures reflect behavior rather than runner resource pressure.
-    scheduler_isolated = {"e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests"}
+    # The paired allocation serializes high-risk WAL/LSN cases separately, but
+    # bootstrap and watermark scheduler binaries also need uncontended workers.
+    scheduler_isolated = {
+        "e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests",
+        "e2e_bootstrap_gating_tests", "e2e_watermark_gating_tests",
+    }
     isolated = [name for name in selected if name in scheduler_isolated]
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
     if args.no_fail_fast:

@@ -43,6 +43,9 @@ async fn configure_fast_scheduler(db: &E2eDb) {
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
         .await;
+    // Keep CI load from deferring the scheduler cycles these tests assert.
+    db.execute("ALTER SYSTEM SET pg_trickle.load_shed_threshold = 0")
+        .await;
     // Disable auto-backoff so 1-second schedules never get stretched in slow
     // CI containers — the default (true since v0.10.0) would double the
     // effective interval once a refresh takes > 950 ms.
@@ -52,6 +55,8 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     db.wait_for_setting("pg_trickle.scheduler_interval_ms", "100")
         .await;
     db.wait_for_setting("pg_trickle.min_schedule_seconds", "1")
+        .await;
+    db.wait_for_setting("pg_trickle.load_shed_threshold", "0")
         .await;
     db.wait_for_setting("pg_trickle.auto_backoff", "off").await;
 
@@ -545,10 +550,18 @@ async fn test_auto_refresh_updates_catalog_metadata() {
     // Insert data and wait for auto-refresh
     db.execute("INSERT INTO meta_src VALUES (2)").await;
 
+    // The scheduler can refresh between the INSERT and a timestamp-based
+    // wait's first read. Wait for the observable post-insert row instead:
+    // it proves the committed source change reached the stream table.
     let refreshed = db
-        .wait_for_auto_refresh("meta_st", Duration::from_secs(60))
+        .wait_for_condition(
+            "post-insert row reaches meta_st",
+            "SELECT EXISTS (SELECT 1 FROM meta_st WHERE id = 2)",
+            Duration::from_secs(60),
+            Duration::from_millis(250),
+        )
         .await;
-    assert!(refreshed, "Scheduler should auto-refresh");
+    assert!(refreshed, "Scheduler should apply the inserted row");
 
     // Verify timestamps advanced
     let new_refresh_at: Option<String> = db

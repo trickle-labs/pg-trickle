@@ -1,0 +1,5 @@
+0233b194a951d6c16d0189a21b27d4874755f9da4019ba923ccdcdb268189e2a  /usr/lib/postgresql/18/lib/pg_trickle.so
+a4441def832f49cb473ff75907eaa6c30115d5ecceb02f51ac43212869de7ad2  /usr/lib/postgresql/18/lib/pg_mdm.so
+066853d9a94c5667fc3fb7444b91a96c117d7e62ee38917174610dbb35ec67d1  /usr/lib/postgresql/18/lib/pg_react.so
+c52a0fd2dc115ef254db81224dce77d7ba921217fe85f1b15c6adb533a46b8de  /usr/share/postgresql/18/extension/pg_react--0.46.0.sql
+dabee76ce9987122a337d4e8c0a4a370d44ab05acbf349c1d92741b1e55234b8  /usr/share/postgresql/18/extension/pg_react--0.46.1.sql
