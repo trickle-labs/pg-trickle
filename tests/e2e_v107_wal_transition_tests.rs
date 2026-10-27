@@ -23,6 +23,10 @@ async fn test_v107_auto_wal_transition_captures_changes() {
     );
     db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
         .await;
+    assert!(
+        db.wait_for_scheduler(Duration::from_secs(30)).await,
+        "scheduler did not start after enabling automatic WAL capture"
+    );
 
     db.execute("CREATE TABLE v107_wal_source (id INT PRIMARY KEY, val TEXT NOT NULL)")
         .await;

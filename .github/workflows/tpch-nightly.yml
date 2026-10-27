@@ -2,7 +2,7 @@
 # TPC-H Nightly — TEST-10: correctness at SF-1 and SF-10
 #
 # Separated from ci.yml because these jobs can take up to ~3 hours each and
-# must not block PRs or push-to-main gating.  They run daily and on manual
+# must not block PRs or push-to-main gating. They run daily at 20:00 UTC and on manual
 # dispatch, matching the pattern established by stability-tests.yml.
 #
 #   SF-1  (150K orders, 3 cycles): timeout 180 min — all 15 tests
@@ -22,7 +22,7 @@ name: TPC-H Nightly
 
 on:
   schedule:
-    - cron: '0 5 * * *'  # Daily 05:00 UTC (after ci.yml at 03:00)
+    - cron: '0 20 * * *' # Daily 20:00 UTC, after daytime CI and stability runs
   workflow_dispatch:
 
 concurrency:

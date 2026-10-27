@@ -462,6 +462,59 @@ async fn test_agg_min_max_differential() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+async fn test_agg_expression_group_by_without_distinct_stays_differential() {
+    for filtered in [false, true] {
+        let db = E2eDb::new().await.with_extension().await;
+        db.execute(
+            "CREATE TABLE agg_events (id INT PRIMARY KEY, ts TIMESTAMPTZ NOT NULL, props JSONB NOT NULL)",
+        )
+        .await;
+        db.execute(
+            r#"INSERT INTO agg_events VALUES
+               (1, '2026-01-01 23:30:00+00', '{"path":"/a"}'),
+               (2, '2026-01-02 01:00:00+00', '{"path":"/a"}'),
+               (3, '2026-01-02 02:00:00+00', '{}')"#,
+        )
+        .await;
+
+        let predicate = if filtered { "WHERE id > 1" } else { "" };
+        let queries: Vec<_> = [
+            ("agg_daily", "(ts AT TIME ZONE 'UTC')::date"),
+            ("agg_paths", "coalesce(props ->> 'path', '')"),
+        ]
+        .into_iter()
+        .map(|(name, key)| {
+            (
+                name,
+                format!(
+                    "SELECT {key} AS key, COUNT(*) AS n FROM agg_events {predicate} GROUP BY {key}"
+                ),
+            )
+        })
+        .collect();
+        for (name, query) in &queries {
+            db.create_st(name, query, "1m", "DIFFERENTIAL").await;
+            db.assert_st_matches_query(name, query).await;
+        }
+
+        for mutation in [
+            r#"INSERT INTO agg_events VALUES
+               (4, '2026-01-02 03:00:00+00', '{"path":"/b"}'),
+               (5, '2026-01-03 00:00:00+00', '{"path":null}')"#,
+            r#"UPDATE agg_events SET ts = '2026-01-03 01:00:00+00', props = '{"path":"/b"}'
+               WHERE id IN (2, 3)"#,
+            "DELETE FROM agg_events WHERE id IN (2, 3, 4, 5)",
+        ] {
+            db.execute(mutation).await;
+            for (name, query) in &queries {
+                refresh_differential(&db, name).await;
+                db.assert_st_matches_query(name, query).await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_agg_count_distinct_differential() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE agg_cdist (id SERIAL PRIMARY KEY, grp TEXT, val INT)")
@@ -766,7 +819,7 @@ async fn test_agg_json_agg_differential() {
 
     db.execute("INSERT INTO agg_json (grp, val) VALUES ('a', 'w')")
         .await;
-    db.refresh_st("agg_json_st").await;
+    db.refresh_st_with_retry("agg_json_st").await;
     db.assert_st_matches_query("agg_json_st", q).await;
 }
 

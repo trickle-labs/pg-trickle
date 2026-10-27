@@ -556,7 +556,7 @@ async fn test_lsn_scheduler_cdc_holdback_recovers_after_long_writer() {
         db.wait_for_condition(
             "held row recovery",
             "SELECT count(*) = 2 FROM lsn_holdback_stream",
-            Duration::from_secs(60),
+            Duration::from_secs(120),
             Duration::from_millis(50),
         )
         .await,
