@@ -1423,7 +1423,7 @@ fn parse_pgoutput_columns(data: &str) -> std::collections::HashMap<String, Strin
 
 /// Parse `name[type]:value` fields without splitting quoted values on spaces.
 /// Later occurrences replace earlier ones, so UPDATE's `new-tuple` wins over
-/// matching `old-key` columns.
+/// matching `old-key` columns. SQL NULLs remove earlier values from the map.
 fn parse_pgoutput_column_payload(payload: &str) -> std::collections::HashMap<String, String> {
     let mut cols = std::collections::HashMap::new();
     let bytes = payload.as_bytes();
@@ -1520,6 +1520,8 @@ fn parse_pgoutput_column_payload(payload: &str) -> std::collections::HashMap<Str
             let value = &payload[start..pos];
             if value != "null" {
                 cols.insert(column, value.to_string());
+            } else {
+                cols.remove(&column);
             }
         }
     }
@@ -3566,6 +3568,17 @@ mod tests {
         let old = parse_pgoutput_old_columns(data);
         assert_eq!(cols.get("name").map(String::as_str), Some("After value"));
         assert_eq!(old.get("name").map(String::as_str), Some("Before value"));
+    }
+
+    #[test]
+    fn test_parse_pgoutput_columns_update_to_null_preserves_old_tuple() {
+        let data = "table public.t: UPDATE: old-key: id[integer]:1 value[text]:'before' new-tuple: id[integer]:1 value[text]:null";
+        let new = parse_pgoutput_columns(data);
+        let old = parse_pgoutput_old_columns(data);
+        assert_eq!(old.get("id").map(String::as_str), Some("1"));
+        assert_eq!(old.get("value").map(String::as_str), Some("before"));
+        assert_eq!(new.get("id").map(String::as_str), Some("1"));
+        assert_eq!(new.get("value"), None, "missing entries bind as SQL NULL");
     }
 
     #[test]

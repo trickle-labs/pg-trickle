@@ -687,7 +687,8 @@ async fn test_circular_default_rejects_cycles() {
 
     // ALTER B to reference A — this would form a cycle
     let result = db
-        .try_execute(
+        .try_execute_with_config(
+            &["SET pg_trickle.allow_circular = false"],
             "SELECT pgtrickle.alter_stream_table('cyc_def_b', \
              query => $$SELECT a.id, a.val FROM cyc_def_a a$$)",
         )
