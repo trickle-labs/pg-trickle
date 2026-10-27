@@ -1,0 +1,95 @@
+[
+    {
+        "Id": "sha256:36d64e083384e1f8185f327d8e222581da3032b57fcd78fee109e44ae4442c4a",
+        "RepoTags": [
+            "s1-control:qualification"
+        ],
+        "RepoDigests": [
+            "s1-control@sha256:36d64e083384e1f8185f327d8e222581da3032b57fcd78fee109e44ae4442c4a"
+        ],
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2026-10-21T06:08:23.04719634Z",
+        "Config": {
+            "User": "postgres",
+            "ExposedPorts": {
+                "5432/tcp": {}
+            },
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/postgresql/18/bin",
+                "GOSU_VERSION=1.19",
+                "LANG=en_US.utf8",
+                "PG_MAJOR=18",
+                "PG_VERSION=18.4-1.pgdg12+1",
+                "PGDATA=/var/lib/postgresql/18/docker",
+                "PG_REACT_INIT_VERSION=0.46.1"
+            ],
+            "Entrypoint": [
+                "/usr/local/bin/s1-entrypoint.sh"
+            ],
+            "Cmd": [
+                "postgres"
+            ],
+            "Volumes": {
+                "/var/lib/postgresql": {}
+            },
+            "Labels": {
+                "pg_mdm.source_revision": "eef7937180d504e62ce1076074bbeed8cef5d5a7",
+                "qualification.mdm_grant_patch": "sha256:a3dd34646b51a89cb52b3e424dfe17c48dab0f632ef585cb06cfbfa4934de388",
+                "qualification.react_pg_trickle_pin": "0.108.3"
+            },
+            "StopSignal": "SIGINT",
+            "ArgsEscaped": true
+        },
+        "Architecture": "arm64",
+        "Os": "linux",
+        "Size": 766481847,
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:5e34d05421f9491747bc11c68b1a7f5029b0aefb18eb9166935ac52be45fb299",
+                "sha256:c916902ed5f41ad035538987e949fedcc57796b9318469b4169820f31807059a",
+                "sha256:5c50eca83966c60a24063e326308435a0ad79743f452456470a66d7db33b56f5",
+                "sha256:efc233be53f0ef9c5d27272ba5062770481fd04a89b061f4bf3e94a4785c6cf2",
+                "sha256:5135d7b695ce0698611149051a28f6c96b47f71321ebcf0ab2cf4c6774e37d9f",
+                "sha256:72998b082f3a6fb47ada8e9020c5aa256675692f33986f1e29317a9a9a90dd9e",
+                "sha256:952868bcdccfe0ee48abe21a1223d4f0ac2d902682603c7afcfc80daa8d21169",
+                "sha256:bdc654e5bb776a6a6dded5b6c09a35cf6c6ea3e2fb8a89e1514276e86bb35df0",
+                "sha256:6e89d4b0160f2b7c10a282513059888b84796ff5a8233529b6d3ab7156891ec8",
+                "sha256:839308df920536d4fb3c4f00b4e07df94c8d05f7ef4a043edfe73f250f3b0c45",
+                "sha256:6800bbd49370360d031a3b699a4fcf29683f0e043bda6b2bdcaf6d8784770504",
+                "sha256:5d73c1a1b10e1c1b8a652dc79d08a2e5150a36c32f0a80be3e3f69326bb11505",
+                "sha256:298884d1c15592bf5a69d6e3a583d20355fdec29710bcf701b83048e5bddda8b",
+                "sha256:ca6d921fdf2b4fd0fd183e51a9a54a2949c816b759dc01d323b0308f4f2f00fd",
+                "sha256:f5c9ac2f867609a808a80b07bcc62c4fc18d698ab2da7acb51ed7c961c55bf87",
+                "sha256:3903262be336e1b83e5844cd62ef60cdeb6ebcec71b4a131947399ef2a94457a",
+                "sha256:8eaac06bcff718f53557d802b7d1854746102fa4af7ecde151eaa4ae934dbe84",
+                "sha256:e4a26db120c93ce2af74b38dbf390a4532d73ddaff7fcd91a0d1771dd6ff231a",
+                "sha256:e6a2cf1edbdbddf63a46460db2f9e293c3b9528459a1ffd8c2109648ce07a568",
+                "sha256:683f6eda7e6cd984e949a03f1c3e744c22981ce506028b99296854b91208e05c",
+                "sha256:370d56cb5dae7ef0041b9765d2bfab468a2d1d5dc0a926c7ee6c9521ae573caf",
+                "sha256:f4ff5048c0a2f39e33e348d708f26715f3f74013a50439c48854daf3f8ade669",
+                "sha256:96629e88d377c45808ba566223bef75a519fe54d8c5b3e42ad79ad139f4ea4c7",
+                "sha256:abbff37bbc73ca6a7e96ec24d8e5b98e9363c6918be2e8fec8c51aff7ff89ab6"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-10-21T06:08:24.523137591Z"
+        },
+        "Descriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:36d64e083384e1f8185f327d8e222581da3032b57fcd78fee109e44ae4442c4a",
+            "size": 4858,
+            "annotations": {
+                "config.digest": "sha256:a8488e3bfb2d6577aba95742d7ec008aa818d3cc34344bde8f30013bfbb4fea7"
+            }
+        },
+        "Identity": {
+            "Build": [
+                {
+                    "Ref": "oxvm4gfm5j5c0qxnltlmknsba",
+                    "CreatedAt": "2026-10-21T06:08:24.750445175Z"
+                }
+            ]
+        }
+    }
+]

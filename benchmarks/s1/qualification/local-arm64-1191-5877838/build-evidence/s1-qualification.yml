@@ -1,0 +1,271 @@
+name: S1 exact-image qualification (approved ARM64 Docker profile)
+
+on:
+  pull_request:
+    paths:
+      - 'benchmarks/s1/**'
+      - 'src/**'
+      - 'sql/**'
+      - 'verification/**'
+      - 'benches/**'
+      - 'scripts/gen_test_schema.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'pg_trickle.control'
+      - '.cargo/**'
+      - '.github/workflows/s1-qualification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s1-arm64-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy_contract:
+    name: S1 acceptance-policy regressions (not throughput qualification)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate the frozen workload and owner-approved 50/min policy
+        run: |
+          set -euo pipefail
+          python3 benchmarks/s1/check_frozen_harness.py
+          python3 benchmarks/s1/test_check_result.py
+  qualify:
+    runs-on: ubuntu-24.04-arm
+    env:
+      DOCKER_DEFAULT_PLATFORM: linux/arm64
+    # Allow both 45-minute supervisors and artifact upload to finish on failure.
+    timeout-minutes: 130
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@v7
+        with:
+          ref: 1c0345791979907e2c1418b0008ea15d58311cb9
+          path: _s1/control
+      - uses: actions/checkout@v7
+        with:
+          repository: trickle-labs/pg-mdm
+          ref: eef7937180d504e62ce1076074bbeed8cef5d5a7
+          path: _s1/mdm
+      - uses: actions/checkout@v7
+        with:
+          repository: trickle-labs/pg-react
+          ref: f19d9b2c5f3d947705ea26aa1619a989f08ae1dc
+          path: _s1/react
+      - name: Retain source, environment, and supervision checks
+        run: |
+          test "$(uname -m)" = aarch64
+          mkdir -p _s1/evidence
+          cp .github/workflows/s1-qualification.yml _s1/evidence/
+          tar --exclude='*/__pycache__' --exclude='*/control-300' --exclude='*/candidate-300' \
+            --exclude='benchmarks/s1/qualification/local-arm64-1191' \
+            -czf _s1/evidence/qualification-source.tar.gz benchmarks/s1
+          uname -a > _s1/evidence/host.txt
+          lscpu >> _s1/evidence/host.txt
+          docker info > _s1/evidence/docker.txt
+          git rev-parse HEAD > _s1/evidence/candidate-commit.txt
+          for component in control mdm react; do
+            git -C "_s1/$component" rev-parse HEAD > "_s1/evidence/$component-commit.txt"
+            (cd "_s1/$component"; git ls-files -z | tar --null -T - -czf "../evidence/$component-source.tar.gz")
+          done
+          git ls-files -z -- Cargo.toml Cargo.lock build.rs pg_trickle.control src verification benches sql scripts/gen_test_schema.py .cargo/config.toml |
+            tar --null -T - -czf _s1/evidence/candidate-source.tar.gz
+          python3 benchmarks/s1/check_frozen_harness.py
+          python3 benchmarks/s1/test_bootstrap_compat.py
+          python3 benchmarks/s1/qualification/test_exec_launch_retry.py
+          python3 benchmarks/s1/test_check_result.py
+          python3 benchmarks/s1/qualification/run_bounded.py --self-check
+          python3 benchmarks/s1/qualification/test_supervisor.py
+          python3 benchmarks/s1/test_grant_analyze.py _s1/evidence/grant-analyze-results.json
+      - name: Check approved ARM64 Docker CPU profile
+        id: profile
+        run: |
+          cpus=$(docker info --format '{{.NCPU}}')
+          if [ "$cpus" -lt 4 ]; then
+            echo "qualify=false" >> "$GITHUB_OUTPUT"
+            printf '{"result":"SKIPPED_UNQUALIFIED_PROFILE","docker_cpus":%s,"required_minimum_cpus":4}\n' "$cpus" \
+              > _s1/evidence/profile-gate.json
+            echo "::notice::S1 qualification needs an approved ARM64 Docker profile with at least 4 CPUs; this runner exposes $cpus CPUs. No rate gate was assessed."
+          else
+            echo "qualify=true" >> "$GITHUB_OUTPUT"
+            printf '{"result":"QUALIFIED_PROFILE","docker_cpus":%s,"required_minimum_cpus":4}\n' "$cpus" \
+              > _s1/evidence/profile-gate.json
+          fi
+      - name: Build native ARM64 SDK
+        if: steps.profile.outputs.qualify == 'true'
+        run: |
+          docker build --platform linux/arm64 --provenance=false -f benchmarks/s1/Dockerfile.arm64-sdk \
+            -t s1-arm64-sdk:qualification . \
+            > _s1/evidence/build-sdk.log 2>&1 || { tail -100 _s1/evidence/build-sdk.log; exit 1; }
+          docker image inspect s1-arm64-sdk:qualification > _s1/evidence/sdk-image.json
+          docker run --rm --entrypoint cat s1-arm64-sdk:qualification /sdk-manifest.txt \
+            > _s1/evidence/sdk-manifest.txt
+      - name: Build exact control and candidate images
+        id: build
+        if: steps.profile.outputs.qualify == 'true'
+        run: |
+          docker build --platform linux/arm64 --provenance=false -f benchmarks/s1/Dockerfile \
+            --build-arg S1_BUILDER=s1-arm64-sdk:qualification \
+            --build-arg TRICKLE_SOURCE=_s1/control -t s1-control:qualification . \
+            > _s1/evidence/build-control.log 2>&1 || { tail -100 _s1/evidence/build-control.log; exit 1; }
+          docker build --platform linux/arm64 --provenance=false -f benchmarks/s1/Dockerfile \
+            --build-arg S1_BUILDER=s1-arm64-sdk:qualification \
+            -t s1-candidate:qualification . \
+            > _s1/evidence/build-candidate.log 2>&1 || { tail -100 _s1/evidence/build-candidate.log; exit 1; }
+          for image in control candidate; do
+            docker image inspect "s1-$image:qualification" > "_s1/evidence/$image-image.json"
+            docker run --rm --entrypoint sha256sum "s1-$image:qualification" \
+              /usr/lib/postgresql/18/lib/pg_trickle.so /usr/lib/postgresql/18/lib/pg_mdm.so \
+              /usr/lib/postgresql/18/lib/pg_react.so \
+              /usr/share/postgresql/18/extension/pg_react--0.46.0.sql \
+              /usr/share/postgresql/18/extension/pg_react--0.46.1.sql > "_s1/evidence/$image-libraries.sha256"
+          done
+          python3 -c 'from pathlib import Path; r=Path("_s1/evidence"); c=(r/"control-libraries.sha256").read_text().splitlines(); n=(r/"candidate-libraries.sha256").read_text().splitlines(); assert c[0] != n[0], "control and candidate reused the same pg_trickle library"; assert c[1:] == n[1:], "MDM/React dependency binaries differ"'
+      - name: Check temporary-server isolation and unchanged runtime settings
+        if: steps.profile.outputs.qualify == 'true' && steps.build.outcome == 'success'
+        run: |
+          for component in control candidate; do
+            image=$(docker image inspect "s1-$component:qualification" --format '{{.Id}}')
+            python3 benchmarks/s1/test_docker_bootstrap.py "$image" "_s1/evidence/bootstrap-$component"
+          done
+      - name: Check actual MDM grants and candidate JIT behavior
+        id: mdm_grants
+        if: steps.profile.outputs.qualify == 'true' && steps.build.outcome == 'success'
+        run: |
+          image=$(docker image inspect s1-candidate:qualification --format '{{.Id}}')
+          python3 benchmarks/s1/test_mdm_grants.py "$image" _s1/evidence/mdm-grant-regression
+      - name: Qualify corrected control, unchanged 300 admissions
+        if: steps.profile.outputs.qualify == 'true' && steps.build.outcome == 'success'
+        env:
+          PGREACT_S1_BATCH_SIZE: '32'
+        run: |
+          image=$(docker image inspect s1-control:qualification --format '{{.Id}}')
+          # The baseline checker accepts only the explicitly approved sole below-60 failure.
+          python3 benchmarks/s1/qualification/run_bounded.py "$image" control-300 || true
+          python3 benchmarks/s1/check_result.py benchmarks/s1/qualification/control-300 --baseline
+      - name: Qualify candidate, unchanged 300 admissions
+        if: ${{ !cancelled() && steps.profile.outputs.qualify == 'true' && steps.build.outcome == 'success' && steps.mdm_grants.outcome == 'success' }}
+        env:
+          PGREACT_S1_BATCH_SIZE: '32'
+        run: |
+          image=$(docker image inspect s1-candidate:qualification --format '{{.Id}}')
+          # The frozen harness still returns 1 if observed throughput misses
+          # the 60/min target. Under owner approval only a sole rate failure
+          # at >=50/min may pass; the checker validates the retained raw exit,
+          # complete failure vector and all unchanged correctness/resource gates.
+          set +e
+          python3 benchmarks/s1/qualification/run_bounded.py "$image" candidate-300
+          raw_exit=$?
+          set -e
+          if [ "$raw_exit" -gt 1 ]; then exit "$raw_exit"; fi
+          python3 benchmarks/s1/check_result.py benchmarks/s1/qualification/candidate-300
+      - uses: actions/checkout@v7
+        if: steps.profile.outputs.qualify != 'true'
+        with:
+          ref: 2d102645ccc6779c508514ee22b4a55603bdc281
+          path: _s1/historical
+          persist-credentials: false
+      - name: Verify historical ARM64 evidence under its original source
+        id: historical-proof
+        if: steps.profile.outputs.qualify != 'true'
+        run: |
+          evidence=benchmarks/s1/qualification/local-arm64-1191
+          (cd "$evidence" && shasum -a 256 -c SHA256SUMS)
+          # Verify the archived compiled inputs against *their own* source
+          # commit, not against this policy-change checkout. Historical evidence
+          # can be checked without claiming qualification of the current head.
+          archived_head=$(cat "$evidence/build-evidence/candidate-commit.txt")
+          current_head=$(git rev-parse HEAD)
+          test "$archived_head" = "2d102645ccc6779c508514ee22b4a55603bdc281"
+          test "$(git -C _s1/historical rev-parse HEAD)" = "$archived_head"
+          # The historical build manifest contains five inputs from its
+          # archived build context that differ from its reported Git SHA.
+          # Verify all 447 archived inputs and record this divergence; do not
+          # silently claim those five inputs or the current source matched.
+          set +e
+          (cd _s1/historical && shasum -a 256 -c "$GITHUB_WORKSPACE/$evidence/build-evidence/compiled-inputs.sha256") \
+            > _s1/evidence/historical-compiled-inputs.log 2>&1
+          compiled_exit=$?
+          set -e
+          HISTORICAL_CHECK_EXIT="$compiled_exit" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          archive = Path("benchmarks/s1/qualification/local-arm64-1191")
+          manifest = archive / "build-evidence/compiled-inputs.sha256"
+          log = Path("_s1/evidence/historical-compiled-inputs.log")
+          entries = [line for line in manifest.read_text().splitlines() if line.strip()]
+          statuses = [line for line in log.read_text().splitlines()
+                      if line.endswith(": OK") or line.endswith(": FAILED")]
+          failed = sorted(line[:-len(": FAILED")] for line in statuses
+                          if line.endswith(": FAILED"))
+          known = sorted((
+              ".dockerignore",
+              ".github/workflows/s1-qualification.yml",
+              "benchmarks/s1/Dockerfile",
+              "benchmarks/s1/check_result.py",
+              "benchmarks/s1/test_check_result.py",
+          ))
+          assert len(entries) == len(statuses) == 447, (len(entries), len(statuses))
+          assert failed in ([], known), {
+              "error": "unexpected historical build-context divergence",
+              "failed": failed, "known": known,
+          }
+          assert int(os.environ["HISTORICAL_CHECK_EXIT"]) == (1 if failed else 0)
+          report = {
+              "status": ("HISTORICAL_BUILD_INPUTS_DIFFER_FROM_COMMIT"
+                         if failed else "HISTORICAL_COMMIT_INPUTS_MATCH"),
+              "archived_compiled_inputs": len(entries),
+              "verified_matching_inputs": len(entries) - len(failed),
+              "unverified_build_inputs": failed,
+              "historical_rate_is_current_head_qualification": False,
+          }
+          Path("_s1/evidence/historical-input-integrity.json").write_text(
+              json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report))
+          PY
+          printf '{"status":"HISTORICAL_ONLY_NOT_CURRENT_SOURCE_QUALIFIED","archive_head":"%s","current_head":"%s","approved_docker_cpus_required":4}\n' \
+            "$archived_head" "$current_head" > _s1/evidence/historical-scope.json
+          local_run_dir="$RUNNER_TEMP/s1-local-arm64-1191"
+          mkdir -p "$local_run_dir"
+          tar -xzf "$evidence/runs.tar.gz" -C "$local_run_dir"
+          python3 benchmarks/s1/check_frozen_harness.py
+          python3 benchmarks/s1/test_check_result.py
+          python3 benchmarks/s1/check_result.py "$local_run_dir/control-300" --baseline
+          # The historical 59.36/min is now within the explicitly approved
+          # >=50/min acceptance floor, while the workload/target remain 60.
+          # This remains historical evidence, never proof for another SHA.
+          python3 -c 'import json, pathlib; q=json.loads(pathlib.Path("benchmarks/s1/qualification/local-arm64-1191/qualification.json").read_text()); rate=q["workload"]["candidate"]["cases_per_minute"]; assert 59 <= rate < 60, rate; assert q["workload"]["target_cases_per_minute"] == 60, q'
+          python3 benchmarks/s1/check_result.py "$local_run_dir/candidate-300"
+          LOCAL_RUN_DIR="$local_run_dir" python3 -c 'import json, os, pathlib; p=pathlib.Path("benchmarks/s1/qualification/local-arm64-1191"); r=pathlib.Path(os.environ["LOCAL_RUN_DIR"]); q=json.loads((p/"qualification.json").read_text()); c=json.loads((r/"control-300/summary.json").read_text()); n=json.loads((r/"candidate-300/summary.json").read_text()); assert q["host"]["docker_cpus"] >= 10 and q["host"]["docker_platform"] == "linux/arm64"; assert q["candidate_source_commit"] == "2d102645ccc6779c508514ee22b4a55603bdc281"; assert q["mdm_source_commit"] == "eef7937180d504e62ce1076074bbeed8cef5d5a7" and q["react_source_commit"] == "f19d9b2c5f3d947705ea26aa1619a989f08ae1dc"; assert q["images"]["candidate"] == n["image"] == "sha256:065ada321676b2bd99b9d41834c31c2e66a86bfb0d912f4cb45b745ea594c0e5"; assert q["images"]["control"] == c["image"] == "sha256:36d64e083384e1f8185f327d8e222581da3032b57fcd78fee109e44ae4442c4a"; assert q["workload"]["candidate"]["cases_per_minute"] == n["cases_per_minute"] and 59 <= n["cases_per_minute"] < 60; assert n["s1_result"] == "PASS_OWNER_APPROVED_FLOOR" and c["s1_result"] == "BASELINE_COMPLETE"; print("local 10-CPU ARM64 evidence: PASS")'
+      - name: Hash complete evidence
+        if: always()
+        run: |
+          paths=(_s1/evidence)
+          for run in benchmarks/s1/qualification/control-300 benchmarks/s1/qualification/candidate-300; do
+            if [ -d "$run" ]; then paths+=("$run"); fi
+          done
+          find "${paths[@]}" -type f ! -name SHA256SUMS -print0 |
+            sort -z | xargs -0 sha256sum > _s1/evidence/SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: s1-arm64-exact-image-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 90
+          path: |
+            _s1/evidence/
+            benchmarks/s1/qualification/control-300/
+            benchmarks/s1/qualification/candidate-300/
+      - name: Enforce current-source approved ARM64 qualification
+        if: ${{ always() && steps.profile.outputs.qualify != 'true' }}
+        run: |
+          echo '::error::Current-source S1 qualification remains REQUIRED: this host has fewer than 4 Docker CPUs. Verified historical evidence (if present) cannot promote this new commit.'
+          exit 1

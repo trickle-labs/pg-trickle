@@ -137,5 +137,19 @@ mod tests {
             qualified_expr.contains("pg_catalog.pg_typeof(NEW.\"embedding\")::oid"),
             "actual type OIDs must govern the policy: {qualified_expr}"
         );
+
+        let numeric_expr = build_changed_cols_bitmask_expr(
+            &pk,
+            &[
+                ("id".to_string(), "integer".to_string()),
+                ("amount".to_string(), "numeric(12, 2)".to_string()),
+            ],
+        )
+        .unwrap();
+        assert!(
+            numeric_expr.contains("pg_catalog.pg_typeof(NEW.\"amount\")::oid IN")
+                && numeric_expr.contains("ELSE B'1' END)::varbit"),
+            "numeric updates must be retained for representation-sensitive consumers: {numeric_expr}"
+        );
     }
 }

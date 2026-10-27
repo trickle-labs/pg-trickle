@@ -322,12 +322,11 @@ pub fn normalize_cdc_capture_mode(value: Option<String>) -> CdcCaptureMode {
     }
 }
 
-/// A44-3 (v0.43.0): Maximum number of changes fetched per WAL poll cycle.
+/// A44-3 (v0.43.0): Target number of changes fetched per WAL poll cycle.
 ///
 /// Controls the `max_changes` parameter passed to
-/// `pg_logical_slot_get_changes()`. Increasing this value raises throughput
-/// at the cost of larger per-tick memory usage; decreasing it reduces latency
-/// for high-volume sources but increases poll overhead.
+/// `pg_logical_slot_peek_changes()`. A poll may exceed this target to finish
+/// replaying an already-persisted transaction prefix.
 ///
 /// Default: 10 000. Range: 100–1 000 000.
 pub static PGS_WAL_MAX_CHANGES_PER_POLL: GucSetting<i32> = GucSetting::<i32>::new(10_000);
@@ -646,10 +645,11 @@ pub fn register_cdc_gucs() {
     // A44-3: WAL poll tuning GUCs.
     GucRegistry::define_int_guc(
         c"pg_trickle.wal_max_changes_per_poll",
-        c"A44-3: Maximum WAL changes fetched per poll cycle.",
+        c"A44-3: Target WAL changes fetched per poll cycle.",
         c"Controls the max_changes argument to pg_logical_slot_peek_changes(). \
           Higher values increase throughput at the cost of larger per-tick memory \
           usage. Lower values reduce per-change latency for high-volume sources. \
+          A poll may exceed this target to finish a persisted transaction prefix. \
           Default: 10000.",
         &PGS_WAL_MAX_CHANGES_PER_POLL,
         100,       // min

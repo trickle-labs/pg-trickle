@@ -1942,21 +1942,38 @@ pub fn is_simple_child(op: &OpTree) -> bool {
 pub fn build_base_table_key_exprs(op: &OpTree, alias: &str) -> Vec<String> {
     match op {
         OpTree::Scan { columns, .. } => {
-            let non_nullable: Vec<&str> = columns
-                .iter()
-                .filter(|c| !c.is_nullable)
-                .map(|c| c.name.as_str())
-                .collect();
+            let non_nullable: Vec<&crate::dvm::parser::Column> =
+                columns.iter().filter(|c| !c.is_nullable).collect();
 
-            let key_cols: Vec<&str> = if non_nullable.is_empty() {
-                columns.iter().map(|c| c.name.as_str()).collect()
+            let key_cols = if non_nullable.is_empty() {
+                columns.iter().collect::<Vec<_>>()
             } else {
                 non_nullable
             };
 
+            let registry = crate::dvm::row_id_v2::TypeRegistry::new();
+            if key_cols.iter().any(|column| {
+                registry
+                    .validate_type(
+                        &column.name,
+                        column.type_oid,
+                        crate::dvm::row_id_v2::SUPPORTED_POSTGRES_MAJORS[0],
+                    )
+                    .is_err()
+            }) {
+                return vec![format!(
+                    "row_to_json(ROW({}))::text",
+                    key_cols
+                        .iter()
+                        .map(|column| format!("{alias}.{}", quote_ident(&column.name)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )];
+            }
+
             key_cols
                 .iter()
-                .map(|c| format!("{alias}.{}", quote_ident(c)))
+                .map(|column| format!("{alias}.{}", quote_ident(&column.name)))
                 .collect()
         }
         _ => {

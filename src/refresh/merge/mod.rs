@@ -582,22 +582,22 @@ fn distinct_agg_bound_error(reason: &str) -> PgTrickleError {
     ))
 }
 
-fn enforce_distinct_aggregate_bounds(
+fn parse_and_enforce_distinct_aggregate_bounds(
     st: &StreamTableMeta,
     defining_query: &str,
     prev_frontier: &Frontier,
     new_frontier: &Frontier,
     change_schema: &str,
-) -> Result<(), PgTrickleError> {
+) -> Result<dvm::ParseResult, PgTrickleError> {
     let max_values = crate::config::pg_trickle_distinct_agg_max_values_per_group() as i64;
-    let mut result = crate::dvm::parse_defining_query_full(defining_query)?;
+    let result = crate::dvm::parse_defining_query_full(defining_query)?;
     let mut checks = Vec::new();
     collect_distinct_agg_bound_checks(&result.tree, &mut checks)?;
-    for (_, body) in result.cte_registry.entries.drain(..) {
-        collect_distinct_agg_bound_checks(&body, &mut checks)?;
+    for (_, body) in &result.cte_registry.entries {
+        collect_distinct_agg_bound_checks(body, &mut checks)?;
     }
     if checks.is_empty() {
-        return Ok(());
+        return Ok(result);
     }
 
     for check in checks {
@@ -611,7 +611,7 @@ fn enforce_distinct_aggregate_bounds(
         }
     }
 
-    Ok(())
+    Ok(result)
 }
 
 fn distinct_aggregate_max_values(
@@ -1297,8 +1297,8 @@ pub fn execute_differential_refresh_with_tuning(
         return Ok((0, 0));
     }
 
-    with_stream_owner(st, || {
-        enforce_distinct_aggregate_bounds(
+    let parsed_query = with_stream_owner(st, || {
+        parse_and_enforce_distinct_aggregate_bounds(
             st,
             &effective_defining_query,
             prev_frontier,
@@ -1306,6 +1306,8 @@ pub fn execute_differential_refresh_with_tuning(
             &change_schema,
         )
     })?;
+    // Reuse the owner-resolved shape within this refresh; never cache it across DDL.
+    let query_has_join = crate::dvm::operators::join_common::tree_contains_join(&parsed_query.tree);
 
     // ── A-3a: Append-only heuristic fallback ─────────────────────────
     // When the stream table is marked append-only, check whether any
@@ -1716,9 +1718,7 @@ pub fn execute_differential_refresh_with_tuning(
     // historical refresh timings and use the cost model to predict
     // whether DIFFERENTIAL or FULL is cheaper for the *current* delta.
     if fallback_reason.is_none() && !skip_ratio_check && total_change_count > 0 {
-        let complexity = with_stream_owner(st, || {
-            Ok(classify_query_complexity(&effective_defining_query))
-        })?;
+        let complexity = classify_query_complexity(&effective_defining_query);
         if let Some(hist) = query_refresh_history_stats(st.pgt_id)
             && cost_model_prefers_full(
                 hist.avg_ms_per_delta,
@@ -2350,22 +2350,36 @@ pub fn execute_differential_refresh_with_tuning(
         );
     }
 
-    // ── PERF-5: ANALYZE change buffer tables before delta execution ──
-    // Only ANALYZE TABLE/FT/MV source buffers (changes_{oid}).  ST-on-ST
-    // sources use changes_pgt_{pgt_id} which is not in catalog_source_oids;
-    // using resolved.source_oids would attempt to ANALYZE non-existent
-    // tables, causing a PostgreSQL ERROR that aborts the refresh.
+    // ── PERF-5: Analyze the relations actually used by delta execution ──
+    // Ordinary refreshes use TABLE/FT/MV buffers. Graph SQL uses bounded
+    // stages for both base-table and stream-table dependencies.
     if crate::config::pg_trickle_analyze_before_delta() {
-        let cb_schema = crate::config::pg_trickle_change_buffer_schema();
-        for &oid in &catalog_source_oids {
-            let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
-            let analyze_sql = format!(
-                "ANALYZE \"{}\".\"{}\"",
-                cb_schema.replace('"', "\"\""),
-                buf_name,
-            );
+        let tables = if graph_same_pass {
+            // Graph delta SQL reads the bounded stages, not the shared buffers.
+            delta_stage
+                .source_tables()
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            let cb_schema = crate::config::pg_trickle_change_buffer_schema();
+            catalog_source_oids
+                .iter()
+                .map(|&oid| {
+                    format!(
+                        "{}.{}",
+                        crate::sql_builder::ident(&cb_schema),
+                        crate::sql_builder::ident(&crate::cdc::buffer_base_name_for_oid(
+                            pg_sys::Oid::from(oid)
+                        )),
+                    )
+                })
+                .collect()
+        };
+        for table in tables {
+            let analyze_sql = format!("ANALYZE {table}");
             if let Err(e) = Spi::run(&analyze_sql) {
-                pgrx::debug1!("[pg_trickle] PERF-5: failed to ANALYZE {}: {}", buf_name, e);
+                pgrx::debug1!("[pg_trickle] PERF-5: failed to ANALYZE {}: {}", table, e);
             }
         }
     }
@@ -2710,9 +2724,7 @@ pub fn execute_differential_refresh_with_tuning(
     // handles these collisions.
     let use_delete_insert = if !resolved.is_deduplicated
         && !resolved.is_all_algebraic
-        && with_stream_owner(st, || {
-            Ok(dvm::query_has_join(&effective_defining_query).unwrap_or(true))
-        })?
+        && query_has_join
         && !st.has_keyless_source
         && !use_explicit_dml
         && st.st_partition_key.is_none()
@@ -2787,90 +2799,162 @@ pub fn execute_differential_refresh_with_tuning(
 
     // MT-8: only the proven single-scan COUNT/SUM/AVG shape replaces the
     // SQL delta producer. Existing target/apply constraints fail closed.
-    let vector_tree =
-        with_stream_owner(st, || dvm::parse_defining_query(&effective_defining_query));
-    let vector_plan = match vector_tree {
-        Ok(tree) => {
-            let admission = crate::dvm::operators::vectorized_agg::VectorAggregateAdmission {
-                immediate_mode: false,
-                constrained_apply: use_explicit_dml
-                    || use_delete_insert
-                    || is_distributed_st
-                    || st.st_partition_key.is_some()
-                    || st.has_keyless_source
-                    || schema.contains('.')
-                    || schema.contains('"')
-                    || name.contains('.')
-                    || name.contains('"')
-                    || !crate::config::pg_trickle_aggregate_fast_path(),
-            };
-            match crate::dvm::operators::vectorized_agg::VectorizedAggregateOperator::plan(
-                &tree,
-                Some("pending"),
-                Some(("pending", "pending")),
-                admission,
-            ) {
-                Ok(mut plan) if plan.output_projection.is_none() => {
-                    plan.change_buffer = format!(
-                        "pg_temp.{}",
-                        crate::refresh::delta_stage::DeltaStage::table_name(
-                            st.pgt_id,
-                            plan.source_oid,
-                        )
-                    );
-                    plan.frontier_placeholders = (
-                        prev_frontier.get_lsn(plan.source_oid),
-                        new_frontier.get_lsn(plan.source_oid),
-                    );
-                    if let Some(staged_source) = delta_stage.source_tables().get(&plan.source_oid) {
-                        let has_minmax = plan.aggregates.iter().any(|aggregate| {
+    let vector_plan = {
+        let tree = &parsed_query.tree;
+        let admission = crate::dvm::operators::vectorized_agg::VectorAggregateAdmission {
+            immediate_mode: false,
+            constrained_apply: use_explicit_dml
+                || use_delete_insert
+                || is_distributed_st
+                || st.st_partition_key.is_some()
+                || st.has_keyless_source
+                || schema.contains('.')
+                || schema.contains('"')
+                || name.contains('.')
+                || name.contains('"')
+                || !crate::config::pg_trickle_aggregate_fast_path(),
+        };
+        match crate::dvm::operators::vectorized_agg::VectorizedAggregateOperator::plan(
+            tree,
+            Some("pending"),
+            Some(("pending", "pending")),
+            admission,
+        ) {
+            Ok(mut plan) if plan.output_projection.is_none() => {
+                plan.change_buffer = format!(
+                    "pg_temp.{}",
+                    crate::refresh::delta_stage::DeltaStage::table_name(st.pgt_id, plan.source_oid)
+                );
+                plan.frontier_placeholders = (
+                    prev_frontier.get_lsn(plan.source_oid),
+                    new_frontier.get_lsn(plan.source_oid),
+                );
+                if let Some(staged_source) = delta_stage.source_tables().get(&plan.source_oid) {
+                    let has_minmax = plan.aggregates.iter().any(|aggregate| {
                             matches!(
                                 aggregate.function,
                                 crate::dvm::operators::vectorized_agg::VectorAggregateFunction::Min
                                     | crate::dvm::operators::vectorized_agg::VectorAggregateFunction::Max
                             )
                         });
-                        let has_deletes = has_minmax
+                    let has_deletes = has_minmax
                             // nosemgrep: rust.spi.query.dynamic-format -- staged_source is an internally generated, quote-escaped temporary relation.
                             && Spi::get_one::<bool>(&format!(
                                 "SELECT EXISTS (SELECT 1 FROM {staged_source} WHERE action = 'D')"
                             ))
                             .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
                             .unwrap_or(false);
-                        Some((plan, !has_deletes))
-                    } else {
-                        pgrx::debug1!(
+                    Some((plan, !has_deletes))
+                } else {
+                    pgrx::debug1!(
                             "[pg_trickle] MT-8 fallback={} for {}.{}",
                             crate::dvm::operators::vectorized_agg::VectorAggregateFallback::StatisticsOrTypeMetadataUnavailable.as_str(),
                             schema,
                             name,
                         );
-                        None
-                    }
+                    None
                 }
-                Ok(_) => {
-                    pgrx::debug1!(
+            }
+            Ok(_) => {
+                pgrx::debug1!(
                         "[pg_trickle] MT-8 fallback={} for {}.{}",
                         crate::dvm::operators::vectorized_agg::VectorAggregateFallback::UnsupportedProjection.as_str(),
                         schema,
                         name,
                     );
-                    None
-                }
-                Err(reason) => {
-                    pgrx::debug1!(
-                        "[pg_trickle] MT-8 fallback={} for {}.{}",
-                        reason.as_str(),
-                        schema,
-                        name,
-                    );
-                    None
-                }
+                None
+            }
+            Err(reason) => {
+                pgrx::debug1!(
+                    "[pg_trickle] MT-8 fallback={} for {}.{}",
+                    reason.as_str(),
+                    schema,
+                    name,
+                );
+                None
             }
         }
-        Err(_) => None,
     };
     let use_vector_agg = vector_plan.is_some();
+    let reconciled_baseline =
+        graph_same_pass && query_has_join && super::phd1::has_reconciled_baseline(st.pgt_id)?;
+    let exact_pointwise_scans = super::phd1::exact_rowwise_join_scan_count(&parsed_query.tree);
+    let exact_pointwise = graph_same_pass
+        && (query_has_join || !resolved.is_deduplicated)
+        && use_explicit_dml
+        && !user_triggers_active
+        && !is_distributed_st
+        && st.st_partition_key.is_none()
+        && dependencies
+            .iter()
+            .all(|dep| matches!(dep.source_type.as_str(), "TABLE" | "STREAM_TABLE"))
+        && exact_pointwise_scans.is_some_and(|count| {
+            // shortcut: retain reconciliation above three scans until deeper-join conformance is complete.
+            count <= 3
+                && count <= crate::config::pg_trickle_deep_join_l0_scan_threshold()
+                && count <= crate::config::pg_trickle_part3_max_scan_count()
+        })
+        && super::phd1::supports_reconciliation_replace(st)?
+        && with_stream_owner(st, || {
+            let complete =
+                dvm::row_id_covers_output(&parsed_query.tree, &parsed_query.tree.output_columns());
+            Ok(complete
+                && crate::api::defining_query_is_immutable_without_sublinks(
+                    &effective_defining_query,
+                )?)
+        })?;
+    let exact_rowwise_join = reconciled_baseline && exact_pointwise;
+    // Reuse the mandatory comparison instead of paying for a large join delta too.
+    // Upstream stream tables are fixed by this graph pass's shared safe boundary.
+    let reconciliation_delta = if graph_same_pass
+        && query_has_join
+        && (resolved.is_deduplicated || reconciled_baseline)
+        && use_explicit_dml
+        && !user_triggers_active
+        && !has_recursive_cte
+        && window_plan
+            .as_ref()
+            .is_none_or(|plan| plan.nodes.is_empty())
+        && !is_distributed_st
+        && st.st_partition_key.is_none()
+        && parsed_query.tree.avg_aux_columns().is_empty()
+        && parsed_query.tree.sum2_aux_columns().is_empty()
+        && parsed_query.tree.nonnull_aux_columns().is_empty()
+        && !parsed_query.tree.needs_dual_count()
+        && !parsed_query.tree.needs_union_dedup_count()
+        && (resolved.trigger_using_sql.len() >= 32 * 1024
+            || (reconciled_baseline && !exact_rowwise_join))
+        && dependencies
+            .iter()
+            .all(|dep| dep.source_type == "STREAM_TABLE")
+        && super::phd1::supports_reconciliation_replace(st)?
+        && with_stream_owner(st, || {
+            crate::api::defining_query_is_immutable_without_sublinks(&effective_defining_query)
+        })? {
+        with_stream_owner(st, || {
+            super::phd1::reconciliation_delta_sql(
+                st,
+                &effective_defining_query,
+                &parsed_query.tree,
+                parsed_query.tree.needs_pgt_count(),
+                super::phd1::is_scalar_aggregate(&parsed_query.tree),
+            )
+        })?
+    } else {
+        None
+    };
+    if let Some(delta) = &reconciliation_delta {
+        resolved.trigger_using_sql = format!("({})", delta.sql);
+    }
+    let uses_reconciliation_delta = reconciliation_delta.is_some();
+    // The non-deduplicated pointwise path already normalizes net I/D multiplicities.
+    let capture_exact_delta = (uses_reconciliation_delta
+        || (exact_pointwise
+            && (!query_has_join || reconciled_baseline)
+            && !resolved.is_deduplicated))
+        && !parsed_query.tree.needs_pgt_count()
+        && crate::config::pg_trickle_diff_output_format() == crate::config::DiffOutputFormat::Split;
+    drop(parsed_query);
 
     // ── A1-2/A1-3: Partition-key range predicate injection ───────────
     // For partitioned stream tables, compute the MIN/MAX of the partition
@@ -2971,12 +3055,27 @@ pub fn execute_differential_refresh_with_tuning(
         use_delete_insert || use_agg_fast_path || use_explicit_dml || use_vector_agg;
     let delta_table_basename = format!("__pgt_delta_{}", st.pgt_id);
     let delta_select = format!("SELECT * FROM {} AS d", resolved.trigger_using_sql);
+    let delta_schema_select = reconciliation_delta.as_ref().map(|delta| {
+        format!(
+            "SELECT __pgt_row_id, ''::pg_catalog.text AS __pgt_action, {columns}, \
+                    NULL::pg_catalog.tid AS {delete_column} FROM {schema}.{name}",
+            columns = delta.columns,
+            delete_column = crate::sql_builder::ident(&delta.delete_column),
+            schema = crate::sql_builder::ident(schema),
+            name = crate::sql_builder::ident(name),
+        )
+    });
     let delta_table = if materializes_delta {
         // resolved.trigger_using_sql is definition-derived: parse/analyze it
         // under the owner's identity and stored search_path, not this
         // privileged caller's.
         crate::refresh::with_stream_owner(st, || {
-            crate::refresh::prepare_owner_temp_table(st, &delta_table_basename, &delta_select)
+            // The comparison has the storage columns plus fixed action/ctid metadata.
+            crate::refresh::prepare_owner_temp_table(
+                st,
+                &delta_table_basename,
+                delta_schema_select.as_ref().unwrap_or(&delta_select),
+            )
         })?
     } else {
         format!(
@@ -3005,7 +3104,10 @@ pub fn execute_differential_refresh_with_tuning(
     } else {
         None
     };
-    let prepared_diff_capture_cols = if use_explicit_dml && needs_downstream_capture {
+    let prepared_diff_capture_cols = if use_explicit_dml
+        && needs_downstream_capture
+        && !capture_exact_delta
+    {
         let cols = get_st_user_columns(st);
         if !cols.is_empty() {
             let col_list = cols
@@ -3078,6 +3180,30 @@ pub fn execute_differential_refresh_with_tuning(
     }
 
     let ((merge_count, strategy_label), downstream_capture) = with_stream_owner(st, || {
+        // Tiny graph deltas otherwise compile thousands of JIT functions on every apply.
+        if crate::refresh::current_graph_refresh_id().is_some()
+            && crate::config::pg_trickle_merge_planner_hints()
+            && total_change_count < PLANNER_HINT_NESTLOOP_THRESHOLD
+        {
+            Spi::run("SET LOCAL jit = off").map_err(|e| {
+                PgTrickleError::SpiError(format!(
+                    "disable small graph delta JIT for {schema}.{name}: {e}"
+                ))
+            })?;
+        }
+        if uses_reconciliation_delta
+            && crate::config::pg_trickle_merge_planner_hints()
+            && crate::config::pg_trickle_delta_enable_nestloop()
+            && crate::config::pg_trickle_merge_join_strategy()
+                == crate::config::MergeJoinStrategy::Auto
+        {
+            // The comparison no longer executes the deep-join delta that needed this hint.
+            Spi::run("SET LOCAL enable_nestloop = on").map_err(|e| {
+                PgTrickleError::SpiError(format!(
+                    "reconciliation planner hint for {schema}.{name}: {e}"
+                ))
+            })?;
+        }
         let mut downstream_capture = None;
         let result = if let Some((plan, accumulator, raw_delta, finalize, insert_only_minmax)) =
             &vector_runtime
@@ -3326,6 +3452,14 @@ pub fn execute_differential_refresh_with_tuning(
 
             Spi::run(&format!("INSERT INTO {delta_table} {delta_select}")) // nosemgrep: rust.spi.run.dynamic-format — table is numeric-ID-derived and delta_select is generated by the DVM engine.
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if graph_same_pass && crate::config::pg_trickle_analyze_before_delta() {
+                let analyze_sql = format!("ANALYZE {delta_table}");
+                Spi::run(&analyze_sql).map_err(|e| {
+                    PgTrickleError::SpiError(format!(
+                        "graph delta statistics for {schema}.{name}: {e}"
+                    ))
+                })?;
+            }
             let t_mat = t_mat_start.elapsed();
             // ST-ST-10: When this ST has downstream ST consumers, snapshot
             // the affected rows BEFORE applying DML.  The weight-aggregation
@@ -3335,7 +3469,8 @@ pub fn execute_differential_refresh_with_tuning(
             // the true effective delta (including value-change DELETEs) after
             // the DML completes.
             let needs_diff_capture = needs_downstream_capture;
-            let diff_capture_cols = if needs_diff_capture {
+            // These exact normalized deltas already describe the committed visible multiset.
+            let diff_capture_cols = if needs_diff_capture && !capture_exact_delta {
                 let cols = prepared_diff_capture_cols.clone().unwrap_or_default();
                 let col_list = cols
                     .iter()
@@ -3375,9 +3510,22 @@ pub fn execute_differential_refresh_with_tuning(
 
             // Step 2: DELETE removed rows (AFTER DELETE triggers fire)
             let t_del_start = Instant::now();
+            let delete_sql = reconciliation_delta.as_ref().map(|delta| {
+                format!(
+                    "DELETE FROM {}.{} WHERE ctid IN (\
+                       SELECT {column} FROM {delta_table} WHERE __pgt_action = 'D')",
+                    crate::sql_builder::ident(schema),
+                    crate::sql_builder::ident(name),
+                    column = delta.delete_column,
+                )
+            });
             let del_count = Spi::connect_mut(|client| {
                 let result = client
-                    .update(&resolved.trigger_delete_sql, None, &[])
+                    .update(
+                        delete_sql.as_ref().unwrap_or(&resolved.trigger_delete_sql),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
@@ -3386,19 +3534,36 @@ pub fn execute_differential_refresh_with_tuning(
             // Step 3: UPDATE changed existing rows (AFTER UPDATE triggers fire)
             // The IS DISTINCT FROM guard (B-1) prevents no-op UPDATE triggers.
             let t_upd_start = Instant::now();
-            let upd_count = Spi::connect_mut(|client| {
-                let result = client
-                    .update(&resolved.trigger_update_sql, None, &[])
-                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-                Ok::<usize, PgTrickleError>(result.len())
-            })?;
+            let upd_count = if uses_reconciliation_delta {
+                0
+            } else {
+                Spi::connect_mut(|client| {
+                    let result = client
+                        .update(&resolved.trigger_update_sql, None, &[])
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                    Ok::<usize, PgTrickleError>(result.len())
+                })?
+            };
             let t_upd = t_upd_start.elapsed();
 
             // Step 4: INSERT genuinely new rows (AFTER INSERT triggers fire)
             let t_ins_start = Instant::now();
+            let insert_sql = reconciliation_delta.as_ref().map(|delta| {
+                format!(
+                    "INSERT INTO {}.{} (__pgt_row_id, {columns}) \
+                     SELECT __pgt_row_id, {columns} FROM {delta_table} WHERE __pgt_action = 'I'",
+                    crate::sql_builder::ident(schema),
+                    crate::sql_builder::ident(name),
+                    columns = delta.columns,
+                )
+            });
             let ins_count = Spi::connect_mut(|client| {
                 let result = client
-                    .update(&resolved.trigger_insert_sql, None, &[])
+                    .update(
+                        insert_sql.as_ref().unwrap_or(&resolved.trigger_insert_sql),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
@@ -3421,7 +3586,14 @@ pub fn execute_differential_refresh_with_tuning(
                 downstream_capture = Some(diff_capture_cols);
             }
 
-            (del_count + upd_count + ins_count, "explicit_dml")
+            (
+                del_count + upd_count + ins_count,
+                if uses_reconciliation_delta {
+                    "reconciliation_delta"
+                } else {
+                    "explicit_dml"
+                },
+            )
         } else if use_prepared {
             // ── D-2: MERGE via prepared statement ────────────────────────
             // After ~5 executions PostgreSQL switches from custom to generic
@@ -3462,20 +3634,15 @@ pub fn execute_differential_refresh_with_tuning(
     // Reconcile only those proven affected shapes; ordinary projections and
     // keyed scans keep their differential cost.
     //
-    // EC-01b: use the parsed OpTree for join detection. If parsing fails,
-    // fail safe and run the repair path.
-    let query_has_join =
-        with_stream_owner(st, || dvm::query_has_join(&effective_defining_query)).unwrap_or(true);
+    // EC-01b: reuse the owner-parsed OpTree validated before applying the delta.
     // A BEFORE trigger may deliberately change the materialized row after
     // the defining query has produced it. Reconciliation against that query
     // would erase the trigger's result, so only reconcile when triggers are
     // disabled or absent.
-    let query_has_recursive_cte = with_stream_owner(st, || {
-        dvm::query_has_recursive_cte(&effective_defining_query)
-    })
-    .unwrap_or(false);
     let phantom_cleanup_count = if query_has_join
-        && !query_has_recursive_cte
+        && !uses_reconciliation_delta
+        && !exact_rowwise_join
+        && !has_recursive_cte
         && !resolved.is_deduplicated
         && st.st_partition_key.is_none()
         && !user_triggers_active
@@ -3498,6 +3665,23 @@ pub fn execute_differential_refresh_with_tuning(
     } else {
         0
     };
+
+    let strategy_label = if uses_reconciliation_delta {
+        strategy_label
+    } else if exact_rowwise_join {
+        "explicit_dml_exact_join"
+    } else if strategy_label == "explicit_dml"
+        && query_has_join
+        && !has_recursive_cte
+        && !resolved.is_deduplicated
+        && st.st_partition_key.is_none()
+        && !user_triggers_active
+    {
+        "explicit_dml_reconciled"
+    } else {
+        strategy_label
+    };
+    crate::refresh::set_merge_strategy(strategy_label);
 
     if phantom_cleanup_count > 0
         && has_downstream_st_consumers(st.pgt_id)
@@ -3705,9 +3889,7 @@ pub fn execute_differential_refresh_with_tuning(
         // derived from recent refresh history.  The cost model computes
         // the crossover delta ratio where INCR cost equals FULL cost,
         // adjusted for query complexity class.
-        let complexity = with_stream_owner(st, || {
-            Ok(classify_query_complexity(&effective_defining_query))
-        })?;
+        let complexity = classify_query_complexity(&effective_defining_query);
         let new_threshold = match estimate_cost_based_threshold(st.pgt_id, complexity) {
             Some(cost_threshold) => {
                 // Weighted blend: 60% ratio-based, 40% cost-based.
