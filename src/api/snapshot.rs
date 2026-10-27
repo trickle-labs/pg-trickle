@@ -765,6 +765,21 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
 
     let caller = security_context::capture_caller_context(EntryContext::SecurityDefiner)?;
     let stream_name = resolve_name_as_caller(name, &caller.search_path)?;
+    let initial_meta = StreamTableMeta::get_by_name(stream_name.schema(), stream_name.name())?;
+    // Refresh holds FOR UPDATE on this row until its output and frontier commit.
+    let locked = Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR SHARE",
+        &[initial_meta.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    if locked.is_none() {
+        return Err(PgTrickleError::NotFound(format!(
+            "{}.{}",
+            stream_name.schema(),
+            stream_name.name()
+        )));
+    }
+    // The lock may have waited for refresh publication; reread its committed frontier.
     let meta = StreamTableMeta::get_by_name(stream_name.schema(), stream_name.name())?;
     check_stream_table_ownership(meta.pgt_relid, stream_name.schema(), stream_name.name())?;
 
@@ -794,6 +809,8 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
         .as_ref()
         .map(|f| serde_json::to_string(f).unwrap_or_else(|_| "null".to_string()))
         .unwrap_or_else(|| "null".to_string());
+
+    crate::refresh::test_atomicity_barrier(&meta, "snapshot_after_metadata", 0);
 
     let ext_ver = env!("CARGO_PKG_VERSION");
     let snapshot_provenance_token = generate_snapshot_provenance_token()?;
