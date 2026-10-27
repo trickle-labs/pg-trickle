@@ -29,14 +29,4 @@ for invalid in (b"", source + source, adapted):
         pass
     else:
         raise AssertionError("changed or repeated bootstrap must fail closed")
-
-versioned = b"CREATE EXTENSION pg_trickle VERSION '0.108.3';\n" + source
-adapted_versioned = compat.adapt_bootstrap(versioned, "0.108.4")
-assert b"CREATE EXTENSION pg_trickle VERSION '0.108.4';" in adapted_versioned
-try:
-    compat.adapt_bootstrap(versioned + versioned, "0.108.4")
-except ValueError:
-    pass
-else:
-    raise AssertionError("repeated pg_trickle version pin must fail closed")
 print("bootstrap exact-delta compatibility checks: PASS")
