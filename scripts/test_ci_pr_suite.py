@@ -264,6 +264,10 @@ class AllocationTests(unittest.TestCase):
 
     def test_wal_barrier_witness_runs_serially_and_failure_blocks_success(self):
         cases = [test for _, test in ci_pr_suite.WAL_SERIAL_CASES]
+        self.assertIn(
+            "test_wal_receipt_commit_order_preserves_late_old_lsn_transaction",
+            cases,
+        )
         for status in (0, 1, 130):
             with self.subTest(status=status), patch(
                 "sys.argv", ["ci_pr_suite.py", "--shard", "1"]

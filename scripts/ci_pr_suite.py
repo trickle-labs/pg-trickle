@@ -11,10 +11,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Keep WAL receipt phase-barrier witnesses serial without removing them from PR coverage.
+# Keep WAL receipt progress witnesses off the parallel run without removing PR coverage.
 WAL_SERIAL_CASES = (
     ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_received_receipt_requires_rebaseline"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_undecoded_commit_requires_rebaseline"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_receipt_commit_order_preserves_late_old_lsn_transaction"),
 )
 
 
