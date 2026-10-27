@@ -12,7 +12,7 @@
 #   bench-tpch       — TPC-H per-query FULL vs DIFFERENTIAL (SF=0.01)
 #
 # Triggers:
-#   Weekly Sunday 02:00 UTC — automated historical tracking
+#   Weekly Wednesday 12:00 UTC — automated historical tracking
 #   workflow_dispatch       — manual run; optionally filter to a single job
 #
 # Artifacts (90-day retention):
@@ -25,7 +25,7 @@ name: E2E Benchmarks
 
 on:
   schedule:
-    - cron: '0 2 * * 0'   # Weekly, Sunday 02:00 UTC
+    - cron: '0 12 * * 3'  # Weekly, Wednesday 12:00 UTC
   workflow_dispatch:
     inputs:
       job:

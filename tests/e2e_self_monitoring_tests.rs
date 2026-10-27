@@ -389,8 +389,9 @@ async fn test_control_plane_survives_df_st_suspension() {
     db.execute("SELECT pgtrickle.setup_self_monitoring()").await;
 
     // Drop all DF STs — simulate suspension.
-    db.execute("SELECT pgtrickle.teardown_self_monitoring()")
-        .await;
+    db.try_execute("SELECT pgtrickle.teardown_self_monitoring()")
+        .await
+        .expect("teardown self-monitoring while preserving the user stream");
 
     // User ST should still refresh successfully.
     db.execute("INSERT INTO src VALUES (3, 30)").await;

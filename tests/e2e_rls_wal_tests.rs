@@ -33,7 +33,22 @@ async fn wait_for_wal_mode(db: &E2eDb, source: &str) {
 
 #[tokio::test]
 async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
-    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "'differential'",
+        "differential",
+    )
+    .await;
+    // Load the override at server startup, before any scheduler can apply mutations.
+    db.pool.close().await;
+    let restarted = tokio::process::Command::new("docker")
+        .args(["restart", db.container_id()])
+        .output()
+        .await
+        .expect("restart the configured RLS fixture");
+    assert!(restarted.status.success(), "RLS fixture restart failed");
+    db.pool = db.reconnect_after_restart().await;
     // Exercise WAL differential execution without adaptive FULL selection.
     db.alter_system_set_and_wait(
         "pg_trickle.refresh_strategy",
