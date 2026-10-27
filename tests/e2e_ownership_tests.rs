@@ -194,6 +194,10 @@ async fn test_reinitialize_expands_cdc_after_trigger_mode_change() {
         ))
         .await;
     println!("r1263 mode-change buffer before refresh: {diagnostic}");
+    let before: String = db
+        .query_scalar("SELECT coalesce(frontier::text, 'null') FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'r1263_row_st'")
+        .await;
+    println!("r1263 mode-change frontier before refresh: {before}");
     db.refresh_st("r1263_row_st").await;
     let diagnostic: String = db.query_scalar("SELECT row_to_json(s)::text FROM pgtrickle.pgt_stream_tables s WHERE pgt_name = 'r1263_row_st'").await;
     println!("r1263 mode-change catalog after refresh: {diagnostic}");
