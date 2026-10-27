@@ -81,7 +81,7 @@ def main() -> int:
     # failures reflect behavior rather than runner resource pressure.
     scheduler_isolated = {
         "e2e_dag_autorefresh_tests", "e2e_mixed_mode_dag_tests",
-        "e2e_mixed_scheduling_tests", "e2e_scheduler_tests",
+        "e2e_mixed_scheduling_tests", "e2e_ownership_tests", "e2e_scheduler_tests",
         # The WAL transition waits for both decoder and scheduler progress.
         # Avoid CI refresh timeouts caused by parallel Docker contention.
         "e2e_v107_wal_transition_tests",
