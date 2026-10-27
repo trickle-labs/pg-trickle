@@ -1435,6 +1435,8 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             .await;
         db.execute("CREATE TABLE history_journal(id INT PRIMARY KEY,value TEXT NOT NULL)")
             .await;
+        db.execute("ALTER TABLE history_source REPLICA IDENTITY FULL")
+            .await;
         create_identity_sentinel(&db, "history_identity", &seed.to_string()).await;
         if seed & 1 != 0 {
             commit_row(&db, "history_source", "history_journal", 0, "baseline").await;
@@ -1635,6 +1637,44 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             &path,
             &mut history,
             "restored catch-up",
+        )
+        .await;
+        fixture
+            .db
+            .execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.history_fast','public.history_slow'])")
+            .await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        configure_scheduler(&fixture.db).await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
+            .await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+        let wal_value = format!("wal-after-restore-{seed:016x}");
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            i32::MIN,
+            &wal_value,
+        )
+        .await;
+        wait_for_receipt(&fixture.db.pool, fixture.oid, "ACKNOWLEDGED", &wal_value).await;
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"trigger-to-WAL after restore","capture":cdc_mode(&fixture.db, &fixture.source).await,"value":wal_value}),
+        );
+        lifecycle_refresh(&fixture, "history_fast").await;
+        lifecycle_exact(
+            &fixture,
+            "history_fast",
+            &path,
+            &mut history,
+            "WAL catch-up before crash",
         )
         .await;
         record_lifecycle(
