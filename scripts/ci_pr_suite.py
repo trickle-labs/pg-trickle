@@ -10,6 +10,14 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+SCHEDULER_ISOLATED = {
+    "e2e_dag_autorefresh_tests", "e2e_mixed_mode_dag_tests",
+    "e2e_mixed_scheduling_tests", "e2e_ownership_tests", "e2e_scheduler_tests",
+    "e2e_v107_wal_transition_tests", "e2e_rls_wal_tests",
+    "e2e_watermark_gating_tests", "e2e_bootstrap_gating_tests",
+    # This failpoint witness requires deterministic scheduler progress.
+    "e2e_dvm_failpoint_tests",
+}
 SERIAL_CASES = [
     ("e2e_rls_wal_tests", "test_rls_bypassrls_owner_differential_wal_matches_query"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_before_receipt_commit_preserves_committed_changes"),
@@ -104,16 +112,12 @@ def main() -> int:
     # failures reflect behavior rather than runner resource pressure.
     # The paired allocation serializes high-risk WAL/LSN cases separately, but
     # bootstrap and watermark scheduler binaries also need uncontended workers.
-    scheduler_isolated = {
-        "e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests",
-        "e2e_bootstrap_gating_tests", "e2e_watermark_gating_tests",
-    }
-    isolated = [name for name in selected if name in scheduler_isolated]
+    isolated = [name for name in selected if name in SCHEDULER_ISOLATED]
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
     if args.no_fail_fast:
         command.append("--no-fail-fast")
     for name in selected:
-        if name != "e2e_refresh_atomicity_tests" and name not in scheduler_isolated:
+        if name != "e2e_refresh_atomicity_tests" and name not in SCHEDULER_ISOLATED:
             command.extend(["--test", name])
     cases = json.loads((ROOT / ".github/ci-suites.json").read_text())["scheduled_cases"]
     excluded = []
@@ -142,7 +146,10 @@ def main() -> int:
         ], cwd=ROOT).returncode
         if status:
             return status
-    serial_cases = [(binary, test) for binary, test in SERIAL_CASES if binary in selected]
+    serial_cases = [
+        (binary, test) for binary, test in SERIAL_CASES
+        if binary in selected and binary not in SCHEDULER_ISOLATED
+    ]
     if not serial_cases:
         return 0
     serial = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0",

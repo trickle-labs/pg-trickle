@@ -22,7 +22,7 @@ until allocated. The source of truth is
 | Transaction visibility and committed-change durability | LSN proof and pure decision logic | Cannot prove snapshot acquisition or commit boundaries | Full long-transaction visibility, snapshot consistency, refresh atomicity, strategy transaction barrier and failure recovery |
 | Scheduler, worker lifecycle, DAG visibility | Scheduler/DAG decision tests | No workers | Full bootstrap/watermark gating, background workers, circular/immediate/mixed-mode scheduling, DAG auto-refresh and property snapshots |
 | Recovery, interrupted finalization, cancellation | Recovery classification tests | No crash/restart lifecycle | Full failpoint, cleanup chaos, error state, window recovery, publication crash and refresh-atomicity suites; relevant changes also repeat every witnessed schedule twice without retries; ten passes run nightly |
-| Ownership, RLS, grants, permissions | Privilege-boundary/static SECURITY DEFINER contracts | Catalog DDL checks only | Light ownership/RLS; full safety, RLS/WAL, versioned security regressions, MAINTAIN grants, guard and replica boundaries; relevant unsafe paths keep ASan |
+| Ownership, RLS, grants, permissions | Privilege-boundary/static SECURITY DEFINER contracts | Catalog DDL checks only | Light ownership/RLS; full ownership, safety, RLS/WAL, versioned security regressions, MAINTAIN grants, guard and replica boundaries; relevant unsafe paths keep ASan |
 | Public SQL API, catalogs, DDL, dump, upgrade | Static API/catalog/release contracts | Existing `catalog_tests` etc. install generated DDL | Light create/alter/drop/schema/dump tests; full versioned conformance and upgrades; shipping-image upgrade stays |
 | Release/candidate identity | Release evidence and LSN rejection controls | Cannot attest installed code | Existing release proof controls, light/full LSN runtime and candidate binding stay separate and unchanged |
 
@@ -36,7 +36,7 @@ the packaged extension. Neither substitutes for the installed tests above.
 
 For runtime or harness changes, Linux unit/catalog/component checks run even
 on drafts. Ready PRs add the existing 91-target, three-shard light suite and
-an explicit 99-target full suite across two duration-balanced runners and one database-free harness target. The old sensitive DVM gate selected all 161
+an explicit 100-target full suite across two duration-balanced runners and one database-free harness target. The old sensitive DVM gate selected all 161
 E2E targets in addition to light E2E. The new full suite retains permanent
 corpus, identity, versioned security and conformance regressions in both
 harnesses. All targets with `cfg(not(feature = "light-e2e"))` stay in the full
@@ -67,7 +67,7 @@ zero-retry behavior are unchanged.
 The paired full allocations also run one at a time so restart and cutover
 assertions do not overlap.
 
-The remaining 51 light targets use the installed extension for parser,
+The remaining 50 light targets use the installed extension for parser,
 manual-refresh, DDL and operator checks. Their second full-harness invocation
 is removed; their assertions remain in light E2E and nightly full E2E.
 No installed-extension assertion is replaced solely by a component test.

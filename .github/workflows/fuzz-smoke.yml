@@ -2,7 +2,7 @@ name: Fuzz smoke (A42-16)
 
 on:
   schedule:
-    - cron: '0 3 * * *'   # Daily at 03:00 UTC
+    - cron: '0 8 * * *'   # Daily at 08:00 UTC, clear of the main CI start
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
