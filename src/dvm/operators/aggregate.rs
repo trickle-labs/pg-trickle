@@ -2571,13 +2571,13 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             );
             if needs_special_value_rescan(agg) && has_rescan {
                 sum = format!(
-                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {sum} END",
+                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN COALESCE(r.{}, 0) ELSE {sum} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
                     quote_ident(&format!("__pgt_aux_sum_{}", agg.alias)),
                 );
             }
             if let Some((guard, special_sum)) = &special {
-                sum = format!("CASE WHEN {guard} THEN {special_sum} ELSE {sum} END");
+                sum = format!("CASE WHEN {guard} THEN COALESCE({special_sum}, 0) ELSE {sum} END");
             }
             let count = initialize_having_group(
                 use_having_rescan && matches!(agg.function, AggFunc::Avg),
@@ -2611,7 +2611,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             );
             let value = if has_rescan {
                 format!(
-                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {algebraic} END",
+                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN COALESCE(r.{}, 0) ELSE {algebraic} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
                     quote_ident(&format!("__pgt_aux_sum2_{}", agg.alias)),
                 )
