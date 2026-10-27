@@ -240,7 +240,7 @@ async fn test_consecutive_errors_tracked_and_reset() {
         .await;
 
     // After fixing the data, the refresh should succeed.
-    db.refresh_st("err_cnt_st").await;
+    db.refresh_st_with_retry("err_cnt_st").await;
     // Manual success clears errors
     let (_, _, _, err_count_after) = db.pgt_status("err_cnt_st").await;
     assert_eq!(

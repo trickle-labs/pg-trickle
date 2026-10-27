@@ -353,7 +353,7 @@ async fn test_projected_source_key_differential_update_removes_full_row() {
         ("DELETE FROM projected_key_source WHERE id = 1", "[]"),
     ] {
         db.execute(mutation).await;
-        db.refresh_st("projected_key_stream").await;
+        db.refresh_st_until_converged("projected_key_stream").await;
         let actual: String = db
             .query_scalar("SELECT COALESCE(jsonb_agg(name ORDER BY name), '[]'::jsonb)::text FROM public.projected_key_stream")
             .await;
