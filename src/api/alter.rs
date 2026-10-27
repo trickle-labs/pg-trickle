@@ -885,7 +885,7 @@ fn alter_stream_table_query(
                 if dep.source_type == "TABLE" && !refresh_mode.is_immediate() {
                     let change_schema = config::pg_trickle_change_buffer_schema();
                     if cdc::trigger_exists(dep.source_relid)? {
-                        cdc::rebuild_cdc_trigger_function(dep.source_relid, &change_schema)?;
+                        cdc::rebuild_cdc_trigger(dep.source_relid, &change_schema)?;
                     } else {
                         let definitions = cdc::resolve_referenced_column_defs(dep.source_relid)?;
                         cdc::rebuild::sync_change_buffer_columns(

@@ -133,6 +133,77 @@ async fn test_reinitialize_cast_sum_expands_old_cdc_buffer() {
     .await;
 }
 
+#[tokio::test]
+async fn test_reinitialize_expands_cdc_after_trigger_mode_change() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE ROLE r1263_mode_owner LOGIN").await;
+    db.execute("GRANT pgtrickle_admin, pgtrickle_operator TO r1263_mode_owner")
+        .await;
+    db.execute("GRANT CREATE ON SCHEMA public TO r1263_mode_owner")
+        .await;
+    db.execute("CREATE TABLE r1263_row_source (id bigint PRIMARY KEY, grp text, val bigint)")
+        .await;
+    db.execute("ALTER TABLE r1263_row_source OWNER TO r1263_mode_owner")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_trigger_mode = 'row'",
+        "SET ROLE r1263_mode_owner",
+        "SELECT pgtrickle.create_stream_table('r1263_row_st', 'SELECT grp, sum(val)::bigint AS total FROM r1263_row_source GROUP BY grp', '1h', refresh_mode => 'DIFFERENTIAL', cdc_mode => 'trigger')",
+        "RESET ROLE",
+        "RESET pg_trickle.cdc_trigger_mode",
+    ])
+    .await;
+    let oid = db.table_oid("r1263_row_source").await;
+    let buffer = db.change_buffer_table(i64::from(oid)).await;
+    db.execute(&format!(
+        "UPDATE pgtrickle.pgt_dependencies SET columns_used = ARRAY['grp'] \
+         WHERE source_relid = {oid}::oid"
+    ))
+    .await;
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_trigger_mode = 'row'",
+        "SELECT pgtrickle.rebuild_cdc_triggers()",
+        "RESET pg_trickle.cdc_trigger_mode",
+    ])
+    .await;
+    db.execute("INSERT INTO r1263_row_source VALUES (1, 'a', 1)")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_trigger_mode = 'statement'",
+        "SET ROLE r1263_mode_owner",
+        "SELECT pgtrickle.reinitialize_stream_table('r1263_row_st')",
+        "RESET ROLE",
+        "RESET pg_trickle.cdc_trigger_mode",
+    ])
+    .await;
+    db.refresh_st("r1263_row_st").await;
+    db.execute("UPDATE r1263_row_source SET val = 7 WHERE id = 1")
+        .await;
+    let captured: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM {buffer} WHERE action = 'I' AND val = 7)"
+        ))
+        .await;
+    assert!(
+        captured,
+        "the active CDC trigger must capture the added column"
+    );
+    let diagnostic: String = db
+        .query_scalar(&format!(
+            "SELECT coalesce(jsonb_agg(to_jsonb(b))::text, '[]') FROM {buffer} b"
+        ))
+        .await;
+    println!("r1263 mode-change buffer before refresh: {diagnostic}");
+    db.refresh_st("r1263_row_st").await;
+    let diagnostic: String = db.query_scalar("SELECT row_to_json(s)::text FROM pgtrickle.pgt_stream_tables s WHERE pgt_name = 'r1263_row_st'").await;
+    println!("r1263 mode-change catalog after refresh: {diagnostic}");
+    db.assert_st_matches_query(
+        "r1263_row_st",
+        "SELECT grp, sum(val)::bigint AS total FROM r1263_row_source GROUP BY grp",
+    )
+    .await;
+}
+
 /// Helper: create the two test roles and a source table owned by sec1_owner.
 async fn setup_ownership_test(db: &E2eDb) {
     // Create roles — use EXCEPTION to handle the race where parallel tests try
