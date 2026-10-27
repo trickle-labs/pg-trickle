@@ -1709,7 +1709,7 @@ async fn test_mixed_upsert_on_conflict_through_view() {
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
     )
     .await;
-    db.refresh_st("mu_st_kv").await;
+    db.refresh_st_until_converged("mu_st_kv").await;
 
     assert_eq!(
         db.count("public.mu_st_kv").await,
@@ -1729,7 +1729,7 @@ async fn test_mixed_upsert_on_conflict_through_view() {
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
     )
     .await;
-    db.refresh_st("mu_st_kv").await;
+    db.refresh_st_until_converged("mu_st_kv").await;
 
     assert_eq!(db.count("public.mu_st_kv").await, 5);
     db.assert_st_matches_query("mu_st_kv", "SELECT key, value FROM mu_v_kv")

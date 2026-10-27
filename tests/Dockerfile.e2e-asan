@@ -42,7 +42,7 @@ RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
     rustup component add rust-src --toolchain "${RUST_NIGHTLY}" && \
     cargo install cargo-pgrx --version 0.18.0 --locked && \
     /usr/local/pgsql/bin/pg_config --version && \
-    cargo pgrx init --pg18 /usr/local/pgsql/bin/pg_config
+    cargo pgrx init --pg18 /usr/local/pgsql/bin/pg_config --no-run
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
