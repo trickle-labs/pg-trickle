@@ -159,11 +159,7 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
         scenario.execution.requested_refresh_mode
     ))
     .await;
-    db.execute(&format!(
-        "SELECT pgtrickle.refresh_stream_table('{}')",
-        scenario.query.stream_table
-    ))
-    .await;
+    db.refresh_st_with_retry(&scenario.query.stream_table).await;
 
     // ── Baseline: stream table matches the direct query ──────────────────
     oracle::compare_st_to_query(
@@ -174,6 +170,38 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     .await
     .expect("baseline stream table should match direct query");
 
+    let pgt_name = scenario
+        .query
+        .stream_table
+        .rsplit('.')
+        .next()
+        .expect("stream table name");
+    // Freeze scheduler ownership, then complete a real differential refresh
+    // so the failure must preserve DIFFERENTIAL as the last mode.
+    db.execute(&format!(
+        "SELECT pgtrickle.pause_scheduler(ARRAY['{}'])",
+        scenario.query.stream_table
+    ))
+    .await;
+    db.execute(&format!(
+        "UPDATE {}.left_leaf SET score = score + 1 WHERE id = 1",
+        scenario.schema.name
+    ))
+    .await;
+    db.refresh_st_with_retry(&scenario.query.stream_table).await;
+    let prior_mode: Option<String> = sqlx::query_scalar(
+        "SELECT effective_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $1",
+    )
+    .bind(pgt_name)
+    .fetch_one(&db.pool)
+    .await
+    .expect("inspect completed pre-failure refresh mode");
+    assert_eq!(
+        prior_mode.as_deref(),
+        Some("DIFFERENTIAL"),
+        "pre-failure refresh should establish the mode to preserve"
+    );
+
     let checkpoint = format!("{}.two_leaf_checkpoint", scenario.schema.name);
     db.execute(&format!(
         "CREATE TABLE {checkpoint} AS TABLE {}",
@@ -182,45 +210,23 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     .await;
 
     // ── Turn the refresh failpoint ON for this stream table ──────────────
-    let pgt_name = scenario
-        .query
-        .stream_table
-        .rsplit('.')
-        .next()
-        .expect("stream table name");
     db.alter_system_set_and_wait(
         "pg_trickle.test_chaos_for_table",
         &format!("'{pgt_name}'"),
         pgt_name,
     )
     .await;
-
-    // Effective mode belongs to the last completed refresh, not the failed attempt.
-    assert!(
-        db.wait_for_condition(
-            "committed no-data baseline before failpoint",
-            &format!(
-                "SELECT COALESCE(effective_refresh_mode = 'NO_DATA', false)
-                   AND EXISTS (
-                       SELECT 1 FROM pgtrickle.pgt_refresh_history h
-                       WHERE h.pgt_id = st.pgt_id AND h.status = 'COMPLETED'
-                         AND h.action = 'NO_DATA' AND h.initiated_by = 'SCHEDULER'
-                   )
-                 FROM pgtrickle.pgt_stream_tables st WHERE pgt_name = '{pgt_name}'"
-            ),
-            Duration::from_secs(60),
-            Duration::from_millis(100),
-        )
-        .await,
-        "scheduler did not establish the committed no-data baseline"
-    );
-
-    // Commit real source changes after enabling the scheduler failpoint. The
-    // failed scheduler attempt must have pending journaled input to process.
+    // Keep the scheduler paused until real input is committed, so it cannot
+    // complete a no-data refresh between the DIFFERENTIAL baseline and fault.
     let cycle = scenario.cycles.first().expect("scenario has a cycle");
     for mutation in &cycle.mutations {
         db.execute(&mutation.sql).await;
     }
+    db.execute(&format!(
+        "SELECT pgtrickle.resume_scheduler(ARRAY['{}'])",
+        scenario.query.stream_table
+    ))
+    .await;
 
     let failure = wait_for_scheduler_failure(&db, pgt_name, Duration::from_secs(60))
         .await
@@ -259,7 +265,7 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     .expect("failed to inspect scheduler failure path");
     assert_eq!(requested_mode, "DIFFERENTIAL");
     assert_eq!(refresh_mode, "DIFFERENTIAL");
-    assert_eq!(effective_mode.as_deref(), Some("NO_DATA"));
+    assert_eq!(effective_mode.as_deref(), Some("DIFFERENTIAL"));
     assert!(!needs_reinit);
 
     let suspended = wait_for_suspended(&db, pgt_name, Duration::from_secs(60)).await;

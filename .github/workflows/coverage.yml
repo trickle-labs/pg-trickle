@@ -3,8 +3,9 @@
 #
 # Generates unit-test and E2E coverage, uploads to Codecov.
 #   push → main       : automatic (src/Cargo/test changes only)
-#   weekly (Mon 2 AM) : A46-15 scheduled weekly run for module tracking
-#   manual            : workflow_dispatch
+#   weekly (Mon 02:00 UTC) : unit coverage
+#   weekly (Mon 12:00 UTC) : E2E coverage
+#   manual                 : workflow_dispatch
 # =============================================================================
 name: Coverage
 
@@ -28,11 +29,10 @@ on:
       - '.github/workflows/coverage.yml'
       - '!tests/release/**'
       - '!**/*.md'
-  # A46-15: Weekly scheduled coverage to track module-level coverage trends.
+  # Weekly unit and E2E coverage run at separate times to avoid competing for runners.
   schedule:
-    - cron: '0 2 * * 1'  # Every Monday at 02:00 UTC (unit coverage)
-    # CI-003: E2E coverage runs weekly on Sunday at 02:00 UTC (see e2e-coverage job)
-    - cron: '0 2 * * 0'  # Every Sunday at 02:00 UTC (E2E coverage)
+    - cron: '0 2 * * 1'  # Monday 02:00 UTC — unit coverage
+    - cron: '0 12 * * 1' # Monday 12:00 UTC — E2E coverage
   workflow_dispatch:
 
 concurrency:
@@ -46,6 +46,7 @@ env:
 jobs:
   coverage:
     name: Code coverage
+    if: github.event_name != 'schedule' || github.event.schedule == '0 2 * * 1'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -98,13 +99,13 @@ jobs:
   # ── E2E coverage (Docker-based, weekly + manual) ──────────────────────
   # Runs the full E2E test suite against a coverage-instrumented Docker
   # image, extracts profraw files, merges with unit profdata, and uploads
-  # combined coverage. Expensive (~90 min), so scheduled weekly (Sunday
-  # 02:00 UTC) and available via workflow_dispatch.
-  # CI-003: gate on schedule OR workflow_dispatch (not push/PR).
+  # combined coverage. Expensive (~90 min), so scheduled weekly (Monday
+  # 12:00 UTC) and available via workflow_dispatch.
+  # CI-003: gate on its weekly schedule or workflow_dispatch (not push/PR).
   e2e-coverage:
     name: E2E coverage
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.event.schedule == '0 12 * * 1')
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7

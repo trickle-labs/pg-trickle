@@ -22,7 +22,7 @@ until allocated. The source of truth is
 | Transaction visibility and committed-change durability | LSN proof and pure decision logic | Cannot prove snapshot acquisition or commit boundaries | Full long-transaction visibility, snapshot consistency, refresh atomicity, strategy transaction barrier and failure recovery |
 | Scheduler, worker lifecycle, DAG visibility | Scheduler/DAG decision tests | No workers | Full bootstrap/watermark gating, background workers, circular/immediate/mixed-mode scheduling, DAG auto-refresh and property snapshots |
 | Recovery, interrupted finalization, cancellation | Recovery classification tests | No crash/restart lifecycle | Full failpoint, cleanup chaos, error state, window recovery, publication crash and refresh-atomicity suites; relevant changes also repeat every witnessed schedule twice without retries; ten passes run nightly |
-| Ownership, RLS, grants, permissions | Privilege-boundary/static SECURITY DEFINER contracts | Catalog DDL checks only | Light ownership/RLS; full safety, RLS/WAL, versioned security regressions, MAINTAIN grants, guard and replica boundaries; relevant unsafe paths keep ASan |
+| Ownership, RLS, grants, permissions | Privilege-boundary/static SECURITY DEFINER contracts | Catalog DDL checks only | Light ownership/RLS; full ownership, safety, RLS/WAL, versioned security regressions, MAINTAIN grants, guard and replica boundaries; relevant unsafe paths keep ASan |
 | Public SQL API, catalogs, DDL, dump, upgrade | Static API/catalog/release contracts | Existing `catalog_tests` etc. install generated DDL | Light create/alter/drop/schema/dump tests; full versioned conformance and upgrades; shipping-image upgrade stays |
 | Release/candidate identity | Release evidence and LSN rejection controls | Cannot attest installed code | Existing release proof controls, light/full LSN runtime and candidate binding stay separate and unchanged |
 
@@ -36,7 +36,7 @@ the packaged extension. Neither substitutes for the installed tests above.
 
 For runtime or harness changes, Linux unit/catalog/component checks run even
 on drafts. Ready PRs add the existing 91-target, three-shard light suite and
-an explicit 99-target full suite across two duration-balanced runners and one database-free harness target. The old sensitive DVM gate selected all 161
+an explicit 100-target full suite across two duration-balanced runners and one database-free harness target. The old sensitive DVM gate selected all 161
 E2E targets in addition to light E2E. The new full suite retains permanent
 corpus, identity, versioned security and conformance regressions in both
 harnesses. All targets with `cfg(not(feature = "light-e2e"))` stay in the full
@@ -53,9 +53,21 @@ light execution alone does not establish equivalent worker protection.
 The bounded full suite disables test retries so a correctness failure cannot
 be hidden by a later successful attempt. Investigate a failed run before
 rerunning it; ordinary infrastructure retries remain an explicit operator
-decision rather than an automatic correctness verdict.
+decision rather than an automatic correctness verdict. The RLS/WAL owner-mode
+case, seven WAL receipt-recovery cases that use advisory-lock witnesses, the
+D+I insert oracle, the automatic WAL-transition case, two LSN scheduler cases,
+the fixed-snapshot LSN case, the monotone circular fixpoint case, the
+three-layer no-spurious-refresh witness, the STDDEV_SAMP update oracle, and
+the revoked-source permission witness run one thread at a time after the
+parallel full suite. This preserves their exact
+assertions while isolating shared worker state and barrier timing from parallel
+E2E load. The long-writer recovery wait is 120 seconds and WAL transition
+witnesses wait up to 180 seconds under hosted-runner load; assertions and
+zero-retry behavior are unchanged.
+The paired full allocations also run one at a time so restart and cutover
+assertions do not overlap.
 
-The remaining 51 light targets use the installed extension for parser,
+The remaining 50 light targets use the installed extension for parser,
 manual-refresh, DDL and operator checks. Their second full-harness invocation
 is removed; their assertions remain in light E2E and nightly full E2E.
 No installed-extension assertion is replaced solely by a component test.
@@ -520,6 +532,360 @@ The summarizer rejects incomplete runs and reports each job's result, wait
 and execution minutes. Record cancelled/failed runs as such, never as passing
 performance comparisons.
 
+### Matched allocation replay
+
+Dispatch `ci.yml` with `compare_pr_allocations=true` on the comparison branch
+to run only the paired experiment. Normal PR, push, nightly and manual jobs
+retain their existing behavior when this input is false.
+
+Both allocations use the production/test trees at
+`6de32e0` (the repaired frozen test tree), the `ubuntu-24.04` runner class,
+cold workspace build directories and zero test retries. A single producer
+freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
+images and one extension package for both sides. Both sides execute inside
+that exact toolchain image, including its identical registry cache. The
+producer smoke-tests Docker/socket/mount access in both full and light harnesses.
+Its cost is reported separately. Each allocation runs five workload jobs:
+the existing integration suites, the same three light shards, and full E2E.
+The before allocation replays the broad full inventory from `b2ebaa8d`
+(after #1189); the after allocation uses the checked bounded list and adds
+the existing DVM components to integration. Fixed recovery witnesses and
+isolated atomicity execution are held constant on both sides.
+Production sources match merged PR #1190 (`0cbd84dc`); both sides also include
+the fixture repairs described below.
+
+This measures the affected tier workloads, including cold test compilation.
+Unchanged unit, release, shipping, LSN and security jobs are excluded from
+both sides. Replay job counts and minutes must not be labeled whole-PR totals;
+the new `PR correctness` aggregation job is also outside this experiment.
+Queue time is observed separately and is not a causal performance claim.
+Source/tool/runner versions, image/package checksums and every step result
+are retained as artifacts. A failed job or mismatched environment makes the
+paired result inconclusive, rather than a passing speedup measurement.
+
+The first [native replay attempt](https://github.com/trickle-labs/pg-trickle/actions/runs/39287515498)
+was stopped as inconclusive after completed jobs exposed hosted image revisions
+`20261018.339.1` and `20261012.334.1`. Its results are not a speedup claim.
+The cancelled pilot used 11 jobs and 147.083 summed execution minutes, recorded
+as experiment overhead rather than either allocation's measured cost.
+The replacement fixes compilation and test userspace in one immutable container.
+Hosted image revision, host kernel and Docker-server version remain disclosed
+per job as residual host variability; GitHub's hosted image revision cannot be
+selected by the `ubuntu-24.04` label. This is a single paired containerized replay,
+not a population estimate or a reconstruction of historical queue conditions.
+
+The first [containerized replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39292981857)
+exposed another one-shot fixture assumption in the mixed view/stream-table
+diamond. Its category update left `Cable` in the joined result (three rows
+instead of two). A controlled source-writer lock reproduces that exact stale
+row in both full and light harnesses after a completed manual attempt. The
+fixture now uses the existing exact-convergence helper at each diamond branch
+and the join, releasing its writer only after witnessing the held-back attempt.
+All original final row assertions remain. Both 35-check targets passed after
+repair; reverting only the convergence calls makes the controlled case fail
+in both harnesses. The failed hosted replay is not a speedup measurement.
+Its broad allocation also exposed a CTE insert fixture with the same one-shot
+assumption (two rows instead of four), now using the convergence helper, and
+a circular-dependency fixture whose session-only `SET` was lost across pooled
+connections. The circular allow/reject cases now use the existing configuration
+reload helper so every backend sees the intended setting. Dispatching its
+replacement triggered the existing concurrency rule and cancelled the still
+running broad job; this failed/cancelled run used 11 jobs and 184.467 summed
+execution minutes, recorded only as experiment overhead. The premature
+replacement was also stopped before building inputs so these failures could
+be repaired before another paired replay.
+Comparison dispatches now use distinct concurrency groups to retain earlier
+attempts. The stopped replacement used one execution minute in its producer;
+its unexpanded matrix placeholder consumed zero execution time.
+The local circular follow-up exposed an additional terminal-state sampling
+race: one peer was still `ACTIVE` after the first reached `ERROR`. The test
+now requires both members to reach `ERROR` together before the deadline;
+it also fails if that deadline expires, where the old conditional could pass.
+The repaired nine-check circular target passed without retries. A separate
+earlier local attempt failed during PostgreSQL template-lock connection setup;
+that infrastructure failure remains part of the verification history.
+Both 86-check CTE targets passed without retries after repair.
+
+The [next paired replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39301975393)
+passed both integration allocations and all six light shards, with matching
+controls in their eight records. Its bounded full job exposed a stale
+bit-aggregate fixture after an insert: the `eng` group retained count 3 and
+permissions 7 instead of count 4 and permissions 23. That fixture now also
+uses the existing convergence helper before its unchanged exact oracle.
+The failed run is inconclusive. Comparison invocations now collect all selected
+parallel failures rather than stopping at the first one; test failures and
+cancellations still fail the run. Normal PR invocations keep their existing
+early-failure behavior.
+Both 36-check refresh targets passed without retries after the bit-aggregate
+fixture repair; the exact wrong-row oracle remains unchanged.
+
+The [following replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39312835865)
+passed the bounded allocation but failed three broad-only fixture checks:
+the cleanup chaos test suspended on a `NO_DATA` attempt with its error counter
+pre-seeded to two; the guide report had not consumed its renamed upstream
+window; and the extension drop/recreate fixture had not consumed its insert.
+The chaos fixture now requires three real failed history rows before suspension
+and retains its final DIFFERENTIAL/40001/failpoint and recovery assertions.
+Guide data assertions and the upgrade roundtrip use exact convergence; guide
+pipelines pause automatic scheduling so combined/sequential mutation windows
+stay under manual control. The busy-refresh lock regression remains separate.
+All 37 locally eligible checks in these three targets passed without retries
+(17 upgrade checks remain ignored). This failed hosted attempt consumed 228.267
+summed execution minutes, with 71.700 summed creation-to-start minutes; neither
+is a passing speedup result. Earlier failed/cancelled attempts consumed another
+546.917 execution minutes. All failed attempts remain experiment overhead.
+
+The [next replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39373735709)
+completed all 1,214 bounded checks with one failure: the RLS/WAL data oracle
+passed but its final effective-mode assertion observed FULL. The fixture left
+`refresh_strategy` at adaptive `auto` while requiring DIFFERENTIAL on a tiny,
+high-churn source. It now explicitly selects the differential strategy for its
+workers, retaining the RLS, WAL, exact-row and effective-mode assertions. The
+local target passed all four checks without retries; two unchanged oracle
+helper cases were marked leaky by nextest. The actual RLS/WAL check passed.
+The failed hosted pair remains inconclusive.
+Its broad allocation passed 2,181/2,182 checks but timed out before witnessing
+the `before_receipt` WAL failpoint; no crash was performed in that failed case.
+The phase helper now starts a fresh, armed scheduler before the target commit
+for that boundary. Later durable-receipt phases retain their existing path.
+All 14 local recovery checks then passed without retries (one cleanup case
+was marked leaky). An earlier variant that restarted every phase failed two
+later-phase witnesses and was narrowed before publication. The failed hosted
+pair consumed 215.217 execution minutes and 0.550 creation-to-start minutes;
+all failed/cancelled experiment attempts so far consumed 990.401 execution
+minutes, recorded as experiment overhead rather than allocation savings.
+
+The [following replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39382059821)
+passed both integration allocations and all six light shards, whose eight
+identity records matched. The bounded full allocation passed 1,211/1,214:
+RLS/WAL still observed FULL, the auto-partition fixture retained count 3
+instead of 4, and the FULL/view fixture retained two rows instead of three.
+The latter two now use the existing exact-convergence helper before their
+unchanged row assertions. The broad allocation passed 2,178/2,182: monitoring
+teardown deadlocked, a fallback fixture counted one buffered row before replay,
+the earliest WAL witness timed out again, and a watermark test missed its
+initial auto-refresh. That watermark fixture now captures its timestamp before
+the write, using the existing timestamp-aware wait helper.
+
+The RLS mode, teardown and WAL failures did not reproduce in a 45-check local
+run against this hosted attempt's exact archived extension image; they are not
+claimed to have a confirmed causal diagnosis. Twenty independent RLS probes
+against the earlier local image also passed without retries. Fixture setup
+now loads the RLS strategy and the pre-receipt witness at retained-server
+startup, rather than relying on a frontend reload acknowledgement or only
+restarting a scheduler. WAL setup retains its database/volume identity check
+and acquires the phase blocker before the target commit. The no-buffered-copy
+witness now checks the target row ID 2 specifically: an older baseline row is
+not a copy of that pending commit. Receipt, crash, exact-journal, recovery-mode
+and final DIFFERENTIAL assertions remain. Failure diagnostics retain refresh
+history, buffered rows, capture/slot and worker state, and full teardown errors.
+The teardown assertion still runs in both full allocations without a retry.
+
+A subsequent local post-restart baseline-guard run passed 13/14 but reproduced
+the earliest fallback timeout. Its diagnostics showed both consumers back in
+`TRANSITIONING` after baseline setup, despite the earlier WAL-mode check.
+The fallback fixture now rechecks WAL readiness after all setup refreshes and restarts,
+before committing the target row; the RLS fixture does the same after its
+cutover drain. A six-target startup-adjusted run passed all 112 eligible checks
+without retries before this additional guard; the failed 13/14 follow-up remains
+part of the record. The two stale-row repairs also passed all 33 checks in the
+light harness without retries.
+The final RLS/WAL recovery follow-up passed all 18 checks without retries,
+including the post-restart baseline guard and recovery negative controls.
+Formatting and lint passed with zero warnings.
+
+Both ten-repetition recovery steps and the broad serial atomicity phase passed.
+This failed pair remains inconclusive: 11 jobs used 203.783 execution minutes
+and 278.933 summed creation-to-start minutes. Failed/cancelled experiment
+overhead was 1,194.184 execution minutes before the next attempt; none is
+allocation savings.
+
+The [2026-10-20 matched replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39394922140)
+used the same frozen inputs in all ten replay records, and all six light shards
+plus both integration jobs passed. The bounded full job also passed. The broad
+full job failed 3 of 2,182 checks (2,179 passed, 135 skipped): two one-shot
+fixture assertions now use `refresh_st_with_retry` or exact convergence, with
+their assertions unchanged. The third was the RLS/WAL effective-mode check;
+its history showed a FULL `SCHEMA_CHANGED` reinitialization after a transient
+connection reset. The isolated RLS/WAL target passed without retries, so the
+cause remains unconfirmed and its strict DIFFERENTIAL assertion remains.
+Because the broad job failed, the validator rejects this pair and no before /
+after cost difference is reported. The run used 11 jobs, 219.417 execution
+minutes and 235.717 summed creation-to-start minutes. Failed/cancelled
+experiment overhead is now 1,413.601 execution minutes. These costs are not
+allocation savings; issue #1188 remains open pending a valid matched replay.
+
+The next dispatch, [run `39408759659`](https://github.com/trickle-labs/pg-trickle/actions/runs/39408759659),
+stopped at the producer's frozen-source guard before building or replaying
+anything. It correctly rejected the two test-file changes against the old
+`88c8` pin. The pin now advances to `91f3a039`, which contains those fixture
+repairs while production sources still match merged #1190. One producer job
+used 0.183 execution minutes and 9.633 queue-proxy minutes; no replay ran.
+Including the producer check, failed/cancelled experiment overhead is now
+1,413.784 execution minutes.
+
+The next dispatch, [run `39410203313`](https://github.com/trickle-labs/pg-trickle/actions/runs/39410203313),
+was also invalid: both full allocations failed. The bounded suite failed the
+RLS/WAL effective-mode and before-receipt fallback cases; the broad suite
+passed 2,179/2,182, with failures in disabled-worker resume, an auto-refresh
+wait, and chained-stream row count.
+
+The following [run `39420981755`](https://github.com/trickle-labs/pg-trickle/actions/runs/39420981755)
+confirmed the RLS/WAL effective-mode case passes when isolated. Its
+before-receipt fallback case still timed out on both sides, with two consumers
+stuck in `TRANSITIONING`, the decoder at the cutover LSN, and autovacuum and
+the scheduler both waiting on buffer content. The broad `before` suite passed
+2,179/2,180; its only failure was the window delete fixture reading three rows
+instead of two. That fixture now uses the existing convergence helper without
+changing its oracle. The comparison jobs now run after/light work first and
+serialize the two full allocations, preventing the sensitive tests from
+overlapping the opposite full suite. The validator rejected the run; it used
+11 jobs, 229.633 execution minutes and 131.650 summed creation-to-start
+minutes. Failed/cancelled experiment overhead is now 1,862.300 execution
+minutes. No cost difference is reported.
+
+The [serialized replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39433887308)
+still failed both full allocations. The broad side passed 2,178/2,180 checks;
+the JSON aggregate and placeholder-cache fixtures now wait for a completed
+manual refresh. The bounded side passed 1,211/1,212; its auto-refresh property
+test timed out waiting for a scheduler cycle during a 30-second inner wait
+within the existing 90-second overall deadline. That inner wait now uses the
+full remaining deadline, preserving the exact invariant checks. The serial
+before-receipt case failed again on the broad side: consumers stayed in
+`TRANSITIONING` at the cutover LSN while autovacuum and the scheduler waited on
+buffer content. The receipt-table autovacuum setting is now disabled in this
+controlled fixture; this diagnosis still needs hosted verification. The two
+full jobs ran sequentially, so cross-allocation overlap was not the cause. The
+invalid run used 11 jobs, 228.967 execution minutes and 60.733 summed
+creation-to-start minutes. Failed/cancelled experiment overhead is now
+2,091.267 execution minutes. No before/after cost difference is reported.
+
+The next [replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39456096246)
+passed the broad inventory 2,180/2,180. Its serial before-receipt case still
+timed out after restart: the scheduler remained in `BufferContent` wait after
+receipt-table autovacuum was disabled, so that fixture setting did not resolve
+the cutover stall and has been removed. The bounded side passed 1,211/1,212;
+`test_scheduler_resumes_after_watermark_unstuck` sampled its auto-refresh
+baseline after the triggering insert, so it now captures `data_timestamp`
+before the write and waits with the existing timestamp-aware helper. Because
+the bounded suite stopped after that failure, it did not run its serial WAL
+cases. The pair is invalid; it used 11 jobs, 209.950 execution minutes and
+107.550 summed creation-to-start minutes. Failed/cancelled experiment overhead
+is now 2,301.217 execution minutes. No cost difference is reported.
+
+The [next replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39548295282)
+passed both integration allocations and all six light shards. The baseline
+broad suite passed 2,178/2,180; its GUC aggregate fixture missed the completed
+manual refresh, and the unchanged-upstream baseline asserted transaction
+identity even though no upstream changes existed. The bounded allocation
+passed 1,211/1,212; both allocations reproduced the before-receipt WAL stall
+after an extra pre-witness restart, with both consumers stuck in
+`TRANSITIONING` at the cutover LSN. The fixture now keeps WAL steady until the
+actual crash witness, waits for every dependency to reach the requested CDC
+mode, and the two broad-only assertions now match their intended invariants.
+The recovery repetition passed 10/10 on both sides. This invalid pair used
+11 jobs, 220.550 execution minutes and 107.250 summed creation-to-start
+minutes. Failed/cancelled experiment overhead is now 2,521.767 execution
+minutes. No cost difference is reported.
+
+The [next paired replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39564224459)
+passed integration and all six light allocations. The broad baseline full suite
+passed 2,177/2,180: the backward-compatibility and CTE cascade count checks
+failed, and the WAL semantic-control fixture timed out before its replay
+barrier. The bounded full allocation passed 1,211/1,212; only
+`test_scheduler_unchanged_upstream_baseline_preserves_counts` failed while
+waiting for its scheduled sibling refresh. Its 60-second wait was too short
+under parallel full-suite load and is now 120 seconds; the scheduler and exact
+result assertions remain. Recovery repetition passed 10/10 on both sides.
+The invalid pair used 11 jobs, 223.533 execution minutes and 257.817 summed
+creation-to-start minutes. Its full allocation jobs took 80.417 minutes before
+and 41.800 minutes after, but the unequal suites and failed correctness checks
+make this unsuitable as a cost comparison. Failed/cancelled experiment
+overhead is now 2,745.300 execution minutes.
+
+The [next paired replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39592595933)
+passed integration, all six light allocations and the 2,180-test broad baseline
+suite, including isolated refresh atomicity and ten recovery repetitions. The
+bounded full suite passed 1,211/1,212; its sole failure,
+`test_wal_trigger_fallback_received_receipt_requires_rebaseline`, timed out
+waiting for the `before_replay` barrier while the scheduler was in
+`TRANSITIONING` at the cutover LSN and waiting on `BufferContent`. The
+unchanged-upstream scheduler case now passed with its 120-second wait. All
+seven WAL receipt-recovery tests that use advisory-lock witnesses are now
+removed from the parallel invocation and retained in the serial one-thread
+step on both allocations. This pair remains invalid. It used 11 jobs, 215.650
+execution minutes and 224.867 summed creation-to-start minutes. The full jobs
+took 62.450 minutes before and 43.817 minutes after; the failed, unequal runs
+are not a cost comparison. Failed/cancelled experiment overhead is now
+2,960.950 execution minutes.
+
+The [next matched replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39616553797)
+passed both integration checks and all six light shards. Its broad baseline
+full suite ran 2,174 tests: 2,172 passed and two failed. The D+I insert oracle
+found one missing row, and `test_v107_auto_wal_transition_captures_changes`
+timed out with capture still in `TRIGGER` instead of `WAL`. The bounded full
+suite ran 1,206 tests: 1,205 passed and
+`test_lsn_manual_refresh_fixed_snapshots_preserve_frontier` failed with a
+serialization error during a concurrent refresh. The separately isolated
+atomicity suite passed 12/12, the eight serial WAL/RLS cases passed 8/8, and
+recovery repetition passed 10/10 on both allocations. All three newly exposed
+parallel-load cases are retained in the one-thread step for the next replay.
+This pair used 11 jobs, 219.600 execution minutes and 319.717 summed
+creation-to-start minutes; its full jobs took 65.683 minutes before and
+46.400 after. Failed suites make it an invalid cost comparison. Failed and
+cancelled experiment overhead is now 3,180.550 execution minutes. Do not
+report a speedup from it.
+
+The repaired replay [run `39729948300`](https://github.com/trickle-labs/pg-trickle/actions/runs/39729948300)
+passed the producer/source guard, both integration allocations and all six
+light shards. The broad full suite passed 2,168/2,168 (151 skipped); the
+bounded full suite passed 1,200/1,200 (47 skipped); isolated atomicity passed
+12/12; recovery repetition passed 10/10 on both sides. The serial WAL/RLS
+phase passed 15/16 on each side: after restart, the before-receipt witness
+timed out with the dependency back in `TRANSITIONING`, the slot at cutover,
+and scheduler/autovacuum waiting on buffer content. The catalog-only
+post-restart `WAL` check did not prove the scheduler had resumed decoding. The
+fixture now waits for a separate, acknowledged readiness receipt before
+arming the target barrier. Both full allocations failed the serial witness,
+so the pair is invalid and no cost difference is reported. Artifacts are
+retained under `target/ci1188-comparison/run-39729948300/`.
+
+The next repaired replay [run `39747899962`](https://github.com/trickle-labs/pg-trickle/actions/runs/39747899962)
+passed the producer/source guard, both integration allocations and all six
+light shards. Its before broad inventory passed 2,166/2,168; the two failures
+were `test_lateral_multiple_refreshes_converge` (an exact row-count lag after
+manual refresh) and `test_scheduler_clock_auto_cron_expires_without_writes`
+(the 30-second due-time witness expired). Its after bounded inventory passed
+1,200/1,200 (47 skipped), and isolated atomicity passed 12/12. The serial WAL
+phase still failed 1/16 on both sides: the before-receipt witness timed out
+with the dependency in `TRANSITIONING`, the slot at cutover, and the scheduler
+and autovacuum waiting on buffer content. Recovery repetition failed on five
+of ten before attempts and one of ten after attempts: the same failpoint test
+observed `effective_refresh_mode = NO_DATA` where it expected `DIFFERENTIAL`.
+The pair is invalid; do not report a cost difference. Source,
+package and workload-image identities matched. Hosted runner image revisions
+and kernels differed and are retained as host variability. Artifacts and
+identity records are under `target/ci1188-comparison/run-39747899962/`.
+
+The follow-up fixture repair makes the initial DVM refresh require a completed
+manual history row, keeps autovacuum off the ephemeral receipt table while
+testing its lock witness, makes the three lateral refreshes wait for exact
+convergence, and allows 90 seconds for scheduler due-time witnesses. These
+changes preserve the result assertions. The WAL change still needs hosted
+verification; disabling autovacuum is a fixture-isolation hypothesis based
+on both failure snapshots showing the scheduler and autovacuum blocked on
+buffer content. The next paired run freezes these repairs at
+`863eb42f0343c3f0610e7ca92036c840ccd8b586`; later documentation and workflow
+guard commits must leave that source/test tree unchanged.
+
+After saving the completed run/jobs JSON above, download only the replay
+evidence (the shared image archive is not needed for the report):
+
+```bash
+gh run download RUN_ID --pattern 'allocation-before-*' --pattern 'allocation-after-*' --dir /tmp/ci-allocation-RUN_ID
+python3 scripts/compare_ci_allocations.py /tmp/ci-run.json /tmp/ci-jobs.json /tmp/ci-allocation-RUN_ID
+```
+
 ## Verification record (2026-10-18)
 
 The local probes used a freshly rebuilt x86-64 PostgreSQL 18.6 image and the
@@ -599,3 +965,22 @@ after rejected input while decoding continued. It now pins the initial receipt
 ID boundary, waits for that cohort to be acknowledged, and compares the same
 cohort after rejection. New bookkeeping receipts remain outside the protected
 cohort. All 11 LSN contract checks passed without retries after this repair.
+
+The next matched allocation replay, hosted run `39772191763` at comparison SHA
+`58363734`, passed the producer, both integration jobs, and all six light
+shards, but both full jobs failed, so the pair is invalid and has no usable
+cost comparison. The before broad inventory passed 2,167/2,168; the nested
+view test observed two rows instead of three. Its lateral convergence and
+scheduler due-time tests passed. The before isolated WAL phase passed 15/16:
+the pre-receipt crash-boundary test timed out after 196.6 seconds. The
+dependency was `TRANSITIONING` with no slot or cutover recorded after the
+readiness receipt had been acknowledged; disabling autovacuum on the ephemeral
+receipt table did not remove the stall. Before recovery repetitions passed
+9/10, with the same `NO_DATA` versus `DIFFERENTIAL` assertion as prior runs.
+The after bounded inventory passed 1,199/1,200; the third refresh unexpectedly
+succeeded in `test_consecutive_errors_tracked_and_reset`. After recovery
+repetitions passed 10/10. Source, package, workload image, Rust, nextest, and
+PostgreSQL identities matched; the hosted runner image revision and kernel
+differed. The validator rejected the run because both full jobs failed. Full
+logs, identity records, and validator inputs are retained under
+`target/ci1188-comparison/run-39772191763/`.

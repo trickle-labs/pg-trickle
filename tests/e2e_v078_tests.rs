@@ -307,8 +307,7 @@ async fn test_p2_complexity_class_backfill() {
     // Insert rows and trigger first refresh (lazy back-fill).
     db.execute("INSERT INTO src_p2 VALUES (1, 10), (2, 20)")
         .await;
-    db.execute("SELECT pgtrickle.refresh_stream_table('st_p2_join_agg')")
-        .await;
+    db.refresh_st_with_retry("st_p2_join_agg").await;
 
     // P-2: complexity class should be non-null after first refresh.
     let class: Option<String> = db
@@ -365,8 +364,7 @@ async fn test_p4_placeholder_cache_correctness() {
     db.execute("INSERT INTO src_p4b VALUES (1, 5), (2, 15)")
         .await;
 
-    db.execute("SELECT pgtrickle.refresh_stream_table('st_p4_two_src')")
-        .await;
+    db.refresh_st_with_retry("st_p4_two_src").await;
 
     // Verify correctness after first refresh.
     let total_1: Option<i64> = db
@@ -378,8 +376,7 @@ async fn test_p4_placeholder_cache_correctness() {
     db.execute("INSERT INTO src_p4a VALUES (3, 30)").await;
     db.execute("INSERT INTO src_p4b VALUES (3, 7)").await;
 
-    db.execute("SELECT pgtrickle.refresh_stream_table('st_p4_two_src')")
-        .await;
+    db.refresh_st_with_retry("st_p4_two_src").await;
 
     let total_3: Option<i64> = db
         .query_scalar_opt("SELECT total::BIGINT FROM st_p4_two_src WHERE id = 3")

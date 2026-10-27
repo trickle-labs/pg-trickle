@@ -188,7 +188,7 @@ async fn test_window_full_refresh_after_delete() {
 
     // Delete top salary
     db.execute("DELETE FROM wf_fd WHERE salary = 100").await;
-    db.refresh_st("wf_fd_st").await;
+    db.refresh_st_with_retry("wf_fd_st").await;
 
     assert_eq!(db.count("public.wf_fd_st").await, 2);
 

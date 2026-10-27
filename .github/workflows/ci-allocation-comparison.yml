@@ -1,0 +1,165 @@
+name: PR allocation comparison
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  NEXTEST_PROFILE: ci
+  NEXTEST_RETRIES: '0'
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: never
+  PGS_E2E_IMAGE: pg_trickle_e2e:latest
+  DOCKER_PLATFORM: linux/amd64
+
+jobs:
+  prepare:
+    name: Comparison inputs
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify matching checked-out candidate and clean source inputs
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain -- src tests verification Cargo.toml Cargo.lock pg_trickle.control)"
+      - name: Free runner space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+      - name: Read the builder image from GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build the single extension candidate
+        env:
+          BUILDER_IMAGE: ghcr.io/trickle-labs/pg-trickle/builder:pg18
+        run: |
+          docker pull "$BUILDER_IMAGE"
+          docker build --build-arg "BUILDER_IMAGE=$BUILDER_IMAGE" -f .github/ci-comparison.Dockerfile -t pg_trickle_comparison:latest .
+          BUILDER_IMAGE=pg_trickle_comparison:latest ./tests/build_e2e_image.sh
+          docker pull postgres:18.6
+          docker pull postgres:18.6-alpine
+      - name: Freeze images and extract the candidate package
+        run: |
+          mkdir -p comparison-inputs/package/usr/lib/postgresql/18/lib comparison-inputs/package/usr/share/postgresql/18/extension
+          docker save pg_trickle_comparison:latest pg_trickle_e2e:latest postgres:18.6 postgres:18.6-alpine --output comparison-inputs/images.tar
+          candidate=$(docker create pg_trickle_e2e:latest)
+          docker cp "$candidate:/usr/lib/postgresql/18/lib/pg_trickle.so" comparison-inputs/package/usr/lib/postgresql/18/lib/
+          docker cp "$candidate:/usr/share/postgresql/18/extension/." comparison-inputs/package/usr/share/postgresql/18/extension/
+          docker rm "$candidate"
+          find comparison-inputs/package/usr/share/postgresql/18/extension -type f ! -name 'pg_trickle*' -delete
+          docker image inspect pg_trickle_comparison:latest pg_trickle_e2e:latest postgres:18.6 postgres:18.6-alpine > comparison-inputs/images.json
+          cd comparison-inputs
+          find package -type f -print0 | sort -z | xargs -0 sha256sum > package.sha256
+          sha256sum images.tar > images.sha256
+      - name: Verify nested Docker access in both harnesses
+        env:
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/comparison-inputs/package
+        run: |
+          bash scripts/in_ci_allocation_container.sh bash scripts/run_light_e2e_tests.sh --test e2e_dag_operations_tests --filter test_alter_schedule_mid_pipeline --no-capture
+          bash scripts/in_ci_allocation_container.sh ./scripts/run_e2e_tests.sh --profile ci --test e2e_dag_operations_tests --retries 0 -E 'test(=test_alter_schedule_mid_pipeline)'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: allocation-inputs
+          path: comparison-inputs/
+          compression-level: 1
+          if-no-files-found: error
+          retention-days: 14
+
+  replay:
+    name: Replay (${{ matrix.allocation }}, ${{ matrix.tier }})
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        allocation: [before, after]
+        tier: [integration, light-1, light-2, light-3]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify matching checked-out candidate and clean source inputs
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain -- src tests verification Cargo.toml Cargo.lock pg_trickle.control)"
+      - name: Free runner space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+      - uses: actions/download-artifact@v8
+        with:
+          name: allocation-inputs
+          path: comparison-inputs
+      - name: Verify and load identical inputs
+        run: |
+          cd comparison-inputs
+          sha256sum -c package.sha256
+          sha256sum -c images.sha256
+          docker load --input images.tar
+      - name: Record environment and run the allocation
+        env:
+          ALLOCATION: ${{ matrix.allocation }}
+          TIER: ${{ matrix.tier }}
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/comparison-inputs/package
+        run: bash scripts/in_ci_allocation_container.sh python3 scripts/run_ci_allocation.py "$ALLOCATION" "$TIER"
+      - name: Retain every attempt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allocation-${{ matrix.allocation }}-${{ matrix.tier }}
+          path: target/allocation-comparison/
+          if-no-files-found: warn
+          retention-days: 14
+
+  replay-full:
+    name: Replay (${{ matrix.allocation }}, full)
+    needs: [prepare, replay]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        allocation: [before, after]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify matching checked-out candidate and clean source inputs
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain -- src tests verification Cargo.toml Cargo.lock pg_trickle.control)"
+      - name: Free runner space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+      - uses: actions/download-artifact@v8
+        with:
+          name: allocation-inputs
+          path: comparison-inputs
+      - name: Verify and load identical inputs
+        run: |
+          cd comparison-inputs
+          sha256sum -c package.sha256
+          sha256sum -c images.sha256
+          docker load --input images.tar
+      - name: Record environment and run the allocation
+        env:
+          ALLOCATION: ${{ matrix.allocation }}
+          TIER: full
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/comparison-inputs/package
+        run: bash scripts/in_ci_allocation_container.sh python3 scripts/run_ci_allocation.py "$ALLOCATION" "$TIER"
+      - name: Retain every attempt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allocation-${{ matrix.allocation }}-full
+          path: target/allocation-comparison/
+          if-no-files-found: warn
+          retention-days: 14

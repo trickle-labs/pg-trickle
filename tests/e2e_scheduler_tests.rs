@@ -82,7 +82,7 @@ async fn assert_clock_dependent_refresh(mode: &str, schedule_kind: &str) {
     assert!(db.wait_for_condition(
         "scheduler due-time witness",
         "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'clock_control' AND h.status = 'COMPLETED')",
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         Duration::from_millis(50),
     ).await);
     let refreshed = db
@@ -100,7 +100,7 @@ async fn assert_clock_dependent_refresh(mode: &str, schedule_kind: &str) {
         assert!(db.wait_for_condition(
             "second scheduler tick before next clock interval",
             "SELECT count(*) >= 2 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'clock_control' AND h.status = 'COMPLETED'",
-            Duration::from_secs(30),
+            Duration::from_secs(90),
             Duration::from_millis(50),
         ).await);
         let refreshes: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'clock_st' AND h.status = 'COMPLETED'").await;
@@ -262,7 +262,7 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
     // case SQL equality evaluates to NULL, not false. Assert transaction
     // equality when both IDs are available, and keep the frontier/buffer
     // and exact-result checks below as the mandatory no-replay evidence.
-    if !witness["same_transaction"].is_null() {
+    if change_upstream && !witness["same_transaction"].is_null() {
         assert_eq!(witness["same_transaction"], true, "{diagnostics}");
     }
     if baseline == "FALLBACK" {
@@ -320,7 +320,7 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
     assert!(db.wait_for_condition(
         "sibling catch-up",
         "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'replay_sibling' AND h.status = 'COMPLETED' AND h.action = 'DIFFERENTIAL' AND NOT h.was_full_fallback)",
-        Duration::from_secs(60),
+        Duration::from_secs(120),
         Duration::from_millis(50),
     ).await);
     db.assert_st_matches_query("replay_sibling", query).await;

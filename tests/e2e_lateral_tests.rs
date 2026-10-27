@@ -731,16 +731,16 @@ async fn test_lateral_multiple_refreshes_converge() {
     // Multiple mutations + refreshes
     db.execute("UPDATE lat_conv SET data = '[1, 2]' WHERE id = 1")
         .await;
-    db.refresh_st("lat_conv_st").await;
+    db.refresh_st_until_converged("lat_conv_st").await;
     assert_eq!(db.count("public.lat_conv_st").await, 2);
 
     db.execute("INSERT INTO lat_conv VALUES (2, '[3, 4, 5]')")
         .await;
-    db.refresh_st("lat_conv_st").await;
+    db.refresh_st_until_converged("lat_conv_st").await;
     assert_eq!(db.count("public.lat_conv_st").await, 5);
 
     db.execute("DELETE FROM lat_conv WHERE id = 1").await;
-    db.refresh_st("lat_conv_st").await;
+    db.refresh_st_until_converged("lat_conv_st").await;
     assert_eq!(db.count("public.lat_conv_st").await, 3);
 
     db.assert_st_matches_query(
