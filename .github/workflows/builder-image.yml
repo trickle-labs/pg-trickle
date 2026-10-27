@@ -9,7 +9,7 @@
 #
 # Triggers:
 #   - Push to main when Dockerfile.builder changes
-#   - Weekly on Sunday 02:00 UTC (keep base images fresh / catch bit-rot)
+#   - Weekly on Saturday 12:00 UTC (keep base images fresh / catch bit-rot)
 #   - Manual dispatch
 #
 # The published image is pulled by CI jobs that call build_e2e_image.sh via
@@ -26,7 +26,7 @@ on:
       - 'tests/Dockerfile.builder'
       - '.github/workflows/builder-image.yml'
   schedule:
-    - cron: '0 2 * * 0'  # Weekly Sunday 02:00 UTC
+    - cron: '0 12 * * 6'  # Weekly Saturday 12:00 UTC
   workflow_dispatch:
 
 permissions:

@@ -8,7 +8,7 @@ name: Stability Tests
 
 on:
   schedule:
-    - cron: '0 3 * * *'  # Daily 03:00 UTC
+    - cron: '0 16 * * *'  # Daily 16:00 UTC, after daytime qualification runs
   workflow_dispatch:
 
 concurrency:
