@@ -2,6 +2,7 @@ name: S1 exact-image qualification (approved ARM64 Docker profile)
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
       - 'benchmarks/s1/**'
       - 'src/**'
@@ -36,6 +37,7 @@ jobs:
           python3 benchmarks/s1/check_frozen_harness.py
           python3 benchmarks/s1/test_check_result.py
   qualify:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-24.04-arm
     env:
       DOCKER_DEFAULT_PLATFORM: linux/arm64
@@ -113,6 +115,7 @@ jobs:
         run: |
           docker build --platform linux/arm64 --provenance=false -f benchmarks/s1/Dockerfile \
             --build-arg S1_BUILDER=s1-arm64-sdk:qualification \
+            --build-arg S1_PG_TRICKLE_PIN=0.108.3 \
             --build-arg TRICKLE_SOURCE=_s1/control -t s1-control:qualification . \
             > _s1/evidence/build-control.log 2>&1 || { tail -100 _s1/evidence/build-control.log; exit 1; }
           docker build --platform linux/arm64 --provenance=false -f benchmarks/s1/Dockerfile \

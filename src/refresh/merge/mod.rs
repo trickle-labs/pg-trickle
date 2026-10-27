@@ -461,6 +461,10 @@ fn collect_distinct_agg_bound_checks(
             group_by,
             aggregates,
         } => {
+            if !aggregates.iter().any(|agg| agg.is_distinct) {
+                return collect_distinct_agg_bound_checks(child, checks);
+            }
+
             let (scan, filter_sql) = match child.as_ref() {
                 OpTree::Scan { .. } => (child.as_ref(), None),
                 OpTree::Filter { predicate, child } => match child.as_ref() {

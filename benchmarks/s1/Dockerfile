@@ -54,12 +54,13 @@ COPY _s1/mdm/sql/configure_helper.sql /sql/configure_helper.sql
 COPY _s1/react/bin/pg-reactd /usr/local/bin/pg-reactd
 COPY _s1/react/docker/00-pg-trickle.sql /docker-entrypoint-initdb.d/10-pg-react.sql
 # Reconstruct the R53 stack's exact patch-version admission; keep every runtime/capability check.
-RUN sed -i 's/0\.108\.0/0.108.4/g' \
+ARG S1_PG_TRICKLE_PIN=0.108.4
+RUN sed -i "s/0\.108\.0/${S1_PG_TRICKLE_PIN}/g" \
     /usr/share/postgresql/18/extension/pg_react--0.46.0.sql \
     /usr/share/postgresql/18/extension/pg_react--0.46.1.sql
 ENV PG_REACT_INIT_VERSION=0.46.1
 LABEL pg_mdm.source_revision="eef7937180d504e62ce1076074bbeed8cef5d5a7"
-LABEL qualification.react_pg_trickle_pin="0.108.4"
+LABEL qualification.react_pg_trickle_pin="${S1_PG_TRICKLE_PIN}"
 LABEL qualification.mdm_grant_patch="sha256:a3dd34646b51a89cb52b3e424dfe17c48dab0f632ef585cb06cfbfa4934de388"
 COPY --chmod=755 benchmarks/s1/docker-entrypoint.sh /usr/local/bin/s1-entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/s1-entrypoint.sh"]

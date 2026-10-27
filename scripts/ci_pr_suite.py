@@ -88,6 +88,7 @@ def main() -> int:
         "e2e_mixed_scheduling_tests",
         "e2e_scheduler_tests",
         "e2e_v078_tests",
+        "e2e_ownership_tests",
         "e2e_v107_wal_transition_tests",
         # Scheduler and WAL progress assertions need an uncontended Docker host.
         "e2e_rls_wal_tests", "e2e_watermark_gating_tests",
