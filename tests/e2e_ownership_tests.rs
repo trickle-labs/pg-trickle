@@ -429,8 +429,10 @@ async fn test_full_refresh_non_superuser_owner_with_downstream() {
     let downstream = format!("{schema}.st2");
 
     db.execute(&format!("CREATE ROLE {owner} LOGIN")).await;
-    db.execute(&format!("GRANT pgtrickle_admin, pgtrickle_operator TO {owner}"))
-        .await;
+    db.execute(&format!(
+        "GRANT pgtrickle_admin, pgtrickle_operator TO {owner}"
+    ))
+    .await;
     db.execute(&format!("CREATE SCHEMA {schema} AUTHORIZATION {owner}"))
         .await;
 
