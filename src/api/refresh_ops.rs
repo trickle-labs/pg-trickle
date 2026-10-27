@@ -224,6 +224,27 @@ fn refresh_stream_table_impl(
         )));
     }
 
+    // Validate before catalog locks or refresh-history writes can mask this
+    // isolation error with a serialization failure.
+    if st.refresh_mode == RefreshMode::Differential
+        && st.topk_limit.is_none()
+        && !manual_requires_whole_query_full(&st)
+        && refresh::current_safe_bound().is_none()
+    {
+        let read_committed = Spi::get_one::<bool>(
+            "SELECT current_setting('transaction_isolation') = 'read committed'",
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        if !read_committed {
+            return Err(PgTrickleError::SafeFrontierUnavailable {
+                context: format!("manual refresh of {schema}.{table_name}"),
+                reason: "manual differential writer-lock proof requires READ COMMITTED isolation"
+                    .to_string(),
+            });
+        }
+    }
+
     // ── Fast no-op exit for DIFFERENTIAL mode ────────────────────────
     // Before acquiring the advisory lock, check if any source table has
     // pending changes. If not, skip the entire refresh pipeline (lock,

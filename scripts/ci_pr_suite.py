@@ -55,6 +55,11 @@ def targets(root: Path = ROOT) -> list[str]:
         source = (root / "tests" / f"{binary}.rs").read_text()
         if binary not in full or f"fn {test}(" not in source:
             raise ValueError(f"missing scheduled combination: {case}")
+    for case in policy.get("isolated_cases", {}):
+        binary, test = case.split("::")
+        source = (root / "tests" / f"{binary}.rs").read_text()
+        if binary not in full or f"fn {test}(" not in source:
+            raise ValueError(f"missing isolated combination: {case}")
     return full
 
 
@@ -84,6 +89,9 @@ def main() -> int:
         "e2e_scheduler_tests",
         "e2e_v078_tests",
         "e2e_v107_wal_transition_tests",
+        # Scheduler and WAL progress assertions need an uncontended Docker host.
+        "e2e_rls_wal_tests", "e2e_watermark_gating_tests",
+        "e2e_bootstrap_gating_tests",
     }
     isolated = [name for name in selected if name in isolated_binaries]
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]

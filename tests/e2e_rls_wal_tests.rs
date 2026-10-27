@@ -57,8 +57,8 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.execute("CREATE POLICY tenant_only ON rls_wal_src USING (tenant_id = 10)")
         .await;
 
-    let db_suffix: String = db.query_scalar("SELECT current_database()").await;
-    let wal_owner = format!("rls_wal_owner_{}", db_suffix.replace('-', "_"));
+    let database: String = db.query_scalar("SELECT current_database()").await;
+    let wal_owner = format!("rls_wal_owner_{}", database.replace('-', "_"));
     db.execute(&format!("CREATE ROLE {wal_owner} LOGIN BYPASSRLS"))
         .await;
     db.execute(&format!(
@@ -95,8 +95,8 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['rls_wal_st'])")
         .await;
     db.refresh_st_with_retry("rls_wal_st").await;
-    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['rls_wal_st'])")
-        .await;
+    // Keep refreshes paused until all source mutations are committed so one
+    // differential pass exercises the complete batch.
     let baseline: i64 = db
         .query_scalar("SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history")
         .await;
@@ -105,6 +105,8 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.execute("UPDATE rls_wal_src SET val = 'b2' WHERE id = 2")
         .await;
     db.execute("DELETE FROM rls_wal_src WHERE id = 1").await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['rls_wal_st'])")
+        .await;
 
     let converged = db
         .wait_for_condition(
