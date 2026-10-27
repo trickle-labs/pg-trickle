@@ -62,6 +62,27 @@ async fn test_full_owner_downstream_cast_sum_matches_query() {
             );
         }
     }
+
+    // Model a stale result left by a pre-fix refresh.
+    db.execute_seq(&[
+        "SET pg_trickle.internal_refresh = 'true'",
+        "UPDATE r1263.casted SET n = 99 WHERE org = 'a'",
+        "RESET pg_trickle.internal_refresh",
+    ])
+    .await;
+    as_owner("SELECT pgtrickle.reinitialize_stream_table('r1263.casted')").await;
+    as_owner("SELECT pgtrickle.refresh_stream_table('r1263.casted')").await;
+    let repaired: i64 = db
+        .query_scalar("SELECT n FROM r1263.casted WHERE org = 'a'")
+        .await;
+    assert_eq!(repaired, 1, "reinitialization must repair the stale group");
+    as_owner("INSERT INTO r1263.ev VALUES (4, 'a', 'u1')").await;
+    as_owner("SELECT pgtrickle.refresh_stream_table('r1263.st1')").await;
+    as_owner("SELECT pgtrickle.refresh_stream_table('r1263.casted')").await;
+    let updated: i64 = db
+        .query_scalar("SELECT n FROM r1263.casted WHERE org = 'a'")
+        .await;
+    assert_eq!(updated, 2, "incremental maintenance must work after repair");
 }
 
 /// Helper: create the two test roles and a source table owned by sec1_owner.
