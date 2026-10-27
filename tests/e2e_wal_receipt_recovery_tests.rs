@@ -1677,6 +1677,11 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             "WAL catch-up before crash",
         )
         .await;
+        assert_eq!(
+            lifecycle_state(&fixture.db.pool, "history_slow").await,
+            slow_baseline,
+            "WAL handoff moved the lagging consumer"
+        );
         record_lifecycle(
             &path,
             &mut history,
