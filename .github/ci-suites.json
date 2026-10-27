@@ -51,6 +51,7 @@
     "e2e_otel_tests",
     "e2e_outbox_tests",
     "e2e_output_delta_qualification_disabled_tests",
+    "e2e_ownership_tests",
     "e2e_pg_mdm_compiler_v9_tests",
     "e2e_pgbouncer_tests",
     "e2e_pgvector_tests",
