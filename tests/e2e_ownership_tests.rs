@@ -85,6 +85,54 @@ async fn test_full_owner_downstream_cast_sum_matches_query() {
     assert_eq!(updated, 2, "incremental maintenance must work after repair");
 }
 
+/// #1263: repair must expand an older selective CDC buffer before new writes.
+#[tokio::test]
+async fn test_reinitialize_cast_sum_expands_old_cdc_buffer() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE r1263_source (id bigint PRIMARY KEY, grp text, val bigint)")
+        .await;
+    db.execute("INSERT INTO r1263_source VALUES (1, 'a', 1)")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table('r1263_direct', 'SELECT grp, sum(val)::bigint AS total FROM r1263_source GROUP BY grp', '1h', refresh_mode => 'DIFFERENTIAL', cdc_mode => 'trigger')").await;
+    db.execute("SELECT pgtrickle.create_stream_table('r1263_peer', 'SELECT grp, count(*) AS n FROM r1263_source GROUP BY grp', '1h', refresh_mode => 'DIFFERENTIAL', cdc_mode => 'trigger')").await;
+    let oid: i64 = db
+        .query_scalar("SELECT 'r1263_source'::regclass::oid::bigint")
+        .await;
+    let buffer = db.change_buffer_table(oid).await;
+    db.execute(&format!(
+        "UPDATE pgtrickle.pgt_dependencies SET columns_used = ARRAY['grp'] \
+         WHERE source_relid = {oid}::oid AND pgt_id = \
+         (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'r1263_direct')"
+    ))
+    .await;
+    db.execute("SELECT pgtrickle.rebuild_cdc_triggers()").await;
+    let missing: bool = db
+        .query_scalar(&format!("SELECT NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = '{buffer}'::regclass AND attname = 'val' AND NOT attisdropped)"))
+        .await;
+    assert!(missing, "fixture must reproduce the old selective buffer");
+
+    db.execute("UPDATE r1263_source SET val = 3 WHERE id = 1")
+        .await;
+    db.refresh_st("r1263_peer").await;
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('r1263_direct')")
+        .await;
+    db.refresh_st("r1263_direct").await;
+    db.execute("UPDATE r1263_source SET val = 4 WHERE id = 1")
+        .await;
+    db.refresh_st("r1263_direct").await;
+    db.assert_st_matches_query(
+        "r1263_direct",
+        "SELECT grp, sum(val)::bigint AS total FROM r1263_source GROUP BY grp",
+    )
+    .await;
+    db.refresh_st("r1263_peer").await;
+    db.assert_st_matches_query(
+        "r1263_peer",
+        "SELECT grp, count(*) AS n FROM r1263_source GROUP BY grp",
+    )
+    .await;
+}
+
 /// Helper: create the two test roles and a source table owned by sec1_owner.
 async fn setup_ownership_test(db: &E2eDb) {
     // Create roles — use EXCEPTION to handle the race where parallel tests try
