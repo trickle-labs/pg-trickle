@@ -216,6 +216,11 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
         pgt_name,
     )
     .await;
+    db.execute(&format!(
+        "SELECT pgtrickle.resume_scheduler(ARRAY['{}'])",
+        scenario.query.stream_table
+    ))
+    .await;
 
     // Effective mode belongs to the last completed refresh, not the failed attempt.
     assert!(
@@ -243,11 +248,6 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     for mutation in &cycle.mutations {
         db.execute(&mutation.sql).await;
     }
-    db.execute(&format!(
-        "SELECT pgtrickle.resume_scheduler(ARRAY['{}'])",
-        scenario.query.stream_table
-    ))
-    .await;
 
     let failure = wait_for_scheduler_failure(&db, pgt_name, Duration::from_secs(60))
         .await

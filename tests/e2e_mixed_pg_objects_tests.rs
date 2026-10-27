@@ -2099,7 +2099,7 @@ async fn test_mixed_alter_table_add_column_through_view() {
     // Insert using the new schema
     db.execute("INSERT INTO ma_evolve (id, val, extra) VALUES (3, 30, 'new')")
         .await;
-    db.refresh_st("ma_st_evolve").await;
+    db.refresh_st_with_retry("ma_st_evolve").await;
 
     assert_eq!(db.count("public.ma_st_evolve").await, 3);
     db.assert_st_matches_query("ma_st_evolve", "SELECT id, val FROM ma_v_evolve")
