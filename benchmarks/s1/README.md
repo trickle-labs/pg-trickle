@@ -433,12 +433,14 @@ remains a failure, with no complete throughput or paired speedup score.
 | PostgreSQL | 18.4, pinned image digest in `Dockerfile` |
 | Harness | Retained R53 files listed with original SHA-256 values in `frozen-harness.json` |
 
-The old runnable joint-stack images were removed during host cleanup. Their
-React package had admitted pg-trickle 0.108.3; the pinned React source still
-admits only 0.108.0. The Dockerfile explicitly replaces that exact patch-version
-pin in the 0.46.0/0.46.1 install SQL. Isolation, trigger CDC, scheduler settings,
-change-ratio and Graph/Delta capability checks remain intact. Both images use
-the same reconstructed React package; its installed SQL hashes are retained.
+The old runnable joint-stack images were removed during host cleanup. The pinned
+React source admits only pg-trickle 0.108.0, so the Dockerfile replaces that
+exact patch-version pin with the candidate version (currently 0.108.4) in the
+0.46.0/0.46.1 install SQL. The qualification checks admission against the
+candidate package default and retains both the upstream MDM pin and the adapted
+fixture hash. Isolation, trigger CDC, scheduler settings, change-ratio and
+Graph/Delta capability checks remain intact. Both images use the same
+reconstructed React package; its installed SQL hashes are retained.
 
 The user approved the separately identified corrected control on 2026-10-19.
 The original exact control `sha256:1fdfeb8e1c08b049491583612f7e34cd4c0e27c7d789084a627ce3089e04d981`
