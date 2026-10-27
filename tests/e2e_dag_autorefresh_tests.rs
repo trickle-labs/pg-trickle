@@ -806,18 +806,28 @@ async fn test_autorefresh_diamond_with_view_branch() {
     )
     .await;
 
-    // Wait for initial stabilization
-    wait_for_refresh_cycle(&db, "ardv_joined", Duration::from_secs(30)).await;
+    // Establish a known baseline; a calculated ST may already have refreshed
+    // before a last_refresh_at waiter samples it.
+    db.refresh_st_until_converged("ardv_branch_a").await;
+    db.refresh_st_until_converged("ardv_branch_b").await;
+    db.refresh_st_until_converged("ardv_joined").await;
 
     // x: total=30, cnt=2; y: total=30, cnt=1
     assert_eq!(db.count("public.ardv_joined").await, 2);
+
+    let before_insert: Option<String> = db
+        .query_scalar_opt(
+            "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema='public' AND pgt_name='ardv_joined'",
+        )
+        .await;
 
     // Add data
     db.execute("INSERT INTO ardv_src (category, amount) VALUES ('x', 40), ('z', 100)")
         .await;
 
     let refreshed = db
-        .wait_for_auto_refresh("ardv_joined", Duration::from_secs(60))
+        .wait_for_auto_refresh_since("ardv_joined", before_insert, Duration::from_secs(60))
         .await;
     assert!(refreshed, "Diamond join ST should auto-refresh");
 
