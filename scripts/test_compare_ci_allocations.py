@@ -10,7 +10,8 @@ import compare_ci_allocations
 class PairedReportTests(unittest.TestCase):
     def fixture(self, root):
         run = {'status': 'completed', 'conclusion': 'success', 'head_sha': 'fixed-sha',
-               'html_url': 'https://example.test/run', 'event': 'workflow_dispatch'}
+               'html_url': 'https://example.test/run', 'event': 'workflow_dispatch',
+               'created_at': '2026-10-18T23:59:00Z'}
         jobs = []
         for allocation in ('before', 'after'):
             for tier in sorted(compare_ci_allocations.TIERS):

@@ -293,7 +293,9 @@ class AllocationTests(unittest.TestCase):
                 self.assertEqual(ci_pr_suite.main(), status)
                 self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
                 self.assertEqual(len(run.call_args_list), 7 if status == 0 else 6)
-                self.assertEqual(run.call_args_list[-1].args[0], [
+                # The final successful call runs the strict serial semantic witnesses.
+                # Atomicity itself is the preceding isolated step (index 5).
+                self.assertEqual(run.call_args_list[5].args[0], [
                     "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
                     "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
                 ])
@@ -378,15 +380,21 @@ class DiskPreparationTests(unittest.TestCase):
             with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
                 "ci_pr_suite.subprocess.run"
             ) as run:
-                run.side_effect = [SimpleNamespace(returncode=value) for value in (0, 0, 0, status, 0)]
+                # Four scheduler-isolated binaries now precede atomicity.
+                # A successful run then executes the strict serial witnesses.
+                run.side_effect = [
+                    SimpleNamespace(returncode=value)
+                    for value in (0, 0, 0, 0, 0, status, 0)
+                ]
                 self.assertEqual(ci_pr_suite.main(), status)
                 self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
-                self.assertEqual(run.call_args_list[3].args[0], [
+                self.assertEqual(len(run.call_args_list), 7 if status == 0 else 6)
+                self.assertEqual(run.call_args_list[5].args[0], [
                     "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
                     "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
                 ])
                 if status == 0:
-                    self.assertIn("--no-fail-fast", run.call_args_list[4].args[0])
+                    self.assertIn("--no-fail-fast", run.call_args_list[6].args[0])
 
     def test_comparison_collects_all_selected_failures_without_changing_result(self):
         for status in (0, 1, 130):
