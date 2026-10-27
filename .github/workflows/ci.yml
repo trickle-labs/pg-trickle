@@ -61,9 +61,9 @@ jobs:
   # Keep contracts on every selected PR, including .github/workflows/release.yml and
   # tests/release/** changes; job selection only defers expensive runtime work.
   release-qualification-contract:
-    name: v0.108.3 release evidence contract
+    name: Release evidence contract and checked LSN proof
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: read
@@ -73,6 +73,8 @@ jobs:
       shipping: ${{ steps.paths.outputs.shipping }}
       monitoring: ${{ steps.paths.outputs.monitoring }}
       getting_started: ${{ steps.paths.outputs.getting_started }}
+      failure_recovery_changed: ${{ steps.paths.outputs.failure_recovery_changed }}
+      unsafe_boundary_changed: ${{ steps.paths.outputs.unsafe_boundary_changed }}
     steps:
       - uses: actions/checkout@v7
 
@@ -114,16 +116,6 @@ jobs:
 
       - name: Validate PR coverage allocation
         run: python3 scripts/ci_pr_suite.py --list
-
-  lsn-verification:
-    name: Checked LSN proof and semantic mutation control
-    needs: release-qualification-contract
-    outputs:
-      runtime: ${{ needs.release-qualification-contract.outputs.runtime }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
 
       - name: Pull pinned Verus image
         run: docker pull ghcr.io/verus-lang/verus:0.2025.06.23.2e59154@sha256:c4d0471379b23c3c6f52e3d7226c7dad28f488c4288e14c623002bd279a745e0
@@ -176,6 +168,9 @@ jobs:
 
       - name: Run unit tests
         run: ./scripts/run_unit_tests.sh pg18
+
+      - name: Run database-free DVM harness contracts
+        run: python3 scripts/ci_pr_suite.py --pure
       - name: Publish Test Report
         uses: mikepenz/action-junit-report@v6
         if: always()
@@ -395,8 +390,8 @@ jobs:
   # every shard, so compiling it in each runner only adds CI cost.
   light-e2e-package:
     name: Package light E2E extension
-    needs: [lsn-verification]
-    if: needs.lsn-verification.outputs.runtime == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    needs: [release-qualification-contract]
+    if: needs.release-qualification-contract.outputs.runtime == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -424,12 +419,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - name: Free up disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-               "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
-
       - uses: actions/checkout@v7
+
+      - name: Prepare runner disk space
+        run: bash scripts/ci_prepare_disk.sh
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -485,17 +478,10 @@ jobs:
             shard_count: 3
             shard_name: 3/3
     steps:
-      - name: Free up disk space
-        run: |
-          df -h
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          df -h
-
       - uses: actions/checkout@v7
+
+      - name: Prepare runner disk space
+        run: bash scripts/ci_prepare_disk.sh
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -520,7 +506,7 @@ jobs:
 
   lsn-candidate-runtime:
     name: Checked LSN runtime against verified candidate package
-    needs: [light-e2e-package, lsn-verification]
+    needs: [light-e2e-package, release-qualification-contract]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -643,9 +629,9 @@ jobs:
   # Ready runtime PRs use the bounded full gate below instead.
   e2e-smoke:
     name: E2E smoke test (PR gate)
-    needs: detect-e2e-gates
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.release-qualification-contract.outputs.runtime == 'true'
     timeout-minutes: 30
     steps:
       - name: Free up disk space
@@ -1024,7 +1010,8 @@ jobs:
             if [ "$first" = true ]; then first=false; else items="$items,"; fi
             items="$items{\"from\":\"$from\",\"to\":\"$to\"}"
           done
-          items="$items]"
+          # Exercise the health-view migration with the current binary/catalog.
+          items="$items,{\"from\":\"0.108.0\",\"to\":\"$current_version\"}]"
           echo "matrix={\"include\":$items}" >> "$GITHUB_OUTPUT"
           echo "Discovered upgrade pairs: $items"
 
@@ -1783,9 +1770,26 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Build E2E Docker image
+        id: recovery-image
         run: ./tests/build_e2e_image.sh
 
+      - name: Repeat failure-recovery schedules
+        if: always() && steps.recovery-image.outcome == 'success'
+        env:
+          FAILURE_RECOVERY_ATTEMPTS: '10'
+        run: bash ./scripts/run_failure_recovery_repetition.sh
+
+      - name: Upload failure-recovery witnesses
+        if: always() && steps.recovery-image.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: failure-recovery-repetition-nightly
+          path: ${{ runner.temp }}/failure-recovery-repetition
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Run crash, WAL, and recovery qualification
+        if: always() && steps.recovery-image.outcome == 'success'
         run: |
           cargo nextest run --profile ci --run-ignored all \
             --test e2e_publication_crash_recovery_tests \
@@ -1798,64 +1802,16 @@ jobs:
   # must not block the ci.yml gate.
 
   # ── CI-1: Sensitive E2E gates on PRs ───────────────────────────────────
-  # One detector feeds both the smoke and sensitive gates. This keeps a PR
-  # from building the same E2E image twice when path sets overlap.
-  detect-e2e-gates:
-    name: Detect sensitive E2E paths
-    needs: release-qualification-contract
-    runs-on: ubuntu-latest
-    if: needs.release-qualification-contract.outputs.runtime == 'true' && ((github.event_name == 'pull_request' && !github.event.pull_request.draft) || github.event_name == 'push')
-    outputs:
-      failure_recovery_changed: ${{ steps.filter.outputs.failure_recovery_changed }}
-      unsafe_boundary_changed: ${{ steps.filter.outputs.unsafe_boundary_changed }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Filter changed paths
-        id: filter
-        uses: dorny/paths-filter@v4
-        with:
-          filters: |
-            failure_recovery_changed:
-              - 'src/refresh/**'
-              - 'src/cdc/**'
-              - 'src/ivm.rs'
-              - 'sql/*.sql'
-              - 'src/api/refresh_ops.rs'
-              - 'src/config/scheduler.rs'
-              - 'src/scheduler/**'
-              - 'tests/e2e_failure_recovery_tests.rs'
-              - 'tests/e2e_refresh_atomicity_tests.rs'
-              - 'tests/e2e_dvm_failpoint_tests.rs'
-              - 'tests/e2e_cleanup_chaos_tests.rs'
-              - 'scripts/run_failure_recovery_repetition.sh'
-              - '.github/workflows/ci.yml'
-              - '.github/ci-suites.json'
-              - 'scripts/ci_pr_suite.py'
-            unsafe_boundary_changed:
-              - 'Cargo.toml'
-              - 'src/error.rs'
-              - 'src/refresh/pipeline.rs'
-              - 'src/api/security_context.rs'
-              - 'src/api/refresh_ops.rs'
-              - 'src/api/outbox.rs'
-              - 'src/scheduler/dispatch.rs'
-              - 'tests/e2e_unsafe_boundary_tests.rs'
-              - 'tests/e2e/mod.rs'
-              - 'tests/Dockerfile.e2e-asan'
-              - 'tests/fixtures/asan_probe.c'
-              - 'tests/fixtures/asan_pg18_leak.supp'
-              - 'tests/fixtures/initdb-asan-wrapper.sh'
-              - '.github/workflows/ci.yml'
-
+  # The static-contract selector feeds both gates without another queued job.
   unsafe-boundary-asan:
     name: Unsafe boundary ASan qualification
-    needs: detect-e2e-gates
+    needs: release-qualification-contract
     if: >
-      github.event_name == 'pull_request' &&
-      needs.detect-e2e-gates.outputs.unsafe_boundary_changed == 'true'
+      !cancelled() &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+        needs.release-qualification-contract.outputs.runtime == 'true' &&
+        needs.release-qualification-contract.outputs.unsafe_boundary_changed == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -1866,6 +1822,8 @@ jobs:
 
       - name: Build and run the required instrumented slice
         run: |
+          # Bookworm's ASan runtime can hang at startup with 32-bit mmap randomization.
+          sudo sysctl -w vm.mmap_rnd_bits=28
           docker build --platform=linux/amd64 \
             -f tests/Dockerfile.e2e-asan \
             -t pg_trickle_e2e_asan:contract .
@@ -1874,19 +1832,20 @@ jobs:
               --features pg18,e2e-unsafe-test-hooks -- --test-threads=1 --nocapture
 
   e2e-sensitive-gate:
-    name: Sensitive E2E gate
-    needs: detect-e2e-gates
-    if: github.event_name == 'pull_request'
+    name: Sensitive E2E gate (${{ matrix.shard }}/2)
+    needs: release-qualification-contract
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft && needs.release-qualification-contract.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
-      - name: Free up disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
-          docker system prune -af
-
       - uses: actions/checkout@v7
+
+      - name: Prepare runner disk space
+        run: bash scripts/ci_prepare_disk.sh
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -1930,21 +1889,25 @@ jobs:
           fi
 
       - name: Build E2E Docker image
+        id: full-image
         env:
           BUILDX_CACHE_SCOPE: pgtrickle-e2e
         run: ./tests/build_e2e_image.sh
 
       - name: Run bounded installed-extension PR suite
-        run: python3 scripts/ci_pr_suite.py
+        run: python3 scripts/ci_pr_suite.py --shard ${{ matrix.shard }}
 
       - name: Repeat failure-recovery schedules
         if: >
           always() &&
-          needs.detect-e2e-gates.outputs.failure_recovery_changed == 'true'
+          matrix.shard == 1 && steps.full-image.outcome == 'success' &&
+          needs.release-qualification-contract.outputs.failure_recovery_changed == 'true'
+        env:
+          FAILURE_RECOVERY_ATTEMPTS: '2'
         run: bash ./scripts/run_failure_recovery_repetition.sh
 
       - name: Upload failure-recovery witnesses
-        if: always() && needs.detect-e2e-gates.outputs.failure_recovery_changed == 'true'
+        if: always() && matrix.shard == 1 && steps.full-image.outcome == 'success' && needs.release-qualification-contract.outputs.failure_recovery_changed == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: failure-recovery-repetition
@@ -1965,13 +1928,11 @@ jobs:
     if: always() && github.event_name == 'pull_request'
     needs:
       - release-qualification-contract
-      - lsn-verification
       - upgrade-check
       - unit-tests
       - integration-tests
       - otel-collector-contract
       - windows-compile-gate
-      - detect-e2e-gates
       - light-e2e-package
       - light-e2e-tests
       - release-evidence-runtime

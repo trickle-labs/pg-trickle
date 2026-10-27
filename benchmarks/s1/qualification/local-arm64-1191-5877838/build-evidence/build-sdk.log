@@ -1,0 +1,36 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.arm64-sdk
+#1 transferring dockerfile: 926B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf
+#2 DONE 0.9s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 745B done
+#3 DONE 0.0s
+
+#4 [stage-0 1/5] FROM docker.io/library/postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf
+#4 resolve docker.io/library/postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf done
+#4 DONE 0.0s
+
+#5 [stage-0 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     curl ca-certificates build-essential pkg-config libreadline-dev zlib1g-dev     libssl-dev clang libclang-dev postgresql-server-dev-18 git     && rm -rf /var/lib/apt/lists/*
+#5 CACHED
+
+#6 [stage-0 3/5] RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs     | sh -s -- -y --default-toolchain 1.98.0 --profile minimal
+#6 CACHED
+
+#7 [stage-0 4/5] RUN --mount=type=cache,id=s1-arm64-registry,sharing=locked,target=/usr/local/cargo/registry     cargo install --locked cargo-pgrx --version 0.18.0     && cargo pgrx init --pg18 /usr/bin/pg_config
+#7 CACHED
+
+#8 [stage-0 5/5] RUN (uname -a; rustc -Vv; cargo pgrx --version; pg_config; dpkg-query -W) > /sdk-manifest.txt
+#8 CACHED
+
+#9 exporting to image
+#9 exporting layers done
+#9 exporting manifest sha256:de453c245823bdb68c341e5b648a08f008e7cf67a336615a753baadd8c1f9150 done
+#9 exporting config sha256:2708aae915d7775a2d8ba7479a9837418b9193cd988745d2d6fb1b6cad8e25f9 done
+#9 naming to docker.io/library/s1-arm64-sdk:1168-078389ba1ff1 done
+#9 unpacking to docker.io/library/s1-arm64-sdk:1168-078389ba1ff1 done
+#9 DONE 0.0s

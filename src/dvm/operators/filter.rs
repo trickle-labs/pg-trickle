@@ -621,6 +621,22 @@ mod tests {
     }
 
     #[test]
+    fn test_having_unknown_emits_delete_for_existing_group() {
+        let mut ctx = test_ctx_with_st("public", "having_st");
+        let child = aggregate(
+            vec![colref("grp")],
+            vec![sum_col("v", "total")],
+            scan(1, "t", "public", "t", &["grp", "v"]),
+        );
+        let tree = filter(binop(">", colref("total"), lit("0")), child);
+        let result = diff_filter(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "WHERE ((\"total\" > 0)) IS NOT TRUE");
+        assert!(!sql.contains("WHERE NOT (\"total\" > 0)"));
+    }
+
+    #[test]
     fn test_filter_resolves_hashed_join_column_name() {
         let alias = "very_long_source_alias_abcdefghijklmnopqrstuv";
         let column = "long_column_name_abcdefgh";

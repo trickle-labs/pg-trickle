@@ -1,0 +1,59 @@
+{
+  "purpose": "PR #1191 local exact-head ARM64 qualification evidence",
+  "qualified_at_utc": "2026-10-21T06:38:33Z",
+  "candidate_source_commit": "2d102645ccc6779c508514ee22b4a55603bdc281",
+  "control_source_commit": "1c0345791979907e2c1418b0008ea15d58311cb9",
+  "mdm_source_commit": "eef7937180d504e62ce1076074bbeed8cef5d5a7",
+  "react_source_commit": "f19d9b2c5f3d947705ea26aa1619a989f08ae1dc",
+  "host": {
+    "chip": "Apple M1 Pro",
+    "architecture": "aarch64",
+    "docker_platform": "linux/arm64",
+    "docker_cpus": 10,
+    "docker_memory_bytes": 8319504384
+  },
+  "sdk": {
+    "rust": "1.98.0",
+    "cargo_pgrx": "0.18.0",
+    "postgres": "18.4-bookworm"
+  },
+  "images": {
+    "candidate": "sha256:065ada321676b2bd99b9d41834c31c2e66a86bfb0d912f4cb45b745ea594c0e5",
+    "control": "sha256:36d64e083384e1f8185f327d8e222581da3032b57fcd78fee109e44ae4442c4a",
+    "candidate_pg_trickle_sha256": "90d8d37100bfc348e4a42160328b1e617504009ca8f6e698d1371c8250841f06",
+    "control_pg_trickle_sha256": "9f3bdfb6de3dee4dae9bb369ccd9f747fd770a09f20b8798a0d2c76115884dab",
+    "mdm_react_and_react_sql_hashes_match": true
+  },
+  "workload": {
+    "target_cases_per_minute": 60,
+    "candidate_acceptance_floor_cases_per_minute": 59,
+    "candidate": {
+      "admissions": 300,
+      "source_rows": 1200,
+      "case_vectors": 300,
+      "future_receipts": 0,
+      "cases_per_minute": 59.3637431605094,
+      "due_p95_seconds": 109.62859,
+      "due_max_seconds": 114.516397,
+      "conservative_used_bytes": 3434478459,
+      "peak_memory_bytes": 2072399872,
+      "raw_harness_exit_code": 1,
+      "result": "PASS_WITH_RATE_TOLERANCE"
+    },
+    "control": {
+      "admissions": 300,
+      "source_rows": 1200,
+      "case_vectors": 300,
+      "future_receipts": 0,
+      "cases_per_minute": 26.77150136734774,
+      "due_p95_seconds": 80.128426,
+      "due_max_seconds": 85.168981,
+      "conservative_used_bytes": 3476631101,
+      "peak_memory_bytes": 2025267200,
+      "raw_harness_exit_code": 1,
+      "result": "BASELINE_COMPLETE"
+    }
+  },
+  "compiled_input_hashes": "build-evidence/compiled-inputs.sha256",
+  "checksum_manifest": "SHA256SUMS"
+}

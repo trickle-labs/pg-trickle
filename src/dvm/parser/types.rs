@@ -612,6 +612,14 @@ pub struct AggExpr {
 }
 
 impl AggExpr {
+    fn filtered_arg_sql(&self, arg_sql: String) -> String {
+        if let Some(filter) = &self.filter {
+            format!("CASE WHEN {} THEN ({arg_sql}) END", filter.to_sql())
+        } else {
+            arg_sql
+        }
+    }
+
     pub fn statistical_accumulator_type(&self) -> Option<&ResolvedSqlType> {
         self.statistical_support
             .as_ref()
@@ -2006,7 +2014,7 @@ impl OpTree {
                         aux.push((
                             format!("__pgt_aux_sum_{}", agg.alias),
                             format!("__pgt_aux_count_{}", agg.alias),
-                            arg_sql,
+                            agg.filtered_arg_sql(arg_sql),
                         ));
                     }
                 }
@@ -2037,7 +2045,10 @@ impl OpTree {
                             .as_ref()
                             .map(|e| e.to_sql())
                             .unwrap_or_else(|| "1".to_string());
-                        aux.push((format!("__pgt_aux_sum2_{}", agg.alias), arg_sql));
+                        aux.push((
+                            format!("__pgt_aux_sum2_{}", agg.alias),
+                            agg.filtered_arg_sql(arg_sql),
+                        ));
                     }
                 }
                 aux
@@ -2078,6 +2089,8 @@ impl OpTree {
                             .as_ref()
                             .map(|e| e.to_sql())
                             .unwrap_or_else(|| "0".to_string());
+                        let y_sql = agg.filtered_arg_sql(y_sql);
+                        let x_sql = agg.filtered_arg_sql(x_sql);
                         let a = &agg.alias;
                         // Use a combined key for arg_sql: "x_expr|y_expr"
                         aux.push((format!("__pgt_aux_sumx_{a}"), x_sql.clone()));
@@ -2153,11 +2166,7 @@ impl OpTree {
                             .as_ref()
                             .map(|e| e.to_sql())
                             .unwrap_or_else(|| "0".to_string());
-                        let arg_sql = if let Some(filter) = &agg.filter {
-                            format!("CASE WHEN {} THEN ({arg_sql}) END", filter.to_sql())
-                        } else {
-                            arg_sql
-                        };
+                        let arg_sql = agg.filtered_arg_sql(arg_sql);
                         aux.push((format!("__pgt_aux_nonnull_{}", agg.alias), arg_sql));
                     }
                 }

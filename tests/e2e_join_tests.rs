@@ -1,5 +1,187 @@
 mod e2e;
 use e2e::E2eDb;
+
+async fn refresh_differential_and_assert(db: &E2eDb, name: &str, query: &str) {
+    let refresh = format!("SELECT pgtrickle.refresh_stream_table('{name}')");
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+        ],
+        &refresh,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{name}: differential refresh failed: {error}"));
+    let (action, status, full_fallback): (String, String, bool) = sqlx::query_as(
+        "SELECT h.action, h.status, h.was_full_fallback \
+         FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+         WHERE st.pgt_name = $1 ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .bind(name)
+    .fetch_one(&db.pool)
+    .await
+    .expect("latest refresh history");
+    assert_eq!(action, "DIFFERENTIAL", "{name} refresh action");
+    assert_eq!(status, "COMPLETED", "{name} refresh status");
+    assert!(!full_fallback, "{name} unexpectedly used full fallback");
+    db.assert_st_matches_query(name, query).await;
+}
+
+#[tokio::test]
+async fn test_inner_join_erroring_non_equi_uses_coherent_endpoint_snapshots() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE err_join_left (id INT PRIMARY KEY, grp INT NOT NULL, val INT)")
+        .await;
+    db.execute("CREATE TABLE err_join_right (id INT PRIMARY KEY, grp INT NOT NULL, val INT)")
+        .await;
+    db.execute("INSERT INTO err_join_left VALUES (1, 1, 2), (2, 1, 4), (3, 2, NULL)")
+        .await;
+    db.execute("INSERT INTO err_join_right VALUES (10, 1, 1), (11, 1, 1), (12, 2, 5)")
+        .await;
+    let query = "SELECT l.grp, l.val AS left_val, r.val AS right_val \
+                 FROM err_join_left l JOIN err_join_right r \
+                   ON l.grp = r.grp AND 10 / (l.val - r.val) > 0";
+    db.create_st("err_join_endpoint_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("err_join_endpoint_st", query)
+        .await;
+
+    // The old left value equals the new right value, so the algebraic delta
+    // would form a zero denominator although both committed endpoints are safe.
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE err_join_left SET val = 3 WHERE id = 1",
+        "UPDATE err_join_right SET val = 2 WHERE id = 10",
+        "COMMIT",
+    ])
+    .await;
+    refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
+
+    // Reverse the transition and update each row twice before the next refresh.
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE err_join_left SET val = 4 WHERE id = 1",
+        "UPDATE err_join_right SET val = 3 WHERE id = 10",
+        "UPDATE err_join_left SET val = 2 WHERE id = 1",
+        "UPDATE err_join_right SET val = 1 WHERE id = 10",
+        "COMMIT",
+    ])
+    .await;
+    refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
+
+    db.execute("UPDATE err_join_left SET val = 5 WHERE id = 2")
+        .await;
+    refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
+
+    // Move a row to another equi-key, insert and delete duplicate-key matches,
+    // then transition a NULL value into a valid endpoint row.
+    db.execute("UPDATE err_join_left SET grp = 2 WHERE id = 1")
+        .await;
+    refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
+    db.execute_seq(&[
+        "BEGIN",
+        "INSERT INTO err_join_left VALUES (4, 1, 8)",
+        "DELETE FROM err_join_right WHERE id = 11",
+        "COMMIT",
+    ])
+    .await;
+    refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
+    db.execute("UPDATE err_join_left SET val = 7 WHERE id = 3")
+        .await;
+    refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
+    db.execute("DELETE FROM err_join_left WHERE id = 2").await;
+    refresh_differential_and_assert(&db, "err_join_endpoint_st", query).await;
+
+    // A real new-endpoint division error must still surface as PostgreSQL 22012.
+    db.execute("UPDATE err_join_left SET val = 1 WHERE id = 4")
+        .await;
+    let error = db
+        .try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy = 'differential'",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+            ],
+            "SELECT pgtrickle.refresh_stream_table('err_join_endpoint_st')",
+        )
+        .await
+        .expect_err("a genuine invalid new endpoint must fail");
+    let code = error
+        .as_database_error()
+        .and_then(|database_error| database_error.code());
+    assert_eq!(code.as_deref(), Some("22012"), "endpoint SQLSTATE: {error}");
+    let stored_rows: Vec<(i32, i32, i32)> = sqlx::query_as(
+        "SELECT grp, left_val, right_val FROM err_join_endpoint_st \
+         ORDER BY grp, left_val, right_val",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("failed refresh preserves the last committed stream-table rows");
+    assert_eq!(stored_rows, vec![(1, 8, 1), (2, 7, 5)]);
+    db.pool.close().await;
+}
+
+#[tokio::test]
+async fn test_inner_join_erroring_non_equi_handles_self_and_nested_joins() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE err_noeq_left (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("CREATE TABLE err_noeq_right (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO err_noeq_left VALUES (1, 2), (2, 4)")
+        .await;
+    db.execute("INSERT INTO err_noeq_right VALUES (10, 1), (11, 7)")
+        .await;
+    let no_equi_query = "SELECT l.id AS lid, l.val AS lv, r.id AS rid, r.val AS rv \
+                         FROM err_noeq_left l JOIN err_noeq_right r \
+                           ON 10 / (l.val - r.val) > 0";
+    db.create_st("err_noeq_st", no_equi_query, "1m", "DIFFERENTIAL")
+        .await;
+    db.execute("UPDATE err_noeq_left SET val = 3 WHERE id = 1")
+        .await;
+    db.execute("UPDATE err_noeq_right SET val = 2 WHERE id = 10")
+        .await;
+    refresh_differential_and_assert(&db, "err_noeq_st", no_equi_query).await;
+
+    db.execute("CREATE TABLE err_self (id INT PRIMARY KEY, grp INT, val INT)")
+        .await;
+    db.execute("INSERT INTO err_self VALUES (1, 1, 2), (2, 1, 1), (3, 1, 5)")
+        .await;
+    let self_query = "SELECT a.id AS aid, b.id AS bid, a.val AS av, b.val AS bv \
+                      FROM err_self a JOIN err_self b \
+                        ON a.grp = b.grp AND a.id < b.id \
+                       AND 10 / (a.val - b.val) > 0";
+    db.create_st("err_self_st", self_query, "1m", "DIFFERENTIAL")
+        .await;
+    db.execute("UPDATE err_self SET val = 3 WHERE id = 1").await;
+    db.execute("UPDATE err_self SET val = 2 WHERE id = 2").await;
+    refresh_differential_and_assert(&db, "err_self_st", self_query).await;
+
+    db.execute("CREATE TABLE err_nested_a (id INT PRIMARY KEY)")
+        .await;
+    db.execute("CREATE TABLE err_nested_b (id INT PRIMARY KEY, a_id INT, grp INT, val INT)")
+        .await;
+    db.execute("CREATE TABLE err_nested_c (id INT PRIMARY KEY, grp INT, val INT)")
+        .await;
+    db.execute("INSERT INTO err_nested_a VALUES (1)").await;
+    db.execute("INSERT INTO err_nested_b VALUES (1, 1, 1, 2)")
+        .await;
+    db.execute("INSERT INTO err_nested_c VALUES (1, 1, 1)")
+        .await;
+    let nested_query = "SELECT a.id, b.val AS bv, c.val AS cv \
+                        FROM err_nested_a a JOIN err_nested_b b ON a.id = b.a_id \
+                        JOIN err_nested_c c ON b.grp = c.grp \
+                          AND 10 / (b.val - c.val) > 0";
+    db.create_st("err_nested_st", nested_query, "1m", "DIFFERENTIAL")
+        .await;
+    db.execute("UPDATE err_nested_b SET val = 3 WHERE id = 1")
+        .await;
+    db.execute("UPDATE err_nested_c SET val = 2 WHERE id = 1")
+        .await;
+    refresh_differential_and_assert(&db, "err_nested_st", nested_query).await;
+}
+
 #[tokio::test]
 async fn test_full_join_multi_row_unmatched() {
     let db = E2eDb::new().await.with_extension().await;
