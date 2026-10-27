@@ -1400,7 +1400,14 @@ async fn lifecycle_refresh(fixture: &Fixture, stream: &str) {
 async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal() {
     use e2e::property_support::{SeededRng, TraceConfig};
     let config = TraceConfig::from_env();
-    for seed in config.seeds(0x1219_0001) {
+    let wal_phases = [
+        "before_receipt",
+        "before_replay",
+        "before_ack",
+        "after_slot_advance",
+    ];
+    for (case_index, seed) in config.seeds(0x1219_0001).into_iter().enumerate() {
+        let wal_phase = wal_phases[case_index % wal_phases.len()];
         let db = E2eDb::new_dedicated().await.with_extension().await;
         db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
             .await;
@@ -1425,7 +1432,7 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             serde_json::json!({
                 "seed":seed, "cycles":config.cycles, "revision":String::from_utf8(revision.stdout).unwrap().trim(),
                 "server_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").unwrap_or_else(|_|"unbound".into()),
-                "configuration":{"capture":"trigger","trigger_mode":mode,"compact_threshold":1},
+                "configuration":{"capture":"trigger","trigger_mode":mode,"wal_interruption_phase":wal_phase,"compact_threshold":1},
                 "initial_rows":if seed & 1 != 0 {serde_json::json!([[0,"baseline"]])} else {serde_json::json!([])},
                 "query":"SELECT id,value FROM history_source",
                 "container":db.container_id(), "minimization":"first failing ordered prefix; SQL and transaction boundaries retained",
@@ -1653,7 +1660,19 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             .alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
             .await;
         wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
-        let wal_value = format!("wal-after-restore-{seed:016x}");
+        let stable_name: String = fixture
+            .db
+            .query_scalar(&format!(
+                "SELECT pgtrickle.source_stable_name({}::oid)",
+                fixture.oid
+            ))
+            .await;
+        fixture.slot = format!("pgtrickle_{stable_name}");
+        let wal_value = format!("wal-{wal_phase}-{seed:016x}");
+        let next_value = format!("wal-next-{wal_phase}-{seed:016x}");
+        let (mut barrier, blocker_pid) =
+            hold_wal_barrier(&fixture.db, fixture.oid, wal_phase).await;
+        set_wal_phase(&fixture.db, fixture.oid, wal_phase, &wal_value).await;
         commit_row(
             &fixture.db,
             &fixture.source,
@@ -1662,30 +1681,48 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             &wal_value,
         )
         .await;
-        wait_for_receipt(&fixture.db.pool, fixture.oid, "ACKNOWLEDGED", &wal_value).await;
+        let worker_pid =
+            wait_for_wal_barrier(&fixture.db, fixture.oid, wal_phase, blocker_pid).await;
+        if wal_phase == "before_receipt" {
+            assert_eq!(
+                matching_receipts(&fixture.db.pool, fixture.oid, "RECEIVED", &wal_value).await,
+                0,
+                "receipt must not commit before the before_receipt interruption"
+            );
+        } else {
+            let status = if wal_phase == "before_replay" {
+                "RECEIVED"
+            } else {
+                "APPLIED"
+            };
+            wait_for_receipt(&fixture.db.pool, fixture.oid, status, &wal_value).await;
+            if wal_phase == "after_slot_advance" {
+                assert!(
+                    receipt_slot_reached(&fixture.db, &fixture.slot, fixture.oid, &wal_value).await
+                );
+                commit_row(
+                    &fixture.db,
+                    &fixture.source,
+                    &fixture.journal,
+                    i32::MIN + 1,
+                    &next_value,
+                )
+                .await;
+            }
+        }
+        terminate_backend(&fixture.db, worker_pid).await;
+        release_wal_barrier(&mut barrier, fixture.oid, wal_phase).await;
+        drop(barrier);
+        clear_wal_phase(&fixture.db).await;
         record_lifecycle(
             &path,
             &mut history,
-            serde_json::json!({"step":"trigger-to-WAL after restore","capture":cdc_mode(&fixture.db, &fixture.source).await,"value":wal_value}),
-        );
-        lifecycle_refresh(&fixture, "history_fast").await;
-        lifecycle_exact(
-            &fixture,
-            "history_fast",
-            &path,
-            &mut history,
-            "WAL catch-up before crash",
-        )
-        .await;
-        assert_eq!(
-            lifecycle_state(&fixture.db.pool, "history_slow").await,
-            slow_baseline,
-            "WAL handoff moved the lagging consumer"
+            serde_json::json!({"step":"trigger-to-WAL interruption after restore","phase":wal_phase,"capture":cdc_mode(&fixture.db, &fixture.source).await,"value":wal_value,"next_value":if wal_phase == "after_slot_advance" {Some(next_value.as_str())} else {None}}),
         );
         record_lifecycle(
             &path,
             &mut history,
-            serde_json::json!({"step":"crash after committed catch-up","retained_identity":format!("{:?}",fixture.identity)}),
+            serde_json::json!({"step":"SIGKILL with interrupted WAL receipt","retained_identity":format!("{:?}",fixture.identity)}),
         );
         fixture.db.pool.close().await;
         for args in [
@@ -1714,18 +1751,28 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             &mut history,
             serde_json::json!({"step":"retained restart witnessed","postmaster_before":settings.3,"postmaster_after":restarted}),
         );
+        wait_for_receipt(&fixture.db.pool, fixture.oid, "ACKNOWLEDGED", &wal_value).await;
+        if wal_phase == "after_slot_advance" {
+            wait_for_receipt(&fixture.db.pool, fixture.oid, "ACKNOWLEDGED", &next_value).await;
+        }
         assert_eq!(
             identity(&fixture.db, "history_identity", fixture.db.container_id()).await,
             fixture.identity
         );
+        lifecycle_refresh(&fixture, "history_fast").await;
         lifecycle_exact(
             &fixture,
             "history_fast",
             &path,
             &mut history,
-            "retained recovery",
+            "WAL interruption recovery",
         )
         .await;
+        assert_eq!(
+            lifecycle_state(&fixture.db.pool, "history_slow").await,
+            slow_baseline,
+            "WAL recovery moved the lagging consumer"
+        );
         lifecycle_refresh(&fixture, "history_slow").await;
         lifecycle_exact(
             &fixture,
