@@ -152,6 +152,10 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
         "DIFFERENTIAL",
     )
     .await;
+    // Keep the cost-model assertion deterministic when the scheduler is active.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_cost_st'])")
+        .await;
     let source_oid = i64::from(db.table_oid("rf_cost_src").await);
     let buffer = db.change_buffer_table(source_oid).await;
 

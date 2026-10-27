@@ -59,14 +59,14 @@ class AllocationTests(unittest.TestCase):
                             )):
                         selected.extend(command[i + 1] for i, arg in enumerate(command) if arg == "--test")
                     self.assertEqual(command[command.index("--retries") + 1], "0")
-                self.assertEqual(len(run.call_args_list), 5)
+                self.assertEqual(len(run.call_args_list), 6)
                 if shard == 1:
-                    isolated_commands = [call.args[0] for call in run.call_args_list[1:3]]
+                    commands = [call.args[0] for call in run.call_args_list[1:4]]
                     self.assertCountEqual(
-                        [command[command.index("--test") + 1] for command in isolated_commands],
-                        ["e2e_bootstrap_gating_tests", "e2e_dag_autorefresh_tests"],
+                        [command[command.index("--test") + 1] for command in commands],
+                        ["e2e_bootstrap_gating_tests", "e2e_dag_autorefresh_tests", "e2e_rls_wal_tests"],
                     )
-                    for command in isolated_commands:
+                    for command in commands:
                         self.assertEqual(command[command.index("--test-threads") + 1], "1")
                         self.assertEqual(command[command.index("--retries") + 1], "0")
                 if shard == 2:
@@ -79,6 +79,7 @@ class AllocationTests(unittest.TestCase):
                         [
                             "e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests",
                             "e2e_scheduler_tests", "e2e_v107_wal_transition_tests",
+                            "e2e_watermark_gating_tests",
                         ],
                     )
                 shards.append(selected)
@@ -233,7 +234,7 @@ class AllocationTests(unittest.TestCase):
                 self.assertEqual(command[command.index("--retries") + 1], "0")
 
     def test_isolated_scheduler_failure_propagates_without_retries(self):
-        for failed_phase in (1, 2, 3, 4):
+        for failed_phase in (1, 2, 3, 4, 5):
             with self.subTest(failed_phase=failed_phase), patch(
                 "sys.argv", ["ci_pr_suite.py", "--shard", "2"]
             ), patch("ci_pr_suite.subprocess.run") as run:
@@ -252,11 +253,11 @@ class AllocationTests(unittest.TestCase):
             with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
                 "ci_pr_suite.subprocess.run"
             ) as run:
-                run.side_effect = [SimpleNamespace(returncode=value) for value in (0, 0, 0, 0, 0, 0, 0, status, 0)]
+                run.side_effect = [SimpleNamespace(returncode=value) for value in (0, 0, 0, 0, 0, 0, 0, 0, 0, status, 0)]
                 self.assertEqual(ci_pr_suite.main(), status)
                 self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
-                self.assertEqual(len(run.call_args_list), 9 if status == 0 else 8)
-                self.assertEqual(run.call_args_list[7].args[0], [
+                self.assertEqual(len(run.call_args_list), 11 if status == 0 else 10)
+                self.assertEqual(run.call_args_list[9].args[0], [
                     "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
                     "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
                 ])
@@ -267,16 +268,16 @@ class AllocationTests(unittest.TestCase):
             with self.subTest(status=status), patch(
                 "sys.argv", ["ci_pr_suite.py", "--shard", "1"]
             ), patch("ci_pr_suite.subprocess.run") as run:
-                run.side_effect = [SimpleNamespace(returncode=x) for x in (0, 0, 0, 0, status)]
+                run.side_effect = [SimpleNamespace(returncode=x) for x in (0, 0, 0, 0, 0, status)]
                 self.assertEqual(ci_pr_suite.main(), status)
-                self.assertEqual(len(run.call_args_list), 5)
-                main_command, first_isolated, second_isolated, atomicity_command, serial_command = (
-                    call.args[0] for call in run.call_args_list
+                self.assertEqual(len(run.call_args_list), 6)
+                commands = [call.args[0] for call in run.call_args_list]
+                main_command, atomicity_command, serial_command = (
+                    commands[0], commands[-2], commands[-1]
                 )
                 self.assertCountEqual(
-                    [first_isolated[first_isolated.index("--test") + 1],
-                     second_isolated[second_isolated.index("--test") + 1]],
-                    ["e2e_bootstrap_gating_tests", "e2e_dag_autorefresh_tests"],
+                    [command[command.index("--test") + 1] for command in commands[1:-2]],
+                    ["e2e_bootstrap_gating_tests", "e2e_dag_autorefresh_tests", "e2e_rls_wal_tests"],
                 )
                 for case in cases:
                     self.assertIn(
