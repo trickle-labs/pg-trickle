@@ -667,7 +667,10 @@ async fn test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_
                     .execute(&mut *transaction)
                     .await
                     .expect_err("late source locks cannot refresh an old transaction snapshot");
-                    assert!(error.to_string().contains("requires READ COMMITTED"), "{error}");
+                    assert!(
+                        error.to_string().contains("requires READ COMMITTED"),
+                        "{error}"
+                    );
                     sqlx::query("ROLLBACK")
                         .execute(&mut *transaction)
                         .await
@@ -736,7 +739,9 @@ async fn test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_
                         ),
                     )
                     .unwrap();
-                    panic!("endpoint-valid projection must not evaluate mixed pairs: {prefix}: {diagnostic_mutation}: {error}");
+                    panic!(
+                        "endpoint-valid projection must not evaluate mixed pairs: {prefix}: {diagnostic_mutation}: {error}"
+                    );
                 }
                 e2e::oracle::assert_st_query_exact(
                     &db,
