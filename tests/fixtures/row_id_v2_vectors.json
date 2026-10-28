@@ -53,7 +53,7 @@
     { "name": "scan_bool_false", "domain": "SCAN_KEY", "fields": [{ "type": "bool", "value": false }], "bytes": "020100000001010100ff" },
     { "name": "scan_bool_true", "domain": "SCAN_KEY", "fields": [{ "type": "bool", "value": true }], "bytes": "020100000001010101ff" },
     { "name": "scan_null_int4", "domain": "SCAN_KEY", "fields": [{ "type": "int4", "value": null }], "bytes": "0201000000010300ff" },
-    { "name": "scan_int4_minus_one", "domain": "SCAN_KEY", "fields": [{ "type": "int4", "value": -1 }], "bytes": "02010000000103017fffffff" },
+    { "name": "scan_int4_minus_one", "domain": "SCAN_KEY", "fields": [{ "type": "int4", "value": -1 }], "bytes": "02010000000103017fffffffff" },
     { "name": "scan_int4_one", "domain": "SCAN_KEY", "fields": [{ "type": "int4", "value": 1 }], "bytes": "020100000001030180000001ff" },
     { "name": "scan_int8_42", "domain": "SCAN_KEY", "fields": [{ "type": "int8", "value": 42 }], "bytes": "0201000000010401800000000000002aff" },
     { "name": "group_float_positive_zero", "domain": "GROUP_KEY", "fields": [{ "type": "float8", "value": "+0" }], "bytes": "02030000000107018000000000000000ff" },

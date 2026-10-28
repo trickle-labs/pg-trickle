@@ -5,6 +5,115 @@ mod e2e;
 use e2e::E2eDb;
 
 #[tokio::test]
+async fn test_identity_scalar_frames_preserve_installed_v2_v3_bytes() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    for (value, tail) in [
+        ("true::boolean", "010101ff"),
+        ("NULL::boolean", "0100ff"),
+        ("1::smallint", "02018001ff"),
+        ("(-1)::integer", "03017fffffffff"),
+        ("9223372036854775807::bigint", "0401ffffffffffffffffff"),
+        (
+            "'00000000-0000-0000-0000-000000000000'::uuid",
+            "0d0100000000000000000000000000000000ff",
+        ),
+    ] {
+        for version in [2, 3] {
+            for (domain, byte) in [
+                ("SCAN_KEY", "01"),
+                ("JOIN_KEY", "04"),
+                ("MDM_SOURCE_KEY_V1", "08"),
+            ] {
+                let actual: String = db.query_scalar(&format!(
+                    "SELECT encode(pgtrickle.encode_row_id_v{version}('{domain}',ROW({value})),'hex')"
+                )).await;
+                assert_eq!(
+                    actual,
+                    format!("0{version}{byte}00000001{tail}"),
+                    "{version}/{domain}/{value}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_identity_colliding_probes_preserve_merge_and_join_complete_ids() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    // Install the seam before creating expression indexes so their contents agree.
+    db.execute("CREATE OR REPLACE FUNCTION pgtrickle.row_probe_v1(input bytea) RETURNS bytea LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE AS 'SELECT decode(''00'',''hex'')'").await;
+    db.execute("CREATE TABLE collision_l(id integer PRIMARY KEY,k integer,v integer)")
+        .await;
+    db.execute("CREATE TABLE collision_r(id integer PRIMARY KEY,k integer,v integer)")
+        .await;
+    db.execute("INSERT INTO collision_l VALUES(1,1,10),(2,1,20),(3,1,30)")
+        .await;
+    db.execute("INSERT INTO collision_r VALUES(1,1,100),(2,1,200),(3,1,300)")
+        .await;
+    let consumers = [
+        ("collision_scan", "SELECT id,k,v FROM collision_l"),
+        (
+            "collision_join",
+            "SELECT l.id AS lid,r.id AS rid,l.v AS lv,r.v AS rv FROM collision_l l JOIN collision_r r ON l.k=r.k",
+        ),
+    ];
+    for (stream, query) in consumers {
+        db.create_st(stream, query, "24h", "DIFFERENTIAL").await;
+    }
+    let mut connection = db.pool.acquire().await.unwrap();
+    for sql in [
+        "SET pg_trickle.refresh_strategy='differential'",
+        "SET pg_trickle.differential_max_change_ratio=0",
+    ] {
+        sqlx::query(sql).execute(&mut *connection).await.unwrap();
+    }
+    for mutation in [
+        "BEGIN; UPDATE collision_l SET v=v+10 WHERE id=1; UPDATE collision_r SET v=v+20 WHERE id=2; COMMIT",
+        "DELETE FROM collision_l WHERE id=2",
+        "DELETE FROM collision_r WHERE id=3",
+        "BEGIN; INSERT INTO collision_l VALUES(4,1,40); INSERT INTO collision_r VALUES(4,1,400); COMMIT",
+    ] {
+        sqlx::raw_sql(mutation).execute(&db.pool).await.unwrap();
+        for (stream, query) in consumers {
+            let before: i64 = db.query_scalar(&format!(
+                "SELECT coalesce(max(h.refresh_id),0) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='{stream}'"
+            )).await;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT pgtrickle.refresh_stream_table('{stream}')"
+            )))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+            e2e::oracle::assert_st_query_exact(
+                &db,
+                stream,
+                query,
+                "complete identity after deliberate probe collision",
+            )
+            .await;
+            let (after, action, fallback): (i64,String,bool) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT h.refresh_id,h.action,coalesce(h.was_full_fallback,false) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{stream}' AND h.status='COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1"
+            ))).fetch_one(&db.pool).await.unwrap();
+            assert!(after > before);
+            assert_eq!(action, "DIFFERENTIAL");
+            assert!(!fallback);
+            let (rows, identities, probes): (i64,i64,i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*),count(DISTINCT __pgt_row_id),count(DISTINCT pgtrickle.row_probe_v1(__pgt_row_id)) FROM {stream}"
+            ))).fetch_one(&db.pool).await.unwrap();
+            assert!(
+                rows > 1,
+                "collision witness must contain distinct complete identities"
+            );
+            assert_eq!(identities, rows);
+            assert_eq!(probes, 1);
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_row_id_v2_non_composite_inputs_error_and_backend_survives() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute_seq(&[

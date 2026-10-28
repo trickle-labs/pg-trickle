@@ -10,6 +10,9 @@ use sqlx::{AssertSqlSafe, Postgres, pool::PoolConnection};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
+const SNAPSHOT_RACE_CREATE_ARGS: &str = "text, text, text, text, boolean, text, text, text, boolean, boolean, \
+     text, integer, double precision, text, boolean, text, integer, text, text";
+
 #[derive(Debug, PartialEq, Eq)]
 struct RefreshProgress {
     frontier: Option<String>,
@@ -49,6 +52,7 @@ fn phase_code(phase: &str) -> i32 {
         "input_boundary" => 1,
         "after_apply" => 2,
         "during_finalize" => 3,
+        "snapshot_after_metadata" => 4,
         _ => panic!("unknown atomicity phase {phase}"),
     }
 }
@@ -1213,4 +1217,479 @@ async fn test_refresh_early_progress_control_is_detected() {
         .expect("restore frontier after semantic control");
     db.refresh_st(stream).await;
     assert_recovered_action(&db, stream, &query, "DIFFERENTIAL").await;
+}
+
+#[tokio::test]
+async fn test_snapshot_during_witnessed_cancel_keeps_committed_rows_and_frontier() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    let stream = "atomic_snapshot_cancel";
+    let query = "SELECT id,value FROM atomic_snapshot_source";
+    db.execute("CREATE TABLE atomic_snapshot_source(id INT PRIMARY KEY,value TEXT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO atomic_snapshot_source VALUES(1,'committed')")
+        .await;
+    db.create_st(stream, query, "1h", "DIFFERENTIAL").await;
+    let id = pgt_id(&db, stream).await;
+    let baseline = progress(&db, id).await;
+    snapshot_table(&db, stream, "atomic_snapshot_checkpoint").await;
+    db.execute("UPDATE atomic_snapshot_source SET value='pending'")
+        .await;
+    set_chaos(&db, stream, "after_apply").await;
+    let (mut barrier, blocker) = hold_barrier(&db, id, "after_apply").await;
+    let (refresh, refresh_pid) = start_manual_refresh(&db, stream).await;
+    let witness = wait_for_barrier(&db, id, "after_apply", blocker, Duration::from_secs(10)).await;
+    assert_eq!(witness.pid, refresh_pid);
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    let artifact = std::path::Path::new(&directory).join("snapshot-cancel.json");
+    std::fs::write(
+        &artifact,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "phase":"after_apply", "refresh_pid":refresh_pid,
+            "blockers":witness.blockers, "wait_event":witness.wait_event,
+            "expected_frontier":baseline.frontier, "stage":"before cancellation",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut connection = db.pool.acquire().await.unwrap();
+    let snapshot_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    let mut snapshot = tokio::spawn(async move {
+        sqlx::query_scalar::<_, String>(
+            "SELECT pgtrickle.snapshot_stream_table('atomic_snapshot_cancel')",
+        )
+        .fetch_one(&mut *connection)
+        .await
+    });
+    let mut completed = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::select! {
+            result = &mut snapshot => { completed=Some(result.unwrap().unwrap()); break; }
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        let blocked: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
+            .bind(refresh_pid)
+            .bind(snapshot_pid)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        if blocked {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "snapshot neither completed nor witnessed blocking"
+        );
+    }
+    let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+        .bind(refresh_pid)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(cancelled);
+    let error = tokio::time::timeout(Duration::from_secs(5), refresh)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("canceling statement due to user request"),
+        "{error}"
+    );
+    release_barrier(&mut barrier, id, "after_apply").await;
+    clear_chaos(&db).await;
+    let snapshot_name = match completed {
+        Some(name) => name,
+        None => tokio::time::timeout(Duration::from_secs(5), snapshot)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+    };
+    let snapshot_frontier: Option<String> = sqlx::query_scalar(
+        "SELECT frontier::text FROM pgtrickle.pgt_snapshots WHERE snapshot_relid=$1::regclass::oid",
+    )
+    .bind(&snapshot_name)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(snapshot_frontier, baseline.frontier);
+    db.assert_st_matches_query(
+        "atomic_snapshot_checkpoint",
+        &format!("SELECT id,value FROM {snapshot_name}"),
+    )
+    .await;
+    assert_committed_checkpoint(&db, id, stream, "atomic_snapshot_checkpoint", &baseline).await;
+    db.refresh_st(stream).await;
+    assert_recovered_action(&db, stream, query, "DIFFERENTIAL").await;
+    db.execute("SELECT pgtrickle.snapshot_stream_table('atomic_snapshot_cancel','public.atomic_snapshot_after')").await;
+    db.assert_st_matches_query(
+        "atomic_snapshot_after",
+        &format!("SELECT id,value FROM {stream}"),
+    )
+    .await;
+    std::fs::write(
+        artifact,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "phase":"after_apply", "refresh_pid":refresh_pid,"snapshot_pid":snapshot_pid,
+            "blockers":witness.blockers,"wait_event":witness.wait_event,
+            "expected_frontier":baseline.frontier,"snapshot_frontier":snapshot_frontier,
+            "cancel_error":error.to_string(),"coherent":true,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute("CREATE TABLE endpoint_fence_l(id INT PRIMARY KEY,v NUMERIC)")
+        .await;
+    db.execute("CREATE TABLE endpoint_fence_r(id INT PRIMARY KEY,v NUMERIC)")
+        .await;
+    db.execute("INSERT INTO endpoint_fence_l VALUES(1,1)").await;
+    db.execute("INSERT INTO endpoint_fence_r VALUES(1,0)").await;
+    let stream = "endpoint_fence_st";
+    let query = "SELECT l.id,100/(l.v-r.v) quotient FROM endpoint_fence_l l JOIN endpoint_fence_r r ON l.id=r.id";
+    db.create_st(stream, query, "24h", "DIFFERENTIAL").await;
+    sqlx::raw_sql(
+        "BEGIN; UPDATE endpoint_fence_l SET v=2; UPDATE endpoint_fence_r SET v=1; COMMIT",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let id = pgt_id(&db, stream).await;
+    set_chaos(&db, stream, "input_boundary").await;
+    let (mut barrier, blocker) = hold_barrier(&db, id, "input_boundary").await;
+    let (refresh, refresh_pid) = start_manual_refresh(&db, stream).await;
+    let witness =
+        wait_for_barrier(&db, id, "input_boundary", blocker, Duration::from_secs(10)).await;
+    assert_eq!(witness.pid, refresh_pid);
+    let locks: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT relation)::bigint FROM pg_locks WHERE pid=$1 AND granted AND mode='ShareLock' \
+         AND relation IN ('endpoint_fence_l'::regclass,'endpoint_fence_r'::regclass)"
+    ).bind(refresh_pid).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(
+        locks, 2,
+        "both endpoint sources must be fenced before selecting the cut"
+    );
+    let mut writer_conn = db.pool.acquire().await.unwrap();
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer_conn)
+        .await
+        .unwrap();
+    sqlx::query("SET lock_timeout='5s'")
+        .execute(&mut *writer_conn)
+        .await
+        .unwrap();
+    let writer = tokio::spawn(async move {
+        sqlx::query("UPDATE endpoint_fence_l SET v=3 WHERE id=1")
+            .execute(&mut *writer_conn)
+            .await
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let blocked: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
+            .bind(refresh_pid)
+            .bind(writer_pid)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        if blocked {
+            break;
+        }
+        assert!(
+            !writer.is_finished(),
+            "writer escaped the admitted source fence"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "writer did not reach the source fence"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    release_barrier(&mut barrier, id, "input_boundary").await;
+    tokio::time::timeout(Duration::from_secs(5), refresh)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), writer)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    clear_chaos(&db).await;
+    let first: f64 = db
+        .query_scalar("SELECT quotient::float8 FROM endpoint_fence_st")
+        .await;
+    assert_eq!(
+        first, 100.0,
+        "first refresh must consume only the selected endpoint"
+    );
+    let oid = db.table_oid("endpoint_fence_l").await;
+    let buffer: String = db.query_scalar(&format!(
+        "SELECT format('%I.%I',current_setting('pg_trickle.change_buffer_schema'), \
+         'changes_'||coalesce(source_stable_name,source_relid::text)) FROM pgtrickle.pgt_change_tracking WHERE source_relid={oid}"
+    )).await;
+    let pending: bool = db.query_scalar(&format!(
+        "SELECT (SELECT max(lsn) FROM {buffer} WHERE action IN ('I','D')) > \
+          (frontier->'sources'->'{oid}'->>'lsn')::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_name='{stream}'"
+    )).await;
+    assert!(
+        pending,
+        "the writer's later captured change must remain beyond the published cut"
+    );
+    db.refresh_st(stream).await;
+    db.assert_st_matches_query(stream, query).await;
+    let next: f64 = db
+        .query_scalar("SELECT quotient::float8 FROM endpoint_fence_st")
+        .await;
+    assert_eq!(next, 50.0);
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        std::path::Path::new(&directory).join("join-endpoint-fence.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "phase":"input_boundary","refresh_pid":refresh_pid,"writer_pid":writer_pid,
+            "refresh_wait":witness.wait_event,"refresh_blockers":witness.blockers,
+            "source_share_locks":locks,"writer_blocked_by_refresh":true,
+            "first_quotient":first,"later_capture_beyond_cut":pending,"next_quotient":next,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_snapshot_metadata_and_rows_match_a_concurrent_refresh() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.execute("CREATE ROLE snapshot_race_owner LOGIN").await;
+    for grant in [
+        "GRANT USAGE ON SCHEMA pgtrickle TO snapshot_race_owner".to_string(),
+        "GRANT CREATE ON SCHEMA public TO snapshot_race_owner".to_string(),
+        format!(
+            "GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table({SNAPSHOT_RACE_CREATE_ARGS}) \
+             TO snapshot_race_owner"
+        ),
+        "GRANT EXECUTE ON FUNCTION pgtrickle.snapshot_stream_table(text, text) \
+         TO snapshot_race_owner"
+            .to_string(),
+    ] {
+        db.execute(&grant).await;
+    }
+
+    for (stream, snapshot_target, owner_role, initially_empty) in [
+        ("atomic_snapshot_default", None, false, false),
+        (
+            "atomic_snapshot_target",
+            Some("public.atomic_snapshot_race_target"),
+            false,
+            false,
+        ),
+        ("atomic_snapshot_empty_owner", None, true, true),
+    ] {
+        let source = format!("{stream}_source");
+        let before = format!("{stream}_before");
+        let after = format!("{stream}_after");
+        let query = format!("SELECT id,value FROM {source}");
+        db.execute(&format!(
+            "CREATE TABLE {source}(id INT PRIMARY KEY,value TEXT NOT NULL)"
+        ))
+        .await;
+        if !initially_empty {
+            db.execute(&format!("INSERT INTO {source} VALUES(1,'committed')"))
+                .await;
+        }
+        if owner_role {
+            db.execute(&format!("GRANT SELECT ON {source} TO snapshot_race_owner"))
+                .await;
+            let create_st = format!(
+                "SELECT pgtrickle.create_stream_table('{stream}', $${query}$$, '1h', 'DIFFERENTIAL')"
+            );
+            let result = db
+                .try_execute_with_role("SET ROLE snapshot_race_owner", &create_st, "RESET ROLE")
+                .await;
+            assert!(
+                result.is_ok(),
+                "role-owned stream creation failed: {result:?}"
+            );
+        } else {
+            db.create_st(stream, &query, "1h", "DIFFERENTIAL").await;
+        }
+        let id = pgt_id(&db, stream).await;
+        let before_progress = progress(&db, id).await;
+        snapshot_table(&db, stream, &before).await;
+        if initially_empty {
+            db.execute(&format!("INSERT INTO {source} VALUES(1,'pending')"))
+                .await;
+        } else {
+            db.execute(&format!("UPDATE {source} SET value='pending'"))
+                .await;
+        }
+        set_chaos(&db, stream, "snapshot_after_metadata").await;
+        let (mut barrier, blocker_pid) = hold_barrier(&db, id, "snapshot_after_metadata").await;
+
+        let mut snapshot_connection = db.pool.acquire().await.unwrap();
+        let snapshot_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *snapshot_connection)
+            .await
+            .unwrap();
+        let stream_name = stream.to_owned();
+        let snapshot_target = snapshot_target.map(str::to_owned);
+        if owner_role {
+            sqlx::query("SET ROLE snapshot_race_owner")
+                .execute(&mut *snapshot_connection)
+                .await
+                .unwrap();
+        }
+        let snapshot_role = owner_role;
+        let mut snapshot = tokio::spawn(async move {
+            let result = match snapshot_target {
+                Some(target) => {
+                    sqlx::query_scalar::<_, String>(
+                        "SELECT pgtrickle.snapshot_stream_table($1, $2)",
+                    )
+                    .bind(stream_name)
+                    .bind(target)
+                    .fetch_one(&mut *snapshot_connection)
+                    .await
+                }
+                None => {
+                    sqlx::query_scalar::<_, String>("SELECT pgtrickle.snapshot_stream_table($1)")
+                        .bind(stream_name)
+                        .fetch_one(&mut *snapshot_connection)
+                        .await
+                }
+            };
+            if snapshot_role {
+                sqlx::query("RESET ROLE")
+                    .execute(&mut *snapshot_connection)
+                    .await?;
+            }
+            result
+        });
+        let witness = wait_for_barrier(
+            &db,
+            id,
+            "snapshot_after_metadata",
+            blocker_pid,
+            Duration::from_secs(10),
+        )
+        .await;
+        let (refresh, refresh_pid) = start_manual_refresh(&db, stream).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let refresh_blocked_by_snapshot = loop {
+            if refresh.is_finished() {
+                break false;
+            }
+            let blocked: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
+                .bind(snapshot_pid)
+                .bind(refresh_pid)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            if blocked {
+                break true;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "refresh neither committed nor waited for the witnessed snapshot; \
+                 snapshot_pid={snapshot_pid} refresh_pid={refresh_pid}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        release_barrier(&mut barrier, id, "snapshot_after_metadata").await;
+        let snapshot_name = tokio::time::timeout(Duration::from_secs(10), &mut snapshot)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), refresh)
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("concurrent manual refresh should commit");
+        clear_chaos(&db).await;
+        db.refresh_st_with_retry(stream).await;
+
+        let after_progress = progress(&db, id).await;
+        assert_ne!(
+            before_progress.frontier, after_progress.frontier,
+            "the refresh must advance the test frontier"
+        );
+        snapshot_table(&db, stream, &after).await;
+        let snapshot_frontier: Option<String> = sqlx::query_scalar(
+            "SELECT frontier::text FROM pgtrickle.pgt_snapshots \
+             WHERE snapshot_relid=to_regclass($1)::oid",
+        )
+        .bind(&snapshot_name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let snapshot_rows: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT count(*) FROM {snapshot_name}"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        if snapshot_rows > 0 {
+            let embedded_frontier: Option<String> = sqlx::query_scalar(AssertSqlSafe(format!(
+                "SELECT __pgt_frontier::text FROM {snapshot_name} LIMIT 1"
+            )))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(snapshot_frontier, embedded_frontier);
+        }
+        let matches_before: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT NOT EXISTS (\
+               (SELECT id,value FROM {snapshot_name} EXCEPT ALL SELECT id,value FROM {before}) \
+               UNION ALL \
+               (SELECT id,value FROM {before} EXCEPT ALL SELECT id,value FROM {snapshot_name})\
+             )"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let matches_after: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT NOT EXISTS (\
+               (SELECT id,value FROM {snapshot_name} EXCEPT ALL SELECT id,value FROM {after}) \
+               UNION ALL \
+               (SELECT id,value FROM {after} EXCEPT ALL SELECT id,value FROM {snapshot_name})\
+             )"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            (matches_before && snapshot_frontier == before_progress.frontier)
+                || (matches_after && snapshot_frontier == after_progress.frontier),
+            "snapshot rows/frontier were not a coherent committed pair: \
+             snapshot={snapshot_name} rows_before={matches_before} rows_after={matches_after} \
+             frontier={snapshot_frontier:?} before={:?} after={:?} \
+             refresh_blocked_by_snapshot={refresh_blocked_by_snapshot} \
+             witness={witness:?}",
+            before_progress.frontier,
+            after_progress.frontier,
+        );
+    }
 }

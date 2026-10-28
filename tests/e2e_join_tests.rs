@@ -1,5 +1,222 @@
 mod e2e;
 use e2e::E2eDb;
+
+#[tokio::test]
+async fn test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute("CREATE FUNCTION public.endpoint_divide(numeric,numeric) RETURNS numeric LANGUAGE SQL IMMUTABLE AS 'SELECT 100/($1-$2)'").await;
+    for mode in ["row", "statement"] {
+        db.alter_system_set_and_wait("pg_trickle.cdc_trigger_mode", &format!("'{mode}'"), mode)
+            .await;
+        for (index, (data_type, a, b)) in [
+            ("smallint", "1", "2"),
+            ("integer", "1", "2"),
+            ("bigint", "1", "2"),
+            ("boolean", "true", "false"),
+            (
+                "uuid",
+                "'00000000-0000-0000-0000-000000000001'",
+                "'00000000-0000-0000-0000-000000000002'",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let prefix = format!("endpoint_{mode}_{index}");
+            let left = format!("{prefix}_l");
+            let right = format!("{prefix}_r");
+            let stream = format!("{prefix}_st");
+            for table in [&left, &right] {
+                db.execute(&format!("CREATE TABLE {table}(id INT PRIMARY KEY DEFERRABLE INITIALLY DEFERRED,k {data_type},v NUMERIC)")).await;
+            }
+            db.execute(&format!(
+                "INSERT INTO {left} VALUES(1,{a},1),(2,{a},3),(3,NULL,99),(4,{b},50)"
+            ))
+            .await;
+            db.execute(&format!(
+                "INSERT INTO {right} VALUES(10,{a},0),(11,{a},-1),(12,NULL,999),(13,{b},5)"
+            ))
+            .await;
+            let join = if index % 2 == 0 {
+                "ON l.k=r.k"
+            } else {
+                "USING(k)"
+            };
+            let expression = if index % 2 == 0 {
+                "100/(l.v-r.v)"
+            } else {
+                "public.endpoint_divide(l.v,r.v)"
+            };
+            let query = format!(
+                "SELECT l.id AS lid,r.id AS rid,{expression} AS quotient FROM {left} l JOIN {right} r {join}"
+            );
+            db.create_st(&stream, &query, "24h", "DIFFERENTIAL").await;
+            let untouched: String = db
+                .query_scalar(&format!("SELECT xmin::text FROM {stream} WHERE lid=4"))
+                .await;
+            if index == 0 {
+                for isolation in ["REPEATABLE READ", "SERIALIZABLE"] {
+                    let mut transaction = db.pool.acquire().await.unwrap();
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "BEGIN ISOLATION LEVEL {isolation}"
+                    )))
+                    .execute(&mut *transaction)
+                    .await
+                    .unwrap();
+                    sqlx::query("SELECT 1")
+                        .execute(&mut *transaction)
+                        .await
+                        .unwrap();
+                    let error = sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "SELECT pgtrickle.refresh_stream_table('{stream}')"
+                    )))
+                    .execute(&mut *transaction)
+                    .await
+                    .expect_err("late source locks cannot refresh an old transaction snapshot");
+                    assert!(
+                        error.to_string().contains("requires READ COMMITTED"),
+                        "{error}"
+                    );
+                    sqlx::query("ROLLBACK")
+                        .execute(&mut *transaction)
+                        .await
+                        .unwrap();
+                }
+            }
+            let mut connection = db.pool.acquire().await.unwrap();
+            for sql in [
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.dvm_decision_trace=on",
+                "SET pg_trickle.log_delta_sql=on",
+                "SET log_min_messages=debug1",
+            ] {
+                sqlx::query(sqlx::AssertSqlSafe(sql.to_string()))
+                    .execute(&mut *connection)
+                    .await
+                    .unwrap();
+            }
+            let mut mutations = [1, -1]
+                .into_iter()
+                .map(|change| {
+                    format!(
+                        "BEGIN; UPDATE {left} SET v=v+({change}) WHERE id IN(1,2); \
+                     UPDATE {right} SET v=v+({change}) WHERE id IN(10,11); COMMIT"
+                    )
+                })
+                .collect::<Vec<_>>();
+            mutations.push(format!(
+                "BEGIN; INSERT INTO {left} VALUES(1,{a},9); DELETE FROM {left} WHERE id=1 AND v=1; \
+                 INSERT INTO {left} VALUES(99,{a},0); UPDATE {left} SET v=1 WHERE id=99; \
+                 DELETE FROM {left} WHERE id=99; COMMIT"
+            ));
+            for mutation in mutations {
+                let diagnostic_mutation = mutation.clone();
+                sqlx::raw_sql(sqlx::AssertSqlSafe(mutation))
+                    .execute(&db.pool)
+                    .await
+                    .unwrap();
+                db.try_execute(&query)
+                    .await
+                    .expect("the coherent native endpoint must remain valid");
+                let before: i64 = db.query_scalar(&format!(
+                    "SELECT coalesce(max(h.refresh_id),0) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='{stream}'"
+                )).await;
+                let refreshed = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "SELECT pgtrickle.refresh_stream_table('{stream}')"
+                )))
+                .execute(&mut *connection)
+                .await;
+                if let Err(error) = refreshed {
+                    let logs = tokio::process::Command::new("docker")
+                        .args(["logs", db.container_id()])
+                        .output()
+                        .await
+                        .unwrap();
+                    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+                        .unwrap_or_else(|_| "artifacts/join-endpoints".into());
+                    std::fs::create_dir_all(&directory).unwrap();
+                    std::fs::write(
+                        std::path::Path::new(&directory).join("join-endpoint-failure.log"),
+                        format!(
+                            "{prefix}: {diagnostic_mutation}\n{error}\n{}{}",
+                            String::from_utf8_lossy(&logs.stdout),
+                            String::from_utf8_lossy(&logs.stderr)
+                        ),
+                    )
+                    .unwrap();
+                    panic!(
+                        "endpoint-valid projection must not evaluate mixed pairs: {prefix}: {diagnostic_mutation}: {error}"
+                    );
+                }
+                e2e::oracle::assert_st_query_exact(
+                    &db,
+                    &stream,
+                    &query,
+                    "coherent endpoint/key scope",
+                )
+                .await;
+                let (after,action,fallback): (i64,String,bool) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                    "SELECT h.refresh_id,h.action,coalesce(h.was_full_fallback,false) FROM pgtrickle.pgt_refresh_history h \
+                     JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='{stream}' AND h.status='COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1"
+                ))).fetch_one(&db.pool).await.unwrap();
+                assert!(after > before);
+                assert_eq!(action, "DIFFERENTIAL");
+                assert!(!fallback);
+                let xmin: String = db
+                    .query_scalar(&format!("SELECT xmin::text FROM {stream} WHERE lid=4"))
+                    .await;
+                assert_eq!(xmin, untouched, "unaffected key must retain its stored row");
+            }
+            let state_sql = format!(
+                "SELECT json_build_object('frontier',frontier,'rows',(SELECT json_agg(q ORDER BY lid,rid) \
+                 FROM (SELECT lid,rid,quotient FROM {stream}) q))::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name='{stream}'"
+            );
+            let checkpoint: String = db.query_scalar(&state_sql).await;
+            db.execute(&format!("UPDATE {left} SET v=0 WHERE id=1"))
+                .await;
+            for sql in [
+                &query,
+                &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
+            ] {
+                let error = db
+                    .try_execute(sql)
+                    .await
+                    .expect_err("invalid native endpoint must still fail");
+                assert_eq!(
+                    error.as_database_error().and_then(|e| e.code()).as_deref(),
+                    Some("22012"),
+                    "{error}"
+                );
+            }
+            assert_eq!(
+                db.query_scalar::<String>(&state_sql).await,
+                checkpoint,
+                "failed refresh published rows or progress"
+            );
+        }
+    }
+    let logs = tokio::process::Command::new("docker")
+        .args(["logs", db.container_id()])
+        .output()
+        .await
+        .unwrap();
+    assert!(logs.status.success());
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&logs.stdout),
+        String::from_utf8_lossy(&logs.stderr)
+    );
+    assert!(
+        logs.contains("\"operator\":\"JoinEndpoint\""),
+        "actual endpoint route was not witnessed: {logs}"
+    );
+}
+
 #[tokio::test]
 async fn test_full_join_multi_row_unmatched() {
     let db = E2eDb::new().await.with_extension().await;
