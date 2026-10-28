@@ -24,6 +24,40 @@ use e2e::oracle;
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+async fn test_oracle_numeric_scale_observation_detects_equal_value_corruption() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "CREATE TABLE oracle_scale_actual (id INT, value NUMERIC)",
+        "CREATE TABLE oracle_scale_expected (id INT, value NUMERIC)",
+        "INSERT INTO oracle_scale_actual VALUES (1, 1.00), (1, 1.00), (2, NULL), (3, 'NaN'), (4, 'Infinity')",
+        "INSERT INTO oracle_scale_expected SELECT * FROM oracle_scale_actual",
+    ])
+    .await;
+    let query = "SELECT id, value FROM oracle_scale_expected";
+    oracle::compare_st_to_query_with_numeric_scale(&db, "oracle_scale_actual", query)
+        .await
+        .expect("identical values and scales must pass, including duplicates and NULL");
+
+    db.execute("UPDATE oracle_scale_actual SET value = 1.0 WHERE id = 1")
+        .await;
+    oracle::compare_st_to_query(&db, "oracle_scale_actual", query)
+        .await
+        .expect("ordinary numeric equality cannot detect scale changes");
+    let diff = oracle::compare_st_to_query_with_numeric_scale(&db, "oracle_scale_actual", query)
+        .await
+        .expect_err("the scale observation must detect equal-value corruption");
+    assert!(diff.comparison_error.is_none(), "{diff}");
+    assert!(diff.schema_mismatch.is_none(), "{diff}");
+    assert_eq!((diff.extra_count, diff.missing_count), (2, 2));
+
+    db.execute("UPDATE oracle_scale_expected SET value = 1.0 WHERE id = 1")
+        .await;
+    oracle::compare_st_to_query_with_numeric_scale(&db, "oracle_scale_actual", query)
+        .await
+        .expect("a contract-consistent scale change must pass");
+}
+
+#[tokio::test]
 async fn test_oracle_detects_same_count_different_content() {
     let db = E2eDb::new().await.with_extension().await;
 
