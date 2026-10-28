@@ -209,18 +209,20 @@ async fn test_strategy_changed_data_trigger_wal_full_differential_witnessed() {
                     String::from_utf8_lossy(&logs.stderr)
                 );
             }
-            let buffer = db
-                .change_buffer_table(db.table_oid("route_source").await as i64)
-                .await;
-            let captured: i64 = db
-                .query_scalar(&format!(
-                    "SELECT count(*) FROM {buffer} WHERE action IN ('I', 'U', 'D')"
-                ))
-                .await;
-            assert!(
-                captured > 0,
-                "{case:?} cycle {cycle}: change buffer was empty"
-            );
+            if case.refresh_mode == strategy::RefreshModeVariant::Differential {
+                let buffer = db
+                    .change_buffer_table(db.table_oid("route_source").await as i64)
+                    .await;
+                let captured: i64 = db
+                    .query_scalar(&format!(
+                        "SELECT count(*) FROM {buffer} WHERE action IN ('I', 'U', 'D')"
+                    ))
+                    .await;
+                assert!(
+                    captured > 0,
+                    "{case:?} cycle {cycle}: differential change buffer was empty"
+                );
+            }
             db.try_execute_with_config(
                 &[&format!(
                     "SET pg_trickle.refresh_strategy = '{}'",

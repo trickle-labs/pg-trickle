@@ -24,6 +24,7 @@ class AllocationTests(unittest.TestCase):
             "e2e_refresh_atomicity_tests", "e2e_long_txn_visibility_tests",
             "e2e_keyless_duplicate_tests", "e2e_safety_tests", "e2e_rls_wal_tests",
             "e2e_dvm_corpus_tests", "e2e_dvm_negative_control_tests",
+            "e2e_dvm_semantic_mutant_tests",
             "e2e_sensitivity_baseline_tests", "e2e_window_state_recovery_tests",
             "e2e_dag_operations_tests", "e2e_dag_concurrent_tests",
             "e2e_monitoring_tests", "e2e_stmt_cdc_tests", "e2e_ownership_tests",
@@ -91,6 +92,7 @@ class AllocationTests(unittest.TestCase):
         shard_2 = set(policy["pr_full_shard_2"])
         all_targets = set(ci_pr_suite.targets())
         self.assertIn("e2e_v078_tests", ci_pr_suite.SCHEDULER_ISOLATED)
+        self.assertIn("e2e_dvm_strategy_tests", ci_pr_suite.SCHEDULER_ISOLATED)
         for shard in (1, 2):
             with patch("sys.argv", ["ci_pr_suite.py", "--shard", str(shard)]), patch(
                 "ci_pr_suite.subprocess.run", return_value=SimpleNamespace(returncode=0)
