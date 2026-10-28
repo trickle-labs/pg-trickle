@@ -3646,7 +3646,7 @@ mod tests {
             data: data.into(),
             source_change,
         };
-        let raw = vec![
+        let mut raw = vec![
             receipt(1, "41", "0/10", "BEGIN 41", false),
             receipt(
                 2,
@@ -3677,9 +3677,21 @@ mod tests {
             ),
             receipt(12, "42", "0/15", "COMMIT 42", false),
         ];
+        raw.extend([
+            receipt(7, "43", "0/16", "BEGIN 43", false),
+            receipt(
+                8,
+                "43",
+                "0/17",
+                "table public.source: INSERT: id[int4]:3",
+                true,
+            ),
+            receipt(9, "43", "0/18", "COMMIT 43", false),
+        ]);
         assert_eq!(
             represented_slot_prefix(&raw, &applied, 0).unwrap(),
-            (6, 3, 0)
+            (6, 3, 0),
+            "acknowledgement must stop before the unrepresented source transaction"
         );
 
         let unrecognized = vec![
