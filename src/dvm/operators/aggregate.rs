@@ -1210,6 +1210,18 @@ struct RescanConfig<'a> {
     special_value_filter: Option<&'a str>,
 }
 
+impl RescanConfig<'_> {
+    fn includes(&self, agg: &AggExpr, child: &OpTree) -> bool {
+        self.force_all_aggs
+            || agg.is_distinct
+            || agg.function.is_group_rescan()
+            || matches!(agg.function, AggFunc::Min | AggFunc::Max)
+            || (self.include_special_aggs
+                && needs_special_value_rescan(agg)
+                && !agg.uses_incremental_nonfinite_state(child))
+    }
+}
+
 fn build_rescan_cte(
     ctx: &mut DiffContext,
     child: &OpTree,
@@ -1224,24 +1236,10 @@ fn build_rescan_cte(
     // When `force_all_aggs` is true (HAVING context), include ALL aggregates
     // so that the merge CTE can use the correct full aggregate value for
     // groups that were absent from the ST (below the HAVING threshold).
-    let rescan_aggs: Vec<&AggExpr> = if config.force_all_aggs {
-        aggregates.iter().collect()
-    } else {
-        aggregates
-            .iter()
-            .filter(|a| {
-                a.is_distinct
-                    || a.function.is_group_rescan()
-                    || matches!(a.function, AggFunc::Min | AggFunc::Max)
-                    || (config.include_special_aggs
-                        && needs_special_value_rescan(a)
-                        && !a.uses_incremental_nonfinite_state(child))
-                // P2-2: SUM over a FULL JOIN child no longer needs a rescan CTE.
-                // The __pgt_aux_nonnull_* auxiliary column provides algebraic
-                // NULL-transition correction without rescanning source data.
-            })
-            .collect()
-    };
+    let rescan_aggs: Vec<&AggExpr> = aggregates
+        .iter()
+        .filter(|agg| config.includes(agg, child))
+        .collect();
     if rescan_aggs.is_empty() {
         return None;
     }
@@ -2478,7 +2476,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         // SUM and AVG use rescan values only when deltas contain special
         // numeric values; ordinary changes keep the algebraic path.
         let agg_has_nonnull_aux = matches!(agg.function, AggFunc::Sum) && !agg.is_distinct;
-        let agg_has_rescan = has_rescan;
+        let agg_has_rescan = rescan_config.includes(agg, child);
         let special_state = if agg.uses_incremental_nonfinite_state(child) {
             let state_col = quote_ident(&format!("__pgt_aux_special_{}", st_col_name(&agg.alias)));
             let inserts = quote_ident(&format!("__ins_special_{}", agg.alias));
@@ -2505,6 +2503,10 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             merge_selects.push(format!(
                 "{state} AS {}",
                 quote_ident(&format!("new___pgt_aux_special_{}", agg.alias)),
+            ));
+            merge_selects.push(format!(
+                "st.{state_col} AS {}",
+                quote_ident(&format!("old___pgt_aux_special_{}", agg.alias)),
             ));
             Some((state, value, use_state))
         } else {
@@ -2597,7 +2599,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                     &format!("({value})::numeric"),
                 );
                 format!("CASE WHEN {use_state} THEN {special_value} ELSE {aux_sum_value} END")
-            } else if needs_special_value_rescan(agg) && has_rescan {
+            } else if needs_special_value_rescan(agg) && agg_has_rescan {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN COALESCE(r.{}, 0) ELSE {aux_sum_value} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
@@ -2636,7 +2638,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             let algebraic = format!(
                 "COALESCE(st.{aux_sum2}, 0) + COALESCE(d.{ins_sum2}, 0) - COALESCE(d.{del_sum2}, 0)"
             );
-            let value = if has_rescan {
+            let value = if agg_has_rescan {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {algebraic} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
@@ -2942,6 +2944,13 @@ END AS __pgt_meta_action"#
             new = quote_ident(&format!("new_{}", agg.alias)),
             old = quote_ident(&format!("old_{}", agg.alias)),
         ));
+        if agg.uses_incremental_nonfinite_state(child) {
+            change_checks.push(format!(
+                "m.{} IS DISTINCT FROM m.{}",
+                quote_ident(&format!("new___pgt_aux_special_{}", agg.alias)),
+                quote_ident(&format!("old___pgt_aux_special_{}", agg.alias)),
+            ));
+        }
     }
     let change_guard = change_checks.join("\n          OR ");
 
