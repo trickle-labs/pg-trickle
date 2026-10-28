@@ -33,6 +33,9 @@ async fn configure_fast_scheduler(db: &E2eDb) {
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
         .await;
+    // Keep CI load from deferring the scheduler cycles these tests assert.
+    db.execute("ALTER SYSTEM SET pg_trickle.load_shed_threshold = 0")
+        .await;
     // Disable auto-backoff so 1-second schedules never get stretched in slow
     // CI containers — the default (true since v0.10.0) would double the
     // effective interval once a refresh takes > 950 ms.
@@ -42,6 +45,8 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     db.wait_for_setting("pg_trickle.scheduler_interval_ms", "100")
         .await;
     db.wait_for_setting("pg_trickle.min_schedule_seconds", "1")
+        .await;
+    db.wait_for_setting("pg_trickle.load_shed_threshold", "0")
         .await;
     db.wait_for_setting("pg_trickle.auto_backoff", "off").await;
 
@@ -277,13 +282,19 @@ async fn test_autorefresh_calculated_schedule() {
     wait_for_refresh_cycle(&db, "arc_l1", Duration::from_secs(30)).await;
 
     // Mutate
+    let initial_ts: Option<String> = db
+        .query_scalar_opt(
+            "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'arc_l2'",
+        )
+        .await;
     db.execute("INSERT INTO arc_src VALUES (2, 200)").await;
 
     // Wait for L2 to auto-refresh (CALCULATED schedule should trigger it).
     // 90s timeout gives headroom for loaded CI environments where the scheduler
     // worker may need up to 60s to respawn after a transient crash (SCAL-002).
     let refreshed = db
-        .wait_for_auto_refresh("arc_l2", Duration::from_secs(90))
+        .wait_for_auto_refresh_since("arc_l2", initial_ts, Duration::from_secs(90))
         .await;
     assert!(
         refreshed,
@@ -433,24 +444,43 @@ async fn test_autorefresh_staggered_schedules() {
     )
     .await;
 
-    // Wait for initial cycle at every layer.
-    wait_for_chain_refresh_cycles(
-        &db,
-        &["ars_l1", "ars_l2", "ars_l3"],
-        Duration::from_secs(30),
-    )
-    .await;
+    // Creation may have already initialized every layer. In that case no
+    // second refresh is required until source data changes; waiting for
+    // last_refresh_at to advance would time out on an already-settled L3.
+    // Synchronize on the initial result rather than an unrelated extra tick.
+    let initialized = db
+        .wait_for_condition(
+            "initial staggered chain result",
+            "SELECT (SELECT count(*) FROM ars_l1) = 1 \
+                    AND (SELECT count(*) FROM ars_l2) = 1 \
+                    AND (SELECT count(*) FROM ars_l3) = 1 \
+                    AND EXISTS (SELECT 1 FROM ars_l3 WHERE id = 1 AND result = 21)",
+            Duration::from_secs(60),
+            Duration::from_millis(200),
+        )
+        .await;
+    assert!(
+        initialized,
+        "staggered chain should produce its initial result"
+    );
 
     // Now insert new data
     db.execute("INSERT INTO ars_src VALUES (2, 20)").await;
 
-    // L3 should eventually converge — give it enough time for L2's 3s schedule
-    let refreshed = db
-        .wait_for_auto_refresh("ars_l3", Duration::from_secs(60))
+    // L3 must converge after L2's slower 3s schedule. Assert the result,
+    // not just a timestamp advance, which can precede propagation.
+    let converged = db
+        .wait_for_condition(
+            "staggered chain after source insert",
+            "SELECT (SELECT count(*) FROM ars_l3) = 2 \
+                    AND EXISTS (SELECT 1 FROM ars_l3 WHERE id = 2 AND result = 41)",
+            Duration::from_secs(90),
+            Duration::from_millis(200),
+        )
         .await;
     assert!(
-        refreshed,
-        "ars_l3 should eventually auto-refresh after base mutation with staggered schedules"
+        converged,
+        "ars_l3 should eventually converge after base mutation with staggered schedules"
     );
 
     // Verify final correctness
@@ -526,7 +556,7 @@ async fn check_auto_invariants(db: &E2eDb) -> bool {
 /// `wait_for_refresh_cycle` uses `last_refresh_at` which advances even on
 /// NO_DATA cycles — so the scheduler may tick l3 before CDC changes from
 /// `prop_auto_src` have been ingested by `prop_auto_l1`.  This helper
-/// adds a retry loop so we only assert once the data has actually converged.
+/// polls actual results so we only assert once the data has converged.
 async fn settle_auto_invariants(
     db: &E2eDb,
     seed: u64,
@@ -545,6 +575,9 @@ async fn settle_auto_invariants(
     // stream-table refresh masking this regression.
     let mut last_nudge = std::time::Instant::now();
     loop {
+        // A refresh is not guaranteed when no upstream work is pending.
+        // Poll the actual result instead of requiring last_refresh_at to
+        // advance; an already-converged chain needs no additional scheduler tick.
         if check_auto_invariants(db).await {
             return;
         }

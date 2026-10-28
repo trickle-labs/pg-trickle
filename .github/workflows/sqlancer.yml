@@ -9,14 +9,14 @@
 #
 # Triggers
 # ────────
-#   weekly (Sunday 02:00 UTC) — full 2 000-case run
+#   weekly (Friday 12:00 UTC) — full 2 000-case run
 #   manual dispatch            — configurable case count
 # =============================================================================
 name: Weekly SQLancer Fuzzing
 
 on:
   schedule:
-    - cron: '0 2 * * 0'   # Every Sunday at 02:00 UTC
+    - cron: '0 12 * * 5'  # Every Friday at 12:00 UTC
   workflow_dispatch:
     inputs:
       sqlancer_cases:

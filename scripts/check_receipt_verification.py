@@ -23,7 +23,7 @@ def check_contract() -> None:
     mutate(SOURCE.read_text(encoding="utf-8"))
     if '#[path = "../verification/receipt.rs"]' not in (runner.ROOT / "src/lib.rs").read_text():
         raise ValueError("production does not import the verified receipt implementation")
-    if "crate::receipt::receipt_ack_row_limit(expected.len())" not in (
+    if "crate::receipt::receipt_ack_row_limit(consumed)" not in (
         runner.ROOT / "src/wal_decoder.rs"
     ).read_text():
         raise ValueError("production acknowledgement does not execute the verified limit")

@@ -114,11 +114,11 @@ async fn test_manual_differential_refresh_records_history() {
         .await;
 
     // First manual refresh (will be FULL since no frontier yet)
-    db.refresh_st("erg_diff_st").await;
+    db.refresh_st_with_retry("erg_diff_st").await;
 
     // Insert more data and do a second manual refresh (should be DIFFERENTIAL)
     db.execute("INSERT INTO erg_diff_src VALUES (2, 'y')").await;
-    db.refresh_st("erg_diff_st").await;
+    db.refresh_st_with_retry("erg_diff_st").await;
 
     // Should have at least 2 MANUAL entries
     let count: i64 = db

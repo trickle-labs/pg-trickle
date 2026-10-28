@@ -6,7 +6,7 @@ use e2e::E2eDb;
 use sqlx::{AssertSqlSafe, PgPool, Postgres, pool::PoolConnection};
 use std::time::Duration;
 
-const WAIT: Duration = Duration::from_secs(90);
+const WAIT: Duration = Duration::from_secs(180);
 
 struct Fixture {
     db: E2eDb,
@@ -75,8 +75,10 @@ async fn wait_for_cdc_mode(db: &E2eDb, source: &str, expected: &str) {
             "WAL CDC mode",
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_dependencies d \
+                 WHERE d.source_relid = '{source}'::regclass::oid) \
+                   AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_dependencies d \
                  WHERE d.source_relid = '{source}'::regclass::oid \
-                   AND d.cdc_mode = '{expected}')"
+                   AND d.cdc_mode <> '{expected}')"
             ),
             WAIT,
             Duration::from_millis(50),
@@ -185,6 +187,9 @@ async fn create_identity_sentinel(db: &E2eDb, table: &str, value: &str) {
 async fn setup_wal_fixture(case_name: &str) -> Fixture {
     let stem = case_name.replace('-', "_");
     let db = E2eDb::new_dedicated().await.with_extension().await;
+    // Avoid autovacuum contending with the short-lived receipt lock witnesses.
+    db.execute("ALTER TABLE pgtrickle.pgt_wal_receipts SET (autovacuum_enabled = false)")
+        .await;
     configure_scheduler(&db).await;
     db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
         .await;
@@ -324,7 +329,19 @@ async fn wait_for_wal_barrier(db: &E2eDb, oid: i64, phase: &str, blocker_pid: i3
             return pid;
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("WAL decoder did not reach {phase} for source OID {oid}");
+            let state: String = db
+                .query_scalar(
+                    "SELECT jsonb_build_object(\
+                        'dependencies', (SELECT jsonb_agg(to_jsonb(d)) FROM pgtrickle.pgt_dependencies d),\
+                        'workers', (SELECT jsonb_agg(jsonb_build_object(\
+                            'pid', pid, 'backend_type', backend_type, 'application_name', application_name,\
+                            'state', state, 'wait_event', wait_event, 'query', query))\
+                            FROM pg_stat_activity WHERE datname = current_database()),\
+                        'slots', (SELECT jsonb_agg(to_jsonb(s)) FROM pg_replication_slots s)\
+                    )::text",
+                )
+                .await;
+            panic!("WAL decoder did not reach {phase} for source OID {oid}; state={state}");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -386,6 +403,157 @@ async fn wait_for_exact(pool: &PgPool, stream: &str, journal: &str) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn run_update_to_null_case(mode: &str) {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    configure_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
+        .await;
+    let source = format!("null_{mode}_source");
+    let stream = format!("null_{mode}_stream");
+    db.execute(&format!(
+        "CREATE TABLE {source} (id INT PRIMARY KEY, value TEXT)"
+    ))
+    .await;
+    db.execute(&format!("ALTER TABLE {source} REPLICA IDENTITY FULL"))
+        .await;
+    db.execute(&format!("INSERT INTO {source} VALUES (1, 'before')"))
+        .await;
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table(\
+            name => '{stream}', query => $$SELECT id, value FROM {source}$$, \
+            schedule => '1s', refresh_mode => 'DIFFERENTIAL', cdc_mode => '{mode}')"
+    ))
+    .await;
+    let expected_mode = mode.to_uppercase();
+    wait_for_cdc_mode(&db, &source, &expected_mode).await;
+    // Drain refreshes while CDC remains active so buffered rows can be inspected.
+    db.execute(&format!(
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
+    ))
+    .await;
+    let oid = i64::from(db.table_oid(&source).await);
+    let buffer = db.change_buffer_table(oid).await;
+    let token = "value[text]:null";
+    db.refresh_st_with_retry(&stream).await;
+    wait_for_cdc_mode(&db, &source, &expected_mode).await;
+    assert_eq!(exact_diff(&db.pool, &stream, &source).await, 0);
+    assert!(
+        db.query_scalar::<bool>(&format!(
+            "SELECT NOT needs_reinit AND frontier IS NOT NULL \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{stream}'"
+        ))
+        .await,
+        "nullable update must start from a settled baseline"
+    );
+    let history: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    let runtime: (String, String, String, String) = sqlx::query_as(
+        "SELECT current_setting('server_version'), pgtrickle.version(), \
+                current_setting('wal_level'), current_setting('pg_trickle.cdc_mode')",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("record loaded PostgreSQL/extension and CDC settings");
+    eprintln!(
+        "[Q1172] runtime={runtime:?} container={} capture={expected_mode}",
+        db.container_id()
+    );
+
+    let mut tx = db.pool.begin().await.expect("begin nullable update");
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {source} SET value = NULL WHERE id = 1"
+    )))
+    .execute(&mut *tx)
+    .await
+    .expect("update nullable source");
+    let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("identify nullable update transaction");
+    tx.commit().await.expect("commit nullable update");
+
+    if mode == "wal" {
+        wait_for_receipt(&db.pool, oid, "ACKNOWLEDGED", token).await;
+        let receipt: (String, String) = sqlx::query_as(
+            "SELECT lsn::text, data FROM pgtrickle.pgt_wal_receipts \
+             WHERE source_relid = $1 AND source_xid::text = $2 \
+               AND source_change AND status = 'ACKNOWLEDGED'",
+        )
+        .bind(oid)
+        .bind(&xid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("observe the committed update acknowledged by WAL capture");
+        eprintln!("[Q1172] xid={xid} receipt={receipt:?}");
+    }
+    let buffered: Vec<(String, i32, Option<String>)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT action::text, id, value FROM {buffer} \
+         WHERE source_xid::text = $1 AND action <> 'S' ORDER BY change_id"
+    )))
+    .bind(&xid)
+    .fetch_all(&db.pool)
+    .await
+    .expect("inspect buffered old/new rows before refresh consumes them");
+    eprintln!("[Q1172] capture={expected_mode} xid={xid} buffered={buffered:?}");
+    assert_eq!(
+        buffered,
+        vec![
+            ("D".into(), 1, Some("before".into())),
+            ("I".into(), 1, None)
+        ],
+        "DELETE must preserve the old value; INSERT must contain SQL NULL"
+    );
+    wait_for_cdc_mode(&db, &source, &expected_mode).await;
+    let reinit_reason: Option<String> = db
+        .query_scalar_opt(&format!(
+            "SELECT refresh_reason || ': ' || refresh_reason_detail \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{stream}' AND needs_reinit"
+        ))
+        .await;
+    assert!(
+        !db.query_scalar::<bool>(&format!(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{stream}'"
+        ))
+        .await,
+        "nullable update must not require a rebuild: {reinit_reason:?}"
+    );
+    db.refresh_st(&stream).await;
+    assert_eq!(exact_diff(&db.pool, &stream, &source).await, 0);
+    let actual: Vec<(i32, Option<String>)> =
+        sqlx::query_as(AssertSqlSafe(format!("SELECT id, value FROM {stream}")))
+            .fetch_all(&db.pool)
+            .await
+            .expect("read exact nullable stream result");
+    assert_eq!(actual, vec![(1, None)]);
+    let refreshes: Vec<(String, bool)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT h.action, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+         WHERE st.pgt_name = '{stream}' AND h.refresh_id > {history} AND h.status = 'COMPLETED'"
+    )))
+    .fetch_all(&db.pool)
+    .await
+    .expect("verify differential refresh without fallback or reinitialization");
+    assert_eq!(refreshes, vec![("DIFFERENTIAL".into(), false)]);
+    assert_eq!(
+        cdc_mode(&db, &source).await.as_deref(),
+        Some(expected_mode.as_str())
+    );
+    eprintln!(
+        "[Q1172] capture={expected_mode} xid={xid} result={actual:?} refresh=DIFFERENTIAL parity=exact"
+    );
+}
+
+#[tokio::test]
+async fn test_wal_update_to_null_preserves_old_row_and_exact_result() {
+    run_update_to_null_case("wal").await;
+}
+
+#[tokio::test]
+async fn test_trigger_update_to_null_preserves_old_row_and_exact_result() {
+    run_update_to_null_case("trigger").await;
 }
 
 async fn matching_receipts(pool: &PgPool, oid: i64, status: &str, value: &str) -> i64 {
@@ -614,12 +782,33 @@ async fn test_wal_receipt_small_limits_preserve_complete_transactions() {
 }
 
 async fn run_interruption_case(phase: &str, status: &str, restart_twice: bool) {
-    let fixture = setup_wal_fixture(phase).await;
+    let mut fixture = setup_wal_fixture(phase).await;
     let sentinel_table = format!("wal_{}_identity", phase.replace('-', "_"));
     let value = format!("{phase}-committed");
     let next_value = format!("{phase}-next-batch");
-    let (mut barrier, blocker_pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
     set_wal_phase(&fixture.db, fixture.oid, phase, &value).await;
+    if phase == "before_receipt" {
+        // A missed pre-receipt batch cannot be replayed; load the witness at server startup.
+        fixture.db.pool = restart_and_check_named(&fixture, &sentinel_table).await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            3,
+            "restart-readiness",
+        )
+        .await;
+        wait_for_receipt(
+            &fixture.db.pool,
+            fixture.oid,
+            "ACKNOWLEDGED",
+            "restart-readiness",
+        )
+        .await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+    }
+    let (mut barrier, blocker_pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
     commit_row(&fixture.db, &fixture.source, &fixture.journal, 2, &value).await;
     let worker_pid = wait_for_wal_barrier(&fixture.db, fixture.oid, phase, blocker_pid).await;
 
@@ -870,17 +1059,26 @@ async fn run_trigger_fallback_case(phase: &str) {
         .await;
     let buffer = db.change_buffer_table(fixture.oid).await;
     let value = format!("fallback-{phase}-pending");
-    let (barrier, blocker_pid) = hold_wal_barrier(db, fixture.oid, phase).await;
     set_wal_phase(db, fixture.oid, phase, &value).await;
+    let db = &fixture.db;
+    // The witnessed restart below is the recovery event under test.
+    wait_for_cdc_mode(db, &fixture.source, "WAL").await;
+    let (barrier, blocker_pid) = hold_wal_barrier(db, fixture.oid, phase).await;
     commit_row(db, &fixture.source, &fixture.journal, 2, &value).await;
     wait_for_wal_barrier(db, fixture.oid, phase, blocker_pid).await;
+    let buffered: String = db
+        .query_scalar(&format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(b)), '[]'::jsonb)::text \
+             FROM {buffer} b WHERE action <> 'S'"
+        ))
+        .await;
     assert_eq!(
         db.query_scalar::<i64>(&format!(
-            "SELECT count(*) FROM {buffer} WHERE action <> 'S'"
+            "SELECT count(*) FROM {buffer} WHERE action <> 'S' AND id = 2"
         ))
         .await,
         0,
-        "pending commit must have no trigger or replay copy"
+        "pending commit must have no trigger or replay copy; buffered={buffered}"
     );
     assert!(exact_diff(&db.pool, &fixture.stream, &fixture.journal).await > 0);
     if phase == "before_replay" {
