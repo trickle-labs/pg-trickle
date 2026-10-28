@@ -42,6 +42,7 @@ class AllocationTests(unittest.TestCase):
             "test(=test_wal_recovery_after_receipt_commit_before_ack_converges_once) | "
             "test(=test_wal_recovery_after_apply_before_ack_does_not_reapply) | "
             "test(=test_wal_recovery_after_slot_advance_finishes_acknowledgement) | "
+            "test(=test_wal_receipt_commit_order_preserves_late_old_lsn_transaction) | "
             "test(=test_wal_trigger_fallback_received_receipt_requires_rebaseline) | "
             "test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline) | "
             "test(=test_wal_recovery_semantic_controls_are_detected) | "

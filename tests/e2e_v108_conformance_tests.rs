@@ -233,6 +233,157 @@ async fn test_v108_non_pristine_registration_and_public_resnapshot() {
 }
 
 #[tokio::test]
+async fn test_v108_cleanup_overlapping_registration_requires_fresh_resnapshot() {
+    let prefix = "v108_cleanup_registration";
+    let (db, first, graph) = active_consumer(prefix).await;
+    let stream = format!("public.{prefix}_stream");
+    let source = format!("public.{prefix}_source");
+    let contract = reference_clients::stream_contract_digest(&db.pool, &stream).await;
+    db.execute(&format!("INSERT INTO {source} VALUES (2, 'pending')"))
+        .await;
+    refresh_graph_without_full(&db.pool, &stream, &graph).await;
+    let batch = reference_clients::pending_batch(&db.pool, &first.consumer_id).await;
+    assert_eq!(batch.row_count, 1);
+
+    // Registration holds the log row while the existing consumer's ack tries
+    // to prune the now-acknowledged batch range.
+    let mut registration = db.pool.begin().await.expect("begin registration");
+    let registration_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *registration)
+        .await
+        .expect("registration backend PID should be available");
+    let late_row = sqlx::query(
+        "SELECT consumer_id::text AS consumer_id, delta_relation, state \
+         FROM pgtrickle.register_output_delta_consumer(\
+             $1::regclass, $2, $3::bytea, 'RESNAPSHOT_REQUIRED')",
+    )
+    .bind(&stream)
+    .bind(format!("{prefix}_late_consumer"))
+    .bind(&contract)
+    .fetch_one(&mut *registration)
+    .await
+    .expect("late consumer registration should succeed");
+    let late = DeltaRegistration {
+        consumer_id: late_row.try_get("consumer_id").expect("consumer ID"),
+        delta_relation: late_row.try_get("delta_relation").expect("delta relation"),
+        state: late_row.try_get("state").expect("consumer state"),
+    };
+    assert_eq!(late.state, "RESNAPSHOT_REQUIRED");
+
+    let mut ack_connection = db.pool.acquire().await.expect("acquire ack backend");
+    sqlx::query("SET application_name = 'quality_cleanup_registration_ack'")
+        .execute(&mut *ack_connection)
+        .await
+        .expect("name ack backend");
+    let first_id = first.consumer_id.clone();
+    let batch_token = batch.batch_token;
+    let ack = tokio::spawn(async move {
+        reference_clients::ack(&mut *ack_connection, &first_id, batch_token).await
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let blocked_by_registration: bool = sqlx::query_scalar(
+            "SELECT $1::int = ANY(pg_blocking_pids(pid)) \
+               FROM pg_stat_activity \
+              WHERE application_name = 'quality_cleanup_registration_ack' \
+                AND wait_event_type = 'Lock'",
+        )
+        .bind(registration_pid)
+        .fetch_optional(&db.pool)
+        .await
+        .expect("inspect witnessed lock wait")
+        .unwrap_or(false);
+        if blocked_by_registration {
+            break;
+        }
+        assert!(
+            !ack.is_finished(),
+            "cleanup ack completed before the registration lock was observed"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cleanup ack never waited for the uncommitted registration"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    registration
+        .commit()
+        .await
+        .expect("commit new consumer registration");
+    assert_eq!(
+        ack.await.expect("cleanup ack task should complete"),
+        "APPLIED"
+    );
+
+    let pgt_id: i64 = db
+        .query_scalar(&format!(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{prefix}_stream'"
+        ))
+        .await;
+    let retained: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM pgtrickle.pgt_output_delta_batches \
+         WHERE pgt_id = $1 AND batch_token <= $2",
+    )
+    .bind(pgt_id)
+    .bind(batch_token)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read pruned batches");
+    assert_eq!(retained, 0, "acknowledged batches should be pruned");
+    let late_state: String = sqlx::query_scalar(
+        "SELECT state FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1::uuid",
+    )
+    .bind(&late.consumer_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("new consumer should remain registered");
+    assert_eq!(late_state, "RESNAPSHOT_REQUIRED");
+
+    let mut baseline = db.pool.begin().await.expect("begin fresh baseline");
+    let (token, head) =
+        reference_clients::begin_resnapshot(&mut *baseline, &late.consumer_id).await;
+    assert_eq!(head, batch_token);
+    let stream_rows: Vec<(i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, value FROM {stream} ORDER BY id"
+    )))
+    .fetch_all(&mut *baseline)
+    .await
+    .expect("read stable stream-table baseline");
+    let source_rows: Vec<(i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, value FROM {source} ORDER BY id"
+    )))
+    .fetch_all(&mut *baseline)
+    .await
+    .expect("read matching source baseline");
+    assert_eq!(stream_rows, source_rows);
+    assert_eq!(
+        reference_clients::ack_resnapshot(&mut *baseline, &late.consumer_id, &token).await,
+        "ACTIVE"
+    );
+    baseline.commit().await.expect("commit fresh baseline");
+
+    db.execute(&format!("INSERT INTO {source} VALUES (3, 'after')"))
+        .await;
+    refresh_graph_without_full(&db.pool, &stream, &graph).await;
+    let next = reference_clients::pending_batch(&db.pool, &late.consumer_id).await;
+    assert_eq!(next.batch_token, head + 1);
+    assert_eq!(next.row_count, 1);
+    let payload: Vec<(String, i32, String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT action, id, value, ordinal FROM {} WHERE batch_token = $1 ORDER BY ordinal",
+        late.delta_relation
+    )))
+    .bind(next.batch_token)
+    .fetch_all(&db.pool)
+    .await
+    .expect("read post-resnapshot delta");
+    assert_eq!(payload, vec![("INSERT".into(), 3, "after".into(), 0)]);
+    db.assert_st_matches_query(&stream, &format!("SELECT id, value FROM {source}"))
+        .await;
+}
+
+#[tokio::test]
 async fn test_v108_exact_batch_acknowledgement_rolls_back() {
     let (db, consumer, graph) = active_consumer("v108_exact").await;
     db.execute("INSERT INTO v108_exact_source VALUES (2, 'after')")
