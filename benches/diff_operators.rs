@@ -1171,6 +1171,7 @@ fn bench_diff_tpch_q21(c: &mut Criterion) {
 
     // NOT EXISTS (SELECT 1 FROM lineitem l3 WHERE ...)
     let antijoin = OpTree::AntiJoin {
+        null_aware_keys: None,
         condition: Expr::BinaryOp {
             op: "=".to_string(),
             left: Box::new(Expr::ColumnRef {
@@ -1253,6 +1254,7 @@ fn bench_diff_semi_join(c: &mut Criterion) {
 /// Represents: `SELECT o.* FROM orders o WHERE NOT EXISTS (SELECT 1 FROM cancels c WHERE c.order_id = o.id)`
 fn bench_diff_anti_join(c: &mut Criterion) {
     let anti = OpTree::AntiJoin {
+        null_aware_keys: None,
         condition: Expr::BinaryOp {
             op: "=".to_string(),
             left: Box::new(Expr::ColumnRef {

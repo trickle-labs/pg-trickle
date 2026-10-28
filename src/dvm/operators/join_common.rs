@@ -325,6 +325,7 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
         }
         OpTree::AntiJoin {
             condition,
+            null_aware_keys,
             left,
             right,
         } => {
@@ -332,7 +333,11 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
             let right_snap = build_snapshot_sql(right);
             let left_alias = "__pgt_al";
             let right_alias = "__pgt_ar";
-            let cond = rewrite_join_condition(condition, left, left_alias, right, right_alias);
+            let condition = null_aware_keys
+                .as_ref()
+                .map(|(lk, rk)| make_null_aware_condition(condition, lk, rk))
+                .unwrap_or_else(|| condition.clone());
+            let cond = rewrite_join_condition(&condition, left, left_alias, right, right_alias);
             format!(
                 "(SELECT {la}.* FROM {left_snap} {la} WHERE NOT EXISTS \
                  (SELECT 1 FROM {right_snap} {ra} WHERE {cond}))",
@@ -373,6 +378,52 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
                 op.node_kind()
             );
         }
+    }
+}
+
+/// Add the NULL cases required by single-column SQL `NOT IN` to its equality.
+pub(crate) fn make_null_aware_condition(
+    condition: &Expr,
+    left_key: &Expr,
+    right_key: &Expr,
+) -> Expr {
+    match condition {
+        Expr::BinaryOp { op, left, right } if op == "=" => {
+            let same_order =
+                left.to_sql() == left_key.to_sql() && right.to_sql() == right_key.to_sql();
+            let reverse_order =
+                left.to_sql() == right_key.to_sql() && right.to_sql() == left_key.to_sql();
+            if same_order || reverse_order {
+                let equality = condition.clone();
+                let left_null = Expr::BinaryOp {
+                    op: "IS".into(),
+                    left: Box::new(left_key.clone()),
+                    right: Box::new(Expr::Literal("NULL".into())),
+                };
+                let right_null = Expr::BinaryOp {
+                    op: "IS".into(),
+                    left: Box::new(right_key.clone()),
+                    right: Box::new(Expr::Literal("NULL".into())),
+                };
+                Expr::BinaryOp {
+                    op: "OR".into(),
+                    left: Box::new(Expr::BinaryOp {
+                        op: "OR".into(),
+                        left: Box::new(equality),
+                        right: Box::new(left_null),
+                    }),
+                    right: Box::new(right_null),
+                }
+            } else {
+                condition.clone()
+            }
+        }
+        Expr::BinaryOp { op, left, right } if op.eq_ignore_ascii_case("AND") => Expr::BinaryOp {
+            op: op.clone(),
+            left: Box::new(make_null_aware_condition(left, left_key, right_key)),
+            right: Box::new(make_null_aware_condition(right, left_key, right_key)),
+        },
+        _ => condition.clone(),
     }
 }
 
