@@ -226,17 +226,20 @@ schedule or interval target when freshness depends on time passing.
 
 ## Fallback behaviour and reason codes
 
-When the DVM engine detects a query pattern that cannot be safely maintained
-incrementally, it sets a `refresh_reason` code in `pgt_refresh_history` and
-falls back to a FULL refresh.  The `pgtrickle.health_check()` function emits
-a `WARN` for any such code in the last hour.
+When the DVM engine cannot use its normal incremental path, it may record a
+`refresh_reason` in `pgt_refresh_history` and choose a scoped recomputation or a
+whole-query FULL refresh, depending on the reason. In particular,
+`recursive_cte_fallback` means recomputing the recursive result and diffing it
+against stored rows; it does not mean the whole stream table is refreshed. The
+`pgtrickle.health_check()` function emits a `WARN` for any such code in the last
+hour.
 
 | Reason code | Trigger condition | Version introduced |
 |-------------|-------------------|--------------------|
 | `CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK` | `SUM/COUNT(CASE…)` aggregate with an `IN (…)` literal list predicate **and** a mutable source (UPDATE possible). The delta algebra mis-counts CASE-condition flips via UPDATE. | v0.78.0 |
 | `CORRELATED_SUBQUERY_DELTA_QUADRATIC` | Correlated aggregate scalar subquery in `WHERE` (e.g. `col > (SELECT SUM(…) FROM t WHERE t.k = outer.k)`) that cannot be safely pre-aggregated into a CTE. Produces O(delta × table) delta SQL. | v0.78.0 |
 | `REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN` | `CASE` expression inside an aggregate contains a scalar subquery or `EXISTS` predicate — the string-based classifier cannot confirm DVM algebraic delta safety. | v0.80.0 |
-| `recursive_cte_fallback` | `WITH RECURSIVE` — the recomputation strategy is always used for recursive queries. | v0.38.0 |
+| `recursive_cte_fallback` | A recursive CTE shape is ineligible for semi-naive evaluation or delete-and-rederive (for example, a non-monotone recursive term or a stored-column mismatch); only the recursive result is recomputed and diffed. | v0.38.0 |
 | `predicted_cost_exceeds_full` | The scheduler's adaptive cost model predicts the differential path would be more expensive than a FULL recompute (large delta, high cost factor). | v0.45.0 |
 
 ### Remediating a fallback
@@ -267,7 +270,12 @@ a `WARN` for any such code in the last hour.
    Simplify the CASE predicate — remove subqueries or EXISTS from inside the CASE condition.
 
 4. **`recursive_cte_fallback`**  
-   Use FULL mode explicitly: no workaround — recursive queries are not differentially maintainable.
+   No mode change is needed: eligible recursive CTEs remain DIFFERENTIAL or
+   IMMEDIATE, using semi-naive evaluation for insert-only changes and
+   delete-and-rederive for deletes or updates. This reason code reports local
+   recursive-result recomputation and diff for an ineligible shape, not a
+   whole-query FULL fallback. Recursive terms with unsupported set operations
+   remain FULL-only under AUTO and are rejected under explicit DIFFERENTIAL.
 
 ---
 
