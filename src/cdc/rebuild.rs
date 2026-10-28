@@ -550,43 +550,53 @@ pub(crate) fn sync_change_buffer_columns(
     Ok(())
 }
 
-/// Check if a CDC trigger exists for a source table.
+/// Check whether all required CDC triggers exist and are enabled for this source.
 pub fn trigger_exists(source_oid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
     let oid_u32 = source_oid.to_u32();
     // CITUS-4: Triggers may use the stable_name (e.g. "pg_trickle_cdc_5fba..."
     // for new tables) OR the legacy OID-based name ("pg_trickle_cdc_12345").
     // Resolve the stable_name so we check both naming conventions.
     let stable_name = super::get_cdc_name_for_source(source_oid);
-    // Check for any DML CDC trigger: the legacy combined row-level trigger
-    // OR any of the three per-event statement-level triggers, under both
-    // stable-name and OID-based naming.
-    let exists = Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS(
-            SELECT 1 FROM pg_trigger
-            WHERE tgname IN ($1, $3, $4, $5, $6, $7, $8, $9)
-              AND tgrelid = $2
-        )",
-        &[
-            format!("pg_trickle_cdc_{}", oid_u32).as_str().into(),
-            source_oid.into(),
-            format!("pg_trickle_cdc_ins_{}", oid_u32).as_str().into(),
-            format!("pg_trickle_cdc_upd_{}", oid_u32).as_str().into(),
-            format!("pg_trickle_cdc_del_{}", oid_u32).as_str().into(),
-            format!("pg_trickle_cdc_{}", stable_name).as_str().into(),
-            format!("pg_trickle_cdc_ins_{}", stable_name)
-                .as_str()
-                .into(),
-            format!("pg_trickle_cdc_upd_{}", stable_name)
-                .as_str()
-                .into(),
-            format!("pg_trickle_cdc_del_{}", stable_name)
-                .as_str()
-                .into(),
-        ],
-    )
-    .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
+    let mut events = match config::pg_trickle_cdc_trigger_mode() {
+        config::CdcTriggerMode::Statement if super::is_insert_only_table(source_oid) => {
+            vec!["ins"]
+        }
+        config::CdcTriggerMode::Statement => vec!["ins", "upd", "del"],
+        config::CdcTriggerMode::Row => vec![""],
+    };
+    events.push("truncate");
 
-    Ok(exists.unwrap_or(false))
+    for event in events {
+        let trigger_name = |identity: &str| {
+            if event.is_empty() {
+                format!("pg_trickle_cdc_{identity}")
+            } else {
+                format!("pg_trickle_cdc_{event}_{identity}")
+            }
+        };
+        let stable_trigger = trigger_name(&stable_name);
+        let legacy_trigger = trigger_name(&oid_u32.to_string());
+        let enabled = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_catalog.pg_trigger
+                  WHERE tgrelid = $1
+                    AND tgname IN ($2, $3)
+                    AND tgenabled IN ('O', 'A')
+             )",
+            &[
+                source_oid.into(),
+                stable_trigger.as_str().into(),
+                legacy_trigger.as_str().into(),
+            ],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        if !enabled {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 /// Get the trigger name for a source OID.
