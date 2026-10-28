@@ -13,9 +13,17 @@ async fn test_semantic_mutants_are_killed_by_exact_bag_oracle() {
         "CREATE TABLE semantic_parent (id INT PRIMARY KEY, active BOOLEAN, payload TEXT)",
         "CREATE TABLE semantic_child (id INT PRIMARY KEY, parent_id INT, qty BIGINT)",
         "CREATE TABLE semantic_receipts (id INT, committed BOOLEAN)",
+        "CREATE TABLE semantic_parent_before (id INT PRIMARY KEY, join_key INT, payload TEXT)",
+        "CREATE TABLE semantic_parent_after (id INT PRIMARY KEY, join_key INT, payload TEXT)",
+        "CREATE TABLE semantic_child_before (id INT PRIMARY KEY, join_key INT, qty BIGINT)",
+        "CREATE TABLE semantic_child_after (id INT PRIMARY KEY, join_key INT, qty BIGINT)",
         "INSERT INTO semantic_parent VALUES (1, true, 'correct'), (2, false, 'other'), (3, true, 'last')",
-        "INSERT INTO semantic_child VALUES (10, 1, 2), (11, 1, 3), (12, 2, 7)",
+        "INSERT INTO semantic_child VALUES (10, 1, 2), (11, 1, 3), (12, 2, 7), (13, 1, NULL)",
         "INSERT INTO semantic_receipts VALUES (1, true), (1, true), (2, false)",
+        "INSERT INTO semantic_parent_before VALUES (1, 10, 'before')",
+        "INSERT INTO semantic_parent_after VALUES (1, 20, 'after')",
+        "INSERT INTO semantic_child_before VALUES (10, 10, 4)",
+        "INSERT INTO semantic_child_after VALUES (10, 20, 9)",
     ]).await;
 
     let cases = [
@@ -26,8 +34,8 @@ async fn test_semantic_mutants_are_killed_by_exact_bag_oracle() {
         ),
         (
             "count",
+            "SELECT parent_id, count(qty) AS n FROM semantic_child GROUP BY parent_id",
             "SELECT parent_id, count(*) AS n FROM semantic_child GROUP BY parent_id",
-            "SELECT parent_id, count(*) + 1 AS n FROM semantic_child GROUP BY parent_id",
         ),
         (
             "payload",
@@ -38,6 +46,11 @@ async fn test_semantic_mutants_are_killed_by_exact_bag_oracle() {
             "join",
             "SELECT p.id, c.qty FROM semantic_parent p JOIN semantic_child c ON c.parent_id = p.id",
             "SELECT p.id, c.qty FROM semantic_parent p JOIN semantic_child c ON c.parent_id = p.id + 1",
+        ),
+        (
+            "join_snapshot",
+            "SELECT p.id, c.qty FROM semantic_parent_after p JOIN semantic_child_after c ON c.join_key = p.join_key",
+            "SELECT p.id, c.qty FROM semantic_parent_before p JOIN semantic_child_after c ON c.join_key = p.join_key",
         ),
         (
             "receipt",
