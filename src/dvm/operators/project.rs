@@ -165,7 +165,13 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
     }
 
     // Differentiate the child
-    let child_result = ctx.diff_node(differential_child)?;
+    let saved_endpoint_policy = ctx.endpoint_join_required;
+    ctx.endpoint_join_required |= expressions
+        .iter()
+        .any(|expr| !matches!(expr, Expr::ColumnRef { .. } | Expr::Literal(_)));
+    let child_result = ctx.diff_node(differential_child);
+    ctx.endpoint_join_required = saved_endpoint_policy;
+    let child_result = child_result?;
 
     // Restore st_user_columns, alias map, and coalesce defaults
     ctx.st_user_columns = saved_st_cols;

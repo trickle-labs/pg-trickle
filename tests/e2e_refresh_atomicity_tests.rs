@@ -1351,6 +1351,132 @@ async fn test_snapshot_during_witnessed_cancel_keeps_committed_rows_and_frontier
 }
 
 #[tokio::test]
+async fn test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute("CREATE TABLE endpoint_fence_l(id INT PRIMARY KEY,v NUMERIC)")
+        .await;
+    db.execute("CREATE TABLE endpoint_fence_r(id INT PRIMARY KEY,v NUMERIC)")
+        .await;
+    db.execute("INSERT INTO endpoint_fence_l VALUES(1,1)").await;
+    db.execute("INSERT INTO endpoint_fence_r VALUES(1,0)").await;
+    let stream = "endpoint_fence_st";
+    let query = "SELECT l.id,100/(l.v-r.v) quotient FROM endpoint_fence_l l JOIN endpoint_fence_r r ON l.id=r.id";
+    db.create_st(stream, query, "24h", "DIFFERENTIAL").await;
+    sqlx::raw_sql(
+        "BEGIN; UPDATE endpoint_fence_l SET v=2; UPDATE endpoint_fence_r SET v=1; COMMIT",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let id = pgt_id(&db, stream).await;
+    set_chaos(&db, stream, "input_boundary").await;
+    let (mut barrier, blocker) = hold_barrier(&db, id, "input_boundary").await;
+    let (refresh, refresh_pid) = start_manual_refresh(&db, stream).await;
+    let witness =
+        wait_for_barrier(&db, id, "input_boundary", blocker, Duration::from_secs(10)).await;
+    assert_eq!(witness.pid, refresh_pid);
+    let locks: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT relation)::bigint FROM pg_locks WHERE pid=$1 AND granted AND mode='ShareLock' \
+         AND relation IN ('endpoint_fence_l'::regclass,'endpoint_fence_r'::regclass)"
+    ).bind(refresh_pid).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(
+        locks, 2,
+        "both endpoint sources must be fenced before selecting the cut"
+    );
+    let mut writer_conn = db.pool.acquire().await.unwrap();
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer_conn)
+        .await
+        .unwrap();
+    sqlx::query("SET lock_timeout='5s'")
+        .execute(&mut *writer_conn)
+        .await
+        .unwrap();
+    let writer = tokio::spawn(async move {
+        sqlx::query("UPDATE endpoint_fence_l SET v=3 WHERE id=1")
+            .execute(&mut *writer_conn)
+            .await
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let blocked: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
+            .bind(refresh_pid)
+            .bind(writer_pid)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        if blocked {
+            break;
+        }
+        assert!(
+            !writer.is_finished(),
+            "writer escaped the admitted source fence"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "writer did not reach the source fence"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    release_barrier(&mut barrier, id, "input_boundary").await;
+    tokio::time::timeout(Duration::from_secs(5), refresh)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), writer)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    clear_chaos(&db).await;
+    let first: f64 = db
+        .query_scalar("SELECT quotient::float8 FROM endpoint_fence_st")
+        .await;
+    assert_eq!(
+        first, 100.0,
+        "first refresh must consume only the selected endpoint"
+    );
+    let oid = db.table_oid("endpoint_fence_l").await;
+    let buffer: String = db.query_scalar(&format!(
+        "SELECT format('%I.%I',current_setting('pg_trickle.change_buffer_schema'), \
+         'changes_'||coalesce(source_stable_name,source_relid::text)) FROM pgtrickle.pgt_change_tracking WHERE source_relid={oid}"
+    )).await;
+    let pending: bool = db.query_scalar(&format!(
+        "SELECT (SELECT max(lsn) FROM {buffer} WHERE action IN ('I','D')) > \
+          (frontier->'sources'->'{oid}'->>'lsn')::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_name='{stream}'"
+    )).await;
+    assert!(
+        pending,
+        "the writer's later captured change must remain beyond the published cut"
+    );
+    db.refresh_st(stream).await;
+    db.assert_st_matches_query(stream, query).await;
+    let next: f64 = db
+        .query_scalar("SELECT quotient::float8 FROM endpoint_fence_st")
+        .await;
+    assert_eq!(next, 50.0);
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        std::path::Path::new(&directory).join("join-endpoint-fence.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "phase":"input_boundary","refresh_pid":refresh_pid,"writer_pid":writer_pid,
+            "refresh_wait":witness.wait_event,"refresh_blockers":witness.blockers,
+            "source_share_locks":locks,"writer_blocked_by_refresh":true,
+            "first_quotient":first,"later_capture_beyond_cut":pending,"next_quotient":next,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
 async fn test_snapshot_metadata_and_rows_match_a_concurrent_refresh() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
