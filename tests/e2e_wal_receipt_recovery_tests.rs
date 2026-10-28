@@ -1753,12 +1753,14 @@ async fn lifecycle_exact(
     assert_eq!(
         actual["rows"],
         expected,
-        "{phase}; history: {}",
+        "PGT_LIFECYCLE_FAILURE:exact_rows; {phase}; history: {}",
         path.display()
     );
     assert_eq!(
         exact_diff(&fixture.db.pool, stream, &fixture.journal).await,
-        0
+        0,
+        "PGT_LIFECYCLE_FAILURE:exact_diff; {phase}; history: {}",
+        path.display()
     );
 }
 
@@ -1793,11 +1795,11 @@ async fn lifecycle_refresh(fixture: &Fixture, stream: &str) {
     .unwrap();
     assert!(
         after > before,
-        "changed boundary must execute a fresh refresh"
+        "PGT_LIFECYCLE_FAILURE:fresh_refresh; stream={stream}"
     );
     assert_eq!(
         action, "DIFFERENTIAL",
-        "lifecycle catch-up must consume retained history"
+        "PGT_LIFECYCLE_FAILURE:refresh_action; stream={stream}"
     );
 }
 
@@ -3030,7 +3032,7 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
                 "configuration":{"capture":"trigger","trigger_mode":mode,"compact_threshold":1},
                 "initial_rows":if seed & 1 != 0 {serde_json::json!([[0,"baseline"]])} else {serde_json::json!([])},
                 "query":"SELECT id,value FROM history_source",
-                "container":db.container_id(), "minimization":"first failing ordered prefix; SQL and transaction boundaries retained",
+                "container":db.container_id(), "minimization":"first failing assertion prefix; use shrink_recovery_history.py to find the shortest cycle prefix with the same tagged invariant",
             }),
         );
         db.execute("CREATE TABLE history_source(id INT PRIMARY KEY,value TEXT NOT NULL)")
@@ -3173,7 +3175,7 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             assert_eq!(
                 after,
                 before,
-                "aborted rows/frontier published; {}",
+                "PGT_LIFECYCLE_FAILURE:abort_atomicity; cycle={cycle}; history: {}",
                 path.display()
             );
             let cut: String = fixture
@@ -3206,13 +3208,14 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
                 .await;
             assert!(
                 covered,
-                "committed rows require matching consumed cut; {}",
+                "PGT_LIFECYCLE_FAILURE:source_cut; cycle={cycle}; history: {}",
                 path.display()
             );
             assert_eq!(
                 lifecycle_state(&fixture.db.pool, "history_slow").await,
                 slow_baseline,
-                "slow consumer moved"
+                "PGT_LIFECYCLE_FAILURE:slow_frontier; cycle={cycle}; history: {}",
+                path.display()
             );
         }
         let catchup_cut: String = fixture
@@ -3234,7 +3237,8 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
         assert_eq!(
             lifecycle_state(&fixture.db.pool, "history_fast").await,
             baseline,
-            "restore mixed rows/frontier"
+            "PGT_LIFECYCLE_FAILURE:restore_pair; history: {}",
+            path.display()
         );
         lifecycle_refresh(&fixture, "history_fast").await;
         lifecycle_exact(
@@ -3249,7 +3253,7 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
         assert!(fixture.db.query_scalar::<bool>(&format!(
             "SELECT (frontier->'sources'->'{}'->>'lsn')::pg_lsn >= '{catchup_cut}'::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_name='history_fast'",
             fixture.oid
-        )).await, "restored catch-up must cover the committed cut");
+        )).await, "PGT_LIFECYCLE_FAILURE:restored_source_cut; history: {}", path.display());
         record_lifecycle(
             &path,
             &mut history,
@@ -3284,12 +3288,15 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
         );
         assert_eq!(
             identity(&fixture.db, "history_identity", fixture.db.container_id()).await,
-            fixture.identity
+            fixture.identity,
+            "PGT_LIFECYCLE_FAILURE:retained_identity; history: {}",
+            path.display()
         );
         assert_eq!(
             lifecycle_state(&fixture.db.pool, "history_fast").await,
             before_crash,
-            "retained restart must preserve the committed rows/frontier checkpoint"
+            "PGT_LIFECYCLE_FAILURE:retained_checkpoint; history: {}",
+            path.display()
         );
         lifecycle_exact(
             &fixture,
@@ -3311,6 +3318,6 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
         assert!(fixture.db.query_scalar::<bool>(&format!(
             "SELECT (frontier->'sources'->'{}'->>'lsn')::pg_lsn >= '{catchup_cut}'::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_name='history_slow'",
             fixture.oid
-        )).await, "lagging catch-up must cover the committed cut");
+        )).await, "PGT_LIFECYCLE_FAILURE:lagging_source_cut; history: {}", path.display());
     }
 }

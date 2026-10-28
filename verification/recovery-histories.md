@@ -66,15 +66,22 @@ against the unchanged CDC package also passes.
 declared server candidate, configuration, initial state, SQL mutations,
 transaction boundaries, expected/actual rows, cuts and durable identity.
 Only the executed prefix through the first failing assertion is retained.
-This is ordered-prefix retention, not a general history reducer or arbitrary
-SQL minimization. Replay a seed and reduce its bounded cycle count while
-preserving the failure detector:
+That trace is kept as the unminimized original. Recovery invariants carry
+stable failure tags so unrelated setup errors cannot count as reproducing the
+same failure. To reduce a failing seed to the shortest cycle prefix that
+preserves its exact tagged invariant, run:
 
 ```sh
-PGS_PROP_SEED=0x12190001 PGS_PROP_CYCLES=4 \
-  ./scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests \
-  -E 'test(=test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal)' --retries 0
+python3 scripts/shrink_recovery_history.py \
+  artifacts/lifecycle-histories/history-0000000012190001.json
 ```
+
+The reducer first verifies the original failure, then replays each shorter
+cycle prefix in order with the same seed and setup. It keeps the unminimized
+trace, candidate traces and logs, a minimized trace, and a report of every
+attempted prefix. The replay requires Docker/Testcontainers and uses the
+existing recovery E2E target. It preserves each cycle's SQL and transaction
+boundaries; it does not simplify SQL statements.
 
 Existing CI jobs retain JSON histories and complete runner output on failure.
 The candidate job runs the small set; the scheduled DVM job runs the larger
@@ -87,13 +94,14 @@ the generated restore histories. It does not establish recovery after required
 history has already been removed. Snapshot metadata-read versus copy,
 cleanup versus new registration, and pause versus dispatch need their own
 witnessed schedules. Existing premature-cleanup/oracle controls remain;
-they are not an executable production cleanup mutant. No general minimizer,
-whole recovery proof, or merge approval is claimed.
+they are not an executable production cleanup mutant. The reducer minimizes
+generated cycle prefixes, not individual operations or SQL. No whole recovery
+proof or merge approval is claimed.
 
 The subsequent [snapshot/restore repair](restore-history-safety.md) addresses
 missing-history recovery, metadata-read versus copy, and cleanup during an
 uncommitted restore. It also strengthens terminal cut/restart assertions and
 fixes CI pipeline failure propagation. Its frozen backend `0ab22465` passes
 the strengthened default and ten-seed/twelve-cycle histories. Capture-mode
-transitions, cleanup versus registration, pause versus dispatch, a general
-minimizer and complete protocol proofs remain outside that follow-up.
+transitions, cleanup versus registration, pause versus dispatch and complete
+protocol proofs remain outside that follow-up.
