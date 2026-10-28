@@ -910,9 +910,8 @@ pub fn generate_delta_query_cached(
         );
     }
 
-    // Salt v0.87.8 templates so catalog-cached SQL from pre-staging releases
-    // cannot be reused under the stream-owner boundary.
-    let query_hash = hash_string(&format!("v0.87.8-stage:{defining_query}"));
+    // Invalidate templates generated before raw aggregate inputs were retained.
+    let query_hash = hash_string(&format!("raw-aggregate-columns-v1:{defining_query}"));
 
     // G8.1: Cross-session cache invalidation — flush if the shared
     // generation counter has advanced past our local snapshot.

@@ -845,6 +845,88 @@ fn alter_stream_table_query(
         )));
     }
     if matches!(classification, AlterClassification::Compatible { .. }) {
+        if st.needs_reinit {
+            let columns = vq
+                .parsed_tree
+                .as_ref()
+                .map(|parsed| parsed.source_columns_used())
+                .unwrap_or_default();
+            let source_oids: Vec<_> = old_deps
+                .iter()
+                .filter(|dep| crate::ivm::is_ivm_trigger_source(&dep.source_type))
+                .map(|dep| dep.source_relid)
+                .collect();
+            cdc::lock_source_relations(&source_oids)?;
+            for dep in &old_deps {
+                let needed = match (&dep.columns_used, columns.get(&dep.source_relid.to_u32())) {
+                    (Some(old), Some(new)) => {
+                        let mut needed = old.clone();
+                        needed.extend(new.iter().filter(|col| !old.contains(col)).cloned());
+                        needed.sort();
+                        Some(needed)
+                    }
+                    _ => None,
+                };
+                if needed == dep.columns_used {
+                    continue;
+                }
+                // Retain every current source column while rebuilding shared CDC.
+                let needed = if dep.source_type == "TABLE" {
+                    None
+                } else {
+                    needed
+                };
+                Spi::run_with_args(
+                    "UPDATE pgtrickle.pgt_dependencies SET columns_used = $1 \
+                     WHERE pgt_id = $2 AND source_relid = $3",
+                    &[needed.into(), st.pgt_id.into(), dep.source_relid.into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                if dep.source_type == "TABLE" && !refresh_mode.is_immediate() {
+                    let change_schema = config::pg_trickle_change_buffer_schema();
+                    if cdc::trigger_exists(dep.source_relid)? {
+                        cdc::rebuild_cdc_trigger(dep.source_relid, &change_schema)?;
+                    } else {
+                        let definitions = cdc::resolve_referenced_column_defs(dep.source_relid)?;
+                        cdc::rebuild::sync_change_buffer_columns(
+                            dep.source_relid,
+                            &change_schema,
+                            &definitions,
+                        )?;
+                    }
+                    let dependents = Spi::connect(|client| {
+                        let rows = client
+                            .select(
+                                "SELECT DISTINCT pgt_id FROM pgtrickle.pgt_dependencies \
+                                 WHERE source_relid = $1",
+                                None,
+                                &[dep.source_relid.into()],
+                            )
+                            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                        rows.into_iter()
+                            .map(|row| {
+                                row.get::<i64>(1)
+                                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                                    .ok_or_else(|| {
+                                        PgTrickleError::InternalError(
+                                            "dependency pgt_id is null".into(),
+                                        )
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })?;
+                    for dependent in dependents {
+                        crate::refresh::invalidate_merge_cache(dependent);
+                        Spi::run_with_args(
+                            "DELETE FROM pgtrickle.pgt_template_cache WHERE pgt_id = $1",
+                            &[dependent.into()],
+                        )
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                    }
+                    shmem::bump_cache_generation();
+                }
+            }
+        }
         return Ok(());
     }
     let rebuild_reason = classification
@@ -3476,7 +3558,9 @@ fn repair_stream_table_impl(name: &str, refresh_immediate: bool) -> Result<Strin
         }
 
         // Rebuild CDC trigger if absent.
-        if !cdc::trigger_exists(source_oid).unwrap_or(false) {
+        if !matches!(dep.cdc_mode, CdcMode::Wal)
+            && !cdc::trigger_exists(source_oid).unwrap_or(false)
+        {
             let pk_columns = cdc::resolve_pk_columns(source_oid).unwrap_or_default();
             let col_defs = cdc::resolve_referenced_column_defs(source_oid).unwrap_or_default();
             let stable_name = cdc::get_cdc_name_for_source(source_oid);
