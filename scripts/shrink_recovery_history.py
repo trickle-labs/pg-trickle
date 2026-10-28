@@ -126,6 +126,22 @@ def scenario_mutations(scenario: dict) -> list[dict[str, int | str]]:
     ]
 
 
+def legal_mutation_plan(seed: int, operations: list[dict[str, int | str]]) -> bool:
+    """Keep inserts unique and updates/deletes attached to a live generated row."""
+    live_ids = {0} if seed & 1 else set()
+    for operation in operations:
+        row_id = operation["id"]
+        if operation["kind"] == "insert":
+            if row_id in live_ids:
+                return False
+            live_ids.add(row_id)
+        elif row_id not in live_ids:
+            return False
+        elif operation["kind"] == "delete":
+            live_ids.remove(row_id)
+    return True
+
+
 def available_path(path: Path) -> Path:
     if not path.exists():
         return path
@@ -193,6 +209,8 @@ def shrink(history_path: Path) -> tuple[Path, Path, Path]:
     attempts_dir = Path(
         tempfile.mkdtemp(prefix=f"history-{seed:016x}-shrink-", dir=output_dir)
     )
+    if not legal_mutation_plan(seed, mutations):
+        raise ValueError("recorded mutations do not form a legal generated row history")
 
     baseline = run_candidate(seed, mutations, attempts_dir / "baseline")
     signature = baseline["failure_signature"]
@@ -215,6 +233,21 @@ def shrink(history_path: Path) -> tuple[Path, Path, Path]:
 
     def replay(candidate: dict) -> bool:
         candidate_mutations = scenario_mutations(candidate)
+        source_cycles = [mutation["source_cycle"] for mutation in candidate_mutations]
+        if not legal_mutation_plan(seed, candidate_mutations):
+            plan_path = attempts_dir / f"rejected-{len(attempts):03d}.json"
+            plan_path.write_text(
+                json.dumps(candidate_mutations, indent=2) + "\n", encoding="utf-8"
+            )
+            attempts.append(
+                {
+                    "cycles": len(candidate_mutations),
+                    "source_cycles": source_cycles,
+                    "rejected_plan": str(plan_path),
+                    "rejected": "generated row history would update/delete a missing row or duplicate an insert",
+                }
+            )
+            return False
         result = run_candidate(
             seed,
             candidate_mutations,
@@ -223,9 +256,7 @@ def shrink(history_path: Path) -> tuple[Path, Path, Path]:
         attempts.append(
             {
                 "cycles": len(candidate_mutations),
-                "source_cycles": [
-                    mutation["source_cycle"] for mutation in candidate_mutations
-                ],
+                "source_cycles": source_cycles,
                 **result,
             }
         )

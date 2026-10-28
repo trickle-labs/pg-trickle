@@ -60,6 +60,20 @@ class RecoveryHistoryShrinkTests(unittest.TestCase):
             ],
         )
 
+    def test_only_shrinks_histories_with_live_row_targets(self):
+        self.assertTrue(
+            shrink.legal_mutation_plan(
+                123,
+                [
+                    {"kind": "insert", "id": 1, "value": 7},
+                    {"kind": "update", "id": 1, "value": 8},
+                    {"kind": "delete", "id": 1, "value": 0},
+                ],
+            )
+        )
+        self.assertFalse(shrink.legal_mutation_plan(123, [{"kind": "update", "id": 1, "value": 8}]))
+        self.assertFalse(shrink.legal_mutation_plan(123, [{"kind": "insert", "id": 0, "value": 8}]))
+
     def test_shrink_removes_arbitrary_cycles_and_zeroes_operands(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
@@ -127,10 +141,11 @@ class RecoveryHistoryShrinkTests(unittest.TestCase):
             )
             report_data = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(report_data["minimized_cycles"], 1)
-            self.assertEqual(report_data["minimized_mutations"][0]["source_cycle"], 3)
-            self.assertTrue(
-                any(attempt["source_cycles"] == [1, 3] for attempt in report_data["attempts"])
+            self.assertEqual(
+                [operation["source_cycle"] for operation in report_data["minimized_mutations"]],
+                [3],
             )
+            self.assertTrue(any(attempt.get("rejected") for attempt in report_data["attempts"]))
 
 
 if __name__ == "__main__":
