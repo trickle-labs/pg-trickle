@@ -34,6 +34,7 @@ class AllocationReplayTests(unittest.TestCase):
         self.assertIn('test(=test_rls_bypassrls_owner_differential_wal_matches_query)', serial_expression)
         self.assertIn('test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline)', serial_expression)
         self.assertIn('test(=test_stddev_samp_differential_mode)', serial_expression)
+        self.assertIn('test(=test_dvm1_case_in_list_append_only_differential)', serial_expression)
         self.assertIn('test(=test_v0878_revoked_source_preserves_state_and_stages)', serial_expression)
         self.assertIn('test(=test_autorefresh_no_spurious_3_layer)', serial_expression)
         self.assertEqual(after[0], ['python3', 'scripts/ci_pr_suite.py', '--no-fail-fast'])

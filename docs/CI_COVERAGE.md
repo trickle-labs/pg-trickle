@@ -95,6 +95,9 @@ and manually in `production-recovery-qualification`; all attempt logs are retain
 and any failed attempt fails the job. This defers additional timing exploration,
 not a unique failure scenario or assertion.
 
+Drain-mode and long-transaction visibility binaries also run after the parallel
+shard because both alter shared server settings and require scheduler progress.
+
 Three WAL receipt progress witnesses also run serially after shard 1's parallel
 suite, so decoder and scheduler waits keep their PR coverage without competing
 with the broad container workload.
