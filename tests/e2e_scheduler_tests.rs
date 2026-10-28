@@ -903,16 +903,27 @@ async fn test_scheduler_paused_atomic_member_stays_stale_until_resume() {
         )
         .await;
 
-        let control_refreshes = wait_for_n_refreshes(
-            &db,
-            "pause_group_control",
-            control_refresh_baseline + 1,
-            Duration::from_secs(30),
-        )
-        .await;
+        // A completed refresh can have taken its source snapshot before the
+        // committed insert. Wait for the observable row as well as new history
+        // so scheduler progress proves this source change was applied.
+        let control_caught_up = db
+            .wait_for_condition(
+                "unpaused control consumes committed source row",
+                &format!(
+                    "SELECT (SELECT count(*) FROM pgtrickle.pgt_refresh_history h \
+                              JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                             WHERE st.pgt_name = 'pause_group_control' \
+                               AND h.status = 'COMPLETED') > {control_refresh_baseline} \
+                        AND EXISTS (SELECT 1 FROM pause_group_control \
+                                    WHERE id = 4 AND val = 20)"
+                ),
+                Duration::from_secs(30),
+                Duration::from_millis(50),
+            )
+            .await;
         assert!(
-            control_refreshes > control_refresh_baseline,
-            "unpaused source consumer did not prove scheduler progress in {mode} mode"
+            control_caught_up,
+            "unpaused source consumer did not apply the committed row in {mode} mode"
         );
         db.assert_st_matches_query("pause_group_control", "SELECT id, val FROM pause_group_src")
             .await;
