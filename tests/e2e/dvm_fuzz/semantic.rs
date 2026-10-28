@@ -238,6 +238,9 @@ pub fn cases_for_bags(max_size: usize) -> Vec<Scenario> {
                 ("UPDATE $s.input SET v=1.00 WHERE id=1", 1),
             ],
         );
+        // Keep this consumer-order case separate from the deferred-key cases.
+        consumers.schema.setup_sql[3] =
+            consumers.schema.setup_sql[3].replace(" DEFERRABLE INITIALLY DEFERRED", "");
         let create = format!(
             "SELECT pgtrickle.create_stream_table('sem_{id}.all_columns', 'SELECT id,k,v,w FROM sem_{id}.input', '24h', 'DIFFERENTIAL')"
         );
