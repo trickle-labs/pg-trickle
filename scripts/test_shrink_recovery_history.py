@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import shrink_recovery_history as shrink
 
@@ -52,6 +53,39 @@ class RecoveryHistoryShrinkTests(unittest.TestCase):
             events, seed, cycles = shrink.read_history(path)
         self.assertEqual((seed, cycles), (123, 4))
         self.assertEqual(events[1]["step"], "snapshot")
+
+    def test_shrink_keeps_original_and_reports_shortest_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.json"
+            path.write_text(
+                json.dumps([{"seed": 123, "cycles": 4}, {"step": "original"}]),
+                encoding="utf-8",
+            )
+
+            def replay(seed, cycles, artifact_dir):
+                artifact_dir.mkdir(parents=True, exist_ok=False)
+                history = artifact_dir / f"history-{seed:016x}.json"
+                history.write_text(
+                    json.dumps([{"seed": seed, "cycles": cycles}, {"step": cycles}]),
+                    encoding="utf-8",
+                )
+                signature = "exact_rows" if cycles >= 2 else None
+                return {
+                    "returncode": 101 if signature else 0,
+                    "failure_signature": signature,
+                    "history": str(history),
+                }
+
+            with patch.object(shrink, "run_candidate", side_effect=replay):
+                original, minimized, report = shrink.shrink(path)
+
+            self.assertEqual(json.loads(original.read_text(encoding="utf-8"))[0]["cycles"], 4)
+            minimized_events = json.loads(minimized.read_text(encoding="utf-8"))
+            self.assertEqual(minimized_events[0]["cycles"], 2)
+            self.assertEqual(minimized_events[0]["minimization"]["failure_signature"], "exact_rows")
+            report_data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(report_data["minimized_cycles"], 2)
+            self.assertEqual([attempt["cycles"] for attempt in report_data["attempts"]], [4, 1, 2])
 
 
 if __name__ == "__main__":
