@@ -426,6 +426,9 @@ async fn run_update_to_null_case(mode: &str) {
     db.create_st(&full_stream, &query, "1s", "FULL").await;
     wait_for_cdc_mode(&db, &source, "TRIGGER").await;
     if mode == "wal" {
+        // Keep the fixed WAL error budget near its production duration.
+        db.alter_system_set_and_wait("pg_trickle.scheduler_interval_ms", "1000", "1000")
+            .await;
         db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
             .await;
     }
