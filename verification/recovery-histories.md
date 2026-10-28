@@ -97,10 +97,11 @@ set. No remote CI success is claimed.
 ## Open boundaries
 
 The generated restore history now includes a pending trigger-captured
-commit, a trigger-to-WAL transition, and an acknowledged WAL-captured commit.
-It verifies that output and frontier do not advance before refresh, then
-restores and catches up the lagging consumer after restart. It does not exercise
-every WAL receipt interruption phase inside the generated history or establish
+commit, a lock-witnessed cancelled refresh with unchanged output/frontier, a
+trigger-to-WAL transition, and an acknowledged WAL-captured commit. It then
+restores the snapshot and catches up the lagging consumer after restart. It does
+not exercise every WAL receipt interruption phase inside the generated history
+or establish
 recovery after required history has already been removed. Snapshot metadata-read
 versus copy, cleanup versus new registration, and pause versus dispatch still
 need their own witnessed schedules. Existing premature-cleanup/oracle controls

@@ -3320,6 +3320,116 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
                 "id":-1,"value":"handoff-pending",
             }),
         );
+        let mut blocker = fixture.db.pool.acquire().await.unwrap();
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        sqlx::query("BEGIN").execute(&mut *blocker).await.unwrap();
+        sqlx::query("LOCK TABLE history_source IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let mut refresh_conn = fixture.db.pool.acquire().await.unwrap();
+        sqlx::raw_sql("SET lock_timeout='0'; SET statement_timeout='0'")
+            .execute(&mut *refresh_conn)
+            .await
+            .unwrap();
+        let refresh_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *refresh_conn)
+            .await
+            .unwrap();
+        let refresh_task = tokio::spawn(async move {
+            sqlx::query("SELECT pgtrickle.refresh_stream_table('history_fast')")
+                .execute(&mut *refresh_conn)
+                .await
+        });
+        assert!(
+            fixture
+                .db
+                .wait_for_condition(
+                    "lifecycle refresh blocked by source lock",
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a \
+                         WHERE a.pid={refresh_pid} \
+                           AND {blocker_pid}=ANY(pg_blocking_pids(a.pid)))"
+                    ),
+                    Duration::from_secs(10),
+                    Duration::from_millis(25),
+                )
+                .await,
+            "refresh did not reach the witnessed source lock; history: {}",
+            path.display()
+        );
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "step":"refresh blocked before cancellation",
+                "refresh_pid":refresh_pid,"blocker_pid":blocker_pid,
+                "state":fast_before_handoff,
+            }),
+        );
+        let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+            .bind(refresh_pid)
+            .fetch_one(&fixture.db.pool)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to cancel witnessed refresh: {error}; history: {}",
+                    path.display()
+                )
+            });
+        assert!(
+            cancelled,
+            "cancel must target the witnessed refresh; history: {}",
+            path.display()
+        );
+        let refresh_result = tokio::time::timeout(Duration::from_secs(5), refresh_task)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "cancelled refresh did not return; history: {}",
+                    path.display()
+                )
+            })
+            .unwrap_or_else(|error| {
+                panic!(
+                    "refresh task panicked: {error}; history: {}",
+                    path.display()
+                )
+            });
+        let cancel_error = refresh_result.expect_err(&format!(
+            "cancelled refresh must return an error; history: {}",
+            path.display()
+        ));
+        assert!(
+            cancel_error
+                .to_string()
+                .contains("canceling statement due to user request"),
+            "{cancel_error}"
+        );
+        sqlx::query("ROLLBACK")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        drop(blocker);
+        let fast_after_cancel = lifecycle_state(&fixture.db.pool, "history_fast").await;
+        assert_eq!(
+            fast_after_cancel,
+            fast_before_handoff,
+            "PGT_LIFECYCLE_FAILURE:cancel_atomicity; history: {}",
+            path.display()
+        );
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "step":"witnessed cancelled refresh",
+                "refresh_pid":refresh_pid,"blocker_pid":blocker_pid,
+                "error":cancel_error.to_string(),"state":fast_after_cancel,
+            }),
+        );
         fixture
             .db
             .alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
