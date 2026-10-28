@@ -144,7 +144,20 @@ jobs:
       - name: Run join endpoint checker and executable mutation controls
         run: python3 scripts/check_join_plan_verification.py
 
+      - name: Run identity frame encoder/validator and executable mutation controls
+        run: python3 scripts/check_identity_frame_verification.py
+
+      - name: Upload exact identity frame verification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: identity-frame-verification-evidence
+          path: .p2p/work/issue-1224-identity-framing/evidence/*
+          retention-days: 30
+          if-no-files-found: error
+
       - name: Upload exact join endpoint verification evidence
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: join-plan-verification-evidence
@@ -153,6 +166,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload exact LSN verification evidence
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: lsn-verification-evidence
@@ -161,6 +175,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload exact receipt verification evidence
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: receipt-verification-evidence
@@ -169,6 +184,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload exact aggregate lifecycle verification evidence
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: aggregate-lifecycle-verification-evidence
@@ -177,6 +193,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload exact CDC image policy verification evidence
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: cdc-elision-verification-evidence
@@ -364,6 +381,9 @@ jobs:
 
       - name: Qualify endpoint SQL with a missing-retraction control
         run: python3 scripts/check_join_sql_control.py
+
+      - name: Check immutable identity vectors and malformed constructors
+        run: bash ./scripts/run_dvm_integration_tests.sh pg18 row_id_v2_vectors --retries 0
 
       - name: Upload endpoint SQL qualification evidence
         if: always()
@@ -608,6 +628,12 @@ jobs:
           name: join-plan-verification-evidence
           path: .p2p/work/issue-1223-join-checker/evidence
 
+      - name: Download identity frame proof record
+        uses: actions/download-artifact@v8
+        with:
+          name: identity-frame-verification-evidence
+          path: .p2p/work/issue-1224-identity-framing/evidence
+
       - name: Pull postgres:18.6 image
         run: docker pull postgres:18.6
 
@@ -709,6 +735,22 @@ jobs:
             --runtime-case e2e_refresh_atomicity_tests::test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut \
             --output .p2p/work/issue-1223-join-checker/evidence/join-plan-candidate-binding.json
 
+      - name: Run packaged identity frame E2E and bind installed library
+        env:
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
+          PGT_RELEASE_ATTESTATION_PATH: target/identity-frame-full-install-attestation.json
+        run: |
+          ./scripts/run_e2e_tests.sh --test e2e_row_id_v2_tests \
+            -E 'test(=test_identity_scalar_frames_preserve_installed_v2_v3_bytes) | test(=test_identity_colliding_probes_preserve_merge_and_join_complete_ids)' --retries 0
+          python3 scripts/check_lsn_candidate_binding.py --proof-kind identity_frame \
+            --proof-record .p2p/work/issue-1224-identity-framing/evidence/identity-frame-verification.json \
+            --package-dir target/release/pg_trickle-pg18 \
+            --installation target/identity-frame-full-install-attestation.json \
+            --candidate-commit "$GITHUB_SHA" \
+            --runtime-case e2e_row_id_v2_tests::test_identity_scalar_frames_preserve_installed_v2_v3_bytes \
+            --runtime-case e2e_row_id_v2_tests::test_identity_colliding_probes_preserve_merge_and_join_complete_ids \
+            --output .p2p/work/issue-1224-identity-framing/evidence/identity-frame-candidate-binding.json
+
       - name: Upload candidate binding evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -728,6 +770,8 @@ jobs:
             target/join-plan-full-install-attestation.json
             .p2p/work/issue-1223-join-checker/evidence/join-plan-candidate-binding.json
             artifacts/join-endpoints/
+            target/identity-frame-full-install-attestation.json
+            .p2p/work/issue-1224-identity-framing/evidence/identity-frame-candidate-binding.json
           retention-days: 30
           if-no-files-found: warn
 
