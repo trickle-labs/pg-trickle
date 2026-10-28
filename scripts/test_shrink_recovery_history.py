@@ -74,13 +74,13 @@ class RecoveryHistoryShrinkTests(unittest.TestCase):
         self.assertFalse(shrink.legal_mutation_plan(123, [{"kind": "update", "id": 1, "value": 8}]))
         self.assertFalse(shrink.legal_mutation_plan(123, [{"kind": "insert", "id": 0, "value": 8}]))
 
-    def test_shrink_removes_arbitrary_cycles_and_zeroes_operands(self):
+    def test_shrink_removes_cycles_and_simplifies_operations_and_operands(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
             original_mutations = [
                 {"kind": "insert", "id": 1, "value": 11, "source_cycle": 1},
-                {"kind": "update", "id": 1, "value": 12, "source_cycle": 2},
-                {"kind": "delete", "id": 1, "value": 13, "source_cycle": 3},
+                {"kind": "insert", "id": 2, "value": 12, "source_cycle": 2},
+                {"kind": "update", "id": 1, "value": 13, "source_cycle": 3},
                 {"kind": "insert", "id": 4, "value": 14, "source_cycle": 4},
             ]
             def replay(seed, mutations, artifact_dir):
@@ -102,7 +102,11 @@ class RecoveryHistoryShrinkTests(unittest.TestCase):
                     json.dumps(events),
                     encoding="utf-8",
                 )
-                signature = "exact_rows" if any(op["kind"] == "delete" for op in mutations) else None
+                signature = (
+                    "exact_rows"
+                    if any(op["kind"] in {"delete", "update"} for op in mutations)
+                    else None
+                )
                 return {
                     "returncode": 101 if signature else 0,
                     "failure_signature": signature,
@@ -137,7 +141,7 @@ class RecoveryHistoryShrinkTests(unittest.TestCase):
             )
             self.assertEqual(
                 minimized_events[0]["minimization"]["minimized_mutations"],
-                [{"kind": "delete", "id": 0, "value": 13, "source_cycle": 3}],
+                [{"kind": "delete", "id": 0, "value": 0, "source_cycle": 3}],
             )
             report_data = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(report_data["minimized_cycles"], 1)
@@ -146,6 +150,14 @@ class RecoveryHistoryShrinkTests(unittest.TestCase):
                 [3],
             )
             self.assertTrue(any(attempt.get("rejected") for attempt in report_data["attempts"]))
+            self.assertTrue(
+                any(
+                    attempt["source_cycles"] == [1, 3]
+                    and [operation["kind"] for operation in attempt["mutations"]]
+                    == ["insert", "delete"]
+                    for attempt in report_data["attempts"]
+                )
+            )
 
 
 if __name__ == "__main__":

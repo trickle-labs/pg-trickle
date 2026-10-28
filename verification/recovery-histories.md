@@ -80,13 +80,15 @@ The reducer first verifies the recorded mutation schedule, then uses the
 existing `scripts/dvm_shrink.py` cycle reducer to try removing any whole
 mutation cycle while preserving order. It rejects candidates that would
 duplicate an insert or update/delete a missing row, then tries replacing
-remaining generated row IDs and values with zero. Every candidate replays with
-the same seed and setup; source and journal always receive the same operation.
+remaining generated operations with simpler DELETE/UPDATE/INSERT forms and
+replacing row IDs and values with zero. Every candidate replays with the same
+seed and setup; source and journal always receive the same operation.
 The unminimized trace, candidate plans, traces and logs, minimized trace, and
 attempt report are retained. Old traces with SQL-only mutation records remain
 readable. Replay requires Docker/Testcontainers and uses the existing recovery
-E2E target. The operation type, paired SQL shape, and transaction boundaries
-remain intact.
+E2E target. Operation type can change only among the generated forms.
+Source/journal statements stay paired, transaction boundaries remain intact,
+and arbitrary SQL syntax is not minimized.
 
 Existing CI jobs retain JSON histories and complete runner output on failure.
 The candidate job runs the small set; the scheduled DVM job runs the larger

@@ -21,6 +21,8 @@ import dvm_shrink  # noqa: E402
 TEST_NAME = "test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal"
 TEST_TARGET = "e2e_wal_receipt_recovery_tests"
 FAILURE_RE = re.compile(r"PGT_LIFECYCLE_FAILURE:([a-z0-9_]+)([^\r\n]*)")
+# Prefer the shorter generated SQL form when it preserves the tagged failure.
+OPERATION_COMPLEXITY = {"delete": 0, "update": 1, "insert": 2}
 LEGACY_MUTATION_RE = re.compile(
     r"INSERT INTO history_source VALUES \((-?\d+),'(-?\d+)'\)"
     r"|UPDATE history_source SET value='(-?\d+)' WHERE id=(-?\d+)"
@@ -103,7 +105,7 @@ def mutation_plan(events: list[dict]) -> list[dict[str, int | str]]:
 
 def replay_scenario(operations: list[dict[str, int | str]]) -> dict:
     """Wrap paired source/journal mutations for the existing cycle shrinker."""
-    # shortcut: SQL shape stays fixed, when a failure needs AST-level shrinking.
+    # shortcut: generated operations only, when a failure needs SQL AST shrinking.
     return {
         "preserve_sql_boundaries": True,
         "initial_data": [],
@@ -225,6 +227,7 @@ def shrink(history_path: Path) -> tuple[Path, Path, Path]:
         {
             "cycles": len(mutations),
             "source_cycles": [mutation["source_cycle"] for mutation in mutations],
+            "mutations": mutations,
             **baseline,
             "role": "reproduced original",
         }
@@ -243,6 +246,7 @@ def shrink(history_path: Path) -> tuple[Path, Path, Path]:
                 {
                     "cycles": len(candidate_mutations),
                     "source_cycles": source_cycles,
+                    "mutations": candidate_mutations,
                     "rejected_plan": str(plan_path),
                     "rejected": "generated row history would update/delete a missing row or duplicate an insert",
                 }
@@ -257,6 +261,7 @@ def shrink(history_path: Path) -> tuple[Path, Path, Path]:
             {
                 "cycles": len(candidate_mutations),
                 "source_cycles": source_cycles,
+                "mutations": candidate_mutations,
                 **result,
             }
         )
@@ -277,6 +282,15 @@ def shrink(history_path: Path) -> tuple[Path, Path, Path]:
                     continue
                 candidate = copy.deepcopy(scenario)
                 candidate["cycles"][index]["mutations"][0][field] = 0
+                if replay(candidate):
+                    scenario = candidate
+        for index in range(len(scenario["cycles"])):
+            current_kind = scenario["cycles"][index]["mutations"][0]["kind"]
+            for kind in ("delete", "update", "insert"):
+                if OPERATION_COMPLEXITY[kind] >= OPERATION_COMPLEXITY[current_kind]:
+                    continue
+                candidate = copy.deepcopy(scenario)
+                candidate["cycles"][index]["mutations"][0]["kind"] = kind
                 if replay(candidate):
                     scenario = candidate
         if json.dumps(scenario, sort_keys=True) == before:
