@@ -932,8 +932,10 @@ pub fn generate_delta_query_cached(
         );
     }
 
-    // Invalidate persisted templates that still evaluate mixed endpoint pairs.
-    let query_hash = hash_string(&format!("v0.108.3-nonfinite-state:{defining_query}"));
+    // Invalidate cached templates after both aggregate-state corrections.
+    let query_hash = hash_string(&format!(
+        "v0.108.3-nonfinite-state:raw-aggregate-columns-v1:{defining_query}"
+    ));
 
     // G8.1: Cross-session cache invalidation — flush if the shared
     // generation counter has advanced past our local snapshot.

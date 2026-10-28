@@ -3533,6 +3533,15 @@ fn collect_refs_from_expr(expr: &Expr, refs: &mut ColumnRefSet) -> bool {
 
 /// Extract column references from an aggregate expression.
 fn collect_refs_from_agg(agg: &AggExpr, refs: &mut ColumnRefSet) -> bool {
+    if matches!(
+        agg.function,
+        AggFunc::ComplexExpression(_)
+            | AggFunc::UserDefined(_)
+            | AggFunc::JsonObjectAggStd(_)
+            | AggFunc::JsonArrayAggStd(_)
+    ) {
+        return false;
+    }
     if let Some(ref arg) = agg.argument
         && !collect_refs_from_expr(arg, refs)
     {

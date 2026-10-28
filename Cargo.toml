@@ -48,7 +48,7 @@ postgres = "0.19"
 aho-corasick = "1"
 # P-8: O(1) LRU eviction for the MERGE template cache (>=0.16.3 fixes RUSTSEC unsound advisory)
 # DEP-002 (v0.74.0): upgraded from 0.16 to 0.18 (minor bump; API-compatible).
-lru = "0.18"
+lru = "0.19"
 
 
 [dev-dependencies]
