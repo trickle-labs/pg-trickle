@@ -1428,6 +1428,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         parallel_state.rebuild(eu_dag, dag_version);
                     }
 
+                    shmem::mark_inline_refresh(database_oid, shmem::INLINE_REFRESH_GROUP);
                     parallel_dispatch_tick(
                         &mut parallel_state,
                         dag_ref,
@@ -1496,6 +1497,15 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         }
                     });
                     if !any_due {
+                        continue;
+                    }
+                    shmem::mark_inline_refresh(database_oid, shmem::INLINE_REFRESH_GROUP);
+                    if scc.nodes.iter().any(|node| match node {
+                        NodeId::StreamTable(id) => {
+                            shmem::is_node_paused_for_database(database_oid, *id)
+                        }
+                        NodeId::BaseTable(_) => false,
+                    }) {
                         continue;
                     }
                     iterate_to_fixpoint(
@@ -1663,6 +1673,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         }
                     }
                     let mut entry = drift_counters.entry(pgt_id).or_insert(0);
+                    shmem::mark_inline_refresh(database_oid, pgt_id);
+                    if shmem::is_node_paused_for_database(database_oid, pgt_id) {
+                        continue;
+                    }
                     refresh_single_st(
                         pgt_id,
                         dag_ref,
@@ -1728,6 +1742,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             continue;
                         }
                         let mut entry = drift_counters.entry(pgt_id).or_insert(0);
+                        shmem::mark_inline_refresh(database_oid, pgt_id);
+                        if shmem::is_node_paused_for_database(database_oid, pgt_id) {
+                            continue;
+                        }
                         refresh_single_st(
                             pgt_id,
                             dag_ref,
@@ -1761,6 +1779,16 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             }
                         }
                     }
+                    continue;
+                }
+
+                shmem::mark_inline_refresh(database_oid, shmem::INLINE_REFRESH_GROUP);
+                if group.members.iter().any(|member| match member {
+                    NodeId::StreamTable(id) => {
+                        shmem::is_node_paused_for_database(database_oid, *id)
+                    }
+                    NodeId::BaseTable(_) => false,
+                }) {
                     continue;
                 }
 
@@ -1914,6 +1942,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 .collect();
             retry_states.retain(|id, _| active_ids.contains(id));
         }));
+
+        // Clear the marker after the tick transaction, including PostgreSQL error exits.
+        shmem::update_database_scheduler(database_oid, |slot| slot.inline_pgt_id = 0);
 
         // Phase 4: Spawn workers outside the transaction (after commit).
         for (db, job_id, generation) in pending_spawns.drain(..) {

@@ -80,6 +80,9 @@ unsafe impl PGRXSharedMemory for SchedulerMetaState {}
 /// cluster-global state. A full registry is a typed startup failure.
 pub const MAX_DATABASE_SCHEDULERS: usize = 64;
 
+/// Sentinel indicating a scheduler transaction may refresh any member of its current group.
+pub const INLINE_REFRESH_GROUP: i64 = -1;
+
 /// Fixed-capacity database key used by scheduler shared state.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct DatabaseKey(pub u32);
@@ -92,6 +95,7 @@ pub struct DatabaseSchedulerSlot {
     pub running: bool,
     pub last_wake_epoch_secs: i64,
     pub drain_seen_epoch: u64,
+    /// In-flight inline pgt_id, or `INLINE_REFRESH_GROUP` for a multi-node dispatch.
     pub inline_pgt_id: i64,
     pub queue_depth: u32,
     pub last_tick_oldest_xmin: u64,
@@ -192,6 +196,21 @@ where
     let mut registry = DATABASE_SCHEDULER_REGISTRY.exclusive();
     if let Some(index) = database_slot_index(&registry, database_oid) {
         update(&mut registry.slots[index]);
+    }
+}
+
+/// Publish inline work through the tick commit; mixed pgt_ids widen to the group sentinel.
+pub fn mark_inline_refresh(database_oid: u32, pgt_id: i64) {
+    update_database_scheduler(database_oid, |slot| {
+        slot.inline_pgt_id = merge_inline_refresh_marker(slot.inline_pgt_id, pgt_id);
+    });
+}
+
+fn merge_inline_refresh_marker(current: i64, next: i64) -> i64 {
+    if current == 0 || current == next {
+        next
+    } else {
+        INLINE_REFRESH_GROUP
     }
 }
 
@@ -2440,7 +2459,10 @@ static SHMEM_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 
 #[cfg(test)]
 mod tests {
-    use super::{PgTrickleSharedState, drain_ring, increment_epoch, push_invalidation};
+    use super::{
+        INLINE_REFRESH_GROUP, PgTrickleSharedState, drain_ring, increment_epoch,
+        merge_inline_refresh_marker, push_invalidation,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
@@ -2464,6 +2486,17 @@ mod tests {
             assert!(current > last);
             last = current;
         }
+    }
+
+    #[test]
+    fn test_inline_refresh_marker_widens_mixed_dispatches() {
+        assert_eq!(merge_inline_refresh_marker(0, 12), 12);
+        assert_eq!(merge_inline_refresh_marker(12, 12), 12);
+        assert_eq!(merge_inline_refresh_marker(12, 13), INLINE_REFRESH_GROUP);
+        assert_eq!(
+            merge_inline_refresh_marker(INLINE_REFRESH_GROUP, 13),
+            INLINE_REFRESH_GROUP
+        );
     }
 
     // ── C2-1: Invalidation ring buffer tests ──────────────────────────────
