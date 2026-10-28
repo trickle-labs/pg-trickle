@@ -765,8 +765,20 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
 
     let caller = security_context::capture_caller_context(EntryContext::SecurityDefiner)?;
     let stream_name = resolve_name_as_caller(name, &caller.search_path)?;
+    let initial_meta = StreamTableMeta::get_by_name(stream_name.schema(), stream_name.name())?;
+    check_stream_table_ownership(
+        initial_meta.pgt_relid,
+        stream_name.schema(),
+        stream_name.name(),
+    )?;
+
+    // Serialize the frontier read and row copy with refresh's transaction lock.
+    Spi::run_with_args(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[initial_meta.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("snapshot refresh lock failed: {e}")))?;
     let meta = StreamTableMeta::get_by_name(stream_name.schema(), stream_name.name())?;
-    check_stream_table_ownership(meta.pgt_relid, stream_name.schema(), stream_name.name())?;
 
     let snapshot_name = match target {
         Some(target_name) => {

@@ -55,6 +55,10 @@ async fn snapshot_as_role(pool: PgPool, role: &'static str) -> Result<(), sqlx::
 }
 
 async fn run_snapshot_during_refresh(db: &E2eDb, use_default_target: bool) {
+    let old_rows: Vec<i32> = sqlx::query_scalar("SELECT id FROM v1183_stream ORDER BY id")
+        .fetch_all(&db.pool)
+        .await
+        .expect("read pre-snapshot rows");
     let old_frontier: String = sqlx::query_scalar(
         "SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'v1183_stream'",
     )
@@ -88,14 +92,14 @@ async fn run_snapshot_during_refresh(db: &E2eDb, use_default_target: bool) {
     assert!(
         notices
             .iter()
-            .all(|notice| !notice.contains("refresh skipped")),
-        "baseline reproduction requires the differential refresh to run: {notices:?}"
+            .any(|notice| notice.contains("refresh skipped")),
+        "refresh must observe the snapshot lock, notices: {notices:?}"
     );
 
     sqlx::query("SELECT pg_advisory_unlock($1, $2)")
         .bind(LOCK_CLASS)
         .bind(LOCK_OBJECT)
-        .execute(&mut *{ barrier })
+        .execute(&mut *barrier)
         .await
         .expect("release snapshot barrier");
     snapshot
@@ -128,13 +132,13 @@ async fn run_snapshot_during_refresh(db: &E2eDb, use_default_target: bool) {
         .fetch_all(&db.pool)
         .await
         .expect("read independent source oracle");
-    assert_ne!(
+    assert_eq!(
         current_frontier, old_frontier,
-        "refresh must commit in the gap"
+        "refresh must not commit in the gap"
     );
     assert_eq!(
-        current_rows, source_rows,
-        "refresh must reach source parity"
+        current_rows, old_rows,
+        "stream-table rows must match the saved frontier"
     );
     assert_eq!(
         snapshot_frontier, old_frontier,
@@ -152,22 +156,35 @@ async fn run_snapshot_during_refresh(db: &E2eDb, use_default_target: bool) {
     .await
     .expect("read snapshot rows");
     assert_eq!(
-        snapshot_rows, current_rows,
-        "snapshot copied post-refresh rows"
+        snapshot_rows, old_rows,
+        "snapshot rows must match the saved frontier"
     );
-    assert_ne!(
-        snapshot_frontier, current_frontier,
-        "reproduction observed a mixed pair"
+
+    db.execute("SELECT pgtrickle.refresh_stream_table('v1183_stream')")
+        .await;
+    let refreshed_rows: Vec<i32> = sqlx::query_scalar("SELECT id FROM v1183_stream ORDER BY id")
+        .fetch_all(&db.pool)
+        .await
+        .expect("read stream-table rows after retained CDC refresh");
+    assert_eq!(
+        refreshed_rows, source_rows,
+        "retained CDC history must still refresh"
     );
 }
 
 #[tokio::test]
 async fn test_snapshot_refresh_race_keeps_frontier_and_rows_coherent() {
     let db = E2eDb::new().await.with_extension().await;
+    let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read transaction isolation");
+    assert_eq!(isolation, "read committed");
     db.execute("CREATE TABLE v1183_source (id integer primary key)")
         .await;
     db.execute("INSERT INTO v1183_source VALUES (1)").await;
-    db.execute("CREATE ROLE v1183_owner LOGIN").await;
+    db.execute("DO $$ BEGIN CREATE ROLE v1183_owner LOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+        .await;
     db.execute("GRANT SELECT ON v1183_source TO v1183_owner")
         .await;
     db.execute("GRANT USAGE ON SCHEMA pgtrickle TO v1183_owner")
@@ -187,9 +204,9 @@ async fn test_snapshot_refresh_race_keeps_frontier_and_rows_coherent() {
     )
     .await
     .expect("create owner stream table");
-    db.execute("CREATE OR REPLACE FUNCTION v1183_snapshot_barrier() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN IF position('v1183_target' in current_query()) > 0 OR position('snapshot_v1183_stream_' in current_query()) > 0 THEN PERFORM pg_advisory_lock(1183, 1183); PERFORM pg_advisory_unlock(1183, 1183); END IF; END $$")
+    db.execute("CREATE OR REPLACE FUNCTION v1183_snapshot_barrier() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN IF EXISTS (SELECT 1 FROM pg_event_trigger_ddl_commands() WHERE object_identity LIKE '%v1183_target' OR object_identity LIKE '%snapshot_v1183_stream_%') THEN PERFORM pg_advisory_lock(1183, 1183); PERFORM pg_advisory_unlock(1183, 1183); END IF; END $$")
         .await;
-    db.execute("CREATE EVENT TRIGGER v1183_snapshot_barrier ON ddl_command_start EXECUTE FUNCTION v1183_snapshot_barrier()")
+    db.execute("CREATE EVENT TRIGGER v1183_snapshot_barrier ON ddl_command_end EXECUTE FUNCTION v1183_snapshot_barrier()")
         .await;
 
     db.execute("INSERT INTO v1183_source VALUES (2)").await;
