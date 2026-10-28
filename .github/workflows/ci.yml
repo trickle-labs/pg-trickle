@@ -183,7 +183,6 @@ jobs:
           if-no-files-found: error
 
       - name: Upload exact join endpoint verification evidence
-        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: join-plan-verification-evidence
