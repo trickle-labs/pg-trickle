@@ -3041,8 +3041,7 @@ re-attaches the trigger to each source table.
 pgtrickle.rebuild_cdc_triggers() → text
 ```
 
-Returns `'done'` on success. Emits a `WARNING` per table on error and
-continues processing remaining sources.
+Returns `'done'` on success. A trigger rebuild failure aborts the transaction.
 
 **When to use:**
 
@@ -3061,7 +3060,7 @@ SELECT pgtrickle.rebuild_cdc_triggers();
 **Notes:**
 - Called automatically during `ALTER EXTENSION pg_trickle UPDATE` (0.3.0 → 0.4.0) migration.
 - Safe to call at any time — existing triggers are dropped and recreated.
-- On error for a specific table, a `WARNING` is logged and processing continues with remaining sources.
+- Existing trigger function bodies keep their previous changed-column policy until rebuilt with the new library. Rebuilding installs representation-aware numeric change tracking; it cannot recover updates already omitted by the old mask. Fully refresh affected stored results and resnapshot dependent consumers as required by their recovery contract.
 
 ---
 

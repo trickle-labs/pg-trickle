@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 FORMAT_VERSION = 1
@@ -186,6 +187,45 @@ def changed_route_check(scenario: dict, database: str | None, previous: int) -> 
         raise ReplayFailure("SilentFallback", "no fresh completed differential history without fallback")
 
 
+def captured_source_cuts(scenario: dict, database: str | None) -> list[tuple[int, str]]:
+    name = scenario["query"]["stream_table"].replace("'", "''")
+    sources = json.loads(psql(database,
+        "SELECT coalesce(json_agg(json_build_array(d.source_relid::bigint, "
+        "format('%I.%I',current_setting('pg_trickle.change_buffer_schema'),"
+        "'changes_' || ct.source_stable_name))), '[]') "
+        "FROM pgtrickle.pgt_dependencies d JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) "
+        "JOIN pgtrickle.pgt_change_tracking ct ON ct.source_relid=d.source_relid "
+        f"WHERE s.pgt_schema || '.' || s.pgt_name='{name}'", tuples=True))
+    if not sources:
+        raise ReplayFailure("CoverageNotReached", "no captured sources")
+    pending = " UNION ALL ".join(
+        f"SELECT {int(oid)}::bigint AS oid,max(lsn)::text AS lsn FROM {buffer} "
+        "WHERE action IN ('I','D') AND lsn > (SELECT "
+        f"coalesce(frontier->'sources'->'{int(oid)}'->>'lsn','0/0')::pg_lsn "
+        f"FROM pgtrickle.pgt_stream_tables WHERE pgt_schema || '.' || pgt_name='{name}')"
+        for oid, buffer in sources)
+    deadline = time.monotonic() + 5
+    while True:
+        cuts = json.loads(psql(database,
+            "SELECT coalesce(json_agg(json_build_array(oid,lsn)), '[]') "
+            f"FROM ({pending}) pending WHERE lsn IS NOT NULL", tuples=True))
+        if cuts:
+            return [(int(oid), lsn) for oid, lsn in cuts]
+        if time.monotonic() >= deadline:
+            raise ReplayFailure("CoverageNotReached", "no committed captured changes above the consumer cut")
+        time.sleep(.01)
+
+
+def source_cut_check(scenario: dict, database: str | None, cuts: list[tuple[int, str]]) -> None:
+    name = scenario["query"]["stream_table"].replace("'", "''")
+    for oid, lsn in cuts:
+        observed = psql(database,
+            f"SELECT coalesce(frontier->'sources'->'{oid}'->>'lsn','0/0')::pg_lsn >= '{lsn}'::pg_lsn "
+            f"FROM pgtrickle.pgt_stream_tables WHERE pgt_schema || '.' || pgt_name='{name}'", tuples=True)
+        if observed != "t":
+            raise ReplayFailure("CoverageNotReached", f"source {oid} captured through {lsn}, but refresh held an earlier cut")
+
+
 def artifact(scenario: dict, scenario_path: Path, failure: dict) -> Path:
     message = failure["detail"]
     directory = Path(os.environ.get("DVM_ARTIFACT_DIR", "artifacts/dvm-fuzz"))
@@ -319,11 +359,15 @@ def run(path: Path, database: str | None, expect_negative_control: bool = False)
                         f"affected rows, got {affected}"
                     )
             mutation_index = None
+            phase = "capture witness"
+            cuts = captured_source_cuts(scenario, database) if require_changed else []
             phase = f"{cycle['name']} refresh"
             psql(database, refresh)
             phase = f"{cycle['name']} refresh mode"
             mode_check(scenario, database)
             if require_changed:
+                phase = f"{cycle['name']} captured source cut"
+                source_cut_check(scenario, database, cuts)
                 phase = f"{cycle['name']} changed-data route"
                 changed_route_check(scenario, database, previous)
             phase = f"{cycle['name']} exact comparison"

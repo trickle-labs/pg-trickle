@@ -388,6 +388,31 @@ fn diff_scan_change_buffer(
         None
     };
 
+    if !is_keyless && ctx.source_has_deferred_key(table_oid) {
+        // Deferred uniqueness permits I(new) before D(old) for one key.
+        let cte_name = ctx.next_cte_name(&format!("scan_{alias}"));
+        let predicate = ctx.scan_pushed_predicate().map_or(String::new(), |p| {
+            format!(" AND ({})", rewrite_predicate_for_scan(p, ""))
+        });
+        let sql = format!(
+            "SELECT c.__pgt_row_id, c.action::text AS __pgt_action, \
+             {payload}, TRUE AS __pgt_key_changed FROM {change_table} c \
+             WHERE {lsn_filter} AND c.action IN ('I','D'){predicate}",
+            payload = new_col_refs.join(", "),
+        );
+        ctx.add_cte(cte_name.clone(), sql);
+        ctx.scan_delta_ctes_mut()
+            .insert((table_oid, alias.to_string()), cte_name.clone());
+        ctx.set_scan_delta_cte_for_source(table_oid, cte_name.clone());
+        return Ok(DiffResult {
+            cte_name,
+            columns: col_names,
+            schema: crate::dvm::schema::RelationSchema::from_parser_columns(columns),
+            is_deduplicated: false,
+            has_key_changed: true,
+        });
+    }
+
     // ── EC-06: Keyless net-counting path ─────────────────────────────
     //
     // For keyless tables, identical rows share the same pk_hash (content
@@ -992,6 +1017,22 @@ mod tests {
 
         // With PK columns, should use pre-computed pk_hash
         assert_sql_contains(&sql, "c.__pgt_row_id");
+    }
+
+    #[test]
+    fn test_diff_scan_deferred_key_retains_signed_events_and_key_flag() {
+        let mut ctx = test_ctx();
+        ctx.set_source_deferred_keys(std::collections::HashSet::from([100]));
+        ctx.merge_safe_dedup = true;
+        let tree = scan_with_pk(100, "orders", "public", "o", &["id", "amount"], &["id"]);
+        let result = diff_scan(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert!(!result.is_deduplicated);
+        assert!(result.has_key_changed);
+        assert_sql_contains(&sql, "c.action::text AS __pgt_action");
+        assert_sql_contains(&sql, "TRUE AS __pgt_key_changed");
+        assert!(!sql.contains("FIRST_VALUE"), "{sql}");
+        assert!(!sql.contains("DISTINCT ON"), "{sql}");
     }
 
     #[test]

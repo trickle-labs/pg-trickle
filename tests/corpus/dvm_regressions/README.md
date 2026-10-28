@@ -72,6 +72,19 @@ referencing a missing `__pgt_key_changed` column. These are preserved failures,
 not successful coverage or repaired behavior. The owning CDC/join work must
 resolve them before this semantic floor can pass.
 
+The scheduled 54-case baseline was also executed against that same production
+package: 10 passed and 44 failed, with zero retries. This establishes observed
+scheduled coverage without treating the larger red selection as qualification.
+
+After the CDC repairs at `db909f1b0a97f06b999a68a478258aa21e2e7e73`, the
+34-case floor reports 16 passes and 18 failures. Both consumer orders, numeric
+projection, CASE, deferred-key replacement and nested-count metadata now pass.
+The remaining failures are all 15 composite COUNT bags, FILTER-protected
+division, special-value SUM/AVG and mixed-snapshot division. The floor remains
+red, with no retries or substituted FULL refreshes. Its local report and full
+failure artifacts are under
+`.p2p/work/issue-1217-semantic-generators/cdc-deferred-frozen/`.
+
 Local commands (Docker/Testcontainers required):
 
 ```sh

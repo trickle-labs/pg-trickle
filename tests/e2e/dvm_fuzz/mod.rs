@@ -451,6 +451,64 @@ async fn replay_inner(db: &E2eDb, scenario: &Scenario) -> Result<(), ReplayFailu
                 ));
             }
         }
+        let mut captured_cuts: Vec<(i64, String)> = Vec::new();
+        if scenario.execution.require_differential_history {
+            let source_oids: Vec<i64> = sqlx::query_scalar("SELECT DISTINCT d.source_relid::bigint FROM pgtrickle.pgt_dependencies d JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_schema || '.' || s.pgt_name=$1")
+                .bind(&scenario.query.stream_table).fetch_all(&db.pool).await.map_err(|e| failure(scenario,"I-04","InfrastructureFailure","capture witness",Some(cycle_index),None,e.to_string()))?;
+            let mut pending = Vec::new();
+            for oid in source_oids {
+                let buffer = db.change_buffer_table(oid).await;
+                pending.push(format!("SELECT {oid}::bigint AS oid,max(lsn)::text AS lsn FROM {buffer} WHERE action IN ('I','D') AND lsn > (SELECT coalesce(frontier->'sources'->'{oid}'->>'lsn','0/0')::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_schema || '.' || pgt_name='{}')",scenario.query.stream_table));
+            }
+            if pending.is_empty() {
+                return Err(failure(
+                    scenario,
+                    "I-04",
+                    "CoverageNotReached",
+                    "capture witness",
+                    Some(cycle_index),
+                    None,
+                    "no captured sources",
+                ));
+            }
+            let pending = format!(
+                "SELECT * FROM ({}) pending WHERE lsn IS NOT NULL",
+                pending.join(" UNION ALL ")
+            );
+            if !db
+                .wait_for_condition(
+                    "committed captured changes",
+                    &format!("SELECT EXISTS ({pending})"),
+                    std::time::Duration::from_secs(5),
+                    std::time::Duration::from_millis(10),
+                )
+                .await
+            {
+                return Err(failure(
+                    scenario,
+                    "I-04",
+                    "CoverageNotReached",
+                    "capture witness",
+                    Some(cycle_index),
+                    None,
+                    "no committed captured changes above the consumer cut",
+                ));
+            }
+            captured_cuts = sqlx::query_as(sqlx::AssertSqlSafe(pending))
+                .fetch_all(&db.pool)
+                .await
+                .map_err(|e| {
+                    failure(
+                        scenario,
+                        "I-04",
+                        "InfrastructureFailure",
+                        "capture witness",
+                        Some(cycle_index),
+                        None,
+                        e.to_string(),
+                    )
+                })?;
+        }
         execute_traced(
             db,
             scenario,
@@ -481,6 +539,22 @@ async fn replay_inner(db: &E2eDb, scenario: &Scenario) -> Result<(), ReplayFailu
             ));
         }
         if scenario.execution.require_differential_history {
+            for (oid, lsn) in captured_cuts {
+                let covered: bool = db.query_scalar(&format!("SELECT coalesce(frontier->'sources'->'{oid}'->>'lsn','0/0')::pg_lsn >= '{lsn}'::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_schema || '.' || pgt_name='{}'", scenario.query.stream_table)).await;
+                if !covered {
+                    return Err(failure(
+                        scenario,
+                        "I-04",
+                        "CoverageNotReached",
+                        format!("{} captured source cut", cycle.name),
+                        Some(cycle_index),
+                        None,
+                        format!(
+                            "source {oid} captured through {lsn}, but refresh held an earlier cut"
+                        ),
+                    ));
+                }
+            }
             let witnessed: bool = db
                 .query_scalar(&format!(
                     "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
@@ -528,18 +602,15 @@ pub async fn replay(db: &E2eDb, scenario: &Scenario) -> Result<(), ReplayFailure
     })?;
 
     let result = replay_inner(db, scenario).await;
-    let cleanup = db
-        .try_execute(&format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            scenario.schema.name
-        ))
-        .await;
+    let cleanup_sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", scenario.schema.name);
     if let Err(failure) = result {
         let postgres_log = collect_postgres_log(db).await;
         write_artifact(scenario, &failure, &postgres_log);
-        let _ = cleanup;
+        write_state_snapshot(db, scenario).await;
+        let _ = db.try_execute(&cleanup_sql).await;
         return Err(failure);
     }
+    let cleanup = db.try_execute(&cleanup_sql).await;
     if let Err(cleanup_error) = cleanup {
         let failure = failure(
             scenario,
@@ -555,6 +626,50 @@ pub async fn replay(db: &E2eDb, scenario: &Scenario) -> Result<(), ReplayFailure
         return Err(failure);
     }
     Ok(())
+}
+
+async fn write_state_snapshot(db: &E2eDb, scenario: &Scenario) {
+    let relations: Vec<(String, String)> = sqlx::query_as(
+        "SELECT schemaname::text,tablename::text FROM pg_tables WHERE schemaname=$1 \
+         UNION ALL SELECT current_setting('pg_trickle.change_buffer_schema'), \
+         'changes_' || coalesce(ct.source_stable_name,ct.source_relid::text) \
+         FROM pgtrickle.pgt_change_tracking ct JOIN pg_class c ON c.oid=ct.source_relid \
+         JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname::text=$1",
+    )
+    .bind(&scenario.schema.name)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap_or_default();
+    let mut rows = serde_json::Map::new();
+    let progress: Result<serde_json::Value, _> = sqlx::query_scalar("SELECT coalesce(jsonb_agg(to_jsonb(s)),'[]'::jsonb) FROM pgtrickle.pgt_stream_tables s WHERE pgt_schema=$1").bind(&scenario.schema.name).fetch_one(&db.pool).await;
+    if let Ok(value) = progress {
+        rows.insert("stream_metadata".to_string(), value);
+    }
+    for (schema, name) in relations {
+        let qualified = format!(
+            "\"{}\".\"{}\"",
+            schema.replace('"', "\"\""),
+            name.replace('"', "\"\"")
+        );
+        let observation: Result<String, _> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]'::jsonb)::text FROM (SELECT * FROM {qualified} LIMIT 100) r"
+        ))).fetch_one(&db.pool).await;
+        if let Ok(value) = observation {
+            rows.insert(qualified, serde_json::Value::String(value));
+        }
+    }
+    let root =
+        std::env::var("DVM_ARTIFACT_DIR").unwrap_or_else(|_| "artifacts/dvm-fuzz".to_string());
+    if let Ok(contents) = serde_json::to_string_pretty(
+        &serde_json::json!({"row_limit_per_relation":100,"relations":rows}),
+    ) {
+        let _ = std::fs::write(
+            std::path::Path::new(&root)
+                .join(&scenario.scenario_id)
+                .join("boundary-state.json"),
+            contents,
+        );
+    }
 }
 
 pub fn render_replay_sql(scenario: &Scenario) -> String {

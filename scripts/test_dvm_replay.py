@@ -87,6 +87,19 @@ class NegativeControlTests(unittest.TestCase):
         self.assertEqual(reduced["query"], scenario["query"])
         self.assertEqual(reduced["cycles"][0]["mutations"][0]["sql"], transaction)
 
+    def test_capture_and_consumed_cut_are_required_without_semantic_retries(self):
+        scenario = dvm_replay.load(CONTROL)
+        with patch.object(dvm_replay, "psql", side_effect=['[[42,"pgtrickle_changes.changes_x"]]', '[[42,"0/ABCD"]]']):
+            cuts = dvm_replay.captured_source_cuts(scenario, "db")
+        self.assertEqual(cuts, [(42, "0/ABCD")])
+        with patch.object(dvm_replay, "psql", return_value="f") as run:
+            with self.assertRaisesRegex(dvm_replay.ReplayFailure, "CoverageNotReached.*earlier cut"):
+                dvm_replay.source_cut_check(scenario, "db", cuts)
+            self.assertEqual(run.call_count, 1)
+        with patch.object(dvm_replay, "psql", return_value="[]"):
+            with self.assertRaisesRegex(dvm_replay.ReplayFailure, "no captured sources"):
+                dvm_replay.captured_source_cuts(scenario, "db")
+
 
 if __name__ == "__main__":
     unittest.main()

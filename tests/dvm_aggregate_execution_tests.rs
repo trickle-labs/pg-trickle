@@ -4,6 +4,8 @@
 //! PostgreSQL container so we can validate result rows for representative
 //! algebraic and rescan aggregate families.
 
+#[path = "../verification/cdc_elision.rs"]
+mod cdc_elision;
 mod common;
 #[path = "../verification/aggregate_lifecycle.rs"]
 mod lifecycle;
@@ -12,6 +14,180 @@ use common::TestDb;
 use pg_trickle::dvm::DiffContext;
 use pg_trickle::dvm::parser::{AggExpr, AggFunc, Column, Expr, OpTree, SortExpr};
 use pg_trickle::version::Frontier;
+
+#[tokio::test]
+async fn test_cdc_keyed_weight_uses_complete_images_without_scalar_equality() {
+    let db = TestDb::new().await;
+    let delta = "SELECT decode('01','hex') AS __pgt_row_id, 'D'::text AS __pgt_action, 1 AS id, 1.0::numeric AS n, '{\"x\":1}'::json AS j \
+                 UNION ALL SELECT decode('01','hex'),'I',1,1.00::numeric,'{\"x\":2}'::json";
+    let rendered = cdc_elision::keyed_weight_sql(delta, "id,n,j");
+    let (action, scale, json): (String, i32, String) = sqlx::query_as(sqlx::AssertSqlSafe(
+        format!("SELECT __pgt_action,scale(n),j::text FROM {rendered} d"),
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (action, scale, json),
+        ("I".to_string(), 2, "{\"x\":2}".to_string())
+    );
+    let scale_delta = "SELECT decode('01','hex') AS __pgt_row_id, 'D'::text AS __pgt_action, 1 AS id, 1.0::numeric AS n \
+                       UNION ALL SELECT decode('01','hex'),'I',1,1.00::numeric";
+    let rendered = cdc_elision::keyed_weight_sql(scale_delta, "id,n");
+    let scale: i32 = db
+        .query_scalar(&format!("SELECT scale(n) FROM {rendered} d"))
+        .await;
+    assert_eq!(scale, 2, "SQL-equal images must not cancel a scale update");
+    let transient = "SELECT decode('01','hex') AS __pgt_row_id, 'I'::text AS __pgt_action, 1 AS id, NULL::json AS j \
+                     UNION ALL SELECT decode('01','hex'),'D',1,NULL::json";
+    let rendered = cdc_elision::keyed_weight_sql(transient, "id,j");
+    let count: i64 = db
+        .query_scalar(&format!("SELECT count(*) FROM {rendered} d"))
+        .await;
+    assert_eq!(count, 0, "genuine same-image cancellation");
+    let collision = "SELECT decode('01','hex') AS __pgt_row_id,'I'::text AS __pgt_action,7 AS __pgt_image,9 AS __pgt_weight";
+    let rendered = cdc_elision::keyed_weight_sql(collision, "__pgt_image,__pgt_weight");
+    let payload: (i32, i32) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT __pgt_image,__pgt_weight FROM {rendered} d"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        payload,
+        (7, 9),
+        "internal aliases must not shadow payload columns"
+    );
+    let image_name = format!("__pgt_image{}", "_".repeat(52));
+    let weight_name = format!("__pgt_weight{}", "_".repeat(51));
+    let columns = format!("__pgt_image,__pgt_weight,{image_name},{weight_name}");
+    let collision = format!(
+        "SELECT decode('01','hex') AS __pgt_row_id,'I'::text AS __pgt_action,\
+         7 AS __pgt_image,9 AS __pgt_weight,11 AS {image_name},13 AS {weight_name}"
+    );
+    let rendered = cdc_elision::keyed_weight_sql(&collision, &columns);
+    let payload: (i32, i32, i32, i32) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {columns} FROM {rendered} d"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(payload, (7, 9, 11, 13), "63-byte payload names survive");
+}
+
+#[tokio::test]
+async fn test_cdc_image_policy_preserves_native_scalar_observations() {
+    let db = TestDb::new().await;
+    db.execute("CREATE DOMAIN image_numeric AS numeric").await;
+    let rendered = cdc_elision::changed_column_sql("a.v", "b.v");
+    let mut observed = 0;
+    for (data_type, values, admitted) in [
+        ("boolean", "(NULL::boolean),(false),(true)", true),
+        (
+            "smallint",
+            "(NULL::smallint),('-32768'::smallint),('32767'::smallint)",
+            true,
+        ),
+        (
+            "integer",
+            "(NULL::int),(-2147483648),(-1),(0),(2147483647)",
+            true,
+        ),
+        (
+            "bigint",
+            "(NULL::bigint),('-9223372036854775808'::bigint),('9223372036854775807'::bigint)",
+            true,
+        ),
+        (
+            "numeric",
+            "(NULL::numeric),(1.0),(1.00),(-1),(0),('Infinity'::numeric),('-Infinity'::numeric),('NaN'::numeric)",
+            false,
+        ),
+        ("text", "(NULL::text),('a'),('A'),('é')", false),
+        (
+            "varchar",
+            "(NULL::varchar(3)),('a'::varchar(3)),('A'::varchar(3))",
+            false,
+        ),
+        (
+            "bpchar",
+            "(NULL::character(2)),('a'::character(2)),('b'::character(2))",
+            false,
+        ),
+        (
+            "bytea",
+            "(NULL::bytea),('\\x'::bytea),('\\x0000'::bytea)",
+            false,
+        ),
+        (
+            "uuid",
+            "(NULL::uuid),('00000000-0000-0000-0000-000000000000'::uuid),('ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)",
+            true,
+        ),
+        (
+            "json",
+            "(NULL::json),('{}'::json),('{\"v\":1}'::json)",
+            false,
+        ),
+        (
+            "image_numeric",
+            "(NULL::image_numeric),(1.0::image_numeric),(1.00::image_numeric)",
+            false,
+        ),
+    ] {
+        let oid: i64 = db
+            .query_scalar(&format!("SELECT '{data_type}'::regtype::oid::bigint"))
+            .await;
+        assert_eq!(
+            cdc_elision::admitted_image_type(oid as u32),
+            admitted,
+            "{data_type}: actual catalog OID"
+        );
+        let observations: Vec<(String, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT ({rendered})::text, a.v::text IS DISTINCT FROM b.v::text FROM (VALUES {values}) a(v) CROSS JOIN (VALUES {values}) b(v)"
+        ))).fetch_all(&db.pool).await.unwrap();
+        for (bit, different_observation) in observations {
+            assert_eq!(
+                bit,
+                if !admitted || different_observation {
+                    "1"
+                } else {
+                    "0"
+                },
+                "{data_type}: native text/NULL observation"
+            );
+            observed += 1;
+        }
+    }
+    assert_eq!(observed, 186);
+    let scale_control: (bool, String) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT a.v IS DISTINCT FROM b.v, ({rendered})::text FROM (VALUES(1.0::numeric)) a(v) CROSS JOIN (VALUES(1.00::numeric)) b(v)"
+    ))).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(
+        scale_control,
+        (false, "1".to_string()),
+        "value-equality control must lose the scale change"
+    );
+    db.execute("CREATE TABLE image_storage (id INT, v TEXT)")
+        .await;
+    db.execute("INSERT INTO image_storage VALUES (1,repeat('abc',10000))")
+        .await;
+    db.execute("ALTER TABLE image_storage ALTER COLUMN v SET STORAGE EXTERNAL")
+        .await;
+    db.execute("INSERT INTO image_storage VALUES (2,repeat('abc',10000))")
+        .await;
+    let (same_wire, different_storage, kept): (bool,bool,String) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT record_send(ROW(a.v)) = record_send(ROW(b.v)), pg_column_size(a.v) <> pg_column_size(b.v), ({rendered})::text FROM image_storage a CROSS JOIN image_storage b WHERE a.id=1 AND b.id=2"
+    ))).fetch_one(&db.pool).await.unwrap();
+    assert!(
+        same_wire && different_storage,
+        "wire equality must not hide storage observations"
+    );
+    assert_eq!(
+        kept, "1",
+        "variable-length values require a stronger observation contract before elision"
+    );
+}
 
 #[tokio::test]
 async fn test_semantic_ternary_partition_and_plan_variation_preserve_bags() {

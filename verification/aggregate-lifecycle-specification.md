@@ -114,8 +114,10 @@ against expected SQL strings copied from the generator:
   without full fallback; zero public delta is valid for invisible-to-invisible
   transitions. The exact schema/bag oracle remains primary.
 
-This source review and independent-oracle evidence are separate from an
-independent reviewer sign-off. No human or second-agent review is claimed.
+An independent read-only agent review accepted this bounded specification at
+`77a0dda5425bd20ffbdd834623c03f6c55453930`, with no blocking findings. See
+[the review record](specification-reviews.md). It did not rerun proofs or tests
+and is not merge approval.
 
 ## Proof controls, candidate evidence and limits
 
