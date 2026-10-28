@@ -92,6 +92,7 @@ This does not establish recovery after required history has already been
 removed. The snapshot metadata-read versus copy schedule is covered above.
 PR #1266 adds separate witnessed cleanup-versus-registration and
 pause-versus-dispatch schedules; those tests remain in that independent PR and
-are not part of this branch. Existing premature-cleanup/oracle controls remain;
-these schedules are not an executable production cleanup mutant. No general
-minimizer, whole recovery proof, or merge approval is claimed.
+are not part of this branch. Existing premature-cleanup/oracle controls remain.
+PR #1266 exercises the real cleanup and dispatch paths but adds no destructive
+production-cleanup mutant. No general minimizer, whole recovery proof, or merge
+approval is claimed.
