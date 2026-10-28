@@ -42,6 +42,10 @@ pub mod citus;
 pub mod config;
 // dag and dvm contain utility/helper functions that may not be called from
 // the main production path but are retained for future use or test support.
+#[path = "../verification/aggregate_lifecycle.rs"]
+pub(crate) mod aggregate_lifecycle;
+#[path = "../verification/cdc_elision.rs"]
+pub(crate) mod cdc_elision;
 #[allow(dead_code)]
 pub mod dag;
 pub(crate) mod diagnostics;
@@ -60,6 +64,8 @@ mod hooks;
 pub(crate) mod integration_contract;
 #[allow(dead_code)]
 mod ivm;
+#[path = "../verification/join_plan.rs"]
+pub(crate) mod join_plan;
 #[path = "../verification/lsn.rs"]
 pub(crate) mod lsn;
 #[allow(dead_code)]

@@ -88,6 +88,7 @@ mod tests {
             format_version: 1,
             generator_version: "test".to_string(),
             seed: 939,
+            preserve_sql_boundaries: false,
             schema: SchemaSpec {
                 name: "dvmf_shrink_test".to_string(),
                 setup_sql: vec![
@@ -139,6 +140,7 @@ mod tests {
             execution: ExecutionSettings {
                 schedule: "1m".to_string(),
                 requested_refresh_mode: "DIFFERENTIAL".to_string(),
+                require_differential_history: false,
             },
             expected_capability: ExpectedCapability {
                 differential: true,

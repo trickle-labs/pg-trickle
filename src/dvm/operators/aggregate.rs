@@ -990,16 +990,17 @@ fn build_intermediate_agg_delta(
             format!("{delta_cte} AS d({delta_group_aliases})")
         };
 
-        let old_presence = if group_columns.is_empty() {
-            String::new()
-        } else {
-            format!("\nWHERE ({old_pgt_count}) > 0")
-        };
-        let new_presence = if group_columns.is_empty() {
-            String::new()
-        } else {
-            "\nWHERE n.__pgt_count > 0".to_string()
-        };
+        let old_presence = format!(
+            "\nWHERE {}",
+            crate::aggregate_lifecycle::group_presence_sql(group_columns.is_empty(), old_pgt_count,)
+        );
+        let new_presence = format!(
+            "\nWHERE {}",
+            crate::aggregate_lifecycle::group_presence_sql(
+                group_columns.is_empty(),
+                "n.__pgt_count",
+            )
+        );
         let final_sql = format!(
             "\
 -- D events: old state (algebraic: old = new - ins + del)
@@ -1372,6 +1373,17 @@ fn build_rescan_cte(
                     "{} AS {}",
                     agg_sum2_rescan_sql(agg),
                     quote_ident(&format!("__pgt_aux_sum2_{}", agg.alias)),
+                ));
+            }
+        }
+        if config.force_all_aggs && matches!(agg.function, AggFunc::Avg) && !agg.is_distinct {
+            for (function, suffix) in [(AggFunc::Sum, "sum"), (AggFunc::Count, "count")] {
+                let mut auxiliary = (*agg).clone();
+                auxiliary.function = function;
+                selects.push(format!(
+                    "COALESCE({}, 0) AS {}",
+                    agg_to_rescan_sql(&auxiliary),
+                    quote_ident(&format!("__pgt_rescan_{suffix}_{}", agg.alias)),
                 ));
             }
         }
@@ -2421,24 +2433,41 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             let ins_cnt = quote_ident(&format!("__ins_count_{}", agg.alias));
             let del_cnt = quote_ident(&format!("__del_count_{}", agg.alias));
 
-            let aux_sum_value = format!(
-                "COALESCE(st.{aux_sum}, 0) + COALESCE(d.{ins_sum}, 0) - COALESCE(d.{del_sum}, 0)"
+            let aux_sum_value = initialize_having_group(
+                use_having_rescan && matches!(agg.function, AggFunc::Avg),
+                &format!(
+                    "COALESCE(r.{}, 0)",
+                    quote_ident(&format!("__pgt_rescan_sum_{}", agg.alias))
+                ),
+                &format!(
+                    "COALESCE(st.{aux_sum}, 0) + COALESCE(d.{ins_sum}, 0) - COALESCE(d.{del_sum}, 0)"
+                ),
             );
             let aux_sum_value = if needs_special_value_rescan(agg) && has_rescan {
                 format!(
-                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {aux_sum_value} END",
+                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN COALESCE(r.{}, 0) ELSE {aux_sum_value} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
                     quote_ident(&format!("__pgt_aux_sum_{}", agg.alias)),
                 )
             } else {
                 aux_sum_value
             };
+            let aux_count_value = initialize_having_group(
+                use_having_rescan && matches!(agg.function, AggFunc::Avg),
+                &format!(
+                    "COALESCE(r.{}, 0)",
+                    quote_ident(&format!("__pgt_rescan_count_{}", agg.alias))
+                ),
+                &format!(
+                    "COALESCE(st.{aux_cnt}, 0) + COALESCE(d.{ins_cnt}, 0) - COALESCE(d.{del_cnt}, 0)"
+                ),
+            );
             merge_selects.push(format!(
                 "{aux_sum_value} AS {}",
                 quote_ident(&format!("new___pgt_aux_sum_{}", agg.alias)),
             ));
             merge_selects.push(format!(
-                "COALESCE(st.{aux_cnt}, 0) + COALESCE(d.{ins_cnt}, 0) - COALESCE(d.{del_cnt}, 0) AS {}",
+                "{aux_count_value} AS {}",
                 quote_ident(&format!("new___pgt_aux_count_{}", agg.alias)),
             ));
         }
@@ -2485,22 +2514,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         // Update the SUM nonnull-count auxiliary column.
         if agg_has_nonnull_aux {
             let st_alias = st_col_name(&agg.alias);
-            let aux_nonnull = quote_ident(&format!("__pgt_aux_nonnull_{st_alias}"));
-            let ins_nonnull = quote_ident(&format!("__ins_nonnull_{}", agg.alias));
-            let del_nonnull = quote_ident(&format!("__del_nonnull_{}", agg.alias));
-            let algebraic = format!(
-                "COALESCE(st.{aux_nonnull}, 0) + COALESCE(d.{ins_nonnull}, 0) - COALESCE(d.{del_nonnull}, 0)"
-            );
-            let new_nonnull = if use_having_rescan {
-                format!(
-                    "CASE WHEN st.__pgt_count IS NULL \
-                     THEN COALESCE(r.{}, 0) \
-                     ELSE {algebraic} END",
-                    quote_ident(&format!("__pgt_nonnull_{}", agg.alias)),
-                )
-            } else {
-                algebraic
-            };
+            let new_nonnull = sum_nonnull_count_expr(&agg.alias, &st_alias, use_having_rescan);
             merge_selects.push(format!(
                 "{new_nonnull} AS {}",
                 quote_ident(&format!("new___pgt_aux_nonnull_{}", agg.alias)),
@@ -2518,29 +2532,23 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     // Action classification (same COALESCE guards as new_count)
     // A hidden HAVING group can requalify through an UPDATE with zero net row count.
-    let action_case = if is_scalar_agg {
-        "\
-CASE
-    WHEN st.__pgt_count IS NULL AND (COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0)) > 0 THEN 'I'
-    ELSE 'U'
-END AS __pgt_meta_action"
-            .to_string()
-    } else if use_having_rescan && has_rescan {
-        "\
-CASE
+    let action_case = if !is_scalar_agg && use_having_rescan && has_rescan {
+        // Preserve full-rescan admissions when hidden HAVING groups requalify.
+        r#"CASE
     WHEN st.__pgt_count IS NULL AND COALESCE(r.__pgt_count, 0) > 0 THEN 'I'
     WHEN COALESCE(st.__pgt_count, 0) + COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0) <= 0 THEN 'D'
     ELSE 'U'
-END AS __pgt_meta_action"
+END AS __pgt_meta_action"#
             .to_string()
     } else {
-        "\
-CASE
-    WHEN st.__pgt_count IS NULL AND (COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0)) > 0 THEN 'I'
-    WHEN COALESCE(st.__pgt_count, 0) + COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0) <= 0 THEN 'D'
-    ELSE 'U'
-END AS __pgt_meta_action"
-            .to_string()
+        format!(
+            "{} AS __pgt_meta_action",
+            crate::aggregate_lifecycle::group_action_sql(
+                is_scalar_agg,
+                "st.__pgt_count IS NOT NULL",
+                &new_count_expr,
+            )
+        )
     };
     merge_selects.push(action_case);
 
@@ -2682,19 +2690,15 @@ END AS __pgt_meta_action"
                     | AggFunc::VarPop
                     | AggFunc::VarSamp
             );
-        if needs_null_on_empty {
-            agg_cases.push(format!(
-                "CASE WHEN m.__pgt_meta_action = 'D' THEN m.{old_col} \
-                 WHEN m.new_count <= 0 THEN NULL \
-                 ELSE m.{new_col} END AS {}",
-                quote_ident(&agg.alias),
-            ));
-        } else {
-            agg_cases.push(format!(
-                "CASE WHEN m.__pgt_meta_action = 'D' THEN m.{old_col} ELSE m.{new_col} END AS {}",
-                quote_ident(&agg.alias),
-            ));
-        }
+        let new_value = crate::aggregate_lifecycle::aggregate_value_sql(
+            needs_null_on_empty,
+            "m.new_count",
+            &format!("m.{new_col}"),
+        );
+        agg_cases.push(format!(
+            "CASE WHEN m.__pgt_meta_action = 'D' THEN m.{old_col} ELSE {new_value} END AS {}",
+            quote_ident(&agg.alias),
+        ));
 
         // AVG auxiliary columns: propagate the algebraically computed values
         if is_algebraic_via_aux(agg) {
@@ -3161,14 +3165,30 @@ fn agg_covar_delta_exprs(
     (ins, del)
 }
 
-/// Generate the merge expression for computing the new aggregate value.
-///
-/// When `has_rescan` is true, group-rescan aggregates reference the rescan
-/// CTE (`r.{alias}`) instead of producing a NULL sentinel. This correctly
-/// re-aggregates the affected group from source data.
-///
-/// When no column aliasing is in effect, use [`agg_merge_expr`] which
-/// defaults `st_col` to `agg.alias`.
+// A group omitted by HAVING has no stored accumulators; initialize all of them from the rescan.
+fn initialize_having_group(having_rescan: bool, rescanned: &str, algebraic: &str) -> String {
+    if having_rescan {
+        format!("CASE WHEN st.__pgt_count IS NULL THEN {rescanned} ELSE {algebraic} END")
+    } else {
+        algebraic.to_string()
+    }
+}
+
+fn sum_nonnull_count_expr(alias: &str, st_col: &str, having_rescan: bool) -> String {
+    let aux = quote_ident(&format!("__pgt_aux_nonnull_{st_col}"));
+    let ins = quote_ident(&format!("__ins_nonnull_{alias}"));
+    let del = quote_ident(&format!("__del_nonnull_{alias}"));
+    initialize_having_group(
+        having_rescan,
+        &format!(
+            "COALESCE(r.{}, 0)",
+            quote_ident(&format!("__pgt_nonnull_{alias}"))
+        ),
+        &format!("COALESCE(st.{aux}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)"),
+    )
+}
+
+/// Generate a new aggregate value, resolving stored aliases and absent HAVING groups.
 fn agg_merge_expr_mapped(
     agg: &AggExpr,
     has_rescan: bool,
@@ -3219,25 +3239,10 @@ fn agg_merge_expr_mapped(
             let ins = quote_ident(&format!("__ins_{alias}"));
             let del = quote_ident(&format!("__del_{alias}"));
             if has_nonnull_aux {
-                // P2-2: Nonnull-count auxiliary available — use algebraic
-                // NULL-transition correction.
-                //
-                // new_nonnull = old_nonnull + ins_nonnull - del_nonnull
-                //   > 0 → at least one non-NULL argument value remains in the
-                //          group: the algebraic SUM formula is safe.
-                //   = 0 → all argument values in the group are now NULL.
-                //          Restore NULL here; an outer Project applies
-                //          COALESCE, if the defining query requested it.
-                let aux_nonnull = quote_ident(&format!("__pgt_aux_nonnull_{st_col}"));
-                let ins_nonnull = quote_ident(&format!("__ins_nonnull_{alias}"));
-                let del_nonnull = quote_ident(&format!("__del_nonnull_{alias}"));
                 let algebraic =
                     format!("COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)");
-                let value = if having_rescan {
-                    format!("CASE WHEN st.__pgt_count IS NULL THEN r.{r_qt} ELSE {algebraic} END")
-                } else {
-                    algebraic
-                };
+                let value =
+                    initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
                 let value = if has_rescan {
                     format!(
                         "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
@@ -3246,13 +3251,8 @@ fn agg_merge_expr_mapped(
                 } else {
                     value
                 };
-                format!(
-                    "CASE \
-                     WHEN (COALESCE(st.{aux_nonnull}, 0) + COALESCE(d.{ins_nonnull}, 0) - COALESCE(d.{del_nonnull}, 0)) > 0 \
-                     THEN {value} \
-                     ELSE NULL \
-                     END",
-                )
+                let new_nonnull = sum_nonnull_count_expr(alias, st_col, having_rescan);
+                crate::aggregate_lifecycle::aggregate_value_sql(true, &new_nonnull, &value)
             } else if has_rescan {
                 // Rescan CTE available (HAVING context):
                 // use the re-aggregated value for any changed group.
@@ -3296,13 +3296,14 @@ fn agg_merge_expr_mapped(
                 "(COALESCE(st.{aux_sum_col}, 0) + COALESCE(d.{ins_sum}, 0) - COALESCE(d.{del_sum}, 0)) \
                  / NULLIF(COALESCE(st.{aux_count_col}, 0) + COALESCE(d.{ins_cnt}, 0) - COALESCE(d.{del_cnt}, 0), 0)",
             );
+            let value = initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
             if has_rescan {
                 format!(
-                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {algebraic} END",
+                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
                     quote_ident(&format!("__special_{alias}")),
                 )
             } else {
-                algebraic
+                value
             }
         }
         // STDDEV/VAR: algebraic via sum, sum-of-squares, and count auxiliaries.

@@ -7,9 +7,11 @@ import argparse
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 FORMAT_VERSION = 1
@@ -86,6 +88,8 @@ def replay_sql(scenario: dict) -> str:
     statements = [f"CREATE SCHEMA {scenario['schema']['name']}"]
     statements += scenario["schema"]["setup_sql"]
     statements += scenario["initial_data"]
+    if execution.get("require_differential_history", False):
+        statements += ["SET pg_trickle.refresh_strategy = 'differential'", "SET pg_trickle.differential_max_change_ratio = 0"]
     statements.append(
         "SELECT pgtrickle.create_stream_table("
         + f"'{query['stream_table']}', "
@@ -160,6 +164,66 @@ def mode_check(scenario: dict, database: str | None) -> None:
         raise ReplayFailure(
             "SilentFallback", f"expected {expected['expected_mode']}, got {mode!r}"
         )
+
+
+def execute_mutation(database: str | None, sql: str) -> int:
+    # Execute the complete script in one session, preserving BEGIN/SAVEPOINT cuts.
+    if re.match(r"^\s*SELECT\b", sql, flags=re.IGNORECASE):
+        return int(psql(database, f"WITH changed AS ({sql.rstrip(';')}) SELECT count(*) FROM changed", tuples=True))
+    output = psql(database, sql)
+    return sum(int(match[2]) for line in output.splitlines()
+               if (match := re.fullmatch(r"(INSERT \d+|UPDATE|DELETE) (\d+)", line.strip())))
+
+
+def changed_route_check(scenario: dict, database: str | None, previous: int) -> None:
+    name = scenario["query"]["stream_table"]
+    observed = psql(database,
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h "
+        "JOIN pgtrickle.pgt_stream_tables s ON s.pgt_id = h.pgt_id "
+        f"WHERE s.pgt_schema || '.' || s.pgt_name = '{name}' AND h.refresh_id > {previous} "
+        "AND h.status = 'COMPLETED' AND h.action = 'DIFFERENTIAL' AND NOT h.was_full_fallback)",
+        tuples=True)
+    if observed != "t":
+        raise ReplayFailure("SilentFallback", "no fresh completed differential history without fallback")
+
+
+def captured_source_cuts(scenario: dict, database: str | None) -> list[tuple[int, str]]:
+    name = scenario["query"]["stream_table"].replace("'", "''")
+    sources = json.loads(psql(database,
+        "SELECT coalesce(json_agg(json_build_array(d.source_relid::bigint, "
+        "format('%I.%I',current_setting('pg_trickle.change_buffer_schema'),"
+        "'changes_' || ct.source_stable_name))), '[]') "
+        "FROM pgtrickle.pgt_dependencies d JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) "
+        "JOIN pgtrickle.pgt_change_tracking ct ON ct.source_relid=d.source_relid "
+        f"WHERE s.pgt_schema || '.' || s.pgt_name='{name}'", tuples=True))
+    if not sources:
+        raise ReplayFailure("CoverageNotReached", "no captured sources")
+    pending = " UNION ALL ".join(
+        f"SELECT {int(oid)}::bigint AS oid,max(lsn)::text AS lsn FROM {buffer} "
+        "WHERE action IN ('I','D') AND lsn > (SELECT "
+        f"coalesce(frontier->'sources'->'{int(oid)}'->>'lsn','0/0')::pg_lsn "
+        f"FROM pgtrickle.pgt_stream_tables WHERE pgt_schema || '.' || pgt_name='{name}')"
+        for oid, buffer in sources)
+    deadline = time.monotonic() + 5
+    while True:
+        cuts = json.loads(psql(database,
+            "SELECT coalesce(json_agg(json_build_array(oid,lsn)), '[]') "
+            f"FROM ({pending}) pending WHERE lsn IS NOT NULL", tuples=True))
+        if cuts:
+            return [(int(oid), lsn) for oid, lsn in cuts]
+        if time.monotonic() >= deadline:
+            raise ReplayFailure("CoverageNotReached", "no committed captured changes above the consumer cut")
+        time.sleep(.01)
+
+
+def source_cut_check(scenario: dict, database: str | None, cuts: list[tuple[int, str]]) -> None:
+    name = scenario["query"]["stream_table"].replace("'", "''")
+    for oid, lsn in cuts:
+        observed = psql(database,
+            f"SELECT coalesce(frontier->'sources'->'{oid}'->>'lsn','0/0')::pg_lsn >= '{lsn}'::pg_lsn "
+            f"FROM pgtrickle.pgt_stream_tables WHERE pgt_schema || '.' || pgt_name='{name}'", tuples=True)
+        if observed != "t":
+            raise ReplayFailure("CoverageNotReached", f"source {oid} captured through {lsn}, but refresh held an earlier cut")
 
 
 def artifact(scenario: dict, scenario_path: Path, failure: dict) -> Path:
@@ -275,6 +339,9 @@ def run(path: Path, database: str | None, expect_negative_control: bool = False)
             + f"'{scenario['execution']['requested_refresh_mode']}')",
         )
         refresh = f"SELECT pgtrickle.refresh_stream_table('{query['stream_table']}')"
+        require_changed = scenario["execution"].get("require_differential_history", False)
+        if require_changed:
+            refresh = "SET pg_trickle.refresh_strategy = 'differential'; SET pg_trickle.differential_max_change_ratio = 0; " + refresh
         phase = "initial refresh"
         psql(database, refresh)
         phase = "initial refresh mode"
@@ -282,25 +349,27 @@ def run(path: Path, database: str | None, expect_negative_control: bool = False)
         phase = "initial exact comparison"
         exact_check(scenario, database)
         for cycle_index, cycle in enumerate(scenario["cycles"]):
+            previous = int(psql(database, "SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history", tuples=True)) if require_changed else 0
             phase = f"{cycle['name']} mutation"
             for mutation_index, mutation in enumerate(cycle["mutations"]):
-                count = psql(
-                    database,
-                    f"WITH changed AS ({mutation['sql'].rstrip(';')}) "
-                    "SELECT count(*) FROM changed",
-                    tuples=True,
-                )
-                affected = int(count)
+                affected = execute_mutation(database, mutation["sql"])
                 if affected != mutation["expected_affected_rows"]:
                     raise ReplayFailure(
                         "GeneratorInvalid", f"expected {mutation['expected_affected_rows']} "
                         f"affected rows, got {affected}"
                     )
             mutation_index = None
+            phase = "capture witness"
+            cuts = captured_source_cuts(scenario, database) if require_changed else []
             phase = f"{cycle['name']} refresh"
             psql(database, refresh)
             phase = f"{cycle['name']} refresh mode"
             mode_check(scenario, database)
+            if require_changed:
+                phase = f"{cycle['name']} captured source cut"
+                source_cut_check(scenario, database, cuts)
+                phase = f"{cycle['name']} changed-data route"
+                changed_route_check(scenario, database, previous)
             phase = f"{cycle['name']} exact comparison"
             exact_check(scenario, database)
     except (RuntimeError, ValueError, OSError) as error:

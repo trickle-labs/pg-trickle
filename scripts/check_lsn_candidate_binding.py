@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,57 @@ REQUIRED_OBLIGATIONS = {
 RECEIPT_CASES = [
     "e2e_wal_receipt_recovery_tests::test_wal_receipt_small_limits_preserve_complete_transactions",
 ]
+LIFECYCLE_CASES = [
+    "e2e_having_transition_tests::test_having_all_nine_truth_transitions_match_postgresql",
+    "e2e_having_transition_tests::test_having_grouped_and_global_empty_lifecycle_match_postgresql",
+]
+CDC_ELISION_CASES = [
+    "e2e_shared_buffer_tests::test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders",
+    "e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload",
+    "e2e_shared_buffer_tests::test_cdc_statement_payload_names_do_not_shadow_row_aliases",
+]
+JOIN_PLAN_CASES = [
+    "e2e_join_tests::test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows",
+    "e2e_refresh_atomicity_tests::test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut",
+]
+PROOF_CONTRACTS = {
+    "join_plan": {
+        "schema": "pg-trickle-join-plan-verification-v1",
+        "obligations": {"admitted_equality_type", "check_endpoint_plan", "scope_pair", "unchanged_pair_has_zero_difference"},
+        "cases": JOIN_PLAN_CASES,
+        "inputs": [
+            "src/lib.rs", "src/api/mod.rs", "src/api/helpers.rs", "src/api/refresh_ops.rs", "src/api/security_context.rs",
+            "src/dvm/parser/validation.rs", "src/dvm/parser/mod.rs", "src/dvm/parser/sublinks/mod.rs", "src/cdc/mod.rs",
+            "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/join.rs",
+            "src/dvm/operators/join_common.rs", "src/dvm/operators/project.rs", "src/dvm/operators/scan.rs",
+            "src/refresh/codegen.rs", "src/refresh/merge/mod.rs", "src/hash.rs",
+            "verification/cdc_elision.rs", "Cargo.toml", "Cargo.lock",
+        ],
+        "mutants": {"unknown-equality-type", "lost-right-scope", "mixed-snapshot-admission", "swapped-binding-admission", "wrong-sign-admission"},
+    },
+    "lsn": {
+        "schema": EXPECTED_SCHEMA, "obligations": REQUIRED_OBLIGATIONS,
+        "cases": EXPECTED_CASES, "inputs": [],
+    },
+    "receipt": {
+        "schema": "pg-trickle-receipt-verification-v1", "obligations": {"receipt_ack_row_limit"},
+        "cases": RECEIPT_CASES, "inputs": ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"],
+    },
+    "aggregate_lifecycle": {
+        "schema": "pg-trickle-aggregate-lifecycle-verification-v1",
+        "obligations": {"visibility_actions", "group_present", "group_action", "aggregate_is_null"},
+        "cases": LIFECYCLE_CASES,
+        "inputs": ["src/lib.rs", "src/dvm/operators/filter.rs", "src/dvm/operators/aggregate.rs", "Cargo.toml", "Cargo.lock"],
+        "mutants": {"unknown-not-retracted", "missing-retraction", "retained-empty-group", "missing-global-empty-result", "non-null-empty-sum"},
+    },
+    "cdc_elision": {
+        "schema": "pg-trickle-cdc-elision-verification-v1",
+        "obligations": {"admitted_image_type", "keep_change", "image_action"},
+        "cases": CDC_ELISION_CASES,
+        "inputs": ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "Cargo.toml", "Cargo.lock"],
+        "mutants": {"lost-image-change", "unknown-type-elision", "lost-positive-image", "reversed-negative-image"},
+    },
+}
 
 
 def digest(path: Path) -> str:
@@ -40,21 +92,30 @@ def require(condition: bool, message: str) -> None:
 
 
 def proof_source_digest(proof: dict[str, Any], source: Path, proof_kind: str = "lsn") -> str:
-    require(proof_kind in ("lsn", "receipt"), "unknown proof kind")
-    schema = EXPECTED_SCHEMA if proof_kind == "lsn" else "pg-trickle-receipt-verification-v1"
-    obligations = REQUIRED_OBLIGATIONS if proof_kind == "lsn" else {"receipt_ack_row_limit"}
-    require(proof.get("schema") == schema, "proof record has an unknown schema")
+    require(proof_kind in PROOF_CONTRACTS, "unknown proof kind")
+    contract = PROOF_CONTRACTS[proof_kind]
+    require(proof.get("schema") == contract["schema"], "proof record has an unknown schema")
     require(proof.get("baseline", {}).get("returncode") == 0, "LSN proof baseline did not pass")
     require(proof.get("semantic_mutation", {}).get("returncode", 0) != 0,
             "LSN semantic mutation was not rejected")
-    require(obligations.issubset(set(proof.get("obligations", []))),
+    require(contract["obligations"].issubset(set(proof.get("obligations", []))),
             "proof record omits a required LSN obligation")
     require(bool(proof.get("compiler_identity")), "proof record omits the compiler identity")
     require(bool(proof.get("solver_identity")), "proof record omits the solver identity")
-    if proof_kind == "receipt":
-        for path in ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"]:
-            require(proof.get("production_inputs", {}).get(path) == digest(ROOT / path),
-                    f"receipt production input differs from verified candidate: {path}")
+    if required := contract.get("mutants"):
+        controls = proof.get("semantic_mutations", {})
+        require(isinstance(controls, dict) and required.issubset(controls),
+                f"{proof_kind} proof omits a required executable mutant")
+        for name in required:
+            control = controls[name]
+            require(isinstance(control, dict) and control.get("returncode", 0) != 0
+                    and control.get("failure_kind") == "postcondition"
+                    and re.search(r"verification results::\s+\d+ verified,\s+[1-9]\d* errors",
+                                  control.get("summary", "")) is not None,
+                    f"{proof_kind} mutant did not fail its intended postcondition: {name}")
+    for path in contract["inputs"]:
+        require(proof.get("production_inputs", {}).get(path) == digest(ROOT / path),
+                f"{proof_kind} production input differs from verified candidate: {path}")
     return digest(source)
 
 
@@ -79,7 +140,7 @@ def validate_binding(
         ),
         "proof record does not use the pinned Verus image",
     )
-    expected_cases = EXPECTED_CASES if proof_kind == "lsn" else RECEIPT_CASES
+    expected_cases = PROOF_CONTRACTS[proof_kind]["cases"]
     require(runtime_cases == expected_cases,
             f"runtime evidence must name all required {proof_kind.upper()} E2E cases")
     package_libraries = sorted((package_dir / "usr/lib/postgresql/18/lib").glob("pg_trickle.so"))
@@ -97,6 +158,8 @@ def validate_binding(
     require(bool(install_observations), "runtime attestation has no candidate pg_trickle.so entry")
     observed: list[dict[str, str]] = []
     for observation in install_observations:
+        require(bool(candidate_commit) and observation.get("candidate_commit") == candidate_commit,
+                "runtime attestation candidate commit is missing or differs from the requested candidate")
         candidate = next(
             item for item in observation["candidate_files"]
             if item.get("path") == "usr/lib/postgresql/18/lib/pg_trickle.so"
@@ -119,8 +182,9 @@ def validate_binding(
             }
         )
     return {
-        "schema": f"pg-trickle-{proof_kind}-candidate-binding-v1",
+        "schema": f"pg-trickle-{proof_kind.replace('_', '-')}-candidate-binding-v1",
         "candidate_commit": candidate_commit,
+        "provenance_boundary": "Build origin and successful named test execution are supplied by the trusted build/test runner; this record checks source hashes and package/install bytes.",
         "workflow": os.environ.get("GITHUB_WORKFLOW", "local"),
         "workflow_run_id": os.environ.get("GITHUB_RUN_ID", "local"),
         "source": source.relative_to(ROOT).as_posix(),
@@ -138,7 +202,7 @@ def validate_binding(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--proof-record", type=Path, required=True)
-    parser.add_argument("--proof-kind", choices=["lsn", "receipt"], default="lsn")
+    parser.add_argument("--proof-kind", choices=list(PROOF_CONTRACTS), default="lsn")
     parser.add_argument("--source", type=Path)
     parser.add_argument("--package-dir", type=Path, required=True)
     parser.add_argument("--installation", type=Path, required=True)

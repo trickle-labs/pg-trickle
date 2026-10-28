@@ -33,7 +33,12 @@ async fn test_semantic_mutants_are_killed_by_exact_bag_oracle() {
             "SELECT id, payload FROM semantic_parent WHERE NOT active",
         ),
         (
-            "count",
+            "count_offset",
+            "SELECT parent_id, count(*) AS n FROM semantic_child GROUP BY parent_id",
+            "SELECT parent_id, count(*) + 1 AS n FROM semantic_child GROUP BY parent_id",
+        ),
+        (
+            "count_null",
             "SELECT parent_id, count(qty) AS n FROM semantic_child GROUP BY parent_id",
             "SELECT parent_id, count(*) AS n FROM semantic_child GROUP BY parent_id",
         ),

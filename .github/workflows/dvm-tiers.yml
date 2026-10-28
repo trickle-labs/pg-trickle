@@ -106,6 +106,9 @@ jobs:
         run: ./tests/build_e2e_image.sh
 
       - name: Run DVM regression corpus
+        env:
+          DVM_SEMANTIC_MAX_BAG_SIZE: '3'
+          PGT_RELEASE_CANDIDATE_COMMIT: ${{ github.sha }}
         run: cargo nextest run --profile ci --test e2e_dvm_corpus_tests --no-capture
 
       - name: Run DVM composition matrix

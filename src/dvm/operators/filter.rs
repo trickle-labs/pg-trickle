@@ -136,11 +136,13 @@ pub fn diff_filter(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
                 "HAVING filter diff: has_st is true but st_qualified_name is None".into(),
             )
         })?;
+        let retraction = crate::aggregate_lifecycle::having_retraction_sql(&predicate_sql);
+        let admission = crate::aggregate_lifecycle::having_admission_sql(&predicate_sql);
         format!(
             "-- Part 1: delta rows that satisfy the predicate — pass through\n\
              SELECT __pgt_row_id, __pgt_action, {cols}\n\
              FROM {child_cte}\n\
-             WHERE {predicate}\n\
+             WHERE {admission}\n\
              \n\
              UNION ALL\n\
              \n\
@@ -148,7 +150,7 @@ pub fn diff_filter(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
              -- but the row IS in the ST → emit DELETE to remove stale row\n\
              SELECT __pgt_row_id, 'D' AS __pgt_action, {cols}\n\
              FROM {child_cte}\n\
-             WHERE ({predicate}) IS NOT TRUE\n\
+             WHERE {retraction}\n\
                AND __pgt_action = 'I'\n\
                AND EXISTS (\n\
                    SELECT 1 FROM {st_table} st\n\
@@ -157,7 +159,8 @@ pub fn diff_filter(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
                )",
             cols = col_refs.join(", "),
             child_cte = child_result.cte_name,
-            predicate = predicate_sql,
+            admission = admission,
+            retraction = retraction,
             st_table = st_table,
         )
     } else if is_lateral_child || is_window_child {
