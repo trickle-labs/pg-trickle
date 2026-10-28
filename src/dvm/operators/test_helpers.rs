@@ -252,6 +252,7 @@ pub fn semi_join(condition: Expr, left: OpTree, right: OpTree) -> OpTree {
 pub fn anti_join(condition: Expr, left: OpTree, right: OpTree) -> OpTree {
     OpTree::AntiJoin {
         condition,
+        null_aware_keys: None,
         left: Box::new(left),
         right: Box::new(right),
     }

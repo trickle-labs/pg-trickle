@@ -446,11 +446,17 @@ fn snapshot_cache_key(op: &crate::dvm::parser::OpTree) -> (String, String) {
             }
             OpTree::AntiJoin {
                 condition,
+                null_aware_keys,
                 left,
                 right,
             } => {
                 push(out, "ANJ");
                 push_expr(out, condition);
+                if let Some((left_key, right_key)) = null_aware_keys {
+                    push(out, "NOT_IN");
+                    push_expr(out, left_key);
+                    push_expr(out, right_key);
+                }
                 push(out, "(");
                 build_fingerprint(left, out);
                 push(out, ")(");

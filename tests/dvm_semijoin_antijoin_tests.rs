@@ -110,6 +110,7 @@ fn build_anti_join_tree() -> OpTree {
     );
 
     OpTree::AntiJoin {
+        null_aware_keys: None,
         condition: eq_cond("o", "cust_id", "c", "id"),
         left: Box::new(left),
         right: Box::new(right),
@@ -491,6 +492,7 @@ fn build_nested_anti_join_tree() -> OpTree {
     };
 
     OpTree::AntiJoin {
+        null_aware_keys: None,
         condition: Expr::BinaryOp {
             op: "=".to_string(),
             left: Box::new(Expr::ColumnRef {

@@ -5712,10 +5712,12 @@ fn promote_predicate(tree: OpTree, pred: Expr, aliases: &[String]) -> OpTree {
         },
         OpTree::AntiJoin {
             condition,
+            null_aware_keys,
             left,
             right,
         } => OpTree::AntiJoin {
             condition,
+            null_aware_keys,
             left: Box::new(promote_predicate(*left, pred, aliases)),
             right,
         },
