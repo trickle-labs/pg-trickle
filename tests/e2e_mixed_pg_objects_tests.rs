@@ -228,7 +228,7 @@ async fn test_mixed_matview_upstream_full_mode() {
     // Refresh matview first, then ST
     db.execute("REFRESH MATERIALIZED VIEW mu_mv_region_totals")
         .await;
-    db.refresh_st("mu_st_region_totals").await;
+    db.refresh_st_with_retry("mu_st_region_totals").await;
 
     assert_eq!(
         db.count("public.mu_st_region_totals").await,
