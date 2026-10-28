@@ -82,7 +82,12 @@ pub(crate) fn outbox_table_name_for(st_name: &str) -> String {
         const SEED: u64 = 0x517cc1b727220a95;
         let hash = xxhash_rust::xxh64::xxh64(st_name.as_bytes(), SEED);
         let suffix = &format!("{:016x}", hash)[..8];
-        format!("{}_{}", &raw[..54], suffix)
+        let prefix_end = raw
+            .char_indices()
+            .take_while(|(idx, _)| *idx <= 54)
+            .last()
+            .map_or(0, |(idx, _)| idx);
+        format!("{}_{}", &raw[..prefix_end], suffix)
     }
 }
 
@@ -739,6 +744,22 @@ mod tests {
             result.chars().count() <= 63,
             "char count must be <= 63, got {}",
             result.chars().count()
+        );
+    }
+
+    #[test]
+    fn test_outbox_table_name_for_long_unicode_name_keeps_utf8_and_hash_suffix() {
+        let name = format!("{}{}", "a".repeat(46), "é".repeat(6));
+        let other_name = format!("{}{}", "a".repeat(46), "ø".repeat(6));
+
+        let result = outbox_table_name_for(&name);
+        let other_result = outbox_table_name_for(&other_name);
+
+        assert!(result.len() <= 63);
+        assert!(other_result.len() <= 63);
+        assert_ne!(
+            result, other_result,
+            "truncated names retain hash collision protection"
         );
     }
 }

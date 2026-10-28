@@ -2703,6 +2703,7 @@ fn ensure_trigger_for_source(
     if cdc::trigger_exists(source_oid)? {
         return Ok(());
     }
+    cdc::drop_change_trigger(source_oid, change_schema)?;
     let pk_columns = cdc::resolve_pk_columns(source_oid)?;
     if pk_columns.is_empty() {
         return Err(PgTrickleError::CdcStateInvalid {
@@ -2797,6 +2798,7 @@ pub fn force_source_to_trigger(
     }
 
     if !cdc::trigger_exists(source_oid)? {
+        cdc::drop_change_trigger(source_oid, change_schema)?;
         let pk_columns = cdc::resolve_pk_columns(source_oid)?;
         let columns = cdc::resolve_source_column_defs(source_oid)?;
         let src_id = crate::citus::SourceIdentifier::from_oid(source_oid).unwrap_or_else(|_| {

@@ -255,6 +255,9 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 - Use checked framing for single-field boolean/integer/UUID identities and
   verified tuple-capacity arithmetic, preserving valid V2/V3 identity bytes
   while rejecting malformed boolean payloads (#1224).
+- Reject output-delta resnapshot acknowledgement when the typed payload
+  relation no longer matches its registered column layout (#1184). Deleted
+  payload rows remain recoverable through a resnapshot.
 - Evaluate computed projections over affected old/old and new/new inner-join
   endpoints for admitted keyed trigger sources, avoiding intermediate
   divide-by-zero errors when both committed endpoints are valid (#1211, #1223).
@@ -5333,11 +5336,10 @@ restarts or code changes required.
 
 ### Silent fallbacks are now visible
 
-When pg_trickle encounters a problem analysing certain query types, it falls
-back to a slower, more conservative update mode. Previously this was invisible.
-The count of such fallbacks is now tracked and surfaced in
-`pgtrickle.metrics_summary()` under `ivm_lock_parse_error_count`, so you can
-spot and address the underlying cause.
+When pg_trickle cannot parse an IMMEDIATE stream table's defining query for
+lock selection, it uses a broader advisory lock. The cumulative parse-failure
+count is surfaced in `pgtrickle.metrics_summary()` as
+`ivm_lock_parse_error_count`, so you can spot and address the underlying cause.
 
 ### Back-pressure alerts for overloaded pipelines
 

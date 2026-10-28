@@ -125,6 +125,18 @@ fn payload_columns_match(
     Ok(actual == expected)
 }
 
+fn payload_relation_matches(
+    delta_relid: pg_sys::Oid,
+    meta: &StreamTableMeta,
+) -> Result<bool, PgTrickleError> {
+    let expected_relid = Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT to_regclass($1)::oid",
+        &[format!("pgtrickle_changes.{}", payload_name(meta.pgt_id)).into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Ok(expected_relid == Some(delta_relid) && payload_columns_match(delta_relid, meta)?)
+}
+
 fn ensure_payload(
     meta: &StreamTableMeta,
     owner_oid: pg_sys::Oid,
@@ -374,11 +386,7 @@ fn validate_consumer_locked(
         } else if metadata_bad {
             Some("PAYLOAD_INCONSISTENT")
         } else {
-            let expected_relid = spi(Spi::get_one_with_args::<pg_sys::Oid>(
-                "SELECT to_regclass($1)::oid",
-                &[format!("pgtrickle_changes.{}", payload_name(meta.pgt_id)).into()],
-            ))?;
-            if expected_relid != Some(delta_relid) || !payload_columns_match(delta_relid, meta)? {
+            if !payload_relation_matches(delta_relid, meta)? {
                 Some("PAYLOAD_INCONSISTENT")
             } else {
                 let payload = format!(
@@ -1353,6 +1361,19 @@ pub fn ack_output_delta_resnapshot(
             return Err(delta_error(
                 "PGT_EXT_TOKEN_INVALID",
                 "resnapshot token is stale",
+            ));
+        }
+        let delta_relid = spi(Spi::get_one_with_args::<pg_sys::Oid>(
+            "SELECT delta_relid FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1",
+            &[meta.pgt_id.into()],
+        ))?
+        .unwrap_or(pg_sys::InvalidOid);
+        if delta_relid.to_u32() == pg_sys::InvalidOid.to_u32()
+            || !payload_relation_matches(delta_relid, &meta)?
+        {
+            return Err(delta_error(
+                "PGT_EXT_CONSUMER_BLOCKED",
+                "typed output-delta payload schema is inconsistent; repair it before acknowledging the resnapshot",
             ));
         }
         spi(Spi::run_with_args(
