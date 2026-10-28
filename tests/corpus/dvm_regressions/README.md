@@ -53,7 +53,10 @@ volatile evaluation or floating point reassociation is assumed equivalent.
 
 Existing permanent regressions remain owned by their repair work:
 
-| Semantic class | Permanent regression / owner | Observed baseline in this stack |
+The outcomes below are historical observations from the owning repair stages;
+they do not describe the current integrated umbrella head.
+
+| Semantic class | Permanent regression / owner | Previously observed baseline |
 | --- | --- | --- |
 | Composite datum NULL | #1203 / PR #1212, COUNT composite installed regressions | All 15 generated count bags fail after differential refresh: record counts undercount NULL-containing records. |
 | FILTER evaluation | #1204 / PR #1214, protected argument installed regressions | FILTER-protected division fails during differential refresh with division by zero. |
@@ -76,7 +79,7 @@ The scheduled 54-case baseline was also executed against that same production
 package: 10 passed and 44 failed, with zero retries. This establishes observed
 scheduled coverage without treating the larger red selection as qualification.
 
-After the CDC repairs at `db909f1b0a97f06b999a68a478258aa21e2e7e73`, the
+At the intermediate CDC-deferred head `db909f1b0a97f06b999a68a478258aa21e2e7e73`, the
 34-case floor reports 16 passes and 18 failures. Both consumer orders, numeric
 projection, CASE, deferred-key replacement and nested-count metadata now pass.
 The remaining failures are all 15 composite COUNT bags, FILTER-protected
@@ -84,6 +87,21 @@ division, special-value SUM/AVG and mixed-snapshot division. The floor remains
 red, with no retries or substituted FULL refreshes. Its local report and full
 failure artifacts are under
 `.p2p/work/issue-1217-semantic-generators/cdc-deferred-frozen/`.
+
+On the integrated umbrella PR head `3b2ac803a9176b403e232a840623aeb655e1be92`
+(2026-10-28), the exact differential semantic test passed all 34 PR cases and
+all 54 scheduled cases with zero retries and zero failures. Each report admitted
+every selected scenario through exact differential history, including the 15
+composite COUNT bags, protected division, `special_sum` and `mixed_join`. These
+results supersede the historical red counts above for this exact head; hosted CI
+remains a separate check.
+
+Reproduce the exact test selection with:
+
+```sh
+DVM_SEMANTIC_MAX_BAG_SIZE=2 bash scripts/run_e2e_tests.sh --test e2e_dvm_corpus_tests test_dvm_generated_semantic_boundaries_execute_differentially --retries 0 --no-fail-fast
+DVM_SEMANTIC_MAX_BAG_SIZE=3 bash scripts/run_e2e_tests.sh --test e2e_dvm_corpus_tests test_dvm_generated_semantic_boundaries_execute_differentially --retries 0 --no-fail-fast
+```
 
 Local commands (Docker/Testcontainers required):
 
