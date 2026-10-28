@@ -90,15 +90,29 @@ impl Drop for SnapSubTransaction {
 
 // ── Internal helpers ───────────────────────────────────────────────────────
 
-fn lock_snapshot_stream(name: &QualifiedIdentifier) -> Result<StreamTableMeta, PgTrickleError> {
+#[derive(Clone, Copy)]
+enum SnapshotStreamLockMode {
+    Share,
+    Update,
+}
+
+fn lock_snapshot_stream(
+    name: &QualifiedIdentifier,
+    mode: SnapshotStreamLockMode,
+) -> Result<StreamTableMeta, PgTrickleError> {
     let meta = StreamTableMeta::get_by_name(name.schema(), name.name())?;
     check_stream_table_ownership(meta.pgt_relid, name.schema(), name.name())?;
-    Spi::get_one_with_args::<i64>(
-        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id=$1 FOR UPDATE",
-        &[meta.pgt_id.into()],
-    )
-    .map_err(|e| PgTrickleError::SpiError(format!("snapshot stream lock failed: {e}")))?
-    .ok_or_else(|| PgTrickleError::NotFound(name.quoted()))?;
+    let lock_sql = match mode {
+        SnapshotStreamLockMode::Share => {
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id=$1 FOR SHARE"
+        }
+        SnapshotStreamLockMode::Update => {
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id=$1 FOR UPDATE"
+        }
+    };
+    Spi::get_one_with_args::<i64>(lock_sql, &[meta.pgt_id.into()])
+        .map_err(|e| PgTrickleError::SpiError(format!("snapshot stream lock failed: {e}")))?
+        .ok_or_else(|| PgTrickleError::NotFound(name.quoted()))?;
     let current = StreamTableMeta::get_by_id(meta.pgt_id)?
         .ok_or_else(|| PgTrickleError::NotFound(name.quoted()))?;
     if current.pgt_schema != name.schema() || current.pgt_name != name.name() {
@@ -827,7 +841,7 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
 
     let caller = security_context::capture_caller_context(EntryContext::SecurityDefiner)?;
     let stream_name = resolve_name_as_caller(name, &caller.search_path)?;
-    let meta = lock_snapshot_stream(&stream_name)?;
+    let meta = lock_snapshot_stream(&stream_name, SnapshotStreamLockMode::Share)?;
 
     let snapshot_name = match target {
         Some(target_name) => {
@@ -855,6 +869,8 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
         .as_ref()
         .map(|f| serde_json::to_string(f).unwrap_or_else(|_| "null".to_string()))
         .unwrap_or_else(|| "null".to_string());
+
+    crate::refresh::test_atomicity_barrier(&meta, "snapshot_after_metadata", 0);
 
     let ext_ver = env!("CARGO_PKG_VERSION");
     let snapshot_provenance_token = generate_snapshot_provenance_token()?;
@@ -1063,7 +1079,7 @@ pub fn restore_from_snapshot(p_name: &str, p_source: &str) {
 fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleError> {
     let caller = security_context::capture_caller_context(EntryContext::SecurityDefiner)?;
     let stream_name = resolve_name_as_caller(name, &caller.search_path)?;
-    let meta = lock_snapshot_stream(&stream_name)?;
+    let meta = lock_snapshot_stream(&stream_name, SnapshotStreamLockMode::Update)?;
 
     let snapshot_name = resolve_name_as_caller(source, &caller.search_path)?;
     let snapshot_catalog = load_snapshot_catalog_row(&snapshot_name)?;

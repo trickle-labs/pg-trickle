@@ -689,6 +689,7 @@ jobs:
         env:
           PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
           PGT_RELEASE_ATTESTATION_PATH: target/receipt-full-install-attestation.json
+          PGS_PROP_CASES: '4'
         run: |
           mkdir -p artifacts/lifecycle-histories
           ./scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests --test e2e_refresh_atomicity_tests \

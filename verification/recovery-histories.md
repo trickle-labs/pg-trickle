@@ -1,15 +1,19 @@
 # Bounded recovery histories (#1219)
 
-This first slice extends the existing Testcontainers WAL-recovery and refresh
-atomicity targets. It changes tests and existing CI selections; production
-recovery behavior is unchanged. It does not complete #1219 or #1225.
+This page specifies the #1219 generated-history test slice in the existing
+Testcontainers WAL-recovery and refresh-atomicity targets. The history tests
+change CI selections and do not require a WAL-recovery production fix. The
+integrated Quality branch also includes separately scoped snapshot, identity,
+join, and proof work; it does not complete #1219 or #1225.
 
 ## Committed journal histories
 
 `test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal` uses
-the existing `TraceConfig` and deterministic RNG: three seeds/four cycles for
-the PR set, ten seeds/twelve cycles in the existing scheduled DVM job. Both
-row and statement capture are selected and witnessed from actual triggers.
+the existing `TraceConfig` and deterministic RNG: four seeds/four cycles for
+the PR selection and ten seeds/twelve cycles in the scheduled DVM job. Each
+seed deterministically selects one WAL interruption phase, so the four-case
+PR selection covers all phases and the scheduled run repeats them. Both row
+and statement capture are selected and witnessed from actual triggers.
 Initial states include empty/nonempty sources; snapshots use default and
 caller-supplied targets.
 
@@ -23,11 +27,17 @@ DIFFERENTIAL history row and must cover the captured committed source cut.
 
 Restoring the fast consumer requires its original rows/frontier pair. Its
 next differential refresh must exactly catch up from history protected by the
-slow consumer. PostgreSQL is then killed with SIGKILL and restarted in the
-same container/data volume. The test checks system identifier, database OID,
-persisted sentinel, volume identity and changed postmaster start time; the
-fast result must survive and the lagging consumer must catch up exactly.
-`fsync`, `synchronous_commit` and `full_page_writes` are witnessed as on.
+slow consumer and reach the recorded source cut. The history then transitions
+from trigger capture to WAL and interrupts at one of four witnessed phases:
+before receipt persistence, before replay, before acknowledgement, or after
+slot advance. The last phase commits a second source/journal row after the slot
+moves. PostgreSQL is killed with SIGKILL and restarted in the same
+container/data volume. The test checks system identifier, database OID,
+persisted sentinel, volume identity and changed postmaster start time. Both
+consumers must follow the same differential, full, or reinitialization path and
+match the committed journal; the post-slot-advance row must be acknowledged or
+force shared-consumer reinitialization. `fsync`, `synchronous_commit` and
+`full_page_writes` are witnessed as on.
 
 Boundary observations read rows and frontier together in one SQL statement;
 bag comparisons also use EXCEPT ALL in both directions against the journal.
@@ -55,8 +65,9 @@ against the unchanged CDC package also passes.
 - Formatting/lint: zero warnings.
 - Default new histories plus cancellation: two test cases pass, no retries.
 - Scheduled-size histories: ten seeds/twelve cycles plus cancellation pass,
-  no retries. Actual trigger/durability/restart witness additions also pass
-  in the final default run.
+  no retries. The expanded restore history covers all four WAL interruption
+  phases across those seeds. Trigger, durability, restart, and source-cut
+  witnesses pass in the final runs.
 - At that baseline the semantic floor was independently 32/34 and 52/54; special SUM/AVG
   and mixed-snapshot division still fail. The original four COUNT/FILTER
   regressions pass. These are not recovery-history successes.
@@ -66,10 +77,11 @@ against the unchanged CDC package also passes.
 declared server candidate, configuration, initial state, SQL mutations,
 transaction boundaries, expected/actual rows, cuts and durable identity.
 Only the executed prefix through the first failing assertion is retained.
-That trace is kept as the unminimized original. Recovery invariants carry
+Each trace records its WAL interruption phase. Recovery invariants carry
 stable failure tags so unrelated setup errors cannot count as reproducing the
-same failure. To reduce a failing seed while preserving its exact tagged
-invariant, run:
+same failure. The shrinker replays the fixed seed and mutation plan; because
+the phase is derived from that seed, shrinking preserves the original phase.
+To reduce a failing seed while preserving its exact tagged invariant, run:
 
 ```sh
 python3 scripts/shrink_recovery_history.py \
@@ -96,23 +108,24 @@ set. No remote CI success is claimed.
 
 ## Open boundaries
 
-The generated restore history now includes a pending trigger-captured
-commit, a lock-witnessed cancelled refresh with unchanged output/frontier, a
-trigger-to-WAL transition, and an acknowledged WAL-captured commit. It then
-restores the snapshot and catches up the lagging consumer after restart. It does
-not exercise every WAL receipt interruption phase inside the generated history
-or establish
-recovery after required history has already been removed. Snapshot metadata-read
-versus copy, cleanup versus new registration, and pause versus dispatch still
-need their own witnessed schedules. Existing premature-cleanup/oracle controls
-remain; they are not an executable production cleanup mutant. The reducer only
-simplifies generated operation kinds and operands; arbitrary SQL AST reduction
-remains out of scope. No whole recovery proof or merge approval is claimed.
+The generated history covers a pending trigger-captured commit, a
+lock-witnessed cancelled refresh with unchanged output/frontier, trigger-to-WAL
+handoff, snapshot restore, and all four WAL receipt interruption phases. It
+checks restart recovery and exact lagging-consumer catch-up, including the
+post-slot-advance row. It does not establish recovery after required history
+has already been removed or arbitrary isolation schedules.
 
-The subsequent [snapshot/restore repair](restore-history-safety.md) addresses
+The current quality-program base includes #1266's separate witnessed
+cleanup-versus-registration and pause-versus-dispatch schedules; they are not
+assertions in this seeded history. Existing premature-cleanup/oracle controls
+remain, and there is no executable production-cleanup mutant. The reducer only
+shrinks generated operations and operands, not arbitrary SQL syntax. No whole
+recovery-protocol proof is claimed.
+
+The separate [snapshot/restore repair](restore-history-safety.md) addresses
 missing-history recovery, metadata-read versus copy, and cleanup during an
-uncommitted restore. It also strengthens terminal cut/restart assertions and
-fixes CI pipeline failure propagation. Its frozen backend `0ab22465` passes
-the strengthened default and ten-seed/twelve-cycle histories. Capture-mode
-transitions, cleanup versus registration, pause versus dispatch and complete
-protocol proofs remain outside that follow-up.
+uncommitted restore. It strengthens terminal cut/restart assertions and fixes
+CI failure propagation. Its frozen backend `0ab22465` passed the strengthened
+default and ten-seed/twelve-cycle histories. Full cleanup/incarnation proofs,
+remote Citus/dblink capture, and arbitrary SQL AST reduction remain outside
+this slice.

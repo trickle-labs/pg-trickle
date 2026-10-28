@@ -10,6 +10,9 @@ use sqlx::{AssertSqlSafe, Postgres, pool::PoolConnection};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
+const SNAPSHOT_RACE_CREATE_ARGS: &str = "text, text, text, text, boolean, text, text, text, boolean, boolean, \
+     text, integer, double precision, text, boolean, text, integer, text, text";
+
 #[derive(Debug, PartialEq, Eq)]
 struct RefreshProgress {
     frontier: Option<String>,
@@ -49,6 +52,7 @@ fn phase_code(phase: &str) -> i32 {
         "input_boundary" => 1,
         "after_apply" => 2,
         "during_finalize" => 3,
+        "snapshot_after_metadata" => 4,
         _ => panic!("unknown atomicity phase {phase}"),
     }
 }
@@ -2143,4 +2147,222 @@ async fn test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut() {
         .unwrap(),
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn test_snapshot_metadata_and_rows_match_a_concurrent_refresh() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.execute("CREATE ROLE snapshot_race_owner LOGIN").await;
+    for grant in [
+        "GRANT USAGE ON SCHEMA pgtrickle TO snapshot_race_owner".to_string(),
+        "GRANT CREATE ON SCHEMA public TO snapshot_race_owner".to_string(),
+        format!(
+            "GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table({SNAPSHOT_RACE_CREATE_ARGS}) \
+             TO snapshot_race_owner"
+        ),
+        "GRANT EXECUTE ON FUNCTION pgtrickle.snapshot_stream_table(text, text) \
+         TO snapshot_race_owner"
+            .to_string(),
+    ] {
+        db.execute(&grant).await;
+    }
+
+    for (stream, snapshot_target, owner_role, initially_empty) in [
+        ("atomic_snapshot_default", None, false, false),
+        (
+            "atomic_snapshot_target",
+            Some("public.atomic_snapshot_race_target"),
+            false,
+            false,
+        ),
+        ("atomic_snapshot_empty_owner", None, true, true),
+    ] {
+        let source = format!("{stream}_source");
+        let before = format!("{stream}_before");
+        let after = format!("{stream}_after");
+        let query = format!("SELECT id,value FROM {source}");
+        db.execute(&format!(
+            "CREATE TABLE {source}(id INT PRIMARY KEY,value TEXT NOT NULL)"
+        ))
+        .await;
+        if !initially_empty {
+            db.execute(&format!("INSERT INTO {source} VALUES(1,'committed')"))
+                .await;
+        }
+        if owner_role {
+            db.execute(&format!("GRANT SELECT ON {source} TO snapshot_race_owner"))
+                .await;
+            let create_st = format!(
+                "SELECT pgtrickle.create_stream_table('{stream}', $${query}$$, '1h', 'DIFFERENTIAL')"
+            );
+            let result = db
+                .try_execute_with_role("SET ROLE snapshot_race_owner", &create_st, "RESET ROLE")
+                .await;
+            assert!(
+                result.is_ok(),
+                "role-owned stream creation failed: {result:?}"
+            );
+        } else {
+            db.create_st(stream, &query, "1h", "DIFFERENTIAL").await;
+        }
+        let id = pgt_id(&db, stream).await;
+        let before_progress = progress(&db, id).await;
+        snapshot_table(&db, stream, &before).await;
+        if initially_empty {
+            db.execute(&format!("INSERT INTO {source} VALUES(1,'pending')"))
+                .await;
+        } else {
+            db.execute(&format!("UPDATE {source} SET value='pending'"))
+                .await;
+        }
+        set_chaos(&db, stream, "snapshot_after_metadata").await;
+        let (mut barrier, blocker_pid) = hold_barrier(&db, id, "snapshot_after_metadata").await;
+
+        let mut snapshot_connection = db.pool.acquire().await.unwrap();
+        let snapshot_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *snapshot_connection)
+            .await
+            .unwrap();
+        let stream_name = stream.to_owned();
+        let snapshot_target = snapshot_target.map(str::to_owned);
+        if owner_role {
+            sqlx::query("SET ROLE snapshot_race_owner")
+                .execute(&mut *snapshot_connection)
+                .await
+                .unwrap();
+        }
+        let snapshot_role = owner_role;
+        let mut snapshot = tokio::spawn(async move {
+            let result = match snapshot_target {
+                Some(target) => {
+                    sqlx::query_scalar::<_, String>(
+                        "SELECT pgtrickle.snapshot_stream_table($1, $2)",
+                    )
+                    .bind(stream_name)
+                    .bind(target)
+                    .fetch_one(&mut *snapshot_connection)
+                    .await
+                }
+                None => {
+                    sqlx::query_scalar::<_, String>("SELECT pgtrickle.snapshot_stream_table($1)")
+                        .bind(stream_name)
+                        .fetch_one(&mut *snapshot_connection)
+                        .await
+                }
+            };
+            if snapshot_role {
+                sqlx::query("RESET ROLE")
+                    .execute(&mut *snapshot_connection)
+                    .await?;
+            }
+            result
+        });
+        let witness = wait_for_barrier(
+            &db,
+            id,
+            "snapshot_after_metadata",
+            blocker_pid,
+            Duration::from_secs(10),
+        )
+        .await;
+        let (refresh, refresh_pid) = start_manual_refresh(&db, stream).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let refresh_blocked_by_snapshot = loop {
+            if refresh.is_finished() {
+                break false;
+            }
+            let blocked: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
+                .bind(snapshot_pid)
+                .bind(refresh_pid)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            if blocked {
+                break true;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "refresh neither committed nor waited for the witnessed snapshot; \
+                 snapshot_pid={snapshot_pid} refresh_pid={refresh_pid}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        release_barrier(&mut barrier, id, "snapshot_after_metadata").await;
+        let snapshot_name = tokio::time::timeout(Duration::from_secs(10), &mut snapshot)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), refresh)
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("concurrent manual refresh should commit");
+        clear_chaos(&db).await;
+        db.refresh_st_with_retry(stream).await;
+
+        let after_progress = progress(&db, id).await;
+        assert_ne!(
+            before_progress.frontier, after_progress.frontier,
+            "the refresh must advance the test frontier"
+        );
+        snapshot_table(&db, stream, &after).await;
+        let snapshot_frontier: Option<String> = sqlx::query_scalar(
+            "SELECT frontier::text FROM pgtrickle.pgt_snapshots \
+             WHERE snapshot_relid=to_regclass($1)::oid",
+        )
+        .bind(&snapshot_name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let snapshot_rows: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT count(*) FROM {snapshot_name}"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        if snapshot_rows > 0 {
+            let embedded_frontier: Option<String> = sqlx::query_scalar(AssertSqlSafe(format!(
+                "SELECT __pgt_frontier::text FROM {snapshot_name} LIMIT 1"
+            )))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(snapshot_frontier, embedded_frontier);
+        }
+        let matches_before: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT NOT EXISTS (\
+               (SELECT id,value FROM {snapshot_name} EXCEPT ALL SELECT id,value FROM {before}) \
+               UNION ALL \
+               (SELECT id,value FROM {before} EXCEPT ALL SELECT id,value FROM {snapshot_name})\
+             )"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let matches_after: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT NOT EXISTS (\
+               (SELECT id,value FROM {snapshot_name} EXCEPT ALL SELECT id,value FROM {after}) \
+               UNION ALL \
+               (SELECT id,value FROM {after} EXCEPT ALL SELECT id,value FROM {snapshot_name})\
+             )"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            (matches_before && snapshot_frontier == before_progress.frontier)
+                || (matches_after && snapshot_frontier == after_progress.frontier),
+            "snapshot rows/frontier were not a coherent committed pair: \
+             snapshot={snapshot_name} rows_before={matches_before} rows_after={matches_after} \
+             frontier={snapshot_frontier:?} before={:?} after={:?} \
+             refresh_blocked_by_snapshot={refresh_blocked_by_snapshot} \
+             witness={witness:?}",
+            before_progress.frontier,
+            after_progress.frontier,
+        );
+    }
 }

@@ -1812,7 +1812,11 @@ async fn lifecycle_exact(
     );
 }
 
-async fn lifecycle_refresh(fixture: &Fixture, stream: &str) {
+async fn lifecycle_refresh(
+    fixture: &Fixture,
+    stream: &str,
+    expected_action: Option<&str>,
+) -> String {
     let before: i64 = sqlx::query_scalar(
         "SELECT coalesce(max(h.refresh_id),0) FROM pgtrickle.pgt_refresh_history h \
          JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name=$1",
@@ -1845,10 +1849,18 @@ async fn lifecycle_refresh(fixture: &Fixture, stream: &str) {
         after > before,
         "PGT_LIFECYCLE_FAILURE:fresh_refresh; stream={stream}"
     );
-    assert_eq!(
-        action, "DIFFERENTIAL",
-        "PGT_LIFECYCLE_FAILURE:refresh_action; stream={stream}"
-    );
+    if let Some(expected_action) = expected_action {
+        assert_eq!(
+            action, expected_action,
+            "lifecycle catch-up action must match recovery state"
+        );
+    } else {
+        assert!(
+            matches!(action.as_str(), "DIFFERENTIAL" | "REINITIALIZE" | "FULL"),
+            "unexpected lifecycle recovery action: {action}"
+        );
+    }
+    action
 }
 
 #[tokio::test]
@@ -3069,7 +3081,26 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
     if replay_plan.is_some() {
         assert_eq!(seeds.len(), 1, "replay plans require one fixed seed");
     }
+    let wal_phases = [
+        "before_receipt",
+        "before_replay",
+        "before_ack",
+        "after_slot_advance",
+    ];
+    if seeds.len() >= wal_phases.len() {
+        let covered = seeds
+            .iter()
+            .map(|seed| wal_phases[(seed % wal_phases.len() as u64) as usize])
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            covered.len(),
+            wal_phases.len(),
+            "the lifecycle seed selection must cover each WAL interruption phase"
+        );
+    }
     for seed in seeds {
+        // The seed keeps the selected interruption phase stable during replay and shrinking.
+        let wal_phase = wal_phases[(seed % wal_phases.len() as u64) as usize];
         let db = E2eDb::new_dedicated().await.with_extension().await;
         configure_scheduler(&db).await;
         db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
@@ -3095,7 +3126,7 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             serde_json::json!({
                 "seed":seed, "cycles":cycles, "revision":String::from_utf8(revision.stdout).unwrap().trim(),
                 "server_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").unwrap_or_else(|_|"unbound".into()),
-                "configuration":{"capture":"trigger","trigger_mode":mode,"capture_handoff":"trigger-to-WAL after generated cycles","compact_threshold":1},
+                "configuration":{"capture":"trigger","trigger_mode":mode,"capture_handoff":"trigger-to-WAL after generated cycles","wal_interruption_phase":wal_phase,"compact_threshold":1},
                 "initial_rows":if seed & 1 != 0 {serde_json::json!([[0,"baseline"]])} else {serde_json::json!([])},
                 "query":"SELECT id,value FROM history_source",
                 "container":db.container_id(), "minimization":"preserve the first failing trace; shrink_recovery_history.py reduces mutation cycles, operation kinds and operands while retaining the tagged invariant",
@@ -3106,6 +3137,8 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
         db.execute("ALTER TABLE history_source REPLICA IDENTITY FULL")
             .await;
         db.execute("CREATE TABLE history_journal(id INT PRIMARY KEY,value TEXT NOT NULL)")
+            .await;
+        db.execute("ALTER TABLE history_source REPLICA IDENTITY FULL")
             .await;
         create_identity_sentinel(&db, "history_identity", &seed.to_string()).await;
         if seed & 1 != 0 {
@@ -3274,7 +3307,7 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
                 &mut history,
                 serde_json::json!({"step":"refresh boundary","expected_source_cut":cut}),
             );
-            lifecycle_refresh(&fixture, "history_fast").await;
+            let _ = lifecycle_refresh(&fixture, "history_fast", Some("DIFFERENTIAL")).await;
             lifecycle_exact(
                 &fixture,
                 "history_fast",
@@ -3534,7 +3567,7 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             "PGT_LIFECYCLE_FAILURE:restore_pair; history: {}",
             path.display()
         );
-        lifecycle_refresh(&fixture, "history_fast").await;
+        let _ = lifecycle_refresh(&fixture, "history_fast", Some("DIFFERENTIAL")).await;
         lifecycle_exact(
             &fixture,
             "history_fast",
@@ -3548,10 +3581,87 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             "SELECT (frontier->'sources'->'{}'->>'lsn')::pg_lsn >= '{catchup_cut}'::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_name='history_fast'",
             fixture.oid
         )).await, "PGT_LIFECYCLE_FAILURE:restored_source_cut; history: {}", path.display());
+        fixture
+            .db
+            .execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.history_fast','public.history_slow'])")
+            .await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        configure_scheduler(&fixture.db).await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
+            .await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+        let stable_name: String = fixture
+            .db
+            .query_scalar(&format!(
+                "SELECT pgtrickle.source_stable_name({}::oid)",
+                fixture.oid
+            ))
+            .await;
+        fixture.slot = format!("pgtrickle_{stable_name}");
+        let wal_value = format!("wal-{wal_phase}-{seed:016x}");
+        let next_value = format!("wal-next-{wal_phase}-{seed:016x}");
+        let (mut barrier, blocker_pid) =
+            hold_wal_barrier(&fixture.db, fixture.oid, wal_phase).await;
+        set_wal_phase(&fixture.db, fixture.oid, wal_phase, &wal_value).await;
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            i32::MIN,
+            &wal_value,
+        )
+        .await;
+        let worker_pid =
+            wait_for_wal_barrier(&fixture.db, fixture.oid, wal_phase, blocker_pid).await;
+        if wal_phase == "before_receipt" {
+            assert_eq!(
+                matching_receipts(&fixture.db.pool, fixture.oid, "RECEIVED", &wal_value).await,
+                0,
+                "receipt must not commit before the before_receipt interruption"
+            );
+        } else {
+            let status = if wal_phase == "before_replay" {
+                "RECEIVED"
+            } else {
+                "APPLIED"
+            };
+            wait_for_receipt(&fixture.db.pool, fixture.oid, status, &wal_value).await;
+            if wal_phase == "after_slot_advance" {
+                assert!(
+                    receipt_slot_reached(&fixture.db, &fixture.slot, fixture.oid, &wal_value).await
+                );
+                commit_row(
+                    &fixture.db,
+                    &fixture.source,
+                    &fixture.journal,
+                    i32::MIN + 1,
+                    &next_value,
+                )
+                .await;
+            }
+        }
+        terminate_backend(&fixture.db, worker_pid).await;
+        release_wal_barrier(&mut barrier, fixture.oid, wal_phase).await;
+        drop(barrier);
+        clear_wal_phase(&fixture.db).await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+            .await;
         record_lifecycle(
             &path,
             &mut history,
-            serde_json::json!({"step":"crash after committed catch-up","retained_identity":format!("{:?}",fixture.identity)}),
+            serde_json::json!({"step":"trigger-to-WAL interruption after restore","phase":wal_phase,"capture":cdc_mode(&fixture.db, &fixture.source).await,"value":wal_value,"next_value":if wal_phase == "after_slot_advance" {Some(next_value.as_str())} else {None}}),
+        );
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"SIGKILL with interrupted WAL receipt","retained_identity":format!("{:?}",fixture.identity)}),
         );
         fixture.db.pool.close().await;
         for args in [
@@ -3575,11 +3685,119 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             .query_scalar("SELECT pg_postmaster_start_time()::text")
             .await;
         assert_ne!(restarted, settings.3, "recovery must restart PostgreSQL");
+        fixture
+            .db
+            .execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.history_fast','public.history_slow'])")
+            .await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        configure_scheduler(&fixture.db).await;
         record_lifecycle(
             &path,
             &mut history,
             serde_json::json!({"step":"retained restart witnessed","postmaster_before":settings.3,"postmaster_after":restarted}),
         );
+        wait_for_receipt(&fixture.db.pool, fixture.oid, "ACKNOWLEDGED", &wal_value).await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+        let next_receipt_acknowledged = if wal_phase == "after_slot_advance" {
+            let recovered = fixture
+                .db
+                .wait_for_condition(
+                    "post-slot-advance WAL recovery",
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_receipts \
+                         WHERE source_relid={} AND status='ACKNOWLEDGED' AND data LIKE '%{}%') \
+                         OR (SELECT count(*)=2 AND bool_and(needs_reinit) \
+                             FROM pgtrickle.pgt_stream_tables \
+                             WHERE pgt_name IN ('history_fast','history_slow'))",
+                        fixture.oid, next_value
+                    ),
+                    WAIT,
+                    Duration::from_millis(50),
+                )
+                .await;
+            assert!(
+                recovered,
+                "the post-slot-advance row needs an acknowledged receipt or consumer reinitialization"
+            );
+            Some(
+                matching_receipts(&fixture.db.pool, fixture.oid, "ACKNOWLEDGED", &next_value).await
+                    > 0,
+            )
+        } else {
+            None
+        };
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+            .await;
+        let receipts: serde_json::Value = sqlx::query_scalar(
+            "SELECT coalesce(jsonb_agg(jsonb_build_array(status,lsn::text,data) ORDER BY receipt_id), \
+                    '[]'::jsonb) FROM pgtrickle.pgt_wal_receipts \
+             WHERE source_relid=$1 AND data LIKE $2",
+        )
+        .bind(fixture.oid)
+        .bind(format!("%{wal_value}%"))
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        let buffered_changes: serde_json::Value = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT coalesce(jsonb_agg(jsonb_build_array(action,lsn::text,id,value) ORDER BY change_id), \
+                    '[]'::jsonb) FROM {buffer} WHERE value=$1"
+        )))
+        .bind(&wal_value)
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        let recovery_state: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_agg(jsonb_build_object( \
+                 'stream',st.pgt_name,'needs_reinit',st.needs_reinit, \
+                 'is_populated',st.is_populated,'frontier',st.frontier, \
+                 'refresh_reason',st.refresh_reason,'refresh_reason_detail',st.refresh_reason_detail, \
+                 'capture_mode',d.cdc_mode,'slot_name',coalesce(d.slot_name,$2), \
+                 'slot_active',slot.active,'slot_confirmed_flush_lsn',slot.confirmed_flush_lsn::text) \
+                 ORDER BY st.pgt_name) \
+             FROM pgtrickle.pgt_stream_tables st \
+             JOIN pgtrickle.pgt_dependencies d USING (pgt_id) \
+             LEFT JOIN pg_replication_slots slot ON slot.slot_name=coalesce(d.slot_name,$2) \
+             WHERE d.source_relid=$1",
+        )
+        .bind(fixture.oid)
+        .bind(&fixture.slot)
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"pre-refresh WAL recovery state","state":recovery_state,"receipts":receipts,"buffered_changes":buffered_changes,"next_receipt_acknowledged":next_receipt_acknowledged}),
+        );
+        let invalidated = recovery_state
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|state| state["needs_reinit"].as_bool().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            invalidated.len(),
+            2,
+            "both shared consumers must be present"
+        );
+        assert!(
+            invalidated.iter().all(|needed| *needed == invalidated[0]),
+            "shared consumers must recover together"
+        );
+        assert!(
+            next_receipt_acknowledged.unwrap_or(true) || invalidated[0],
+            "the post-slot-advance row needs an acknowledged receipt or consumer reinitialization"
+        );
+        let expected_action = if invalidated[0] {
+            Some("REINITIALIZE")
+        } else {
+            None
+        };
         assert_eq!(
             identity(&fixture.db, "history_identity", fixture.db.container_id()).await,
             fixture.identity,
@@ -3592,15 +3810,55 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             "PGT_LIFECYCLE_FAILURE:retained_checkpoint; history: {}",
             path.display()
         );
+        let recovery_action = lifecycle_refresh(&fixture, "history_fast", expected_action).await;
+        let post_refresh_state: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_build_object( \
+                 'needs_reinit',st.needs_reinit,'frontier',st.frontier, \
+                 'latest_action',(SELECT h.action FROM pgtrickle.pgt_refresh_history h \
+                     WHERE h.pgt_id=st.pgt_id AND h.status='COMPLETED' \
+                     ORDER BY h.refresh_id DESC LIMIT 1)) \
+             FROM pgtrickle.pgt_stream_tables st \
+             WHERE st.pgt_schema='public' AND st.pgt_name='history_fast'",
+        )
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"post-refresh WAL recovery state","state":post_refresh_state}),
+        );
         lifecycle_exact(
             &fixture,
             "history_fast",
             &path,
             &mut history,
-            "retained recovery",
+            "WAL interruption recovery",
         )
         .await;
-        lifecycle_refresh(&fixture, "history_slow").await;
+        let slow_after_restart = lifecycle_state(&fixture.db.pool, "history_slow").await;
+        let slow_needs_reinit: bool = sqlx::query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema='public' AND pgt_name='history_slow'",
+        )
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            slow_needs_reinit,
+            recovery_action == "REINITIALIZE",
+            "shared consumers must follow the same recovery path"
+        );
+        if recovery_action == "REINITIALIZE" {
+            assert_eq!(slow_after_restart["rows"], slow_baseline["rows"]);
+            assert!(slow_after_restart["frontier"].is_null());
+        } else {
+            assert_eq!(
+                slow_after_restart, slow_baseline,
+                "WAL recovery moved the lagging consumer"
+            );
+        }
+        let _ = lifecycle_refresh(&fixture, "history_slow", Some(&recovery_action)).await;
         lifecycle_exact(
             &fixture,
             "history_slow",

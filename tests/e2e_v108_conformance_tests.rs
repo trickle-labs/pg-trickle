@@ -420,6 +420,107 @@ async fn test_v108_exact_batch_acknowledgement_rolls_back() {
 }
 
 #[tokio::test]
+async fn test_v108_lagging_consumer_retains_exact_history_until_catch_up() {
+    let (db, fast, graph) = active_consumer("v108_lagging").await;
+    let root = "public.v108_lagging_stream";
+    let contract = reference_clients::stream_contract_digest(&db.pool, root).await;
+    let slow = reference_clients::register(&db.pool, root, "v108_lagging_slow", &contract).await;
+    let (baseline_token, _) =
+        reference_clients::begin_resnapshot(&db.pool, &slow.consumer_id).await;
+    assert_eq!(
+        reference_clients::ack_resnapshot(&db.pool, &slow.consumer_id, &baseline_token).await,
+        "ACTIVE"
+    );
+
+    db.execute("DELETE FROM v108_lagging_source WHERE id = 1")
+        .await;
+    db.execute("INSERT INTO v108_lagging_source VALUES (1, 'after')")
+        .await;
+    refresh_graph_without_full(&db.pool, root, &graph).await;
+    let first = reference_clients::pending_batch(&db.pool, &fast.consumer_id).await;
+    assert_eq!(first.mode, "EXACT");
+    assert_eq!(first.row_count, 2);
+    assert_eq!(
+        reference_clients::ack(&db.pool, &fast.consumer_id, first.batch_token).await,
+        "APPLIED"
+    );
+
+    db.execute("INSERT INTO v108_lagging_source VALUES (2, 'new')")
+        .await;
+    refresh_graph_without_full(&db.pool, root, &graph).await;
+    let second = reference_clients::pending_batch(&db.pool, &fast.consumer_id).await;
+    assert_eq!(second.mode, "EXACT");
+    assert_eq!(second.batch_token, first.batch_token + 1);
+    assert_eq!(second.row_count, 1);
+    assert_eq!(
+        reference_clients::ack(&db.pool, &fast.consumer_id, second.batch_token).await,
+        "APPLIED"
+    );
+
+    let batches: Vec<(i64, String, i64)> = sqlx::query_as(
+        "SELECT batch_token, mode, row_count \
+         FROM pgtrickle.output_delta_batches($1::uuid, NULL) ORDER BY batch_token",
+    )
+    .bind(&slow.consumer_id)
+    .fetch_all(&db.pool)
+    .await
+    .expect("lagging consumer should retain contiguous batches");
+    assert_eq!(
+        batches,
+        vec![
+            (first.batch_token, "EXACT".to_string(), 2),
+            (second.batch_token, "EXACT".to_string(), 1),
+        ]
+    );
+
+    let payload: Vec<(i64, String, i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT batch_token, action, id, value FROM {} \
+         WHERE batch_token > 0 ORDER BY batch_token, ordinal",
+        slow.delta_relation
+    )))
+    .fetch_all(&db.pool)
+    .await
+    .expect("lagging consumer should read its typed payload");
+    let mut replayed = std::collections::BTreeMap::from([(1, "before".to_string())]);
+    for (_, action, id, value) in payload {
+        match action.as_str() {
+            "DELETE" => assert_eq!(replayed.remove(&id).as_deref(), Some(value.as_str())),
+            "INSERT" => assert!(replayed.insert(id, value).is_none()),
+            _ => unreachable!("typed payload action is constrained"),
+        }
+    }
+    let source: std::collections::BTreeMap<i32, String> =
+        sqlx::query_as("SELECT id, value FROM v108_lagging_source ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("committed source should be queryable")
+            .into_iter()
+            .collect();
+    assert_eq!(replayed, source);
+    db.assert_st_matches_query(root, "SELECT id, value FROM v108_lagging_source")
+        .await;
+
+    assert_eq!(
+        reference_clients::ack(&db.pool, &slow.consumer_id, second.batch_token).await,
+        "APPLIED"
+    );
+    let retained_batches: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pgtrickle.pgt_output_delta_batches \
+         WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_output_delta_consumers \
+                        WHERE consumer_id = $1::uuid)",
+    )
+    .bind(&slow.consumer_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("acknowledged batches should be pruned");
+    assert_eq!(retained_batches, 0);
+    assert_eq!(
+        reference_clients::read_payload(&db.pool, &slow.delta_relation).await,
+        0
+    );
+}
+
+#[tokio::test]
 async fn test_v108_full_invalidation_requires_resynchronized_ack() {
     let (db, consumer, _) = active_consumer("v108_full_invalidation").await;
     assert_eq!(
