@@ -21,7 +21,8 @@ use pgrx::prelude::*;
 /// multi-database Grafana panels can use this as a single data source.
 ///
 /// v0.31.0 (PERF-3): Added `ivm_lock_parse_error_count` — cumulative count
-/// of IMMEDIATE-mode lock-mode downgrades due to query parse failures.
+/// of defining-query parse failures that select the conservative blocking
+/// advisory-lock mode for IMMEDIATE tables.
 ///
 /// v0.80.0 (O-3): Added `cleanup_backlog_count` and `cleanup_blocked_count`
 /// — total and blocked entries in `pgt_cleanup_status` for backlog trend monitoring.

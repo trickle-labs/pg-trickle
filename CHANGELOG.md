@@ -5300,11 +5300,10 @@ restarts or code changes required.
 
 ### Silent fallbacks are now visible
 
-When pg_trickle encounters a problem analysing certain query types, it falls
-back to a slower, more conservative update mode. Previously this was invisible.
-The count of such fallbacks is now tracked and surfaced in
-`pgtrickle.metrics_summary()` under `ivm_lock_parse_error_count`, so you can
-spot and address the underlying cause.
+When pg_trickle cannot parse an IMMEDIATE stream table's defining query for
+lock selection, it uses a broader advisory lock. The cumulative parse-failure
+count is surfaced in `pgtrickle.metrics_summary()` as
+`ivm_lock_parse_error_count`, so you can spot and address the underlying cause.
 
 ### Back-pressure alerts for overloaded pipelines
 
