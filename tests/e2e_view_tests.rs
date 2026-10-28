@@ -216,7 +216,7 @@ async fn test_view_inline_diff_with_filter() {
     // Insert an active row
     db.execute("INSERT INTO vi_filt_base VALUES (5, 'active', 500)")
         .await;
-    db.refresh_st("vi_st_filt").await;
+    db.refresh_st_until_converged("vi_st_filt").await;
     assert_eq!(
         db.count("public.vi_st_filt").await,
         3,
@@ -226,7 +226,7 @@ async fn test_view_inline_diff_with_filter() {
     // Insert an inactive row — should NOT appear in ST
     db.execute("INSERT INTO vi_filt_base VALUES (6, 'inactive', 600)")
         .await;
-    db.refresh_st("vi_st_filt").await;
+    db.refresh_st_until_converged("vi_st_filt").await;
     assert_eq!(
         db.count("public.vi_st_filt").await,
         3,
