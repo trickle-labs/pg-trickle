@@ -612,7 +612,11 @@ pub struct AggExpr {
 }
 
 impl AggExpr {
-    pub(crate) fn needs_nonfinite_state(&self, child: &OpTree) -> bool {
+    pub(crate) fn needs_nonfinite_state(&self) -> bool {
+        !self.is_distinct && matches!(self.function, AggFunc::Sum | AggFunc::Avg)
+    }
+
+    pub(crate) fn uses_incremental_nonfinite_state(&self, child: &OpTree) -> bool {
         if self.is_distinct || !matches!(self.function, AggFunc::Sum | AggFunc::Avg) {
             return false;
         }
@@ -626,8 +630,7 @@ impl AggExpr {
         {
             return matches!(column.type_oid, 700 | 701 | 1700);
         }
-        // Expressions and composite children are admitted by the generated SQL's result-type check.
-        true
+        false
     }
 
     fn filtered_arg_sql(&self, arg_sql: String) -> String {
@@ -2178,9 +2181,7 @@ impl OpTree {
     /// Returns an empty vec if the operator tree is not an aggregate query.
     pub fn nonnull_aux_columns(&self) -> Vec<(String, String)> {
         match self {
-            OpTree::Aggregate {
-                aggregates, child, ..
-            } => {
+            OpTree::Aggregate { aggregates, .. } => {
                 let mut aux = Vec::new();
                 for agg in aggregates {
                     if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
@@ -2192,7 +2193,7 @@ impl OpTree {
                         let arg_sql = agg.filtered_arg_sql(arg_sql);
                         aux.push((format!("__pgt_aux_nonnull_{}", agg.alias), arg_sql));
                     }
-                    if agg.needs_nonfinite_state(child) {
+                    if agg.needs_nonfinite_state() {
                         let argument = agg
                             .argument
                             .as_ref()
