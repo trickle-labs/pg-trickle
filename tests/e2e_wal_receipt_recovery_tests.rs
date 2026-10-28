@@ -3071,6 +3071,7 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
     }
     for seed in seeds {
         let db = E2eDb::new_dedicated().await.with_extension().await;
+        configure_scheduler(&db).await;
         db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
             .await;
         db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
@@ -3094,13 +3095,15 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             serde_json::json!({
                 "seed":seed, "cycles":cycles, "revision":String::from_utf8(revision.stdout).unwrap().trim(),
                 "server_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").unwrap_or_else(|_|"unbound".into()),
-                "configuration":{"capture":"trigger","trigger_mode":mode,"compact_threshold":1},
+                "configuration":{"capture":"trigger","trigger_mode":mode,"capture_handoff":"trigger-to-WAL after generated cycles","compact_threshold":1},
                 "initial_rows":if seed & 1 != 0 {serde_json::json!([[0,"baseline"]])} else {serde_json::json!([])},
                 "query":"SELECT id,value FROM history_source",
-                "container":db.container_id(), "minimization":"preserve the first failing trace; shrink_recovery_history.py reduces mutation cycles and operands while retaining the tagged invariant",
+                "container":db.container_id(), "minimization":"preserve the first failing trace; shrink_recovery_history.py reduces mutation cycles, operation kinds and operands while retaining the tagged invariant",
             }),
         );
         db.execute("CREATE TABLE history_source(id INT PRIMARY KEY,value TEXT NOT NULL)")
+            .await;
+        db.execute("ALTER TABLE history_source REPLICA IDENTITY FULL")
             .await;
         db.execute("CREATE TABLE history_journal(id INT PRIMARY KEY,value TEXT NOT NULL)")
             .await;
@@ -3300,6 +3303,105 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
                 path.display()
             );
         }
+        let fast_before_handoff = lifecycle_state(&fixture.db.pool, "history_fast").await;
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            -1,
+            "handoff-pending",
+        )
+        .await;
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "step":"trigger-captured commit before WAL transition",
+                "id":-1,"value":"handoff-pending",
+            }),
+        );
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
+            .await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            -2,
+            "after-wal",
+        )
+        .await;
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "step":"WAL-captured commit after transition",
+                "id":-2,"value":"after-wal",
+            }),
+        );
+        assert!(
+            fixture
+                .db
+                .wait_for_condition(
+                    "acknowledged post-transition WAL receipt",
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_receipts \
+                         WHERE source_relid={}::oid AND source_change \
+                           AND status='ACKNOWLEDGED' AND data LIKE '%after-wal%')",
+                        fixture.oid
+                    ),
+                    WAIT,
+                    Duration::from_millis(50),
+                )
+                .await,
+            "PGT_LIFECYCLE_FAILURE:handoff_receipt; history: {}",
+            path.display()
+        );
+        let handoff_mode = cdc_mode(&fixture.db, &fixture.source).await;
+        assert_eq!(
+            handoff_mode.as_deref(),
+            Some("WAL"),
+            "PGT_LIFECYCLE_FAILURE:handoff_mode; history: {}",
+            path.display()
+        );
+        let fast_after_handoff = lifecycle_state(&fixture.db.pool, "history_fast").await;
+        assert_eq!(
+            fast_after_handoff["rows"],
+            fast_before_handoff["rows"],
+            "PGT_LIFECYCLE_FAILURE:handoff_output; history: {}",
+            path.display()
+        );
+        assert_eq!(
+            fast_after_handoff["frontier"],
+            fast_before_handoff["frontier"],
+            "PGT_LIFECYCLE_FAILURE:handoff_frontier; history: {}",
+            path.display()
+        );
+        assert_eq!(
+            lifecycle_state(&fixture.db.pool, "history_slow").await,
+            slow_baseline,
+            "PGT_LIFECYCLE_FAILURE:handoff_slow_frontier; history: {}",
+            path.display()
+        );
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "step":"trigger-to-WAL handoff witnessed",
+                "capture":handoff_mode,"fast_state":fast_after_handoff,
+                "slow_state":slow_baseline,
+            }),
+        );
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+            .await;
         let catchup_cut: String = fixture
             .db
             .query_scalar(&format!(

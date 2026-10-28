@@ -96,14 +96,17 @@ set. No remote CI success is claimed.
 
 ## Open boundaries
 
-This does not yet combine capture-mode transitions or WAL interruption with
-the generated restore histories. It does not establish recovery after required
-history has already been removed. Snapshot metadata-read versus copy,
-cleanup versus new registration, and pause versus dispatch need their own
-witnessed schedules. Existing premature-cleanup/oracle controls remain;
-they are not an executable production cleanup mutant. The reducer does not
-change operation types or SQL structure. No whole recovery proof or merge
-approval is claimed.
+The generated restore history now includes a pending trigger-captured
+commit, a trigger-to-WAL transition, and an acknowledged WAL-captured commit.
+It verifies that output and frontier do not advance before refresh, then
+restores and catches up the lagging consumer after restart. It does not exercise
+every WAL receipt interruption phase inside the generated history or establish
+recovery after required history has already been removed. Snapshot metadata-read
+versus copy, cleanup versus new registration, and pause versus dispatch still
+need their own witnessed schedules. Existing premature-cleanup/oracle controls
+remain; they are not an executable production cleanup mutant. The reducer only
+simplifies generated operation kinds and operands; arbitrary SQL AST reduction
+remains out of scope. No whole recovery proof or merge approval is claimed.
 
 The subsequent [snapshot/restore repair](restore-history-safety.md) addresses
 missing-history recovery, metadata-read versus copy, and cleanup during an
