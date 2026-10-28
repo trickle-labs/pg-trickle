@@ -1297,6 +1297,13 @@ SELECT pgtrickle.drop_stream_table('order_totals');
 - Drops the underlying storage table with `CASCADE`.
 - Removes all catalog entries (metadata, dependencies, refresh history).
 - Cleans up CDC triggers and change buffer tables for source tables that are no longer tracked by any ST.
+- Local WAL slot removal is queued transactionally and performed by the
+  scheduler after commit. Rolling back the call preserves the slot. A disabled
+  scheduler defers physical cleanup and WAL release. Upgrade the extension
+  catalog to `0.108.4` before using this behavior.
+- Reusing a dropped source's name can conflict with its pending WAL slot
+  reservation. Drop the old suspended consumer, let the scheduler finish that
+  retirement, then retry registering the replacement source.
 - Automatically drops a downstream publication only when its recorded binding
   still matches; stale bindings reject the stream-table drop for safety.
 
@@ -6113,6 +6120,13 @@ SELECT pgtrickle.pause_scheduler(ARRAY['public.order_totals', 'public.customer_s
 - Raises `ERROR` if any name in `nodes` does not exist in `pgtrickle.pgt_stream_tables`.
 - Safe to call on already-paused nodes (idempotent).
 - Returns `'OK'` on success.
+- Drains admitted inline and worker units through transaction completion.
+  A unit containing any paused member cannot begin refresh work. Dispatch
+  selected before pause may finish recording a skipped/retryable job afterward.
+- A drain timeout raises `ERROR`; the target nodes remain paused. Manual
+  refresh remains available. Concurrent pause/resume calls should be coordinated.
+- Serialize creation or alteration of IMMEDIATE dependency edges with pause
+  operations; pause admission does not fence concurrent topology changes.
 
 ---
 

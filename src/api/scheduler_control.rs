@@ -52,13 +52,59 @@ fn current_database_oid() -> Result<u32, PgTrickleError> {
     .ok_or_else(|| PgTrickleError::NotFound("current database".to_string()))
 }
 
+/// Hold admission through commit, including work inside internal subtransactions.
+pub(crate) fn try_lock_scheduler_targets(pgt_ids: &[i64]) -> Result<bool, PgTrickleError> {
+    // Collisions every 2^32 IDs only conservatively delay unrelated work.
+    let mut keys: Vec<i32> = pgt_ids.iter().map(|id| *id as i32).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    Spi::get_one_with_args::<bool>(
+        "SELECT COALESCE(bool_and(pg_catalog.pg_try_advisory_xact_lock(1346851928, lock_id)), true) \
+         FROM unnest($1::integer[]) AS targets(lock_id)",
+        &[keys.into()],
+    )
+    .map_err(|error| PgTrickleError::SpiError(format!("scheduler admission for {pgt_ids:?}: {error}")))?
+    .ok_or_else(|| PgTrickleError::InternalError("scheduler admission returned no decision".into()))
+}
+
+/// Recheck shared pause flags after acquiring the same locks used by drain.
+pub(crate) fn admit_scheduler_targets(pgt_ids: &[i64]) -> bool {
+    // Scheduled writes can synchronously maintain IMMEDIATE descendants.
+    let targets = Spi::get_one_with_args::<Vec<i64>>(
+        "WITH RECURSIVE write_targets(pgt_id,pgt_relid) AS ( \
+             SELECT pgt_id,pgt_relid FROM pgtrickle.pgt_stream_tables WHERE pgt_id=ANY($1::bigint[]) \
+             UNION \
+             SELECT child.pgt_id,child.pgt_relid FROM write_targets parent \
+             JOIN pgtrickle.pgt_dependencies dep ON dep.source_relid=parent.pgt_relid \
+                 AND dep.source_type='STREAM_TABLE' \
+             JOIN pgtrickle.pgt_stream_tables child ON child.pgt_id=dep.pgt_id \
+                 AND child.refresh_mode='IMMEDIATE' \
+         ) SELECT ARRAY(SELECT pgt_id FROM write_targets UNION SELECT unnest($1::bigint[]))",
+        &[pgt_ids.to_vec().into()],
+    )
+    .unwrap_or_else(|error| pgrx::error!("scheduler write closure for {pgt_ids:?}: {error}"))
+    .unwrap_or_else(|| pgrx::error!("scheduler write closure returned no membership"));
+    // SAFETY: admission runs in a connected scheduler or refresh worker backend.
+    let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
+    let paused = || {
+        targets
+            .iter()
+            .any(|id| shmem::is_node_paused_for_database(database_oid, *id))
+    };
+    if paused() {
+        return false;
+    }
+    try_lock_scheduler_targets(&targets).unwrap_or_else(|error| pgrx::error!("{error}"))
+        && !paused()
+}
+
 // ── SQL API ──────────────────────────────────────────────────────────────────
 
 /// API-1 (v0.62.0): Pause the scheduler for the given stream table nodes.
 ///
 /// Marks each node as paused in shared memory so that the scheduler skips
 /// dispatching refreshes for it. After setting all pause flags, the call
-/// checks matching scheduler jobs and inline worker slots every 100 ms up to
+/// checks matching scheduler jobs and admitted transaction locks every 100 ms up to
 /// `pg_trickle.scheduler_drain_timeout` seconds. If matching work remains at
 /// the timeout, the call errors and the nodes remain paused for future ticks.
 ///
@@ -139,19 +185,17 @@ pub fn pause_scheduler(nodes: pgrx::Array<&str>) -> &'static str {
         )
         .unwrap_or_else(|e| pgrx::error!("pg_trickle: pause_scheduler: {}", e))
         .unwrap_or(0);
-        let inline = shmem::database_scheduler_slots()
-            .into_iter()
-            .find(|slot| slot.database_oid == database_oid)
-            .map(|slot| slot.inline_pgt_id != 0 && pgt_ids.contains(&slot.inline_pgt_id))
-            .unwrap_or(false);
-        if pending == 0 && !inline {
+        let admitted =
+            try_lock_scheduler_targets(&pgt_ids).unwrap_or_else(|error| pgrx::error!("{error}"));
+        if pending == 0 && admitted {
             break;
         }
         if std::time::Instant::now() >= deadline {
             pgrx::error!(
-                "pg_trickle: pause_scheduler timed out after {}s with {} relevant job(s) remaining",
+                "pg_trickle: pause_scheduler timed out after {}s with {} relevant job(s) remaining (admitted work drained={})",
                 drain_timeout_secs,
-                pending
+                pending,
+                admitted
             );
         }
         pgrx::check_for_interrupts!();

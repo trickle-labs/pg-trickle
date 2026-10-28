@@ -102,6 +102,7 @@ class CandidateBindingTests(unittest.TestCase):
         import check_receipt_verification as driver
         contract=binding.PROOF_CONTRACTS["receipt"]
         self.assertEqual(contract["mutants"],set(driver.MUTATIONS))
+        self.assertEqual(contract["inputs"], driver.PRODUCTION_INPUTS)
         self.source = binding.ROOT / "verification/receipt.rs"
         self.proof.update({
             "schema": "pg-trickle-receipt-verification-v1",
@@ -112,7 +113,7 @@ class CandidateBindingTests(unittest.TestCase):
                                    for name in contract["mutants"]},
             "production_inputs": {
                 path: binding.digest(binding.ROOT / path)
-                for path in ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"]
+                for path in contract["inputs"]
             },
         })
         arguments = dict(
