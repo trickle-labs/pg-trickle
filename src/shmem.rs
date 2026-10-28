@@ -80,6 +80,17 @@ unsafe impl PGRXSharedMemory for SchedulerMetaState {}
 /// cluster-global state. A full registry is a typed startup failure.
 pub const MAX_DATABASE_SCHEDULERS: usize = 64;
 
+/// Marker used when one scheduler transaction refreshes multiple stream tables.
+pub const INLINE_PGT_ID_MULTIPLE: i64 = -1;
+
+fn merge_inline_pgt_id(current: i64, next: i64) -> i64 {
+    if current == 0 || current == next {
+        next
+    } else {
+        INLINE_PGT_ID_MULTIPLE
+    }
+}
+
 /// Fixed-capacity database key used by scheduler shared state.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct DatabaseKey(pub u32);
@@ -1222,6 +1233,33 @@ pub fn resume_nodes_for_database(database_oid: u32, pgt_ids: &[i64]) {
             index += 1;
         }
     }
+}
+
+/// Claim inline scheduler work unless any target is paused, then record it
+/// until the scheduler tick transaction commits or rolls back.
+pub fn begin_inline_refreshes_for_database(database_oid: u32, pgt_ids: &[i64]) -> bool {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    let paused = PAUSED_NODES_STATE.exclusive();
+    if pgt_ids.iter().any(|pgt_id| {
+        paused.entries[..paused.count as usize]
+            .iter()
+            .any(|entry| entry.database_oid == database_oid && entry.pgt_id == *pgt_id)
+    }) {
+        return false;
+    }
+    update_database_scheduler(database_oid, |slot| {
+        for &pgt_id in pgt_ids {
+            slot.inline_pgt_id = merge_inline_pgt_id(slot.inline_pgt_id, pgt_id);
+        }
+    });
+    true
+}
+
+/// Clear inline work after its enclosing scheduler transaction has ended.
+pub fn clear_inline_refreshes_for_database(database_oid: u32) {
+    update_database_scheduler(database_oid, |slot| slot.inline_pgt_id = 0);
 }
 
 /// Maximum number of lag samples in the rolling reservoir.
@@ -2440,7 +2478,10 @@ static SHMEM_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 
 #[cfg(test)]
 mod tests {
-    use super::{PgTrickleSharedState, drain_ring, increment_epoch, push_invalidation};
+    use super::{
+        INLINE_PGT_ID_MULTIPLE, PgTrickleSharedState, drain_ring, increment_epoch,
+        merge_inline_pgt_id, push_invalidation,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
@@ -2464,6 +2505,17 @@ mod tests {
             assert!(current > last);
             last = current;
         }
+    }
+
+    #[test]
+    fn test_inline_refresh_marker_sets_multiple_sentinel() {
+        assert_eq!(merge_inline_pgt_id(0, 17), 17);
+        assert_eq!(merge_inline_pgt_id(17, 17), 17);
+        assert_eq!(merge_inline_pgt_id(17, 23), INLINE_PGT_ID_MULTIPLE);
+        assert_eq!(
+            merge_inline_pgt_id(INLINE_PGT_ID_MULTIPLE, 23),
+            INLINE_PGT_ID_MULTIPLE
+        );
     }
 
     // ── C2-1: Invalidation ring buffer tests ──────────────────────────────
