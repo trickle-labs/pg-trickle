@@ -95,6 +95,10 @@ and manually in `production-recovery-qualification`; all attempt logs are retain
 and any failed attempt fails the job. This defers additional timing exploration,
 not a unique failure scenario or assertion.
 
+Three WAL receipt progress witnesses also run serially after shard 1's parallel
+suite, so decoder and scheduler waits keep their PR coverage without competing
+with the broad container workload.
+
 Runtime selection uses [.github/ci-paths.yml](../.github/ci-paths.yml), with
 unclassified inputs retaining runtime coverage. Ordinary docs changes avoid
 extension builds. Mixed changes select the union. The bounded full suite now

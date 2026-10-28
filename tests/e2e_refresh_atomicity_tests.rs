@@ -1063,6 +1063,298 @@ async fn test_refresh_two_callers_publish_one_consistent_result() {
     assert_recovered_action(&db, stream, &query, "DIFFERENTIAL").await;
 }
 
+async fn advance_scheduler_watermark(db: &E2eDb, stream: &str, query: &str, after: i64) {
+    let id = pgt_id(db, stream).await;
+    db.execute(&format!(
+        "UPDATE pgtrickle.pgt_stream_tables \
+            SET last_refresh_at = now() - interval '2 hours' WHERE pgt_id = {id}"
+    ))
+    .await;
+    db.execute(&format!(
+        "SELECT pgtrickle.resume_scheduler(ARRAY['public.{stream}'])"
+    ))
+    .await;
+    assert!(
+        db.wait_for_condition(
+            "independent scheduled refresh after source write",
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
+                   WHERE pgt_id = {id} AND refresh_id > {after} AND status = 'COMPLETED')"
+            ),
+            Duration::from_secs(15),
+            Duration::from_millis(50),
+        )
+        .await
+    );
+    db.assert_st_matches_query(stream, query).await;
+    db.execute(&format!(
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_pause_scheduler_drains_inline_refresh_until_commit() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    configure_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.scheduler_drain_timeout", "1", "1")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.scheduled_lock_timeout_ms", "6000", "6000")
+        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.scheduled_statement_timeout_ms",
+        "48000",
+        "48000",
+    )
+    .await;
+
+    for (index, mode) in ["off", "dry_run"].into_iter().enumerate() {
+        db.alter_system_set_and_wait(
+            "pg_trickle.parallel_refresh_mode",
+            &format!("'{mode}'"),
+            mode,
+        )
+        .await;
+        let source = format!("inline_pause_source_{index}");
+        let stream = format!("inline_pause_st_{index}");
+        let control = format!("inline_pause_control_{index}");
+        let query = format!("SELECT id, value FROM public.{source}");
+        db.execute(&format!(
+            "CREATE TABLE public.{source} (id INT PRIMARY KEY, value INT NOT NULL)"
+        ))
+        .await;
+        db.execute(&format!("INSERT INTO public.{source} VALUES (1, 10)"))
+            .await;
+        db.create_st(&stream, &query, "1m", "DIFFERENTIAL").await;
+        db.create_st(&control, &query, "1m", "DIFFERENTIAL").await;
+        db.execute(&format!(
+            "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}', 'public.{control}'])"
+        ))
+        .await;
+        db.refresh_st(&stream).await;
+        db.refresh_st(&control).await;
+
+        let id = pgt_id(&db, &stream).await;
+        let control_id = pgt_id(&db, &control).await;
+        let baseline: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history \
+              WHERE pgt_id = $1 AND status = 'COMPLETED'",
+        )
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read baseline refresh id");
+        let mut setup = db.pool.begin().await.expect("begin due-work setup");
+        sqlx::query(
+            "UPDATE pgtrickle.pgt_stream_tables
+                SET last_refresh_at = now() - interval '2 hours'
+              WHERE pgt_id = $1",
+        )
+        .bind(id)
+        .execute(&mut *setup)
+        .await
+        .expect("make the scheduled refresh due");
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO public.{source} VALUES (2, 20)"
+        )))
+        .execute(&mut *setup)
+        .await
+        .expect("commit the pending source change");
+        setup.commit().await.expect("commit due-work setup");
+        let control_baseline: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history \
+              WHERE pgt_id = $1 AND status = 'COMPLETED'",
+        )
+        .bind(control_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read control baseline refresh id");
+        advance_scheduler_watermark(&db, &control, &query, control_baseline).await;
+        set_chaos(&db, &stream, "input_boundary").await;
+        let (mut barrier, blocker_pid) = hold_barrier(&db, id, "input_boundary").await;
+        db.execute(&format!(
+            "SELECT pgtrickle.resume_scheduler(ARRAY['public.{stream}'])"
+        ))
+        .await;
+
+        let witness = wait_for_barrier(
+            &db,
+            id,
+            "input_boundary",
+            blocker_pid,
+            Duration::from_secs(30),
+        )
+        .await;
+        let backend_type: String =
+            sqlx::query_scalar("SELECT backend_type FROM pg_stat_activity WHERE pid = $1")
+                .bind(witness.pid)
+                .fetch_one(&db.pool)
+                .await
+                .expect("read witnessed backend type");
+        assert!(
+            backend_type.contains("scheduler"),
+            "the witness must be the scheduler worker, got {backend_type}"
+        );
+
+        let pause_started = std::time::Instant::now();
+        let pause_error = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+            "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .expect_err("pause must report failure while the inline refresh exceeds its deadline");
+        assert!(
+            pause_started.elapsed() >= Duration::from_secs(1),
+            "pause returned before the configured drain deadline: {pause_error}"
+        );
+        assert!(
+            pause_error.to_string().contains("timed out after 1s"),
+            "{pause_error}"
+        );
+        let still_blocked = wait_for_barrier(
+            &db,
+            id,
+            "input_boundary",
+            blocker_pid,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(still_blocked.pid, witness.pid);
+        release_barrier(&mut barrier, id, "input_boundary").await;
+        db.execute(&format!(
+            "SELECT pgtrickle.resume_scheduler(ARRAY['public.{stream}'])"
+        ))
+        .await;
+        assert!(
+            db.wait_for_condition(
+                "scheduled refresh commit after barrier release",
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
+                       WHERE pgt_id = {id} AND refresh_id > {baseline} \
+                         AND status = 'COMPLETED')"
+                ),
+                Duration::from_secs(15),
+                Duration::from_millis(50),
+            )
+            .await
+        );
+        db.assert_st_matches_query(&stream, &query).await;
+        let result: String = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .expect("pause after commit should succeed");
+        assert_eq!(result, "OK");
+
+        if mode == "off" {
+            let next_baseline: i64 = sqlx::query_scalar(
+                "SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history \
+                  WHERE pgt_id = $1 AND status = 'COMPLETED'",
+            )
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read second baseline refresh id");
+            let control_baseline: i64 = sqlx::query_scalar(
+                "SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history \
+                  WHERE pgt_id = $1 AND status = 'COMPLETED'",
+            )
+            .bind(control_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read second control baseline refresh id");
+            let mut setup = db.pool.begin().await.expect("begin second due-work setup");
+            sqlx::query(
+                "UPDATE pgtrickle.pgt_stream_tables
+                    SET last_refresh_at = now() - interval '2 hours'
+                  WHERE pgt_id = $1",
+            )
+            .bind(id)
+            .execute(&mut *setup)
+            .await
+            .expect("make the second scheduled refresh due");
+            sqlx::query(AssertSqlSafe(format!(
+                "INSERT INTO public.{source} VALUES (3, 30)"
+            )))
+            .execute(&mut *setup)
+            .await
+            .expect("commit the second source change");
+            setup.commit().await.expect("commit second due-work setup");
+            advance_scheduler_watermark(&db, &control, &query, control_baseline).await;
+            let (mut early_barrier, early_blocker_pid) =
+                hold_barrier(&db, id, "input_boundary").await;
+            db.execute(&format!(
+                "SELECT pgtrickle.resume_scheduler(ARRAY['public.{stream}'])"
+            ))
+            .await;
+            let second_witness = wait_for_barrier(
+                &db,
+                id,
+                "input_boundary",
+                early_blocker_pid,
+                Duration::from_secs(30),
+            )
+            .await;
+            assert_eq!(second_witness.pid, witness.pid);
+
+            let pool = db.pool.clone();
+            let pause_sql = format!("SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])");
+            let mut pause_call = tokio::spawn(async move {
+                sqlx::query_scalar::<_, String>(AssertSqlSafe(pause_sql))
+                    .fetch_one(&pool)
+                    .await
+            });
+            let returned_early = tokio::time::timeout(Duration::from_millis(250), &mut pause_call)
+                .await
+                .is_ok();
+            wait_for_barrier(
+                &db,
+                id,
+                "input_boundary",
+                early_blocker_pid,
+                Duration::from_secs(1),
+            )
+            .await;
+            release_barrier(&mut early_barrier, id, "input_boundary").await;
+            let result = tokio::time::timeout(Duration::from_secs(3), pause_call)
+                .await
+                .expect("pause after barrier release must finish before its deadline")
+                .expect("pause task must not panic")
+                .expect("pause after early release should succeed");
+            assert!(
+                !returned_early,
+                "pause returned before the inline refresh was released"
+            );
+            assert_eq!(result, "OK");
+            assert!(
+                db.wait_for_condition(
+                    "second scheduled refresh commit after barrier release",
+                    &format!(
+                        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
+                           WHERE pgt_id = {id} AND refresh_id > {next_baseline} \
+                             AND status = 'COMPLETED')"
+                    ),
+                    Duration::from_secs(15),
+                    Duration::from_millis(50),
+                )
+                .await
+            );
+            db.assert_st_matches_query(&stream, &query).await;
+            db.execute(&format!(
+                "SELECT pgtrickle.resume_scheduler(ARRAY['public.{stream}'])"
+            ))
+            .await;
+        } else {
+            db.execute(&format!(
+                "SELECT pgtrickle.resume_scheduler(ARRAY['public.{stream}'])"
+            ))
+            .await;
+        }
+    }
+    clear_chaos(&db).await;
+}
+
 #[tokio::test]
 async fn test_refresh_nonfinite_aggregate_keeps_later_writer_for_next_cut() {
     let db = E2eDb::new_dedicated().await.with_extension().await;

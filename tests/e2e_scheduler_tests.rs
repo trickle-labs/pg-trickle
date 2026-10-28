@@ -760,6 +760,211 @@ async fn test_pause_resume_scheduler_basic() {
     );
 }
 
+#[tokio::test]
+async fn test_scheduler_paused_atomic_member_stays_stale_until_resume() {
+    for mode in ["off", "dry_run"] {
+        let db = E2eDb::new_dedicated().await.with_extension().await;
+        configure_fast_scheduler(&db).await;
+        db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", mode, mode)
+            .await;
+        db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+            .await;
+
+        db.execute("CREATE TABLE pause_group_src (id INT PRIMARY KEY, val INT)")
+            .await;
+        db.execute("INSERT INTO pause_group_src VALUES (1, 10), (2, 20), (3, 30)")
+            .await;
+        // The 1h schedule leaves an idle window before pause; members become due afterward.
+        for (name, query) in [
+            (
+                "pause_group_b",
+                "SELECT id, val FROM pause_group_src WHERE val <= 20",
+            ),
+            (
+                "pause_group_c",
+                "SELECT id, val FROM pause_group_src WHERE val >= 20",
+            ),
+            (
+                "pause_group_d",
+                "SELECT b.id AS b_id, c.id AS c_id, b.val + c.val AS total \
+                 FROM pause_group_b b JOIN pause_group_c c ON b.id = c.id",
+            ),
+        ] {
+            db.execute(&format!(
+                "SELECT pgtrickle.create_stream_table('{name}', $${query}$$, \
+                 '1h', 'FULL', true, 'atomic')"
+            ))
+            .await;
+        }
+        db.create_st(
+            "pause_group_control",
+            "SELECT id, val FROM pause_group_src",
+            "1s",
+            "DIFFERENTIAL",
+        )
+        .await;
+
+        for name in [
+            "pause_group_b",
+            "pause_group_c",
+            "pause_group_d",
+            "pause_group_control",
+        ] {
+            let count = wait_for_n_refreshes(&db, name, 1, Duration::from_secs(60)).await;
+            assert!(count >= 1, "{name} did not populate in {mode} mode");
+        }
+        assert!(
+            db.query_scalar::<bool>(
+                "SELECT count(*) = 3 AND count(DISTINCT group_id) = 1 \
+                   FROM pgtrickle.diamond_groups() \
+                  WHERE member_schema = 'public' \
+                    AND member_name IN ('pause_group_b', 'pause_group_c', 'pause_group_d')"
+            )
+            .await,
+            "B, C, and D must be members of one atomic diamond group in {mode} mode"
+        );
+
+        let group_refresh_baselines = sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT st.pgt_name::text, \
+                    count(*) FILTER (WHERE h.status = 'COMPLETED')::bigint, \
+                    count(*)::bigint \
+               FROM pgtrickle.pgt_stream_tables st \
+               LEFT JOIN pgtrickle.pgt_refresh_history h USING (pgt_id) \
+              WHERE st.pgt_name IN ('pause_group_b', 'pause_group_c', 'pause_group_d') \
+              GROUP BY st.pgt_name",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .expect("read atomic group refresh baselines");
+        assert_eq!(group_refresh_baselines.len(), 3);
+        let group_refreshes: i64 = group_refresh_baselines.iter().map(|row| row.2).sum();
+        let control_refresh_baseline =
+            wait_for_n_refreshes(&db, "pause_group_control", 1, Duration::from_secs(30)).await;
+
+        assert_eq!(
+            db.query_scalar::<String>("SELECT current_setting('pg_trickle.parallel_refresh_mode')")
+                .await,
+            mode,
+            "scheduler must use the requested sequential path"
+        );
+        assert!(
+            db.query_scalar::<bool>(
+                "SELECT bool_and(st.last_refresh_at > now() - interval '55 minutes') \
+                        AND bool_and(st.status = 'ACTIVE' AND st.consecutive_errors = 0 \
+                                     AND st.fuse_mode = 'off' AND st.fuse_state = 'armed') \
+                        AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_source_gates g \
+                                        WHERE g.source_relid = 'pause_group_src'::regclass) \
+                        AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                                        JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                                        WHERE st.pgt_name IN ('pause_group_b', 'pause_group_c', \
+                                                              'pause_group_d') \
+                                          AND h.status = 'RUNNING') \
+                   FROM pgtrickle.pgt_stream_tables st \
+                  WHERE st.pgt_name IN ('pause_group_b', 'pause_group_c', 'pause_group_d')"
+            )
+            .await,
+            "group must be idle, healthy, ungated, and not due before pause in {mode} mode"
+        );
+        assert_eq!(
+            db.query_scalar::<String>(
+                "SELECT pgtrickle.pause_scheduler(ARRAY['public.pause_group_b'])"
+            )
+            .await,
+            "OK"
+        );
+        db.execute("INSERT INTO pause_group_src VALUES (4, 20)")
+            .await;
+        let source_oid = i64::from(db.table_oid("pause_group_src").await);
+        let change_buffer = db.change_buffer_table(source_oid).await;
+        assert!(
+            db.wait_for_condition(
+                "control source insert capture",
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {change_buffer} WHERE id = 4 AND action = 'I')"
+                ),
+                Duration::from_secs(30),
+                Duration::from_millis(50),
+            )
+            .await,
+            "source insert was not captured before scheduler progress in {mode} mode"
+        );
+        db.execute(
+            "UPDATE pgtrickle.pgt_stream_tables \
+                SET last_refresh_at = now() - interval '2 hours' \
+              WHERE pgt_name IN ('pause_group_b', 'pause_group_c', 'pause_group_d', \
+                                 'pause_group_control')",
+        )
+        .await;
+
+        let control_refreshes = wait_for_n_refreshes(
+            &db,
+            "pause_group_control",
+            control_refresh_baseline + 1,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(
+            control_refreshes > control_refresh_baseline,
+            "unpaused source consumer did not prove scheduler progress in {mode} mode"
+        );
+        db.assert_st_matches_query("pause_group_control", "SELECT id, val FROM pause_group_src")
+            .await;
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let after_pause: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM pgtrickle.pgt_refresh_history h \
+                   JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                  WHERE st.pgt_name IN ('pause_group_b', 'pause_group_c', 'pause_group_d')",
+            )
+            .await;
+        assert_eq!(
+            after_pause, group_refreshes,
+            "atomic group must stay deferred while B is paused in {mode} mode"
+        );
+        for table in ["pause_group_b", "pause_group_c"] {
+            assert_eq!(
+                db.query_scalar::<i64>(&format!("SELECT count(*) FROM {table} WHERE id = 4"))
+                    .await,
+                0,
+                "{table} changed while B was paused in {mode} mode"
+            );
+        }
+        assert_eq!(
+            db.query_scalar::<i64>("SELECT count(*) FROM pause_group_d WHERE b_id = 4")
+                .await,
+            0,
+            "pause_group_d changed while B was paused in {mode} mode"
+        );
+
+        db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['public.pause_group_b'])")
+            .await;
+        for (name, completed, _) in group_refresh_baselines {
+            assert!(
+                wait_for_n_refreshes(&db, &name, completed + 1, Duration::from_secs(30)).await
+                    > completed,
+                "{name} did not refresh after resume in {mode} mode"
+            );
+        }
+        db.assert_st_matches_query(
+            "pause_group_b",
+            "SELECT id, val FROM pause_group_src WHERE val <= 20",
+        )
+        .await;
+        db.assert_st_matches_query(
+            "pause_group_c",
+            "SELECT id, val FROM pause_group_src WHERE val >= 20",
+        )
+        .await;
+        db.assert_st_matches_query(
+            "pause_group_d",
+            "SELECT b.id AS b_id, c.id AS c_id, b.val + c.val AS total \
+             FROM pause_group_b b JOIN pause_group_c c ON b.id = c.id",
+        )
+        .await;
+    }
+}
+
 /// API-1: `pause_scheduler` returns within `scheduler_drain_timeout` seconds
 /// even when there are active refresh workers.
 ///

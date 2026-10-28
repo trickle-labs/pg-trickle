@@ -1247,6 +1247,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         let mut pending_spawns: Vec<(String, i64, u64)> = Vec::new();
 
         // Run the scheduler tick inside a transaction
+        shmem::clear_inline_refreshes_for_database(database_oid);
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
             // v0.92.0: Validate capture ownership before computing or
             // advancing any frontier. A cloned or quiesced database may not
@@ -1681,6 +1682,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             continue;
                         }
                     }
+                    if !crate::shmem::begin_inline_refreshes_for_database(database_oid, &[pgt_id]) {
+                        log!("pg_trickle scheduler: skipping {pgt_id} — node is paused");
+                        continue;
+                    }
                     let mut entry = drift_counters.entry(pgt_id).or_insert(0);
                     refresh_single_st(
                         pgt_id,
@@ -1746,6 +1751,15 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             );
                             continue;
                         }
+                        if !crate::shmem::begin_inline_refreshes_for_database(
+                            database_oid,
+                            &[pgt_id],
+                        ) {
+                            log!(
+                                "pg_trickle scheduler: skipping {pgt_id} — node is paused (group)"
+                            );
+                            continue;
+                        }
                         let mut entry = drift_counters.entry(pgt_id).or_insert(0);
                         refresh_single_st(
                             pgt_id,
@@ -1780,6 +1794,32 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             }
                         }
                     }
+                    continue;
+                }
+
+                if all_atomic
+                    && group.members.iter().any(|member| match member {
+                        NodeId::StreamTable(id) => {
+                            crate::shmem::is_node_paused_for_database(database_oid, *id)
+                        }
+                        NodeId::BaseTable(_) => false,
+                    })
+                {
+                    log!("pg_trickle scheduler: deferring atomic group with a paused member");
+                    continue;
+                }
+
+                let inline_pgt_ids: Vec<i64> = group
+                    .members
+                    .iter()
+                    .filter_map(|member| match member {
+                        NodeId::StreamTable(id) => Some(*id),
+                        NodeId::BaseTable(_) => None,
+                    })
+                    .collect();
+                if !crate::shmem::begin_inline_refreshes_for_database(database_oid, &inline_pgt_ids)
+                {
+                    log!("pg_trickle scheduler: deferring atomic group with a paused member");
                     continue;
                 }
 
@@ -1889,6 +1929,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     let (has_changes, _has_stream_table_changes) =
                         upstream_change_state(&st, initial_table_changes.get(&pgt_id).copied());
                     let action = determine_scheduled_refresh_action(&st, has_changes);
+                    if !crate::shmem::begin_inline_refreshes_for_database(database_oid, &[pgt_id]) {
+                        group_ok = false;
+                        break;
+                    }
                     let result =
                         execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None);
 
@@ -1944,6 +1988,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 .collect();
             retry_states.retain(|id, _| active_ids.contains(id));
         }));
+        shmem::clear_inline_refreshes_for_database(database_oid);
 
         // Phase 4: Spawn workers outside the transaction (after commit).
         for (db, job_id, generation) in pending_spawns.drain(..) {

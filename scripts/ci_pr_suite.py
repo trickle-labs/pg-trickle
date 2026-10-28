@@ -25,6 +25,7 @@ SERIAL_CASES = [
     ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_after_receipt_commit_before_ack_converges_once"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_after_apply_before_ack_does_not_reapply"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_after_slot_advance_finishes_acknowledgement"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_receipt_commit_order_preserves_late_old_lsn_transaction"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_received_receipt_requires_rebaseline"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_undecoded_commit_requires_rebaseline"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_semantic_controls_are_detected"),

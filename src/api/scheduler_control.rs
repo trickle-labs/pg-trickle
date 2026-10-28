@@ -103,9 +103,10 @@ pub(crate) fn admit_scheduler_targets(pgt_ids: &[i64]) -> bool {
 ///
 /// Marks each node as paused in shared memory so that the scheduler skips
 /// dispatching refreshes for it. After setting all pause flags, the call
-/// checks matching scheduler jobs and admitted transaction locks every 100 ms up to
-/// `pg_trickle.scheduler_drain_timeout` seconds. If matching work remains at
-/// the timeout, the call errors and the nodes remain paused for future ticks.
+/// checks matching scheduler jobs, admitted transaction locks, and inline
+/// refreshes every 100 ms up to `pg_trickle.scheduler_drain_timeout` seconds.
+/// If matching work remains at the timeout, the call errors and the nodes
+/// remain paused for future ticks.
 ///
 /// Example:
 /// ```sql
@@ -186,15 +187,24 @@ pub fn pause_scheduler(nodes: pgrx::Array<&str>) -> &'static str {
         .unwrap_or(0);
         let admitted =
             try_lock_scheduler_targets(&pgt_ids).unwrap_or_else(|error| pgrx::error!("{error}"));
-        if pending == 0 && admitted {
+        let inline = shmem::database_scheduler_slots()
+            .into_iter()
+            .find(|slot| slot.database_oid == database_oid)
+            .map(|slot| {
+                slot.inline_pgt_id == shmem::INLINE_PGT_ID_MULTIPLE
+                    || (slot.inline_pgt_id != 0 && pgt_ids.contains(&slot.inline_pgt_id))
+            })
+            .unwrap_or(false);
+        if pending == 0 && admitted && !inline {
             break;
         }
         if std::time::Instant::now() >= deadline {
             pgrx::error!(
-                "pg_trickle: pause_scheduler timed out after {}s with {} relevant job(s) remaining (admitted work drained={})",
+                "pg_trickle: pause_scheduler timed out after {}s with {} relevant job(s) remaining (admitted work drained={}, inline refresh active={})",
                 drain_timeout_secs,
                 pending,
-                admitted
+                admitted,
+                inline
             );
         }
         pgrx::check_for_interrupts!();
