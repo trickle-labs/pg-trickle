@@ -2514,7 +2514,8 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // that existed before the v0.59.0 upgrade and haven't been ALTERed yet).
     let query_hash = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        "v0.108.3-nonfinite-state".hash(&mut hasher);
+        "v0.108.3-deferred-history:nonfinite-state:raw-aggregate-columns-v1:join-endpoints-v1"
+            .hash(&mut hasher);
         if st.defining_query_hash != 0 {
             st.defining_query_hash.hash(&mut hasher);
         } else {

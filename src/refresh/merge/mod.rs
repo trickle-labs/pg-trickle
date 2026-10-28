@@ -1923,7 +1923,8 @@ pub fn execute_differential_refresh_with_tuning(
     let query_hash: u64 = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        "v0.108.3-nonfinite-state".hash(&mut hasher);
+        "v0.108.3-deferred-history:nonfinite-state:raw-aggregate-columns-v1:join-endpoints-v1"
+            .hash(&mut hasher);
         if std::ptr::eq(
             effective_defining_query.as_ref() as *const str,
             st.defining_query.as_ref() as *const str,

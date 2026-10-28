@@ -779,46 +779,47 @@ async fn test_stmt_cdc_numeric_scale_changes_reach_shared_consumers() {
         db.assert_st_matches_query(&all_name, &all_query).await;
         db.assert_st_matches_query(&scale_name, &scale_query).await;
         let buffer = db.change_buffer_table(source_oid).await;
+        // Numeric and text columns are conservatively retained by the shared image policy.
         let mutations = [
             (
                 format!("UPDATE {source} SET amount = 1.00 WHERE id = 1"),
-                "D:010,I:010",
+                "D:011,I:011",
                 2,
                 all_first,
             ),
             (
                 format!("UPDATE {source} SET amount = 1.0 WHERE id = 1"),
-                "D:010,I:010",
+                "D:011,I:011",
                 2,
                 !all_first,
             ),
             (
                 format!("UPDATE {source} SET amount = 1.000 WHERE id = 1"),
-                "D:010,I:010",
+                "D:011,I:011",
                 2,
                 all_first,
             ),
             (
                 format!("UPDATE {source} SET amount = amount WHERE id = 1"),
-                "D:000,I:000",
+                "D:011,I:011",
                 2,
                 all_first,
             ),
             (
                 format!("UPDATE {source} SET amount = NULL WHERE id = 1"),
-                "D:010,I:010",
+                "D:011,I:011",
                 2,
                 !all_first,
             ),
             (
                 format!("UPDATE {source} SET amount = 2.00 WHERE id = 1"),
-                "D:010,I:010",
+                "D:011,I:011",
                 2,
                 all_first,
             ),
             (
                 format!("UPDATE {source} SET amount = 3.00 WHERE id = 1"),
-                "D:010,I:010",
+                "D:011,I:011",
                 2,
                 !all_first,
             ),
@@ -906,7 +907,7 @@ async fn test_stmt_cdc_numeric_scale_changes_survive_trigger_rebuild() {
         .await;
         assert_eq!(
             last_buffer_events(&db, &buffer, 2).await,
-            "D:010,I:010",
+            "D:011,I:011",
             "rebuild should retain the numeric scale change in both CDC events"
         );
         refresh_differential_and_assert(&db, "numeric_rebuild_st", query).await;

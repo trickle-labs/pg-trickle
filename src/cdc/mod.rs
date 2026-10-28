@@ -2776,8 +2776,8 @@ fn build_pk_hash_stmt_expr(
 
 /// WB-1: Build the `changed_cols` VARBIT expression for statement-level UPDATE triggers.
 ///
-/// Uses the same conservative image policy as row-level capture with the
-/// transition table aliases. Bit position `i` follows capture column order.
+/// Uses the row-level conservative image policy with transition-table aliases.
+/// Bit position `i` follows capture column order.
 fn build_changed_cols_bitmask_stmt_expr(
     pk_columns: &[String],
     columns: &[(String, String)],
@@ -2787,12 +2787,11 @@ fn build_changed_cols_bitmask_stmt_expr(
     }
     let parts: Vec<String> = columns
         .iter()
-        .map(|(col_name, type_name)| {
+        .map(|(col_name, _)| {
             let qcol = col_name.replace('"', "\"\"");
-            triggers::changed_col_bit_expr(
-                &format!("n.\"{qcol}\""),
+            crate::cdc_elision::changed_column_sql(
                 &format!("o.\"{qcol}\""),
-                type_name,
+                &format!("n.\"{qcol}\""),
             )
         })
         .collect();
@@ -3893,7 +3892,7 @@ mod tests {
     }
 
     #[test]
-    fn test_statement_bitmask_compares_numeric_scale_representation() {
+    fn test_statement_bitmask_retains_unknown_numeric_changes() {
         let pk = vec!["id".to_string()];
         let cols = vec![
             ("id".to_string(), "integer".to_string()),
@@ -3901,9 +3900,9 @@ mod tests {
         ];
         let expr = build_changed_cols_bitmask_stmt_expr(&pk, &cols).unwrap();
         assert!(
-            expr.contains("n.\"amount\" IS DISTINCT FROM o.\"amount\" OR")
-                && expr.contains("scale(n.\"amount\") IS DISTINCT FROM scale(o.\"amount\")"),
-            "statement changed_cols must observe numeric scale changes: {expr}"
+            expr.contains("pg_catalog.pg_typeof(n.\"amount\")::oid IN")
+                && expr.contains("ELSE B'1' END)::varbit"),
+            "statement changed_cols must conservatively retain numeric changes: {expr}"
         );
     }
 

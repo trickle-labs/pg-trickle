@@ -53,10 +53,7 @@ volatile evaluation or floating point reassociation is assumed equivalent.
 
 Existing permanent regressions remain owned by their repair work:
 
-The outcomes below are historical observations from the owning repair stages;
-they do not describe the current integrated umbrella head.
-
-| Semantic class | Permanent regression / owner | Previously observed baseline |
+| Semantic class | Permanent regression / owner | Observed baseline in this stack |
 | --- | --- | --- |
 | Composite datum NULL | #1203 / PR #1212, COUNT composite installed regressions | All 15 generated count bags fail after differential refresh: record counts undercount NULL-containing records. |
 | FILTER evaluation | #1204 / PR #1214, protected argument installed regressions | FILTER-protected division fails during differential refresh with division by zero. |
@@ -79,7 +76,7 @@ The scheduled 54-case baseline was also executed against that same production
 package: 10 passed and 44 failed, with zero retries. This establishes observed
 scheduled coverage without treating the larger red selection as qualification.
 
-At the intermediate CDC-deferred head `db909f1b0a97f06b999a68a478258aa21e2e7e73`, the
+After the CDC repairs at `db909f1b0a97f06b999a68a478258aa21e2e7e73`, the
 34-case floor reports 16 passes and 18 failures. Both consumer orders, numeric
 projection, CASE, deferred-key replacement and nested-count metadata now pass.
 The remaining failures are all 15 composite COUNT bags, FILTER-protected

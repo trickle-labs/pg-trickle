@@ -44,7 +44,7 @@ async fn test_dvm_numeric_scale_python_replay_and_corruption_control() {
     std::fs::create_dir_all(&directory).expect("Python replay directory");
     let cases: Vec<_> = dvm_fuzz::semantic::bounded_cases()
         .into_iter()
-        .filter(|scenario| scenario.execution.observe_numeric_scale)
+        .filter(|scenario| scenario.query.defining_query.contains("scale(v)"))
         .collect();
     assert_eq!(cases.len(), 3, "all declared numeric-scale cases must run");
     let mut observed = Vec::new();

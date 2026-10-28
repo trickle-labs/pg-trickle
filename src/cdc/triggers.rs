@@ -34,62 +34,10 @@ pub fn cb_col_name(name: &str) -> String {
     }
 }
 
-pub(super) fn is_pgvector_type(type_name: &str) -> bool {
-    matches!(
-        type_name
-            .split('(')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .rsplit('.')
-            .next()
-            .unwrap_or("")
-            .trim_matches('"'),
-        "vector" | "halfvec" | "sparsevec"
-    )
-}
-
-pub(super) fn is_numeric_type(type_name: &str) -> bool {
-    matches!(
-        type_name
-            .split('(')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .rsplit('.')
-            .next()
-            .unwrap_or("")
-            .trim_matches('"'),
-        "numeric" | "decimal"
-    )
-}
-
-pub(super) fn changed_col_bit_expr(new_value: &str, old_value: &str, type_name: &str) -> String {
-    if is_pgvector_type(type_name) {
-        return format!(
-            "(CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_type t \
-             JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_type'::regclass::oid AND d.objid = t.oid \
-             JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid \
-             WHERE t.oid = pg_catalog.pg_typeof({new_value})::oid \
-               AND d.refclassid = 'pg_catalog.pg_extension'::regclass::oid AND d.deptype = 'e' \
-               AND e.extname = 'vector' AND t.typname IN ('vector', 'halfvec', 'sparsevec')) \
-             THEN CASE WHEN {new_value}::text IS DISTINCT FROM {old_value}::text \
-                       THEN B'1' ELSE B'0' END ELSE B'1' END)::varbit"
-        );
-    }
-    let comparison = if is_numeric_type(type_name) {
-        format!(
-            "{new_value} IS DISTINCT FROM {old_value} OR \
-             scale({new_value}) IS DISTINCT FROM scale({old_value})"
-        )
-    } else {
-        return crate::cdc_elision::changed_column_sql(old_value, new_value);
-    };
-    format!("(CASE WHEN {comparison} THEN B'1' ELSE B'0' END)::varbit")
-}
-
 /// Build the VARBIT bitmask expression for `changed_cols` in UPDATE triggers.
-/// Numeric scale changes and admitted binary images are observable by SQL.
+///
+/// Compare binary images of admitted builtin values, retaining unknown types.
+/// SQL equality alone cannot protect observations such as numeric scale.
 ///
 /// Returns `None` for keyless tables (`pk_columns` empty): all columns
 /// contribute to the content hash and must always be present.
@@ -105,12 +53,11 @@ pub fn build_changed_cols_bitmask_expr(
     }
     let parts: Vec<String> = columns
         .iter()
-        .map(|(col_name, type_name)| {
+        .map(|(col_name, _)| {
             let qcol = col_name.replace('"', "\"\"");
-            changed_col_bit_expr(
-                &format!("NEW.\"{qcol}\""),
+            crate::cdc_elision::changed_column_sql(
                 &format!("OLD.\"{qcol}\""),
-                type_name,
+                &format!("NEW.\"{qcol}\""),
             )
         })
         .collect();
@@ -190,23 +137,19 @@ mod tests {
             qualified_expr.contains("pg_catalog.pg_typeof(NEW.\"embedding\")::oid"),
             "actual type OIDs must govern the policy: {qualified_expr}"
         );
-    }
 
-    #[test]
-    fn test_build_changed_cols_bitmask_expr_numeric_compares_scale_representation() {
-        let pk = vec!["id".to_string()];
-        let cols = vec![
-            ("id".to_string(), "integer".to_string()),
-            (
-                "amount".to_string(),
-                "pg_catalog.numeric(12, 2)".to_string(),
-            ),
-        ];
-        let expr = build_changed_cols_bitmask_expr(&pk, &cols).unwrap();
+        let numeric_expr = build_changed_cols_bitmask_expr(
+            &pk,
+            &[
+                ("id".to_string(), "integer".to_string()),
+                ("amount".to_string(), "numeric(12, 2)".to_string()),
+            ],
+        )
+        .unwrap();
         assert!(
-            expr.contains("NEW.\"amount\" IS DISTINCT FROM OLD.\"amount\" OR")
-                && expr.contains("scale(NEW.\"amount\") IS DISTINCT FROM scale(OLD.\"amount\")"),
-            "numeric changed_cols must observe scale changes: {expr}"
+            numeric_expr.contains("pg_catalog.pg_typeof(NEW.\"amount\")::oid IN")
+                && numeric_expr.contains("ELSE B'1' END)::varbit"),
+            "numeric updates must be retained for representation-sensitive consumers: {numeric_expr}"
         );
     }
 }

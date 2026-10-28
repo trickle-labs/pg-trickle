@@ -141,7 +141,6 @@ mod tests {
                 schedule: "1m".to_string(),
                 requested_refresh_mode: "DIFFERENTIAL".to_string(),
                 require_differential_history: false,
-                observe_numeric_scale: false,
             },
             expected_capability: ExpectedCapability {
                 differential: true,

@@ -15,30 +15,15 @@ CONTROL = Path(__file__).resolve().parent.parent / "tests/corpus/dvm_negative_co
 
 
 class NegativeControlTests(unittest.TestCase):
-    def test_numeric_scale_observation_is_explicit_and_attached_to_each_row(self):
-        scenario=copy.deepcopy(dvm_replay.load(CONTROL))
-        scenario["execution"]["observe_numeric_scale"]=True
-        scenario["query"]["columns"]=["id","v"]
-        with patch.object(dvm_replay,"psql",side_effect=['["v","__pgt_aux_sum_hidden"]',"ok"]) as query:
-            dvm_replay.exact_check(scenario,"unused")
-            sql=query.call_args.args[1]
-            self.assertEqual(sql.count('pg_catalog.scale("v")'),4)
-            self.assertNotIn('scale("__pgt_aux_sum_hidden")',sql)
-        for invalid in ["true",1,None]:
-            scenario["execution"]["observe_numeric_scale"]=invalid
-            with self.assertRaisesRegex(ValueError,"must be boolean"):
-                dvm_replay.validate(scenario)
-
-    def test_numeric_scale_cannot_silently_select_no_admitted_type(self):
-        scenario=copy.deepcopy(dvm_replay.load(CONTROL))
-        scenario["execution"]["observe_numeric_scale"]=True
-        with patch.object(dvm_replay,"psql",return_value="[]"):
-            with self.assertRaisesRegex(dvm_replay.ReplayFailure,"no admitted public numeric"):
-                dvm_replay.exact_check(scenario,"unused")
-        scenario["query"]["columns"]=["__pgt_aux_sum_hidden"]
-        with patch.object(dvm_replay,"psql",return_value='["__pgt_aux_sum_hidden"]'):
-            with self.assertRaisesRegex(dvm_replay.ReplayFailure,"no admitted public numeric"):
-                dvm_replay.exact_check(scenario,"unused")
+    def test_numeric_scale_is_compared_when_selected_by_the_query(self):
+        scenario = copy.deepcopy(dvm_replay.load(CONTROL))
+        scenario["query"]["stream_table"] = "output"
+        scenario["query"]["defining_query"] = "SELECT id, v, scale(v) AS observed_scale FROM input"
+        scenario["query"]["columns"] = ["id", "v", "scale(v) AS observed_scale"]
+        with patch.object(dvm_replay, "psql", return_value="ok") as query:
+            dvm_replay.exact_check(scenario, "unused")
+            sql = query.call_args.args[1]
+        self.assertEqual(sql.count("scale(v)"), 6)
 
     def test_every_failure_coordinate_must_match(self):
         scenario = dvm_replay.load(CONTROL)

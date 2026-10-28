@@ -67,8 +67,6 @@ pub struct ExecutionSettings {
     pub requested_refresh_mode: String,
     #[serde(default)]
     pub require_differential_history: bool,
-    #[serde(default)]
-    pub observe_numeric_scale: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,22 +281,13 @@ async fn compare(
     cycle: Option<usize>,
 ) -> Result<(), ReplayFailure> {
     let phase = phase.into();
-    let comparison = if scenario.execution.observe_numeric_scale {
-        e2e::oracle::compare_st_to_query_with_numeric_scale(
-            db,
-            &scenario.query.stream_table,
-            &scenario.query.defining_query,
-        )
-        .await
-    } else {
-        e2e::oracle::compare_st_to_query(
-            db,
-            &scenario.query.stream_table,
-            &scenario.query.defining_query,
-        )
-        .await
-    };
-    if let Err(diff) = comparison {
+    if let Err(diff) = e2e::oracle::compare_st_to_query(
+        db,
+        &scenario.query.stream_table,
+        &scenario.query.defining_query,
+    )
+    .await
+    {
         let mut replay_failure = failure(
             scenario,
             "I-02",
