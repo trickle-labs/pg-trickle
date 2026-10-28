@@ -379,7 +379,7 @@ async fn test_projected_source_without_pk_preserves_duplicate_values() {
         "DELETE FROM projected_duplicates WHERE id = 2",
     ] {
         db.execute(mutation).await;
-        db.refresh_st("projected_duplicate_stream").await;
+        db.refresh_st_with_retry("projected_duplicate_stream").await;
         db.assert_st_matches_query("public.projected_duplicate_stream", query)
             .await;
     }
