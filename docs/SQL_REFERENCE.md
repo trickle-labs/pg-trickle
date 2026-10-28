@@ -1843,7 +1843,9 @@ Captures a transaction-scoped output-log head and returns a resnapshot token.
 Commits the resnapshot token and activates the consumer at the captured log
 head. The token fences the log head, the database instance ID, the output
 contract digest, and the row identity version. A change to any fenced value
-invalidates the token.
+invalidates the token. Acknowledgement also verifies that the typed payload
+relation still has the registered column layout; if it does not, the call
+fails and the consumer remains invalidated until the relation is repaired.
 
 ### pgtrickle.request_output_delta_resnapshot
 

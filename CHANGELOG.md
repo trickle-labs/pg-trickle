@@ -222,6 +222,9 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Reject output-delta resnapshot acknowledgement when the typed payload
+  relation no longer matches its registered column layout (#1184). Deleted
+  payload rows remain recoverable through a resnapshot.
 - Evaluate computed projections over affected old/old and new/new inner-join
   endpoints for admitted keyed trigger sources, avoiding intermediate
   divide-by-zero errors when both committed endpoints are valid (#1211, #1223).
