@@ -291,7 +291,7 @@ async fn test_t_a44_10_delete_correctness() {
 
     db.execute("DELETE FROM a44_del_src WHERE name = 'bob'")
         .await;
-    db.refresh_st("a44_del_st").await;
+    db.refresh_st_with_retry("a44_del_st").await;
     db.assert_st_matches_query("a44_del_st", "SELECT id, name, val FROM a44_del_src")
         .await;
 }
