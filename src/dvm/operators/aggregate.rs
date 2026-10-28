@@ -2483,6 +2483,11 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             let state_col = quote_ident(&format!("__pgt_aux_special_{}", st_col_name(&agg.alias)));
             let inserts = quote_ident(&format!("__ins_special_{}", agg.alias));
             let deletes = quote_ident(&format!("__del_special_{}", agg.alias));
+            let use_state = format!(
+                "({} OR COALESCE(d.{}, 0) > 0)",
+                crate::dvm::operators::nonfinite::has_special_sql(&format!("st.{state_col}")),
+                quote_ident(&format!("__special_{}", agg.alias)),
+            );
             let merged_state = crate::dvm::operators::nonfinite::merge_sql(
                 &format!("st.{state_col}"),
                 &format!("d.{inserts}"),
@@ -2501,13 +2506,24 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 "{state} AS {}",
                 quote_ident(&format!("new___pgt_aux_special_{}", agg.alias)),
             ));
-            Some((state, value))
+            Some((state, value, use_state))
         } else {
             None
         };
-        let new_val_expr = if let Some((_, value)) = &special_state {
+        let algebraic_value = agg_merge_expr_mapped(
+            agg,
+            agg_has_rescan,
+            use_having_rescan,
+            agg_has_nonnull_aux,
+            &st_col_name(&agg.alias),
+            ctx.agg_sum_coalesce_defaults
+                .as_ref()
+                .and_then(|m| m.get(&agg.alias))
+                .map(|s| s.as_str()),
+        );
+        let new_val_expr = if let Some((_, value, use_state)) = &special_state {
             let value = format!("({value})::numeric");
-            match agg.function {
+            let special_value = match agg.function {
                 AggFunc::Sum => {
                     let new_nonnull = sum_nonnull_count_expr(
                         &agg.alias,
@@ -2526,30 +2542,16 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                          COALESCE(d.{inserts}, 0) - COALESCE(d.{deletes}, 0), 0)"
                     )
                 }
-                _ => agg_merge_expr_mapped(
-                    agg,
-                    agg_has_rescan,
-                    use_having_rescan,
-                    agg_has_nonnull_aux,
-                    &st_col_name(&agg.alias),
-                    ctx.agg_sum_coalesce_defaults
-                        .as_ref()
-                        .and_then(|m| m.get(&agg.alias))
-                        .map(|s| s.as_str()),
-                ),
-            }
-        } else {
-            agg_merge_expr_mapped(
-                agg,
-                agg_has_rescan,
+                _ => algebraic_value.clone(),
+            };
+            let special_value = initialize_having_group(
                 use_having_rescan,
-                agg_has_nonnull_aux,
-                &st_col_name(&agg.alias),
-                ctx.agg_sum_coalesce_defaults
-                    .as_ref()
-                    .and_then(|m| m.get(&agg.alias))
-                    .map(|s| s.as_str()),
-            )
+                &format!("r.{}", quote_ident(&agg.alias)),
+                &special_value,
+            );
+            format!("CASE WHEN {use_state} THEN {special_value} ELSE {algebraic_value} END")
+        } else {
+            algebraic_value
         };
         merge_selects.push(format!(
             "{new_val_expr} AS {}",
@@ -2585,8 +2587,16 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                     "COALESCE(st.{aux_sum}, 0) + COALESCE(d.{ins_sum}, 0) - COALESCE(d.{del_sum}, 0)"
                 ),
             );
-            let aux_sum_value = if let Some((_, value)) = &special_state {
-                format!("({value})::numeric")
+            let aux_sum_value = if let Some((_, value, use_state)) = &special_state {
+                let special_value = initialize_having_group(
+                    use_having_rescan,
+                    &format!(
+                        "COALESCE(r.{}, 0)",
+                        quote_ident(&format!("__pgt_rescan_sum_{}", agg.alias))
+                    ),
+                    &format!("({value})::numeric"),
+                );
+                format!("CASE WHEN {use_state} THEN {special_value} ELSE {aux_sum_value} END")
             } else if needs_special_value_rescan(agg) && has_rescan {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN COALESCE(r.{}, 0) ELSE {aux_sum_value} END",
