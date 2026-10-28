@@ -1764,6 +1764,18 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     continue;
                 }
 
+                if all_atomic
+                    && group.members.iter().any(|member| match member {
+                        NodeId::StreamTable(id) => {
+                            crate::shmem::is_node_paused_for_database(database_oid, *id)
+                        }
+                        NodeId::BaseTable(_) => false,
+                    })
+                {
+                    log!("pg_trickle scheduler: deferring atomic group with a paused member");
+                    continue;
+                }
+
                 // All members due (per policy) — wrap in an internal sub-transaction.
                 //
                 // Background workers cannot use `Spi::run("SAVEPOINT …")` because
