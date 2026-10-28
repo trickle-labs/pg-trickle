@@ -47,6 +47,7 @@ class AllocationTests(unittest.TestCase):
             "test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline) | "
             "test(=test_wal_recovery_semantic_controls_are_detected) | "
             "test(=test_t_a44_10_insert_correctness) | "
+            "test(=test_lsn_manual_refresh_own_writes_visible_in_caller_transaction) | "
             "test(=test_lsn_manual_refresh_fixed_snapshots_preserve_frontier) | "
             "test(=test_lsn_scheduler_cdc_holdback_recovers_after_long_writer) | "
             "test(=test_prop_monotone_cycle_small_graph_converges) | "
