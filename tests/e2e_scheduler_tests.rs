@@ -896,16 +896,23 @@ async fn test_scheduler_paused_atomic_member_stays_stale_until_resume() {
         )
         .await;
 
-        let control_refreshes = wait_for_n_refreshes(
-            &db,
-            "pause_group_control",
-            control_refresh_baseline + 1,
-            Duration::from_secs(30),
-        )
-        .await;
+        let control_refreshed_change = db
+            .wait_for_condition(
+                "control refresh includes the post-pause source change",
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM pause_group_control WHERE id = 4) \
+                       AND (SELECT count(*) FROM pgtrickle.pgt_refresh_history h \
+                             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                            WHERE st.pgt_name = 'pause_group_control' \
+                              AND h.status = 'COMPLETED') > {control_refresh_baseline}"
+                ),
+                Duration::from_secs(30),
+                Duration::from_millis(50),
+            )
+            .await;
         assert!(
-            control_refreshes > control_refresh_baseline,
-            "unpaused source consumer did not prove scheduler progress in {mode} mode"
+            control_refreshed_change,
+            "unpaused source consumer did not materialize the new row in {mode} mode"
         );
         db.assert_st_matches_query("pause_group_control", "SELECT id, val FROM pause_group_src")
             .await;
