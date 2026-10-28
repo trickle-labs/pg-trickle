@@ -281,6 +281,17 @@ pgtrickle.create_stream_table(
 | `storage_backend` | `text` | `NULL` | Columnar storage backend to use for the stream table storage table (e.g. `'hydra'`, `'citus_columnar'`). When set, differential refreshes use the `delete_insert` strategy (columnar backends are append-only). |
 | `orchestration_mode` | `text` | `'MANAGED'` | Durable refresh owner. `MANAGED` enables pg_trickle scheduling; `EXTERNAL` leaves refresh submission to an external coordinator. `EXTERNAL` cannot be combined with `IMMEDIATE`. |
 
+Populating a table during creation requires READ COMMITTED-compatible isolation.
+REPEATABLE READ and SERIALIZABLE calls that populate the new table are rejected:
+an older transaction snapshot cannot be paired safely with a current capture
+frontier. Retry creation under READ COMMITTED, or create with `initialize =>
+false` and perform the first refresh under READ COMMITTED. Failed creation
+publishes no table, dependency or frontier.
+
+For a consumer previously initialized from an old fixed snapshot, use a FULL
+refresh or `reinitialize_stream_table` under READ COMMITTED to rebuild its
+baseline; ordinary differential refresh may already be past the missing change.
+
 When `refresh_mode => 'IMMEDIATE'`, the cluster-wide `pg_trickle.cdc_mode`
 setting is ignored. IMMEDIATE mode always uses statement-level IVM triggers
 instead of CDC triggers or WAL replication slots. If the effective or explicit
@@ -1286,6 +1297,13 @@ SELECT pgtrickle.drop_stream_table('order_totals');
 - Drops the underlying storage table with `CASCADE`.
 - Removes all catalog entries (metadata, dependencies, refresh history).
 - Cleans up CDC triggers and change buffer tables for source tables that are no longer tracked by any ST.
+- Local WAL slot removal is queued transactionally and performed by the
+  scheduler after commit. Rolling back the call preserves the slot. A disabled
+  scheduler defers physical cleanup and WAL release. Upgrade the extension
+  catalog to `0.108.4` before using this behavior.
+- Reusing a dropped source's name can conflict with its pending WAL slot
+  reservation. Drop the old suspended consumer, let the scheduler finish that
+  retirement, then retry registering the replacement source.
 - Automatically drops a downstream publication only when its recorded binding
   still matches; stale bindings reject the stream-table drop for safety.
 
@@ -6102,6 +6120,13 @@ SELECT pgtrickle.pause_scheduler(ARRAY['public.order_totals', 'public.customer_s
 - Raises `ERROR` if any name in `nodes` does not exist in `pgtrickle.pgt_stream_tables`.
 - Safe to call on already-paused nodes (idempotent).
 - Returns `'OK'` on success.
+- Drains admitted inline and worker units through transaction completion.
+  A unit containing any paused member cannot begin refresh work. Dispatch
+  selected before pause may finish recording a skipped/retryable job afterward.
+- A drain timeout raises `ERROR`; the target nodes remain paused. Manual
+  refresh remains available. Concurrent pause/resume calls should be coordinated.
+- Serialize creation or alteration of IMMEDIATE dependency edges with pause
+  operations; pause admission does not fence concurrent topology changes.
 
 ---
 

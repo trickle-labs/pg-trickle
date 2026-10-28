@@ -99,14 +99,21 @@ class CandidateBindingTests(unittest.TestCase):
             binding.validate_binding(**arguments)
 
     def test_receipt_binding_checks_production_inputs_and_installed_bytes(self) -> None:
+        import check_receipt_verification as driver
+        contract=binding.PROOF_CONTRACTS["receipt"]
+        self.assertEqual(contract["mutants"],set(driver.MUTATIONS))
+        self.assertEqual(contract["inputs"], driver.PRODUCTION_INPUTS)
         self.source = binding.ROOT / "verification/receipt.rs"
         self.proof.update({
             "schema": "pg-trickle-receipt-verification-v1",
             "source_sha256": binding.digest(self.source),
-            "obligations": ["receipt_ack_row_limit"],
+            "obligations": sorted(contract["obligations"]),
+            "semantic_mutations": {name: {"returncode":1,"failure_kind":"postcondition",
+                                          "summary":"verification results:: 1 verified, 1 errors"}
+                                   for name in contract["mutants"]},
             "production_inputs": {
                 path: binding.digest(binding.ROOT / path)
-                for path in ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"]
+                for path in contract["inputs"]
             },
         })
         arguments = dict(
@@ -116,6 +123,16 @@ class CandidateBindingTests(unittest.TestCase):
         )
         self.assertEqual(binding.validate_binding(**arguments)["schema"],
                          "pg-trickle-receipt-candidate-binding-v1")
+        for name in contract["mutants"]:
+            control=self.proof["semantic_mutations"].pop(name)
+            with self.assertRaisesRegex(ValueError,"omits a required executable mutant"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name]={**control,"failure_kind":"compile-error"}
+            with self.assertRaisesRegex(ValueError,"intended postcondition"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name]=control
+        with self.assertRaisesRegex(ValueError,"all required RECEIPT E2E cases"):
+            binding.validate_binding(**{**arguments,"runtime_cases":binding.RECEIPT_CASES[:1]})
         self.proof["production_inputs"]["src/wal_decoder.rs"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "production input differs"):
             binding.validate_binding(**arguments)
