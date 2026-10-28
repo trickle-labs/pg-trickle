@@ -21,7 +21,7 @@ name: DVM deep tiers (COR-18)
 
 on:
   schedule:
-    - cron: '30 2 * * *'   # Nightly at 02:30 UTC — bounded subset
+    - cron: '0 0 * * *'     # Nightly at 00:00 UTC — bounded subset
     - cron: '0 4 * * 1'    # Weekly, Monday 04:00 UTC — full deep suite
   workflow_dispatch:
     inputs:

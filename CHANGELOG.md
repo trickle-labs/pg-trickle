@@ -235,6 +235,10 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
   old DELETE. Keyed delta reduction compares complete binary row images, so
   numeric representation changes survive and json payloads need no equality
   operator (#1180, #1221).
+- Preserve inputs to casted and other complex aggregates during differential
+  refresh (#1263). After upgrading, reinitialize existing affected stream
+  tables before refreshing them to repair stale results and expand older
+  selective change buffers.
 - Count non-NULL composite values containing NULL fields correctly during
   differential refresh, including filtered counts (#1203). Existing affected
   stream tables need a FULL refresh to correct previously stored undercounts.
@@ -250,6 +254,8 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
   predicates, preventing errors from transient cross-snapshot row pairs while
   preserving exact duplicate counts and the algebraic path for simple
   equijoins (#1211).
+- Preserve explicit NULL values in WAL-captured updates while retaining the old
+  row for differential refresh (#1172).
 - Prevent manual DIFFERENTIAL refreshes from skipping trigger-captured changes
   when source transactions commit out of LSN order (#1158).
 - Add versioned V3 row identities whose `bpchar` canonicalization matches PostgreSQL equality; V2 bytes remain unchanged. V2-backed stream tables require protected FULL reinitialization after upgrade.

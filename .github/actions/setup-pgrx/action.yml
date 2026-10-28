@@ -14,6 +14,9 @@ inputs:
   pg-install-mode:
     description: PostgreSQL provisioning mode for pgrx (`system` or `download`)
     default: system
+  cache:
+    description: Restore and save build caches (disable for cold-cache comparisons)
+    default: 'true'
 
 runs:
   using: composite
@@ -52,6 +55,7 @@ runs:
     # the 'matrix' context internally, which is unavailable in composite
     # actions and causes GitHub Actions workflow validation to fail.
     - name: Cache cargo registry
+      if: inputs.cache == 'true'
       uses: actions/cache@v5
       with:
         path: |
@@ -64,6 +68,7 @@ runs:
           v1-cargo-registry-${{ runner.os }}-
 
     - name: Cache cargo build artifacts
+      if: inputs.cache == 'true'
       uses: actions/cache@v5
       with:
         path: target
@@ -75,6 +80,7 @@ runs:
         key: v3-cargo-build-pgrx0.18-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS || 'unknown' }}-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Cache cargo-pgrx binary
+      if: inputs.cache == 'true'
       id: cache-cargo-pgrx
       uses: actions/cache@v5
       with:
@@ -99,6 +105,7 @@ runs:
           v3-cargo-pgrx-bin-${{ runner.os }}-
 
     - name: Cache pgrx home directory (~/.pgrx)
+      if: inputs.cache == 'true'
       id: cache-pgrx-home
       uses: actions/cache@v5
       with:

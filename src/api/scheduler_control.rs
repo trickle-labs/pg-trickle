@@ -142,7 +142,10 @@ pub fn pause_scheduler(nodes: pgrx::Array<&str>) -> &'static str {
         let inline = shmem::database_scheduler_slots()
             .into_iter()
             .find(|slot| slot.database_oid == database_oid)
-            .map(|slot| slot.inline_pgt_id != 0 && pgt_ids.contains(&slot.inline_pgt_id))
+            .map(|slot| {
+                slot.inline_pgt_id == shmem::INLINE_PGT_ID_MULTIPLE
+                    || (slot.inline_pgt_id != 0 && pgt_ids.contains(&slot.inline_pgt_id))
+            })
             .unwrap_or(false);
         if pending == 0 && !inline {
             break;

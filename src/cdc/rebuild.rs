@@ -371,7 +371,7 @@ pub fn rebuild_cdc_trigger(
 ///
 /// F39: Columns that were dropped from the source are cleaned up by dropping
 /// the orphaned flat columns from the buffer table.
-fn sync_change_buffer_columns(
+pub(crate) fn sync_change_buffer_columns(
     source_oid: pg_sys::Oid,
     change_schema: &str,
     columns: &[(String, String)],

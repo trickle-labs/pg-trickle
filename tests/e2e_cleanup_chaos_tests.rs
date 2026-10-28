@@ -6,7 +6,7 @@
 //! Test scenario:
 //!   1. Create source table + DIFFERENTIAL stream table.
 //!   2. Pause scheduling and insert rows → changes land in the CDC buffer.
-//!   3. Pre-seed `consecutive_errors` to `max_consecutive_errors − 1`.
+//!   3. Keep `consecutive_errors` at zero so real failures reach the threshold.
 //!   4. Enable the `pg_trickle.test_chaos_for_table` GUC and resume scheduling.
 //!      The scheduler reaches the real refresh error path and injects a
 //!      retryable failure before apply on every eligible tick.
@@ -141,18 +141,32 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     db.execute("INSERT INTO chaos_src VALUES (4, 'delta'), (5, 'epsilon')")
         .await;
 
-    // ── 3b. Pre-seed consecutive_errors to max_consecutive_errors − 1 ─
-    //
-    // Pre-seeding to one below the threshold means only a single chaos tick
-    // is required to trigger suspension, making the test fast and deterministic.
-    db.execute(
-        "UPDATE pgtrickle.pgt_stream_tables \
-         SET consecutive_errors = 2 \
-         WHERE pgt_name = 'chaos_st'",
-    )
-    .await;
+    // WAL capture is asynchronous. A scheduler tick with an empty buffer can
+    // legitimately select NO_DATA, and the failpoint would suspend the stream
+    // before the test has exercised a differential refresh. Wait for both
+    // committed INSERTs to reach CDC before arming the failure.
+    let source_oid: i64 = db
+        .query_scalar("SELECT 'public.chaos_src'::regclass::oid::bigint")
+        .await;
+    let change_buffer = db.change_buffer_table(source_oid).await;
+    let captured = db
+        .wait_for_condition(
+            "chaos source inserts captured",
+            &format!(
+                "SELECT count(DISTINCT id) = 2 FROM {change_buffer} \
+                 WHERE action = 'I' AND id IN (4, 5)"
+            ),
+            Duration::from_secs(60),
+            Duration::from_millis(100),
+        )
+        .await;
+    assert!(
+        captured,
+        "both pending INSERTs must be CDC-visible before injecting the refresh failure"
+    );
 
-    // Arm the failure only after pending differential work and its counter are ready.
+    // A tick can retain an empty change snapshot from before pause. Let it fail
+    // before fresh ticks witness the pending differential work and reach the limit.
     db.alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "'chaos_st'", "chaos_st")
         .await;
     db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['public.chaos_st'])")
@@ -160,8 +174,7 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
 
     // ── 4. Wait for auto-suspension ──────────────────────────────────
     //
-    // With consecutive_errors pre-seeded to 2, one scheduler-owned injected
-    // failure increments it to 3 = max_consecutive_errors → SUSPENDED.
+    // Three scheduler-owned failures must reach max_consecutive_errors.
     let suspended = wait_for_suspended(&db, "chaos_st", Duration::from_secs(60)).await;
     // Capture diagnostic info before the assertion so the panic message is informative.
     let (status_at_timeout, _mode, _populated, consecutive_errors_at_timeout) =
@@ -177,6 +190,17 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     assert!(
         consecutive_errors >= 3,
         "consecutive_errors should be >= 3 when auto-suspended, got {consecutive_errors}"
+    );
+    let failed_attempts: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'chaos_st' AND h.status = 'FAILED'",
+        )
+        .await;
+    assert!(
+        failed_attempts >= 3,
+        "three real failures must precede suspension"
     );
 
     let failure: (String, String, String, String, bool, String) = sqlx::query_as(

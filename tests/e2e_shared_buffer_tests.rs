@@ -781,7 +781,7 @@ async fn test_perf2_auto_mode_starts_unpartitioned() {
     // Normal differential refresh should still work.
     db.execute("INSERT INTO perf2_auto_src (val) VALUES (4)")
         .await;
-    db.refresh_st("perf2_auto_cnt").await;
+    db.refresh_st_until_converged("perf2_auto_cnt").await;
 
     let cnt: i64 = db.query_scalar("SELECT cnt FROM perf2_auto_cnt").await;
     assert_eq!(cnt, 4);

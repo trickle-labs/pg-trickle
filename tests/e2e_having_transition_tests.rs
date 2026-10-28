@@ -296,13 +296,13 @@ async fn test_having_row_group_migration() {
     // Move val=25 from 'a' to 'b': a drops (10 ≤ 20), b rises (5+25=30 > 20)
     db.execute("UPDATE hv_mig SET grp = 'b' WHERE val = 25")
         .await;
-    db.refresh_st("hv_mig_st").await;
+    db.refresh_st_until_converged("hv_mig_st").await;
     db.assert_st_matches_query("hv_mig_st", q).await;
 
     // Move it back
     db.execute("UPDATE hv_mig SET grp = 'a' WHERE val = 25")
         .await;
-    db.refresh_st("hv_mig_st").await;
+    db.refresh_st_until_converged("hv_mig_st").await;
     db.assert_st_matches_query("hv_mig_st", q).await;
 }
 

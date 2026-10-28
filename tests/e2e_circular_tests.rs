@@ -58,26 +58,6 @@ async fn wait_for_refresh(db: &E2eDb, pgt_name: &str, timeout: Duration) -> bool
     }
 }
 
-/// Wait until a stream table reaches the given status.
-async fn wait_for_status(db: &E2eDb, pgt_name: &str, status: &str, timeout: Duration) -> bool {
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > timeout {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let current: String = db
-            .query_scalar(&format!(
-                "SELECT status FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_name = '{pgt_name}'"
-            ))
-            .await;
-        if current == status {
-            return true;
-        }
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 1: Monotone cycle creation + scheduler convergence
 // ═══════════════════════════════════════════════════════════════════════════
@@ -547,12 +527,15 @@ async fn test_circular_nonconvergence_error_status() {
     // Wait for the scheduler to attempt the cycle and hit the limit.
     // With max_fixpoint_iterations=1, it should fail to converge and mark ERROR.
     assert!(
-        wait_for_status(&db, "cyc_nc_a", "ERROR", Duration::from_secs(180)).await,
-        "cyc_nc_a should reach ERROR on non-convergence"
-    );
-    assert!(
-        wait_for_status(&db, "cyc_nc_b", "ERROR", Duration::from_secs(180)).await,
-        "cyc_nc_b should reach ERROR on non-convergence"
+        db.wait_for_condition(
+            "both SCC members reach ERROR after non-convergence",
+            "SELECT count(*) = 2 AND bool_and(status = 'ERROR') \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name IN ('cyc_nc_a', 'cyc_nc_b')",
+            Duration::from_secs(180),
+            Duration::from_millis(100),
+        )
+        .await,
+        "Both SCC members must reach ERROR on non-convergence"
     );
 }
 
@@ -687,7 +670,8 @@ async fn test_circular_default_rejects_cycles() {
 
     // ALTER B to reference A — this would form a cycle
     let result = db
-        .try_execute(
+        .try_execute_with_config(
+            &["SET pg_trickle.allow_circular = false"],
             "SELECT pgtrickle.alter_stream_table('cyc_def_b', \
              query => $$SELECT a.id, a.val FROM cyc_def_a a$$)",
         )
