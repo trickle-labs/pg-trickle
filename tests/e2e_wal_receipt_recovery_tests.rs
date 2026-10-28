@@ -1714,6 +1714,54 @@ fn record_lifecycle(
     std::fs::write(path, serde_json::to_vec_pretty(history).unwrap()).unwrap();
 }
 
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LifecycleMutationKind {
+    Insert,
+    Update,
+    Delete,
+}
+
+impl LifecycleMutationKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Insert => "insert",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+struct LifecycleMutation {
+    kind: LifecycleMutationKind,
+    id: i32,
+    value: i32,
+}
+
+impl LifecycleMutation {
+    fn sql(self, table: &str) -> String {
+        match self.kind {
+            LifecycleMutationKind::Insert => {
+                format!("INSERT INTO {table} VALUES ({},'{}')", self.id, self.value)
+            }
+            LifecycleMutationKind::Update => {
+                format!(
+                    "UPDATE {table} SET value='{}' WHERE id={}",
+                    self.value, self.id
+                )
+            }
+            LifecycleMutationKind::Delete => {
+                format!("DELETE FROM {table} WHERE id={}", self.id)
+            }
+        }
+    }
+
+    fn json(self) -> serde_json::Value {
+        serde_json::json!({"kind":self.kind.name(),"id":self.id,"value":self.value})
+    }
+}
+
 async fn lifecycle_state(pool: &PgPool, stream: &str) -> serde_json::Value {
     sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT jsonb_build_object('rows', \
@@ -2999,12 +3047,29 @@ async fn test_restore_after_consumed_history_cleanup_reinitializes_before_catchu
     assert_eq!(action, "REINITIALIZE");
 }
 
-/// Each first failing prefix is retained with its seed, SQL operations and states.
+/// The first failing history is retained with its seed, mutations and states.
 #[tokio::test]
 async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal() {
     use e2e::property_support::{SeededRng, TraceConfig};
     let config = TraceConfig::from_env();
-    for seed in config.seeds(0x1219_0001) {
+    let replay_plan = std::env::var("PGT_LIFECYCLE_REPLAY_PLAN").ok().map(|path| {
+        let bytes = std::fs::read(&path).expect("read lifecycle replay plan");
+        let plan: Vec<LifecycleMutation> =
+            serde_json::from_slice(&bytes).expect("parse lifecycle replay plan");
+        assert!(
+            !plan.is_empty(),
+            "lifecycle replay plan must contain a mutation"
+        );
+        plan
+    });
+    let cycles = replay_plan
+        .as_ref()
+        .map_or(config.cycles, |plan| plan.len());
+    let seeds = config.seeds(0x1219_0001);
+    if replay_plan.is_some() {
+        assert_eq!(seeds.len(), 1, "replay plans require one fixed seed");
+    }
+    for seed in seeds {
         let db = E2eDb::new_dedicated().await.with_extension().await;
         db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
             .await;
@@ -3027,12 +3092,12 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             &path,
             &mut history,
             serde_json::json!({
-                "seed":seed, "cycles":config.cycles, "revision":String::from_utf8(revision.stdout).unwrap().trim(),
+                "seed":seed, "cycles":cycles, "revision":String::from_utf8(revision.stdout).unwrap().trim(),
                 "server_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").unwrap_or_else(|_|"unbound".into()),
                 "configuration":{"capture":"trigger","trigger_mode":mode,"compact_threshold":1},
                 "initial_rows":if seed & 1 != 0 {serde_json::json!([[0,"baseline"]])} else {serde_json::json!([])},
                 "query":"SELECT id,value FROM history_source",
-                "container":db.container_id(), "minimization":"first failing assertion prefix; use shrink_recovery_history.py to find the shortest cycle prefix with the same tagged invariant",
+                "container":db.container_id(), "minimization":"preserve the first failing trace; shrink_recovery_history.py reduces mutation cycles and operands while retaining the tagged invariant",
             }),
         );
         db.execute("CREATE TABLE history_source(id INT PRIMARY KEY,value TEXT NOT NULL)")
@@ -3127,34 +3192,51 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
         );
         let mut rng = SeededRng::new(seed);
         let mut ids = if seed & 1 != 0 { vec![0] } else { vec![] };
-        for cycle in 1..=config.cycles {
-            let value = rng.i32_range(-1000, 1000).to_string();
-            let choice = rng.usize_range(0, 2);
-            let operation = if ids.is_empty() || choice == 0 {
-                let id = i32::try_from(cycle).unwrap();
-                ids.push(id);
-                format!("INSERT INTO $table VALUES ({id},'{value}')")
+        for cycle in 1..=cycles {
+            let mutation = if let Some(plan) = &replay_plan {
+                plan[cycle - 1]
             } else {
-                let index = rng.usize_range(0, ids.len() - 1);
-                let id = ids[index];
-                if choice == 2 && ids.len() > 1 {
-                    ids.remove(index);
-                    format!("DELETE FROM $table WHERE id={id}")
+                let value = rng.i32_range(-1000, 1000);
+                let choice = rng.usize_range(0, 2);
+                if ids.is_empty() || choice == 0 {
+                    let id = i32::try_from(cycle).unwrap();
+                    ids.push(id);
+                    LifecycleMutation {
+                        kind: LifecycleMutationKind::Insert,
+                        id,
+                        value,
+                    }
                 } else {
-                    format!("UPDATE $table SET value='{value}' WHERE id={id}")
+                    let index = rng.usize_range(0, ids.len() - 1);
+                    let id = ids[index];
+                    if choice == 2 && ids.len() > 1 {
+                        ids.remove(index);
+                        LifecycleMutation {
+                            kind: LifecycleMutationKind::Delete,
+                            id,
+                            value,
+                        }
+                    } else {
+                        LifecycleMutation {
+                            kind: LifecycleMutationKind::Update,
+                            id,
+                            value,
+                        }
+                    }
                 }
             };
             let sql = format!(
                 "BEGIN; {}; {}; SAVEPOINT abandoned; \
                  UPDATE history_source SET value='abandoned'; ROLLBACK TO abandoned; COMMIT",
-                operation.replace("$table", &fixture.source),
-                operation.replace("$table", &fixture.journal)
+                mutation.sql(&fixture.source),
+                mutation.sql(&fixture.journal)
             );
             record_lifecycle(
                 &path,
                 &mut history,
                 serde_json::json!({
-                    "step":"committed source+journal mutation","cycle":cycle,"sql":sql,
+                    "step":"committed source+journal mutation","cycle":cycle,
+                    "mutation":mutation.json(),"sql":sql,
                 }),
             );
             sqlx::raw_sql(AssertSqlSafe(sql))

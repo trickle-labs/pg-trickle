@@ -68,20 +68,23 @@ transaction boundaries, expected/actual rows, cuts and durable identity.
 Only the executed prefix through the first failing assertion is retained.
 That trace is kept as the unminimized original. Recovery invariants carry
 stable failure tags so unrelated setup errors cannot count as reproducing the
-same failure. To reduce a failing seed to the shortest cycle prefix that
-preserves its exact tagged invariant, run:
+same failure. To reduce a failing seed while preserving its exact tagged
+invariant, run:
 
 ```sh
 python3 scripts/shrink_recovery_history.py \
   artifacts/lifecycle-histories/history-0000000012190001.json
 ```
 
-The reducer first verifies the original failure, then replays each shorter
-cycle prefix in order with the same seed and setup. It keeps the unminimized
-trace, candidate traces and logs, a minimized trace, and a report of every
-attempted prefix. The replay requires Docker/Testcontainers and uses the
-existing recovery E2E target. It preserves each cycle's SQL and transaction
-boundaries; it does not simplify SQL statements.
+The reducer first verifies the recorded mutation schedule, then uses the
+existing `scripts/dvm_shrink.py` cycle reducer to try removing any whole
+mutation cycle while preserving order. It then tries replacing generated row
+IDs and values with zero. Every candidate replays with the same seed and setup;
+source and journal always receive the same operation. The unminimized trace,
+candidate plans, traces and logs, minimized trace, and attempt report are
+retained. Old traces with SQL-only mutation records remain readable. Replay
+requires Docker/Testcontainers and uses the existing recovery E2E target. The
+operation type, paired SQL shape, and transaction boundaries remain intact.
 
 Existing CI jobs retain JSON histories and complete runner output on failure.
 The candidate job runs the small set; the scheduled DVM job runs the larger
@@ -94,9 +97,9 @@ the generated restore histories. It does not establish recovery after required
 history has already been removed. Snapshot metadata-read versus copy,
 cleanup versus new registration, and pause versus dispatch need their own
 witnessed schedules. Existing premature-cleanup/oracle controls remain;
-they are not an executable production cleanup mutant. The reducer minimizes
-generated cycle prefixes, not individual operations or SQL. No whole recovery
-proof or merge approval is claimed.
+they are not an executable production cleanup mutant. The reducer does not
+change operation types or SQL structure. No whole recovery proof or merge
+approval is claimed.
 
 The subsequent [snapshot/restore repair](restore-history-safety.md) addresses
 missing-history recovery, metadata-read versus copy, and cleanup during an
