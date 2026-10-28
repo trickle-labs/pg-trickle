@@ -713,6 +713,14 @@ jobs:
             --runtime-case e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_null_named_reference_across_source_oids \
             --output .p2p/work/issue-1222-receipt-prefix/evidence/receipt-candidate-binding.json
 
+      - name: Run packaged snapshot and lagging-consumer E2E
+        run: |
+          ./scripts/run_e2e_tests.sh \
+            --test e2e_refresh_atomicity_tests \
+            --test e2e_v108_conformance_tests \
+            -E 'test(=test_snapshot_metadata_and_rows_match_a_concurrent_refresh) | test(=test_v108_lagging_consumer_retains_exact_history_until_catch_up)' \
+            --test-threads 1 --retries 0
+
       - name: Run packaged lifecycle E2E and bind installed library
         env:
           PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
