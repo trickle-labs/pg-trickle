@@ -68,7 +68,7 @@ async fn test_manual_refresh_records_completed_status() {
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.erg_status_st'])")
         .await;
 
-    db.refresh_st("erg_status_st").await;
+    db.refresh_st_with_retry("erg_status_st").await;
 
     let status: String = db
         .query_scalar(

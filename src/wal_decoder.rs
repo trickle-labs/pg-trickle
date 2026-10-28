@@ -3882,9 +3882,10 @@ mod tests {
             represented_slot_prefix(&raw, &changed, 0).is_err(),
             "mismatched source work must fail before consuming the slot"
         );
-        assert!(
-            represented_slot_prefix(&raw[..5], &source, 0).is_err(),
-            "partial raw transactions cannot be acknowledged"
+        assert_eq!(
+            represented_slot_prefix(&raw[..5], &source, 0).unwrap(),
+            (3, 0, 0),
+            "a trailing partial transaction must remain unconsumed"
         );
     }
 
