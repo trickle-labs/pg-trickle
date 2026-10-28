@@ -130,6 +130,15 @@ pub fn pause_scheduler(nodes: pgrx::Array<&str>) -> &'static str {
         std::time::Instant::now() + std::time::Duration::from_secs(drain_timeout_secs as u64);
 
     loop {
+        // After commit clears the marker, the following catalog read sees admitted jobs.
+        let inline = shmem::database_scheduler_slots()
+            .into_iter()
+            .find(|slot| slot.database_oid == database_oid)
+            .map(|slot| {
+                slot.inline_pgt_id == shmem::INLINE_REFRESH_GROUP
+                    || (slot.inline_pgt_id != 0 && pgt_ids.contains(&slot.inline_pgt_id))
+            })
+            .unwrap_or(false);
         let pending = Spi::get_one_with_args::<i64>(
             "SELECT count(*)::bigint \
              FROM pgtrickle.pgt_scheduler_jobs \
@@ -139,14 +148,6 @@ pub fn pause_scheduler(nodes: pgrx::Array<&str>) -> &'static str {
         )
         .unwrap_or_else(|e| pgrx::error!("pg_trickle: pause_scheduler: {}", e))
         .unwrap_or(0);
-        let inline = shmem::database_scheduler_slots()
-            .into_iter()
-            .find(|slot| slot.database_oid == database_oid)
-            .map(|slot| {
-                slot.inline_pgt_id == shmem::INLINE_REFRESH_GROUP
-                    || (slot.inline_pgt_id != 0 && pgt_ids.contains(&slot.inline_pgt_id))
-            })
-            .unwrap_or(false);
         if pending == 0 && !inline {
             break;
         }
