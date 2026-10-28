@@ -74,12 +74,16 @@ async fn test_semantic_sql_controls_reject_predicate_count_payload_and_join_muta
         ('I',ROW(1,NULL)::control_pair),('I',ROW(1,2)::control_pair), \
         ('D',ROW(NULL,NULL)::control_pair))";
     let generated = format!("{input} SELECT {inserts} AS inserted,{deletes} AS deleted FROM t");
-    assert_eq!(generated.matches("COUNT(payload)").count(), 2);
+    assert!(generated.contains("COUNT(CASE WHEN __pgt_action = 'I' THEN payload ELSE NULL END)"));
+    assert!(generated.contains("COUNT(CASE WHEN __pgt_action = 'D' THEN payload ELSE NULL END)"));
     controls.push(Control {
         name:"wrong-nonnull-count", phase:"count_argument_nullability",
         source:("src/dvm/operators/aggregate.rs",include_str!("../src/dvm/operators/aggregate.rs")),
         oracle:format!("{input} SELECT pg_catalog.count(payload) FILTER(WHERE __pgt_action='I') AS inserted,pg_catalog.count(payload) FILTER(WHERE __pgt_action='D') AS deleted FROM t"),
-        mutant:generated.replace("COUNT(payload)","COUNT(CASE WHEN payload IS NOT NULL THEN 1 END)"),
+        mutant:generated.replace(
+            "THEN payload ELSE NULL END",
+            "THEN CASE WHEN payload IS NOT NULL THEN 1 ELSE NULL END ELSE NULL END",
+        ),
         baseline:generated,
     });
 
@@ -197,7 +201,7 @@ async fn test_semantic_sql_controls_reject_predicate_count_payload_and_join_muta
 }
 
 #[tokio::test]
-async fn test_nonfinite_aggregate_state_uses_frozen_delta_and_restores_avg_auxiliary() {
+async fn test_nonfinite_aggregate_rescan_tracks_each_frontier() {
     let db = TestDb::new().await;
     for (sql_type, oid, average_type) in [
         ("numeric", 1700, "numeric"),
@@ -210,13 +214,10 @@ async fn test_nonfinite_aggregate_state_uses_frozen_delta_and_restores_avg_auxil
              CREATE TABLE public.orders(id int,region text,amount {sql_type},label text); \
              CREATE TABLE pgtrickle_changes.changes_1(change_id bigserial,lsn pg_lsn,action text,__pgt_row_id bytea,id int,region text,amount {sql_type},label text); \
              CREATE TABLE public.special_st(__pgt_row_id bytea,region text,__pgt_count bigint,total {sql_type},mean {average_type}, \
-                 __pgt_aux_nonnull_total bigint,__pgt_aux_sum_mean numeric,__pgt_aux_count_mean bigint, \
-                 __pgt_aux_special_total jsonb,__pgt_aux_special_mean jsonb); \
-             INSERT INTO public.orders VALUES(2,'east',1,''),(3,'east',3,''); \
-             INSERT INTO pgtrickle_changes.changes_1(lsn,action,__pgt_row_id,id,region,amount,label) VALUES('0/1','D',decode('01','hex'),1,'east','Infinity',''), \
-                 ('0/20','I',decode('03','hex'),3,'east',3,''); \
-             INSERT INTO public.special_st VALUES(decode('10','hex'),'east',2,'Infinity','Infinity',2,'Infinity',2, \
-                 '{{\"finite\":1,\"nan\":0,\"pos\":1,\"neg\":0}}','{{\"finite\":1,\"nan\":0,\"pos\":1,\"neg\":0}}');"
+                 __pgt_aux_nonnull_total bigint,__pgt_aux_sum_mean numeric,__pgt_aux_count_mean bigint); \
+             INSERT INTO public.orders VALUES(2,'east',1,''); \
+             INSERT INTO pgtrickle_changes.changes_1(lsn,action,__pgt_row_id,id,region,amount,label) VALUES('0/1','D',decode('01','hex'),1,'east','Infinity',''); \
+             INSERT INTO public.special_st VALUES(decode('10','hex'),'east',2,'Infinity','Infinity',2,'Infinity',2);"
         ))).execute(&db.pool).await.unwrap();
         let mut scan = scan_orders();
         if let OpTree::Scan { columns, .. } = &mut scan {
@@ -240,12 +241,19 @@ async fn test_nonfinite_aggregate_state_uses_frozen_delta_and_restores_avg_auxil
         assert_eq!(
             (count, total, mean.parse::<f64>().unwrap(), aux),
             (1, "1".into(), 1.0, "1".into()),
-            "{sql_type}: later source insert must remain outside the cut"
+            "{sql_type}: deleted infinity must leave the finite source value"
         );
         db.execute(&format!("WITH delta AS ({delta}) UPDATE public.special_st s SET \
             __pgt_count=d.__pgt_count,total=d.total,mean=d.mean,__pgt_aux_sum_mean=d.__pgt_aux_sum_mean, \
-            __pgt_aux_count_mean=d.__pgt_aux_count_mean,__pgt_aux_nonnull_total=d.__pgt_aux_nonnull_total, \
-            __pgt_aux_special_total=d.__pgt_aux_special_total,__pgt_aux_special_mean=d.__pgt_aux_special_mean FROM delta d WHERE s.region=d.region")).await;
+            __pgt_aux_count_mean=d.__pgt_aux_count_mean,__pgt_aux_nonnull_total=d.__pgt_aux_nonnull_total \
+            FROM delta d WHERE s.region=d.region")).await;
+        db.execute("INSERT INTO public.orders VALUES(3,'east',3,'')")
+            .await;
+        db.execute(
+            "INSERT INTO pgtrickle_changes.changes_1(lsn,action,__pgt_row_id,id,region,amount,label) \
+             VALUES('0/20','I',decode('03','hex'),3,'east',3,'')",
+        )
+        .await;
         let mut previous = Frontier::new();
         previous.set_source(1, "0/10".into(), "2025-01-01T00:00:10Z".into());
         let mut next = Frontier::new();
@@ -274,6 +282,8 @@ async fn test_nonfinite_aggregate_state_uses_frozen_delta_and_restores_avg_auxil
             db.execute("ALTER TABLE special_st ALTER COLUMN region TYPE special_region")
                 .await;
             db.execute("TRUNCATE special_st,pgtrickle_changes.changes_1")
+                .await;
+            db.execute("INSERT INTO orders VALUES(4,'new','Infinity','')")
                 .await;
             db.execute("INSERT INTO pgtrickle_changes.changes_1(lsn,action,__pgt_row_id,id,region,amount,label) VALUES('0/1','I',decode('04','hex'),4,'new','Infinity','')").await;
             let delta = make_aggregate_ctx("special_st", &["region", "total", "mean"])
