@@ -2481,7 +2481,7 @@ pgtrickle.metrics_summary() → SETOF record(
 | `failed_refreshes` | Cumulative failed refreshes. A non-zero value indicates stream tables that need attention. |
 | `total_rows_processed` | Cumulative rows inserted + deleted across all differential refreshes. |
 | `active_workers` | Current number of active background worker processes (from shared memory). |
-| `ivm_lock_parse_error_count` | Cumulative count of IMMEDIATE-mode lock-mode downgrades due to query parse failures (v0.31.0+). |
+| `ivm_lock_parse_error_count` | Cumulative count of defining-query parse failures that select the conservative blocking advisory-lock mode for IMMEDIATE tables (v0.31.0+). |
 | `holdback_probe_calls` | Total hold-back probes executed since last extension restart. |
 | `holdback_probe_cache_hits` | Probes satisfied from the hold-back cache without a full snapshot scan. |
 | `holdback_probe_avg_ms` | Average hold-back probe latency in milliseconds. High values (> 50 ms) indicate contention on the watermark table. |
@@ -3745,6 +3745,13 @@ The `'IMMEDIATE'` refresh mode supports nearly all SQL constructs supported by `
 
 None — all constructs that work in `'DIFFERENTIAL'` mode are now also available in
 `'IMMEDIATE'` mode.
+
+IMMEDIATE writes take a transaction-scoped advisory lock keyed by the stream
+table OID. Simple single-table scans with optional filters/projections try the
+lock without waiting. Other query shapes use a blocking advisory lock so delta
+maintenance cannot race concurrent source changes. If that lock exceeds
+PostgreSQL's `lock_timeout`, the source statement errors and its changes roll
+back; pg_trickle does not switch the stream table to SCHEDULED mode.
 
 **Notes on `WITH RECURSIVE` in IMMEDIATE mode:**
 

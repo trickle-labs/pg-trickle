@@ -298,10 +298,15 @@ restrictions on what the defining query can do:
 | Cross-database references | ❌ Blocked | SPI cannot span databases in one transaction |
 | Long-running aggregate (cost > threshold) | ❌ Blocked | May exceed `lock_timeout` |
 
-IMMEDIATE mode uses `FOR KEY SHARE` locking on scanned source tables to
-prevent phantom reads.  If the lock cannot be acquired within the configured
-timeout, the extension automatically downgrades to SCHEDULED mode and emits
-an `ivm_lock_parse_error_count` increment.
+IMMEDIATE mode takes a transaction-scoped advisory lock keyed by the stream
+table OID. Simple single-table scans with optional filters/projections try to
+take it without waiting; other query shapes take it with a blocking call to
+protect delta computation from concurrent source changes. If that blocking
+lock exceeds PostgreSQL's `lock_timeout`, the source statement fails and its
+changes roll back with the statement/transaction. The refresh mode is not
+changed. `ivm_lock_parse_error_count` counts defining-query parse failures
+that select the conservative blocking lock mode; lock timeouts do not
+increment it.
 
 ---
 

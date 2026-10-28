@@ -245,6 +245,127 @@ async fn test_write_and_refresh_rejects_lock_skip_and_rolls_back_write() {
 }
 
 #[tokio::test]
+async fn test_immediate_aggregate_advisory_lock_timeout_rolls_back_source_write() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE imm_lock_agg_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO imm_lock_agg_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "imm_lock_agg_st",
+        "SELECT SUM(val) AS total FROM imm_lock_agg_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+
+    let lock_key: i64 = db
+        .query_scalar("SELECT 'public.imm_lock_agg_st'::regclass::oid::bigint")
+        .await;
+    let counter_before: i64 = db
+        .query_scalar("SELECT ivm_lock_parse_error_count FROM pgtrickle.metrics_summary()")
+        .await;
+    let mut blocker = db
+        .pool
+        .begin()
+        .await
+        .expect("begin lock-holder transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *blocker)
+        .await
+        .expect("acquire the stream table advisory lock");
+
+    let result = db
+        .try_execute_with_config(
+            &["SET lock_timeout = '100ms'"],
+            "INSERT INTO imm_lock_agg_src VALUES (2, 20)",
+        )
+        .await;
+    let sqlstate = result
+        .as_ref()
+        .err()
+        .and_then(sqlx::Error::as_database_error)
+        .and_then(|error| error.code());
+    assert_eq!(sqlstate.as_deref(), Some("55P03"), "{result:?}");
+
+    blocker.rollback().await.expect("release stream table lock");
+    assert_eq!(db.count("imm_lock_agg_src").await, 1);
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT total FROM imm_lock_agg_st")
+            .await,
+        10
+    );
+    assert_eq!(
+        db.query_scalar::<String>(
+            "SELECT refresh_mode::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'imm_lock_agg_st'"
+        )
+        .await,
+        "IMMEDIATE"
+    );
+    assert_eq!(
+        db.query_scalar::<i64>(
+            "SELECT ivm_lock_parse_error_count FROM pgtrickle.metrics_summary()"
+        )
+        .await,
+        counter_before
+    );
+}
+
+#[tokio::test]
+async fn test_immediate_simple_scan_try_lock_keeps_source_write_nonblocking() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE imm_lock_scan_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO imm_lock_scan_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "imm_lock_scan_st",
+        "SELECT id, val FROM imm_lock_scan_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+
+    let lock_key: i64 = db
+        .query_scalar("SELECT 'public.imm_lock_scan_st'::regclass::oid::bigint")
+        .await;
+    let counter_before: i64 = db
+        .query_scalar("SELECT ivm_lock_parse_error_count FROM pgtrickle.metrics_summary()")
+        .await;
+    let mut blocker = db
+        .pool
+        .begin()
+        .await
+        .expect("begin lock-holder transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *blocker)
+        .await
+        .expect("acquire the stream table advisory lock");
+
+    db.try_execute_with_config(
+        &["SET lock_timeout = '100ms'"],
+        "INSERT INTO imm_lock_scan_src VALUES (2, 20)",
+    )
+    .await
+    .expect("simple-scan IMMEDIATE insert should not wait for the advisory lock");
+
+    blocker.rollback().await.expect("release stream table lock");
+    assert_eq!(db.count("imm_lock_scan_src").await, 2);
+    db.assert_st_matches_query("imm_lock_scan_st", "SELECT id, val FROM imm_lock_scan_src")
+        .await;
+    assert_eq!(
+        db.query_scalar::<i64>(
+            "SELECT ivm_lock_parse_error_count FROM pgtrickle.metrics_summary()"
+        )
+        .await,
+        counter_before
+    );
+}
+
+#[tokio::test]
 async fn test_concurrent_inserts_during_refresh() {
     let db = E2eDb::new().await.with_extension().await;
 
