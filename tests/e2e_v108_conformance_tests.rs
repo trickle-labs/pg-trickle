@@ -654,6 +654,146 @@ async fn test_v108_validation_persists_detected_payload_mismatch() {
 }
 
 #[tokio::test]
+async fn test_v108_resnapshot_recovers_deleted_payload_rows_with_real_baseline() {
+    let (db, consumer, batch) = pending_consumer("v108_deleted_payload_resnapshot").await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DELETE FROM {} WHERE batch_token = {} AND ordinal = 0",
+        consumer.delta_relation, batch.batch_token
+    )))
+    .execute(&db.pool)
+    .await
+    .expect("controlled corruption should remove a typed payload row");
+    let invalidated = reference_clients::validate_consumer(&db.pool, &consumer.consumer_id).await;
+    assert_eq!(invalidated.state, "INVALIDATED");
+    assert_eq!(
+        invalidated.state_reason.as_deref(),
+        Some("PAYLOAD_INCONSISTENT")
+    );
+
+    let root = "public.v108_deleted_payload_resnapshot_stream";
+    let graph = graph_digest(&db.pool, root).await;
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin real baseline transaction");
+    let row = sqlx::query(
+        "SELECT stream_table, resnapshot_token::text AS token, log_head \
+         FROM pgtrickle.begin_output_delta_resnapshot($1::uuid)",
+    )
+    .bind(&consumer.consumer_id)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("begin deleted-row recovery");
+    let stream_table: String = row
+        .try_get("stream_table")
+        .expect("stream table is returned");
+    let baseline_sql = format!("SELECT id, value FROM {stream_table} ORDER BY id");
+    let baseline_rows: Vec<(i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(baseline_sql))
+        .fetch_all(&mut *tx)
+        .await
+        .expect("read real stream-table baseline");
+    assert_eq!(
+        baseline_rows,
+        vec![(1, "before".into()), (2, "pending".into())]
+    );
+    let token: String = row.try_get("token").expect("resnapshot token is returned");
+    let head: i64 = row
+        .try_get("log_head")
+        .expect("resnapshot head is returned");
+    assert_eq!(
+        reference_clients::ack_resnapshot(&mut *tx, &consumer.consumer_id, &token).await,
+        "ACTIVE"
+    );
+    tx.commit().await.expect("commit repaired baseline");
+
+    let active = reference_clients::validate_consumer(&db.pool, &consumer.consumer_id).await;
+    assert_eq!(active.state, "ACTIVE");
+    assert_eq!(active.acknowledged_batch_token, head);
+    assert_eq!(
+        reference_clients::read_payload(&db.pool, &consumer.delta_relation).await,
+        0,
+        "resnapshot should prune the corrupted pending payload"
+    );
+
+    db.execute("INSERT INTO v108_deleted_payload_resnapshot_source VALUES (3, 'after')")
+        .await;
+    refresh_graph_without_full(&db.pool, root, &graph).await;
+    let next_batch = reference_clients::pending_batch(&db.pool, &consumer.consumer_id).await;
+    assert_eq!(next_batch.row_count, 1);
+    assert_eq!(
+        reference_clients::read_payload(&db.pool, &consumer.delta_relation).await,
+        1,
+        "the consumer should receive typed rows after recovery"
+    );
+}
+
+#[tokio::test]
+async fn test_v108_resnapshot_ack_with_renamed_payload_column_rejects_activation() {
+    let (db, consumer, _) = active_consumer("v108_renamed_payload_resnapshot").await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {} RENAME COLUMN value TO renamed_value",
+        consumer.delta_relation
+    )))
+    .execute(&db.pool)
+    .await
+    .expect("controlled payload corruption should rename the typed column");
+
+    let invalidated = reference_clients::validate_consumer(&db.pool, &consumer.consumer_id).await;
+    assert_eq!(invalidated.state, "INVALIDATED");
+    assert_eq!(
+        invalidated.state_reason.as_deref(),
+        Some("PAYLOAD_INCONSISTENT")
+    );
+
+    let mut tx = db.pool.begin().await.expect("begin baseline transaction");
+    let row = sqlx::query(
+        "SELECT stream_table, resnapshot_token::text AS token \
+         FROM pgtrickle.begin_output_delta_resnapshot($1::uuid)",
+    )
+    .bind(&consumer.consumer_id)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("begin real resnapshot");
+    let stream_table: String = row
+        .try_get("stream_table")
+        .expect("stream table is returned");
+    let baseline_sql = format!("SELECT id, value FROM {stream_table} ORDER BY id");
+    let baseline_rows: Vec<(i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(baseline_sql))
+        .fetch_all(&mut *tx)
+        .await
+        .expect("read real stream-table baseline");
+    assert_eq!(baseline_rows, vec![(1, "before".into())]);
+    let token: String = row.try_get("token").expect("resnapshot token is returned");
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle.ack_output_delta_resnapshot($1::uuid, $2::uuid)",
+    )
+    .bind(&consumer.consumer_id)
+    .bind(&token)
+    .fetch_one(&mut *tx)
+    .await
+    .expect_err("a malformed payload relation must not be activated");
+    assert!(
+        error
+            .to_string()
+            .contains("typed output-delta payload schema is inconsistent"),
+        "unexpected acknowledgement error: {error}"
+    );
+    tx.rollback().await.expect("roll back rejected resnapshot");
+
+    let after_ack = reference_clients::validate_consumer(&db.pool, &consumer.consumer_id).await;
+    assert_eq!(after_ack.state, "INVALIDATED");
+    assert_eq!(
+        after_ack.state_reason.as_deref(),
+        Some("PAYLOAD_INCONSISTENT")
+    );
+    assert_eq!(
+        after_ack.acknowledged_batch_token,
+        invalidated.acknowledged_batch_token
+    );
+}
+
+#[tokio::test]
 async fn test_v108_validation_persists_detected_contract_mismatch() {
     let (db, consumer, _) = active_consumer("v108_detect_contract").await;
     sqlx::query(
