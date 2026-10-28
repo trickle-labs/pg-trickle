@@ -95,6 +95,9 @@ and manually in `production-recovery-qualification`; all attempt logs are retain
 and any failed attempt fails the job. This defers additional timing exploration,
 not a unique failure scenario or assertion.
 
+Drain-mode and long-transaction visibility binaries also run after the parallel
+shard because both alter shared server settings and require scheduler progress.
+
 Runtime selection uses [.github/ci-paths.yml](../.github/ci-paths.yml), with
 unclassified inputs retaining runtime coverage. Ordinary docs changes avoid
 extension builds. Mixed changes select the union. The bounded full suite now

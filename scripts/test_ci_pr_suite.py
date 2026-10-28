@@ -85,6 +85,9 @@ class AllocationTests(unittest.TestCase):
         }))
 
     def test_shards_cover_each_target_once_and_keep_witnesses_isolated(self):
+        self.assertTrue({
+            "e2e_drain_mode_tests", "e2e_long_txn_visibility_tests",
+        } <= ci_pr_suite.SCHEDULER_ISOLATED)
         shards = []
         policy = json.loads((ci_pr_suite.ROOT / ".github/ci-suites.json").read_text())
         shard_2 = set(policy["pr_full_shard_2"])
