@@ -7,9 +7,11 @@ recovery behavior is unchanged. It does not complete #1219 or #1225.
 ## Committed journal histories
 
 `test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal` uses
-the existing `TraceConfig` and deterministic RNG: three seeds/four cycles for
-the PR set, ten seeds/twelve cycles in the existing scheduled DVM job. Both
-row and statement capture are selected and witnessed from actual triggers.
+the existing `TraceConfig` and deterministic RNG: four seeds/four cycles for
+the PR set, ten seeds/twelve cycles in the existing scheduled DVM job. The PR
+sample reaches all four WAL interruption phases across trigger-to-WAL handoff;
+the scheduled job repeats those phases with more histories. Both row and
+statement capture are selected and witnessed from actual triggers.
 Initial states include empty/nonempty sources; snapshots use default and
 caller-supplied targets.
 
@@ -73,8 +75,16 @@ declared server candidate, configuration, initial state, SQL mutations,
 transaction boundaries, expected/actual rows, cuts and durable identity.
 Only the executed prefix through the first failing assertion is retained.
 This is ordered-prefix retention, not a general history reducer or arbitrary
-SQL minimization. Replay a seed and reduce its bounded cycle count while
-preserving the failure detector:
+SQL minimization. The ready-PR selection is:
+
+```sh
+PGS_PROP_CASES=4 PGS_PROP_CYCLES=4 \
+  ./scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests \
+  -E 'test(=test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal)' --retries 0
+```
+
+For an exact single-seed replay, override the seed and reduce its bounded cycle
+count while preserving the failure detector:
 
 ```sh
 PGS_PROP_SEED=0x12190001 PGS_PROP_CYCLES=4 \
