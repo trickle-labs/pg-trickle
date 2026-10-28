@@ -75,7 +75,7 @@ async fn test_dvm_numeric_scale_python_replay_and_corruption_control() {
     control["cycles"] = serde_json::json!([{
         "name": "scale_corruption",
         "mutations": [{
-            "sql": "WITH injection AS MATERIALIZED (SELECT set_config('pg_trickle.internal_refresh','true',true)) UPDATE sem_numeric_observations.result SET v=1.00 FROM injection WHERE id=1",
+            "sql": "WITH injection AS MATERIALIZED (SELECT set_config('pg_trickle.internal_refresh','true',true)) UPDATE sem_numeric_observations.result SET observed_scale=2 FROM injection WHERE id=1",
             "expected_affected_rows": 1
         }]
     }]);
