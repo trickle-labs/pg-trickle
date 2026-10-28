@@ -328,6 +328,10 @@ async fn test_v0878_revoked_source_preserves_state_and_stages() {
             .await
             .is_ok()
     );
+    // Keep the background scheduler from consuming this insert.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.v878_revoke_st'])")
+        .await;
     db.execute("INSERT INTO v878_revoke_src VALUES (2)").await;
     let before: i64 = db.count("v878_revoke_st").await;
     db.execute("REVOKE SELECT ON v878_revoke_src FROM v878_revoke_owner")

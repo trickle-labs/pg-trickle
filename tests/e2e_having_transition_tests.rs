@@ -8,6 +8,186 @@
 mod e2e;
 
 use e2e::E2eDb;
+use e2e::oracle;
+
+async fn refresh_witnessed_differential(db: &E2eDb, stream: &str) {
+    let source_oid: i64 = db
+        .query_scalar(&format!(
+            "SELECT d.source_relid::bigint FROM pgtrickle.pgt_dependencies d \
+         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = '{stream}'"
+        ))
+        .await;
+    let buffer = db.change_buffer_table(source_oid).await;
+    let captured: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I', 'D', 'U')"
+        ))
+        .await;
+    assert!(
+        captured > 0,
+        "{stream}: the source mutation must be captured"
+    );
+    let before: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+        ],
+        &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
+    )
+    .await
+    .expect("changed-data differential refresh");
+    let (action, fallback, changed): (String, bool, i64) = sqlx::query_as(sqlx::AssertSqlSafe(
+        format!(
+            "SELECT action, was_full_fallback, delta_row_count \
+             FROM pgtrickle.pgt_refresh_history WHERE refresh_id > {before} \
+             AND pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{stream}') \
+             AND status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1"
+        ),
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .expect("new completed refresh history");
+    assert_eq!(action, "DIFFERENTIAL", "{stream}: wrong executed route");
+    assert!(
+        !fallback,
+        "{stream}: fallback cannot qualify the transition"
+    );
+    assert!(changed >= 0, "{stream}: invalid result delta size");
+}
+
+#[tokio::test]
+async fn test_having_all_nine_truth_transitions_match_postgresql() {
+    use std::collections::BTreeSet;
+
+    let db = E2eDb::new().await.with_extension().await;
+    let values = ["1", "-1", "NULL"];
+    for (family, predicate) in [
+        "SUM(v) > 0",
+        "AVG(v) > 0",
+        "SUM(v) > 0 AND COUNT(*) = 1",
+        "AVG(v) > 0 OR COUNT(*) = 0",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source = format!("having_truth_source_{family}");
+        let stream = format!("having_truth_stream_{family}");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, g INT, v INT)"
+        ))
+        .await;
+        for id in 0..9 {
+            db.execute(&format!(
+                "INSERT INTO {source} VALUES ({id}, {id}, {})",
+                values[id / 3]
+            ))
+            .await;
+        }
+        db.execute(&format!("INSERT INTO {source} VALUES (100, 100, 5)"))
+            .await;
+        let query = format!(
+            "SELECT g, SUM(v) AS total, AVG(v) AS mean, COUNT(*) AS rows, COUNT(v) AS nonnull \
+             FROM {source} GROUP BY g HAVING {predicate}"
+        );
+        db.execute(&format!(
+            "SELECT pgtrickle.create_stream_table(name => '{stream}', query => $q${query}$q$, \
+             schedule => '24h', refresh_mode => 'DIFFERENTIAL', cdc_mode => 'trigger')"
+        ))
+        .await;
+        oracle::assert_st_query_exact(&db, &stream, &query, "initial HAVING state").await;
+        let truth_query =
+            format!("SELECT g, ({predicate}) FROM {source} WHERE g < 100 GROUP BY g ORDER BY g");
+        let old: Vec<(i32, Option<bool>)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(truth_query.clone()))
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        db.execute(&format!(
+            "UPDATE {source} SET v = CASE id % 3 WHEN 0 THEN 1 WHEN 1 THEN -1 ELSE NULL END WHERE id < 100"
+        ))
+        .await;
+        let new: Vec<(i32, Option<bool>)> = sqlx::query_as(sqlx::AssertSqlSafe(truth_query))
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!((old.len(), new.len()), (9, 9));
+        let observed: BTreeSet<_> = old
+            .iter()
+            .zip(&new)
+            .map(|(old, new)| {
+                assert_eq!(old.0, new.0);
+                (old.1, new.1)
+            })
+            .collect();
+        assert_eq!(
+            observed.len(),
+            9,
+            "{predicate}: all actual PostgreSQL transitions must be reached"
+        );
+        refresh_witnessed_differential(&db, &stream).await;
+        oracle::assert_st_query_exact(&db, &stream, &query, "nine HAVING transitions").await;
+        for mutation in [
+            format!("DELETE FROM {source} WHERE id < 100"),
+            format!("INSERT INTO {source} VALUES (1, 1, 2)"),
+            format!("UPDATE {source} SET g = 50 WHERE id = 1"),
+            format!("UPDATE {source} SET v = 3 WHERE id = 1"),
+        ] {
+            db.execute(&mutation).await;
+            refresh_witnessed_differential(&db, &stream).await;
+            oracle::assert_st_query_exact(&db, &stream, &query, &mutation).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_having_grouped_and_global_empty_lifecycle_match_postgresql() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE lifecycle_source (id INT PRIMARY KEY, g TEXT, v INT)")
+        .await;
+    let queries = [
+        (
+            "lifecycle_grouped",
+            "SELECT g, COUNT(*) AS rows, COUNT(v) AS nonnull, SUM(v) AS total, AVG(v) AS mean FROM lifecycle_source GROUP BY g",
+        ),
+        (
+            "lifecycle_global",
+            "SELECT COUNT(*) AS rows, COUNT(v) AS nonnull, SUM(v) AS total, AVG(v) AS mean FROM lifecycle_source",
+        ),
+        (
+            "lifecycle_global_having",
+            "SELECT COUNT(*) AS rows, COUNT(v) AS nonnull, SUM(v) AS total FROM lifecycle_source HAVING SUM(v) > 0",
+        ),
+        (
+            "lifecycle_global_avg_having",
+            "SELECT COUNT(*) AS rows, COUNT(v) AS nonnull, AVG(v) AS mean FROM lifecycle_source HAVING AVG(v) > 0",
+        ),
+    ];
+    for (stream, query) in queries {
+        db.execute(&format!(
+            "SELECT pgtrickle.create_stream_table(name => '{stream}', query => $q${query}$q$, \
+             schedule => '24h', refresh_mode => 'DIFFERENTIAL', cdc_mode => 'trigger')"
+        ))
+        .await;
+        oracle::assert_st_query_exact(&db, stream, query, "initial empty aggregate").await;
+    }
+    for mutation in [
+        "INSERT INTO lifecycle_source VALUES (1, 'a', NULL)",
+        "UPDATE lifecycle_source SET v = 5 WHERE id = 1",
+        "INSERT INTO lifecycle_source VALUES (2, 'a', NULL)",
+        "UPDATE lifecycle_source SET v = NULL WHERE id = 1",
+        "DELETE FROM lifecycle_source",
+        "INSERT INTO lifecycle_source VALUES (3, 'b', 2)",
+    ] {
+        db.execute(mutation).await;
+        for (stream, query) in queries {
+            refresh_witnessed_differential(&db, stream).await;
+            oracle::assert_st_query_exact(&db, stream, query, mutation).await;
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Group crosses HAVING threshold: appears / disappears

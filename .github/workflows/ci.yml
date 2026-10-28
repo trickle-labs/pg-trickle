@@ -125,6 +125,8 @@ jobs:
           python3 scripts/v0_108_3_release_gate.py
           python3 scripts/check_lsn_verification.py --contract-only
           python3 scripts/check_receipt_verification.py --contract-only
+          python3 scripts/check_aggregate_lifecycle_verification.py --contract-only
+          python3 scripts/check_cdc_elision_verification.py --contract-only
           python3 -m unittest discover -s scripts -p 'test_*.py'
 
       - name: Validate PR coverage allocation
@@ -139,6 +141,15 @@ jobs:
       - name: Run receipt limit baseline and executable mutation control
         run: python3 scripts/check_receipt_verification.py
 
+      - name: Run aggregate lifecycle baseline and executable mutation controls
+        run: python3 scripts/check_aggregate_lifecycle_verification.py
+
+      - name: Run CDC image policy baseline and executable mutation controls
+        run: python3 scripts/check_cdc_elision_verification.py
+
+      - name: Run join endpoint checker and executable mutation controls
+        run: python3 scripts/check_join_plan_verification.py
+
       - name: Upload exact LSN verification evidence
         uses: actions/upload-artifact@v7
         with:
@@ -152,6 +163,30 @@ jobs:
         with:
           name: receipt-verification-evidence
           path: .p2p/work/issue-1222-receipt-prefix/evidence/*
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload exact aggregate lifecycle verification evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: aggregate-lifecycle-verification-evidence
+          path: .p2p/work/issue-1220-aggregate-lifecycle/evidence/*
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload exact CDC image policy verification evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: cdc-elision-verification-evidence
+          path: .p2p/work/issue-1221-cdc-observations/evidence/*
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload exact join endpoint verification evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: join-plan-verification-evidence
+          path: .p2p/work/issue-1223-join-checker/evidence/*
           retention-days: 30
           if-no-files-found: error
 
@@ -335,6 +370,18 @@ jobs:
 
       - name: Run execution-backed DVM component tests
         run: bash ./scripts/run_dvm_integration_tests.sh pg18
+
+      - name: Qualify endpoint SQL with a missing-retraction control
+        run: python3 scripts/check_join_sql_control.py
+
+      - name: Upload endpoint SQL qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: join-sql-control-evidence
+          path: .p2p/work/issue-1223-join-checker/evidence/join-sql-*
+          retention-days: 30
+          if-no-files-found: warn
       - name: Publish Test Report
         uses: mikepenz/action-junit-report@v6
         if: always()
@@ -543,6 +590,24 @@ jobs:
           name: receipt-verification-evidence
           path: .p2p/work/issue-1222-receipt-prefix/evidence
 
+      - name: Download aggregate lifecycle proof record
+        uses: actions/download-artifact@v8
+        with:
+          name: aggregate-lifecycle-verification-evidence
+          path: .p2p/work/issue-1220-aggregate-lifecycle/evidence
+
+      - name: Download CDC image policy proof record
+        uses: actions/download-artifact@v8
+        with:
+          name: cdc-elision-verification-evidence
+          path: .p2p/work/issue-1221-cdc-observations/evidence
+
+      - name: Download join endpoint proof record
+        uses: actions/download-artifact@v8
+        with:
+          name: join-plan-verification-evidence
+          path: .p2p/work/issue-1223-join-checker/evidence
+
       - name: Pull postgres:18.6 image
         run: docker pull postgres:18.6
 
@@ -589,6 +654,58 @@ jobs:
             --runtime-case e2e_wal_receipt_recovery_tests::test_wal_receipt_small_limits_preserve_complete_transactions \
             --output .p2p/work/issue-1222-receipt-prefix/evidence/receipt-candidate-binding.json
 
+      - name: Run packaged lifecycle E2E and bind installed library
+        env:
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
+          PGT_RELEASE_ATTESTATION_PATH: target/lifecycle-full-install-attestation.json
+        run: |
+          ./scripts/run_e2e_tests.sh --test e2e_having_transition_tests \
+            -E 'test(=test_having_all_nine_truth_transitions_match_postgresql) | test(=test_having_grouped_and_global_empty_lifecycle_match_postgresql)' --retries 0
+          python3 scripts/check_lsn_candidate_binding.py --proof-kind aggregate_lifecycle \
+            --proof-record .p2p/work/issue-1220-aggregate-lifecycle/evidence/lifecycle-verification.json \
+            --package-dir target/release/pg_trickle-pg18 \
+            --installation target/lifecycle-full-install-attestation.json \
+            --candidate-commit "$GITHUB_SHA" \
+            --runtime-case e2e_having_transition_tests::test_having_all_nine_truth_transitions_match_postgresql \
+            --runtime-case e2e_having_transition_tests::test_having_grouped_and_global_empty_lifecycle_match_postgresql \
+            --output .p2p/work/issue-1220-aggregate-lifecycle/evidence/lifecycle-candidate-binding.json
+
+      - name: Run packaged CDC image policy E2E and bind installed library
+        env:
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
+          PGT_RELEASE_ATTESTATION_PATH: target/cdc-elision-full-install-attestation.json
+        run: |
+          ./scripts/run_e2e_tests.sh --test e2e_shared_buffer_tests \
+            -E 'test(=test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders) | test(=test_cdc_deferred_replacement_preserves_complete_payload) | test(=test_cdc_statement_payload_names_do_not_shadow_row_aliases)' --retries 0
+          python3 scripts/check_lsn_candidate_binding.py --proof-kind cdc_elision \
+            --proof-record .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-verification.json \
+            --package-dir target/release/pg_trickle-pg18 \
+            --installation target/cdc-elision-full-install-attestation.json \
+            --candidate-commit "$GITHUB_SHA" \
+            --runtime-case e2e_shared_buffer_tests::test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders \
+            --runtime-case e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload \
+            --runtime-case e2e_shared_buffer_tests::test_cdc_statement_payload_names_do_not_shadow_row_aliases \
+            --output .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-candidate-binding.json
+
+      - name: Run packaged join endpoint E2E and bind installed library
+        env:
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
+          PGT_RELEASE_ATTESTATION_PATH: target/join-plan-full-install-attestation.json
+          PGT_LIFECYCLE_ARTIFACT_DIR: artifacts/join-endpoints
+        run: |
+          mkdir -p artifacts/join-endpoints
+          ./scripts/run_e2e_tests.sh --test e2e_join_tests --test e2e_refresh_atomicity_tests \
+            -E 'test(=test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows) | test(=test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut)' \
+            --retries 0 2>&1 | tee artifacts/join-endpoints/runtime.log
+          python3 scripts/check_lsn_candidate_binding.py --proof-kind join_plan \
+            --proof-record .p2p/work/issue-1223-join-checker/evidence/join-plan-verification.json \
+            --package-dir target/release/pg_trickle-pg18 \
+            --installation target/join-plan-full-install-attestation.json \
+            --candidate-commit "$GITHUB_SHA" \
+            --runtime-case e2e_join_tests::test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows \
+            --runtime-case e2e_refresh_atomicity_tests::test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut \
+            --output .p2p/work/issue-1223-join-checker/evidence/join-plan-candidate-binding.json
+
       - name: Upload candidate binding evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -600,6 +717,14 @@ jobs:
             .p2p/work/issue-1097-verified-production-lsn/evidence/lsn-candidate-binding.json
             target/receipt-full-install-attestation.json
             .p2p/work/issue-1222-receipt-prefix/evidence/receipt-candidate-binding.json
+            target/lifecycle-full-install-attestation.json
+            .p2p/work/issue-1220-aggregate-lifecycle/evidence/lifecycle-candidate-binding.json
+            target/cdc-elision-full-install-attestation.json
+            .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-candidate-binding.json
+            artifacts/lifecycle-histories/
+            target/join-plan-full-install-attestation.json
+            .p2p/work/issue-1223-join-checker/evidence/join-plan-candidate-binding.json
+            artifacts/join-endpoints/
           retention-days: 30
           if-no-files-found: warn
 

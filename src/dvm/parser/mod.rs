@@ -5258,6 +5258,36 @@ mod tests {
         assert_eq!(names, vec!["dept", "salary"]);
     }
 
+    #[test]
+    fn test_prune_scan_columns_preserves_raw_aggregate_inputs() {
+        for function in [
+            AggFunc::ComplexExpression("sum(salary)::bigint".into()),
+            AggFunc::UserDefined("custom_agg(salary ORDER BY name)".into()),
+            AggFunc::JsonObjectAggStd("JSON_OBJECTAGG(name: salary)".into()),
+            AggFunc::JsonArrayAggStd("JSON_ARRAYAGG(salary ORDER BY name)".into()),
+        ] {
+            let mut tree = OpTree::Aggregate {
+                group_by: vec![qualified_col("t", "dept")],
+                aggregates: vec![AggExpr {
+                    function,
+                    argument: None,
+                    alias: "result".into(),
+                    is_distinct: false,
+                    second_arg: None,
+                    filter: None,
+                    order_within_group: None,
+                    statistical_support: None,
+                }],
+                child: Box::new(scan_node("t", 1, &["dept", "salary", "name"])),
+            };
+            tree.prune_scan_columns();
+            let OpTree::Aggregate { child, .. } = &tree else {
+                panic!()
+            };
+            assert_eq!(col_names(child), vec!["dept", "salary", "name"]);
+        }
+    }
+
     // ── strip_order_by_and_limit tests ──────────────────────────────
 
     #[test]

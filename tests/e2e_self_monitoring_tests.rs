@@ -1,6 +1,20 @@
 mod e2e;
 use e2e::E2eDb;
 
+async fn pause_self_monitoring(db: &E2eDb) {
+    db.execute(
+        "SELECT pgtrickle.pause_scheduler(ARRAY[
+            'pgtrickle.df_efficiency_rolling',
+            'pgtrickle.df_anomaly_signals',
+            'pgtrickle.df_threshold_advice',
+            'pgtrickle.df_cdc_buffer_trends',
+            'pgtrickle.df_scheduling_interference',
+            'pgtrickle.df_frozen_stream_tables'
+        ])",
+    )
+    .await;
+}
+
 // ── DF-F3: E2E test — setup/teardown cycle ──────────────────────────────────
 
 #[tokio::test]
@@ -81,9 +95,9 @@ async fn test_self_monitoring_teardown_drops_all_stream_tables() {
         .await;
     assert_eq!(before, 6);
 
-    // Concurrent scheduler DDL can transiently deadlock a teardown attempt.
-    // PostgreSQL aborts that statement's transaction (40P01), so retry the
-    // complete teardown; any other error must still fail this regression.
+    pause_self_monitoring(&db).await;
+
+    // Retry the complete teardown if concurrent scheduler DDL still deadlocks.
     for attempt in 0..3 {
         match db
             .try_execute("SELECT pgtrickle.teardown_self_monitoring()")
@@ -136,6 +150,7 @@ async fn test_self_monitoring_teardown_safe_with_partial_setup() {
 
     // Setup, then manually drop one DF ST to simulate partial state.
     db.execute("SELECT pgtrickle.setup_self_monitoring()").await;
+    pause_self_monitoring(&db).await;
     db.execute("SELECT pgtrickle.drop_stream_table('pgtrickle.df_anomaly_signals', true)")
         .await;
 
@@ -231,6 +246,8 @@ async fn test_self_monitoring_full_lifecycle() {
         .query_scalar("SELECT count(*) FROM pgtrickle.self_monitoring_status() WHERE exists")
         .await;
     assert_eq!(count, 6);
+
+    pause_self_monitoring(&db).await;
 
     // Teardown.
     db.execute("SELECT pgtrickle.teardown_self_monitoring()")
@@ -410,6 +427,7 @@ async fn test_control_plane_survives_df_st_suspension() {
     db.execute("SELECT pgtrickle.setup_self_monitoring()").await;
 
     // Drop all DF STs — simulate suspension.
+    pause_self_monitoring(&db).await;
     db.try_execute("SELECT pgtrickle.teardown_self_monitoring()")
         .await
         .expect("teardown self-monitoring while preserving the user stream");
@@ -1120,6 +1138,8 @@ async fn test_soak_self_monitoring_with_many_user_sts() {
             f * 100.0
         );
     }
+
+    pause_self_monitoring(&db).await;
 
     // Teardown should work cleanly.
     db.execute("SELECT pgtrickle.teardown_self_monitoring()")

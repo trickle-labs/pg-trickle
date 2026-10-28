@@ -204,6 +204,11 @@ def shrink_scenario(scenario: dict, still_fails: Callable[[dict], bool]) -> dict
                     scenario = candidate
                     changed = True
 
+        # Typed/transactional counterexamples shrink whole history steps and
+        # initial rows, retaining expression evaluation and transaction cuts.
+        if scenario.get("preserve_sql_boundaries", False):
+            continue
+
         # (d) simplify mutation and setup literals (values, keys, aliases).
         for section in ("setup_sql", "initial_data"):
             statements = scenario["schema"][section] if section == "setup_sql" else scenario[section]

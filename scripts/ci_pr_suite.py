@@ -13,8 +13,12 @@ ROOT = Path(__file__).resolve().parent.parent
 SCHEDULER_ISOLATED = {
     "e2e_dag_autorefresh_tests", "e2e_mixed_mode_dag_tests",
     "e2e_mixed_scheduling_tests", "e2e_ownership_tests", "e2e_scheduler_tests",
+    # This matrix checks WAL receipt and scheduler progress across routes.
+    "e2e_dvm_strategy_tests",
     "e2e_v107_wal_transition_tests", "e2e_rls_wal_tests",
     "e2e_watermark_gating_tests", "e2e_bootstrap_gating_tests",
+    # These share server settings and depend on uncontended scheduler progress.
+    "e2e_drain_mode_tests", "e2e_long_txn_visibility_tests",
     # This failpoint witness requires deterministic scheduler progress.
     "e2e_dvm_failpoint_tests",
 }
@@ -24,11 +28,15 @@ SERIAL_CASES = [
     ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_after_receipt_commit_before_ack_converges_once"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_after_apply_before_ack_does_not_reapply"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_after_slot_advance_finishes_acknowledgement"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_receipt_commit_order_preserves_late_old_lsn_transaction"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_received_receipt_requires_rebaseline"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_undecoded_commit_requires_rebaseline"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_semantic_controls_are_detected"),
     ("e2e_v043_tests", "test_t_a44_10_insert_correctness"),
     ("e2e_v107_wal_transition_tests", "test_v107_auto_wal_transition_captures_changes"),
+    # Keep this aggregate history out of the broad concurrent E2E sweep.
+    ("e2e_v078_tests", "test_dvm1_case_in_list_append_only_differential"),
+    ("e2e_lsn_contract_tests", "test_lsn_manual_refresh_own_writes_visible_in_caller_transaction"),
     ("e2e_lsn_contract_tests", "test_lsn_manual_refresh_fixed_snapshots_preserve_frontier"),
     ("e2e_lsn_contract_tests", "test_lsn_scheduler_cdc_holdback_recovers_after_long_writer"),
     ("e2e_property_circular_tests", "test_prop_monotone_cycle_small_graph_converges"),

@@ -31,8 +31,13 @@ pub fn rebuild_cdc_trigger_function(
     let mode = config::pg_trickle_cdc_trigger_mode();
     match mode {
         config::CdcTriggerMode::Statement => {
-            let (ins_fn, upd_fn, del_fn) =
-                super::build_stmt_trigger_fn_sql(change_schema, &cdc_name, &pk_columns, &columns);
+            let (ins_fn, upd_fn, del_fn) = super::build_stmt_trigger_fn_sql(
+                change_schema,
+                &cdc_name,
+                &pk_columns,
+                &columns,
+                super::has_immediate_primary_key(source_oid)?,
+            );
             Spi::run(&ins_fn).map_err(|e| {
                 PgTrickleError::SpiError(format!(
                     "Failed to rebuild CDC INSERT trigger function: {}",
@@ -212,8 +217,13 @@ pub fn rebuild_cdc_trigger(
     // 1. Rebuild trigger function(s) for the current mode.
     match mode {
         config::CdcTriggerMode::Statement => {
-            let (ins_fn, upd_fn, del_fn) =
-                super::build_stmt_trigger_fn_sql(change_schema, &cdc_name, &pk_columns, &columns);
+            let (ins_fn, upd_fn, del_fn) = super::build_stmt_trigger_fn_sql(
+                change_schema,
+                &cdc_name,
+                &pk_columns,
+                &columns,
+                super::has_immediate_primary_key(source_oid)?,
+            );
             replace_trigger_function(
                 change_schema,
                 &format!("pg_trickle_cdc_ins_fn_{cdc_name}"),
@@ -361,7 +371,7 @@ pub fn rebuild_cdc_trigger(
 ///
 /// F39: Columns that were dropped from the source are cleaned up by dropping
 /// the orphaned flat columns from the buffer table.
-fn sync_change_buffer_columns(
+pub(crate) fn sync_change_buffer_columns(
     source_oid: pg_sys::Oid,
     change_schema: &str,
     columns: &[(String, String)],

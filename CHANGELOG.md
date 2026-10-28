@@ -222,6 +222,30 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Evaluate computed projections over affected old/old and new/new inner-join
+  endpoints for admitted keyed trigger sources, avoiding intermediate
+  divide-by-zero errors when both committed endpoints are valid (#1211, #1223).
+  Manual refresh fences source writes until transaction end and requires
+  READ COMMITTED isolation. The restricted route covers single built-in
+  boolean/integer/UUID equality keys, including single-key USING; other join
+  routes retain their existing behavior.
+- Preserve numeric scale-only UPDATEs for narrow and shared CDC consumers in
+  both row and statement trigger modes (#1210, #1221). Changed-column masks use
+  binary images for admitted fixed-size built-in types and conservatively retain
+  variable-length and unknown types. Existing installations must rebuild CDC
+  triggers with the new library and fully refresh results already made stale
+  by omitted updates.
+- Keep concrete differential windows out of the reusable MERGE cache, including
+  decision tracing and per-leaf snapshot overrides, so later refreshes cannot
+  reuse earlier LSN cuts (#1221).
+- Retain deferred-key payload replacements even when their INSERT precedes the
+  old DELETE. Keyed delta reduction compares complete binary row images, so
+  numeric representation changes survive and json payloads need no equality
+  operator (#1180, #1221).
+- Preserve inputs to casted and other complex aggregates during differential
+  refresh (#1263). After upgrading, reinitialize existing affected stream
+  tables before refreshing them to repair stale results and expand older
+  selective change buffers.
 - Count non-NULL composite values containing NULL fields correctly during
   differential refresh, including filtered counts (#1203). Existing affected
   stream tables need a FULL refresh to correct previously stored undercounts.

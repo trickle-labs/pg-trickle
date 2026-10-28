@@ -408,10 +408,11 @@ async fn wait_for_exact(pool: &PgPool, stream: &str, journal: &str) {
 async fn run_update_to_null_case(mode: &str) {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     configure_scheduler(&db).await;
-    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
         .await;
     let source = format!("null_{mode}_source");
     let stream = format!("null_{mode}_stream");
+    let full_stream = format!("null_{mode}_full_stream");
     db.execute(&format!(
         "CREATE TABLE {source} (id INT PRIMARY KEY, value TEXT)"
     ))
@@ -420,25 +421,32 @@ async fn run_update_to_null_case(mode: &str) {
         .await;
     db.execute(&format!("INSERT INTO {source} VALUES (1, 'before')"))
         .await;
-    db.execute(&format!(
-        "SELECT pgtrickle.create_stream_table(\
-            name => '{stream}', query => $$SELECT id, value FROM {source}$$, \
-            schedule => '1s', refresh_mode => 'DIFFERENTIAL', cdc_mode => '{mode}')"
-    ))
-    .await;
+    let query = format!("SELECT id, value FROM {source}");
+    db.create_st(&stream, &query, "1s", "DIFFERENTIAL").await;
+    db.create_st(&full_stream, &query, "1s", "FULL").await;
+    wait_for_cdc_mode(&db, &source, "TRIGGER").await;
+    if mode == "wal" {
+        // Keep the fixed WAL error budget near its production duration.
+        db.alter_system_set_and_wait("pg_trickle.scheduler_interval_ms", "1000", "1000")
+            .await;
+        db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
+            .await;
+    }
     let expected_mode = mode.to_uppercase();
     wait_for_cdc_mode(&db, &source, &expected_mode).await;
     // Drain refreshes while CDC remains active so buffered rows can be inspected.
     db.execute(&format!(
-        "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}', 'public.{full_stream}'])"
     ))
     .await;
     let oid = i64::from(db.table_oid(&source).await);
     let buffer = db.change_buffer_table(oid).await;
     let token = "value[text]:null";
     db.refresh_st_with_retry(&stream).await;
+    db.refresh_st_with_retry(&full_stream).await;
     wait_for_cdc_mode(&db, &source, &expected_mode).await;
     assert_eq!(exact_diff(&db.pool, &stream, &source).await, 0);
+    assert_eq!(exact_diff(&db.pool, &full_stream, &source).await, 0);
     assert!(
         db.query_scalar::<bool>(&format!(
             "SELECT NOT needs_reinit AND frontier IS NOT NULL \
@@ -520,14 +528,30 @@ async fn run_update_to_null_case(mode: &str) {
         .await,
         "nullable update must not require a rebuild: {reinit_reason:?}"
     );
+    assert!(
+        !db.query_scalar::<bool>(&format!(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{full_stream}'"
+        ))
+        .await,
+        "FULL refresh must not require reinitialization"
+    );
     db.refresh_st(&stream).await;
+    db.refresh_st(&full_stream).await;
     assert_eq!(exact_diff(&db.pool, &stream, &source).await, 0);
+    assert_eq!(exact_diff(&db.pool, &full_stream, &source).await, 0);
     let actual: Vec<(i32, Option<String>)> =
         sqlx::query_as(AssertSqlSafe(format!("SELECT id, value FROM {stream}")))
             .fetch_all(&db.pool)
             .await
             .expect("read exact nullable stream result");
     assert_eq!(actual, vec![(1, None)]);
+    let full_actual: Vec<(i32, Option<String>)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT id, value FROM {full_stream}"
+    )))
+    .fetch_all(&db.pool)
+    .await
+    .expect("read exact nullable FULL result");
+    assert_eq!(full_actual, vec![(1, None)]);
     let refreshes: Vec<(String, bool)> = sqlx::query_as(AssertSqlSafe(format!(
         "SELECT h.action, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h \
          JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
@@ -537,6 +561,15 @@ async fn run_update_to_null_case(mode: &str) {
     .await
     .expect("verify differential refresh without fallback or reinitialization");
     assert_eq!(refreshes, vec![("DIFFERENTIAL".into(), false)]);
+    let full_refreshes: Vec<(String, bool)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT h.action, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+         WHERE st.pgt_name = '{full_stream}' AND h.refresh_id > {history} AND h.status = 'COMPLETED'"
+    )))
+    .fetch_all(&db.pool)
+    .await
+    .expect("verify FULL refresh route");
+    assert_eq!(full_refreshes, vec![("FULL".into(), false)]);
     assert_eq!(
         cdc_mode(&db, &source).await.as_deref(),
         Some(expected_mode.as_str())

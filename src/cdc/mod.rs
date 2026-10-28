@@ -817,8 +817,13 @@ pub fn create_change_trigger(
     let mode = config::pg_trickle_cdc_trigger_mode();
     match mode {
         config::CdcTriggerMode::Statement => {
-            let (ins_fn, upd_fn, del_fn) =
-                build_stmt_trigger_fn_sql(change_schema, stable_name, pk_columns, columns);
+            let (ins_fn, upd_fn, del_fn) = build_stmt_trigger_fn_sql(
+                change_schema,
+                stable_name,
+                pk_columns,
+                columns,
+                has_immediate_primary_key(source_oid)?,
+            );
             let buffer_key = format!("changes_{stable_name}");
             Spi::run(&with_sync_guard(&ins_fn, &buffer_key)).map_err(|e| {
                 PgTrickleError::SpiError(format!(
@@ -2135,9 +2140,23 @@ pub fn is_selective_capture_active(source_oid: pg_sys::Oid) -> bool {
     keep.len() < all_cols.len()
 }
 
-/// Resolve primary key column names for a source table via `pg_constraint`.
-///
-/// Returns columns in key order. Returns an empty Vec if no PK exists.
+/// Deferred keys cannot pair statement transition rows by key within a transaction.
+pub fn has_immediate_primary_key(source_oid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
+    Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint \
+         WHERE conrelid=$1 AND contype='p' AND NOT condeferrable)",
+        &[source_oid.into()],
+    )
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "source {} key constraints: {e}",
+            source_oid.to_u32()
+        ))
+    })
+    .map(|found| found.unwrap_or(false))
+}
+
+/// Resolve primary key column names in key order; missing keys return an empty list.
 pub fn resolve_pk_columns(source_oid: pg_sys::Oid) -> Result<Vec<String>, PgTrickleError> {
     let sql = format!(
         "SELECT a.attname::text \
@@ -2431,6 +2450,7 @@ fn build_stmt_trigger_fn_sql(
     name: &str,
     pk_columns: &[String],
     columns: &[(String, String)],
+    pair_updates: bool,
 ) -> (String, String, String) {
     let pkn = build_pk_hash_stmt_expr("n", pk_columns, columns);
     let pko = build_pk_hash_stmt_expr("o", pk_columns, columns);
@@ -2494,8 +2514,8 @@ fn build_stmt_trigger_fn_sql(
     // UPDATE trigger function — accesses both __pgt_new and __pgt_old.
     // A44-10: D+I decomposition — emit D-row (OLD values) + I-row (NEW values).
     // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
-    let upd_fn = if pk_columns.is_empty() {
-        // Keyless table: no PK join possible — model UPDATE as DELETE+INSERT.
+    let upd_fn = if pk_columns.is_empty() || !pair_updates {
+        // Keyless/deferred keys cannot pair transition rows uniquely by key.
         // Two separate INSERT … SELECT statements (row-level trigger cannot batch).
         format!(
             "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{name}()
@@ -2548,12 +2568,24 @@ fn build_stmt_trigger_fn_sql(
         let pair_row_id = format!("CASE WHEN {o_present} THEN {pko} ELSE {pkn} END");
         let old_event_cols = columns
             .iter()
-            .map(|(col, _)| format!(", (p.__pgt_old_row).\"{}\"", col.replace('"', "\"\"")))
+            .enumerate()
+            .map(|(i, _)| format!(", (p.__pgt_old_row).f{}", i + 1))
             .collect::<String>();
         let new_event_cols = columns
             .iter()
-            .map(|(col, _)| format!(", (p.__pgt_new_row).\"{}\"", col.replace('"', "\"\"")))
+            .enumerate()
+            .map(|(i, _)| format!(", (p.__pgt_new_row).f{}", i + 1))
             .collect::<String>();
+        let new_pair_cols = columns
+            .iter()
+            .map(|(col, _)| format!("n.\"{}\"", col.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let old_pair_cols = columns
+            .iter()
+            .map(|(col, _)| format!("o.\"{}\"", col.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(", ");
         let matched_changed_cols = bitmask_opt.as_deref().map_or_else(
             || "NULL::varbit".to_string(),
             |bitmask| format!("CASE WHEN {n_present} AND {o_present} THEN ({bitmask}) END"),
@@ -2577,7 +2609,7 @@ fn build_stmt_trigger_fn_sql(
              END IF;
              -- Pair stable keys and PK-changing UPDATEs once, then emit D before I.
              WITH pair_rows AS MATERIALIZED (
-                 SELECT n AS __pgt_new_row, o AS __pgt_old_row,
+                 SELECT ROW({new_pair_cols}) AS __pgt_new_row, ROW({old_pair_cols}) AS __pgt_old_row,
                         ({n_present}) AS __pgt_new_present,
                         ({o_present}) AS __pgt_old_present,
                         ({pair_row_id}) AS __pgt_row_id,
@@ -2744,9 +2776,8 @@ fn build_pk_hash_stmt_expr(
 
 /// WB-1: Build the `changed_cols` VARBIT expression for statement-level UPDATE triggers.
 ///
-/// Uses the same typed representation comparison as row-level triggers, with
-/// transition-table aliases for statement-level UPDATEs.
-/// Bit at position `i` (leftmost = 0) is B'1' when column `i` changed.
+/// Uses the row-level conservative image policy with transition-table aliases.
+/// Bit position `i` follows capture column order.
 fn build_changed_cols_bitmask_stmt_expr(
     pk_columns: &[String],
     columns: &[(String, String)],
@@ -2756,12 +2787,11 @@ fn build_changed_cols_bitmask_stmt_expr(
     }
     let parts: Vec<String> = columns
         .iter()
-        .map(|(col_name, type_name)| {
+        .map(|(col_name, _)| {
             let qcol = col_name.replace('"', "\"\"");
-            triggers::changed_col_bit_expr(
-                &format!("n.\"{qcol}\""),
+            crate::cdc_elision::changed_column_sql(
                 &format!("o.\"{qcol}\""),
-                type_name,
+                &format!("n.\"{qcol}\""),
             )
         })
         .collect();
@@ -3700,7 +3730,7 @@ mod tests {
             ("value".to_string(), "text".to_string()),
         ];
         let (_, update, _) =
-            build_stmt_trigger_fn_sql("pgtrickle_changes", "test_source", &pk, &columns);
+            build_stmt_trigger_fn_sql("pgtrickle_changes", "test_source", &pk, &columns, true);
 
         assert!(update.contains("FULL JOIN __pgt_old"), "{update}");
         assert!(
@@ -3720,6 +3750,21 @@ mod tests {
             "D must precede I in {update}"
         );
         assert!(!update.contains("NOT EXISTS"), "{update}");
+    }
+
+    #[test]
+    fn test_statement_deferred_key_update_retains_unpaired_transition_rows() {
+        let pk = vec!["id".to_string()];
+        let columns = vec![
+            ("id".to_string(), "integer".to_string()),
+            ("n".to_string(), "numeric".to_string()),
+        ];
+        let (_, update, _) =
+            build_stmt_trigger_fn_sql("pgtrickle_changes", "test_source", &pk, &columns, false);
+        assert!(!update.contains("FULL JOIN"), "{update}");
+        assert!(update.contains("FROM __pgt_old o"));
+        assert!(update.contains("FROM __pgt_new n"));
+        assert!(update.contains("'SCAN_KEY'"));
     }
 
     // ── build_pk_hash_trigger_exprs tests ────────────────────────────
@@ -3847,7 +3892,7 @@ mod tests {
     }
 
     #[test]
-    fn test_statement_bitmask_compares_numeric_scale_representation() {
+    fn test_statement_bitmask_retains_unknown_numeric_changes() {
         let pk = vec!["id".to_string()];
         let cols = vec![
             ("id".to_string(), "integer".to_string()),
@@ -3855,9 +3900,9 @@ mod tests {
         ];
         let expr = build_changed_cols_bitmask_stmt_expr(&pk, &cols).unwrap();
         assert!(
-            expr.contains("n.\"amount\" IS DISTINCT FROM o.\"amount\" OR")
-                && expr.contains("scale(n.\"amount\") IS DISTINCT FROM scale(o.\"amount\")"),
-            "statement changed_cols must observe numeric scale changes: {expr}"
+            expr.contains("pg_catalog.pg_typeof(n.\"amount\")::oid IN")
+                && expr.contains("ELSE B'1' END)::varbit"),
+            "statement changed_cols must conservatively retain numeric changes: {expr}"
         );
     }
 

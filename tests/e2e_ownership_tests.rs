@@ -14,6 +14,223 @@ mod e2e;
 
 use e2e::E2eDb;
 
+/// #1263: a changed upstream group must update cast and uncast SUM results.
+#[tokio::test]
+async fn test_full_owner_downstream_cast_sum_matches_query() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE ROLE r1263_owner LOGIN").await;
+    db.execute("GRANT pgtrickle_admin, pgtrickle_operator TO r1263_owner")
+        .await;
+    db.execute("CREATE SCHEMA r1263 AUTHORIZATION r1263_owner")
+        .await;
+    let as_owner = async |sql: &str| {
+        db.try_execute_with_role("SET ROLE r1263_owner", sql, "RESET ROLE")
+            .await
+            .expect("owner operation succeeds");
+    };
+    as_owner("CREATE TABLE r1263.ev (id bigint PRIMARY KEY, org text, usr text)").await;
+    as_owner("SELECT pgtrickle.create_stream_table('r1263.st1', 'SELECT org, usr, count(*) AS n FROM r1263.ev GROUP BY org, usr', '1h', refresh_mode => 'FULL')").await;
+    for (name, sum) in [("casted", "sum(n)::bigint"), ("control", "sum(n)")] {
+        as_owner(&format!("SELECT pgtrickle.create_stream_table('r1263.{name}', 'SELECT org, {sum} AS n, count(*) AS users FROM r1263.st1 GROUP BY org', 'calculated', refresh_mode => 'DIFFERENTIAL')")).await;
+    }
+    for catalog in ["pgt_dependencies", "pgt_stream_tables"] {
+        let allowed: bool = db
+            .query_scalar(&format!(
+                "SELECT has_table_privilege('r1263_owner', 'pgtrickle.{catalog}', 'SELECT')"
+            ))
+            .await;
+        assert!(!allowed, "owner must not read {catalog}");
+    }
+    for mutation in [
+        "INSERT INTO r1263.ev VALUES (1, 'a', 'u1'), (2, 'a', 'u2')",
+        "INSERT INTO r1263.ev VALUES (3, 'a', 'u1')",
+        "DELETE FROM r1263.ev WHERE id = 3",
+        "UPDATE r1263.ev SET org = 'b' WHERE id = 2",
+    ] {
+        as_owner(mutation).await;
+        for table in ["st1", "casted", "control"] {
+            as_owner(&format!(
+                "SELECT pgtrickle.refresh_stream_table('r1263.{table}')"
+            ))
+            .await;
+        }
+        for table in ["control", "casted"] {
+            let matches: bool = db.query_scalar(&format!("SELECT NOT EXISTS ((SELECT org, n::bigint, users FROM r1263.{table} EXCEPT ALL SELECT org, sum(n)::bigint, count(*) FROM r1263.st1 GROUP BY org) UNION ALL (SELECT org, sum(n)::bigint, count(*) FROM r1263.st1 GROUP BY org EXCEPT ALL SELECT org, n::bigint, users FROM r1263.{table}))")).await;
+            assert!(
+                matches,
+                "{table} must match its defining query after {mutation}"
+            );
+        }
+    }
+
+    // Model a stale result left by a pre-fix refresh.
+    db.execute_seq(&[
+        "SET pg_trickle.internal_refresh = 'true'",
+        "UPDATE r1263.casted SET n = 99 WHERE org = 'a'",
+        "RESET pg_trickle.internal_refresh",
+    ])
+    .await;
+    as_owner("SELECT pgtrickle.reinitialize_stream_table('r1263.casted')").await;
+    as_owner("SELECT pgtrickle.refresh_stream_table('r1263.casted')").await;
+    let repaired: i64 = db
+        .query_scalar("SELECT n FROM r1263.casted WHERE org = 'a'")
+        .await;
+    assert_eq!(repaired, 1, "reinitialization must repair the stale group");
+    as_owner("INSERT INTO r1263.ev VALUES (4, 'a', 'u1')").await;
+    as_owner("SELECT pgtrickle.refresh_stream_table('r1263.st1')").await;
+    as_owner("SELECT pgtrickle.refresh_stream_table('r1263.casted')").await;
+    let updated: i64 = db
+        .query_scalar("SELECT n FROM r1263.casted WHERE org = 'a'")
+        .await;
+    assert_eq!(updated, 2, "incremental maintenance must work after repair");
+}
+
+/// #1263: repair must expand an older selective CDC buffer before new writes.
+#[tokio::test]
+async fn test_reinitialize_cast_sum_expands_old_cdc_buffer() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE r1263_source (id bigint PRIMARY KEY, grp text, val bigint)")
+        .await;
+    db.execute("INSERT INTO r1263_source VALUES (1, 'a', 1)")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table('r1263_direct', 'SELECT grp, sum(val)::bigint AS total FROM r1263_source GROUP BY grp', '1h', refresh_mode => 'DIFFERENTIAL', cdc_mode => 'trigger')").await;
+    db.execute("SELECT pgtrickle.create_stream_table('r1263_peer', 'SELECT grp, count(*) AS n FROM r1263_source GROUP BY grp', '1h', refresh_mode => 'DIFFERENTIAL', cdc_mode => 'trigger')").await;
+    let oid: i64 = db
+        .query_scalar("SELECT 'r1263_source'::regclass::oid::bigint")
+        .await;
+    let buffer = db.change_buffer_table(oid).await;
+    db.execute(&format!(
+        "UPDATE pgtrickle.pgt_dependencies SET columns_used = ARRAY['grp'] \
+         WHERE source_relid = {oid}::oid AND pgt_id = \
+         (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'r1263_direct')"
+    ))
+    .await;
+    db.execute("SELECT pgtrickle.rebuild_cdc_triggers()").await;
+    let missing: bool = db
+        .query_scalar(&format!("SELECT NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = '{buffer}'::regclass AND attname = 'val' AND NOT attisdropped)"))
+        .await;
+    assert!(missing, "fixture must reproduce the old selective buffer");
+
+    db.execute("UPDATE r1263_source SET val = 3 WHERE id = 1")
+        .await;
+    db.refresh_st("r1263_peer").await;
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('r1263_direct')")
+        .await;
+    db.refresh_st("r1263_direct").await;
+    db.execute("UPDATE r1263_source SET val = 4 WHERE id = 1")
+        .await;
+    db.refresh_st("r1263_direct").await;
+    db.assert_st_matches_query(
+        "r1263_direct",
+        "SELECT grp, sum(val)::bigint AS total FROM r1263_source GROUP BY grp",
+    )
+    .await;
+    db.refresh_st("r1263_peer").await;
+    db.assert_st_matches_query(
+        "r1263_peer",
+        "SELECT grp, count(*) AS n FROM r1263_source GROUP BY grp",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_reinitialize_expands_cdc_after_trigger_mode_change() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE ROLE r1263_mode_owner LOGIN").await;
+    db.execute("GRANT pgtrickle_admin, pgtrickle_operator TO r1263_mode_owner")
+        .await;
+    db.execute("GRANT CREATE ON SCHEMA public TO r1263_mode_owner")
+        .await;
+    db.execute("CREATE TABLE r1263_row_source (id bigint PRIMARY KEY, grp text, val bigint)")
+        .await;
+    db.execute("ALTER TABLE r1263_row_source OWNER TO r1263_mode_owner")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_trigger_mode = 'row'",
+        "SET ROLE r1263_mode_owner",
+        "SELECT pgtrickle.create_stream_table('r1263_row_st', 'SELECT grp, sum(val)::bigint AS total FROM r1263_row_source GROUP BY grp', '1h', refresh_mode => 'DIFFERENTIAL', cdc_mode => 'trigger')",
+        "RESET ROLE",
+        "RESET pg_trickle.cdc_trigger_mode",
+    ])
+    .await;
+    let oid = db.table_oid("r1263_row_source").await;
+    let buffer = db.change_buffer_table(i64::from(oid)).await;
+    db.execute(&format!(
+        "UPDATE pgtrickle.pgt_dependencies SET columns_used = ARRAY['grp'] \
+         WHERE source_relid = {oid}::oid"
+    ))
+    .await;
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_trigger_mode = 'row'",
+        "SELECT pgtrickle.rebuild_cdc_triggers()",
+        "RESET pg_trickle.cdc_trigger_mode",
+    ])
+    .await;
+    db.execute("INSERT INTO r1263_row_source VALUES (1, 'a', 1)")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_trigger_mode = 'statement'",
+        "SET ROLE r1263_mode_owner",
+        "SELECT pgtrickle.reinitialize_stream_table('r1263_row_st')",
+        "RESET ROLE",
+        "RESET pg_trickle.cdc_trigger_mode",
+    ])
+    .await;
+    db.refresh_st("r1263_row_st").await;
+    db.execute("UPDATE r1263_row_source SET val = 7 WHERE id = 1")
+        .await;
+    let captured: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM {buffer} WHERE action = 'I' AND val = 7)"
+        ))
+        .await;
+    assert!(
+        captured,
+        "the active CDC trigger must capture the added column"
+    );
+    let diagnostic: String = db
+        .query_scalar(&format!(
+            "SELECT coalesce(jsonb_agg(to_jsonb(b))::text, '[]') FROM {buffer} b"
+        ))
+        .await;
+    println!("r1263 mode-change buffer before refresh: {diagnostic}");
+    let before: String = db
+        .query_scalar("SELECT coalesce(frontier::text, 'null') FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'r1263_row_st'")
+        .await;
+    println!("r1263 mode-change frontier before refresh: {before}");
+    let before_lsn: String = db
+        .query_scalar(&format!("SELECT frontier->'sources'->'{oid}'->>'lsn' FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'r1263_row_st'"))
+        .await;
+    let mut writer = db.pool.begin().await.expect("begin buffer writer");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "LOCK TABLE {buffer} IN ROW EXCLUSIVE MODE"
+    )))
+    .execute(&mut *writer)
+    .await
+    .expect("hold the change-buffer writer lock");
+    db.refresh_st("r1263_row_st").await;
+    let held_lsn: String = db
+        .query_scalar(&format!("SELECT frontier->'sources'->'{oid}'->>'lsn' FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'r1263_row_st'"))
+        .await;
+    assert_eq!(
+        held_lsn, before_lsn,
+        "a held-back refresh must not advance the frontier"
+    );
+    let held_total: i64 = db
+        .query_scalar("SELECT total FROM r1263_row_st WHERE grp = 'a'")
+        .await;
+    assert_eq!(held_total, 1, "the pending update must remain held back");
+    writer.commit().await.expect("release buffer writer lock");
+    db.refresh_st_until_converged("r1263_row_st").await;
+    let diagnostic: String = db.query_scalar("SELECT row_to_json(s)::text FROM pgtrickle.pgt_stream_tables s WHERE pgt_name = 'r1263_row_st'").await;
+    println!("r1263 mode-change catalog after refresh: {diagnostic}");
+    db.assert_st_matches_query(
+        "r1263_row_st",
+        "SELECT grp, sum(val)::bigint AS total FROM r1263_row_source GROUP BY grp",
+    )
+    .await;
+}
+
 /// Helper: create the two test roles and a source table owned by sec1_owner.
 async fn setup_ownership_test(db: &E2eDb) {
     // Create roles — use EXCEPTION to handle the race where parallel tests try

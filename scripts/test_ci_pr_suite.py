@@ -24,6 +24,7 @@ class AllocationTests(unittest.TestCase):
             "e2e_refresh_atomicity_tests", "e2e_long_txn_visibility_tests",
             "e2e_keyless_duplicate_tests", "e2e_safety_tests", "e2e_rls_wal_tests",
             "e2e_dvm_corpus_tests", "e2e_dvm_negative_control_tests",
+            "e2e_dvm_semantic_mutant_tests",
             "e2e_sensitivity_baseline_tests", "e2e_window_state_recovery_tests",
             "e2e_dag_operations_tests", "e2e_dag_concurrent_tests",
             "e2e_monitoring_tests", "e2e_stmt_cdc_tests", "e2e_ownership_tests",
@@ -36,16 +37,20 @@ class AllocationTests(unittest.TestCase):
             "./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0",
             "--no-fail-fast", "--test-threads", "1",
             "--test", "e2e_wal_receipt_recovery_tests", "--test", "e2e_v043_tests",
-            "--test", "e2e_lsn_contract_tests", "--test", "e2e_property_circular_tests",
+            "--test", "e2e_v078_tests", "--test", "e2e_lsn_contract_tests",
+            "--test", "e2e_property_circular_tests",
             "--test", "e2e_refresh_tests", "--test", "e2e_v0878_security_tests", "-E",
             "test(=test_wal_recovery_before_receipt_commit_preserves_committed_changes) | "
             "test(=test_wal_recovery_after_receipt_commit_before_ack_converges_once) | "
             "test(=test_wal_recovery_after_apply_before_ack_does_not_reapply) | "
             "test(=test_wal_recovery_after_slot_advance_finishes_acknowledgement) | "
+            "test(=test_wal_receipt_commit_order_preserves_late_old_lsn_transaction) | "
             "test(=test_wal_trigger_fallback_received_receipt_requires_rebaseline) | "
             "test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline) | "
             "test(=test_wal_recovery_semantic_controls_are_detected) | "
             "test(=test_t_a44_10_insert_correctness) | "
+            "test(=test_dvm1_case_in_list_append_only_differential) | "
+            "test(=test_lsn_manual_refresh_own_writes_visible_in_caller_transaction) | "
             "test(=test_lsn_manual_refresh_fixed_snapshots_preserve_frontier) | "
             "test(=test_lsn_scheduler_cdc_holdback_recovers_after_long_writer) | "
             "test(=test_prop_monotone_cycle_small_graph_converges) | "
@@ -85,10 +90,14 @@ class AllocationTests(unittest.TestCase):
         }))
 
     def test_shards_cover_each_target_once_and_keep_witnesses_isolated(self):
+        self.assertTrue({
+            "e2e_drain_mode_tests", "e2e_long_txn_visibility_tests",
+        } <= ci_pr_suite.SCHEDULER_ISOLATED)
         shards = []
         policy = json.loads((ci_pr_suite.ROOT / ".github/ci-suites.json").read_text())
         shard_2 = set(policy["pr_full_shard_2"])
         all_targets = set(ci_pr_suite.targets())
+        self.assertIn("e2e_dvm_strategy_tests", ci_pr_suite.SCHEDULER_ISOLATED)
         for shard in (1, 2):
             with patch("sys.argv", ["ci_pr_suite.py", "--shard", str(shard)]), patch(
                 "ci_pr_suite.subprocess.run", return_value=SimpleNamespace(returncode=0)
