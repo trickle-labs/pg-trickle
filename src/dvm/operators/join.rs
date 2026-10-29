@@ -862,6 +862,9 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             let mut hash_corr_args = left_key_exprs_dl.clone();
             hash_corr_args.extend(right_key_exprs_dr.clone());
             let hash_correction = crate::hash::build_composite_hash_expr(&hash_corr_args);
+            let correction_action = crate::join_plan::nested_correction_action_sql(use_r0);
+            let correction_left_filter =
+                crate::join_plan::nested_correction_left_filter_sql(use_r0);
 
             format!(
                 "
@@ -873,15 +876,14 @@ UNION ALL
 -- For dl.action='I': these rows are in L₁ but not L₀ → flip dr action to cancel
 -- For dl.action='D': these rows are in L₀ but not L₁ → keep dr action to add
 SELECT {hash_correction} AS __pgt_row_id,
-       CASE WHEN dl.__pgt_action = 'I'
-            THEN CASE WHEN dr.__pgt_action = 'I' THEN 'D' ELSE 'I' END
-            ELSE dr.__pgt_action
-       END AS __pgt_action,
+       {correction_action} AS __pgt_action,
        {all_cols_correction}
 FROM {delta_left} dl
-JOIN {delta_right} dr ON {cond}",
+JOIN {delta_right} dr ON {cond} AND ({correction_left_filter})",
                 delta_left = left_result.cte_name,
                 delta_right = right_result.cte_name,
+                correction_action = correction_action,
+                correction_left_filter = correction_left_filter,
             )
         } else {
             // DI-5: Part 3 correction suppressed — either left child is

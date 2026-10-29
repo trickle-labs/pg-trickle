@@ -51,6 +51,7 @@ CDC_ELISION_CASES = [
 JOIN_PLAN_CASES = [
     "e2e_join_tests::test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows",
     "e2e_refresh_atomicity_tests::test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut",
+    "e2e_join_tests::test_nested_inner_join_correction_in_semijoin_context_matches_postgres",
 ]
 IDENTITY_FRAME_CASES = [
     "e2e_row_id_v2_tests::test_identity_scalar_frames_preserve_installed_v2_v3_bytes",
@@ -71,7 +72,7 @@ PROOF_CONTRACTS = {
     },
     "join_plan": {
         "schema": "pg-trickle-join-plan-verification-v1",
-        "obligations": {"admitted_equality_type", "check_endpoint_plan", "scope_pair", "unchanged_pair_has_zero_difference"},
+        "obligations": {"admitted_equality_type", "check_endpoint_plan", "scope_pair", "unchanged_pair_has_zero_difference", "correction_is_delete", "nested_left_correction_matches_endpoints"},
         "cases": JOIN_PLAN_CASES,
         "inputs": [
             "src/lib.rs", "src/api/mod.rs", "src/api/helpers.rs", "src/api/refresh_ops.rs", "src/api/security_context.rs",
@@ -81,7 +82,7 @@ PROOF_CONTRACTS = {
             "src/refresh/codegen.rs", "src/refresh/merge/mod.rs", "src/hash.rs",
             "verification/cdc_elision.rs", "Cargo.toml", "Cargo.lock",
         ],
-        "mutants": {"unknown-equality-type", "lost-right-scope", "mixed-snapshot-admission", "swapped-binding-admission", "wrong-sign-admission"},
+        "mutants": {"unknown-equality-type", "lost-right-scope", "mixed-snapshot-admission", "swapped-binding-admission", "wrong-sign-admission", "wrong-nested-correction-polarity"},
     },
     "lsn": {
         "schema": EXPECTED_SCHEMA, "obligations": REQUIRED_OBLIGATIONS,

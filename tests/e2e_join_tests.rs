@@ -218,16 +218,24 @@ async fn test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_
 }
 
 async fn refresh_differential_and_assert(db: &E2eDb, name: &str, query: &str) {
+    refresh_differential_and_assert_with_config(db, name, query, &[]).await;
+}
+
+async fn refresh_differential_and_assert_with_config(
+    db: &E2eDb,
+    name: &str,
+    query: &str,
+    extra_config: &[&str],
+) {
     let refresh = format!("SELECT pgtrickle.refresh_stream_table('{name}')");
-    db.try_execute_with_config(
-        &[
-            "SET pg_trickle.refresh_strategy = 'differential'",
-            "SET pg_trickle.differential_max_change_ratio = 0",
-        ],
-        &refresh,
-    )
-    .await
-    .unwrap_or_else(|error| panic!("{name}: differential refresh failed: {error}"));
+    let mut config = vec![
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+    ];
+    config.extend_from_slice(extra_config);
+    db.try_execute_with_config(&config, &refresh)
+        .await
+        .unwrap_or_else(|error| panic!("{name}: differential refresh failed: {error}"));
     let (action, status, full_fallback): (String, String, bool) = sqlx::query_as(
         "SELECT h.action, h.status, h.was_full_fallback \
          FROM pgtrickle.pgt_refresh_history h \
@@ -806,4 +814,63 @@ async fn test_join_r0_multi_cycle_after_codelete() {
     db.execute("DELETE FROM r0c_items WHERE id = 12").await;
     db.refresh_st("r0c_st").await;
     db.assert_st_matches_query("r0c_st", q).await;
+}
+
+#[tokio::test]
+async fn test_nested_inner_join_correction_in_semijoin_context_matches_postgres() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE nc_left (id INT PRIMARY KEY)")
+        .await;
+    db.execute("CREATE TABLE nc_middle (id INT PRIMARY KEY, left_id INT, grp INT)")
+        .await;
+    db.execute("CREATE TABLE nc_right (id INT PRIMARY KEY, grp INT)")
+        .await;
+    db.execute("CREATE TABLE nc_gate (left_id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO nc_left VALUES (1)").await;
+    db.execute("INSERT INTO nc_middle VALUES (1, 1, 1)").await;
+    db.execute("INSERT INTO nc_right VALUES (1, 1)").await;
+    db.execute("INSERT INTO nc_gate VALUES (1)").await;
+
+    let query = "SELECT l.id AS left_id, m.id AS middle_id, r.id AS right_id, \
+                 m.grp AS middle_group, r.grp AS right_group \
+                 FROM nc_left l JOIN nc_middle m ON l.id = m.left_id \
+                 JOIN nc_right r ON m.grp = r.grp \
+                 WHERE EXISTS (SELECT 1 FROM nc_gate g WHERE g.left_id = l.id)";
+    db.create_st("nc_join_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.refresh_st("nc_join_st").await;
+    db.assert_st_matches_query("nc_join_st", query).await;
+
+    // Both sides of the nested join change in one window, exercising all
+    // INSERT/DELETE correction-action combinations below the semijoin.
+    db.execute("UPDATE nc_middle SET grp = 2 WHERE id = 1")
+        .await;
+    db.execute("UPDATE nc_right SET grp = 2 WHERE id = 1").await;
+    refresh_differential_and_assert_with_config(
+        &db,
+        "nc_join_st",
+        query,
+        &["SET pg_trickle.dvm_decision_trace = on"],
+    )
+    .await;
+
+    let logs = tokio::process::Command::new("docker")
+        .args(["logs", db.container_id()])
+        .output()
+        .await
+        .expect("read PostgreSQL logs for the generated delta witness");
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&logs.stdout),
+        String::from_utf8_lossy(&logs.stderr)
+    );
+    assert!(
+        logs.contains("Correction for nested join"),
+        "the differential refresh did not generate the nested-join correction"
+    );
+    assert!(
+        logs.contains("dl.__pgt_action = 'I'"),
+        "the generated correction did not exercise the split Part 1 filter"
+    );
 }
