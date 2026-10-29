@@ -376,6 +376,8 @@ jobs:
             --test property_tests
 
       - name: Run execution-backed DVM component tests
+        env:
+          PGT_RELEASE_CANDIDATE_COMMIT: ${{ github.sha }}
         run: bash ./scripts/run_dvm_integration_tests.sh pg18
 
       - name: Qualify endpoint SQL with a missing-retraction control
