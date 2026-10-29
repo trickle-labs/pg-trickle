@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER_IMAGE = "pg_trickle_builder:pg18"
+RUNTIME_IMAGE = "pg_trickle_i1289_runtime:pg18"
 PACKAGE_SO = "/artefacts/pg_trickle-pg18/usr/lib/postgresql/18/lib/pg_trickle.so"
 INSTALLED_SO = "/usr/lib/postgresql/18/lib/pg_trickle.so"
 PACKAGE_ROOT = "/artefacts/pg_trickle-pg18"
@@ -38,6 +39,7 @@ INFRA_MARKERS = (
     "testcontainers error",
     "permission denied while trying to connect to the docker api",
     "not found locally",
+    "no match for platform in manifest",
 )
 
 
@@ -304,6 +306,19 @@ def owned_container_ids(run_id: str) -> tuple[list[str], str]:
     return result.stdout.splitlines() if result.returncode == 0 else [], result.stderr.strip()
 
 
+def registered_worktree_paths() -> tuple[set[str], str]:
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"], cwd=ROOT, text=True, capture_output=True
+    )
+    if result.returncode:
+        return set(), result.stderr.strip()
+    return {
+        line.removeprefix("worktree ")
+        for line in result.stdout.splitlines()
+        if line.startswith("worktree ")
+    }, ""
+
+
 def cleanup_resources(resources: RunResources) -> dict:
     errors = []
     removed_containers = []
@@ -349,9 +364,12 @@ def cleanup_resources(resources: RunResources) -> dict:
         elif "no such volume" not in check.stderr.lower():
             errors.append(f"verify removed volume {volume}: {check.stderr.strip()}")
 
+    registered, worktree_list_error = registered_worktree_paths()
+    if worktree_list_error:
+        errors.append(f"list worktrees for scoped cleanup: {worktree_list_error}")
     removed_worktrees = []
     for worktree in reversed(resources.worktrees):
-        if worktree.exists():
+        if worktree.exists() or str(worktree) in registered:
             result = subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree)],
                 cwd=ROOT,
@@ -397,7 +415,13 @@ def cleanup_resources(resources: RunResources) -> dict:
     remaining_containers, remaining_error = owned_container_ids(resources.run_id)
     if remaining_error:
         errors.append(f"verify run-owned containers: {remaining_error}")
-    remaining_worktrees = [str(path) for path in resources.worktrees if path.exists()]
+    registered, worktree_list_error = registered_worktree_paths()
+    if worktree_list_error:
+        errors.append(f"verify worktree cleanup: {worktree_list_error}")
+    remaining_worktrees = [
+        str(path) for path in resources.worktrees
+        if path.exists() or str(path) in registered
+    ]
     remaining_staging = [str(path) for path in resources.staging_dirs if path.exists()]
     remaining_images = [
         tag for tag in resources.ephemeral_images
@@ -495,18 +519,42 @@ def docker_platform() -> str:
     return "linux/amd64" if machine in ("x86_64", "amd64") else "linux/arm64"
 
 
-def ensure_builder(artifacts: Path, platform_name: str) -> None:
-    if docker_exists(BUILDER_IMAGE, ROOT, artifacts / "builder-inspect.log"):
-        return
+def builder_image_for(platform_name: str) -> str:
+    return f"{BUILDER_IMAGE}-{platform_name.rsplit('/', 1)[-1]}"
+
+
+def ensure_builder(artifacts: Path, platform_name: str) -> tuple[str, str]:
+    image = builder_image_for(platform_name)
+    if docker_exists(image, ROOT, artifacts / "builder-inspect.log"):
+        actual_platform = require_command(
+            ["docker", "image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}"],
+            ROOT,
+            artifacts / "builder-platform.log",
+            "inspect shared builder platform",
+        )
+        if actual_platform != platform_name:
+            raise CampaignError(
+                "stale", f"shared builder tag {image} has platform {actual_platform}, expected {platform_name}"
+            )
+        return image, image_id(image, ROOT, artifacts / "builder-image-id.log")
     require_command(
         [
             "docker", "build", "--platform", platform_name, "--provenance=false",
-            "--tag", BUILDER_IMAGE, "--file", "tests/Dockerfile.builder", str(ROOT),
+            "--tag", image, "--file", "tests/Dockerfile.builder", str(ROOT),
         ],
         ROOT,
         artifacts / "build-builder.log",
         "builder image build",
     )
+    actual_platform = require_command(
+        ["docker", "image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}"],
+        ROOT,
+        artifacts / "builder-platform.log",
+        "verify shared builder platform",
+    )
+    if actual_platform != platform_name:
+        raise CampaignError("stale", f"built builder platform {actual_platform}, expected {platform_name}")
+    return image, image_id(image, ROOT, artifacts / "builder-image-id.log")
 
 
 def image_library_sha(image: str, path: str, artifacts: Path, label: str, cwd: Path) -> str:
@@ -528,11 +576,28 @@ def image_id(image: str, cwd: Path, log_path: Path) -> str:
     )
 
 
-def build_runtime_image(tag: str, artifacts: Path, platform_name: str) -> str:
+def build_runtime_image(tag: str, builder_image: str, artifacts: Path, platform_name: str) -> str:
+    dockerfile_sha = file_sha256(ROOT / "tests/Dockerfile.e2e")
+    if docker_exists(tag, ROOT, artifacts / "runtime-image-preexistence.log"):
+        metadata = require_command(
+            [
+                "docker", "image", "inspect", tag, "--format",
+                '{{index .Config.Labels "com.pgtrickle.issue-1289.runtime-source-sha"}}|{{.Os}}/{{.Architecture}}',
+            ],
+            ROOT,
+            artifacts / "runtime-image-existing-metadata.log",
+            "inspect reusable runtime metadata",
+        )
+        source_sha, existing_platform = metadata.split("|", 1)
+        if not source_sha:
+            raise CampaignError("stale", f"refusing to overwrite unowned runtime image tag {tag}")
+        if source_sha == dockerfile_sha and existing_platform == platform_name:
+            return image_id(tag, ROOT, artifacts / "runtime-base-image-id.log")
     argv = [
         "docker", "build", "--platform", platform_name, "--provenance=false",
         "--tag", tag, "--file", "tests/Dockerfile.e2e", "--target", "runtime-base",
-        "--build-arg", f"BUILDER_IMAGE={BUILDER_IMAGE}",
+        "--build-arg", f"BUILDER_IMAGE={builder_image}",
+        "--build-arg", f"ISSUE_1289_RUNTIME_SOURCE_SHA={dockerfile_sha}",
     ]
     require_command(
         argv + [str(ROOT)],
@@ -540,16 +605,32 @@ def build_runtime_image(tag: str, artifacts: Path, platform_name: str) -> str:
         artifacts / "runtime-base-build.log",
         f"build reusable runtime image {tag}",
     )
+    metadata = require_command(
+        [
+            "docker", "image", "inspect", tag, "--format",
+            '{{index .Config.Labels "com.pgtrickle.issue-1289.runtime-source-sha"}}|{{.Os}}/{{.Architecture}}',
+        ],
+        ROOT,
+        artifacts / "runtime-image-built-metadata.log",
+        "verify reusable runtime metadata",
+    )
+    if metadata != f"{dockerfile_sha}|{platform_name}":
+        raise CampaignError("stale", f"built runtime metadata does not match candidate: {metadata}")
     return image_id(tag, ROOT, artifacts / "runtime-base-image-id.log")
 
 
 def build_package_image(
-    context: Path, tag: str, artifacts: Path, platform_name: str, resources: RunResources
+    context: Path,
+    tag: str,
+    builder_image: str,
+    artifacts: Path,
+    platform_name: str,
+    resources: RunResources,
 ) -> str:
     argv = [
         "docker", "build", "--platform", platform_name, "--provenance=false",
         "--tag", tag, "--file", "tests/Dockerfile.e2e", "--target", "builder",
-        "--build-arg", f"BUILDER_IMAGE={BUILDER_IMAGE}",
+        "--build-arg", f"BUILDER_IMAGE={builder_image}",
         str(context),
     ]
     if docker_exists(tag, context, artifacts / f"{tag.replace(':', '-')}-preexistence.log"):
@@ -624,6 +705,7 @@ def run_test(
     evidence_dir = case_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
+    env.pop("PGT_DVM_MUTATION_FORCE_FAILURE", None)
     env.update(
         {
             "PGT_DISABLE_NEXTEST": "1",
@@ -786,6 +868,8 @@ def self_test() -> None:
     assert test_outcome(MUTANTS[0], 101, "assertion failed", True)[0] == "inconclusive"
     assert parse_size("1.5GiB") == 1_610_612_736
     assert parse_size("10MB") == 10_000_000
+    assert builder_image_for("linux/amd64") == "pg_trickle_builder:pg18-amd64"
+    assert builder_image_for("linux/arm64") == "pg_trickle_builder:pg18-arm64"
     for bad_size in ("10", "1XB"):
         try:
             parse_size(bad_size)
@@ -917,6 +1001,7 @@ def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decim
     if status.strip():
         raise CampaignError("inconclusive", "campaign requires a clean candidate worktree")
     candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    artifacts = artifacts.resolve()
     run_id = f"i1289-{datetime.now(timezone.utc).strftime('%y%m%d%H%M%S%f')}-{os.getpid()}"
     platform_name = docker_platform()
     artifacts.mkdir(parents=True, exist_ok=False)
@@ -956,11 +1041,10 @@ def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decim
     monitor.start()
     try:
         monitor.check_before("reusable runtime image build")
-        ensure_builder(artifacts, platform_name)
-        runtime_image = f"pg_trickle_i1289_runtime:{run_id}"
-        if docker_exists(runtime_image, ROOT, artifacts / "runtime-image-preexistence.log"):
-            raise CampaignError("stale", f"refusing to overwrite existing runtime image {runtime_image}")
-        runtime_id = build_runtime_image(runtime_image, artifacts, platform_name)
+        builder_image, builder_id = ensure_builder(artifacts, platform_name)
+        payload["builder_image"] = {"tag": builder_image, "image_id": builder_id}
+        runtime_image = RUNTIME_IMAGE
+        runtime_id = build_runtime_image(runtime_image, builder_image, artifacts, platform_name)
         payload["reusable_runtime_image"] = {
             "tag": runtime_image,
             "image_id": runtime_id,
@@ -971,7 +1055,9 @@ def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decim
 
         baseline_tag = f"pg_trickle_i1289_package:{run_id}-baseline"
         monitor.check_before("baseline package build")
-        baseline_image_id = build_package_image(ROOT, baseline_tag, artifacts, platform_name, resources)
+        baseline_image_id = build_package_image(
+            ROOT, baseline_tag, builder_image, artifacts, platform_name, resources
+        )
         baseline_package_dir = artifacts / ".staging" / "baseline-package"
         resources.staging_dirs.append(baseline_package_dir)
         baseline_package = stage_package(baseline_tag, baseline_package_dir, run_id, artifacts)
@@ -1040,7 +1126,9 @@ def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decim
                 build_tag = f"pg_trickle_i1289_package:{run_id}-{case.name}"
                 build_dir = artifacts / case.name / "build"
                 build_dir.mkdir(parents=True)
-                package_image_id = build_package_image(worktree, build_tag, build_dir, platform_name, resources)
+                package_image_id = build_package_image(
+                    worktree, build_tag, builder_image, build_dir, platform_name, resources
+                )
                 package_dir = artifacts / ".staging" / f"{case.name}-package"
                 resources.staging_dirs.append(package_dir)
                 package = stage_package(build_tag, package_dir, run_id, artifacts)
