@@ -624,6 +624,7 @@ struct BuiltGraphContract {
     digest: Vec<u8>,
     json: Value,
     members: BTreeMap<u32, StreamTableMeta>,
+    dependencies: BTreeMap<u32, Vec<StDependency>>,
 }
 
 fn graph_contract_data(roots: &[pg_sys::Oid]) -> Result<BuiltGraphContract, PgTrickleError> {
@@ -802,6 +803,7 @@ fn graph_contract_data(roots: &[pg_sys::Oid]) -> Result<BuiltGraphContract, PgTr
         digest: digest.to_vec(),
         json,
         members,
+        dependencies,
     })
 }
 
@@ -952,6 +954,7 @@ pub fn refresh_graph_strict(
             digest: initial_digest,
             json: initial_graph,
             members: mut initial_members,
+            ..
         } = graph_contract_data(&roots)?;
         if expected_graph_digest != initial_digest {
             return Err(integration_error(
@@ -1012,6 +1015,7 @@ pub fn refresh_graph_strict(
             digest: graph_digest,
             json: graph,
             members: mut fresh_members,
+            dependencies: graph_dependencies,
         } = graph_contract_data(&roots)?;
         if expected_graph_digest != graph_digest {
             return Err(integration_error(
@@ -1043,9 +1047,17 @@ pub fn refresh_graph_strict(
                 ))
             })
             .collect::<Result<Vec<_>, PgTrickleError>>()?;
+        let dependencies_for = |relid: u32| {
+            graph_dependencies.get(&relid).ok_or_else(|| {
+                integration_error(
+                    "PGT_EXT_GRAPH_INVALID",
+                    format!("graph member OID {relid} has no dependency snapshot"),
+                )
+            })
+        };
         let mut source_oids = BTreeSet::new();
-        for (_, meta) in &member_ids {
-            for dependency in StDependency::get_for_st(meta.pgt_id)? {
+        for (relid, _) in &member_ids {
+            for dependency in dependencies_for(*relid)? {
                 if matches!(dependency.source_type.as_str(), "TABLE" | "STREAM_TABLE") {
                     source_oids.insert(dependency.source_relid.to_u32());
                 }
@@ -1056,11 +1068,8 @@ pub fn refresh_graph_strict(
             .map(pg_sys::Oid::from)
             .collect::<Vec<_>>();
         crate::cdc::lock_source_relations(&source_oids)?;
-        for (_, meta) in &member_ids {
-            crate::cdc::lock_stream_table_sources(
-                meta.pgt_id,
-                &StDependency::get_for_st(meta.pgt_id)?,
-            )?;
+        for (relid, meta) in &member_ids {
+            crate::cdc::lock_stream_table_sources(meta.pgt_id, dependencies_for(*relid)?)?;
         }
         let safe_bound = crate::cdc::get_current_wal_lsn()?;
         let graph_refresh_id =
@@ -1073,6 +1082,10 @@ pub fn refresh_graph_strict(
             .iter()
             .map(|(_, meta)| meta.clone())
             .collect::<Vec<_>>();
+        let member_pgt_ids = member_ids
+            .iter()
+            .map(|(relid, meta)| (*relid, meta.pgt_id))
+            .collect::<BTreeMap<_, _>>();
         let (boundary, boundary_digest) =
             build_source_boundary(&graph, &members, &safe_bound, graph_refresh_id)?;
         let mut node_results = serde_json::Map::new();
@@ -1088,7 +1101,8 @@ pub fn refresh_graph_strict(
                     ),
                 ));
             }
-            let source_oids = super::refresh_ops::get_source_oids_for_manual_refresh(meta.pgt_id)?;
+            let source_oids =
+                super::refresh_ops::source_oids_from_dependencies(dependencies_for(relid)?);
             let refresh = crate::refresh::with_refresh_context(
                 crate::refresh::RefreshContext::graph_result(
                     &safe_bound,
@@ -1126,11 +1140,15 @@ pub fn refresh_graph_strict(
         }
         let nodes_finished = std::time::Instant::now();
         let change_schema = crate::config::pg_trickle_change_buffer_schema();
-        let upstream_ids = members
-            .iter()
-            .flat_map(|meta| StDependency::get_for_st(meta.pgt_id).unwrap_or_default())
+        let upstream_ids = graph_dependencies
+            .values()
+            .flat_map(|dependencies| dependencies.iter())
             .filter(|dependency| dependency.source_type == "STREAM_TABLE")
-            .filter_map(|dependency| StreamTableMeta::pgt_id_for_relid(dependency.source_relid))
+            .filter_map(|dependency| {
+                member_pgt_ids
+                    .get(&dependency.source_relid.to_u32())
+                    .copied()
+            })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();

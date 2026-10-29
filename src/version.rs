@@ -156,6 +156,32 @@ impl Frontier {
     }
 }
 
+/// Whether restoring this saved view can safely continue from its frontier.
+/// Missing or differently shaped frontiers cannot prove that all required CDC
+/// history is still retained, so they require a full reinitialization.
+pub(crate) fn snapshot_restore_needs_reinit(
+    current: Option<&Frontier>,
+    restored: Option<&Frontier>,
+) -> Result<bool, LsnParseError> {
+    let (Some(current), Some(restored)) = (current, restored) else {
+        return Ok(true);
+    };
+    if current.sources.len() != restored.sources.len()
+        || current
+            .sources
+            .keys()
+            .any(|key| !restored.sources.contains_key(key))
+    {
+        return Ok(true);
+    }
+    for (key, current_source) in &current.sources {
+        if Lsn::parse(&restored.sources[key].lsn)? < Lsn::parse(&current_source.lsn)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Compare two LSN strings. Returns true if `a > b`.
 ///
 /// LSN format is `X/Y` where X and Y are hex numbers.
@@ -477,6 +503,40 @@ mod tests {
         let mut oids = frontier.source_oids();
         oids.sort();
         assert_eq!(oids, vec![100, 200]);
+    }
+
+    #[test]
+    fn test_snapshot_restore_requires_reinit_when_history_may_be_missing() {
+        let mut current = Frontier::new();
+        current.set_source(100, "0/20".into(), "current".into());
+        let mut older = Frontier::new();
+        older.set_source(100, "0/10".into(), "older".into());
+        assert!(snapshot_restore_needs_reinit(Some(&current), Some(&older)).unwrap());
+        assert!(snapshot_restore_needs_reinit(None, Some(&older)).unwrap());
+        assert!(snapshot_restore_needs_reinit(Some(&current), None).unwrap());
+
+        let mut newer = Frontier::new();
+        newer.set_source(100, "0/30".into(), "newer".into());
+        assert!(!snapshot_restore_needs_reinit(Some(&current), Some(&newer)).unwrap());
+        assert!(!snapshot_restore_needs_reinit(Some(&current), Some(&current)).unwrap());
+    }
+
+    #[test]
+    fn test_snapshot_restore_requires_reinit_when_source_set_changes() {
+        let mut current = Frontier::new();
+        current.set_source(100, "0/10".into(), "ts".into());
+        let mut restored = Frontier::new();
+        restored.set_source(200, "0/10".into(), "ts".into());
+        assert!(snapshot_restore_needs_reinit(Some(&current), Some(&restored)).unwrap());
+    }
+
+    #[test]
+    fn test_snapshot_restore_rejects_malformed_frontier_lsn() {
+        let mut current = Frontier::new();
+        current.set_source(100, "0/20".into(), "current".into());
+        let mut restored = Frontier::new();
+        restored.set_source(100, "bad".into(), "older".into());
+        assert!(snapshot_restore_needs_reinit(Some(&current), Some(&restored)).is_err());
     }
 
     #[test]
