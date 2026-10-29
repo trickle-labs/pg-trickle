@@ -18,6 +18,10 @@ import run_release_criterion as criterion
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.108.3"
+PREVIOUS_VERSION = "0.108.2"
+SOURCE_VERSIONS = [PREVIOUS_VERSION, "0.106.1"]
+GATE_SCRIPT = "v0_108_3_release_gate.py"
+REQUIRED_SHARDS = {"sensitivity-baseline", "failure-recovery", "publication-topology", "row-identity-upgrade"}
 REQUIRED_CASES = {
     "e2e_sensitivity_baseline_tests::test_oracle_detects_same_count_different_content",
     "e2e_sensitivity_baseline_tests::test_oracle_detects_duplicate_multiplicity_mismatch",
@@ -78,9 +82,9 @@ def check_support_contract() -> None:
         "Graph V1.2 differential feature identifiers drifted",
     )
     shared.require(
-        criterion.BASELINE_TAG == "v0.108.2"
-        and criterion.QUALIFICATION.name == "v0.108.3-qualification.json",
-        "Criterion qualification must compare against the v0.108.2 release",
+        criterion.BASELINE_TAG == f"v{PREVIOUS_VERSION}"
+        and criterion.QUALIFICATION.name == f"v{VERSION}-qualification.json",
+        "Criterion qualification must compare against the previous release",
     )
     shared.require(
         (delta["major_version"], delta["minor_version"]) == (1, 1),
@@ -136,7 +140,7 @@ def check_support_contract() -> None:
     shared.require("Rejected with `PGT_EXT_CDC_UNAVAILABLE`" not in config, "configuration retains stale WAL claim")
 
     qualification = json.loads(
-        (ROOT / "tests/release/v0.108.3-qualification.json").read_text(encoding="utf-8")
+        (ROOT / f"tests/release/v{VERSION}-qualification.json").read_text(encoding="utf-8")
     )
     shared.require(qualification.get("contract_version") == 3, "release qualification contract is not evidence-complete")
     shared.require(qualification.get("build_kind") == "exact-release", "qualification does not require exact release builds")
@@ -185,18 +189,18 @@ def check_support_contract() -> None:
     )
     shared.require(
         suites["pending-data-upgrade"]["command_argv"][-2:]
-        == ["0.106.1", "0.108.3"],
+        == ["0.106.1", VERSION],
         "live package upgrade does not cover the pg-mdm-pinned v0.106.1 package",
     )
     shared.require(
-        suites["upgrade-chain"]["command_argv"][-2:] == ["0.108.2", "0.108.3"],
+        suites["upgrade-chain"]["command_argv"][-2:] == [PREVIOUS_VERSION, VERSION],
         "archive and upgrade completeness do not cover the release boundary",
     )
     identity_upgrade = suites["row-identity-upgrade"]
     identity_upgrade_command = [
         "bash",
         "-c",
-        "PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 0.108.3 && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO=0.108.3 scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture",
+        f"PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 {VERSION} && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO={VERSION} scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture",
     ]
     identity_upgrade_case = "e2e_upgrade_tests::test_upgrade_v1082_rebuilds_bpchar_identity_before_differential"
     shared.require(
@@ -216,7 +220,7 @@ def check_support_contract() -> None:
         "required release case identities are incomplete or renamed",
     )
     shared.require(
-        set(shards) == {"sensitivity-baseline", "failure-recovery", "publication-topology", "row-identity-upgrade"}
+        set(shards) == REQUIRED_SHARDS
         and {case for shard in shards.values() for case in shard["required_cases"]} == REQUIRED_CASES
         and all(len(shard["required_cases"]) == len(set(shard["required_cases"])) for shard in shards.values()),
         "required release case shards are incomplete or ambiguous",
@@ -263,10 +267,10 @@ def main() -> None:
     )
     args = parser.parse_args()
     shared.VERSION = VERSION
-    shared.PREVIOUS_VERSION = "0.108.2"
-    shared.EXPECTED_SOURCE_VERSIONS = ["0.108.2", "0.106.1"]
-    shared.QUALIFICATION = ROOT / "tests/release/v0.108.3-qualification.json"
-    shared.GATE_SCRIPT = "v0_108_3_release_gate.py"
+    shared.PREVIOUS_VERSION = PREVIOUS_VERSION
+    shared.EXPECTED_SOURCE_VERSIONS = SOURCE_VERSIONS
+    shared.QUALIFICATION = ROOT / f"tests/release/v{VERSION}-qualification.json"
+    shared.GATE_SCRIPT = GATE_SCRIPT
     shared.EXPECTED_SUITES = EXPECTED_SUITES
     check_support_contract()
     if args.unsafe_asan_log is not None:

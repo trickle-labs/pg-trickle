@@ -1,12 +1,42 @@
 use pg_trickle::dvm::row_id_v2::{
-    EncodedField, IdentityDomain, TYPE_BPCHAR, TYPE_INT4, TYPE_INTERVAL, TYPE_NUMERIC, TYPE_TEXT,
-    encode_bpchar, encode_bpchar_v3, encode_bytes, encode_interval_value, encode_numeric_text,
-    encode_signed, encode_tuple, encode_tuple_v3,
+    EncodedField, IdentityDomain, TYPE_BOOL, TYPE_BPCHAR, TYPE_INT4, TYPE_INTERVAL, TYPE_NUMERIC,
+    TYPE_TEXT, TYPE_UUID, encode_bpchar, encode_bpchar_v3, encode_bytes, encode_interval_value,
+    encode_numeric_text, encode_signed, encode_tuple, encode_tuple_v3, validate_identity_v2,
 };
 use serde_json::Value;
 use std::collections::HashSet;
 
 const CORPUS: &str = include_str!("fixtures/row_id_v2_vectors.json");
+
+#[test]
+fn scalar_constructor_validates_payloads_and_preserves_immutable_versions() {
+    let uuid = [0u8; 16];
+    let field = [EncodedField::value(TYPE_UUID, &uuid)];
+    let v2 = encode_tuple(IdentityDomain::ScanKey, &field).unwrap();
+    let v3 = encode_tuple_v3(IdentityDomain::ScanKey, &field).unwrap();
+    assert_eq!(v2[0], 2);
+    assert_eq!(v3[0], 3);
+    assert_eq!(&v2[1..], &v3[1..]);
+    assert!(validate_identity_v2(&v2).is_ok());
+    assert!(
+        validate_identity_v2(&v3).is_err(),
+        "V2's validator must retain its version contract"
+    );
+    for invalid in [
+        EncodedField::value(TYPE_BOOL, &[2]),
+        EncodedField::value(TYPE_INT4, &[0; 3]),
+    ] {
+        assert!(encode_tuple(IdentityDomain::ScanKey, &[invalid]).is_err());
+        assert!(encode_tuple_v3(IdentityDomain::ScanKey, &[invalid]).is_err());
+    }
+    for malformed in [
+        [v2.clone(), vec![0]].concat(),
+        v2[..v2.len() - 1].to_vec(),
+        vec![2, 1, 0, 0, 0, 1, TYPE_BOOL, 1, 2, 255],
+    ] {
+        assert!(validate_identity_v2(&malformed).is_err());
+    }
+}
 
 fn hex(value: &Value) -> &str {
     value["bytes"]
@@ -50,6 +80,8 @@ fn row_id_v2_corpus_is_independent_and_exact() {
         let bytes = hex(vector);
         assert!(!bytes.is_empty() && bytes.len().is_multiple_of(2));
         assert!(bytes.chars().all(|c| c.is_ascii_hexdigit()));
+        validate_identity_v2(&decode_hex(bytes))
+            .unwrap_or_else(|error| panic!("invalid golden frame {}: {error}", vector["name"]));
         assert!(
             bytes.ends_with("ff"),
             "{} is not tuple-terminated",
@@ -74,7 +106,7 @@ fn row_id_v2_corpus_is_independent_and_exact() {
             .iter()
             .find(|v| v["name"] == "scan_int4_minus_one")
             .map(hex),
-        Some("02010000000103017fffffff")
+        Some("02010000000103017fffffffff")
     );
     assert_eq!(
         vectors
@@ -94,6 +126,18 @@ fn row_id_v2_corpus_is_independent_and_exact() {
         Some("0203000000010701fff8000000000000ff")
     );
 
+    let minus_one = encode_signed(-1, 4).expect("int4 minus-one payload");
+    assert_eq!(
+        encode_tuple(
+            IdentityDomain::ScanKey,
+            &[EncodedField::value(TYPE_INT4, &minus_one)]
+        )
+        .unwrap(),
+        decode_hex(hex(vectors
+            .iter()
+            .find(|v| v["name"] == "scan_int4_minus_one")
+            .unwrap()))
+    );
     let payload = encode_signed(1, 4).expect("int4 payload");
     let generated = encode_tuple(
         IdentityDomain::ScanKey,

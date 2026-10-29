@@ -537,6 +537,18 @@ async fn compare_st_to_query_observing(
         });
     }
 
+    if observe_numeric_scale
+        && !actual_sig
+            .columns
+            .iter()
+            .any(|column| column.type_oid == NUMERIC_OID)
+    {
+        return Err(RelationDiff::comparison_error(
+            "numeric-scale observation has no admitted public numeric column",
+            actual_sig,
+            expected_sig,
+        ));
+    }
     let projection = if observe_numeric_scale {
         numeric_scale_projection
     } else {

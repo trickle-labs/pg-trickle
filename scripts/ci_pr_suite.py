@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCHEDULER_ISOLATED = {
     "e2e_dag_autorefresh_tests", "e2e_mixed_mode_dag_tests",
     "e2e_mixed_scheduling_tests", "e2e_ownership_tests", "e2e_scheduler_tests",
+    "e2e_v078_tests",
     # This matrix checks WAL receipt and scheduler progress across routes.
     "e2e_dvm_strategy_tests",
     "e2e_v107_wal_transition_tests", "e2e_rls_wal_tests",

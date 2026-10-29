@@ -886,6 +886,7 @@ pub(crate) fn test_atomicity_barrier(
         "input_boundary" => 1,
         "after_apply" => 2,
         "during_finalize" => 3,
+        "snapshot_after_metadata" => 4,
         _ => return None,
     };
     let Ok(lock_id) = i32::try_from(st.pgt_id) else {

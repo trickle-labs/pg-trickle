@@ -15,6 +15,16 @@ CONTROL = Path(__file__).resolve().parent.parent / "tests/corpus/dvm_negative_co
 
 
 class NegativeControlTests(unittest.TestCase):
+    def test_numeric_scale_is_compared_when_selected_by_the_query(self):
+        scenario = copy.deepcopy(dvm_replay.load(CONTROL))
+        scenario["query"]["stream_table"] = "output"
+        scenario["query"]["defining_query"] = "SELECT id, v, scale(v) AS observed_scale FROM input"
+        scenario["query"]["columns"] = ["id", "v", "scale(v) AS observed_scale"]
+        with patch.object(dvm_replay, "psql", return_value="ok") as query:
+            dvm_replay.exact_check(scenario, "unused")
+            sql = query.call_args.args[1]
+        self.assertEqual(sql.count("scale(v)"), 6)
+
     def test_every_failure_coordinate_must_match(self):
         scenario = dvm_replay.load(CONTROL)
         failure = {

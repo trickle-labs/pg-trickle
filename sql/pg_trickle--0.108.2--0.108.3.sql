@@ -1,5 +1,6 @@
 -- pg_trickle v0.108.2 -> v0.108.3
 -- Rebuild existing projected identities so FULL and DIFFERENTIAL refreshes agree.
+-- The same protected rebuild creates and seeds SUM/AVG special-input state.
 
 CREATE OR REPLACE FUNCTION pgtrickle._reject_output_delta_contract_change()
 RETURNS trigger LANGUAGE plpgsql

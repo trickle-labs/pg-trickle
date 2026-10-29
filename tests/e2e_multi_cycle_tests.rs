@@ -120,19 +120,19 @@ async fn test_multi_cycle_stddev_algebraic() {
     // Cycle 1: insert widens distribution
     db.execute("INSERT INTO mc_sd (dept, amount) VALUES ('eng', 1000)")
         .await;
-    db.refresh_st("mc_sd_st").await;
+    db.refresh_st_with_retry("mc_sd_st").await;
     db.assert_st_matches_query("mc_sd_st", q).await;
 
     // Cycle 2: delete narrows it
     db.execute("DELETE FROM mc_sd WHERE dept = 'eng' AND amount = 1000")
         .await;
-    db.refresh_st("mc_sd_st").await;
+    db.refresh_st_with_retry("mc_sd_st").await;
     db.assert_st_matches_query("mc_sd_st", q).await;
 
     // Cycle 3: update shifts values
     db.execute("UPDATE mc_sd SET amount = 250 WHERE dept = 'sales' AND amount = 50")
         .await;
-    db.refresh_st("mc_sd_st").await;
+    db.refresh_st_with_retry("mc_sd_st").await;
     db.assert_st_matches_query("mc_sd_st", q).await;
 
     // Cycle 4: mixed — add new group + modify existing
@@ -140,11 +140,11 @@ async fn test_multi_cycle_stddev_algebraic() {
         .await;
     db.execute("DELETE FROM mc_sd WHERE dept = 'eng' AND amount = 100")
         .await;
-    db.refresh_st("mc_sd_st").await;
+    db.refresh_st_with_retry("mc_sd_st").await;
     db.assert_st_matches_query("mc_sd_st", q).await;
 
     // Cycle 5: no-op refresh
-    db.refresh_st("mc_sd_st").await;
+    db.refresh_st_with_retry("mc_sd_st").await;
     db.assert_st_matches_query("mc_sd_st", q).await;
 }
 
@@ -988,28 +988,28 @@ async fn test_multi_cycle_lateral_join_differential() {
 
     // Cycle 1: add new score that becomes the new best
     db.execute("INSERT INTO lat_score VALUES (15, 1, 99)").await;
-    db.refresh_st("lat_st").await;
+    db.refresh_st_until_converged("lat_st").await;
     db.assert_st_matches_query("lat_st", q).await;
 
     // Cycle 2: delete the current best — score reverts
     db.execute("DELETE FROM lat_score WHERE sid = 15").await;
-    db.refresh_st("lat_st").await;
+    db.refresh_st_until_converged("lat_st").await;
     db.assert_st_matches_query("lat_st", q).await;
 
     // Cycle 3: add new parent (no scores yet → best = NULL)
     db.execute("INSERT INTO lat_parent VALUES (4,'dave')").await;
-    db.refresh_st("lat_st").await;
+    db.refresh_st_until_converged("lat_st").await;
     db.assert_st_matches_query("lat_st", q).await;
 
     // Cycle 4: add scores for the new parent
     db.execute("INSERT INTO lat_score VALUES (16,4,60),(17,4,75)")
         .await;
-    db.refresh_st("lat_st").await;
+    db.refresh_st_until_converged("lat_st").await;
     db.assert_st_matches_query("lat_st", q).await;
 
     // Cycle 5: delete all scores for bob → best becomes NULL
     db.execute("DELETE FROM lat_score WHERE pid = 2").await;
-    db.refresh_st("lat_st").await;
+    db.refresh_st_until_converged("lat_st").await;
     db.assert_st_matches_query("lat_st", q).await;
 }
 

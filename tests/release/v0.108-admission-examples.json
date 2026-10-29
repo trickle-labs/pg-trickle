@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "release_version": "0.108.3",
+  "release_version": "0.108.4",
   "capabilities": [
     {
       "id": "trigger-capture",

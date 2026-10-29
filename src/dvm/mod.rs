@@ -934,7 +934,7 @@ pub fn generate_delta_query_cached(
 
     // Invalidate templates predating deferred-key histories, raw aggregate inputs, and endpoint joins.
     let query_hash = hash_string(&format!(
-        "v0.108.3-deferred-history:raw-aggregate-columns-v1:join-endpoints-v1:{defining_query}"
+        "v0.108.3-deferred-history:nonfinite-state:raw-aggregate-columns-v1:join-endpoints-v1:{defining_query}"
     ));
 
     // G8.1: Cross-session cache invalidation — flush if the shared

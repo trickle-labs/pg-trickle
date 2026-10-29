@@ -55,6 +55,24 @@ async fn test_oracle_numeric_scale_observation_detects_equal_value_corruption() 
     oracle::compare_st_to_query_with_numeric_scale(&db, "oracle_scale_actual", query)
         .await
         .expect("a contract-consistent scale change must pass");
+    db.execute("CREATE TABLE oracle_scale_integer AS SELECT 1 AS id")
+        .await;
+    oracle::compare_st_to_query(&db, "oracle_scale_integer", "SELECT 1 AS id")
+        .await
+        .unwrap();
+    let empty_contract = oracle::compare_st_to_query_with_numeric_scale(
+        &db,
+        "oracle_scale_integer",
+        "SELECT 1 AS id",
+    )
+    .await
+    .expect_err("numeric observation cannot silently admit no numeric column");
+    assert!(
+        empty_contract
+            .comparison_error
+            .as_deref()
+            .is_some_and(|error| error.contains("no admitted public numeric column"))
+    );
 }
 
 #[tokio::test]

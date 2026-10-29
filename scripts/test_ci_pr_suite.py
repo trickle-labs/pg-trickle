@@ -37,7 +37,7 @@ class AllocationTests(unittest.TestCase):
             "./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0",
             "--no-fail-fast", "--test-threads", "1",
             "--test", "e2e_wal_receipt_recovery_tests", "--test", "e2e_v043_tests",
-            "--test", "e2e_v078_tests", "--test", "e2e_lsn_contract_tests",
+            "--test", "e2e_lsn_contract_tests",
             "--test", "e2e_property_circular_tests",
             "--test", "e2e_refresh_tests", "--test", "e2e_v0878_security_tests", "-E",
             "test(=test_wal_recovery_before_receipt_commit_preserves_committed_changes) | "
@@ -49,7 +49,6 @@ class AllocationTests(unittest.TestCase):
             "test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline) | "
             "test(=test_wal_recovery_semantic_controls_are_detected) | "
             "test(=test_t_a44_10_insert_correctness) | "
-            "test(=test_dvm1_case_in_list_append_only_differential) | "
             "test(=test_lsn_manual_refresh_own_writes_visible_in_caller_transaction) | "
             "test(=test_lsn_manual_refresh_fixed_snapshots_preserve_frontier) | "
             "test(=test_lsn_scheduler_cdc_holdback_recovers_after_long_writer) | "
@@ -97,6 +96,7 @@ class AllocationTests(unittest.TestCase):
         policy = json.loads((ci_pr_suite.ROOT / ".github/ci-suites.json").read_text())
         shard_2 = set(policy["pr_full_shard_2"])
         all_targets = set(ci_pr_suite.targets())
+        self.assertIn("e2e_v078_tests", ci_pr_suite.SCHEDULER_ISOLATED)
         self.assertIn("e2e_dvm_strategy_tests", ci_pr_suite.SCHEDULER_ISOLATED)
         for shard in (1, 2):
             with patch("sys.argv", ["ci_pr_suite.py", "--shard", str(shard)]), patch(

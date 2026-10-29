@@ -85,6 +85,21 @@ red, with no retries or substituted FULL refreshes. Its local report and full
 failure artifacts are under
 `.p2p/work/issue-1217-semantic-generators/cdc-deferred-frozen/`.
 
+On the integrated umbrella PR head `3b2ac803a9176b403e232a840623aeb655e1be92`
+(2026-10-28), the exact differential semantic test passed all 34 PR cases and
+all 54 scheduled cases with zero retries and zero failures. Each report admitted
+every selected scenario through exact differential history, including the 15
+composite COUNT bags, protected division, `special_sum` and `mixed_join`. These
+results supersede the historical red counts above for this exact head; hosted CI
+remains a separate check.
+
+Reproduce the exact test selection with:
+
+```sh
+DVM_SEMANTIC_MAX_BAG_SIZE=2 bash scripts/run_e2e_tests.sh --test e2e_dvm_corpus_tests test_dvm_generated_semantic_boundaries_execute_differentially --retries 0 --no-fail-fast
+DVM_SEMANTIC_MAX_BAG_SIZE=3 bash scripts/run_e2e_tests.sh --test e2e_dvm_corpus_tests test_dvm_generated_semantic_boundaries_execute_differentially --retries 0 --no-fail-fast
+```
+
 Local commands (Docker/Testcontainers required):
 
 ```sh
