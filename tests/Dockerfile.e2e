@@ -78,7 +78,7 @@ RUN echo "=== Package artifacts ===" && \
 # ── Stage 2: Runtime image with extension installed ─────────────────────────
 # OPS-10-03: Pinned to exact SHA256 digest for reproducibility.
 # Run scripts/update_base_image_digests.sh to refresh quarterly.
-FROM postgres:18.6-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc
+FROM postgres:18.6-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc AS runtime-base
 
 LABEL org.opencontainers.image.title="pg_trickle E2E test image"
 LABEL org.opencontainers.image.description="PostgreSQL 18.6 with pg_trickle extension for integration testing"
@@ -88,15 +88,6 @@ LABEL org.opencontainers.image.description="PostgreSQL 18.6 with pg_trickle exte
 RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-18-pgvector \
     && rm -rf /var/lib/apt/lists/*
-
-# Copy extension artifacts from the builder stage
-COPY --from=builder \
-    /artefacts/pg_trickle-pg18/usr/share/postgresql/18/extension/ \
-    /usr/share/postgresql/18/extension/
-
-COPY --from=builder \
-    /artefacts/pg_trickle-pg18/usr/lib/postgresql/18/lib/ \
-    /usr/lib/postgresql/18/lib/
 
 # Install a SQL-only pg_tide contract stub for outbox boundary tests. The
 # tests create it explicitly, so the absent-extension cases remain real.
@@ -123,10 +114,6 @@ RUN echo "" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "# the shared 'postgres' DB scheduler used by bgworker/cascade tests." >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "max_worker_processes = 128" >> /usr/share/postgresql/postgresql.conf.sample
 
-# Verify the extension files are in place
-RUN ls -la /usr/share/postgresql/18/extension/pg_trickle* && \
-    ls -la /usr/lib/postgresql/18/lib/pg_trickle*
-
 # Pre-create the extension on the `postgres` database during initdb.
 # The launcher background worker probes databases on startup — if the
 # extension isn't installed yet it waits 5 min (skip_ttl) before re-probing.
@@ -137,5 +124,21 @@ RUN echo "CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE;" \
 
 # CI-2: Run container as the unprivileged postgres OS user (non-root).
 USER postgres
+
+# Normal E2E image: mutation runs use `runtime-base` and Testcontainers copies
+# the candidate package into a fresh container before PostgreSQL starts.
+FROM runtime-base AS runtime
+
+COPY --from=builder \
+    /artefacts/pg_trickle-pg18/usr/share/postgresql/18/extension/ \
+    /usr/share/postgresql/18/extension/
+
+COPY --from=builder \
+    /artefacts/pg_trickle-pg18/usr/lib/postgresql/18/lib/ \
+    /usr/lib/postgresql/18/lib/
+
+# Verify the extension files are in place
+RUN ls -la /usr/share/postgresql/18/extension/pg_trickle* && \
+    ls -la /usr/lib/postgresql/18/lib/pg_trickle*
 
 EXPOSE 5432

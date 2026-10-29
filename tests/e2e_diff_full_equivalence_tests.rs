@@ -439,6 +439,13 @@ async fn assert_composite_count_equivalence(query: &str) {
         let target_cycle = mutation == "DELETE FROM dfe_composite WHERE id = 4";
         if campaign && target_cycle {
             dvm_mutation_pilot::refresh_target(&db, "dfe_composite_st", "count-null-delete").await;
+            dvm_mutation_pilot::record_target_bags(
+                &db,
+                "dfe_composite_st",
+                query,
+                "M-COUNT-NULL-DELETE SQL-NULL payload deletion cycle",
+            )
+            .await;
         } else {
             db.execute_seq(&[
                 "LOAD 'pg_trickle'",
@@ -963,6 +970,13 @@ async fn test_diff_full_equivalence_having_unknown_transitions() {
         if campaign && target_cycle {
             dvm_mutation_pilot::refresh_target(&db, "dfe_hav_sum", "having-unknown-retraction")
                 .await;
+            dvm_mutation_pilot::record_target_bags(
+                &db,
+                "dfe_hav_sum",
+                query,
+                "M-HAVING-UNKNOWN-RETRACTION TRUE-to-UNKNOWN cycle",
+            )
+            .await;
             e2e::oracle::assert_st_query_exact(
                 &db,
                 "dfe_hav_sum",

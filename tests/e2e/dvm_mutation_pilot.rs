@@ -71,8 +71,11 @@ pub async fn preflight(db: &E2eDb, expected_case: &str) -> bool {
 
     let artifact_dir = artifact_dir();
     fs::create_dir_all(&artifact_dir).expect("create mutation artifact directory");
+    let runtime_image = env::var("PGS_E2E_IMAGE").unwrap_or_default();
+    let package_dir = env::var("PGT_E2E_MUTATION_PACKAGE_DIR").unwrap_or_default();
     let loaded_evidence = format!(
-        "backend_pid={backend_pid}\nlibrary_symbol={library_symbol}\nlibrary_search_path={library_search_path}\nresolved_path={LIBRARY_PATH}\nload=success\nlibrary_sha256={loaded_sha}\nsha256sum={}",
+        "container_id={}\nruntime_image={runtime_image}\npackage_dir={package_dir}\nbackend_pid={backend_pid}\nlibrary_symbol={library_symbol}\nlibrary_search_path={library_search_path}\nresolved_path={LIBRARY_PATH}\nload=success\nlibrary_sha256={loaded_sha}\nsha256sum={}",
+        db.container_id(),
         stdout.trim()
     );
     fs::write(artifact_dir.join("loaded-library.txt"), loaded_evidence)
@@ -85,7 +88,44 @@ pub async fn preflight(db: &E2eDb, expected_case: &str) -> bool {
         "DVM_MUTATION_PREFLIGHT case={case} server_version={server_version} backend_pid={backend_pid} library_sha256={loaded_sha} library_symbol={library_symbol} library_search_path={library_search_path} resolved_path={LIBRARY_PATH} load=success artifact={} ",
         artifact_dir.display()
     );
+    assert!(
+        env::var_os("PGT_DVM_MUTATION_FORCE_FAILURE").is_none(),
+        "DVM_MUTATION_FORCED_CLEANUP_FAILURE: injected after library attestation"
+    );
     true
+}
+
+pub async fn record_target_bags(db: &E2eDb, stream_table: &str, query: &str, context: &str) {
+    assert!(
+        stream_table
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_'),
+        "mutation oracle table must be a simple identifier"
+    );
+    let table = format!("public.\"{stream_table}\"");
+    let bag_sql = |source: &str| {
+        format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(bag_row) ORDER BY to_jsonb(bag_row)::text), '[]'::jsonb)::text \
+             FROM ({source}) AS bag_row"
+        )
+    };
+    // The identifier is validated above and the defining query comes from the test fixture.
+    let actual_sql = bag_sql(&format!("SELECT * FROM {table}"));
+    let actual: String = sqlx::query_scalar(sqlx::AssertSqlSafe(actual_sql))
+        .fetch_one(&db.pool)
+        .await
+        .expect("capture exact stream-table result bag");
+    let expected: String = sqlx::query_scalar(sqlx::AssertSqlSafe(bag_sql(query)))
+        .fetch_one(&db.pool)
+        .await
+        .expect("capture exact defining-query result bag");
+    let evidence_dir = artifact_dir();
+    fs::create_dir_all(&evidence_dir).expect("create exact-bag artifact directory");
+    fs::write(
+        evidence_dir.join("expected-actual-bags.txt"),
+        format!("context={context}\nexpected={expected}\nactual={actual}\n"),
+    )
+    .expect("save exact expected and actual row bags");
 }
 
 pub async fn create_differential_stream_table(db: &E2eDb, name: &str, query: &str) {
