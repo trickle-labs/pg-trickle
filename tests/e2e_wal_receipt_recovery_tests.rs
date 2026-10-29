@@ -1608,7 +1608,7 @@ async fn cleanup_fixture() -> (E2eDb, String, String, String, i64, String) {
         fast,
         &format!("SELECT id, value FROM public.{source}"),
         "1h",
-        "FULL",
+        "DIFFERENTIAL",
     )
     .await;
     db.execute(&format!(
@@ -1687,6 +1687,159 @@ async fn test_shared_source_cleanup_retains_slow_consumer_changes() {
 #[tokio::test]
 async fn test_shared_source_cleanup_catchup_remains_exact() {
     run_shared_source_cleanup_case().await;
+}
+
+#[tokio::test]
+async fn test_shared_source_cleanup_serializes_new_consumer_registration() {
+    let (db, source, slow, fast, oid, buffer) = cleanup_fixture().await;
+    commit_row(&db, &source, "cleanup_journal", 3, "shared-checkpoint").await;
+    db.refresh_st_with_retry(&slow).await;
+    commit_row(&db, &source, "cleanup_journal", 4, "cleanup-race-pending").await;
+
+    let slow_frontier = frontier(&db, &slow, oid).await;
+    let reclaimable: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I', 'D', 'T') \
+             AND lsn <= '{slow_frontier}'::pg_lsn"
+        ))
+        .await;
+    assert!(reclaimable > 0, "the cleanup schedule needs stale history");
+
+    let mut blocker = db.pool.acquire().await.expect("acquire cleanup blocker");
+    sqlx::query("BEGIN")
+        .execute(&mut *blocker)
+        .await
+        .expect("begin cleanup blocker");
+    sqlx::query(AssertSqlSafe(format!("LOCK TABLE {buffer} IN SHARE MODE")))
+        .execute(&mut *blocker)
+        .await
+        .expect("allow stale-row check but block cleanup DELETE");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("get cleanup blocker PID");
+
+    let mut refresh_connection = db.pool.acquire().await.expect("acquire refresh session");
+    sqlx::query("SET application_name = 'pgt_cleanup_registration_refresh'")
+        .execute(&mut *refresh_connection)
+        .await
+        .expect("tag cleanup refresh session");
+    let refresh = tokio::spawn(async move {
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('cleanup_fast_stream')")
+            .execute(&mut *refresh_connection)
+            .await
+            .expect("refresh fast consumer through cleanup");
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let waiting: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity a
+                 JOIN pg_locks l ON l.pid = a.pid
+                  WHERE a.application_name = 'pgt_cleanup_registration_refresh'
+                    AND a.wait_event_type = 'Lock'
+                    AND l.locktype = 'relation'
+                    AND l.relation = '{buffer}'::regclass
+                    AND NOT l.granted
+                    AND $1 = ANY(pg_blocking_pids(a.pid))
+             )"
+        )))
+        .bind(blocker_pid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("observe cleanup blocked on change buffer");
+        if waiting {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            sqlx::query("COMMIT")
+                .execute(&mut *blocker)
+                .await
+                .expect("release change buffer after timeout");
+            let _ = refresh.await;
+            panic!("refresh never reached the witnessed change-buffer cleanup DELETE");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let mut registration_connection = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire registration session");
+    sqlx::query("SET application_name = 'pgt_cleanup_registration_create'")
+        .execute(&mut *registration_connection)
+        .await
+        .expect("tag registration session");
+    let registration = tokio::spawn(async move {
+        sqlx::query(
+            "SELECT pgtrickle.create_stream_table(
+                 'cleanup_registration_new',
+                 'SELECT id, value FROM public.cleanup_shared_source',
+                 '1h', 'DIFFERENTIAL'
+             )",
+        )
+        .execute(&mut *registration_connection)
+        .await
+        .expect("register consumer while cleanup is in flight");
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let registering: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity
+                  WHERE application_name = 'pgt_cleanup_registration_create'
+                    AND query ILIKE '%create_stream_table%'
+             )",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("observe registration while cleanup is in flight");
+        if registering || registration.is_finished() {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            sqlx::query("COMMIT")
+                .execute(&mut *blocker)
+                .await
+                .expect("release buffer after registration witness timeout");
+            let _ = tokio::time::timeout(Duration::from_secs(30), registration).await;
+            let _ = tokio::time::timeout(Duration::from_secs(30), refresh).await;
+            panic!("registration was not observed while cleanup was blocked");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    sqlx::query("COMMIT")
+        .execute(&mut *blocker)
+        .await
+        .expect("release change buffer cleanup");
+    tokio::time::timeout(Duration::from_secs(30), refresh)
+        .await
+        .expect("cleanup refresh finishes after buffer lock release")
+        .expect("cleanup refresh task joins");
+    tokio::time::timeout(Duration::from_secs(30), registration)
+        .await
+        .expect("registration finishes after buffer lock release")
+        .expect("registration task joins");
+
+    db.assert_st_matches_query(
+        "cleanup_registration_new",
+        &format!("SELECT id, value FROM public.{source}"),
+    )
+    .await;
+    commit_row(&db, &source, "cleanup_journal", 5, "after-registration").await;
+    db.refresh_st_with_retry("cleanup_registration_new").await;
+    db.assert_st_matches_query(
+        "cleanup_registration_new",
+        "SELECT id, value FROM public.cleanup_journal",
+    )
+    .await;
+    db.refresh_st_with_retry(&fast).await;
+    db.assert_st_matches_query(&fast, "SELECT id, value FROM public.cleanup_journal")
+        .await;
 }
 
 async fn assert_mismatch(pool: &PgPool, stream: &str, journal: &str) {
