@@ -504,6 +504,15 @@ pub(crate) fn adopt_database_instance(instance_id: &str) -> Result<(), PgTrickle
     ))
 }
 
+pub(crate) fn invalidate_after_snapshot_restore(pgt_id: i64) -> Result<(), PgTrickleError> {
+    spi(Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_output_delta_consumers
+            SET state = 'INVALIDATED', state_reason = 'SNAPSHOT_RESTORED', updated_at = now()
+          WHERE pgt_id = $1 AND state <> 'DROPPED'",
+        &[pgt_id.into()],
+    ))
+}
+
 /// Start the output capture window immediately before a refresh executor runs.
 pub(crate) fn begin_capture(pgt_id: i64) -> Result<(), PgTrickleError> {
     if !has_consumer(pgt_id) {
