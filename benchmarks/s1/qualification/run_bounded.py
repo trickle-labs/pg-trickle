@@ -71,7 +71,7 @@ def disk_metrics(args):
     # maintenance/restarts while du walks the data directory. Retry these
     # specific ENOENT paths, never arbitrary missing files or permission errors.
     vanished = (r"du: cannot access '.*/base/[0-9]+/(?:"
-                r"t[0-9]+_[0-9]+(?:_(?:fsm|vm|init))?(?:\.[0-9]+)?"
+                r"(?:t[0-9]+_[0-9]+|[0-9]+)(?:_(?:fsm|vm|init))?(?:\.[0-9]+)?"
                 r"|pg_internal\.init)': No such file or directory")
     for attempt in range(5):
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)
