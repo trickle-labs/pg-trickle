@@ -478,7 +478,7 @@ state is fixed for the entire delta computation, this should be safe.
 
 ### DI-5: Part 3 Correction Consolidation ✅
 
-**Status:** Completed (threshold raise approach).
+**Status:** Completed (Part 3 correctness is independent of the inlining threshold).
 
 **Problem:** Part 3 (correction for double-counted rows in nested joins)
 generates separate CTEs for each join node in the chain. For a 6-table
@@ -491,12 +491,12 @@ contains a semi-join or anti-join. For pure inner-join chains (TPC-H
 Q05/Q07/Q08), `use_l0` is always `true` and Part 3 is never emitted —
 making the original "consolidation across join levels" approach moot.
 
-**Implementation (revised):** Raised the `join_scan_count` eligibility
-threshold from 3 to 5 via new constant `PART3_MAX_SCAN_COUNT`. DI-1's
-named CTE L₀ snapshots (NOT MATERIALIZED, shared via cache) reduce the
-temp-file pressure that motivated the old limit, allowing Part 3 to cover
-6-table semi-join chains. Added diagnostic SQL comment when correction is
-suppressed. 2 unit tests added.
+**Implementation:** Emit the correction whenever the nested left child and
+snapshot strategy require it, regardless of scan count. The
+`pg_trickle.part3_max_scan_count` setting controls whether the relevant delta
+CTE is forced `NOT MATERIALIZED`; it does not suppress the correction. This
+preserves exact results for deep semi-join chains while leaving PostgreSQL's
+default CTE materialization choice available above the configured threshold.
 
 ---
 

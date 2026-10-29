@@ -2732,17 +2732,11 @@ fn explain_stream_table(name: &str) -> Result<String, PgTrickleError> {
     };
 
     let deep_threshold = crate::config::pg_trickle_deep_join_l0_scan_threshold();
-    let part3_threshold = crate::config::pg_trickle_part3_max_scan_count();
-
     let join_strategy_note = if join_count == 0 {
         "no_join".to_string()
     } else if join_count > deep_threshold {
         format!(
             "L1+Part3 correction (join depth {join_count} > deep_join_l0_scan_threshold {deep_threshold})"
-        )
-    } else if join_count > part3_threshold {
-        format!(
-            "L1 without Part3 (join depth {join_count} > part3_max_scan_count {part3_threshold})"
         )
     } else {
         format!("L0 per-leaf snapshot (join depth {join_count} <= threshold {deep_threshold})")
