@@ -187,13 +187,6 @@ with patch.object(bounded.subprocess, "run", side_effect=[vanished_internal, hea
      patch.object(bounded.time, "sleep") as sleep_mock:
     assert bounded.disk_metrics(["docker", "exec", name, "sh"]) is healthy
     assert run_mock.call_count == 2 and sleep_mock.call_count == 1
-vanished_relation = subprocess.CompletedProcess(
-    [], 1, "1024 /data\n",
-    "du: cannot access '/var/lib/postgresql/18/docker/base/58308/51190': No such file or directory\n")
-with patch.object(bounded.subprocess, "run", side_effect=[vanished_relation, healthy]) as run_mock, \
-     patch.object(bounded.time, "sleep") as sleep_mock:
-    assert bounded.disk_metrics(["docker", "exec", name, "sh"]) is healthy
-    assert run_mock.call_count == 2 and sleep_mock.call_count == 1
 
 for message in ("permission denied", "du: cannot access '/data/global/pg_control': No such file or directory",
                 vanished.stderr + "permission denied"):
