@@ -765,8 +765,20 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
 
     let caller = security_context::capture_caller_context(EntryContext::SecurityDefiner)?;
     let stream_name = resolve_name_as_caller(name, &caller.search_path)?;
+    let initial_meta = StreamTableMeta::get_by_name(stream_name.schema(), stream_name.name())?;
+    check_stream_table_ownership(
+        initial_meta.pgt_relid,
+        stream_name.schema(),
+        stream_name.name(),
+    )?;
+
+    // Serialize the frontier read and row copy with refresh's transaction lock.
+    Spi::run_with_args(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[initial_meta.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("snapshot refresh lock failed: {e}")))?;
     let meta = StreamTableMeta::get_by_name(stream_name.schema(), stream_name.name())?;
-    check_stream_table_ownership(meta.pgt_relid, stream_name.schema(), stream_name.name())?;
 
     let snapshot_name = match target {
         Some(target_name) => {
@@ -1102,6 +1114,37 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
             subtxn.rollback();
             return Err(e);
         }
+    }
+
+    // The restored rows have no CDC batch for downstream tables or external consumers.
+    let invalidation_result = Spi::run_with_args(
+        r#"WITH RECURSIVE downstream(pgt_id, pgt_relid) AS (
+               SELECT st.pgt_id, st.pgt_relid
+                 FROM pgtrickle.pgt_dependencies d
+                 JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id
+                WHERE d.source_relid = $1
+               UNION
+               SELECT st.pgt_id, st.pgt_relid
+                 FROM downstream parent
+                 JOIN pgtrickle.pgt_dependencies d ON d.source_relid = parent.pgt_relid
+                 JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id
+           )
+           UPDATE pgtrickle.pgt_stream_tables st
+              SET needs_reinit = true, updated_at = now()
+             FROM downstream d
+            WHERE st.pgt_id = d.pgt_id"#,
+        &[meta.pgt_relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("downstream invalidation failed: {e}")));
+
+    if let Err(e) = invalidation_result {
+        subtxn.rollback();
+        return Err(e);
+    }
+
+    if let Err(e) = crate::api::output_delta::invalidate_after_snapshot_restore(meta.pgt_id) {
+        subtxn.rollback();
+        return Err(e);
     }
 
     subtxn.commit();

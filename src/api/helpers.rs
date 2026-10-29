@@ -3134,7 +3134,7 @@ pub(super) fn initialize_st(
     // no-op (it assumes empty frontiers belong to ST-on-ST dependencies).
     // Including the FT OID with the current WAL LSN gives differential refresh
     // a valid lower bound from which to compare polled change-buffer rows.
-    let slot_positions = cdc::get_slot_positions_at_bound(&source_oids, &safe_bound)?;
+    let slot_positions = cdc::get_slot_positions_at_bound(&source_oids, &safe_bound, false)?;
     let data_ts = get_data_timestamp_str();
     let mut frontier = version::compute_initial_frontier(&slot_positions, &data_ts);
     for (upstream_pgt_id, lsn) in st_source_lsn_snapshot {

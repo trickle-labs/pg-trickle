@@ -475,6 +475,90 @@ async fn test_outbox_refresh_rejects_recreated_tide_outbox() {
             }
         }
     }
+
+    db.execute_seq(&[
+        "CREATE ROLE ob20_owner LOGIN",
+        "GRANT USAGE ON SCHEMA pgtrickle TO ob20_owner",
+        "GRANT SELECT ON ob20_src TO ob20_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.detach_outbox(text, boolean) TO ob20_owner",
+        "ALTER TABLE ob20_st OWNER TO ob20_owner",
+    ])
+    .await;
+    db.try_execute_with_role(
+        "SET ROLE ob20_owner",
+        "SELECT pgtrickle.detach_outbox('ob20_st')",
+        "RESET ROLE",
+    )
+    .await
+    .expect("stream-table owner must be able to detach a stale binding");
+    let binding_count: i64 = db
+        .query_scalar(
+            "SELECT COUNT(*) FROM pgtrickle.pgt_outbox_config \
+             WHERE stream_table_name = 'public.ob20_st'",
+        )
+        .await;
+    assert_eq!(
+        binding_count, 0,
+        "detach must remove the stale private binding"
+    );
+    let external_outbox_exists: bool = db
+        .query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM tide.tide_outbox_config \
+             WHERE outbox_name = 'outbox_ob20_st')",
+        )
+        .await;
+    assert!(
+        external_outbox_exists,
+        "detach must leave pg_tide storage untouched"
+    );
+    db.execute("SELECT pgtrickle.refresh_stream_table('ob20_st')")
+        .await;
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT COUNT(*) FROM ob20_st").await,
+        4,
+        "refresh must recover after detaching the stale outbox binding"
+    );
+}
+
+#[tokio::test]
+async fn test_outbox_detach_if_exists_removes_stale_tide_binding() {
+    let db = E2eDb::new().await.with_extension().await;
+    make_outbox_st(&db, "ob20_if_src", "ob20_if_st").await;
+    install_pg_tide_stub(&db).await;
+    db.execute("SELECT pgtrickle.attach_outbox('ob20_if_st')")
+        .await;
+
+    db.execute("DELETE FROM tide.tide_outbox_config WHERE outbox_name = 'outbox_ob20_if_st'")
+        .await;
+    db.execute("SELECT tide.outbox_create('outbox_ob20_if_st', 24, 10000)")
+        .await;
+    db.execute("INSERT INTO ob20_if_src VALUES (4, 'd')").await;
+    assert!(
+        db.try_execute("SELECT pgtrickle.refresh_stream_table('ob20_if_st')")
+            .await
+            .is_err(),
+        "refresh must fail closed on the stale binding"
+    );
+
+    db.execute("SELECT pgtrickle.detach_outbox('ob20_if_st', p_if_exists => true)")
+        .await;
+    let binding_count: i64 = db
+        .query_scalar(
+            "SELECT COUNT(*) FROM pgtrickle.pgt_outbox_config \
+             WHERE stream_table_name = 'public.ob20_if_st'",
+        )
+        .await;
+    assert_eq!(
+        binding_count, 0,
+        "if_exists detach must remove the stale binding"
+    );
+    db.execute("SELECT pgtrickle.refresh_stream_table('ob20_if_st')")
+        .await;
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT COUNT(*) FROM ob20_if_st")
+            .await,
+        4
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

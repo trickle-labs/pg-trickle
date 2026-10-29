@@ -477,8 +477,11 @@ pub(crate) fn execute_manual_refresh(
             let frontier = match StreamTableMeta::get_frontier(st.pgt_id)? {
                 Some(frontier) => frontier,
                 None => {
-                    let positions =
-                        cdc::get_slot_positions_at_bound(source_oids, &manual_tick_watermark)?;
+                    let positions = cdc::get_slot_positions_at_bound(
+                        source_oids,
+                        &manual_tick_watermark,
+                        false,
+                    )?;
                     version::compute_initial_frontier(&positions, &get_data_timestamp_str())
                 }
             };
@@ -645,6 +648,9 @@ fn execute_manual_full_refresh_target(
         crate::cdc::lock_source_relations(source_oids)?;
         crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
     }
+    // Persist polling deltas before this FULL reads the foreign source. The
+    // baseline frontier can then skip those rows while other ST frontiers keep them.
+    refresh::poll_foreign_table_sources_for_st(st)?;
     let safe_bound = refresh_safe_bound()?;
 
     let needs_diff_capture = refresh::has_downstream_st_consumers(st.pgt_id);
@@ -905,7 +911,7 @@ fn execute_manual_full_refresh_target(
     // Compute and store frontier so differential can start from here.
     // S3 optimization: single SPI call combines frontier storage,
     // timestamp update, and marking the ST as populated.
-    let slot_positions = cdc::get_slot_positions_at_bound(source_oids, &safe_bound)?;
+    let slot_positions = cdc::get_slot_positions_at_bound(source_oids, &safe_bound, true)?;
     let data_ts = get_data_timestamp_str();
     let mut frontier = version::compute_initial_frontier(&slot_positions, &data_ts);
 
@@ -1107,7 +1113,7 @@ fn execute_manual_differential_refresh(
             candidate
         }
     };
-    let slot_positions = cdc::get_slot_positions_at_bound(source_oids, &safe_bound)?;
+    let slot_positions = cdc::get_slot_positions_at_bound(source_oids, &safe_bound, false)?;
     let data_ts = get_data_timestamp_str();
     let mut new_frontier = version::compute_new_frontier(&slot_positions, &data_ts);
     for (upstream_pgt_id, lsn) in upstream_st_source_positions(st, &safe_bound)? {

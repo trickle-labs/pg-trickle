@@ -887,6 +887,7 @@ fn alter_stream_table_query(
                     if cdc::trigger_exists(dep.source_relid)? {
                         cdc::rebuild_cdc_trigger(dep.source_relid, &change_schema)?;
                     } else {
+                        cdc::drop_change_trigger(dep.source_relid, &change_schema)?;
                         let definitions = cdc::resolve_referenced_column_defs(dep.source_relid)?;
                         cdc::rebuild::sync_change_buffer_columns(
                             dep.source_relid,
@@ -3558,28 +3559,32 @@ fn repair_stream_table_impl(name: &str, refresh_immediate: bool) -> Result<Strin
         }
 
         // Rebuild CDC trigger if absent.
-        if !matches!(dep.cdc_mode, CdcMode::Wal)
-            && !cdc::trigger_exists(source_oid).unwrap_or(false)
-        {
+        if !matches!(dep.cdc_mode, CdcMode::Wal) && !cdc::trigger_exists(source_oid)? {
+            cdc::drop_change_trigger(source_oid, &change_schema)?;
             let pk_columns = cdc::resolve_pk_columns(source_oid).unwrap_or_default();
             let col_defs = cdc::resolve_referenced_column_defs(source_oid).unwrap_or_default();
             let stable_name = cdc::get_cdc_name_for_source(source_oid);
-            if let Err(e) = cdc::create_change_trigger(
+            cdc::create_change_trigger(
                 source_oid,
                 &change_schema,
                 &pk_columns,
                 &col_defs,
                 &stable_name,
-            ) {
-                actions.push(format!(
-                    "trigger rebuild failed for OID {}: {}",
-                    source_oid.to_u32(),
-                    e
-                ));
-            } else {
-                actions.push(format!("trigger rebuilt for OID {}", source_oid.to_u32()));
-                cdc_rebuilt = true;
+            )
+            .map_err(|e| {
+                PgTrickleError::SpiError(format!(
+                    "Failed to restore CDC triggers for source OID {}: {e}",
+                    source_oid.to_u32()
+                ))
+            })?;
+            if !cdc::trigger_exists(source_oid)? {
+                return Err(PgTrickleError::SpiError(format!(
+                    "CDC triggers for source OID {} remain incomplete after repair",
+                    source_oid.to_u32()
+                )));
             }
+            actions.push(format!("trigger rebuilt for OID {}", source_oid.to_u32()));
+            cdc_rebuilt = true;
         }
     }
 

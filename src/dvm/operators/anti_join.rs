@@ -20,7 +20,8 @@
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{
-    build_snapshot_sql, extract_equijoin_keys_aliased, rewrite_join_condition,
+    build_snapshot_sql, extract_equijoin_keys_aliased, make_null_aware_condition,
+    rewrite_join_condition,
 };
 use crate::dvm::parser::OpTree;
 use crate::error::PgTrickleError;
@@ -29,6 +30,7 @@ use crate::error::PgTrickleError;
 pub fn diff_anti_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgTrickleError> {
     let OpTree::AntiJoin {
         condition,
+        null_aware_keys,
         left,
         right,
     } = op
@@ -51,11 +53,15 @@ pub fn diff_anti_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let right_table = build_snapshot_sql(right);
 
     // Rewrite join condition aliases for each part
-    let cond_part1 = rewrite_join_condition(condition, left, "dl", right, "r");
-    let cond_part1_old = rewrite_join_condition(condition, left, "dl", right, "r_old");
-    let cond_part2_new = rewrite_join_condition(condition, left, "l", right, "r");
-    let cond_part2_dr = rewrite_join_condition(condition, left, "l", right, "dr");
-    let cond_part2_old = rewrite_join_condition(condition, left, "l", right, "r_old");
+    let match_condition = null_aware_keys
+        .as_ref()
+        .map(|(lk, rk)| make_null_aware_condition(condition, lk, rk))
+        .unwrap_or_else(|| condition.clone());
+    let cond_part1 = rewrite_join_condition(&match_condition, left, "dl", right, "r");
+    let cond_part1_old = rewrite_join_condition(&match_condition, left, "dl", right, "r_old");
+    let cond_part2_new = rewrite_join_condition(&match_condition, left, "l", right, "r");
+    let cond_part2_dr = rewrite_join_condition(&match_condition, left, "l", right, "dr");
+    let cond_part2_old = rewrite_join_condition(&match_condition, left, "l", right, "r_old");
 
     let left_cols = &left_result.columns;
 
@@ -106,7 +112,8 @@ pub fn diff_anti_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         let valid_keys: Vec<_> = r_old_equi_keys
             .iter()
             .filter(|(lk, rk)| {
-                lk.starts_with("dl.") && rk.starts_with(&format!("\"{}\".", right_alias))
+                lk.starts_with(&format!("{}.", quote_ident("dl")))
+                    && rk.starts_with(&format!("{}.", quote_ident(right_alias)))
             })
             .collect();
         if valid_keys.is_empty() {
@@ -116,12 +123,16 @@ pub fn diff_anti_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 .iter()
                 .map(|(left_key, right_key)| {
                     format!(
-                        "{right_key} IN (\
+                        "({right_key} IN (\
                          SELECT {left_key} FROM {delta_left} dl \
                          UNION ALL \
-                         SELECT {right_key} FROM {delta_right} dr)",
+                         SELECT {right_key} FROM {delta_right} dr){null_key})",
                         delta_left = left_result.cte_name,
                         delta_right = right_result.cte_name,
+                        null_key = null_aware_keys
+                            .as_ref()
+                            .map(|_| format!(" OR {right_key} IS NULL"))
+                            .unwrap_or_default(),
                     )
                 })
                 .collect();
@@ -148,7 +159,10 @@ pub fn diff_anti_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let equi_keys_raw = extract_equijoin_keys_aliased(condition, left, "__pgt_pre", right, "dr");
     let equi_keys: Vec<_> = equi_keys_raw
         .into_iter()
-        .filter(|(lk, rk)| lk.contains("__pgt_pre") && rk.starts_with("dr."))
+        .filter(|(lk, rk)| {
+            lk.starts_with(&format!("{}.", quote_ident("__pgt_pre")))
+                && rk.starts_with(&format!("{}.", quote_ident("dr")))
+        })
         .collect();
     let left_snapshot_raw = build_snapshot_sql(left);
     let left_user_cols: Vec<&String> = left_cols.iter().filter(|c| *c != "__pgt_count").collect();
@@ -165,8 +179,33 @@ pub fn diff_anti_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
          SELECT {left_col_list} FROM {delta_left} WHERE __pgt_action = 'I')",
         delta_left = left_result.cte_name,
     );
-    let left_snapshot_filtered = if equi_keys.is_empty() {
-        left_unchanged_snapshot
+    let left_snapshot_filtered = if let Some((left_key, right_key)) = null_aware_keys {
+        let left_key = rewrite_join_condition(left_key, left, "__pgt_pre", right, "dr");
+        let right_key = rewrite_join_condition(right_key, left, "__pgt_pre", right, "dr");
+        let null_delta = format!(
+            "EXISTS (SELECT 1 FROM {} dr WHERE {right_key} IS NULL)",
+            right_result.cte_name
+        );
+        let null_left = format!("{left_key} IS NULL");
+        let regular = equi_keys
+            .iter()
+            .map(|(lk, rk)| {
+                format!(
+                    "{lk} IN (SELECT DISTINCT {rk} FROM {} dr)",
+                    right_result.cte_name
+                )
+            })
+            .collect::<Vec<_>>();
+        let regular = if regular.is_empty() {
+            "FALSE".to_string()
+        } else {
+            regular.join(" AND ")
+        };
+        format!(
+            "(SELECT * FROM {left_unchanged_snapshot} \"__pgt_pre\" WHERE ({regular}) OR ({null_delta}) OR ({null_left}))",
+        )
+    } else if equi_keys.is_empty() {
+        left_unchanged_snapshot.clone()
     } else {
         let filters: Vec<String> = equi_keys
             .iter()
@@ -250,6 +289,7 @@ mod tests {
         let right = scan(2, "returns", "public", "r", &["order_id", "reason"]);
         let cond = eq_cond("o", "id", "r", "order_id");
         let tree = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: cond,
             left: Box::new(left),
             right: Box::new(right),
@@ -268,6 +308,7 @@ mod tests {
         let right = scan(2, "returns", "public", "ret", &["order_id"]);
         let cond = eq_cond("o", "id", "ret", "order_id");
         let tree = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: cond,
             left: Box::new(left),
             right: Box::new(right),
@@ -303,6 +344,7 @@ mod tests {
 
         // Inner: B ANTI JOIN C on bl.reason = ex.reason
         let inner = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: eq_cond("bl", "reason", "ex", "reason"),
             left: Box::new(b),
             right: Box::new(c),
@@ -310,6 +352,7 @@ mod tests {
 
         // Outer: A ANTI JOIN (B ▷ C) on o.order_id = bl.order_id
         let outer = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: eq_cond("o", "order_id", "bl", "order_id"),
             left: Box::new(a),
             right: Box::new(inner),
@@ -341,6 +384,7 @@ mod tests {
         );
 
         let tree = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: cond,
             left: Box::new(left),
             right: Box::new(right),
@@ -369,6 +413,7 @@ mod tests {
         let cond = eq_cond("o", "id", "r", "order_id");
 
         let tree = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: cond,
             left: Box::new(left),
             right: Box::new(filtered_right),
@@ -394,6 +439,7 @@ mod tests {
         let cond = eq_cond("a", "x", "b", "x");
 
         let tree = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: cond,
             left: Box::new(left),
             right: Box::new(right),
@@ -423,6 +469,7 @@ mod tests {
         let cond = eq_cond("o", "id", "c", "order_id");
 
         let tree = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: cond,
             left: Box::new(left),
             right: Box::new(right),
@@ -454,6 +501,7 @@ mod tests {
             let cond = eq_cond("o", "id", "r", "order_id");
             if is_anti {
                 OpTree::AntiJoin {
+                    null_aware_keys: None,
                     condition: cond,
                     left: Box::new(left),
                     right: Box::new(right),
@@ -510,6 +558,7 @@ mod tests {
             let right = scan(2, "right_t", "public", "r", &rrefs);
             let cond  = eq_cond("l", &lcols[0], "r", &rcols[0]);
             let tree  = OpTree::AntiJoin {
+                null_aware_keys: None,
                 condition: cond,
                 left: Box::new(left),
                 right: Box::new(right),
@@ -542,6 +591,7 @@ mod tests {
             let right = scan(2, "right_t", "public", "r", &rrefs);
             let cond  = eq_cond("l", &lcols[0], "r", &rcols[0]);
             let tree  = OpTree::AntiJoin {
+                null_aware_keys: None,
                 condition: cond,
                 left: Box::new(left),
                 right: Box::new(right),

@@ -371,6 +371,23 @@ async fn restart_and_check_named(fixture: &Fixture, sentinel_table: &str) -> PgP
     pool
 }
 
+async fn start_after_crash_and_check_named(fixture: &Fixture, sentinel_table: &str) -> PgPool {
+    fixture.db.pool.close().await;
+    let output = tokio::process::Command::new("docker")
+        .args(["start", fixture.db.container_id()])
+        .output()
+        .await
+        .expect("docker start must run after the crash");
+    assert!(output.status.success(), "docker start failed after crash");
+    let pool = fixture.db.reconnect_after_restart().await;
+    let after = identity_pool(&pool, sentinel_table, fixture.db.container_id()).await;
+    assert!(
+        identity_matches(&fixture.identity, &after),
+        "recovery must use the retained database identity"
+    );
+    pool
+}
+
 async fn exact_diff(pool: &PgPool, stream: &str, journal: &str) -> i64 {
     sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT count(*)::bigint FROM (\
@@ -903,6 +920,114 @@ async fn run_interruption_case(phase: &str, status: &str, restart_twice: bool) {
     }
 }
 
+async fn assert_capture_gate_preserves_pending_receipt_after_restart(gate: &str) {
+    let mut fixture = setup_wal_fixture(&format!("capture_gate_{gate}")).await;
+    let value = format!("{gate}-pending-receipt");
+    let sentinel_table = format!("wal_capture_gate_{gate}_identity");
+    set_wal_phase(&fixture.db, fixture.oid, "before_replay", &value).await;
+    let (barrier, blocker_pid) = hold_wal_barrier(&fixture.db, fixture.oid, "before_replay").await;
+    commit_row(&fixture.db, &fixture.source, &fixture.journal, 2, &value).await;
+    let _worker_pid =
+        wait_for_wal_barrier(&fixture.db, fixture.oid, "before_replay", blocker_pid).await;
+    wait_for_receipt(&fixture.db.pool, fixture.oid, "RECEIVED", &value).await;
+    let slot_lsn: String = sqlx::query_scalar(
+        "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1",
+    )
+    .bind(&fixture.slot)
+    .fetch_one(&fixture.db.pool)
+    .await
+    .expect("read WAL slot position before capture gate");
+
+    match gate {
+        "quiesced" => {
+            fixture
+                .db
+                .execute(
+                    "UPDATE pgtrickle.pgt_capture_instance SET state = 'QUIESCED' WHERE singleton",
+                )
+                .await;
+        }
+        "quarantined" => {
+            fixture
+                .db
+                .execute(
+                    "UPDATE pgtrickle.pgt_capture_instance \
+                        SET database_oid = (database_oid::bigint + 1)::oid WHERE singleton",
+                )
+                .await;
+        }
+        _ => unreachable!("known capture gate scenario"),
+    }
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "off", "off")
+        .await;
+    let output = tokio::process::Command::new("docker")
+        .args(["kill", "--signal", "KILL", fixture.db.container_id()])
+        .output()
+        .await
+        .expect("kill the PostgreSQL container with a pending receipt");
+    assert!(output.status.success(), "Docker kill failed");
+    drop(barrier);
+
+    fixture.db.pool = start_after_crash_and_check_named(&fixture, &sentinel_table).await;
+    assert!(fixture.db.wait_for_scheduler(WAIT).await);
+    clear_wal_phase(&fixture.db).await;
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "on", "on")
+        .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let expected_state = if gate == "quiesced" {
+        "QUIESCED"
+    } else {
+        "QUARANTINED"
+    };
+    let state: String = fixture
+        .db
+        .query_scalar("SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton")
+        .await;
+    assert_eq!(state, expected_state);
+    assert_eq!(
+        matching_receipts(&fixture.db.pool, fixture.oid, "RECEIVED", &value).await,
+        1,
+        "blocked ownership must retain the pending receipt"
+    );
+    assert_eq!(
+        matching_receipts(&fixture.db.pool, fixture.oid, "APPLIED", &value).await
+            + matching_receipts(&fixture.db.pool, fixture.oid, "ACKNOWLEDGED", &value).await,
+        0,
+        "blocked ownership must not replay or acknowledge the receipt"
+    );
+    let after_slot_lsn: String = sqlx::query_scalar(
+        "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1",
+    )
+    .bind(&fixture.slot)
+    .fetch_one(&fixture.db.pool)
+    .await
+    .expect("read WAL slot position while capture is blocked");
+    let slot_advanced: bool = sqlx::query_scalar("SELECT $1::pg_lsn > $2::pg_lsn")
+        .bind(&after_slot_lsn)
+        .bind(&slot_lsn)
+        .fetch_one(&fixture.db.pool)
+        .await
+        .expect("compare WAL slot positions");
+    assert!(
+        !slot_advanced,
+        "the slot must not advance while blocked: before={slot_lsn}, after={after_slot_lsn}"
+    );
+
+    if gate == "quiesced" {
+        let _: bool = fixture
+            .db
+            .query_scalar("SELECT pgtrickle.resume_all()")
+            .await;
+        wait_for_receipt(&fixture.db.pool, fixture.oid, "ACKNOWLEDGED", &value).await;
+        wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
+    }
+}
+
 #[tokio::test]
 async fn test_wal_recovery_before_receipt_commit_preserves_committed_changes() {
     run_interruption_case("before_receipt", "RECEIVED", false).await;
@@ -921,6 +1046,16 @@ async fn test_wal_recovery_after_apply_before_ack_does_not_reapply() {
 #[tokio::test]
 async fn test_wal_recovery_after_slot_advance_finishes_acknowledgement() {
     run_interruption_case("after_slot_advance", "APPLIED", false).await;
+}
+
+#[tokio::test]
+async fn test_wal_quiesced_restart_preserves_pending_receipts_until_resume() {
+    assert_capture_gate_preserves_pending_receipt_after_restart("quiesced").await;
+}
+
+#[tokio::test]
+async fn test_wal_quarantined_restart_preserves_pending_receipts() {
+    assert_capture_gate_preserves_pending_receipt_after_restart("quarantined").await;
 }
 
 #[tokio::test]

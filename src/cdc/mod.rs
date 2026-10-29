@@ -2877,6 +2877,7 @@ pub fn get_slot_positions(
 pub fn get_slot_positions_at_bound(
     source_oids: &[pg_sys::Oid],
     safe_bound: &str,
+    full_baseline: bool,
 ) -> Result<HashMap<u32, String>, PgTrickleError> {
     if !is_valid_lsn(safe_bound) {
         return Err(PgTrickleError::SafeFrontierUnavailable {
@@ -2903,22 +2904,40 @@ pub fn get_slot_positions_at_bound(
             context: format!("source OID {}", oid.to_u32()),
             reason: e.to_string(),
         })?;
+        let tracking_slot = Spi::get_one_with_args::<String>(
+            "SELECT (SELECT slot_name::text FROM pgtrickle.pgt_change_tracking WHERE source_relid = $1)",
+            &[(*oid).into()],
+        )
+        .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+            context: format!("source OID {}", oid.to_u32()),
+            reason: e.to_string(),
+        })?;
         let position = match wal_position {
             Some(lsn) => confirmed_wal_position(*oid, &lsn)?,
-            None if !Spi::get_one_with_args::<bool>(
-                "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_change_tracking \
-                                WHERE source_relid = $1)",
-                &[(*oid).into()],
-            )
-            .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                context: format!("source OID {}", oid.to_u32()),
-                reason: e.to_string(),
-            })?
-            .unwrap_or(false) =>
+            None if tracking_slot.is_none() => safe_bound.to_string(),
+            None if full_baseline
+                && tracking_slot
+                    .as_deref()
+                    .is_some_and(|slot| slot.starts_with("foreign_poll_")) =>
             {
-                // IMMEDIATE sources use IVM triggers and intentionally have no
-                // base CDC buffer to cap against.
-                safe_bound.to_string()
+                let change_schema = crate::config::pg_trickle_change_buffer_schema();
+                let buffer = buffer_qualified_name_for_oid(&change_schema, *oid);
+                // nosemgrep: rust.spi.get_one_with_args.dynamic-format — buffer is a quoted catalog-derived identifier; safe_bound is a parameter.
+                Spi::get_one_with_args::<String>(
+                    &format!(
+                        "SELECT COALESCE(MAX(lsn), $1::pg_lsn)::text \
+                         FROM {buffer} WHERE lsn > '0/0'::pg_lsn"
+                    ),
+                    &[safe_bound.into()],
+                )
+                .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                    context: format!("polling source OID {}", oid.to_u32()),
+                    reason: format!("polling baseline frontier lookup failed: {e}"),
+                })?
+                .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
+                    context: format!("polling source OID {}", oid.to_u32()),
+                    reason: "polling baseline frontier was NULL".to_string(),
+                })?
             }
             None => {
                 // A trigger row can become visible after the coordinator's

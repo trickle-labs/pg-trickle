@@ -13,6 +13,16 @@ mod e2e;
 use e2e::E2eDb;
 use std::time::Duration;
 
+async fn refresh_external_root(db: &E2eDb, name: &str) {
+    db.execute(&format!(
+        "SELECT * FROM pgtrickle.refresh_graph_strict(\
+            ARRAY['public.{name}'::regclass], \
+            (SELECT graph_digest FROM pgtrickle.graph_contract(\
+                ARRAY['public.{name}'::regclass])), 'ALLOW')"
+    ))
+    .await;
+}
+
 #[tokio::test]
 async fn test_immediate_resume_rebuilds_without_cdc_buffer() {
     let db = E2eDb::new().await.with_extension().await;
@@ -376,6 +386,177 @@ async fn test_repair_stream_table_resets_frontier() {
     // After refresh, data should still be correct
     db.refresh_st("rep_st").await;
     db.assert_st_matches_query("rep_st", q).await;
+}
+
+#[tokio::test]
+async fn test_repair_missing_statement_update_trigger_restores_capture() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_mode = 'trigger'",
+        "SET pg_trickle.cdc_trigger_mode = 'statement'",
+        "CREATE TABLE repair_partial_src (id INT PRIMARY KEY, v INT)",
+        "INSERT INTO repair_partial_src VALUES (1, 10)",
+        "SELECT pgtrickle.create_stream_table(\
+            name => 'repair_partial_st', \
+            query => 'SELECT id, v FROM repair_partial_src', \
+            schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false, \
+            orchestration_mode => 'EXTERNAL')",
+    ])
+    .await;
+    let refresh_external = "SELECT * FROM pgtrickle.refresh_graph_strict(\
+        ARRAY['public.repair_partial_st'::regclass], \
+        (SELECT graph_digest FROM pgtrickle.graph_contract(\
+            ARRAY['public.repair_partial_st'::regclass])), 'ALLOW')";
+    db.execute(refresh_external).await;
+    db.assert_st_matches_query("repair_partial_st", "SELECT id, v FROM repair_partial_src")
+        .await;
+
+    let source_oid = db.table_oid("repair_partial_src").await as i64;
+    let stable_name: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.source_stable_name({source_oid}::oid)"
+        ))
+        .await;
+    db.execute(&format!(
+        "DROP TRIGGER pg_trickle_cdc_upd_{stable_name} ON repair_partial_src"
+    ))
+    .await;
+
+    let repair_summary: String = db
+        .query_scalar("SELECT pgtrickle.repair_stream_table('repair_partial_st')")
+        .await;
+    assert!(
+        repair_summary.contains("trigger rebuilt"),
+        "{repair_summary}"
+    );
+    db.execute(refresh_external).await;
+    db.assert_st_matches_query("repair_partial_st", "SELECT id, v FROM repair_partial_src")
+        .await;
+
+    let buffer = db.change_buffer_table(source_oid).await;
+    let max_change_before: Option<i64> = db
+        .query_scalar_opt(&format!("SELECT max(change_id) FROM {buffer}"))
+        .await;
+    db.execute("UPDATE repair_partial_src SET v = 11 WHERE id = 1")
+        .await;
+    let max_change_after: Option<i64> = db
+        .query_scalar_opt(&format!("SELECT max(change_id) FROM {buffer}"))
+        .await;
+    assert!(
+        max_change_after > max_change_before,
+        "post-repair UPDATE should append CDC history"
+    );
+    db.execute(refresh_external).await;
+    let refresh_action: String = db
+        .query_scalar(
+            "SELECT h.action FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'repair_partial_st' \
+             ORDER BY h.refresh_id DESC LIMIT 1",
+        )
+        .await;
+    assert_eq!(refresh_action, "DIFFERENTIAL");
+    db.assert_st_matches_query("repair_partial_st", "SELECT id, v FROM repair_partial_src")
+        .await;
+}
+
+#[tokio::test]
+async fn test_repair_disabled_combined_row_trigger_restores_capture() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_mode = 'trigger'",
+        "SET pg_trickle.cdc_trigger_mode = 'row'",
+        "CREATE TABLE repair_row_src (id INT PRIMARY KEY, v INT)",
+        "INSERT INTO repair_row_src VALUES (1, 10)",
+        "SELECT pgtrickle.create_stream_table(\
+            name => 'repair_row_st', \
+            query => 'SELECT id, v FROM repair_row_src', \
+            schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false, \
+            orchestration_mode => 'EXTERNAL')",
+    ])
+    .await;
+    refresh_external_root(&db, "repair_row_st").await;
+
+    let stable_name: String = db
+        .query_scalar("SELECT pgtrickle.source_stable_name('repair_row_src'::regclass)")
+        .await;
+    let disable =
+        format!("ALTER TABLE repair_row_src DISABLE TRIGGER pg_trickle_cdc_{stable_name}");
+    db.execute_seq(&["SET pg_trickle.cdc_trigger_mode = 'row'", &disable])
+        .await;
+    let trigger_state: String = db
+        .query_scalar(&format!(
+            "SELECT tgenabled::text FROM pg_trigger WHERE tgrelid = 'repair_row_src'::regclass \
+             AND tgname = 'pg_trickle_cdc_{stable_name}'"
+        ))
+        .await;
+    assert_eq!(trigger_state, "D");
+
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_trigger_mode = 'row'",
+        "SELECT pgtrickle.repair_stream_table('repair_row_st')",
+    ])
+    .await;
+    let trigger_state: String = db
+        .query_scalar(&format!(
+            "SELECT tgenabled::text FROM pg_trigger WHERE tgrelid = 'repair_row_src'::regclass \
+             AND tgname = 'pg_trickle_cdc_{stable_name}'"
+        ))
+        .await;
+    assert_eq!(trigger_state, "O");
+
+    refresh_external_root(&db, "repair_row_st").await;
+    db.execute("UPDATE repair_row_src SET v = 11 WHERE id = 1")
+        .await;
+    refresh_external_root(&db, "repair_row_st").await;
+    db.assert_st_matches_query("repair_row_st", "SELECT id, v FROM repair_row_src")
+        .await;
+}
+
+#[tokio::test]
+async fn test_repair_preserves_shared_consumer_pending_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_mode = 'trigger'",
+        "SET pg_trickle.cdc_trigger_mode = 'statement'",
+        "CREATE TABLE repair_shared_src (id INT PRIMARY KEY, v INT)",
+        "INSERT INTO repair_shared_src VALUES (1, 10)",
+        "SELECT pgtrickle.create_stream_table(\
+            name => 'repair_shared_a', query => 'SELECT id, v FROM repair_shared_src', \
+            schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false, \
+            orchestration_mode => 'EXTERNAL')",
+        "SELECT pgtrickle.create_stream_table(\
+            name => 'repair_shared_b', query => 'SELECT id, v FROM repair_shared_src', \
+            schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false, \
+            orchestration_mode => 'EXTERNAL')",
+    ])
+    .await;
+    refresh_external_root(&db, "repair_shared_a").await;
+    refresh_external_root(&db, "repair_shared_b").await;
+
+    db.execute("INSERT INTO repair_shared_src VALUES (2, 20)")
+        .await;
+    refresh_external_root(&db, "repair_shared_a").await;
+    assert_eq!(db.count("repair_shared_b").await, 1);
+
+    let stable_name: String = db
+        .query_scalar("SELECT pgtrickle.source_stable_name('repair_shared_src'::regclass)")
+        .await;
+    let drop_update = format!("DROP TRIGGER pg_trickle_cdc_upd_{stable_name} ON repair_shared_src");
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_trigger_mode = 'statement'",
+        &drop_update,
+        "SELECT pgtrickle.repair_stream_table('repair_shared_a')",
+    ])
+    .await;
+    refresh_external_root(&db, "repair_shared_a").await;
+
+    db.execute("UPDATE repair_shared_src SET v = 11 WHERE id = 1")
+        .await;
+    refresh_external_root(&db, "repair_shared_a").await;
+    refresh_external_root(&db, "repair_shared_b").await;
+    db.assert_st_matches_query("repair_shared_b", "SELECT id, v FROM repair_shared_src")
+        .await;
 }
 
 /// R3: repair_stream_table resets error state to ACTIVE.
