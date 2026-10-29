@@ -3735,7 +3735,23 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             "PGT_LIFECYCLE_FAILURE:restore_pair; history: {}",
             path.display()
         );
-        let _ = lifecycle_refresh(&fixture, "history_fast", Some("DIFFERENTIAL")).await;
+        let restore_needs_reinit: bool = sqlx::query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name='history_fast'",
+        )
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"restored catch-up state","needs_reinit":restore_needs_reinit}),
+        );
+        let restore_action = if restore_needs_reinit {
+            "REINITIALIZE"
+        } else {
+            "DIFFERENTIAL"
+        };
+        let _ = lifecycle_refresh(&fixture, "history_fast", Some(restore_action)).await;
         lifecycle_exact(
             &fixture,
             "history_fast",

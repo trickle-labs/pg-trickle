@@ -120,19 +120,19 @@ async fn test_multi_cycle_stddev_algebraic() {
     // Cycle 1: insert widens distribution
     db.execute("INSERT INTO mc_sd (dept, amount) VALUES ('eng', 1000)")
         .await;
-    db.refresh_st("mc_sd_st").await;
+    db.refresh_st_with_retry("mc_sd_st").await;
     db.assert_st_matches_query("mc_sd_st", q).await;
 
     // Cycle 2: delete narrows it
     db.execute("DELETE FROM mc_sd WHERE dept = 'eng' AND amount = 1000")
         .await;
-    db.refresh_st("mc_sd_st").await;
+    db.refresh_st_with_retry("mc_sd_st").await;
     db.assert_st_matches_query("mc_sd_st", q).await;
 
     // Cycle 3: update shifts values
     db.execute("UPDATE mc_sd SET amount = 250 WHERE dept = 'sales' AND amount = 50")
         .await;
-    db.refresh_st("mc_sd_st").await;
+    db.refresh_st_with_retry("mc_sd_st").await;
     db.assert_st_matches_query("mc_sd_st", q).await;
 
     // Cycle 4: mixed — add new group + modify existing
@@ -140,11 +140,11 @@ async fn test_multi_cycle_stddev_algebraic() {
         .await;
     db.execute("DELETE FROM mc_sd WHERE dept = 'eng' AND amount = 100")
         .await;
-    db.refresh_st("mc_sd_st").await;
+    db.refresh_st_with_retry("mc_sd_st").await;
     db.assert_st_matches_query("mc_sd_st", q).await;
 
     // Cycle 5: no-op refresh
-    db.refresh_st("mc_sd_st").await;
+    db.refresh_st_with_retry("mc_sd_st").await;
     db.assert_st_matches_query("mc_sd_st", q).await;
 }
 
