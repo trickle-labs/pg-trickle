@@ -14,6 +14,81 @@ mod e2e;
 
 use e2e::E2eDb;
 
+#[tokio::test]
+async fn test_snapshot_restore_after_cdc_cleanup_reinitializes_from_sources() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE snap_restore_source (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO snap_restore_source VALUES (1)")
+        .await;
+    let query = "SELECT id FROM snap_restore_source";
+    db.create_st("snap_restore_st", query, "1m", "DIFFERENTIAL")
+        .await;
+
+    let snapshot: String = db
+        .query_scalar("SELECT pgtrickle.snapshot_stream_table('snap_restore_st')")
+        .await;
+    db.execute("INSERT INTO snap_restore_source VALUES (2)")
+        .await;
+    // A successful full refresh consumes the change and may remove its CDC
+    // history, leaving the older snapshot frontier unsafe to restore.
+    db.execute_seq(&[
+        "SET pg_trickle.internal_refresh = 'true'",
+        "UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = true \
+         WHERE pgt_name = 'snap_restore_st'",
+        "RESET pg_trickle.internal_refresh",
+    ])
+    .await;
+    db.refresh_st("snap_restore_st").await;
+
+    let source_oid = db.table_oid("snap_restore_source").await;
+    let buffer: String = db
+        .query_scalar(&format!(
+            "SELECT format('%I.%I', current_setting('pg_trickle.change_buffer_schema'), \
+             'changes_'||coalesce(source_stable_name,source_relid::text)) \
+             FROM pgtrickle.pgt_change_tracking WHERE source_relid={source_oid}"
+        ))
+        .await;
+    let retained_changes: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I', 'D', 'T')"
+        ))
+        .await;
+    assert_eq!(
+        retained_changes, 0,
+        "the refresh should have cleaned its CDC rows"
+    );
+
+    db.execute(&format!(
+        "SELECT pgtrickle.restore_from_snapshot('snap_restore_st', '{snapshot}')"
+    ))
+    .await;
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'snap_restore_st'",
+        )
+        .await;
+    assert!(
+        needs_reinit,
+        "restoring behind cleaned CDC history must reinitialize"
+    );
+
+    db.refresh_st("snap_restore_st").await;
+    db.assert_st_matches_query("public.snap_restore_st", query)
+        .await;
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'snap_restore_st'",
+        )
+        .await;
+    assert!(
+        !needs_reinit,
+        "the successful full refresh should clear reinit state"
+    );
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // K1 — Two STs on overlapping sources produce consistent results
 // ══════════════════════════════════════════════════════════════════════

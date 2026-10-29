@@ -990,9 +990,9 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
 
 /// SNAP-2 (v0.27.0): Rehydrate a stream table from an archival snapshot.
 ///
-/// The stream table must already be registered. After restore the frontier is
-/// set to the snapshot's frontier so the next refresh cycle is DIFFERENTIAL
-/// (skipping the initial FULL re-scan).
+/// The stream table must already be registered. The saved frontier is restored
+/// when valid; if it rewinds the stream table, the next refresh fully
+/// reinitializes because earlier CDC rows may already have been cleaned up.
 #[pg_extern(schema = "pgtrickle", security_definer)]
 #[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub fn restore_from_snapshot(p_name: &str, p_source: &str) {
@@ -1025,6 +1025,15 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
     validate_snapshot_select(&snapshot_relation, &snapshot_name)?;
     validate_snapshot_relation_layout(snapshot_relation.relid, meta.pgt_relid)?;
 
+    let restored_frontier = snapshot_catalog
+        .frontier_json
+        .as_deref()
+        .map(crate::version::Frontier::from_json)
+        .transpose()
+        .map_err(|e| {
+            PgTrickleError::InternalError(format!("invalid saved snapshot frontier: {e}"))
+        })?;
+
     let src_fqn = snapshot_name.quoted();
     let storage_fqn = stream_name.quoted();
 
@@ -1047,6 +1056,25 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
         subtxn.rollback();
         return Err(e);
     }
+
+    // The lock can wait for a refresh to finish, so compare against the
+    // frontier committed when the lock was acquired.
+    let current_meta = match StreamTableMeta::get_by_id(meta.pgt_id)? {
+        Some(current) => current,
+        None => {
+            subtxn.rollback();
+            return Err(PgTrickleError::InternalError(format!(
+                "stream table {}.{} disappeared during snapshot restore",
+                stream_name.schema(),
+                stream_name.name()
+            )));
+        }
+    };
+    let needs_reinit = crate::version::snapshot_restore_needs_reinit(
+        current_meta.frontier.as_ref(),
+        restored_frontier.as_ref(),
+    )
+    .map_err(|e| PgTrickleError::InternalError(format!("invalid stream-table frontier: {e}")))?;
 
     // Truncate, then bulk-insert from snapshot (excluding metadata columns)
     let truncate_result =
@@ -1088,20 +1116,29 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
         return Err(e);
     }
 
-    // Restore frontier so next refresh is DIFFERENTIAL (not FULL)
-    if let Some(fj) = snapshot_catalog.frontier_json.as_deref() {
-        let frontier_result = Spi::run_with_args(
+    // A rewind may point behind CDC rows already removed by frontier cleanup.
+    // In that case the next refresh must rebuild from current source state.
+    let frontier_result = if let Some(fj) = snapshot_catalog.frontier_json.as_deref() {
+        Spi::run_with_args(
             "UPDATE pgtrickle.pgt_stream_tables \
-             SET frontier = $1::jsonb, is_populated = true \
-             WHERE pgt_id = $2",
-            &[fj.into(), meta.pgt_id.into()],
+             SET frontier = $1::jsonb, is_populated = true, \
+                 needs_reinit = needs_reinit OR $2 \
+             WHERE pgt_id = $3",
+            &[fj.into(), needs_reinit.into(), meta.pgt_id.into()],
         )
-        .map_err(|e| PgTrickleError::SpiError(format!("frontier restore failed: {e}")));
+    } else {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables \
+             SET frontier = NULL, is_populated = true, needs_reinit = true \
+             WHERE pgt_id = $1",
+            &[meta.pgt_id.into()],
+        )
+    }
+    .map_err(|e| PgTrickleError::SpiError(format!("frontier restore failed: {e}")));
 
-        if let Err(e) = frontier_result {
-            subtxn.rollback();
-            return Err(e);
-        }
+    if let Err(e) = frontier_result {
+        subtxn.rollback();
+        return Err(e);
     }
 
     subtxn.commit();
