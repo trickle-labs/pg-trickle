@@ -780,17 +780,18 @@ fn try_fused_chain_refresh(
             Some(watermark) => watermark,
             None => continue,
         };
-        let slot_positions = match cdc::get_slot_positions_at_bound(&source_oids, tick_watermark) {
-            Ok(positions) => positions,
-            Err(e) => {
-                warning!(
-                    "pg_trickle: fused refresh frontier unavailable for pgt_id={}: {}",
-                    pgt_id,
-                    e
-                );
-                continue;
-            }
-        };
+        let slot_positions =
+            match cdc::get_slot_positions_at_bound(&source_oids, tick_watermark, false) {
+                Ok(positions) => positions,
+                Err(e) => {
+                    warning!(
+                        "pg_trickle: fused refresh frontier unavailable for pgt_id={}: {}",
+                        pgt_id,
+                        e
+                    );
+                    continue;
+                }
+            };
         let data_ts_str = version::select_target_data_timestamp(
             st.schedule
                 .as_ref()
@@ -2691,9 +2692,9 @@ pub(crate) fn batched_has_source_changes(
     let mut arms: Vec<String> = Vec::with_capacity(sts.len());
 
     for st in sts {
-        // A reinitialization needs the full source query, not CDC rows. In
-        // particular, IMMEDIATE sources have no change buffer to inspect.
-        if st.needs_reinit || st.refresh_mode.is_immediate() {
+        // Reinitializations still poll external sources before their FULL
+        // baseline so shared-buffer siblings retain their pending changes.
+        if st.refresh_mode.is_immediate() {
             continue;
         }
         let mut source_oids = Vec::new();
@@ -2792,7 +2793,7 @@ pub(crate) fn batched_has_source_changes(
 /// PERF-6: Uses a single batched EXISTS query instead of one SPI round-trip
 /// per source table.
 fn has_table_source_changes(st: &StreamTableMeta) -> bool {
-    if st.needs_reinit || st.refresh_mode.is_immediate() {
+    if st.refresh_mode.is_immediate() {
         return false;
     }
     if let Err(e) = refresh::poll_foreign_table_sources_for_st(st) {
@@ -3924,7 +3925,7 @@ fn execute_scheduled_refresh(
             return RefreshOutcome::RetryableFailure;
         }
     }
-    let slot_positions = match cdc::get_slot_positions_at_bound(&source_oids, safe_bound) {
+    let slot_positions = match cdc::get_slot_positions_at_bound(&source_oids, safe_bound, true) {
         Ok(pos) => pos,
         Err(e) => {
             log!(
