@@ -447,10 +447,6 @@ pub fn detach_outbox(p_name: &str, p_if_exists: default!(bool, false)) {
 fn detach_outbox_impl(name: &str, if_exists: bool) -> Result<(), PgTrickleError> {
     let caller = capture_caller_context(EntryContext::SecurityDefiner)?;
     let (_, _, meta) = resolve_owned_stream_table_with_caller(name, &caller)?;
-    let has_binding = load_private_binding(meta.pgt_id)?.is_some();
-    if has_binding {
-        let _ = get_outbox_table_name(meta.pgt_id)?;
-    }
 
     // COR-002 (v0.72.0): Delete by `pgt_relid` (the real relation OID).
     let deleted = Spi::get_one_with_args::<i64>(
