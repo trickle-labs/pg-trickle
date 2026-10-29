@@ -1445,15 +1445,45 @@ pub fn compact_change_buffer(
 
     // ponytail: keep shared/keyless histories intact; compact them only with
     // a multiplicity-preserving algorithm that respects every consumer frontier.
-    let can_compact = Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS (SELECT 1 FROM pg_constraint
-                        WHERE conrelid = $1 AND contype = 'p' AND NOT condeferrable)
-            AND (SELECT count(DISTINCT pgt_id) FROM pgtrickle.pgt_dependencies
-                 WHERE source_relid = $1) = 1",
-        &[pg_sys::Oid::from(source_oid).into()],
-    )
-    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-    .unwrap_or(false);
+    let (has_immediate_primary_key, has_single_consumer, has_truncate_barrier) = Spi::connect(
+        |client| {
+            let facts = client
+                .select(
+                    &format!(
+                        "SELECT EXISTS (SELECT 1 FROM pg_constraint
+                                        WHERE conrelid = $1 AND contype = 'p' AND NOT condeferrable),
+                                (SELECT count(DISTINCT pgt_id) FROM pgtrickle.pgt_dependencies
+                                 WHERE source_relid = $1) = 1,
+                                EXISTS (SELECT 1 FROM \"{schema}\".{buffer}
+                                        WHERE action = 'T'
+                                          AND lsn > '{prev_lsn}'::pg_lsn
+                                          AND lsn <= '{new_lsn}'::pg_lsn)",
+                        schema = change_schema,
+                        buffer = buf_name,
+                    ),
+                    None,
+                    &[pg_sys::Oid::from(source_oid).into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let row = facts.first();
+            Ok::<_, PgTrickleError>((
+                row.get::<bool>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(false),
+                row.get::<bool>(2)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(false),
+                row.get::<bool>(3)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(false),
+            ))
+        },
+    )?;
+    let can_compact = crate::cdc_elision::can_compact_history(
+        has_immediate_primary_key,
+        has_single_consumer,
+        has_truncate_barrier,
+    );
     if !can_compact {
         return Ok(CompactionResult::BelowThreshold);
     }

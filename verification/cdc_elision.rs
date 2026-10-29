@@ -30,6 +30,18 @@ pub fn image_action(weight: i64) -> (action: ImageAction)
     else if weight < 0 { ImageAction::Delete }
     else { ImageAction::Skip }
 }
+
+/// Base-buffer compaction is safe only for one immediate keyed consumer and a
+/// source window with no TRUNCATE barrier.
+pub fn can_compact_history(
+    has_immediate_primary_key: bool,
+    has_single_consumer: bool,
+    has_truncate_barrier: bool,
+) -> (eligible: bool)
+    ensures eligible == (has_immediate_primary_key && has_single_consumer && !has_truncate_barrier),
+{
+    has_immediate_primary_key && has_single_consumer && !has_truncate_barrier
+}
 }
 
 /// Unknown types never invoke a send/equality function and retain their bit.
@@ -104,5 +116,19 @@ mod tests {
         }
         assert!(!admitted_image_type(0));
         assert!(!admitted_image_type(u32::MAX));
+    }
+
+    #[test]
+    fn compaction_rejects_missing_keys_shared_consumers_and_truncate_barriers() {
+        for has_key in [false, true] {
+            for single_consumer in [false, true] {
+                for truncate in [false, true] {
+                    assert_eq!(
+                        can_compact_history(has_key, single_consumer, truncate),
+                        has_key && single_consumer && !truncate
+                    );
+                }
+            }
+        }
     }
 }

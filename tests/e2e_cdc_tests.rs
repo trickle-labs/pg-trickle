@@ -56,7 +56,11 @@ async fn test_sf10_truncate_then_insert_post_truncate_rows_captured() {
         .await;
 
     // Refresh — the engine must detect the 'T' marker and do a full snapshot
-    db.refresh_st("sf10_st").await;
+    db.execute_seq(&[
+        "SET pg_trickle.compact_threshold = 1",
+        "SELECT pgtrickle.refresh_stream_table('sf10_st')",
+    ])
+    .await;
 
     let count = db.count("public.sf10_st").await;
     assert_eq!(

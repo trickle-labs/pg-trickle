@@ -47,6 +47,7 @@ CDC_ELISION_CASES = [
     "e2e_shared_buffer_tests::test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders",
     "e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload",
     "e2e_shared_buffer_tests::test_cdc_statement_payload_names_do_not_shadow_row_aliases",
+    "e2e_cdc_tests::test_sf10_truncate_then_insert_post_truncate_rows_captured",
 ]
 JOIN_PLAN_CASES = [
     "e2e_join_tests::test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows",
@@ -105,10 +106,10 @@ PROOF_CONTRACTS = {
     },
     "cdc_elision": {
         "schema": "pg-trickle-cdc-elision-verification-v1",
-        "obligations": {"admitted_image_type", "keep_change", "image_action"},
+        "obligations": {"admitted_image_type", "keep_change", "image_action", "can_compact_history"},
         "cases": CDC_ELISION_CASES,
         "inputs": ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "Cargo.toml", "Cargo.lock"],
-        "mutants": {"lost-image-change", "unknown-type-elision", "lost-positive-image", "reversed-negative-image"},
+        "mutants": {"lost-image-change", "unknown-type-elision", "lost-positive-image", "reversed-negative-image", "cross-truncate-barrier"},
     },
 }
 

@@ -21,8 +21,11 @@ The existing union of consumer columns and scan-side mask intersection remain
 separate integration boundaries.
 
 `verification/cdc_elision.rs` contains the exact production decisions checked
-by Verus: `admitted_image_type`, `keep_change` and `image_action`. They require no unchecked
-preconditions. `keep_change` retains every unknown policy and every unequal
+by Verus: `admitted_image_type`, `keep_change`, `image_action` and
+`can_compact_history`. They require no unchecked preconditions.
+`can_compact_history` admits base-buffer compaction only for an immediate
+primary key, one dependent stream table and a selected LSN range with no
+captured TRUNCATE marker. `keep_change` retains every unknown policy and every unequal
 image, and elides only the admitted/equal case. `admitted_image_type` admits
 only the PostgreSQL built-in OIDs for fixed-size boolean, int2/int4/int8 and
 uuid. Actual runtime `pg_typeof` OIDs enforce that
