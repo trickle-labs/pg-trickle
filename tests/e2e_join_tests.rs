@@ -842,8 +842,9 @@ async fn test_nested_inner_join_correction_in_semijoin_context_matches_postgres(
     db.refresh_st("nc_join_st").await;
     db.assert_st_matches_query("nc_join_st", query).await;
 
-    // Both sides of the nested join change in one window, exercising all
-    // INSERT/DELETE correction-action combinations below the semijoin.
+    // Both nested-join inputs change in one window. This semijoin plan splits
+    // Part 1 on R₀, so the correction covers left inserts against both right
+    // actions; left deletes are already handled by Part 1.
     db.execute("UPDATE nc_middle SET grp = 2 WHERE id = 1")
         .await;
     db.execute("UPDATE nc_right SET grp = 2 WHERE id = 1").await;
