@@ -199,6 +199,8 @@ def main():
         required_features = ["stable_row_identity_encoder_v3", "custom_table_srf_out_columns",
                              "lateral_immutable_composite_function"]
         advertised_features = (graph or {}).get("details", {}).get("differential_features")
+        candidate_version = sql("SELECT default_version FROM pg_available_extensions "
+                                "WHERE name = 'pg_trickle'", "postgres")
         observations["mdm_pgtrickle_compatibility"] = {
             "mdm_source_revision": source_revision, "required_differential_features": required_features,
             "advertised_differential_features": advertised_features,
@@ -207,11 +209,11 @@ def main():
             observations.update(entry_decision="INPUT_BLOCKED",
                 blocker="pg_mdm 0.14.1 and the installed pg_trickle capability profile are incompatible")
             observations["remaining_inputs"] = [
-                "a released pg_mdm adapter compatible with pg_trickle 0.108.3, or an approved supported artifact pair"]
+                f"a released pg_mdm adapter compatible with pg_trickle {candidate_version}, or an approved supported artifact pair"]
             print("INPUT_BLOCKED: installed pg_mdm rejects the pg_trickle differential capability profile", flush=True)
             return
         react_admission = json.loads(sql("SELECT pgreact_internal.pgtrickle_integration_status()", "postgres"))
-        assert react_admission["extension_version"] == "0.108.3" and react_admission["qualified"], react_admission
+        assert react_admission["extension_version"] == candidate_version and react_admission["qualified"], react_admission
         rejected_admission = json.loads(sql(
             "BEGIN; SET LOCAL pg_trickle.enabled=on; "
             "SELECT pgreact_internal.pgtrickle_integration_status(); ROLLBACK", "postgres"))
@@ -223,14 +225,16 @@ def main():
         original = upstream_fixture.read_bytes()
         original_sha = hashlib.sha256(original).hexdigest()
         assert original_sha == "b72d8aa270369db31dfc2333c120ea6873eaa6d15fad0ac3398800c9b9d607f0", original_sha
-        assert b"CREATE EXTENSION pg_trickle VERSION '0.108.3';" in original
+        source_pin = b"CREATE EXTENSION pg_trickle VERSION '0.108.3';"
+        assert original.count(source_pin) == 1
         assert b"VERSION '0.105.1'" not in original and b"0.108.0" not in original
         observations["mdm_fixture"] = {
             "source_revision": source_revision, "upstream_sha256": original_sha,
-            "pg_trickle_version": "0.108.3",
+            "upstream_pg_trickle_version": "0.108.3", "pg_trickle_version": candidate_version,
             "adaptation": "two helper-audit strategy assertions also accept exact affected-record deltas (#1171)"}
         bootstrap = output / "mdm-e2e-bootstrap.sql"
-        bootstrap.write_bytes(adapt_bootstrap(original))
+        candidate_pin = f"CREATE EXTENSION pg_trickle VERSION '{candidate_version}';".encode()
+        bootstrap.write_bytes(adapt_bootstrap(original.replace(source_pin, candidate_pin)))
         observations["mdm_fixture"]["adapted_sha256"] = hashlib.sha256(bootstrap.read_bytes()).hexdigest()
         fixture("mdm-bootstrap", "/work/" + bootstrap.relative_to(root).as_posix(), "postgres")
         fixture("mdm-policy-fixtures", "/tests/e2e_policy.sql")
@@ -348,7 +352,8 @@ def main():
         assert s1_e2e_sha == original_sha
         assert b"CREATE DATABASE foundation;" in s1_e2e_bytes
         assert b"\\connect foundation" in s1_e2e_bytes
-        s1_e2e_adapted = adapt_bootstrap(s1_e2e_bytes).replace(b"CREATE DATABASE foundation;", b"CREATE DATABASE s1_idle;")
+        s1_e2e_adapted = adapt_bootstrap(s1_e2e_bytes.replace(source_pin, candidate_pin)).replace(
+            b"CREATE DATABASE foundation;", b"CREATE DATABASE s1_idle;")
         s1_e2e_adapted = s1_e2e_adapted.replace(b"\\connect foundation", b"\\connect s1_idle")
         s1_e2e_path = output / "mdm-e2e-s1-idle.sql"
         s1_e2e_path.write_bytes(s1_e2e_adapted)

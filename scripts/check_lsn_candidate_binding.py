@@ -28,6 +28,16 @@ REQUIRED_OBLIGATIONS = {
 }
 RECEIPT_CASES = [
     "e2e_wal_receipt_recovery_tests::test_wal_receipt_small_limits_preserve_complete_transactions",
+    "e2e_wal_receipt_recovery_tests::test_wal_receipts_do_not_recursively_capture_their_own_payloads",
+    "e2e_wal_receipt_recovery_tests::test_wal_receipt_commit_order_preserves_late_old_lsn_transaction",
+    "e2e_wal_receipt_recovery_tests::test_last_wal_consumer_drop_rollback_preserves_slot_and_frontier",
+    "e2e_wal_receipt_recovery_tests::test_deferred_consumer_registration_rollback_preserves_wal_slot",
+    "e2e_wal_receipt_recovery_tests::test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash",
+    "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_active_stale_and_mismatched_slots",
+    "e2e_wal_receipt_recovery_tests::test_dropped_wal_source_retains_retirement_until_last_consumer_commits",
+    "e2e_wal_receipt_recovery_tests::test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash",
+    "e2e_wal_receipt_recovery_tests::test_replacement_source_cannot_reassign_pending_slot_retirement",
+    "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_null_named_reference_across_source_oids",
 ]
 LIFECYCLE_CASES = [
     "e2e_having_transition_tests::test_having_all_nine_truth_transitions_match_postgresql",
@@ -42,7 +52,23 @@ JOIN_PLAN_CASES = [
     "e2e_join_tests::test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows",
     "e2e_refresh_atomicity_tests::test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut",
 ]
+IDENTITY_FRAME_CASES = [
+    "e2e_row_id_v2_tests::test_identity_scalar_frames_preserve_installed_v2_v3_bytes",
+    "e2e_row_id_v2_tests::test_identity_colliding_probes_preserve_merge_and_join_complete_ids",
+]
 PROOF_CONTRACTS = {
+    "identity_frame": {
+        "schema": "pg-trickle-identity-frame-verification-v1",
+        "obligations": {"fixed_scalar_width", "checked_frame_size", "validate_scalar_frame", "encode_scalar_frame", "unique_scalar_decoding"},
+        "cases": IDENTITY_FRAME_CASES,
+        "inputs": [
+            "src/lib.rs", "src/dvm/row_id_v2.rs", "src/dvm/row_id.rs", "src/hash.rs", "src/refresh/codegen.rs",
+            "src/dvm/operators/join_common.rs", "src/refresh/merge/mod.rs", "src/refresh/merge/insert.rs",
+            "tests/row_id_v2_vectors.rs", "tests/fixtures/row_id_v2_vectors.json", "tests/e2e_row_id_v2_tests.rs",
+            "Cargo.toml", "Cargo.lock",
+        ],
+        "mutants": {"lost-terminator", "trailing-input", "invalid-bool-payload", "lost-domain", "lost-size-payload"},
+    },
     "join_plan": {
         "schema": "pg-trickle-join-plan-verification-v1",
         "obligations": {"admitted_equality_type", "check_endpoint_plan", "scope_pair", "unchanged_pair_has_zero_difference"},
@@ -62,8 +88,13 @@ PROOF_CONTRACTS = {
         "cases": EXPECTED_CASES, "inputs": [],
     },
     "receipt": {
-        "schema": "pg-trickle-receipt-verification-v1", "obligations": {"receipt_ack_row_limit"},
-        "cases": RECEIPT_CASES, "inputs": ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"],
+        "schema": "pg-trickle-receipt-verification-v1", "obligations": {"receipt_frame_ends", "receipt_ack_row_limit", "may_skip_source_free_row", "retired_slot_action"},
+        "cases": RECEIPT_CASES, "inputs": [
+            "src/lib.rs", "src/wal_decoder.rs", "src/api/helpers.rs", "src/api/alter.rs",
+            "src/hooks.rs", "src/scheduler/scheduler_loop.rs", "src/config/scheduler.rs",
+            "sql/pg_trickle--0.108.3--0.108.4.sql", "tests/e2e_wal_receipt_recovery_tests.rs", "Cargo.toml", "Cargo.lock",
+        ],
+        "mutants": {"incomplete-prefix", "off-by-one", "skip-source-row", "skip-unrecognized-table", "skip-other-action", "retire-stale-owner", "retire-active-reference", "retire-mismatched-slot"},
     },
     "aggregate_lifecycle": {
         "schema": "pg-trickle-aggregate-lifecycle-verification-v1",

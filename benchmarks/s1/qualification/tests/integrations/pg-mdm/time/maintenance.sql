@@ -103,13 +103,16 @@ SELECT claim_maintenance.state() AS state, claim_maintenance.api() AS api;
 ALTER EXTENSION pg_react UPDATE TO '0.46.1';
 DO $pgt_runtime$
 DECLARE status jsonb := pgreact_internal.pgtrickle_integration_status();
+    candidate_version text;
 BEGIN
-    IF status ->> 'extension_version' IS DISTINCT FROM '0.108.3'
+    SELECT default_version INTO STRICT candidate_version
+    FROM pg_available_extensions WHERE name = 'pg_trickle';
+    IF status ->> 'extension_version' IS DISTINCT FROM candidate_version
        OR NOT COALESCE((status ->> 'qualified')::boolean, false)
        OR status -> 'capabilities' -> 'external_graph_refresh' -> 'raw' -> 'details' -> 'differential_features'
           IS DISTINCT FROM
           '["stable_row_identity_encoder_v3","custom_table_srf_out_columns","lateral_immutable_composite_function"]'::jsonb THEN
-        RAISE EXCEPTION '0.46.0 -> 0.46.1 did not qualify pg_trickle 0.108.3: %', status;
+        RAISE EXCEPTION '0.46.0 -> 0.46.1 did not qualify candidate pg_trickle %: %', candidate_version, status;
     END IF;
 END
 $pgt_runtime$;

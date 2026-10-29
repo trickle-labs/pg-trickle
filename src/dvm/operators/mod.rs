@@ -15,6 +15,7 @@ pub mod join;
 pub mod join_common;
 pub mod lateral_function;
 pub mod lateral_subquery;
+pub(crate) mod nonfinite;
 pub mod outer_join;
 pub mod project;
 pub mod recursive_cte;

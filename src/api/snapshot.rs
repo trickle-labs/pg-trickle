@@ -90,6 +90,82 @@ impl Drop for SnapSubTransaction {
 
 // ── Internal helpers ───────────────────────────────────────────────────────
 
+#[derive(Clone, Copy)]
+enum SnapshotStreamLockMode {
+    Share,
+    Update,
+}
+
+fn lock_snapshot_stream(
+    name: &QualifiedIdentifier,
+    mode: SnapshotStreamLockMode,
+) -> Result<StreamTableMeta, PgTrickleError> {
+    let meta = StreamTableMeta::get_by_name(name.schema(), name.name())?;
+    check_stream_table_ownership(meta.pgt_relid, name.schema(), name.name())?;
+    let lock_sql = match mode {
+        SnapshotStreamLockMode::Share => {
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id=$1 FOR SHARE"
+        }
+        SnapshotStreamLockMode::Update => {
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id=$1 FOR UPDATE"
+        }
+    };
+    Spi::get_one_with_args::<i64>(lock_sql, &[meta.pgt_id.into()])
+        .map_err(|e| PgTrickleError::SpiError(format!("snapshot stream lock failed: {e}")))?
+        .ok_or_else(|| PgTrickleError::NotFound(name.quoted()))?;
+    let current = StreamTableMeta::get_by_id(meta.pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(name.quoted()))?;
+    if current.pgt_schema != name.schema() || current.pgt_name != name.name() {
+        return Err(PgTrickleError::NotFound(name.quoted()));
+    }
+    check_stream_table_ownership(current.pgt_relid, name.schema(), name.name())?;
+    Ok(current)
+}
+
+/// Only an existing protected cut permits differential reuse of an archive.
+fn snapshot_history_is_protected(
+    meta: &StreamTableMeta,
+    frontier: Option<&str>,
+) -> Result<bool, PgTrickleError> {
+    if meta.needs_reinit || frontier.is_none() {
+        return Ok(false);
+    }
+    let mut deps = crate::catalog::StDependency::get_for_st(meta.pgt_id)?;
+    if deps.is_empty() || deps.iter().any(|dep| dep.source_type != "TABLE") {
+        return Ok(false);
+    }
+    deps.sort_by_key(|dep| dep.source_relid.to_u32());
+    for dep in &deps {
+        // Both ordinary cleanup paths take this lock before reading minima.
+        Spi::get_one_with_args::<bool>(
+            "SELECT pg_advisory_xact_lock($1::bigint) IS NULL",
+            &[i64::from(dep.source_relid.to_u32()).into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(format!("snapshot history lock failed: {e}")))?;
+    }
+    Spi::get_one_with_args::<bool>(
+        "SELECT current_setting('transaction_isolation')='read committed' AND NOT EXISTS (
+           SELECT 1 FROM pgtrickle.pgt_dependencies d WHERE d.pgt_id=$1 AND (
+             $2::jsonb->'sources'->d.source_relid::text->>'lsn' IS NULL OR
+             NOT EXISTS (
+               SELECT 1 FROM pgtrickle.pgt_dependencies p
+               JOIN pgtrickle.pgt_stream_tables s ON s.pgt_id=p.pgt_id
+               WHERE p.source_relid=d.source_relid AND p.source_type='TABLE'
+                 AND NOT s.needs_reinit AND s.is_populated
+                 AND (s.pgt_id<>$1 OR
+                     (s.frontier->'sources'->d.source_relid::text->>'lsn')::pg_lsn
+                     = ($2::jsonb->'sources'->d.source_relid::text->>'lsn')::pg_lsn)
+                 AND (s.frontier->'sources'->d.source_relid::text->>'lsn')::pg_lsn
+                     <= ($2::jsonb->'sources'->d.source_relid::text->>'lsn')::pg_lsn
+             )
+           )
+         )",
+        &[meta.pgt_id.into(), frontier.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("snapshot history inspection failed: {e}")))
+    .map(|protected| protected.unwrap_or(false))
+}
+
 const SNAPSHOT_COMMENT_PREFIX: &str = "pgtrickle:snapshot:v1|";
 const SNAPSHOT_CATALOG_MIGRATION_SQL: &str = "\
 ALTER TABLE pgtrickle.pgt_snapshots\n\
@@ -778,7 +854,10 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
         &[initial_meta.pgt_id.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(format!("snapshot refresh lock failed: {e}")))?;
-    let meta = StreamTableMeta::get_by_name(stream_name.schema(), stream_name.name())?;
+    let meta = lock_snapshot_stream(&stream_name, SnapshotStreamLockMode::Share)?;
+    if meta.pgt_id != initial_meta.pgt_id {
+        return Err(PgTrickleError::NotFound(stream_name.quoted()));
+    }
 
     let snapshot_name = match target {
         Some(target_name) => {
@@ -806,6 +885,8 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
         .as_ref()
         .map(|f| serde_json::to_string(f).unwrap_or_else(|_| "null".to_string()))
         .unwrap_or_else(|| "null".to_string());
+
+    crate::refresh::test_atomicity_barrier(&meta, "snapshot_after_metadata", 0);
 
     let ext_ver = env!("CARGO_PKG_VERSION");
     let snapshot_provenance_token = generate_snapshot_provenance_token()?;
@@ -1014,8 +1095,7 @@ pub fn restore_from_snapshot(p_name: &str, p_source: &str) {
 fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleError> {
     let caller = security_context::capture_caller_context(EntryContext::SecurityDefiner)?;
     let stream_name = resolve_name_as_caller(name, &caller.search_path)?;
-    let meta = StreamTableMeta::get_by_name(stream_name.schema(), stream_name.name())?;
-    check_stream_table_ownership(meta.pgt_relid, stream_name.schema(), stream_name.name())?;
+    let meta = lock_snapshot_stream(&stream_name, SnapshotStreamLockMode::Update)?;
 
     let snapshot_name = resolve_name_as_caller(source, &caller.search_path)?;
     let snapshot_catalog = load_snapshot_catalog_row(&snapshot_name)?;
@@ -1045,7 +1125,6 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
         .map_err(|e| {
             PgTrickleError::InternalError(format!("invalid saved snapshot frontier: {e}"))
         })?;
-
     let src_fqn = snapshot_name.quoted();
     let storage_fqn = stream_name.quoted();
 
@@ -1082,11 +1161,14 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
             )));
         }
     };
+    let history_protected =
+        snapshot_history_is_protected(&current_meta, snapshot_catalog.frontier_json.as_deref())?;
     let needs_reinit = crate::version::snapshot_restore_needs_reinit(
         current_meta.frontier.as_ref(),
         restored_frontier.as_ref(),
     )
-    .map_err(|e| PgTrickleError::InternalError(format!("invalid stream-table frontier: {e}")))?;
+    .map_err(|e| PgTrickleError::InternalError(format!("invalid stream-table frontier: {e}")))?
+        || !history_protected;
 
     // Truncate, then bulk-insert from snapshot (excluding metadata columns)
     let truncate_result =
@@ -1128,8 +1210,8 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
         return Err(e);
     }
 
-    // A rewind may point behind CDC rows already removed by frontier cleanup.
-    // In that case the next refresh must rebuild from current source state.
+    // Reinitialize when the restored cut is behind expired CDC history or the
+    // snapshot's source history is no longer protected.
     let frontier_result = if let Some(fj) = snapshot_catalog.frontier_json.as_deref() {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_stream_tables \

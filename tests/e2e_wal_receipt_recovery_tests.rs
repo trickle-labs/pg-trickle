@@ -1,12 +1,121 @@
 //! #1095: durable WAL receipt recovery, replay, and shared-source cleanup.
 
 mod e2e;
+#[allow(dead_code)] // This binary uses selected receipt kernels for its controls.
+#[path = "../verification/receipt.rs"]
+mod receipt_limit;
 
 use e2e::E2eDb;
 use sqlx::{AssertSqlSafe, PgPool, Postgres, pool::PoolConnection};
 use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(180);
+
+#[tokio::test]
+async fn test_receipt_prefix_sql_control_rejects_executable_off_by_one() {
+    use sha2::{Digest, Sha256};
+    let digest = |bytes: &[u8]| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.execute("CREATE TABLE semantic_prefix_source(id int PRIMARY KEY,value text)")
+        .await;
+    for slot in ["semantic_prefix_baseline", "semantic_prefix_mutant"] {
+        let created: String = sqlx::query_scalar(
+            "SELECT slot_name::text FROM pg_create_logical_replication_slot($1,'test_decoding')",
+        )
+        .bind(slot)
+        .fetch_one(&db.pool)
+        .await
+        .expect("slot setup errors cannot qualify a semantic kill");
+        assert_eq!(created, slot);
+    }
+    db.execute("INSERT INTO semantic_prefix_source VALUES(1,'first'),(2,'first')")
+        .await;
+    db.execute("INSERT INTO semantic_prefix_source VALUES(3,'later')")
+        .await;
+    type Message = (String, String, String);
+    let peek: Vec<Message>=sqlx::query_as("SELECT lsn::text,xid::text,data FROM pg_logical_slot_peek_changes('semantic_prefix_baseline',NULL,NULL,'skip-empty-xacts','1')")
+        .fetch_all(&db.pool).await.expect("peek must execute before prefix qualification");
+    assert!(
+        peek.iter()
+            .filter(|message| message.2.starts_with("COMMIT"))
+            .count()
+            >= 2,
+        "two committed transactions must be visible"
+    );
+    let end = peek
+        .iter()
+        .position(|message| message.2.starts_with("COMMIT"))
+        .unwrap()
+        + 1;
+    let expected = peek[..end].to_vec();
+    assert!(
+        expected
+            .iter()
+            .any(|message| message.2.contains("semantic_prefix_source"))
+    );
+    let limit = receipt_limit::receipt_ack_row_limit(expected.len())
+        .expect("native complete prefix must fit checked row bound");
+    let sql = "SELECT lsn::text,xid::text,data FROM pg_logical_slot_get_changes($1,NULL,$2,'skip-empty-xacts','1')";
+    let baseline: Vec<Message> = sqlx::query_as(sql)
+        .bind("semantic_prefix_baseline")
+        .bind(limit)
+        .fetch_all(&db.pool)
+        .await
+        .expect("correct baseline SQL must execute");
+    assert_eq!(
+        baseline, expected,
+        "checked limit must consume exactly the represented complete prefix"
+    );
+    let mutant_limit = limit.checked_add(1).unwrap();
+    let mutant: Vec<Message> = sqlx::query_as(sql)
+        .bind("semantic_prefix_mutant")
+        .bind(mutant_limit)
+        .fetch_all(&db.pool)
+        .await
+        .expect("SQL/infrastructure errors cannot count as detecting the off-by-one mutant");
+    assert_ne!(
+        mutant, expected,
+        "executable n+1 SQL limit must fail the exact-prefix comparison"
+    );
+    assert!(
+        mutant.len() > expected.len() && mutant[..end] == expected,
+        "mutant must cross the represented prefix, not fail elsewhere"
+    );
+    assert!(
+        mutant[end..]
+            .iter()
+            .any(|message| message.2.contains("semantic_prefix_source")),
+        "the extra prefix must include unrepresented source changes"
+    );
+    let directory = std::path::Path::new(".p2p/work/issue-1218-semantic-controls/evidence");
+    std::fs::create_dir_all(directory).unwrap();
+    std::fs::write(directory.join("receipt-prefix-sql-control.json"),serde_json::to_vec_pretty(&serde_json::json!({
+        "schema":"pg-trickle-semantic-sql-controls-v1","selected":1,"case":"incomplete-receipt-prefix",
+        "expected_failure_class":"ReceiptPrefixMismatch","failure_class":"ReceiptPrefixMismatch",
+        "expected_phase":"acknowledge_complete_prefix","phase":"acknowledge_complete_prefix",
+        "baseline_passed":true,"mutant_executed":true,"baseline_limit":limit,"mutant_limit":mutant_limit,
+        "source_path":"verification/receipt.rs","source_sha256":digest(include_bytes!("../verification/receipt.rs")),
+        "test_source_sha256":digest(include_bytes!("e2e_wal_receipt_recovery_tests.rs")),
+        "sql_sha256":digest(sql.as_bytes()),"expected":expected,"baseline":baseline,"mutant":mutant,
+        "installed_candidate_commit":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+        "boundary":"The production checked limit feeds PostgreSQL logical-slot SQL; the mutant changes that executable SQL parameter from n to n+1. No decoder, receipt catalog, or cleanup proof is claimed."
+    })).unwrap()).unwrap();
+    for slot in ["semantic_prefix_baseline", "semantic_prefix_mutant"] {
+        sqlx::query("SELECT pg_drop_replication_slot($1)")
+            .bind(slot)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+}
 
 struct Fixture {
     db: E2eDb,
@@ -37,6 +146,10 @@ fn phase_code(phase: &str) -> i64 {
         "before_replay" => 2,
         "before_ack" => 3,
         "after_slot_advance" => 4,
+        "before_slot_retirement" => 5,
+        "after_slot_retirement" => 6,
+        "slot_retirement_kept" => 7,
+        "before_slot_adoption" => 8,
         _ => panic!("unknown WAL receipt phase {phase}"),
     }
 }
@@ -609,7 +722,7 @@ async fn test_trigger_update_to_null_preserves_old_row_and_exact_result() {
 async fn matching_receipts(pool: &PgPool, oid: i64, status: &str, value: &str) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*)::bigint FROM pgtrickle.pgt_wal_receipts
-          WHERE source_relid = $1 AND status = $2 AND data LIKE $3",
+          WHERE source_relid = $1 AND source_change AND status = $2 AND data LIKE $3",
     )
     .bind(oid)
     .bind(status)
@@ -622,7 +735,7 @@ async fn matching_receipts(pool: &PgPool, oid: i64, status: &str, value: &str) -
 async fn matching_receipt_lsn(db: &E2eDb, oid: i64, status: &str, value: &str) -> String {
     sqlx::query_scalar(
         "SELECT lsn::text FROM pgtrickle.pgt_wal_receipts
-          WHERE source_relid = $1 AND status = $2 AND data LIKE $3
+          WHERE source_relid = $1 AND source_change AND status = $2 AND data LIKE $3
           ORDER BY lsn LIMIT 1",
     )
     .bind(oid)
@@ -707,6 +820,62 @@ async fn receipt_slot_reached(db: &E2eDb, slot: &str, oid: i64, value: &str) -> 
     .fetch_one(&db.pool)
     .await
     .expect("inspect WAL slot acknowledgement")
+}
+
+#[tokio::test]
+async fn test_wal_receipts_do_not_recursively_capture_their_own_payloads() {
+    let fixture = setup_wal_fixture("feedback_bound").await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = std::path::Path::new(&directory).join("receipt-feedback.json");
+    let mut history = Vec::new();
+    for cycle in 1..=6 {
+        let value = format!("feedback-{cycle}");
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            cycle + 1,
+            &value,
+        )
+        .await;
+        assert!(fixture.db.wait_for_condition("actual source receipt acknowledged", &format!(
+            "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_receipts WHERE source_relid={} AND source_change AND status='ACKNOWLEDGED' AND data LIKE '%{value}%')",
+            fixture.oid
+        ), WAIT, Duration::from_millis(25)).await);
+        let sample: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_build_object('receipts',count(*),'max_payload_bytes',coalesce(max(octet_length(data)),0),
+                'recursive_receipts',count(*) FILTER(WHERE data LIKE '%table pgtrickle.pgt_wal_receipts:%table pgtrickle.pgt_wal_receipts:%'))
+             FROM pgtrickle.pgt_wal_receipts WHERE source_relid=$1",
+        ).bind(fixture.oid).fetch_one(&fixture.db.pool).await.unwrap();
+        let recursive_transaction: serde_json::Value = sqlx::query_scalar(
+            "SELECT coalesce(jsonb_agg(jsonb_build_object('source_xid',source_xid,'source_change',source_change,'data',left(data,600)) ORDER BY receipt_id),'[]'::jsonb)
+             FROM pgtrickle.pgt_wal_receipts WHERE source_relid=$1 AND source_xid IN (
+               SELECT source_xid FROM pgtrickle.pgt_wal_receipts WHERE source_relid=$1
+               AND data LIKE '%table pgtrickle.pgt_wal_receipts:%table pgtrickle.pgt_wal_receipts:%' LIMIT 1)",
+        ).bind(fixture.oid).fetch_one(&fixture.db.pool).await.unwrap();
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "cycle":cycle,"source_acknowledged":true,"sample":sample,
+                "recursive_transaction":recursive_transaction,
+                "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            }),
+        );
+        assert_eq!(
+            sample["recursive_receipts"],
+            0,
+            "receipt bookkeeping must not become recursively nested durable payloads; {}",
+            path.display()
+        );
+        assert_eq!(
+            cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
+            Some("WAL")
+        );
+    }
+    wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
 }
 
 #[tokio::test]
@@ -1317,10 +1486,15 @@ async fn run_trigger_fallback_case(phase: &str) {
         .await;
     wait_for_cdc_mode(db, &fixture.source, "TRIGGER").await;
     assert!(
-        db.query_scalar::<bool>(&format!(
-            "SELECT NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = '{}')",
-            fixture.slot
-        ))
+        db.wait_for_condition(
+            "committed trigger-fallback slot retirement",
+            &format!(
+                "SELECT NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = '{}')",
+                fixture.slot
+            ),
+            WAIT,
+            Duration::from_millis(25)
+        )
         .await
     );
     for stream in [&fixture.stream, &shared] {
@@ -1437,7 +1611,7 @@ async fn cleanup_fixture() -> (E2eDb, String, String, String, i64, String) {
         fast,
         &format!("SELECT id, value FROM public.{source}"),
         "1h",
-        "FULL",
+        "DIFFERENTIAL",
     )
     .await;
     db.execute(&format!(
@@ -1516,6 +1690,159 @@ async fn test_shared_source_cleanup_retains_slow_consumer_changes() {
 #[tokio::test]
 async fn test_shared_source_cleanup_catchup_remains_exact() {
     run_shared_source_cleanup_case().await;
+}
+
+#[tokio::test]
+async fn test_shared_source_cleanup_serializes_new_consumer_registration() {
+    let (db, source, slow, fast, oid, buffer) = cleanup_fixture().await;
+    commit_row(&db, &source, "cleanup_journal", 3, "shared-checkpoint").await;
+    db.refresh_st_with_retry(&slow).await;
+    commit_row(&db, &source, "cleanup_journal", 4, "cleanup-race-pending").await;
+
+    let slow_frontier = frontier(&db, &slow, oid).await;
+    let reclaimable: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I', 'D', 'T') \
+             AND lsn <= '{slow_frontier}'::pg_lsn"
+        ))
+        .await;
+    assert!(reclaimable > 0, "the cleanup schedule needs stale history");
+
+    let mut blocker = db.pool.acquire().await.expect("acquire cleanup blocker");
+    sqlx::query("BEGIN")
+        .execute(&mut *blocker)
+        .await
+        .expect("begin cleanup blocker");
+    sqlx::query(AssertSqlSafe(format!("LOCK TABLE {buffer} IN SHARE MODE")))
+        .execute(&mut *blocker)
+        .await
+        .expect("allow stale-row check but block cleanup DELETE");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("get cleanup blocker PID");
+
+    let mut refresh_connection = db.pool.acquire().await.expect("acquire refresh session");
+    sqlx::query("SET application_name = 'pgt_cleanup_registration_refresh'")
+        .execute(&mut *refresh_connection)
+        .await
+        .expect("tag cleanup refresh session");
+    let refresh = tokio::spawn(async move {
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('cleanup_fast_stream')")
+            .execute(&mut *refresh_connection)
+            .await
+            .expect("refresh fast consumer through cleanup");
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let waiting: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity a
+                 JOIN pg_locks l ON l.pid = a.pid
+                  WHERE a.application_name = 'pgt_cleanup_registration_refresh'
+                    AND a.wait_event_type = 'Lock'
+                    AND l.locktype = 'relation'
+                    AND l.relation = '{buffer}'::regclass
+                    AND NOT l.granted
+                    AND $1 = ANY(pg_blocking_pids(a.pid))
+             )"
+        )))
+        .bind(blocker_pid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("observe cleanup blocked on change buffer");
+        if waiting {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            sqlx::query("COMMIT")
+                .execute(&mut *blocker)
+                .await
+                .expect("release change buffer after timeout");
+            let _ = tokio::time::timeout(Duration::from_secs(30), refresh).await;
+            panic!("refresh never reached the witnessed change-buffer cleanup DELETE");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let mut registration_connection = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire registration session");
+    sqlx::query("SET application_name = 'pgt_cleanup_registration_create'")
+        .execute(&mut *registration_connection)
+        .await
+        .expect("tag registration session");
+    let registration = tokio::spawn(async move {
+        sqlx::query(
+            "SELECT pgtrickle.create_stream_table(
+                 'cleanup_registration_new',
+                 'SELECT id, value FROM public.cleanup_shared_source',
+                 '1h', 'DIFFERENTIAL'
+             )",
+        )
+        .execute(&mut *registration_connection)
+        .await
+        .expect("register consumer while cleanup is in flight");
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let registering: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity
+                  WHERE application_name = 'pgt_cleanup_registration_create'
+                    AND query ILIKE '%create_stream_table%'
+             )",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("observe registration while cleanup is in flight");
+        if registering || registration.is_finished() {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            sqlx::query("COMMIT")
+                .execute(&mut *blocker)
+                .await
+                .expect("release buffer after registration witness timeout");
+            let _ = tokio::time::timeout(Duration::from_secs(30), registration).await;
+            let _ = tokio::time::timeout(Duration::from_secs(30), refresh).await;
+            panic!("registration was not observed while cleanup was blocked");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    sqlx::query("COMMIT")
+        .execute(&mut *blocker)
+        .await
+        .expect("release change buffer cleanup");
+    tokio::time::timeout(Duration::from_secs(30), refresh)
+        .await
+        .expect("cleanup refresh finishes after buffer lock release")
+        .expect("cleanup refresh task joins");
+    tokio::time::timeout(Duration::from_secs(30), registration)
+        .await
+        .expect("registration finishes after buffer lock release")
+        .expect("registration task joins");
+
+    db.assert_st_matches_query(
+        "cleanup_registration_new",
+        &format!("SELECT id, value FROM public.{source}"),
+    )
+    .await;
+    commit_row(&db, &source, "cleanup_journal", 5, "after-registration").await;
+    db.refresh_st_with_retry("cleanup_registration_new").await;
+    db.assert_st_matches_query(
+        "cleanup_registration_new",
+        "SELECT id, value FROM public.cleanup_journal",
+    )
+    .await;
+    db.refresh_st_with_retry(&fast).await;
+    db.assert_st_matches_query(&fast, "SELECT id, value FROM public.cleanup_journal")
+        .await;
 }
 
 async fn assert_mismatch(pool: &PgPool, stream: &str, journal: &str) {
@@ -1700,4 +2027,2189 @@ async fn run_clean_replay_control(fixture: Fixture) {
     drop(barrier);
     clear_wal_phase(&fixture.db).await;
     wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
+}
+
+fn record_lifecycle(
+    path: &std::path::Path,
+    history: &mut Vec<serde_json::Value>,
+    event: serde_json::Value,
+) {
+    history.push(event);
+    std::fs::write(path, serde_json::to_vec_pretty(history).unwrap()).unwrap();
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LifecycleMutationKind {
+    Insert,
+    Update,
+    Delete,
+}
+
+impl LifecycleMutationKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Insert => "insert",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+struct LifecycleMutation {
+    kind: LifecycleMutationKind,
+    id: i32,
+    value: i32,
+}
+
+impl LifecycleMutation {
+    fn sql(self, table: &str) -> String {
+        match self.kind {
+            LifecycleMutationKind::Insert => {
+                format!("INSERT INTO {table} VALUES ({},'{}')", self.id, self.value)
+            }
+            LifecycleMutationKind::Update => {
+                format!(
+                    "UPDATE {table} SET value='{}' WHERE id={}",
+                    self.value, self.id
+                )
+            }
+            LifecycleMutationKind::Delete => {
+                format!("DELETE FROM {table} WHERE id={}", self.id)
+            }
+        }
+    }
+
+    fn json(self) -> serde_json::Value {
+        serde_json::json!({"kind":self.kind.name(),"id":self.id,"value":self.value})
+    }
+}
+
+async fn lifecycle_state(pool: &PgPool, stream: &str) -> serde_json::Value {
+    sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT jsonb_build_object('rows', \
+             (SELECT coalesce(jsonb_agg(jsonb_build_array(id,value) ORDER BY id,value),'[]'::jsonb) \
+              FROM public.{stream}), 'frontier', frontier, 'populated', is_populated) \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_schema='public' AND pgt_name=$1"
+    )))
+    .bind(stream)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn lifecycle_exact(
+    fixture: &Fixture,
+    stream: &str,
+    path: &std::path::Path,
+    history: &mut Vec<serde_json::Value>,
+    phase: &str,
+) {
+    let actual = lifecycle_state(&fixture.db.pool, stream).await;
+    let expected: serde_json::Value = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT coalesce(jsonb_agg(jsonb_build_array(id,value) ORDER BY id,value),'[]'::jsonb) \
+         FROM public.{}",
+        fixture.journal
+    )))
+    .fetch_one(&fixture.db.pool)
+    .await
+    .unwrap();
+    record_lifecycle(
+        path,
+        history,
+        serde_json::json!({
+            "phase": phase, "stream": stream, "expected_rows": expected, "actual": actual,
+        }),
+    );
+    assert_eq!(
+        actual["rows"],
+        expected,
+        "PGT_LIFECYCLE_FAILURE:exact_rows; {phase}; history: {}",
+        path.display()
+    );
+    assert_eq!(
+        exact_diff(&fixture.db.pool, stream, &fixture.journal).await,
+        0,
+        "PGT_LIFECYCLE_FAILURE:exact_diff; {phase}; history: {}",
+        path.display()
+    );
+}
+
+async fn lifecycle_refresh(
+    fixture: &Fixture,
+    stream: &str,
+    expected_action: Option<&str>,
+) -> String {
+    let before: i64 = sqlx::query_scalar(
+        "SELECT coalesce(max(h.refresh_id),0) FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name=$1",
+    )
+    .bind(stream)
+    .fetch_one(&fixture.db.pool)
+    .await
+    .unwrap();
+    fixture
+        .db
+        .try_execute_with_config(
+            &[
+                "SET pg_trickle.compact_threshold=1",
+                "SET pg_trickle.refresh_strategy='differential'",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
+        )
+        .await
+        .unwrap();
+    let (after, action): (i64, String) = sqlx::query_as(
+        "SELECT h.refresh_id,h.action FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+         WHERE s.pgt_name=$1 AND h.status='COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .bind(stream)
+    .fetch_one(&fixture.db.pool)
+    .await
+    .unwrap();
+    assert!(
+        after > before,
+        "PGT_LIFECYCLE_FAILURE:fresh_refresh; stream={stream}"
+    );
+    if let Some(expected_action) = expected_action {
+        assert_eq!(
+            action, expected_action,
+            "lifecycle catch-up action must match recovery state"
+        );
+    } else {
+        assert!(
+            matches!(action.as_str(), "DIFFERENTIAL" | "REINITIALIZE" | "FULL"),
+            "unexpected lifecycle recovery action: {action}"
+        );
+    }
+    action
+}
+
+#[tokio::test]
+async fn test_restore_source_lock_defers_cleanup_until_rewind_is_visible() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute_seq(&[
+        "CREATE TABLE restore_lock_source(id int PRIMARY KEY,value text)",
+        "INSERT INTO restore_lock_source VALUES(1,'old')",
+    ])
+    .await;
+    for stream in ["restore_lock_target", "restore_lock_fast"] {
+        db.create_st(
+            stream,
+            "SELECT id,value FROM restore_lock_source",
+            "24h",
+            "DIFFERENTIAL",
+        )
+        .await;
+    }
+    db.execute("SELECT pgtrickle.snapshot_stream_table('restore_lock_target','public.restore_lock_archive')").await;
+    let oid = i64::from(db.table_oid("restore_lock_source").await);
+    let old = frontier(&db, "restore_lock_target", oid).await;
+    let buffer = db.change_buffer_table(oid).await;
+    db.execute("UPDATE restore_lock_source SET value='new'")
+        .await;
+    let cut: String = db
+        .query_scalar(&format!(
+            "SELECT max(lsn)::text FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    for stream in ["restore_lock_fast", "restore_lock_target"] {
+        db.try_execute_with_config(
+            &["SET pg_trickle.refresh_strategy='differential'"],
+            &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
+        )
+        .await
+        .unwrap();
+    }
+    let needed = format!(
+        "SELECT count(*) FROM {buffer} WHERE action IN ('I','D') AND lsn>'{old}'::pg_lsn AND lsn<='{cut}'::pg_lsn"
+    );
+    let before: i64 = db.query_scalar(&needed).await;
+    assert!(
+        before > 0,
+        "the cleanup schedule must begin with retained required history"
+    );
+    let mut restore = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pgtrickle.restore_from_snapshot('restore_lock_target','public.restore_lock_archive')")
+        .execute(&mut *restore).await.unwrap();
+    db.execute("INSERT INTO restore_lock_source VALUES(2,'concurrent')")
+        .await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        db.try_execute_with_config(
+            &["SET pg_trickle.refresh_strategy='full'"],
+            "SELECT pgtrickle.refresh_stream_table('restore_lock_fast')",
+        ),
+    )
+    .await
+    .expect("cleanup must skip the restore lock without blocking refresh")
+    .unwrap();
+    let during: i64 = db.query_scalar(&needed).await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = std::path::Path::new(&directory).join("restore-cleanup-ordering.json");
+    let mut history = Vec::new();
+    record_lifecycle(
+        &path,
+        &mut history,
+        serde_json::json!({
+            "step":"cleanup during actual uncommitted restore","installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            "snapshot_cut":old,"captured_cut":cut,"required_rows_before":before,"required_rows_during":during,
+        }),
+    );
+    assert_eq!(
+        during, before,
+        "cleanup cannot use an obsolete minimum while restore holds the source lock"
+    );
+    restore.commit().await.unwrap();
+    db.execute("INSERT INTO restore_lock_source VALUES(3,'after-restore')")
+        .await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy='full'"],
+        "SELECT pgtrickle.refresh_stream_table('restore_lock_fast')",
+    )
+    .await
+    .unwrap();
+    let after: i64 = db.query_scalar(&needed).await;
+    record_lifecycle(
+        &path,
+        &mut history,
+        serde_json::json!({"step":"cleanup after committed rewind","required_rows":after,"target":lifecycle_state(&db.pool,"restore_lock_target").await}),
+    );
+    assert_eq!(
+        after, before,
+        "later cleanup must honor the published restored cut"
+    );
+    db.refresh_st("restore_lock_target").await;
+    for stream in ["restore_lock_target", "restore_lock_fast"] {
+        db.assert_st_matches_query(stream, "SELECT id,value FROM restore_lock_source")
+            .await;
+    }
+    let remaining: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    record_lifecycle(
+        &path,
+        &mut history,
+        serde_json::json!({"step":"protected catch-up completed","remaining_consumed_rows":remaining}),
+    );
+    assert_eq!(
+        remaining, 0,
+        "cleanup may reclaim history after both consumers catch up"
+    );
+}
+
+#[tokio::test]
+async fn test_snapshot_waits_for_committed_refresh_before_loading_frontier() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.execute_seq(&[
+        "CREATE TABLE snapshot_commit_source(id int PRIMARY KEY,value text)",
+        "INSERT INTO snapshot_commit_source VALUES(1,'old')",
+    ])
+    .await;
+    db.create_st(
+        "snapshot_commit_stream",
+        "SELECT id,value FROM snapshot_commit_source",
+        "24h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("UPDATE snapshot_commit_source SET value='new'")
+        .await;
+    let mut refresh = db.pool.begin().await.unwrap();
+    let refresh_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *refresh)
+        .await
+        .unwrap();
+    sqlx::raw_sql("SET LOCAL pg_trickle.refresh_strategy='full'; SELECT pgtrickle.refresh_stream_table('snapshot_commit_stream')")
+        .execute(&mut *refresh).await.unwrap();
+    let committed:serde_json::Value=sqlx::query_scalar("SELECT jsonb_build_object('rows',(SELECT jsonb_agg(jsonb_build_array(id,value) ORDER BY id) FROM snapshot_commit_stream),'frontier',frontier) FROM pgtrickle.pgt_stream_tables WHERE pgt_name='snapshot_commit_stream'")
+        .fetch_one(&mut *refresh).await.unwrap();
+    let mut snapshot_conn = db.pool.acquire().await.unwrap();
+    let snapshot_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *snapshot_conn)
+        .await
+        .unwrap();
+    let snapshot = tokio::spawn(async move {
+        sqlx::query_scalar::<_,String>("SELECT pgtrickle.snapshot_stream_table('snapshot_commit_stream','public.snapshot_commit_archive')")
+            .fetch_one(&mut *snapshot_conn).await
+    });
+    assert!(
+        db.wait_for_condition(
+            "snapshot waiting behind actual uncommitted full refresh",
+            &format!("SELECT {refresh_pid}=ANY(pg_blocking_pids({snapshot_pid}))"),
+            Duration::from_secs(10),
+            Duration::from_millis(20)
+        )
+        .await
+    );
+    assert!(
+        !snapshot.is_finished(),
+        "snapshot must be witnessed waiting before commit"
+    );
+    refresh.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(20), snapshot)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let archive:serde_json::Value=db.query_scalar("SELECT jsonb_build_object('rows',(SELECT jsonb_agg(jsonb_build_array(id,value) ORDER BY id) FROM snapshot_commit_archive),'frontier',frontier) FROM pgtrickle.pgt_snapshots WHERE snapshot_table='snapshot_commit_archive'").await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        std::path::Path::new(&directory).join("snapshot-committed-refresh.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            "refresh_pid":refresh_pid,"snapshot_pid":snapshot_pid,"witnessed_blocker":true,
+            "expected_committed":committed,"archive":archive,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        archive, committed,
+        "snapshot rows and metadata must describe the same committed refresh"
+    );
+}
+
+#[tokio::test]
+async fn test_consumer_initialization_does_not_cover_rows_missing_from_fixed_snapshot() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute("CREATE TABLE registration_source(id int PRIMARY KEY,value text NOT NULL)")
+        .await;
+    db.execute("CREATE TABLE registration_journal(id int PRIMARY KEY,value text NOT NULL)")
+        .await;
+    commit_row(
+        &db,
+        "registration_source",
+        "registration_journal",
+        1,
+        "baseline",
+    )
+    .await;
+    db.create_st(
+        "registration_existing",
+        "SELECT id,value FROM registration_source",
+        "24h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let oid = i64::from(db.table_oid("registration_source").await);
+    let buffer = db.change_buffer_table(oid).await;
+    let pending: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    assert_eq!(pending, 0, "baseline must have no pending captured rows");
+    let mut rejected = Vec::new();
+    for (index, isolation) in ["REPEATABLE READ", "SERIALIZABLE"].iter().enumerate() {
+        let mut caller = db.pool.begin().await.unwrap();
+        sqlx::query(AssertSqlSafe(format!(
+            "SET TRANSACTION ISOLATION LEVEL {isolation}"
+        )))
+        .execute(&mut *caller)
+        .await
+        .unwrap();
+        let pinned: i64 = sqlx::query_scalar("SELECT count(*) FROM registration_source")
+            .fetch_one(&mut *caller)
+            .await
+            .unwrap();
+        assert_eq!(pinned, index as i64 + 1);
+        let snapshot: String = sqlx::query_scalar("SELECT pg_current_snapshot()::text")
+            .fetch_one(&mut *caller)
+            .await
+            .unwrap();
+        commit_row(
+            &db,
+            "registration_source",
+            "registration_journal",
+            index as i32 + 2,
+            "committed-after-snapshot",
+        )
+        .await;
+        let captured_cut: String = db
+            .query_scalar(&format!(
+                "SELECT max(lsn)::text FROM {buffer} WHERE action IN ('I','D')"
+            ))
+            .await;
+        let error = sqlx::query("SELECT pgtrickle.create_stream_table(name=>'registration_new',query=>'SELECT id,value FROM registration_source',schedule=>'24h',refresh_mode=>'DIFFERENTIAL')")
+            .execute(&mut *caller).await.expect_err("fixed-snapshot initialization must fail before publishing a frontier").to_string();
+        assert!(
+            error.contains("READ COMMITTED") && error.contains("initialization"),
+            "{error}"
+        );
+        caller.rollback().await.unwrap();
+        assert!(db.query_scalar::<bool>("SELECT to_regclass('public.registration_new') IS NULL AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name='registration_new')").await);
+        rejected.push(serde_json::json!({"isolation":isolation,"pinned_snapshot":snapshot,"pinned_rows":pinned,"committed_writer_cut":captured_cut,"error":error,"partial_registration":false}));
+    }
+    db.create_st(
+        "registration_new",
+        "SELECT id,value FROM registration_source",
+        "24h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let initialized = lifecycle_state(&db.pool, "registration_new").await;
+    db.assert_st_matches_query(
+        "registration_new",
+        "SELECT id,value FROM registration_journal",
+    )
+    .await;
+    let before_refresh: i64 = db.query_scalar("SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='registration_new'").await;
+    commit_row(
+        &db,
+        "registration_source",
+        "registration_journal",
+        4,
+        "after-initialization",
+    )
+    .await;
+    let differential_cut: String = db
+        .query_scalar(&format!(
+            "SELECT max(lsn)::text FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy='differential'"],
+        "SELECT pgtrickle.refresh_stream_table('registration_new')",
+    )
+    .await
+    .unwrap();
+    let differential: (i64, String) = sqlx::query_as("SELECT refresh_id,action FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='registration_new' AND h.status='COMPLETED' ORDER BY refresh_id DESC LIMIT 1").fetch_one(&db.pool).await.unwrap();
+    assert!(differential.0 > before_refresh);
+    assert_eq!(differential.1, "DIFFERENTIAL");
+    let covered: bool = sqlx::query_scalar("SELECT (frontier->'sources'->$1::text->>'lsn')::pg_lsn >= $2::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_name='registration_new'")
+        .bind(oid.to_string()).bind(&differential_cut).fetch_one(&db.pool).await.unwrap();
+    assert!(
+        covered,
+        "differential retry must cover the committed writer cut"
+    );
+    let mut deferred = db.pool.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *deferred)
+        .await
+        .unwrap();
+    let _: i64 = sqlx::query_scalar("SELECT count(*) FROM registration_source")
+        .fetch_one(&mut *deferred)
+        .await
+        .unwrap();
+    commit_row(
+        &db,
+        "registration_source",
+        "registration_journal",
+        5,
+        "after-deferred-snapshot",
+    )
+    .await;
+    sqlx::query("SELECT pgtrickle.create_stream_table(name=>'registration_deferred',query=>'SELECT id,value FROM registration_source',schedule=>'24h',refresh_mode=>'DIFFERENTIAL',initialize=>false)")
+        .execute(&mut *deferred).await.unwrap();
+    deferred.commit().await.unwrap();
+    assert!(db.query_scalar::<bool>("SELECT NOT is_populated AND frontier IS NULL FROM pgtrickle.pgt_stream_tables WHERE pgt_name='registration_deferred'").await);
+    db.refresh_st("registration_deferred").await;
+    db.assert_st_matches_query(
+        "registration_deferred",
+        "SELECT id,value FROM registration_journal",
+    )
+    .await;
+    db.refresh_st("registration_new").await;
+    let refreshed = lifecycle_state(&db.pool, "registration_new").await;
+    let expected: serde_json::Value = db
+        .query_scalar("SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM registration_journal t")
+        .await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        std::path::Path::new(&directory).join("registration-fixed-snapshot.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            "rejected":rejected,
+            "differential_history":differential,"differential_writer_cut":differential_cut,"frontier_covers_cut":covered,
+            "initialized":initialized,"refreshed":refreshed,"expected_journal":expected,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    db.assert_st_matches_query(
+        "registration_new",
+        "SELECT id,value FROM registration_journal",
+    )
+    .await;
+}
+
+async fn disable_wal_scheduler(fixture: &Fixture) {
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    assert!(fixture.db.wait_for_condition("idle WAL slot", &format!(
+        "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{}' AND NOT active)",fixture.slot
+    ), WAIT, Duration::from_millis(25)).await);
+}
+
+async fn retirement_pending(fixture: &Fixture) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name=$1)",
+    )
+    .bind(&fixture.slot)
+    .fetch_one(&fixture.db.pool)
+    .await
+    .unwrap()
+}
+
+async fn slot_present(db: &E2eDb, slot: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)")
+        .bind(slot)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+async fn wait_for_retirement(fixture: &Fixture) {
+    assert!(fixture.db.wait_for_condition("committed slot retirement", &format!(
+        "SELECT NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{0}') AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{0}')",fixture.slot
+    ), WAIT, Duration::from_millis(25)).await);
+}
+
+#[tokio::test]
+async fn test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash() {
+    let mut fixture = setup_wal_fixture("retirement_crash").await;
+    disable_wal_scheduler(&fixture).await;
+    assert!(
+        !fixture
+            .db
+            .query_scalar::<bool>("SELECT pg_try_advisory_lock(1346851927,0)")
+            .await,
+        "live scheduler must retain the local pipeline session mutex"
+    );
+    fixture
+        .db
+        .execute(&format!(
+            "SELECT pgtrickle.drop_stream_table('{}')",
+            fixture.stream
+        ))
+        .await;
+    assert!(retirement_pending(&fixture).await);
+    assert!(
+        slot_present(&fixture.db, &fixture.slot).await,
+        "API commit cannot physically drop the slot"
+    );
+    fixture.db.pool = restart_and_check_named(&fixture, "wal_retirement_crash_identity").await;
+    assert!(
+        retirement_pending(&fixture).await,
+        "retirement intent must survive a retained restart"
+    );
+    assert!(slot_present(&fixture.db, &fixture.slot).await);
+
+    let phase = "after_slot_retirement";
+    let (barrier, pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
+    set_wal_phase(&fixture.db, fixture.oid, phase, &fixture.slot).await;
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    wait_for_wal_barrier(&fixture.db, fixture.oid, phase, pid).await;
+    assert!(
+        !slot_present(&fixture.db, &fixture.slot).await,
+        "witness must follow actual physical DROP"
+    );
+    assert!(
+        retirement_pending(&fixture).await,
+        "intent deletion is still uncommitted"
+    );
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    clear_wal_phase(&fixture.db).await;
+    for args in [
+        vec!["kill", "--signal", "KILL", fixture.db.container_id()],
+        vec!["start", fixture.db.container_id()],
+    ] {
+        let output = tokio::process::Command::new("docker")
+            .args(args)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "retirement crash/restart failed");
+    }
+    drop(barrier);
+    fixture.db.pool = fixture.db.reconnect_after_restart().await;
+    assert!(
+        retirement_pending(&fixture).await,
+        "aborted worker deletion must retain committed intent"
+    );
+    assert!(!slot_present(&fixture.db, &fixture.slot).await);
+    assert_eq!(
+        identity(
+            &fixture.db,
+            "wal_retirement_crash_identity",
+            fixture.db.container_id()
+        )
+        .await,
+        fixture.identity
+    );
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    wait_for_retirement(&fixture).await;
+}
+
+#[tokio::test]
+async fn test_slot_retirement_keeps_active_stale_and_mismatched_slots() {
+    let fixture = setup_wal_fixture("retirement_kept").await;
+    disable_wal_scheduler(&fixture).await;
+    // Exercise each guard in the actual worker, including SQL NULL physical-slot fields.
+    for (slot, owner, create) in [
+        (fixture.slot.clone(), "instance_id", None),
+        (
+            "retirement_stale".into(),
+            "'stale-owner'",
+            Some("SELECT pg_create_logical_replication_slot('retirement_stale','test_decoding')"),
+        ),
+        (
+            "retirement_plugin".into(),
+            "instance_id",
+            Some("SELECT pg_create_logical_replication_slot('retirement_plugin','pgoutput')"),
+        ),
+        (
+            "retirement_physical".into(),
+            "instance_id",
+            Some("SELECT pg_create_physical_replication_slot('retirement_physical')"),
+        ),
+    ] {
+        if let Some(sql) = create {
+            fixture.db.execute(sql).await;
+        }
+        fixture.db.execute(&format!("INSERT INTO pgtrickle.pgt_wal_slot_retirements(slot_name,source_relid,capture_instance_id) SELECT '{slot}',{}::oid,{owner} FROM pgtrickle.pgt_capture_instance",fixture.oid)).await;
+        let phase = "slot_retirement_kept";
+        let (mut barrier, pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
+        set_wal_phase(&fixture.db, fixture.oid, phase, &slot).await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        wait_for_wal_barrier(&fixture.db, fixture.oid, phase, pid).await;
+        assert!(
+            slot_present(&fixture.db, &slot).await,
+            "guard must preserve {slot}"
+        );
+        assert!(fixture.db.query_scalar::<bool>(&format!("SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{slot}')")).await,
+            "mismatch must retain its diagnostic intent");
+        assert_eq!(
+            cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
+            Some("WAL")
+        );
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+            .await;
+        clear_wal_phase(&fixture.db).await;
+        release_wal_barrier(&mut barrier, fixture.oid, phase).await;
+        drop(barrier);
+        // Block until the witnessed worker transaction releases its intent lock.
+        fixture
+            .db
+            .execute(&format!(
+                "DELETE FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{slot}'"
+            ))
+            .await;
+        if create.is_some() {
+            fixture
+                .db
+                .execute(&format!("SELECT pg_drop_replication_slot('{slot}')"))
+                .await;
+        }
+    }
+    let before_conflict = lifecycle_state(&fixture.db.pool, &fixture.stream).await;
+    fixture.db.execute(&format!("INSERT INTO pgtrickle.pgt_wal_slot_retirements(slot_name,source_relid,capture_instance_id) VALUES('{}',{}::oid,'previous-owner')",fixture.slot,fixture.oid)).await;
+    let rejected = sqlx::query("SELECT pgtrickle.drop_stream_table($1)")
+        .bind(&fixture.stream)
+        .execute(&fixture.db.pool)
+        .await
+        .expect_err("a stale retirement owner cannot be rebound by API cleanup");
+    assert!(
+        rejected
+            .to_string()
+            .contains("pending reservation for another source or capture owner")
+    );
+    assert_eq!(
+        lifecycle_state(&fixture.db.pool, &fixture.stream).await,
+        before_conflict
+    );
+    assert!(slot_present(&fixture.db, &fixture.slot).await);
+    let queued_owner: String = sqlx::query_scalar(
+        "SELECT capture_instance_id FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name=$1",
+    )
+    .bind(&fixture.slot)
+    .fetch_one(&fixture.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(queued_owner, "previous-owner");
+    fixture
+        .db
+        .execute(&format!(
+            "DELETE FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{}'",
+            fixture.slot
+        ))
+        .await;
+    fixture
+        .db
+        .execute(&format!(
+            "SELECT pgtrickle.drop_stream_table('{}')",
+            fixture.stream
+        ))
+        .await;
+    let phase = "before_slot_retirement";
+    let (mut barrier, pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
+    set_wal_phase(&fixture.db, fixture.oid, phase, &fixture.slot).await;
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    let worker = wait_for_wal_barrier(&fixture.db, fixture.oid, phase, pid).await;
+    let mut recovery = fixture.db.pool.acquire().await.unwrap();
+    let recovery_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *recovery)
+        .await
+        .unwrap();
+    let recovery_task = tokio::spawn(async move {
+        let result = sqlx::query("SELECT pgtrickle.recover_capture_instance()")
+            .execute(&mut *recovery)
+            .await;
+        result.expect_err("the blocked recovery call must be cancelled");
+    });
+    assert!(
+        fixture
+            .db
+            .wait_for_condition(
+                "capture recovery blocked by retirement owner lock",
+                &format!("SELECT {worker}=ANY(pg_blocking_pids({recovery_pid}))"),
+                WAIT,
+                Duration::from_millis(25)
+            )
+            .await
+    );
+    assert!(
+        fixture
+            .db
+            .query_scalar::<bool>(&format!("SELECT pg_cancel_backend({recovery_pid})"))
+            .await
+    );
+    recovery_task.await.unwrap();
+    clear_wal_phase(&fixture.db).await;
+    release_wal_barrier(&mut barrier, fixture.oid, phase).await;
+    drop(barrier);
+    wait_for_retirement(&fixture).await;
+}
+
+#[tokio::test]
+async fn test_dropped_wal_source_retains_retirement_until_last_consumer_commits() {
+    for legacy in [false, true] {
+        let fixture = setup_wal_fixture(if legacy {
+            "retirement_source_drop_legacy"
+        } else {
+            "retirement_source_drop"
+        })
+        .await;
+        disable_wal_scheduler(&fixture).await;
+        if legacy {
+            fixture.db.execute(&format!("UPDATE pgtrickle.pgt_dependencies SET slot_name=NULL WHERE source_relid={}::oid",fixture.oid)).await;
+        }
+        fixture
+            .db
+            .execute(&format!("DROP TABLE {}", fixture.source))
+            .await;
+        assert!(
+            retirement_pending(&fixture).await,
+            "source-drop hook must retain exact slot provenance"
+        );
+        let phase = "slot_retirement_kept";
+        let (mut barrier, pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
+        set_wal_phase(&fixture.db, fixture.oid, phase, &fixture.slot).await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        wait_for_wal_barrier(&fixture.db, fixture.oid, phase, pid).await;
+        assert!(
+            slot_present(&fixture.db, &fixture.slot).await,
+            "source removal cannot retire a surviving WAL consumer's slot"
+        );
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+            .await;
+        clear_wal_phase(&fixture.db).await;
+        release_wal_barrier(&mut barrier, fixture.oid, phase).await;
+        drop(barrier);
+        let mut caller = fixture.db.pool.begin().await.unwrap();
+        sqlx::query("SELECT pgtrickle.drop_stream_table($1)")
+            .bind(&fixture.stream)
+            .execute(&mut *caller)
+            .await
+            .unwrap();
+        caller.rollback().await.unwrap();
+        assert!(slot_present(&fixture.db, &fixture.slot).await);
+        assert!(retirement_pending(&fixture).await);
+        fixture
+            .db
+            .execute(&format!(
+                "SELECT pgtrickle.drop_stream_table('{}')",
+                fixture.stream
+            ))
+            .await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        wait_for_retirement(&fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn test_deferred_consumer_registration_rollback_preserves_wal_slot() {
+    let fixture = setup_wal_fixture("deferred_rollback").await;
+    disable_wal_scheduler(&fixture).await;
+    let baseline = lifecycle_state(&fixture.db.pool, &fixture.stream).await;
+    let mut caller = fixture.db.pool.begin().await.unwrap();
+    sqlx::query(AssertSqlSafe(format!("SELECT pgtrickle.create_stream_table(name=>'deferred_abandoned',query=>'SELECT id,value FROM {}',schedule=>'24h',refresh_mode=>'DIFFERENTIAL',initialize=>false)",fixture.source)))
+        .execute(&mut *caller).await.unwrap();
+    caller.rollback().await.unwrap();
+    assert!(slot_present(&fixture.db, &fixture.slot).await);
+    assert!(
+        !retirement_pending(&fixture).await,
+        "rollback must discard retirement intent"
+    );
+    assert_eq!(
+        cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
+        Some("WAL")
+    );
+    assert_eq!(
+        lifecycle_state(&fixture.db.pool, &fixture.stream).await,
+        baseline
+    );
+}
+
+#[tokio::test]
+async fn test_replacement_source_cannot_reassign_pending_slot_retirement() {
+    let fixture = setup_wal_fixture("retirement_replacement").await;
+    disable_wal_scheduler(&fixture).await;
+    fixture
+        .db
+        .execute(&format!("DROP TABLE {}", fixture.source))
+        .await;
+    let original:(i64,String)=sqlx::query_as("SELECT source_relid::bigint,capture_instance_id FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name=$1")
+        .bind(&fixture.slot).fetch_one(&fixture.db.pool).await.unwrap();
+    assert_eq!(original.0, fixture.oid);
+    fixture
+        .db
+        .execute(&format!(
+            "CREATE TABLE {}(id int PRIMARY KEY,value text NOT NULL)",
+            fixture.source
+        ))
+        .await;
+    fixture
+        .db
+        .execute(&format!(
+            "ALTER TABLE {} REPLICA IDENTITY FULL",
+            fixture.source
+        ))
+        .await;
+    fixture
+        .db
+        .execute(&format!(
+            "INSERT INTO {} VALUES(1,'replacement')",
+            fixture.source
+        ))
+        .await;
+    let replacement_oid = i64::from(fixture.db.table_oid(&fixture.source).await);
+    assert_ne!(replacement_oid, fixture.oid);
+    let registration=sqlx::query(AssertSqlSafe(format!("SELECT pgtrickle.create_stream_table(name=>'retirement_replacement_new',query=>'SELECT id,value FROM {}',schedule=>'24h',refresh_mode=>'DIFFERENTIAL',cdc_mode=>'wal')",fixture.source)))
+        .execute(&fixture.db.pool).await;
+    let after:(i64,String)=sqlx::query_as("SELECT source_relid::bigint,capture_instance_id FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name=$1")
+        .bind(&fixture.slot).fetch_one(&fixture.db.pool).await.unwrap();
+    let state:String=fixture.db.query_scalar("SELECT jsonb_build_object(
+        'dependencies',(SELECT jsonb_agg(to_jsonb(d)) FROM pgtrickle.pgt_dependencies d),
+        'tracking',(SELECT jsonb_agg(to_jsonb(t)) FROM pgtrickle.pgt_change_tracking t),
+        'slots',(SELECT jsonb_agg(jsonb_build_object('slot_name',slot_name,'plugin',plugin,'database',database,'confirmed_flush_lsn',confirmed_flush_lsn)) FROM pg_replication_slots)
+    )::text").await;
+    let cleanup = sqlx::query("SELECT pgtrickle.drop_stream_table($1)")
+        .bind(&fixture.stream)
+        .execute(&fixture.db.pool)
+        .await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        std::path::Path::new(&directory).join("slot-retirement-source-replacement.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            "old_oid":fixture.oid,"replacement_oid":replacement_oid,"slot":fixture.slot,
+        "state_after_registration":serde_json::from_str::<serde_json::Value>(&state).unwrap(),
+            "intent_before":original,"intent_after_registration":after,
+            "registration_error":registration.as_ref().err().map(ToString::to_string),
+            "old_consumer_cleanup_error":cleanup.as_ref().err().map(ToString::to_string),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        cleanup.is_ok(),
+        "replacement registration must preserve old-consumer cleanup: {cleanup:?}"
+    );
+    assert!(
+        registration.as_ref().err().is_some_and(|error| error
+            .to_string()
+            .contains("pending reservation for another source or capture owner")),
+        "a replacement cannot take over a pending slot reservation"
+    );
+    assert_eq!(
+        after, original,
+        "a committed retirement intent cannot change source or owner"
+    );
+    assert!(slot_present(&fixture.db, &fixture.slot).await);
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    wait_for_retirement(&fixture).await;
+    fixture.db.execute(&format!("SELECT pgtrickle.create_stream_table(name=>'retirement_replacement_new',query=>'SELECT id,value FROM {}',schedule=>'24h',refresh_mode=>'DIFFERENTIAL',cdc_mode=>'wal')",fixture.source)).await;
+    wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+    fixture
+        .db
+        .execute(&format!(
+            "INSERT INTO {} VALUES(2,'replacement-after-wal')",
+            fixture.source
+        ))
+        .await;
+    wait_for_receipt(
+        &fixture.db.pool,
+        replacement_oid,
+        "ACKNOWLEDGED",
+        "replacement-after-wal",
+    )
+    .await;
+    fixture.db.refresh_st("retirement_replacement_new").await;
+    fixture
+        .db
+        .assert_st_matches_query(
+            "retirement_replacement_new",
+            &format!("SELECT id,value FROM {}", fixture.source),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn test_slot_retirement_keeps_null_named_reference_across_source_oids() {
+    let fixture = setup_wal_fixture("retirement_cross_oid").await;
+    disable_wal_scheduler(&fixture).await;
+    fixture
+        .db
+        .execute(&format!("DROP TABLE {}", fixture.source))
+        .await;
+    fixture
+        .db
+        .execute(&format!(
+            "CREATE TABLE {}(id int PRIMARY KEY,value text)",
+            fixture.source
+        ))
+        .await;
+    let replacement_oid = i64::from(fixture.db.table_oid(&fixture.source).await);
+    assert_ne!(replacement_oid, fixture.oid);
+    // Exercise the legacy catalog shape explicitly; a dropped source normally
+    // retains its original slot_name until retirement is committed.
+    fixture
+        .db
+        .execute(&format!(
+            "UPDATE pgtrickle.pgt_dependencies SET slot_name=NULL WHERE source_relid={}::oid",
+            fixture.oid
+        ))
+        .await;
+    assert!(fixture.db.query_scalar::<bool>(&format!("SELECT cdc_mode='WAL' AND slot_name IS NULL AND source_stable_name IS NOT NULL FROM pgtrickle.pgt_dependencies WHERE source_relid={}::oid",fixture.oid)).await);
+    // Qualify the reassigned-intent shape observed on e0008f1 independently of new admission.
+    fixture.db.execute(&format!("UPDATE pgtrickle.pgt_wal_slot_retirements SET source_relid={replacement_oid}::oid WHERE slot_name='{}'",fixture.slot)).await;
+    let phase = "slot_retirement_kept";
+    let (mut barrier, pid) = hold_wal_barrier(&fixture.db, replacement_oid, phase).await;
+    set_wal_phase(&fixture.db, replacement_oid, phase, &fixture.slot).await;
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    let kept = format!(
+        "EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.application_name='pgt_wal_receipt:{replacement_oid}:{phase}' AND {pid}=ANY(pg_blocking_pids(a.pid)))"
+    );
+    assert!(fixture.db.wait_for_condition("cross-OID retirement decision",&format!(
+        "SELECT {kept} OR NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{0}') OR NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{0}')",fixture.slot
+    ),WAIT,Duration::from_millis(25)).await);
+    let slot_preserved = slot_present(&fixture.db, &fixture.slot).await;
+    let intent_preserved = retirement_pending(&fixture).await;
+    let kept_witness = fixture
+        .db
+        .query_scalar::<bool>(&format!("SELECT {kept}"))
+        .await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(std::path::Path::new(&directory).join("slot-retirement-cross-oid-reference.json"),serde_json::to_vec_pretty(&serde_json::json!({
+        "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+        "old_oid":fixture.oid,"queued_oid":replacement_oid,"slot":fixture.slot,
+        "old_dependency":"WAL with NULL slot_name and durable stable name",
+        "slot_preserved":slot_preserved,"intent_preserved":intent_preserved,"kept_witness":kept_witness,
+    })).unwrap()).unwrap();
+    assert!(
+        slot_preserved && intent_preserved && kept_witness,
+        "a cross-OID NULL-name WAL reference must prevent actual retirement"
+    );
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    fixture
+        .db
+        .execute(&format!(
+            "SELECT pgtrickle.drop_stream_table('{}')",
+            fixture.stream
+        ))
+        .await;
+    clear_wal_phase(&fixture.db).await;
+    release_wal_barrier(&mut barrier, replacement_oid, phase).await;
+    drop(barrier);
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    wait_for_retirement(&fixture).await;
+}
+
+#[tokio::test]
+async fn test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash() {
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    configure_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    for sql in [
+        "CREATE TABLE retirement_orphan_source(id int PRIMARY KEY,value text)",
+        "ALTER TABLE retirement_orphan_source REPLICA IDENTITY FULL",
+        "INSERT INTO retirement_orphan_source VALUES(1,'baseline')",
+    ] {
+        db.execute(sql).await;
+    }
+    db.execute("SELECT pgtrickle.create_stream_table(name=>'retirement_orphan_stream',query=>'SELECT id,value FROM retirement_orphan_source',schedule=>'24h',refresh_mode=>'DIFFERENTIAL',cdc_mode=>'wal')").await;
+    let oid = i64::from(db.table_oid("retirement_orphan_source").await);
+    let stable: String = db
+        .query_scalar(&format!("SELECT pgtrickle.source_stable_name({oid}::oid)"))
+        .await;
+    let slot = format!("pgtrickle_{stable}");
+    let (mut before, before_pid) = hold_wal_barrier(&db, oid, "before_slot_adoption").await;
+    set_wal_phase(&db, oid, "before_slot_adoption", &slot).await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    wait_for_wal_barrier(&db, oid, "before_slot_adoption", before_pid).await;
+    assert!(
+        slot_present(&db, &slot).await,
+        "pristine creation must precede the witness"
+    );
+    assert!(db.query_scalar::<bool>(&format!("SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{slot}')")).await,
+        "creation must already have a committed reservation");
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.execute("SELECT pgtrickle.drop_stream_table('retirement_orphan_stream')")
+        .await;
+    release_wal_barrier(&mut before, oid, "before_slot_adoption").await;
+    drop(before);
+    let rejection = format!(
+        "slot '{slot}' reservation no longer matches current source, consumer or capture ownership"
+    );
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let logs = tokio::process::Command::new("docker")
+            .args(["logs", "--tail", "100", db.container_id()])
+            .output()
+            .await
+            .unwrap();
+        assert!(logs.status.success(), "inspect actual adoption rejection");
+        if String::from_utf8_lossy(&logs.stderr).contains(&rejection) {
+            eprintln!("[slot adoption] rejected removed consumer: {rejection}");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "worker did not reject stale adoption: {}",
+            String::from_utf8_lossy(&logs.stderr)
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    clear_wal_phase(&db).await;
+    for args in [
+        vec!["kill", "--signal", "KILL", db.container_id()],
+        vec!["start", db.container_id()],
+    ] {
+        let output = tokio::process::Command::new("docker")
+            .args(args)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "orphan retained crash/restart failed"
+        );
+    }
+    db.pool = db.reconnect_after_restart().await;
+    assert!(slot_present(&db, &slot).await);
+    assert!(db.query_scalar::<bool>(&format!("SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{slot}')")).await);
+    db.alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    assert!(db.wait_for_condition("orphan retired after rejected adoption",&format!(
+        "SELECT NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{slot}') AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{slot}')"
+    ),WAIT,Duration::from_millis(25)).await);
+}
+
+#[tokio::test]
+async fn test_last_wal_consumer_drop_rollback_preserves_slot_and_frontier() {
+    let fixture = setup_wal_fixture("drop_rollback").await;
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    assert!(fixture.db.wait_for_condition("idle WAL slot before rollback", &format!(
+        "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{}' AND NOT active)",fixture.slot
+    ), WAIT, Duration::from_millis(25)).await);
+    let baseline = lifecycle_state(&fixture.db.pool, &fixture.stream).await;
+    let mut caller = fixture.db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pgtrickle.drop_stream_table($1)")
+        .bind(&fixture.stream)
+        .execute(&mut *caller)
+        .await
+        .unwrap();
+    caller.rollback().await.unwrap();
+    let restored = lifecycle_state(&fixture.db.pool, &fixture.stream).await;
+    let mode = cdc_mode(&fixture.db, &fixture.source).await;
+    let slot_preserved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name=$1 AND plugin='test_decoding')")
+        .bind(&fixture.slot).fetch_one(&fixture.db.pool).await.unwrap();
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        std::path::Path::new(&directory).join("slot-drop-rollback.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            "baseline":baseline,"restored":restored,"mode":mode,"slot":fixture.slot,
+            "slot_preserved":slot_preserved,"scheduler_disabled":true,"slot_was_idle":true,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored, baseline,
+        "rollback must restore rows and frontier"
+    );
+    assert_eq!(mode.as_deref(), Some("WAL"));
+    assert!(
+        slot_preserved,
+        "rollback must preserve the restored consumer's WAL retention boundary"
+    );
+}
+
+#[tokio::test]
+async fn test_consumer_fixed_snapshot_rejection_preserves_existing_wal_slot() {
+    let fixture = setup_wal_fixture("registration_reject").await;
+    let mut rejected = Vec::new();
+    for isolation in ["REPEATABLE READ", "SERIALIZABLE"] {
+        let mut caller = fixture.db.pool.begin().await.unwrap();
+        sqlx::query(AssertSqlSafe(format!(
+            "SET TRANSACTION ISOLATION LEVEL {isolation}"
+        )))
+        .execute(&mut *caller)
+        .await
+        .unwrap();
+        let _: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT count(*) FROM {}",
+            fixture.source
+        )))
+        .fetch_one(&mut *caller)
+        .await
+        .unwrap();
+        let error = sqlx::query(AssertSqlSafe(format!("SELECT pgtrickle.create_stream_table(name=>'registration_rejected',query=>'SELECT id,value FROM {}',schedule=>'24h',refresh_mode=>'DIFFERENTIAL')",fixture.source)))
+            .execute(&mut *caller).await.expect_err("reject before CDC setup can drop the existing slot").to_string();
+        assert!(error.contains("READ COMMITTED"), "{error}");
+        caller.rollback().await.unwrap();
+        let slot_preserved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name=$1 AND plugin='test_decoding')")
+            .bind(&fixture.slot).fetch_one(&fixture.db.pool).await.unwrap();
+        assert!(slot_preserved);
+        assert_eq!(
+            cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
+            Some("WAL")
+        );
+        rejected.push(serde_json::json!({"isolation":isolation,"error":error,"slot_preserved":slot_preserved}));
+    }
+    commit_row(
+        &fixture.db,
+        &fixture.source,
+        &fixture.journal,
+        2,
+        "after-rejected-registration",
+    )
+    .await;
+    wait_for_receipt(
+        &fixture.db.pool,
+        fixture.oid,
+        "ACKNOWLEDGED",
+        "after-rejected-registration",
+    )
+    .await;
+    wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(std::path::Path::new(&directory).join("registration-wal-slot.json"),serde_json::to_vec_pretty(&serde_json::json!({
+        "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+        "slot":fixture.slot,"rejected":rejected,"subsequent_source_acknowledged":true,"exact_journal":true,
+    })).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn test_restore_after_consumed_history_cleanup_reinitializes_before_catchup() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute("CREATE TABLE restore_history_source(id int PRIMARY KEY,value text NOT NULL)")
+        .await;
+    db.execute("INSERT INTO restore_history_source VALUES(1,'old')")
+        .await;
+    db.create_st(
+        "restore_history_stream",
+        "SELECT id,value FROM restore_history_source",
+        "24h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let baseline = lifecycle_state(&db.pool, "restore_history_stream").await;
+    let snapshot: String = db
+        .query_scalar("SELECT pgtrickle.snapshot_stream_table('restore_history_stream','public.restore_history_archive')")
+        .await;
+    db.execute_seq(&[
+        "UPDATE restore_history_source SET value='new' WHERE id=1",
+        "INSERT INTO restore_history_source VALUES(2,'later')",
+    ])
+    .await;
+    let oid = i64::from(db.table_oid("restore_history_source").await);
+    let buffer = db.change_buffer_table(oid).await;
+    let captured: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    assert!(captured > 0, "committed changes must exist before cleanup");
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy='full'"],
+        "SELECT pgtrickle.refresh_stream_table('restore_history_stream')",
+    )
+    .await
+    .unwrap();
+    db.assert_st_matches_query(
+        "restore_history_stream",
+        "SELECT id,value FROM restore_history_source",
+    )
+    .await;
+    let retained: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    assert_eq!(
+        retained, 0,
+        "ordinary full-refresh cleanup must remove consumed history"
+    );
+    sqlx::query("SELECT pgtrickle.restore_from_snapshot('restore_history_stream',$1)")
+        .bind(&snapshot)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let restored = lifecycle_state(&db.pool, "restore_history_stream").await;
+    assert_eq!(
+        restored, baseline,
+        "restore must retain the snapshot rows/frontier pair"
+    );
+    let needs_reinit: bool = db
+        .query_scalar("SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name='restore_history_stream'")
+        .await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy='differential'"],
+        "SELECT pgtrickle.refresh_stream_table('restore_history_stream')",
+    )
+    .await
+    .unwrap();
+    let recovered = lifecycle_state(&db.pool, "restore_history_stream").await;
+    let action: String = db.query_scalar("SELECT action FROM pgtrickle.pgt_refresh_history WHERE pgt_id=(SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name='restore_history_stream') AND status='COMPLETED' ORDER BY refresh_id DESC LIMIT 1").await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(std::path::Path::new(&directory).join("restore-missing-history.json"),serde_json::to_vec_pretty(&serde_json::json!({
+        "scenario":"restore-after-ordinary-cleanup","installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+        "captured_rows":captured,"retained_after_cleanup":retained,"snapshot_state":baseline,
+        "restored_state":restored,"restored_needs_reinit":needs_reinit,"recovered_state":recovered,
+        "expected_rows":[[1,"new"],[2,"later"]],"refresh_action":action,
+    })).unwrap()).unwrap();
+    db.assert_st_matches_query(
+        "restore_history_stream",
+        "SELECT id,value FROM restore_history_source",
+    )
+    .await;
+    assert!(
+        needs_reinit,
+        "missing history requires protected reinitialization"
+    );
+    assert_eq!(action, "REINITIALIZE");
+}
+
+/// The first failing history is retained with its seed, mutations and states.
+#[tokio::test]
+async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal() {
+    use e2e::property_support::{SeededRng, TraceConfig};
+    let config = TraceConfig::from_env();
+    let replay_plan = std::env::var("PGT_LIFECYCLE_REPLAY_PLAN").ok().map(|path| {
+        let bytes = std::fs::read(&path).expect("read lifecycle replay plan");
+        let plan: Vec<LifecycleMutation> =
+            serde_json::from_slice(&bytes).expect("parse lifecycle replay plan");
+        assert!(
+            !plan.is_empty(),
+            "lifecycle replay plan must contain a mutation"
+        );
+        plan
+    });
+    let cycles = replay_plan
+        .as_ref()
+        .map_or(config.cycles, |plan| plan.len());
+    let seeds = config.seeds(0x1219_0001);
+    if replay_plan.is_some() {
+        assert_eq!(seeds.len(), 1, "replay plans require one fixed seed");
+    }
+    let wal_phases = [
+        "before_receipt",
+        "before_replay",
+        "before_ack",
+        "after_slot_advance",
+    ];
+    if seeds.len() >= wal_phases.len() {
+        let covered = seeds
+            .iter()
+            .map(|seed| wal_phases[(seed % wal_phases.len() as u64) as usize])
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            covered.len(),
+            wal_phases.len(),
+            "the lifecycle seed selection must cover each WAL interruption phase"
+        );
+    }
+    for seed in seeds {
+        // The seed keeps the selected interruption phase stable during replay and shrinking.
+        let wal_phase = wal_phases[(seed % wal_phases.len() as u64) as usize];
+        let db = E2eDb::new_dedicated().await.with_extension().await;
+        configure_scheduler(&db).await;
+        db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+            .await;
+        db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+            .await;
+        let mode = if seed & 1 == 0 { "row" } else { "statement" };
+        db.alter_system_set_and_wait("pg_trickle.cdc_trigger_mode", &format!("'{mode}'"), mode)
+            .await;
+        let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+            .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = std::path::Path::new(&directory).join(format!("history-{seed:016x}.json"));
+        let revision = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(revision.status.success());
+        let mut history = Vec::new();
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "seed":seed, "cycles":cycles, "revision":String::from_utf8(revision.stdout).unwrap().trim(),
+                "server_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").unwrap_or_else(|_|"unbound".into()),
+                "configuration":{"capture":"trigger","trigger_mode":mode,"capture_handoff":"trigger-to-WAL after generated cycles","wal_interruption_phase":wal_phase,"compact_threshold":1},
+                "initial_rows":if seed & 1 != 0 {serde_json::json!([[0,"baseline"]])} else {serde_json::json!([])},
+                "query":"SELECT id,value FROM history_source",
+                "container":db.container_id(), "minimization":"preserve the first failing trace; shrink_recovery_history.py reduces mutation cycles, operation kinds and operands while retaining the tagged invariant",
+            }),
+        );
+        db.execute("CREATE TABLE history_source(id INT PRIMARY KEY,value TEXT NOT NULL)")
+            .await;
+        db.execute("ALTER TABLE history_source REPLICA IDENTITY FULL")
+            .await;
+        db.execute("CREATE TABLE history_journal(id INT PRIMARY KEY,value TEXT NOT NULL)")
+            .await;
+        db.execute("ALTER TABLE history_source REPLICA IDENTITY FULL")
+            .await;
+        create_identity_sentinel(&db, "history_identity", &seed.to_string()).await;
+        if seed & 1 != 0 {
+            commit_row(&db, "history_source", "history_journal", 0, "baseline").await;
+        }
+        for stream in ["history_slow", "history_fast"] {
+            db.create_st(
+                stream,
+                "SELECT id,value FROM history_source",
+                "1h",
+                "DIFFERENTIAL",
+            )
+            .await;
+        }
+        let cluster_identity = identity(&db, "history_identity", db.container_id()).await;
+        let mut fixture = Fixture {
+            oid: i64::from(db.table_oid("history_source").await),
+            db,
+            source: "history_source".into(),
+            stream: "history_fast".into(),
+            journal: "history_journal".into(),
+            slot: String::new(),
+            identity: cluster_identity,
+        };
+        let capture = cdc_mode(&fixture.db, &fixture.source).await;
+        assert_eq!(capture.as_deref(), Some("TRIGGER"));
+        let triggers: Vec<String> = sqlx::query_scalar(
+            "SELECT pg_get_triggerdef(oid) FROM pg_trigger \
+             WHERE tgrelid=$1::oid AND NOT tgisinternal AND (tgtype & 28)<>0 ORDER BY oid",
+        )
+        .bind(fixture.oid)
+        .fetch_all(&fixture.db.pool)
+        .await
+        .unwrap();
+        assert!(!triggers.is_empty());
+        let expected_mode = if mode == "row" {
+            "FOR EACH ROW"
+        } else {
+            "FOR EACH STATEMENT"
+        };
+        assert!(
+            triggers
+                .iter()
+                .all(|trigger| trigger.contains(expected_mode))
+        );
+        let settings: (String, String, String, String) = sqlx::query_as(
+            "SELECT current_setting('fsync'),current_setting('synchronous_commit'), \
+             current_setting('full_page_writes'),pg_postmaster_start_time()::text",
+        )
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (&*settings.0, &*settings.1, &*settings.2),
+            ("on", "on", "on")
+        );
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "step":"capture/durability witness","capture":capture,"triggers":triggers,
+                "fsync":settings.0,"synchronous_commit":settings.1,"full_page_writes":settings.2,
+                "postmaster_start":settings.3,
+            }),
+        );
+        let baseline = lifecycle_state(&fixture.db.pool, &fixture.stream).await;
+        let slow_baseline = lifecycle_state(&fixture.db.pool, "history_slow").await;
+        let buffer: String = fixture
+            .db
+            .query_scalar(&format!(
+                "SELECT format('%I.%I',current_setting('pg_trickle.change_buffer_schema'), \
+             'changes_' || coalesce(source_stable_name,source_relid::text)) \
+             FROM pgtrickle.pgt_change_tracking WHERE source_relid={}::oid",
+                fixture.oid
+            ))
+            .await;
+        let snapshot_sql = if seed & 1 == 0 {
+            "SELECT pgtrickle.snapshot_stream_table('history_fast','public.history_archive')"
+        } else {
+            "SELECT pgtrickle.snapshot_stream_table('history_fast')"
+        };
+        let snapshot: String = fixture.db.query_scalar(snapshot_sql).await;
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"snapshot","sql":snapshot_sql,"name":snapshot,"state":baseline}),
+        );
+        let mut rng = SeededRng::new(seed);
+        let mut ids = if seed & 1 != 0 { vec![0] } else { vec![] };
+        for cycle in 1..=cycles {
+            let mutation = if let Some(plan) = &replay_plan {
+                plan[cycle - 1]
+            } else {
+                let value = rng.i32_range(-1000, 1000);
+                let choice = rng.usize_range(0, 2);
+                if ids.is_empty() || choice == 0 {
+                    let id = i32::try_from(cycle).unwrap();
+                    ids.push(id);
+                    LifecycleMutation {
+                        kind: LifecycleMutationKind::Insert,
+                        id,
+                        value,
+                    }
+                } else {
+                    let index = rng.usize_range(0, ids.len() - 1);
+                    let id = ids[index];
+                    if choice == 2 && ids.len() > 1 {
+                        ids.remove(index);
+                        LifecycleMutation {
+                            kind: LifecycleMutationKind::Delete,
+                            id,
+                            value,
+                        }
+                    } else {
+                        LifecycleMutation {
+                            kind: LifecycleMutationKind::Update,
+                            id,
+                            value,
+                        }
+                    }
+                }
+            };
+            let sql = format!(
+                "BEGIN; {}; {}; SAVEPOINT abandoned; \
+                 UPDATE history_source SET value='abandoned'; ROLLBACK TO abandoned; COMMIT",
+                mutation.sql(&fixture.source),
+                mutation.sql(&fixture.journal)
+            );
+            record_lifecycle(
+                &path,
+                &mut history,
+                serde_json::json!({
+                    "step":"committed source+journal mutation","cycle":cycle,
+                    "mutation":mutation.json(),"sql":sql,
+                }),
+            );
+            sqlx::raw_sql(AssertSqlSafe(sql))
+                .execute(&fixture.db.pool)
+                .await
+                .unwrap();
+            let before = lifecycle_state(&fixture.db.pool, &fixture.stream).await;
+            let sql = "BEGIN; UPDATE history_source SET value='rolled-back'; \
+                       SAVEPOINT abandoned; DELETE FROM history_source; ROLLBACK TO abandoned; \
+                       SELECT pgtrickle.refresh_stream_table('history_fast'); ROLLBACK";
+            record_lifecycle(
+                &path,
+                &mut history,
+                serde_json::json!({"step":"rollback refresh/savepoint","sql":sql}),
+            );
+            sqlx::raw_sql(sql).execute(&fixture.db.pool).await.unwrap();
+            let after = lifecycle_state(&fixture.db.pool, &fixture.stream).await;
+            assert_eq!(
+                after,
+                before,
+                "PGT_LIFECYCLE_FAILURE:abort_atomicity; cycle={cycle}; history: {}",
+                path.display()
+            );
+            let cut: String = fixture
+                .db
+                .query_scalar(&format!(
+                    "SELECT max(lsn)::text FROM {buffer} WHERE action IN ('I','D')"
+                ))
+                .await;
+            record_lifecycle(
+                &path,
+                &mut history,
+                serde_json::json!({"step":"refresh boundary","expected_source_cut":cut}),
+            );
+            let _ = lifecycle_refresh(&fixture, "history_fast", Some("DIFFERENTIAL")).await;
+            lifecycle_exact(
+                &fixture,
+                "history_fast",
+                &path,
+                &mut history,
+                "fast/compact",
+            )
+            .await;
+            let covered: bool = fixture
+                .db
+                .query_scalar(&format!(
+                    "SELECT (frontier->'sources'->'{}'->>'lsn')::pg_lsn >= '{cut}'::pg_lsn \
+                 FROM pgtrickle.pgt_stream_tables WHERE pgt_name='history_fast'",
+                    fixture.oid
+                ))
+                .await;
+            assert!(
+                covered,
+                "PGT_LIFECYCLE_FAILURE:source_cut; cycle={cycle}; history: {}",
+                path.display()
+            );
+            assert_eq!(
+                lifecycle_state(&fixture.db.pool, "history_slow").await,
+                slow_baseline,
+                "PGT_LIFECYCLE_FAILURE:slow_frontier; cycle={cycle}; history: {}",
+                path.display()
+            );
+        }
+        let fast_before_handoff = lifecycle_state(&fixture.db.pool, "history_fast").await;
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            -1,
+            "handoff-pending",
+        )
+        .await;
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "step":"trigger-captured commit before WAL transition",
+                "id":-1,"value":"handoff-pending",
+            }),
+        );
+        let mut blocker = fixture.db.pool.acquire().await.unwrap();
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        sqlx::query("BEGIN").execute(&mut *blocker).await.unwrap();
+        sqlx::query("LOCK TABLE history_source IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let mut refresh_conn = fixture.db.pool.acquire().await.unwrap();
+        sqlx::raw_sql("SET lock_timeout='0'; SET statement_timeout='0'")
+            .execute(&mut *refresh_conn)
+            .await
+            .unwrap();
+        let refresh_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *refresh_conn)
+            .await
+            .unwrap();
+        let refresh_task = tokio::spawn(async move {
+            sqlx::query("SELECT pgtrickle.refresh_stream_table('history_fast')")
+                .execute(&mut *refresh_conn)
+                .await
+        });
+        assert!(
+            fixture
+                .db
+                .wait_for_condition(
+                    "lifecycle refresh blocked by source lock",
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a \
+                         WHERE a.pid={refresh_pid} \
+                           AND {blocker_pid}=ANY(pg_blocking_pids(a.pid)))"
+                    ),
+                    Duration::from_secs(10),
+                    Duration::from_millis(25),
+                )
+                .await,
+            "refresh did not reach the witnessed source lock; history: {}",
+            path.display()
+        );
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "step":"refresh blocked before cancellation",
+                "refresh_pid":refresh_pid,"blocker_pid":blocker_pid,
+                "state":fast_before_handoff,
+            }),
+        );
+        let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+            .bind(refresh_pid)
+            .fetch_one(&fixture.db.pool)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to cancel witnessed refresh: {error}; history: {}",
+                    path.display()
+                )
+            });
+        assert!(
+            cancelled,
+            "cancel must target the witnessed refresh; history: {}",
+            path.display()
+        );
+        let refresh_result = tokio::time::timeout(Duration::from_secs(5), refresh_task)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "cancelled refresh did not return; history: {}",
+                    path.display()
+                )
+            })
+            .unwrap_or_else(|error| {
+                panic!(
+                    "refresh task panicked: {error}; history: {}",
+                    path.display()
+                )
+            });
+        let cancel_error = refresh_result.expect_err(&format!(
+            "cancelled refresh must return an error; history: {}",
+            path.display()
+        ));
+        assert!(
+            cancel_error
+                .to_string()
+                .contains("canceling statement due to user request"),
+            "{cancel_error}"
+        );
+        sqlx::query("ROLLBACK")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        drop(blocker);
+        let fast_after_cancel = lifecycle_state(&fixture.db.pool, "history_fast").await;
+        assert_eq!(
+            fast_after_cancel,
+            fast_before_handoff,
+            "PGT_LIFECYCLE_FAILURE:cancel_atomicity; history: {}",
+            path.display()
+        );
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "step":"witnessed cancelled refresh",
+                "refresh_pid":refresh_pid,"blocker_pid":blocker_pid,
+                "error":cancel_error.to_string(),"state":fast_after_cancel,
+            }),
+        );
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
+            .await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            -2,
+            "after-wal",
+        )
+        .await;
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "step":"WAL-captured commit after transition",
+                "id":-2,"value":"after-wal",
+            }),
+        );
+        assert!(
+            fixture
+                .db
+                .wait_for_condition(
+                    "acknowledged post-transition WAL receipt",
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_receipts \
+                         WHERE source_relid={}::oid AND source_change \
+                           AND status='ACKNOWLEDGED' AND data LIKE '%after-wal%')",
+                        fixture.oid
+                    ),
+                    WAIT,
+                    Duration::from_millis(50),
+                )
+                .await,
+            "PGT_LIFECYCLE_FAILURE:handoff_receipt; history: {}",
+            path.display()
+        );
+        let handoff_mode = cdc_mode(&fixture.db, &fixture.source).await;
+        assert_eq!(
+            handoff_mode.as_deref(),
+            Some("WAL"),
+            "PGT_LIFECYCLE_FAILURE:handoff_mode; history: {}",
+            path.display()
+        );
+        let fast_after_handoff = lifecycle_state(&fixture.db.pool, "history_fast").await;
+        assert_eq!(
+            fast_after_handoff["rows"],
+            fast_before_handoff["rows"],
+            "PGT_LIFECYCLE_FAILURE:handoff_output; history: {}",
+            path.display()
+        );
+        assert_eq!(
+            fast_after_handoff["frontier"],
+            fast_before_handoff["frontier"],
+            "PGT_LIFECYCLE_FAILURE:handoff_frontier; history: {}",
+            path.display()
+        );
+        assert_eq!(
+            lifecycle_state(&fixture.db.pool, "history_slow").await,
+            slow_baseline,
+            "PGT_LIFECYCLE_FAILURE:handoff_slow_frontier; history: {}",
+            path.display()
+        );
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({
+                "step":"trigger-to-WAL handoff witnessed",
+                "capture":handoff_mode,"fast_state":fast_after_handoff,
+                "slow_state":slow_baseline,
+            }),
+        );
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+            .await;
+        let catchup_cut: String = fixture
+            .db
+            .query_scalar(&format!(
+                "SELECT max(lsn)::text FROM {buffer} WHERE action IN ('I','D')"
+            ))
+            .await;
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"restore","snapshot":snapshot,"expected_source_cut":catchup_cut}),
+        );
+        sqlx::query("SELECT pgtrickle.restore_from_snapshot('history_fast',$1)")
+            .bind(&snapshot)
+            .execute(&fixture.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            lifecycle_state(&fixture.db.pool, "history_fast").await,
+            baseline,
+            "PGT_LIFECYCLE_FAILURE:restore_pair; history: {}",
+            path.display()
+        );
+        let restore_needs_reinit: bool = sqlx::query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name='history_fast'",
+        )
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"restored catch-up state","needs_reinit":restore_needs_reinit}),
+        );
+        let restore_action = if restore_needs_reinit {
+            "REINITIALIZE"
+        } else {
+            "DIFFERENTIAL"
+        };
+        let _ = lifecycle_refresh(&fixture, "history_fast", Some(restore_action)).await;
+        lifecycle_exact(
+            &fixture,
+            "history_fast",
+            &path,
+            &mut history,
+            "restored catch-up",
+        )
+        .await;
+        let before_crash = lifecycle_state(&fixture.db.pool, "history_fast").await;
+        assert!(fixture.db.query_scalar::<bool>(&format!(
+            "SELECT (frontier->'sources'->'{}'->>'lsn')::pg_lsn >= '{catchup_cut}'::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_name='history_fast'",
+            fixture.oid
+        )).await, "PGT_LIFECYCLE_FAILURE:restored_source_cut; history: {}", path.display());
+        fixture
+            .db
+            .execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.history_fast','public.history_slow'])")
+            .await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        configure_scheduler(&fixture.db).await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
+            .await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+        let stable_name: String = fixture
+            .db
+            .query_scalar(&format!(
+                "SELECT pgtrickle.source_stable_name({}::oid)",
+                fixture.oid
+            ))
+            .await;
+        fixture.slot = format!("pgtrickle_{stable_name}");
+        let wal_value = format!("wal-{wal_phase}-{seed:016x}");
+        let next_value = format!("wal-next-{wal_phase}-{seed:016x}");
+        let (mut barrier, blocker_pid) =
+            hold_wal_barrier(&fixture.db, fixture.oid, wal_phase).await;
+        set_wal_phase(&fixture.db, fixture.oid, wal_phase, &wal_value).await;
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            i32::MIN,
+            &wal_value,
+        )
+        .await;
+        let worker_pid =
+            wait_for_wal_barrier(&fixture.db, fixture.oid, wal_phase, blocker_pid).await;
+        if wal_phase == "before_receipt" {
+            assert_eq!(
+                matching_receipts(&fixture.db.pool, fixture.oid, "RECEIVED", &wal_value).await,
+                0,
+                "receipt must not commit before the before_receipt interruption"
+            );
+        } else {
+            let status = if wal_phase == "before_replay" {
+                "RECEIVED"
+            } else {
+                "APPLIED"
+            };
+            wait_for_receipt(&fixture.db.pool, fixture.oid, status, &wal_value).await;
+            if wal_phase == "after_slot_advance" {
+                assert!(
+                    receipt_slot_reached(&fixture.db, &fixture.slot, fixture.oid, &wal_value).await
+                );
+                commit_row(
+                    &fixture.db,
+                    &fixture.source,
+                    &fixture.journal,
+                    i32::MIN + 1,
+                    &next_value,
+                )
+                .await;
+            }
+        }
+        terminate_backend(&fixture.db, worker_pid).await;
+        release_wal_barrier(&mut barrier, fixture.oid, wal_phase).await;
+        drop(barrier);
+        clear_wal_phase(&fixture.db).await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+            .await;
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"trigger-to-WAL interruption after restore","phase":wal_phase,"capture":cdc_mode(&fixture.db, &fixture.source).await,"value":wal_value,"next_value":if wal_phase == "after_slot_advance" {Some(next_value.as_str())} else {None}}),
+        );
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"SIGKILL with interrupted WAL receipt","retained_identity":format!("{:?}",fixture.identity)}),
+        );
+        fixture.db.pool.close().await;
+        for args in [
+            vec!["kill", "--signal", "KILL", fixture.db.container_id()],
+            vec!["start", fixture.db.container_id()],
+        ] {
+            let output = tokio::process::Command::new("docker")
+                .args(args)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "retained restart failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        fixture.db.pool = fixture.db.reconnect_after_restart().await;
+        let restarted: String = fixture
+            .db
+            .query_scalar("SELECT pg_postmaster_start_time()::text")
+            .await;
+        assert_ne!(restarted, settings.3, "recovery must restart PostgreSQL");
+        fixture
+            .db
+            .execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.history_fast','public.history_slow'])")
+            .await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        configure_scheduler(&fixture.db).await;
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"retained restart witnessed","postmaster_before":settings.3,"postmaster_after":restarted}),
+        );
+        wait_for_receipt(&fixture.db.pool, fixture.oid, "ACKNOWLEDGED", &wal_value).await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+        let next_receipt_acknowledged = if wal_phase == "after_slot_advance" {
+            let recovered = fixture
+                .db
+                .wait_for_condition(
+                    "post-slot-advance WAL recovery",
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_receipts \
+                         WHERE source_relid={} AND status='ACKNOWLEDGED' AND data LIKE '%{}%') \
+                         OR (SELECT count(*)=2 AND bool_and(needs_reinit) \
+                             FROM pgtrickle.pgt_stream_tables \
+                             WHERE pgt_name IN ('history_fast','history_slow'))",
+                        fixture.oid, next_value
+                    ),
+                    WAIT,
+                    Duration::from_millis(50),
+                )
+                .await;
+            assert!(
+                recovered,
+                "the post-slot-advance row needs an acknowledged receipt or consumer reinitialization"
+            );
+            Some(
+                matching_receipts(&fixture.db.pool, fixture.oid, "ACKNOWLEDGED", &next_value).await
+                    > 0,
+            )
+        } else {
+            None
+        };
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+            .await;
+        let receipts: serde_json::Value = sqlx::query_scalar(
+            "SELECT coalesce(jsonb_agg(jsonb_build_array(status,lsn::text,data) ORDER BY receipt_id), \
+                    '[]'::jsonb) FROM pgtrickle.pgt_wal_receipts \
+             WHERE source_relid=$1 AND data LIKE $2",
+        )
+        .bind(fixture.oid)
+        .bind(format!("%{wal_value}%"))
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        let buffered_changes: serde_json::Value = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT coalesce(jsonb_agg(jsonb_build_array(action,lsn::text,id,value) ORDER BY change_id), \
+                    '[]'::jsonb) FROM {buffer} WHERE value=$1"
+        )))
+        .bind(&wal_value)
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        let recovery_state: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_agg(jsonb_build_object( \
+                 'stream',st.pgt_name,'needs_reinit',st.needs_reinit, \
+                 'is_populated',st.is_populated,'frontier',st.frontier, \
+                 'refresh_reason',st.refresh_reason,'refresh_reason_detail',st.refresh_reason_detail, \
+                 'capture_mode',d.cdc_mode,'slot_name',coalesce(d.slot_name,$2), \
+                 'slot_active',slot.active,'slot_confirmed_flush_lsn',slot.confirmed_flush_lsn::text) \
+                 ORDER BY st.pgt_name) \
+             FROM pgtrickle.pgt_stream_tables st \
+             JOIN pgtrickle.pgt_dependencies d USING (pgt_id) \
+             LEFT JOIN pg_replication_slots slot ON slot.slot_name=coalesce(d.slot_name,$2) \
+             WHERE d.source_relid=$1",
+        )
+        .bind(fixture.oid)
+        .bind(&fixture.slot)
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"pre-refresh WAL recovery state","state":recovery_state,"receipts":receipts,"buffered_changes":buffered_changes,"next_receipt_acknowledged":next_receipt_acknowledged}),
+        );
+        let invalidated = recovery_state
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|state| state["needs_reinit"].as_bool().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            invalidated.len(),
+            2,
+            "both shared consumers must be present"
+        );
+        assert!(
+            invalidated.iter().all(|needed| *needed == invalidated[0]),
+            "shared consumers must recover together"
+        );
+        assert!(
+            next_receipt_acknowledged.unwrap_or(true) || invalidated[0],
+            "the post-slot-advance row needs an acknowledged receipt or consumer reinitialization"
+        );
+        let expected_action = if invalidated[0] {
+            Some("REINITIALIZE")
+        } else {
+            None
+        };
+        assert_eq!(
+            identity(&fixture.db, "history_identity", fixture.db.container_id()).await,
+            fixture.identity,
+            "PGT_LIFECYCLE_FAILURE:retained_identity; history: {}",
+            path.display()
+        );
+        assert_eq!(
+            lifecycle_state(&fixture.db.pool, "history_fast").await,
+            before_crash,
+            "PGT_LIFECYCLE_FAILURE:retained_checkpoint; history: {}",
+            path.display()
+        );
+        let recovery_action = lifecycle_refresh(&fixture, "history_fast", expected_action).await;
+        let post_refresh_state: serde_json::Value = sqlx::query_scalar(
+            "SELECT jsonb_build_object( \
+                 'needs_reinit',st.needs_reinit,'frontier',st.frontier, \
+                 'latest_action',(SELECT h.action FROM pgtrickle.pgt_refresh_history h \
+                     WHERE h.pgt_id=st.pgt_id AND h.status='COMPLETED' \
+                     ORDER BY h.refresh_id DESC LIMIT 1)) \
+             FROM pgtrickle.pgt_stream_tables st \
+             WHERE st.pgt_schema='public' AND st.pgt_name='history_fast'",
+        )
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        record_lifecycle(
+            &path,
+            &mut history,
+            serde_json::json!({"step":"post-refresh WAL recovery state","state":post_refresh_state}),
+        );
+        lifecycle_exact(
+            &fixture,
+            "history_fast",
+            &path,
+            &mut history,
+            "WAL interruption recovery",
+        )
+        .await;
+        let slow_after_restart = lifecycle_state(&fixture.db.pool, "history_slow").await;
+        let slow_needs_reinit: bool = sqlx::query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema='public' AND pgt_name='history_slow'",
+        )
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            slow_needs_reinit,
+            recovery_action == "REINITIALIZE",
+            "shared consumers must follow the same recovery path"
+        );
+        if recovery_action == "REINITIALIZE" {
+            assert_eq!(slow_after_restart["rows"], slow_baseline["rows"]);
+            assert!(slow_after_restart["frontier"].is_null());
+        } else {
+            assert_eq!(
+                slow_after_restart, slow_baseline,
+                "WAL recovery moved the lagging consumer"
+            );
+        }
+        let _ = lifecycle_refresh(&fixture, "history_slow", Some(&recovery_action)).await;
+        lifecycle_exact(
+            &fixture,
+            "history_slow",
+            &path,
+            &mut history,
+            "lagging catch-up",
+        )
+        .await;
+        assert!(fixture.db.query_scalar::<bool>(&format!(
+            "SELECT (frontier->'sources'->'{}'->>'lsn')::pg_lsn >= '{catchup_cut}'::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_name='history_slow'",
+            fixture.oid
+        )).await, "PGT_LIFECYCLE_FAILURE:lagging_source_cut; history: {}", path.display());
+    }
 }

@@ -99,14 +99,21 @@ class CandidateBindingTests(unittest.TestCase):
             binding.validate_binding(**arguments)
 
     def test_receipt_binding_checks_production_inputs_and_installed_bytes(self) -> None:
+        import check_receipt_verification as driver
+        contract=binding.PROOF_CONTRACTS["receipt"]
+        self.assertEqual(contract["mutants"],set(driver.MUTATIONS))
+        self.assertEqual(contract["inputs"], driver.PRODUCTION_INPUTS)
         self.source = binding.ROOT / "verification/receipt.rs"
         self.proof.update({
             "schema": "pg-trickle-receipt-verification-v1",
             "source_sha256": binding.digest(self.source),
-            "obligations": ["receipt_ack_row_limit"],
+            "obligations": sorted(contract["obligations"]),
+            "semantic_mutations": {name: {"returncode":1,"failure_kind":"postcondition",
+                                          "summary":"verification results:: 1 verified, 1 errors"}
+                                   for name in contract["mutants"]},
             "production_inputs": {
                 path: binding.digest(binding.ROOT / path)
-                for path in ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"]
+                for path in contract["inputs"]
             },
         })
         arguments = dict(
@@ -116,6 +123,16 @@ class CandidateBindingTests(unittest.TestCase):
         )
         self.assertEqual(binding.validate_binding(**arguments)["schema"],
                          "pg-trickle-receipt-candidate-binding-v1")
+        for name in contract["mutants"]:
+            control=self.proof["semantic_mutations"].pop(name)
+            with self.assertRaisesRegex(ValueError,"omits a required executable mutant"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name]={**control,"failure_kind":"compile-error"}
+            with self.assertRaisesRegex(ValueError,"intended postcondition"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name]=control
+        with self.assertRaisesRegex(ValueError,"all required RECEIPT E2E cases"):
+            binding.validate_binding(**{**arguments,"runtime_cases":binding.RECEIPT_CASES[:1]})
         self.proof["production_inputs"]["src/wal_decoder.rs"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "production input differs"):
             binding.validate_binding(**arguments)
@@ -192,6 +209,40 @@ class CandidateBindingTests(unittest.TestCase):
         )
         self.assertEqual(record["candidate_package_library_sha256"], self.library_digest)
         self.assertEqual(record["installed_observations"][0]["installed_sha256"], self.library_digest)
+
+    def test_identity_binding_rejects_missing_controls_cases_and_stale_codec(self) -> None:
+        import check_identity_frame_verification as driver
+
+        contract = binding.PROOF_CONTRACTS["identity_frame"]
+        self.assertEqual(contract["inputs"], driver.PRODUCTION_INPUTS)
+        self.assertEqual(contract["mutants"], set(driver.MUTATIONS))
+        self.source = binding.ROOT / "verification/identity_frame.rs"
+        self.proof.update({
+            "schema": contract["schema"], "source_sha256": binding.digest(self.source),
+            "obligations": sorted(contract["obligations"]),
+            "production_inputs": {path: binding.digest(binding.ROOT / path) for path in contract["inputs"]},
+            "semantic_mutations": {name: {"returncode": 1, "failure_kind": "postcondition",
+                                           "summary": "verification results:: 5 verified, 1 errors"}
+                                   for name in contract["mutants"]},
+        })
+        arguments = dict(proof=self.proof, source=self.source, package_dir=self.package,
+                         installation=self.installation, runtime_cases=binding.IDENTITY_FRAME_CASES,
+                         candidate_commit="fixture-commit", proof_kind="identity_frame")
+        self.assertEqual(binding.validate_binding(**arguments)["schema"],
+                         "pg-trickle-identity-frame-candidate-binding-v1")
+        with self.assertRaisesRegex(ValueError, "all required IDENTITY_FRAME E2E cases"):
+            binding.validate_binding(**{**arguments, "runtime_cases": binding.IDENTITY_FRAME_CASES[:1]})
+        for name in contract["mutants"]:
+            control = self.proof["semantic_mutations"].pop(name)
+            with self.assertRaisesRegex(ValueError, "omits a required executable mutant"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name] = {**control, "failure_kind": "compile-error"}
+            with self.assertRaisesRegex(ValueError, "intended postcondition"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name] = control
+        self.proof["production_inputs"]["src/dvm/row_id_v2.rs"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "production input differs"):
+            binding.validate_binding(**arguments)
 
     def test_lsn_candidate_binding_rejects_source_mismatch(self) -> None:
         self.proof["source_sha256"] = "0" * 64

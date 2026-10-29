@@ -250,7 +250,22 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
     // worker exits — leaving the job stuck in RUNNING and the ST never
     // transitioning to ERROR.
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if job.unit_kind == "repeatable_read_group" {
+            // pgrx takes a snapshot before entering each transaction closure.
+            let configured = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                Spi::run(
+                    "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+                )
+            }));
+            if let Err(error) = configured {
+                log!("pg_trickle refresh worker: failed to set REPEATABLE READ isolation: {error}");
+                return RefreshOutcome::PermanentFailure;
+            }
+        }
         BackgroundWorker::transaction(AssertUnwindSafe(|| -> RefreshOutcome {
+            if !crate::api::scheduler_control::admit_scheduler_targets(&job.member_pgt_ids) {
+                return RefreshOutcome::RetryableFailure;
+            }
             match job.unit_kind.as_str() {
                 "singleton" => execute_worker_singleton(&job),
                 "atomic_group" => execute_worker_atomic_group(&job, false),

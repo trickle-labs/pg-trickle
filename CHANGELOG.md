@@ -222,6 +222,39 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Verify the production WAL transaction-boundary scan against complete receipt
+  framing, including XID/slot/order and per-transaction LSN bounds, while keeping
+  persisted formats and lazy error behavior unchanged (#1222).
+- Make scheduler pause wait for admitted inline and worker transactions,
+  including synchronous IMMEDIATE descendants, and reject dispatch selected
+  before a pause but admitted afterward. Dedicated repeatable-read jobs now
+  set isolation before their first work snapshot (#1219).
+- Retire local WAL slots only after consumer removal or trigger fallback commits.
+  Caller rollback preserves the original slot; durable cleanup reservations also
+  cover interrupted creation and restart after physical removal. This requires
+  the `0.108.3` to `0.108.4` catalog upgrade (#1222).
+- Reject initial population under REPEATABLE READ or SERIALIZABLE rather than
+  publish a newer capture frontier over rows from an older snapshot. Retry
+  under READ COMMITTED, or defer initial population until the first refresh
+  (#1219, #1222).
+- Prevent recursive WAL receipt payloads during continued source activity.
+  Complete source transactions remain durable before acknowledgement; only
+  validated source-free table transactions can advance without another receipt
+  (#1222).
+- Keep archival snapshot rows and frontiers from the same committed refresh.
+  Restoring an older archive retains differential catch-up only when its
+  required history is protected; otherwise the next refresh reinitializes.
+  Cleanup now honors an in-progress restore before deleting consumed history
+  (#1219).
+- Preserve finite SUM/AVG contributions when built-in numeric/float NaN or
+  infinity inputs are changed or removed, including private-state updates while
+  the displayed value stays infinite (#1217). Recovery uses captured deltas
+  without adding a live-source rescan or FULL fallback.
+- Use the maintained total-row count for an unprojected HAVING COUNT(*), rather
+  than emitting an aggregate call in the differential WHERE clause.
+- Use checked framing for single-field boolean/integer/UUID identities and
+  verified tuple-capacity arithmetic, preserving valid V2/V3 identity bytes
+  while rejecting malformed boolean payloads (#1224).
 - Reject output-delta resnapshot acknowledgement when the typed payload
   relation no longer matches its registered column layout (#1184). Deleted
   payload rows remain recoverable through a resnapshot.

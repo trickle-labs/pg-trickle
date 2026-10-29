@@ -163,18 +163,42 @@ fn build_group_filter(
     )
 }
 
-fn special_aggregate_delta_filter(aggregates: &[AggExpr]) -> Option<String> {
+fn special_aggregate_delta_filter(aggregates: &[AggExpr], child: &OpTree) -> Option<String> {
     let filters: Vec<String> = aggregates
         .iter()
         .filter(|agg| needs_special_value_rescan(agg))
         .map(|agg| {
+            let state_guard = if agg.uses_incremental_nonfinite_state(child) {
+                format!(
+                    " AND pg_catalog.jsonb_typeof(__pgt_d2.{}) IS DISTINCT FROM 'object'",
+                    quote_ident(&format!("__ins_special_{}", agg.alias))
+                )
+            } else {
+                String::new()
+            };
             format!(
-                "COALESCE(__pgt_d2.{}, 0) > 0",
-                quote_ident(&format!("__special_{}", agg.alias))
+                "COALESCE(__pgt_d2.{}, 0) > 0{state_guard}",
+                quote_ident(&format!("__special_{}", agg.alias)),
             )
         })
         .collect();
     (!filters.is_empty()).then(|| filters.join(" OR "))
+}
+
+fn special_state_delta_exprs(
+    action: &str,
+    argument: &str,
+    filter: Option<&str>,
+) -> (String, String) {
+    let argument = filter
+        .map(|filter| format!("CASE WHEN ({filter}) THEN ({argument}) END"))
+        .unwrap_or_else(|| argument.to_string());
+    let state_for = |wanted_action: &str| {
+        crate::dvm::operators::nonfinite::state_sql(&format!(
+            "CASE WHEN {action} = '{wanted_action}' THEN ({argument}) END"
+        ))
+    };
+    (state_for("I"), state_for("D"))
 }
 
 fn needs_special_value_rescan(agg: &AggExpr) -> bool {
@@ -1186,6 +1210,18 @@ struct RescanConfig<'a> {
     special_value_filter: Option<&'a str>,
 }
 
+impl RescanConfig<'_> {
+    fn includes(&self, agg: &AggExpr, child: &OpTree) -> bool {
+        self.force_all_aggs
+            || agg.is_distinct
+            || agg.function.is_group_rescan()
+            || matches!(agg.function, AggFunc::Min | AggFunc::Max)
+            || (self.include_special_aggs
+                && needs_special_value_rescan(agg)
+                && !agg.uses_incremental_nonfinite_state(child))
+    }
+}
+
 fn build_rescan_cte(
     ctx: &mut DiffContext,
     child: &OpTree,
@@ -1200,22 +1236,10 @@ fn build_rescan_cte(
     // When `force_all_aggs` is true (HAVING context), include ALL aggregates
     // so that the merge CTE can use the correct full aggregate value for
     // groups that were absent from the ST (below the HAVING threshold).
-    let rescan_aggs: Vec<&AggExpr> = if config.force_all_aggs {
-        aggregates.iter().collect()
-    } else {
-        aggregates
-            .iter()
-            .filter(|a| {
-                a.is_distinct
-                    || a.function.is_group_rescan()
-                    || matches!(a.function, AggFunc::Min | AggFunc::Max)
-                    || (config.include_special_aggs && needs_special_value_rescan(a))
-                // P2-2: SUM over a FULL JOIN child no longer needs a rescan CTE.
-                // The __pgt_aux_nonnull_* auxiliary column provides algebraic
-                // NULL-transition correction without rescanning source data.
-            })
-            .collect()
-    };
+    let rescan_aggs: Vec<&AggExpr> = aggregates
+        .iter()
+        .filter(|agg| config.includes(agg, child))
+        .collect();
     if rescan_aggs.is_empty() {
         return None;
     }
@@ -1362,6 +1386,23 @@ fn build_rescan_cte(
             agg_to_rescan_sql(agg),
             quote_ident(&agg.alias),
         ));
+        if config.force_all_aggs && agg.uses_incremental_nonfinite_state(child) {
+            let argument = agg
+                .argument
+                .as_ref()
+                .map(Expr::to_sql)
+                .unwrap_or_else(|| "0".to_string());
+            let argument = agg
+                .filter
+                .as_ref()
+                .map(|filter| format!("CASE WHEN {} THEN ({argument}) END", filter.to_sql()))
+                .unwrap_or(argument);
+            selects.push(format!(
+                "{} AS {}",
+                crate::dvm::operators::nonfinite::state_sql(&argument),
+                quote_ident(&format!("__pgt_rescan_special_{}", agg.alias)),
+            ));
+        }
         if config.include_special_aggs && needs_special_value_rescan(agg) {
             selects.push(format!(
                 "{} AS {}",
@@ -1951,6 +1992,22 @@ fn generate_direct_agg_delta(
             ));
         }
 
+        if agg.uses_incremental_nonfinite_state(scan) {
+            let argument = case_rewrites
+                .get(&agg.alias)
+                .cloned()
+                .unwrap_or_else(|| direct_agg_argument_expr(agg));
+            let (inserts, deletes) = special_state_delta_exprs("c.action", &argument, None);
+            select_exprs.push(format!(
+                "{inserts} AS {}",
+                quote_ident(&format!("__ins_special_{}", agg.alias)),
+            ));
+            select_exprs.push(format!(
+                "{deletes} AS {}",
+                quote_ident(&format!("__del_special_{}", agg.alias)),
+            ));
+        }
+
         // SUM needs a qualifying non-NULL count so the algebraic merge can
         // restore PostgreSQL's NULL result when the last value disappears.
         if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
@@ -2180,6 +2237,28 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 ));
             }
 
+            if agg.uses_incremental_nonfinite_state(child) {
+                let argument = agg
+                    .argument
+                    .as_ref()
+                    .map(|expr| resolve_expr_for_child(expr, child_cols))
+                    .unwrap_or_else(|| "NULL".to_string());
+                let filter = agg
+                    .filter
+                    .as_ref()
+                    .map(|expr| resolve_expr_for_child(expr, child_cols));
+                let (inserts, deletes) =
+                    special_state_delta_exprs("__pgt_action", &argument, filter.as_deref());
+                delta_selects.push(format!(
+                    "{inserts} AS {}",
+                    quote_ident(&format!("__ins_special_{}", agg.alias)),
+                ));
+                delta_selects.push(format!(
+                    "{deletes} AS {}",
+                    quote_ident(&format!("__del_special_{}", agg.alias)),
+                ));
+            }
+
             // AVG/STDDEV/VAR algebraic path: also track non-NULL counts for
             // the argument so the merge can update __pgt_aux_count_{alias}.
             if is_algebraic_via_aux(agg) {
@@ -2307,7 +2386,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let special_value_filter = if use_having_rescan || has_other_rescan_aggregate {
         None
     } else {
-        special_aggregate_delta_filter(aggregates)
+        special_aggregate_delta_filter(aggregates, child)
     };
     let rescan_config = RescanConfig {
         force_all_aggs: use_having_rescan,
@@ -2397,8 +2476,43 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         // SUM and AVG use rescan values only when deltas contain special
         // numeric values; ordinary changes keep the algebraic path.
         let agg_has_nonnull_aux = matches!(agg.function, AggFunc::Sum) && !agg.is_distinct;
-        let agg_has_rescan = has_rescan;
-        let new_val_expr = agg_merge_expr_mapped(
+        let agg_has_rescan = rescan_config.includes(agg, child);
+        let special_state = if agg.uses_incremental_nonfinite_state(child) {
+            let state_col = quote_ident(&format!("__pgt_aux_special_{}", st_col_name(&agg.alias)));
+            let inserts = quote_ident(&format!("__ins_special_{}", agg.alias));
+            let deletes = quote_ident(&format!("__del_special_{}", agg.alias));
+            let use_state = format!(
+                "({} OR COALESCE(d.{}, 0) > 0)",
+                crate::dvm::operators::nonfinite::has_special_sql(&format!("st.{state_col}")),
+                quote_ident(&format!("__special_{}", agg.alias)),
+            );
+            let merged_state = crate::dvm::operators::nonfinite::merge_sql(
+                &format!("st.{state_col}"),
+                &format!("d.{inserts}"),
+                &format!("d.{deletes}"),
+            );
+            let state = initialize_having_group(
+                use_having_rescan,
+                &format!(
+                    "COALESCE(r.{}, 'null'::jsonb)",
+                    quote_ident(&format!("__pgt_rescan_special_{}", agg.alias))
+                ),
+                &merged_state,
+            );
+            let value = crate::dvm::operators::nonfinite::value_sql(&format!("({state})"));
+            merge_selects.push(format!(
+                "{state} AS {}",
+                quote_ident(&format!("new___pgt_aux_special_{}", agg.alias)),
+            ));
+            merge_selects.push(format!(
+                "st.{state_col} AS {}",
+                quote_ident(&format!("old___pgt_aux_special_{}", agg.alias)),
+            ));
+            Some((state, value, use_state))
+        } else {
+            None
+        };
+        let algebraic_value = agg_merge_expr_mapped(
             agg,
             agg_has_rescan,
             use_having_rescan,
@@ -2409,6 +2523,38 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 .and_then(|m| m.get(&agg.alias))
                 .map(|s| s.as_str()),
         );
+        let new_val_expr = if let Some((_, value, use_state)) = &special_state {
+            let value = format!("({value})::numeric");
+            let special_value = match agg.function {
+                AggFunc::Sum => {
+                    let new_nonnull = sum_nonnull_count_expr(
+                        &agg.alias,
+                        &st_col_name(&agg.alias),
+                        use_having_rescan,
+                    );
+                    crate::aggregate_lifecycle::aggregate_value_sql(true, &new_nonnull, &value)
+                }
+                AggFunc::Avg => {
+                    let aux_count =
+                        quote_ident(&format!("__pgt_aux_count_{}", st_col_name(&agg.alias)));
+                    let inserts = quote_ident(&format!("__ins_count_{}", agg.alias));
+                    let deletes = quote_ident(&format!("__del_count_{}", agg.alias));
+                    format!(
+                        "{value} / NULLIF(COALESCE(st.{aux_count}, 0) + \
+                         COALESCE(d.{inserts}, 0) - COALESCE(d.{deletes}, 0), 0)"
+                    )
+                }
+                _ => algebraic_value.clone(),
+            };
+            let special_value = initialize_having_group(
+                use_having_rescan,
+                &format!("r.{}", quote_ident(&agg.alias)),
+                &special_value,
+            );
+            format!("CASE WHEN {use_state} THEN {special_value} ELSE {algebraic_value} END")
+        } else {
+            algebraic_value
+        };
         merge_selects.push(format!(
             "{new_val_expr} AS {}",
             quote_ident(&format!("new_{}", agg.alias)),
@@ -2443,7 +2589,17 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                     "COALESCE(st.{aux_sum}, 0) + COALESCE(d.{ins_sum}, 0) - COALESCE(d.{del_sum}, 0)"
                 ),
             );
-            let aux_sum_value = if needs_special_value_rescan(agg) && has_rescan {
+            let aux_sum_value = if let Some((_, value, use_state)) = &special_state {
+                let special_value = initialize_having_group(
+                    use_having_rescan,
+                    &format!(
+                        "COALESCE(r.{}, 0)",
+                        quote_ident(&format!("__pgt_rescan_sum_{}", agg.alias))
+                    ),
+                    &format!("({value})::numeric"),
+                );
+                format!("CASE WHEN {use_state} THEN {special_value} ELSE {aux_sum_value} END")
+            } else if needs_special_value_rescan(agg) && agg_has_rescan {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN COALESCE(r.{}, 0) ELSE {aux_sum_value} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
@@ -2482,7 +2638,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             let algebraic = format!(
                 "COALESCE(st.{aux_sum2}, 0) + COALESCE(d.{ins_sum2}, 0) - COALESCE(d.{del_sum2}, 0)"
             );
-            let value = if has_rescan {
+            let value = if agg_has_rescan {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {algebraic} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
@@ -2651,6 +2807,9 @@ END AS __pgt_meta_action"#
         if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
             output_cols.push(format!("__pgt_aux_nonnull_{}", agg.alias));
         }
+        if agg.uses_incremental_nonfinite_state(child) {
+            output_cols.push(format!("__pgt_aux_special_{}", agg.alias));
+        }
     }
 
     let group_col_refs = group_columns
@@ -2749,6 +2908,15 @@ END AS __pgt_meta_action"#
                 "CASE WHEN m.__pgt_meta_action = 'D' THEN 0 ELSE m.{new_aux_nonnull} END AS {aux_nonnull_alias}",
             ));
         }
+
+        if agg.uses_incremental_nonfinite_state(child) {
+            let new_state = quote_ident(&format!("new___pgt_aux_special_{}", agg.alias));
+            let state_alias = quote_ident(&format!("__pgt_aux_special_{}", agg.alias));
+            agg_cases.push(format!(
+                "CASE WHEN m.__pgt_meta_action = 'D' THEN NULL::jsonb \
+                 ELSE m.{new_state} END AS {state_alias}",
+            ));
+        }
     }
 
     let extra_agg_cases = if agg_cases.is_empty() {
@@ -2776,6 +2944,13 @@ END AS __pgt_meta_action"#
             new = quote_ident(&format!("new_{}", agg.alias)),
             old = quote_ident(&format!("old_{}", agg.alias)),
         ));
+        if agg.uses_incremental_nonfinite_state(child) {
+            change_checks.push(format!(
+                "m.{} IS DISTINCT FROM m.{}",
+                quote_ident(&format!("new___pgt_aux_special_{}", agg.alias)),
+                quote_ident(&format!("old___pgt_aux_special_{}", agg.alias)),
+            ));
+        }
     }
     let change_guard = change_checks.join("\n          OR ");
 
@@ -3823,11 +3998,21 @@ mod tests {
         assert!(special_delta.contains("__pgt_action IN ('I', 'D')"));
         assert!(special_delta.contains("(amount)::text IN ('Infinity', '-Infinity', 'NaN')"));
 
+        let mut child = scan(1, "t", "public", "t", &["amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[0].type_oid = 1700;
+        }
         let avg = avg_col("amount", "average");
-        let special_filter =
-            special_aggregate_delta_filter(&[sum_col("amount", "total"), avg.clone()]).unwrap();
+        let special_aggs = [sum_col("amount", "total"), avg.clone()];
+        let special_filter = special_aggregate_delta_filter(&special_aggs, &child).unwrap();
         assert!(special_filter.contains("__special_total"));
         assert!(special_filter.contains("__special_average"));
+        assert!(special_filter.contains("jsonb_typeof(__pgt_d2.\"__ins_special_total\")"));
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[0].type_oid = 25;
+        }
+        let fallback_filter = special_aggregate_delta_filter(&special_aggs, &child).unwrap();
+        assert!(!fallback_filter.contains("jsonb_typeof"));
         let group_filter = build_group_filter(
             "agg_delta",
             &[colref("grp")],
@@ -3856,7 +4041,8 @@ mod tests {
     #[test]
     fn test_statistical_special_values_rescan_auxiliaries() {
         let stddev = stddev_pop_col("amount", "stddev");
-        let filter = special_aggregate_delta_filter(std::slice::from_ref(&stddev)).unwrap();
+        let child = scan(1, "t", "public", "t", &["amount"]);
+        let filter = special_aggregate_delta_filter(std::slice::from_ref(&stddev), &child).unwrap();
         assert!(filter.contains("__special_stddev"));
         assert!(needs_special_value_rescan(&stddev));
         assert_eq!(
