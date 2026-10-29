@@ -11,11 +11,18 @@ async fn test_pg_dump_restore_recreates_oid_shifted_dag() {
     db.execute("INSERT INTO source VALUES (1, 'one'), (2, 'two')")
         .await;
 
-    db.create_st(
-        "dump_test_st",
-        "SELECT id, val FROM source",
-        "1m",
-        "DIFFERENTIAL",
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'dump_test_st', query => 'SELECT id, val FROM source', \
+             schedule => '1m', refresh_mode => 'DIFFERENTIAL', initialize => false, \
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .await;
+    db.execute(
+        "SELECT * FROM pgtrickle.refresh_graph_strict(\
+             ARRAY['public.dump_test_st'::regclass], \
+             (SELECT graph_digest FROM pgtrickle.graph_contract(\
+                 ARRAY['public.dump_test_st'::regclass])), 'ALLOW')",
     )
     .await;
     db.create_st(
@@ -33,6 +40,16 @@ async fn test_pg_dump_restore_recreates_oid_shifted_dag() {
         .await;
     let downstream_ddl: String = db
         .query_scalar("SELECT pgtrickle.export_definition('public.dump_test_downstream')")
+        .await;
+    let consumer_id: String = db
+        .query_scalar(
+            "SELECT consumer_id::text \
+               FROM pgtrickle.register_output_delta_consumer(\
+                    'public.dump_test_st'::regclass, 'dump_restore_consumer', \
+                    (SELECT contract_digest \
+                       FROM pgtrickle.stream_table_contract('public.dump_test_st'::regclass)), \
+                    'RESNAPSHOT_REQUIRED')",
+        )
         .await;
     let source_recovery: String = db
         .query_scalar("SELECT pgtrickle.validate_recovery()")
@@ -225,6 +242,33 @@ async fn test_pg_dump_restore_recreates_oid_shifted_dag() {
             .expect("inspect restored capture state");
     assert_eq!(capture_state, "QUARANTINED");
 
+    let (stored_relid, restored_relid, stored_delta_relid, restored_delta_relid): (
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT st.pgt_relid::bigint, \
+                'public.dump_test_st'::regclass::oid::bigint, \
+                l.delta_relid::bigint, \
+                to_regclass(format('%I.%I', 'pgtrickle_changes', \
+                    'output_delta_' || st.pgt_id::text))::oid::bigint \
+           FROM pgtrickle.pgt_stream_tables st \
+           JOIN pgtrickle.pgt_output_delta_logs l ON l.pgt_id = st.pgt_id \
+          WHERE st.pgt_name = 'dump_test_st'",
+    )
+    .fetch_one(&restored_pool)
+    .await
+    .expect("inspect restored stream-table OID");
+    assert_ne!(
+        stored_relid, restored_relid,
+        "logical restore must shift the stream-table OID"
+    );
+    assert_ne!(
+        stored_delta_relid, restored_delta_relid,
+        "logical restore must shift the output-delta payload OID"
+    );
+
     // The legacy bulk restore helper remains disabled. The supported workflow
     // explicitly adopts the database, drops restored stream tables, and
     // recreates them from definitions resolved against the restored OIDs.
@@ -244,6 +288,52 @@ async fn test_pg_dump_restore_recreates_oid_shifted_dag() {
         .await
         .expect("adopt restored capture instance");
     assert!(adoption.contains("capture ownership adopted"));
+
+    let (adopted_relid, live_relid, delta_relid, live_delta_relid): (i64, i64, i64, i64) =
+        sqlx::query_as(
+            "SELECT st.pgt_relid::bigint, \
+                    'public.dump_test_st'::regclass::oid::bigint, \
+                    l.delta_relid::bigint, \
+                    to_regclass(format('%I.%I', 'pgtrickle_changes', \
+                        'output_delta_' || st.pgt_id::text))::oid::bigint \
+               FROM pgtrickle.pgt_stream_tables st \
+               JOIN pgtrickle.pgt_output_delta_logs l ON l.pgt_id = st.pgt_id \
+              WHERE st.pgt_name = 'dump_test_st'",
+        )
+        .fetch_one(&restored_pool)
+        .await
+        .expect("inspect adopted output-delta relation OIDs");
+    assert_eq!(adopted_relid, live_relid);
+    assert_eq!(delta_relid, live_delta_relid);
+    let consumer_state: (String, Option<String>) = sqlx::query_as(
+        "SELECT state, state_reason \
+           FROM pgtrickle.pgt_output_delta_consumers \
+          WHERE consumer_id = $1::uuid",
+    )
+    .bind(&consumer_id)
+    .fetch_one(&restored_pool)
+    .await
+    .expect("inspect restored consumer invalidation");
+    assert_eq!(
+        consumer_state,
+        (
+            "INVALIDATED".to_string(),
+            Some("DATABASE_INSTANCE_CHANGED".to_string())
+        )
+    );
+    let guard_enabled: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger \
+          WHERE tgrelid = 'pgtrickle.pgt_stream_tables'::regclass \
+            AND tgname = 'pgt_stream_tables_output_delta_contract_guard' \
+            AND tgenabled <> 'D')",
+    )
+    .fetch_one(&restored_pool)
+    .await
+    .expect("inspect output-delta contract guard after adoption");
+    assert!(
+        guard_enabled,
+        "adoption must restore the output-delta contract guard"
+    );
 
     sqlx::query(
         "SELECT pgtrickle.bulk_drop_stream_tables(
