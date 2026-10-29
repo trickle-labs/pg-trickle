@@ -59,10 +59,10 @@
 //! - For ΔQ_I rows (inserts): emit with FLIPPED dr action (cancels excess)
 //! - For ΔQ_D rows (deletes): emit with dr action (adds missing contribution)
 //!
-//! The correction is only applied when the left child is a **shallow** join
-//! (both of its children are simple Scan nodes).  For deeper chains (e.g.
-//! Q08 with 8 tables), cascading corrections at every level generate SQL
-//! too complex for PostgreSQL's planner, so the correction is skipped.
+//! The correction is applied whenever the left child is a nested join. The
+//! `part3_max_scan_count` GUC controls whether PostgreSQL is forced to inline
+//! the child delta CTE; it never suppresses a correction required for exact
+//! results.
 //!
 //! ## Semi-join optimization
 //!
@@ -85,8 +85,8 @@ use crate::config;
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{
     build_base_table_key_exprs, build_filtered_leaf_snapshot_sql, build_snapshot_sql,
-    is_join_child, is_simple_child, join_scan_count, rewrite_expr_for_join, rewrite_join_condition,
-    snapshot_join_column_name,
+    is_join_child, is_simple_child, rewrite_expr_for_join, rewrite_join_condition,
+    snapshot_join_column_name, total_scan_count,
 };
 use crate::dvm::parser::{Expr, OpTree};
 use crate::dvm::snapshot::SnapshotPlan;
@@ -363,9 +363,8 @@ fn diff_keyed_endpoints(
 // PostgreSQL reserves lower OIDs for built-in catalog types and operators.
 const FIRST_NORMAL_OBJECT_ID: u32 = 16_384;
 
-// A44-1 (v0.43.0): Part 3 correction term scan count limit is now controlled
-// by the `pg_trickle.part3_max_scan_count` GUC (default 5, previously hardcoded).
-// The default value of 5 was chosen to cover 6-table semi-join chains.
+// A44-1 (v0.43.0): Part 3 child-delta inlining threshold is controlled by the
+// `pg_trickle.part3_max_scan_count` GUC (default 5).
 // A44-1 (v0.43.0): Deep-join L0 snapshot threshold is now controlled
 // by the `pg_trickle.deep_join_l0_scan_threshold` GUC (default 4, previously hardcoded).
 
@@ -549,30 +548,23 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     let join_cond_part2 = rewrite_join_condition(condition, left, "l", right, "dr");
 
     // Part 3 correction condition: dl (delta left) + dr (delta right).
-    // Used when Part 2 uses L₁ (post-change) instead of L₀.  The
-    // correction cancels the (ΔL ⋈ ΔR) double-counting error introduced
-    // by using L₁.  Generated for join children up to PART3_MAX_SCAN_COUNT
-    // scan nodes.  This fixes Q07-type revenue drift in multi-table join
-    // chains that contain semi-joins.
+    // Used when Part 2 uses L₁ (post-change) instead of L₀. The correction
+    // cancels the (ΔL ⋈ ΔR) double-counting error introduced by using L₁.
+    // It is required for correctness at every nested-join depth.
     //
-    // DI-5: Threshold raised from 3 to 5 — DI-1's named CTE L₀ snapshots
-    // make delta CTEs cheaper, and the Part 3 correction joins two
-    // already-computed delta CTEs (NOT MATERIALIZED), so temp file
-    // pressure is lower than the pre-DI-1 era where full snapshot CTEs
-    // were inlined. Covers 6-table semi-join chains (e.g. Q21 variants).
+    // The configured scan threshold controls whether the child delta CTE is
+    // forced inline or left to PostgreSQL's default materialization choice.
     //
-    // The correction is computed eagerly here but only emitted when
-    // `!use_l0` (see `correction_sql` below).
-    let left_scan_count = join_scan_count(left);
-    // A44-1: Read deep-join threshold from GUC (default 5, previously hardcoded).
+    // The correction is computed eagerly here but only needed when `!use_l0`
+    // (see `correction_sql` below). Count every scan, including those below a
+    // semi/anti join, so this GUC controls only the inline/materialize hint.
+    let left_scan_count = total_scan_count(left);
     let part3_max_scan_count = config::pg_trickle_part3_max_scan_count();
-    let join_cond_correction =
-        if !is_simple_child(left) && is_join_child(left) && left_scan_count <= part3_max_scan_count
-        {
-            Some(rewrite_join_condition(condition, left, "dl", right, "dr"))
-        } else {
-            None
-        };
+    let join_cond_correction = if !is_simple_child(left) && is_join_child(left) {
+        Some(rewrite_join_condition(condition, left, "dl", right, "dr"))
+    } else {
+        None
+    };
 
     // Extract equi-join key pairs for semi-join optimization.
     // If we can identify (left_key, right_key) pairs from the condition,
@@ -853,8 +845,11 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             // The correction adds a second FROM-clause reference to
             // delta_left.  PostgreSQL (12+) auto-materializes CTEs with
             // >= 2 references, which can spill huge temp files for join
-            // delta CTEs.  Mark it NOT MATERIALIZED so PG inlines it.
-            ctx.mark_cte_not_materialized(&left_result.cte_name);
+            // delta CTEs. Force inlining only for smaller join trees; larger
+            // delta CTEs keep PostgreSQL's default materialization choice.
+            if left_scan_count <= part3_max_scan_count {
+                ctx.mark_cte_not_materialized(&left_result.cte_name);
+            }
 
             // Row ID for correction rows: hash of both sides' PK columns,
             // using the same canonical left-first, right-second order as
@@ -884,9 +879,7 @@ JOIN {delta_right} dr ON {cond} AND ({correction_left_filter})",
                 correction_left_filter = correction_left_filter,
             )
         } else {
-            // DI-5: Part 3 correction suppressed — either left child is
-            // not a join, or scan count exceeds PART3_MAX_SCAN_COUNT.
-            // This may cause minor drift for very deep semi-join chains.
+            // The left child is not a nested join, so no Part 3 term applies.
             String::new()
         }
     } else {
@@ -1551,6 +1544,7 @@ pub fn mark_leaf_delta_ctes_not_materialized(op: &OpTree, ctx: &mut DiffContext)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dvm::operators::join_common::join_scan_count;
     use crate::dvm::operators::test_helpers::*;
     use proptest::prelude::*;
 
@@ -2245,11 +2239,9 @@ mod tests {
     }
 
     #[test]
-    fn test_di5_part3_threshold_raised_covers_4_scan_semijoin_chain() {
-        // DI-5: Part 3 correction threshold raised from 3 → 5.
-        // Build a left child with join_scan_count = 4 that contains a
-        // semi-join — this triggers `use_l0 = false` (semi-join present)
-        // and should emit Part 3 correction at the outer join.
+    fn test_part3_correction_for_nested_semijoin_child() {
+        // Build a left child with four ordinary join scans and a semi-join.
+        // This triggers `use_l0 = false` and requires Part 3 at the outer join.
         //
         // Structure: inner_join(
         //   left = inner_join(
@@ -2268,7 +2260,7 @@ mod tests {
         //
         // Use structure where left child = inner_join(chain4, semi_join(E, F)):
         //   chain4 = (A ⋈ B) ⋈ C ⋈ D  (4 scans)
-        //   left = chain4 ⋈ semi_join(E, F)  → 4 + 0 = 4 scan_count
+        //   left = chain4 ⋈ semi_join(E, F)  → join_scan_count = 4
         //   contains_semijoin(left) = true
         let a = scan(1, "a", "public", "a", &["id"]);
         let b = scan(2, "b", "public", "b", &["id"]);
@@ -2289,12 +2281,13 @@ mod tests {
         // calling diff_node on each child separately.
         // The outer diff_inner_join sees left = inner_join(chain4, semi_join(e,f))
         // → is_join_child(left) = true, contains_semijoin(left) = true
-        // → join_scan_count(left) = 4 + 0 = 4
+        // → join_scan_count(left) = 4; total_scan_count(left) = 6
         let sj = semi_join(eq_cond("e", "id", "f", "id"), e, f);
         let left = inner_join(eq_cond("a", "id", "e", "id"), chain4, sj);
 
         // Verify preconditions
         assert_eq!(join_scan_count(&left), 4);
+        assert_eq!(total_scan_count(&left), 6);
         assert!(is_join_child(&left));
 
         // Outer join: left ⋈ g
@@ -2304,20 +2297,14 @@ mod tests {
         let result = diff_inner_join(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // DI-5: With threshold 5, scan_count 4 is within range →
-        // Part 3 correction should be emitted.
+        // The nested cross-delta correction is emitted for this semijoin tree.
         assert_sql_contains(&sql, "Correction for nested join");
     }
 
     #[test]
-    fn test_di5_part3_suppressed_above_threshold() {
-        // DI-5: Part 3 correction suppressed at the outermost join when
-        // left_scan_count > PART3_MAX_SCAN_COUNT (5).
-        //
-        // DI-11: Inner join levels with 4+ scan children now use L₁ + Part 3
-        // (instead of L₀ per-leaf). So "Correction for nested join" may appear
-        // at inner levels. We verify the outermost join CTE does NOT contain
-        // the correction.
+    fn test_di5_part3_preserved_above_inline_threshold() {
+        // The Part 3 correction remains required above the configured inline
+        // threshold. Only the CTE materialization hint changes with depth.
         let a = scan(1, "a", "public", "a", &["id"]);
         let b = scan(2, "b", "public", "b", &["id"]);
         let c = scan(3, "c", "public", "c", &["id"]);
@@ -2340,6 +2327,7 @@ mod tests {
         let left = inner_join(eq_cond("a", "id", "g", "id"), chain6, sj);
 
         assert_eq!(join_scan_count(&left), 6);
+        assert_eq!(total_scan_count(&left), 8);
 
         let tree = inner_join(eq_cond("a", "id", "i", "id"), left, i);
 
@@ -2351,11 +2339,12 @@ mod tests {
             .cte_sql(&result.cte_name)
             .expect("outer CTE should exist");
 
-        // scan_count 6 > PART3_MAX_SCAN_COUNT (5) → outermost correction
-        // suppressed (inner levels may still have corrections due to DI-11).
+        // The left child has six join scans (eight including the semi join),
+        // above the test threshold of five, but suppressing the correction
+        // would lose the simultaneous-change cross term.
         assert!(
-            !outer_cte_sql.contains("Correction for nested join"),
-            "Outermost CTE should NOT contain Part 3 correction, got:\n{}",
+            outer_cte_sql.contains("Correction for nested join"),
+            "Outermost CTE should retain the Part 3 correction, got:\n{}",
             &outer_cte_sql[..outer_cte_sql.len().min(500)]
         );
     }

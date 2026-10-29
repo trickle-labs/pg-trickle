@@ -253,6 +253,51 @@ async fn refresh_differential_and_assert_with_config(
 }
 
 #[tokio::test]
+async fn test_nested_semijoin_correction_is_emitted_past_scan_threshold() {
+    let mut db = E2eDb::new().await.with_extension().await;
+    let options = db
+        .pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .options([("pg_trickle.part3_max_scan_count", "1")]);
+    db.pool.close().await;
+    db.pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await
+        .expect("connect with low Part 3 scan threshold");
+
+    db.execute("CREATE TABLE deep_corr_a (id INT PRIMARY KEY)")
+        .await;
+    db.execute("CREATE TABLE deep_corr_b (id INT PRIMARY KEY)")
+        .await;
+    db.execute("CREATE TABLE deep_corr_c (id INT PRIMARY KEY)")
+        .await;
+    db.execute("CREATE TABLE deep_corr_gate (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO deep_corr_a VALUES (2)").await;
+    let query = "SELECT a.id FROM deep_corr_a a JOIN deep_corr_b b ON b.id = a.id \
+                 JOIN deep_corr_c c ON c.id = b.id \
+                 WHERE EXISTS (SELECT 1 FROM deep_corr_gate g WHERE g.id = a.id)";
+    db.create_st("deep_corr_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("deep_corr_st", query).await;
+
+    db.execute_seq(&[
+        "BEGIN",
+        "INSERT INTO deep_corr_a VALUES (1)",
+        "INSERT INTO deep_corr_b VALUES (1)",
+        "INSERT INTO deep_corr_c VALUES (1)",
+        "INSERT INTO deep_corr_gate VALUES (1)",
+        "DELETE FROM deep_corr_a WHERE id = 2",
+        "COMMIT",
+    ])
+    .await;
+    refresh_differential_and_assert(&db, "deep_corr_st", query).await;
+}
+
+#[tokio::test]
 async fn test_inner_join_erroring_non_equi_uses_coherent_endpoint_snapshots() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE err_join_left (id INT PRIMARY KEY, grp INT NOT NULL, val INT)")

@@ -113,7 +113,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.online_schema_evolution` | `bool` | `false` | Default: `false` (standard ALTER QUERY reinit behaviour). |
 | `pg_trickle.otel_endpoint` | `text` | `None` | Set to `NULL` / empty to disable OTEL export (default). |
 | `pg_trickle.parallel_refresh_mode` | `text` | `"on"` | - `"on"` (default as of v0.11.0): Enable true parallel refresh via   dynamic workers. |
-| `pg_trickle.part3_max_scan_count` | `int4` | `5` | Default: 5 (matches the previously hardcoded `PART3_MAX_SCAN_COUNT`). |
+| `pg_trickle.part3_max_scan_count` | `int4` | `5` | Maximum number of child scans at which nested-join delta CTEs are forced NOT MATERIALIZED. |
 | `pg_trickle.per_database_worker_quota` | `int4` | `0` | Set to 0 (default) to disable per-database quotas — all databases share `max_dynamic_refresh_workers` on a first-come-first-served basis, bounded per coordinator by `max_concurrent_refreshes`. |
 | `pg_trickle.pipeline_batch_size` | `int4` | `4096` | Maximum logical rows in one differential pipeline apply batch. |
 | `pg_trickle.planner_aggressive` | `bool` | `true` | Replaces the old `merge_planner_hints` and `merge_work_mem_mb` GUCs (both still accepted but emit deprecation warnings). |
