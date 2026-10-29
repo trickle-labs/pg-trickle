@@ -176,6 +176,11 @@ fn ensure_payload(
         quoted_ident(&role)
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run(&format!(
+        "GRANT USAGE ON SCHEMA pgtrickle_changes TO {}",
+        quoted_ident(&role)
+    ))
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     Spi::get_one_with_args::<pg_sys::Oid>(
         "SELECT to_regclass($1)::oid",
         &[format!("pgtrickle_changes.{name}").into()],
