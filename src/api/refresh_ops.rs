@@ -1278,8 +1278,11 @@ pub(crate) fn get_source_oids_for_manual_refresh(
     pgt_id: i64,
 ) -> Result<Vec<pg_sys::Oid>, PgTrickleError> {
     let deps = StDependency::get_for_st(pgt_id)?;
-    Ok(deps
-        .into_iter()
+    Ok(source_oids_from_dependencies(&deps))
+}
+
+pub(crate) fn source_oids_from_dependencies(deps: &[StDependency]) -> Vec<pg_sys::Oid> {
+    deps.iter()
         .filter(|dep| {
             matches!(
                 dep.source_type.as_str(),
@@ -1287,5 +1290,5 @@ pub(crate) fn get_source_oids_for_manual_refresh(
             )
         })
         .map(|dep| dep.source_relid)
-        .collect())
+        .collect()
 }
