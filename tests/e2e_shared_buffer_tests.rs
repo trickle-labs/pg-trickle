@@ -298,6 +298,57 @@ async fn test_compaction_shared_stream_preserves_consumer_boundaries() {
 }
 
 #[tokio::test]
+async fn test_compaction_single_consumer_stream_preserves_latest_payload() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE compact_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO compact_src VALUES (1, 0)").await;
+    db.create_st(
+        "compact_upstream",
+        "SELECT id, val FROM compact_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "compact_downstream",
+        "SELECT id, val FROM compact_upstream",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    for val in 1..=3 {
+        db.execute(&format!("UPDATE compact_src SET val = {val} WHERE id = 1"))
+            .await;
+        db.refresh_st_until_converged("compact_upstream").await;
+    }
+
+    db.execute_seq(&[
+        "SET pg_trickle.compact_threshold = 1",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('compact_downstream')",
+    ])
+    .await;
+    db.assert_st_matches_query("compact_downstream", "SELECT id, val FROM compact_src")
+        .await;
+    let differential: bool = db
+        .query_scalar(
+            "SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' \
+             AND NOT h.was_full_fallback \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'compact_downstream' \
+             ORDER BY h.refresh_id DESC LIMIT 1",
+        )
+        .await;
+    assert!(
+        differential,
+        "single-consumer ST compaction stays differential"
+    );
+}
+
+#[tokio::test]
 async fn test_compaction_keyless_source_and_stream_preserve_duplicates() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE compact_src (val INT)").await;

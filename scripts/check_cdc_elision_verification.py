@@ -18,8 +18,8 @@ MUTATIONS = {
     "lost-positive-image": ("if weight > 0 { ImageAction::Insert }", "if weight > 0 { ImageAction::Skip }"),
     "reversed-negative-image": ("else if weight < 0 { ImageAction::Delete }", "else if weight < 0 { ImageAction::Insert }"),
     "cross-truncate-barrier": (
-        "    has_immediate_primary_key && has_single_consumer && !has_truncate_barrier\n",
-        "    has_immediate_primary_key && has_single_consumer\n",
+        "    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier\n",
+        "    has_immediate_unique_identity && has_single_consumer\n",
     ),
 }
 
@@ -44,6 +44,9 @@ def check_contract() -> None:
         raise ValueError("keyed MERGE does not execute the checked image action adapter")
     if "crate::cdc_elision::can_compact_history(" not in (runner.ROOT / "src/cdc/mod.rs").read_text():
         raise ValueError("base-buffer compaction bypasses the checked barrier decision")
+    cdc = (runner.ROOT / "src/cdc/mod.rs").read_text()
+    if cdc.count("crate::cdc_elision::can_compact_history(") != 2:
+        raise ValueError("base and stream-table compaction must use the checked barrier decision")
 
 
 def run_checks() -> None:
