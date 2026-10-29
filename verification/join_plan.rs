@@ -77,6 +77,64 @@ pub fn scope_pair(left_changed: bool, right_changed: bool) -> (include: bool)
     left_changed || right_changed
 }
 
+/// The correction polarity depends on whether Part 1 already uses the old right.
+pub fn correction_is_delete(left_insert: bool, right_insert: bool, part1_split: bool) -> (deletes: bool)
+    ensures deletes == if part1_split {
+        left_insert && right_insert
+    } else {
+        left_insert == right_insert
+    },
+{
+    if part1_split {
+        left_insert && right_insert
+    } else {
+        left_insert == right_insert
+    }
+}
+
+/// Nested-left correction terms equal the endpoint bag difference in both
+/// Part 1 plans: split deletes use the old right, while unsplit deltas use it
+/// only through the ordinary signed join term.
+pub proof fn nested_left_correction_matches_endpoints(
+    l0: int, l1: int, li: int, ld: int,
+    r0: int, r1: int, ri: int, rd: int,
+    part1_split: bool,
+)
+    requires l1 == l0 + li - ld, r1 == r0 + ri - rd,
+    ensures
+        part1_split ==> li * r1 - ld * r0 + l1 * (ri - rd) - li * (ri - rd)
+            == l1 * r1 - l0 * r0,
+        !part1_split ==> li * r1 - ld * r1 + l1 * (ri - rd) - li * (ri - rd) + ld * (ri - rd)
+            == l1 * r1 - l0 * r0,
+{
+    assert(l1 == l0 + li - ld);
+    assert(r1 == r0 + ri - rd);
+    if part1_split {
+        assert(li * r1 == li * r0 + li * (ri - rd)) by (nonlinear_arith)
+            requires r1 == r0 + ri - rd;
+        assert(l1 * r1 == l1 * r0 + l1 * (ri - rd)) by (nonlinear_arith)
+            requires r1 == r0 + ri - rd;
+        assert(li * r0 - ld * r0 == l1 * r0 - l0 * r0) by (nonlinear_arith)
+            requires l1 == l0 + li - ld;
+        assert(
+            li * r1 - ld * r0 + l1 * (ri - rd) - li * (ri - rd)
+                == l1 * r1 - l0 * r0
+        ) by (nonlinear_arith)
+            requires l1 == l0 + li - ld, r1 == r0 + ri - rd;
+    } else {
+        assert(li * r1 - ld * r1 == (li - ld) * r1) by (nonlinear_arith);
+        assert(l1 == l0 + (li - ld));
+        assert(l1 * (ri - rd) - li * (ri - rd) + ld * (ri - rd)
+            == l0 * (ri - rd)) by (nonlinear_arith)
+            requires l1 == l0 + li - ld;
+        assert(
+            li * r1 - ld * r1 + l1 * (ri - rd) - li * (ri - rd) + ld * (ri - rd)
+                == l1 * r1 - l0 * r0
+        ) by (nonlinear_arith)
+            requires l1 == l0 + li - ld, r1 == r0 + ri - rd;
+    }
+}
+
 /// Pointwise bag semantics: an omitted unchanged image-pair has zero delta.
 pub proof fn unchanged_pair_has_zero_difference(l0: int, l1: int, r0: int, r1: int, predicate_true: bool)
     requires l0 == l1, r0 == r1,
@@ -119,6 +177,39 @@ pub fn endpoint_changes_sql(
         ));
     }
     Some(arms.join("\nUNION ALL\n"))
+}
+
+/// Emit the checked row-action polarity used by the legacy nested correction.
+pub fn nested_correction_action_sql(part1_split: bool) -> String {
+    let action = |left_insert, right_insert| {
+        if correction_is_delete(left_insert, right_insert, part1_split) {
+            "D"
+        } else {
+            "I"
+        }
+    };
+    if part1_split {
+        format!(
+            "CASE WHEN dr.__pgt_action = 'I' THEN '{}' ELSE '{}' END",
+            action(true, true),
+            action(true, false),
+        )
+    } else {
+        format!(
+            "CASE WHEN (dl.__pgt_action = 'I') = (dr.__pgt_action = 'I') \
+             THEN '{}' ELSE '{}' END",
+            action(true, true),
+            action(true, false),
+        )
+    }
+}
+
+pub fn nested_correction_left_filter_sql(part1_split: bool) -> &'static str {
+    if part1_split {
+        "dl.__pgt_action = 'I'"
+    } else {
+        "TRUE"
+    }
 }
 
 #[allow(dead_code)]
@@ -181,5 +272,34 @@ mod tests {
                 assert_eq!(scope_pair(l, r), l || r);
             }
         }
+    }
+
+    #[test]
+    fn nested_correction_emits_checked_action_polarity() {
+        for (left, right, split, expected) in [
+            (true, true, false, true),
+            (true, false, false, false),
+            (false, true, false, false),
+            (false, false, false, true),
+            (true, true, true, true),
+            (true, false, true, false),
+            (false, true, true, false),
+            (false, false, true, false),
+        ] {
+            assert_eq!(correction_is_delete(left, right, split), expected);
+        }
+        assert_eq!(
+            nested_correction_action_sql(false),
+            "CASE WHEN (dl.__pgt_action = 'I') = (dr.__pgt_action = 'I') THEN 'D' ELSE 'I' END"
+        );
+        assert_eq!(
+            nested_correction_action_sql(true),
+            "CASE WHEN dr.__pgt_action = 'I' THEN 'D' ELSE 'I' END"
+        );
+        assert_eq!(nested_correction_left_filter_sql(false), "TRUE");
+        assert_eq!(
+            nested_correction_left_filter_sql(true),
+            "dl.__pgt_action = 'I'"
+        );
     }
 }
