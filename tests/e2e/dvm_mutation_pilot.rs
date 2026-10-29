@@ -109,8 +109,26 @@ pub async fn record_target_bags(db: &E2eDb, stream_table: &str, query: &str, con
              FROM ({source}) AS bag_row"
         )
     };
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT attname::text FROM pg_attribute \
+         WHERE attrelid = to_regclass($1)::oid AND attnum > 0 AND NOT attisdropped \
+           AND left(attname::text, 6) <> '__pgt_' ORDER BY attnum",
+    )
+    .bind(&table)
+    .fetch_all(&db.pool)
+    .await
+    .expect("read public stream-table columns");
+    assert!(
+        !columns.is_empty(),
+        "stream table has no public columns: {table}"
+    );
+    let projection = columns
+        .iter()
+        .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
     // The identifier is validated above and the defining query comes from the test fixture.
-    let actual_sql = bag_sql(&format!("SELECT * FROM {table}"));
+    let actual_sql = bag_sql(&format!("SELECT {projection} FROM {table}"));
     let actual: String = sqlx::query_scalar(sqlx::AssertSqlSafe(actual_sql))
         .fetch_one(&db.pool)
         .await
