@@ -938,6 +938,89 @@ async fn test_partitioned_st_differential_refresh_updates_and_deletes() {
 }
 
 #[tokio::test]
+async fn test_partitioned_not_in_first_rhs_null_hides_all_rows() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE notin_left (id integer PRIMARY KEY, k integer)")
+        .await;
+    db.execute("CREATE TABLE notin_right (id integer PRIMARY KEY, k integer)")
+        .await;
+    db.execute(
+        "INSERT INTO notin_left \
+         SELECT id, CASE WHEN id = 1 THEN NULL ELSE id % 10 + 1 END \
+         FROM generate_series(1, 100) AS series(id)",
+    )
+    .await;
+    let query = "SELECT l.id, l.k FROM notin_left l \
+                 WHERE l.k NOT IN (SELECT r.k FROM notin_right r)";
+    db.create_st_partitioned("notin_partitioned_st", query, "1h", "DIFFERENTIAL", "id")
+        .await;
+    db.assert_st_matches_query("notin_partitioned_st", query)
+        .await;
+
+    let (relkind, partition_key): (String, String) = sqlx::query_as(
+        "SELECT c.relkind::text, pg_get_partkeydef(c.oid) \
+         FROM pgtrickle.pgt_stream_tables st JOIN pg_class c ON c.oid = st.pgt_relid \
+         WHERE st.pgt_name = 'notin_partitioned_st'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read partitioned stream-table metadata");
+    assert_eq!(relkind, "p");
+    assert_eq!(partition_key, "RANGE (id)");
+
+    async fn refresh_and_compare(db: &E2eDb, query: &str) {
+        db.try_execute_with_config(
+            &["SET pg_trickle.refresh_strategy = 'differential'"],
+            "SELECT pgtrickle.refresh_stream_table('notin_partitioned_st')",
+        )
+        .await
+        .expect("run forced differential refresh");
+
+        let history: (String, bool, String) = sqlx::query_as(
+            "SELECT action, was_full_fallback, status FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                             WHERE pgt_name = 'notin_partitioned_st') \
+             ORDER BY refresh_id DESC LIMIT 1",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("read effective refresh history");
+        assert_eq!(history, ("DIFFERENTIAL".into(), false, "COMPLETED".into()));
+
+        let actual: Vec<(i32, Option<i32>)> =
+            sqlx::query_as("SELECT id, k FROM notin_partitioned_st ORDER BY id")
+                .fetch_all(&db.pool)
+                .await
+                .expect("read partitioned stream-table rows");
+        let expected: Vec<(i32, Option<i32>)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("{query} ORDER BY l.id")))
+                .fetch_all(&db.pool)
+                .await
+                .expect("read independent PostgreSQL NOT IN oracle");
+        assert_eq!(actual, expected, "partitioned NOT IN must match PostgreSQL");
+    }
+
+    db.execute("INSERT INTO notin_right VALUES (1, 10), (2, 10)")
+        .await;
+    refresh_and_compare(&db, query).await;
+
+    db.execute("INSERT INTO notin_right VALUES (3, NULL)").await;
+    refresh_and_compare(&db, query).await;
+
+    db.execute("INSERT INTO notin_right VALUES (4, NULL)").await;
+    refresh_and_compare(&db, query).await;
+
+    db.execute("DELETE FROM notin_right WHERE id = 3").await;
+    refresh_and_compare(&db, query).await;
+
+    db.execute("DELETE FROM notin_right WHERE id = 4").await;
+    refresh_and_compare(&db, query).await;
+
+    db.execute("DELETE FROM notin_right").await;
+    refresh_and_compare(&db, query).await;
+}
+
+#[tokio::test]
 async fn test_partitioned_st_validate_partition_key_error() {
     let db = E2eDb::new().await.with_extension().await;
 

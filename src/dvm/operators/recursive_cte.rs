@@ -3683,6 +3683,7 @@ mod tests {
         let left = make_scan(100, "a", "public", "a", &["id"]);
         let right = make_scan(200, "b", "public", "b", &["id"]);
         let anti = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: Expr::Literal("a.id = b.id".to_string()),
             left: Box::new(left),
             right: Box::new(right),

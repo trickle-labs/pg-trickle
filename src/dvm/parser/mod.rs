@@ -4165,6 +4165,7 @@ mod tests {
     #[test]
     fn test_anti_join_alias() {
         let tree = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: Expr::Literal("TRUE".into()),
             left: Box::new(make_scan(1, "orders", "o", &["id"])),
             right: Box::new(make_scan(2, "returns", "r", &["id"])),
@@ -4196,6 +4197,7 @@ mod tests {
     #[test]
     fn test_anti_join_node_kind() {
         let tree = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: Expr::Literal("TRUE".into()),
             left: Box::new(make_scan(1, "t1", "t1", &["id"])),
             right: Box::new(make_scan(2, "t2", "t2", &["id"])),
@@ -4228,6 +4230,7 @@ mod tests {
     #[test]
     fn test_anti_join_output_columns() {
         let tree = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: Expr::Literal("TRUE".into()),
             left: Box::new(make_scan(1, "orders", "o", &["id", "amount"])),
             right: Box::new(make_scan(2, "returns", "r", &["order_id"])),
@@ -4305,6 +4308,7 @@ mod tests {
     #[test]
     fn test_check_ivm_support_anti_join() {
         let tree = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: Expr::Literal("TRUE".into()),
             left: Box::new(make_scan(1, "t1", "t1", &["id"])),
             right: Box::new(make_scan(2, "t2", "t2", &["id"])),

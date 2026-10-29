@@ -343,8 +343,8 @@ pub fn post_full_refresh_cleanup(st: &StreamTableMeta) {
     // path where the delta SQL actually reads from the change buffer.
 }
 
-/// Poll all FOREIGN_TABLE and MATVIEW dependencies for a stream table before
-/// selecting a new differential frontier.
+/// Poll all FOREIGN_TABLE and MATVIEW dependencies before selecting a new
+/// differential frontier or establishing a FULL baseline.
 ///
 /// Polling writes synthetic CDC rows into the local change buffers and updates
 /// the per-source snapshot tables. Callers must do this before capturing the

@@ -57,6 +57,205 @@ async fn pending_consumer(
     (db, consumer, batch)
 }
 
+#[tokio::test]
+async fn test_v108_output_delta_owner_can_read_payload_without_change_buffer_access() {
+    let db = E2eDb::new().await.with_extension().await;
+    let role = "v108_delta_payload_owner";
+    let stream = "v108_delta_payload_stream";
+    let root = format!("public.{stream}");
+    db.execute(&format!("CREATE ROLE {role} LOGIN")).await;
+    db.execute_seq(&[
+        &format!("GRANT USAGE, CREATE ON SCHEMA public TO {role}"),
+        &format!("GRANT USAGE ON SCHEMA pgtrickle TO {role}"),
+        &format!("GRANT EXECUTE ON FUNCTION pgtrickle.register_output_delta_consumer(oid, text, bytea, text) TO {role}"),
+    ])
+    .await;
+    db.execute("CREATE TABLE v108_delta_payload_source (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO v108_delta_payload_source VALUES (1)")
+        .await;
+    db.execute(&format!(
+        "GRANT SELECT, MAINTAIN ON v108_delta_payload_source TO {role}"
+    ))
+    .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'v108_delta_payload_stream',\
+             query => 'SELECT id FROM v108_delta_payload_source',\
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,\
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .await;
+    db.execute(&format!("ALTER TABLE {root} OWNER TO {role}"))
+        .await;
+    assert!(
+        !db.query_scalar::<bool>(&format!(
+            "SELECT has_schema_privilege('{role}', 'pgtrickle_changes', 'USAGE')"
+        ))
+        .await
+    );
+
+    let contract = reference_clients::stream_contract_digest(&db.pool, &root).await;
+    let mut conn = db.pool.acquire().await.expect("acquire owner connection");
+    sqlx::query("SET ROLE v108_delta_payload_owner")
+        .execute(&mut *conn)
+        .await
+        .expect("assume stream owner role");
+    let row = sqlx::query(
+        "SELECT consumer_id::text AS consumer_id, delta_relation, state FROM pgtrickle.register_output_delta_consumer($1::regclass, $2, $3::bytea, 'CURRENT')",
+    )
+    .bind(&root)
+    .bind("payload_reader")
+    .bind(&contract)
+    .fetch_one(&mut *conn)
+    .await
+    .expect("owner should register a current-position consumer");
+    let delta_relation: String = row.try_get("delta_relation").expect("delta relation");
+    let consumer_id: String = row.try_get("consumer_id").expect("consumer id");
+    let state: String = row.try_get("state").expect("consumer state");
+    assert_eq!(state, "ACTIVE");
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("reset role after registration");
+    drop(conn);
+    assert!(
+        db.query_scalar::<bool>(&format!(
+            "SELECT has_schema_privilege('{role}', 'pgtrickle_changes', 'USAGE')"
+        ))
+        .await
+    );
+
+    let graph = graph_digest(&db.pool, &root).await;
+    reference_clients::refresh_graph(&db.pool, &root, &graph).await;
+    db.execute("INSERT INTO v108_delta_payload_source VALUES (2)")
+        .await;
+    refresh_graph_without_full(&db.pool, &root, &graph).await;
+
+    let pgt_id: i64 = db
+        .query_scalar(&format!(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{stream}'"
+        ))
+        .await;
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire owner payload connection");
+    sqlx::query("SET ROLE v108_delta_payload_owner")
+        .execute(&mut *conn)
+        .await
+        .expect("assume stream owner role");
+    let payload_rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {delta_relation} WHERE action = 'INSERT' AND id = 2"
+    )))
+    .fetch_one(&mut *conn)
+    .await
+    .expect("owner should read the returned delta relation");
+    assert_eq!(payload_rows, 1);
+    let private_read = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM pgtrickle_changes.changes_pgt_{pgt_id}"
+    )))
+    .execute(&mut *conn)
+    .await;
+    assert!(
+        private_read.is_err(),
+        "payload schema USAGE must not grant access to private CDC tables"
+    );
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("reset role after payload checks");
+    let owner_valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1::uuid)",
+    )
+    .bind(consumer_id)
+    .fetch_one(&mut *conn)
+    .await
+    .expect("verify consumer persisted");
+    assert!(owner_valid);
+}
+
+#[tokio::test]
+async fn test_v108_snapshot_restore_reinitializes_downstream_and_invalidates_consumer() {
+    let prefix = "v108_snapshot_restore";
+    let (db, consumer, _) = active_consumer(prefix).await;
+    let upstream_fqn = format!("public.{prefix}_stream");
+    let downstream = format!("{prefix}_downstream");
+    db.execute(&format!(
+        "SELECT pgtrickle.snapshot_stream_table('{prefix}_stream')"
+    ))
+    .await;
+    let snapshot: String = db
+        .query_scalar(&format!(
+            "SELECT format('%I.%I', s.snapshot_schema, s.snapshot_table) FROM pgtrickle.pgt_snapshots s JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = '{prefix}_stream' ORDER BY s.created_at DESC LIMIT 1"
+        ))
+        .await;
+
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table(\
+             name => '{downstream}',\
+             query => 'SELECT id, value FROM {prefix}_stream',\
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false)"
+    ))
+    .await;
+    let downstream_fqn = format!("public.{downstream}");
+    db.execute(&format!(
+        "SELECT pgtrickle.refresh_stream_table('{downstream}')"
+    ))
+    .await;
+
+    db.execute(&format!("DELETE FROM {prefix}_source WHERE id = 1"))
+        .await;
+    db.execute(&format!("INSERT INTO {prefix}_source VALUES (2, 'after')"))
+        .await;
+    let upstream_graph = graph_digest(&db.pool, &upstream_fqn).await;
+    refresh_graph_without_full(&db.pool, &upstream_fqn, &upstream_graph).await;
+    assert_eq!(db.count(&downstream_fqn).await, 1);
+
+    db.execute(&format!(
+        "SELECT pgtrickle.restore_from_snapshot('{prefix}_stream', '{snapshot}')"
+    ))
+    .await;
+    let consumer_state: String = sqlx::query_scalar(
+        "SELECT state FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1::uuid",
+    )
+    .bind(&consumer.consumer_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("restored source consumer should remain registered");
+    assert_eq!(consumer_state, "INVALIDATED");
+    assert_eq!(
+        db.query_scalar::<String>(&format!(
+            "SELECT state_reason FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = '{}'::uuid",
+            consumer.consumer_id
+        ))
+        .await,
+        "SNAPSHOT_RESTORED"
+    );
+    assert!(
+        db.query_scalar::<bool>(&format!(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{downstream}'"
+        ))
+        .await
+    );
+    db.execute(&format!(
+        "SELECT pgtrickle.refresh_stream_table('{downstream}')"
+    ))
+    .await;
+    assert_eq!(db.count(&downstream_fqn).await, 1);
+    assert_eq!(
+        db.query_scalar::<i32>(&format!("SELECT id FROM {downstream_fqn}"))
+            .await,
+        1
+    );
+    assert_eq!(
+        db.query_scalar::<String>(&format!("SELECT value FROM {downstream_fqn}"))
+            .await,
+        "before"
+    );
+}
+
 async fn assert_persistently_invalidated(db: &E2eDb, consumer: &DeltaRegistration, reason: &str) {
     for _ in 0..2 {
         let status = reference_clients::validate_consumer(&db.pool, &consumer.consumer_id).await;

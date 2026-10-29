@@ -1605,6 +1605,8 @@ pub enum OpTree {
     /// affected left rows.
     AntiJoin {
         condition: Expr,
+        /// Equality operands for SQL `NOT IN`, whose NULL behavior differs from NOT EXISTS.
+        null_aware_keys: Option<(Expr, Expr)>,
         left: Box<OpTree>,
         right: Box<OpTree>,
     },
@@ -1798,6 +1800,7 @@ impl ParseResult {
                 condition,
                 left,
                 right,
+                ..
             } => {
                 Self::collect_funcs_from_expr(condition, names);
                 Self::collect_expr_funcs(left, names);
@@ -3102,6 +3105,7 @@ impl OpTree {
                 condition,
                 left,
                 right,
+                ..
             } => {
                 Self::collect_column_names_from_expr(condition, names);
                 left.collect_key_column_names(names);
@@ -3412,6 +3416,7 @@ impl OpTree {
                 condition,
                 left,
                 right,
+                ..
             } => {
                 if !collect_refs_from_expr(condition, refs) {
                     return false;

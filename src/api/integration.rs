@@ -852,7 +852,7 @@ fn build_source_boundary(
         .into_iter()
         .map(pg_sys::Oid::from)
         .collect::<Vec<_>>();
-    let positions = crate::cdc::get_slot_positions_at_bound(&table_oids, safe_bound)?;
+    let positions = crate::cdc::get_slot_positions_at_bound(&table_oids, safe_bound, false)?;
     let members_by_relid = members
         .iter()
         .map(|member| (member.pgt_relid.to_u32(), member))

@@ -33,6 +33,8 @@ struct SublinkWrapper {
     /// The join condition (correlation condition from the inner WHERE,
     /// possibly including the IN equality condition).
     condition: Expr,
+    /// Equality operands for single-column NOT IN, which is NULL-aware unlike NOT EXISTS.
+    null_aware_keys: Option<(Expr, Expr)>,
     /// Parsed OpTree for the inner subquery's FROM clause.
     inner_tree: OpTree,
 }
@@ -675,6 +677,7 @@ fn parse_exists_sublink(
         return Ok(SublinkWrapper {
             negated,
             condition,
+            null_aware_keys: None,
             inner_tree,
         });
     }
@@ -692,6 +695,7 @@ fn parse_exists_sublink(
     Ok(SublinkWrapper {
         negated,
         condition,
+        null_aware_keys: None,
         inner_tree,
     })
 }
@@ -914,6 +918,15 @@ fn parse_any_sublink(
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
         safe_node_to_expr(sublink.testexpr)?
     };
+    let negated_equality = negated
+        && if sublink.operName.is_null() {
+            true
+        } else {
+            // SAFETY: operName is PostgreSQL's operator-name list from the parsed SubLink.
+            unsafe { extract_func_name(sublink.operName) }
+                .map(|name| name == "=")
+                .unwrap_or(false)
+        };
 
     // ── M-5 (v0.55.0): Multi-column IN → EXISTS-equivalent SemiJoin ─
     //
@@ -1038,6 +1051,7 @@ fn parse_any_sublink(
         return Ok(SublinkWrapper {
             negated,
             condition,
+            null_aware_keys: None,
             inner_tree,
         });
     }
@@ -1150,13 +1164,18 @@ fn parse_any_sublink(
         let inner_col_qualified = qualify_inner_col_refs(inner_col_expr, inner_tree.alias());
         let equality = Expr::BinaryOp {
             op: "=".to_string(),
-            left: Box::new(test_expr),
-            right: Box::new(inner_col_qualified),
+            left: Box::new(test_expr.clone()),
+            right: Box::new(inner_col_qualified.clone()),
         };
 
         return Ok(SublinkWrapper {
             negated,
             condition: equality,
+            null_aware_keys: if negated_equality {
+                Some((test_expr.clone(), inner_col_qualified.clone()))
+            } else {
+                None
+            },
             inner_tree,
         });
     }
@@ -1172,8 +1191,8 @@ fn parse_any_sublink(
     // Build the equality condition: test_expr = inner_col_expr
     let equality = Expr::BinaryOp {
         op: "=".to_string(),
-        left: Box::new(test_expr),
-        right: Box::new(inner_col_qualified),
+        left: Box::new(test_expr.clone()),
+        right: Box::new(inner_col_qualified.clone()),
     };
 
     // Combine with inner WHERE clause if present
@@ -1192,6 +1211,11 @@ fn parse_any_sublink(
     Ok(SublinkWrapper {
         negated,
         condition,
+        null_aware_keys: if negated_equality {
+            Some((test_expr, inner_col_qualified))
+        } else {
+            None
+        },
         inner_tree,
     })
 }
@@ -1399,6 +1423,7 @@ fn parse_all_sublink(
     Ok(SublinkWrapper {
         negated: !negated,
         condition,
+        null_aware_keys: None,
         inner_tree,
     })
 }
@@ -3053,6 +3078,7 @@ unsafe fn parse_select_stmt_inner(
             if wrapper.negated {
                 tree = OpTree::AntiJoin {
                     condition: wrapper.condition,
+                    null_aware_keys: wrapper.null_aware_keys,
                     left: Box::new(tree),
                     right: Box::new(wrapper.inner_tree),
                 };

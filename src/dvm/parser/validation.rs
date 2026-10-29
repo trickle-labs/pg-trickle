@@ -932,6 +932,7 @@ pub(crate) fn tree_collect_volatility(
             condition,
             left,
             right,
+            ..
         } => {
             collect_volatilities(condition, worst)?;
             tree_collect_volatility(left, worst)?;
@@ -1974,6 +1975,7 @@ mod monotonicity_tests {
     #[test]
     fn test_anti_join_is_not_monotone() {
         let tree = OpTree::AntiJoin {
+            null_aware_keys: None,
             condition: Expr::Literal("true".into()),
             left: Box::new(scan()),
             right: Box::new(scan()),
