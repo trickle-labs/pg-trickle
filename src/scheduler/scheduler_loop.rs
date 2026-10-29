@@ -872,6 +872,30 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             now_ms,
         );
 
+        // Durable capture ownership gates WAL polling, transitions, replay,
+        // and acknowledgement as well as refresh dispatch.
+        let capture_gate = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            crate::api::recovery::capture_gate_allows_work()
+        }));
+        let capture_gate_error = match capture_gate {
+            Ok(true) => {
+                capture_gate_blocked = false;
+                None
+            }
+            Ok(false) => Some("capture is quarantined or quiesced".to_string()),
+            Err(error) => Some(format!("capture ownership transaction failed: {error}")),
+        };
+        if let Some(error) = capture_gate_error {
+            if !capture_gate_blocked {
+                warning!(
+                    "pg_trickle scheduler: {}; WAL work and refresh dispatch are disabled",
+                    error
+                );
+            }
+            capture_gate_blocked = true;
+            continue;
+        }
+
         // WAL transition processing — three phases with separate transactions
         // to ensure slot creation happens in a pristine transaction (no prior
         // SPI reads that could assign an XID via hint-bit WAL writes).
@@ -1230,35 +1254,6 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         // Run the scheduler tick inside a transaction
         shmem::clear_inline_refreshes_for_database(database_oid);
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
-            // v0.92.0: Validate capture ownership before computing or
-            // advancing any frontier. A cloned or quiesced database may not
-            // dispatch refresh work until an explicit recovery/resume action.
-            match crate::api::recovery::capture_gate_allows_work() {
-                Ok(true) => {
-                    capture_gate_blocked = false;
-                }
-                Ok(false) => {
-                    if !capture_gate_blocked {
-                        warning!(
-                            "pg_trickle scheduler: capture is quarantined or quiesced; \
-                             refresh dispatch is disabled"
-                        );
-                        capture_gate_blocked = true;
-                    }
-                    return;
-                }
-                Err(error) => {
-                    if !capture_gate_blocked {
-                        warning!(
-                            "pg_trickle scheduler: capture ownership validation failed: {}",
-                            error
-                        );
-                        capture_gate_blocked = true;
-                    }
-                    return;
-                }
-            }
-
             // CSS1 / #536: Capture tick watermark for cross-source snapshot consistency
             // with frontier holdback to prevent silent data loss from long-running
             // transactions that span a tick boundary.
