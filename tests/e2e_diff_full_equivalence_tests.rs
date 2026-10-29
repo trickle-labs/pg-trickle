@@ -417,7 +417,9 @@ async fn assert_composite_count_equivalence(query: &str) {
     for mutation in [
         "INSERT INTO dfe_composite VALUES \
          (2,1,ROW(1,NULL),NULL,true), (3,1,ROW(NULL,NULL),30,false), (4,1,NULL,40,NULL)",
-        // Each datum shape transitions to another, including SQL NULL in both directions.
+        // Delete id=4 while its SQL-NULL payload is still unchanged.
+        "DELETE FROM dfe_composite WHERE id = 4",
+        // Other datum shapes transition, including SQL NULL in both directions.
         "UPDATE dfe_composite SET payload = CASE id \
          WHEN 1 THEN NULL::dfe_pair WHEN 2 THEN ROW(NULL,NULL)::dfe_pair \
          WHEN 3 THEN ROW(1,1)::dfe_pair ELSE ROW(1,NULL)::dfe_pair END, \
@@ -428,7 +430,6 @@ async fn assert_composite_count_equivalence(query: &str) {
          grp = 2, scalar = 42, keep = true",
         "DELETE FROM dfe_composite WHERE id = 2",
         "DELETE FROM dfe_composite WHERE id = 3",
-        "DELETE FROM dfe_composite WHERE id = 4",
         "DELETE FROM dfe_composite WHERE id = 1",
         "INSERT INTO dfe_composite VALUES \
          (5,1,ROW(NULL,NULL),NULL,true), (6,2,NULL,60,false)",
