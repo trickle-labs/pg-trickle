@@ -1757,7 +1757,7 @@ async fn test_shared_source_cleanup_serializes_new_consumer_registration() {
                 .execute(&mut *blocker)
                 .await
                 .expect("release change buffer after timeout");
-            let _ = refresh.await;
+            let _ = tokio::time::timeout(Duration::from_secs(30), refresh).await;
             panic!("refresh never reached the witnessed change-buffer cleanup DELETE");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
