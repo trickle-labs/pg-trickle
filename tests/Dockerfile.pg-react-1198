@@ -1,0 +1,53 @@
+ARG S1_BUILDER=pg-react-1198-arm64-sdk:qualification
+FROM ${S1_BUILDER} AS compiler
+RUN rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
+
+FROM compiler AS mdm
+WORKDIR /build/mdm
+COPY .joint/mdm/ ./
+RUN --mount=type=cache,id=joint-registry,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=joint-mdm,sharing=locked,target=/build/mdm/target \
+    CARGO_BUILD_JOBS=2 cargo pgrx package --pg-config /usr/bin/pg_config --out-dir /package-mdm
+COPY .joint/mdm/sql/archive/ /package-mdm/usr/share/postgresql/18/extension/
+
+FROM compiler AS react
+WORKDIR /build/react
+COPY .joint/react/ ./
+RUN --mount=type=cache,id=joint-registry,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=joint-react,sharing=locked,target=/build/react/target \
+    CARGO_BUILD_JOBS=2 cargo build --locked --release --features pg18 && \
+    cp target/release/libpg_react.so /libpg_react.so
+
+FROM compiler AS trickle
+WORKDIR /build/trickle
+COPY Cargo.toml Cargo.lock build.rs pg_trickle.control ./
+COPY src/ src/
+COPY verification/ verification/
+COPY benches/ benches/
+COPY sql/ sql/
+COPY scripts/gen_test_schema.py scripts/gen_test_schema.py
+COPY .cargo/config.toml .cargo/config.toml
+RUN --mount=type=cache,id=joint-registry,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=joint-git,sharing=locked,target=/usr/local/cargo/git \
+    --mount=type=cache,id=joint-trickle,sharing=locked,target=/build/trickle/target \
+    sha256sum Cargo.lock > /tmp/lock.sha256 && \
+    cargo clean -p pg_trickle --release && \
+    CARGO_BUILD_JOBS=2 cargo pgrx package --pg-config /usr/bin/pg_config --out-dir /package-trickle && \
+    sha256sum -c /tmp/lock.sha256
+
+FROM postgres:18.6-bookworm
+ARG PG_MDM_SOURCE_REVISION
+ARG PG_REACT_SOURCE_REVISION
+ARG PG_TRICKLE_SOURCE_REVISION
+ARG PG_TRICKLE_SOURCE_ARCHIVE_SHA256
+COPY --from=mdm /package-mdm/ /
+COPY --from=trickle /package-trickle/ /
+COPY --from=react /libpg_react.so /usr/lib/postgresql/18/lib/pg_react.so
+COPY .joint/react/sql/ /usr/share/postgresql/18/extension/
+COPY .joint/react/pg_react.control /usr/share/postgresql/18/extension/
+COPY .joint/mdm/tests/ /tests/
+COPY .joint/mdm/sql/ /sql/
+LABEL pg_mdm.source_revision=${PG_MDM_SOURCE_REVISION} \
+      pg_react.source_revision=${PG_REACT_SOURCE_REVISION} \
+      pg_trickle.source_revision=${PG_TRICKLE_SOURCE_REVISION} \
+      pg_trickle.source_archive_sha256=${PG_TRICKLE_SOURCE_ARCHIVE_SHA256}

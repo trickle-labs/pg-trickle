@@ -1,0 +1,110 @@
+name: Pinned pg-react MDM-source joint audit (#1198)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/pg-react-1198-joint-audit.yml'
+      - 'tests/Dockerfile.pg-react-1198'
+      - '.dockerignore'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'pg_trickle.control'
+      - 'src/**'
+      - 'sql/**'
+      - 'verification/**'
+      - 'benches/**'
+      - 'scripts/gen_test_schema.py'
+      - 'tests/e2e_v104_conformance_tests.rs'
+
+permissions:
+  contents: read
+
+jobs:
+  joint-audit:
+    if: github.event.pull_request.number == 1199
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      DOCKER_DEFAULT_PLATFORM: linux/arm64
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: trickle-labs/pg-mdm
+          ref: 06471e647ee54a80973fb5ad6709830f9955dbff
+          path: .joint/mdm
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: trickle-labs/pg-react
+          ref: 5559a5cb3130b2e46fab2993686087024a360ddb
+          path: .joint/react
+          persist-credentials: false
+      - name: Verify source pins and build archive identity
+        id: source
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          test "$(git -C .joint/mdm rev-parse HEAD)" = 06471e647ee54a80973fb5ad6709830f9955dbff
+          test "$(git -C .joint/react rev-parse HEAD)" = 5559a5cb3130b2e46fab2993686087024a360ddb
+          mkdir -p .joint/evidence
+          archive_sha=$(git archive HEAD | sha256sum | cut -d' ' -f1)
+          printf '%s\n' "$PR_HEAD_SHA" > .joint/evidence/pg-trickle-commit.txt
+          printf '%s\n' "$(git -C .joint/mdm rev-parse HEAD)" > .joint/evidence/pg-mdm-commit.txt
+          printf '%s\n' "$(git -C .joint/react rev-parse HEAD)" > .joint/evidence/pg-react-commit.txt
+          printf '%s\n' "$archive_sha" > .joint/evidence/pg-trickle-source-archive.sha256
+          echo "archive_sha=$archive_sha" >> "$GITHUB_OUTPUT"
+          docker info > .joint/evidence/docker-info.txt
+      - name: Build native ARM64 SDK
+        run: |
+          docker build --platform linux/arm64 --provenance=false \
+            -f benchmarks/s1/Dockerfile.arm64-sdk \
+            -t pg-react-1198-arm64-sdk:qualification . \
+            > .joint/evidence/sdk-build.log 2>&1 || { tail -100 .joint/evidence/sdk-build.log; exit 1; }
+          docker image inspect pg-react-1198-arm64-sdk:qualification > .joint/evidence/sdk-image.json
+      - name: Build exact pinned joint image
+        run: |
+          set -euo pipefail
+          docker build --platform linux/arm64 --progress=plain \
+            --build-arg S1_BUILDER=pg-react-1198-arm64-sdk:qualification \
+            --build-arg PG_MDM_SOURCE_REVISION=06471e647ee54a80973fb5ad6709830f9955dbff \
+            --build-arg PG_REACT_SOURCE_REVISION=5559a5cb3130b2e46fab2993686087024a360ddb \
+            --build-arg PG_TRICKLE_SOURCE_REVISION="$PR_HEAD_SHA" \
+            --build-arg PG_TRICKLE_SOURCE_ARCHIVE_SHA256="${{ steps.source.outputs.archive_sha }}" \
+            -f tests/Dockerfile.pg-react-1198 -t pgreact:issue1199 . \
+            > .joint/evidence/image-build.log 2>&1 || { tail -100 .joint/evidence/image-build.log; exit 1; }
+          docker image inspect pgreact:issue1199 > .joint/evidence/image.json
+          docker image inspect pgreact:issue1199 --format '{{.Id}} {{.Os}}/{{.Architecture}} {{json .Config.Labels}}' \
+            > .joint/evidence/image-identity.txt
+      - name: Run the pinned React MDM-source audit
+        run: |
+          set -euo pipefail
+          python3 .joint/react/tests/integrations/pg-mdm/time/audit.py \
+            pgreact:issue1199 .joint/evidence/runtime
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path(".joint/evidence")
+          observed = json.loads((root / "runtime/observations.json").read_text())
+          checks = {c["name"] for c in observed["checks"] if c["result"] == "passed"}
+          assert "future-idle-mdm-receipt" in checks, checks
+          labels = observed["image_labels"]
+          assert observed["react_revision"] == "5559a5cb3130b2e46fab2993686087024a360ddb"
+          assert labels["pg_mdm.source_revision"] == "06471e647ee54a80973fb5ad6709830f9955dbff"
+          assert labels["pg_react.source_revision"] == "5559a5cb3130b2e46fab2993686087024a360ddb"
+          assert labels["pg_trickle.source_revision"] == (root / "pg-trickle-commit.txt").read_text().strip()
+          assert labels["pg_trickle.source_archive_sha256"] == (root / "pg-trickle-source-archive.sha256").read_text().strip()
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pg-react-1198-joint-audit-${{ github.run_id }}
+          path: .joint/evidence/
