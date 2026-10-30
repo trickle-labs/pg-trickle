@@ -30,6 +30,18 @@ pub fn image_action(weight: i64) -> (action: ImageAction)
     else if weight < 0 { ImageAction::Delete }
     else { ImageAction::Skip }
 }
+
+/// Keyed history compaction is safe only for one immediate identity and one
+/// consumer, with no reset barrier in the selected window.
+pub fn can_compact_history(
+    has_immediate_unique_identity: bool,
+    has_single_consumer: bool,
+    has_truncate_barrier: bool,
+) -> (eligible: bool)
+    ensures eligible == (has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier),
+{
+    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier
+}
 }
 
 /// Unknown types never invoke a send/equality function and retain their bit.
@@ -104,5 +116,19 @@ mod tests {
         }
         assert!(!admitted_image_type(0));
         assert!(!admitted_image_type(u32::MAX));
+    }
+
+    #[test]
+    fn compaction_rejects_missing_identity_shared_consumers_and_truncate_barriers() {
+        for has_identity in [false, true] {
+            for single_consumer in [false, true] {
+                for truncate in [false, true] {
+                    assert_eq!(
+                        can_compact_history(has_identity, single_consumer, truncate),
+                        has_identity && single_consumer && !truncate
+                    );
+                }
+            }
+        }
     }
 }

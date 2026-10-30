@@ -11,7 +11,10 @@ import check_lsn_verification as runner
 
 SOURCE = runner.ROOT / "verification/join_plan.rs"
 EVIDENCE = runner.ROOT / ".p2p/work/issue-1223-join-checker/evidence"
-OBLIGATIONS = ["admitted_equality_type", "check_endpoint_plan", "scope_pair", "unchanged_pair_has_zero_difference"]
+OBLIGATIONS = [
+    "admitted_equality_type", "check_endpoint_plan", "scope_pair", "unchanged_pair_has_zero_difference",
+    "correction_is_delete", "nested_left_correction_matches_endpoints",
+]
 PRODUCTION_INPUTS = [
     "src/lib.rs", "src/api/mod.rs", "src/api/helpers.rs", "src/api/refresh_ops.rs", "src/api/security_context.rs",
     "src/dvm/parser/validation.rs", "src/dvm/parser/mod.rs", "src/dvm/parser/sublinks/mod.rs", "src/cdc/mod.rs",
@@ -32,6 +35,10 @@ MUTATIONS = {
         "    left_scan != right_scan\n        && true",
     ),
     "wrong-sign-admission": ("        && !insert.retract && delete.retract\n", "        && !insert.retract\n"),
+    "wrong-nested-correction-polarity": (
+        "    } else {\n        left_insert == right_insert\n    }\n}",
+        "    } else {\n        left_insert != right_insert\n    }\n}",
+    ),
 }
 
 
@@ -55,6 +62,9 @@ def check_contract() -> None:
     for name in ["endpoint_changes_sql", "scope_pair", "admitted_equality_type"]:
         if f"crate::join_plan::{name}(" not in caller:
             raise ValueError(f"production bypasses {name}")
+    for name in ["nested_correction_action_sql", "nested_correction_left_filter_sql"]:
+        if f"crate::join_plan::{name}(" not in caller:
+            raise ValueError(f"legacy nested correction bypasses the checked {name}")
     if "check_endpoint_plan(0, 1, insert, delete)" not in source:
         raise ValueError("SQL lowering bypasses the checked endpoint plan")
 
@@ -70,7 +80,7 @@ def run_checks() -> None:
         solver = runner.run_tool_identity("z3", ["--version"], EVIDENCE / "join-z3-version.log")
         baseline = runner.run_verus("verification/join_plan.rs", EVIDENCE / "join-verification-baseline.log")
         summary = runner.VERIFICATION_SUMMARY.search(baseline.stdout)
-        if baseline.returncode or summary is None or int(summary[1]) < 6 or int(summary[2]) != 0:
+        if baseline.returncode or summary is None or int(summary[1]) < len(OBLIGATIONS) or int(summary[2]) != 0:
             raise RuntimeError("join baseline failed or omitted required obligations")
         controls = {}
         for name in MUTATIONS:
@@ -91,7 +101,7 @@ def run_checks() -> None:
             "semantic_mutation": controls["mixed-snapshot-admission"], "semantic_mutations": controls,
         }
         (EVIDENCE / "join-plan-verification.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        print(f"Join kernel verified; all five executable mutants rejected. Evidence: {EVIDENCE.relative_to(runner.ROOT)}")
+        print(f"Join kernel verified; all {len(MUTATIONS)} executable mutants rejected. Evidence: {EVIDENCE.relative_to(runner.ROOT)}")
     finally:
         temporary.unlink(missing_ok=True)
 

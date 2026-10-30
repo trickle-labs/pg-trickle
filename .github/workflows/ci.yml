@@ -728,8 +728,8 @@ jobs:
           PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
           PGT_RELEASE_ATTESTATION_PATH: target/cdc-elision-full-install-attestation.json
         run: |
-          ./scripts/run_e2e_tests.sh --test e2e_shared_buffer_tests \
-            -E 'test(=test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders) | test(=test_cdc_deferred_replacement_preserves_complete_payload) | test(=test_cdc_statement_payload_names_do_not_shadow_row_aliases)' --retries 0
+          ./scripts/run_e2e_tests.sh --test e2e_shared_buffer_tests --test e2e_cdc_tests \
+            -E 'test(=test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders) | test(=test_cdc_deferred_replacement_preserves_complete_payload) | test(=test_cdc_statement_payload_names_do_not_shadow_row_aliases) | test(=test_sf10_truncate_then_insert_post_truncate_rows_captured)' --retries 0
           python3 scripts/check_lsn_candidate_binding.py --proof-kind cdc_elision \
             --proof-record .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-verification.json \
             --package-dir target/release/pg_trickle-pg18 \
@@ -738,6 +738,7 @@ jobs:
             --runtime-case e2e_shared_buffer_tests::test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders \
             --runtime-case e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload \
             --runtime-case e2e_shared_buffer_tests::test_cdc_statement_payload_names_do_not_shadow_row_aliases \
+            --runtime-case e2e_cdc_tests::test_sf10_truncate_then_insert_post_truncate_rows_captured \
             --output .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-candidate-binding.json
 
       - name: Run packaged join endpoint E2E and bind installed library
@@ -748,7 +749,7 @@ jobs:
         run: |
           mkdir -p artifacts/join-endpoints
           ./scripts/run_e2e_tests.sh --test e2e_join_tests --test e2e_refresh_atomicity_tests \
-            -E 'test(=test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows) | test(=test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut)' \
+            -E 'test(=test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows) | test(=test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut) | test(=test_nested_inner_join_correction_in_semijoin_context_matches_postgres)' \
             --retries 0 2>&1 | tee artifacts/join-endpoints/runtime.log
           python3 scripts/check_lsn_candidate_binding.py --proof-kind join_plan \
             --proof-record .p2p/work/issue-1223-join-checker/evidence/join-plan-verification.json \
@@ -757,6 +758,7 @@ jobs:
             --candidate-commit "$GITHUB_SHA" \
             --runtime-case e2e_join_tests::test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows \
             --runtime-case e2e_refresh_atomicity_tests::test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut \
+            --runtime-case e2e_join_tests::test_nested_inner_join_correction_in_semijoin_context_matches_postgres \
             --output .p2p/work/issue-1223-join-checker/evidence/join-plan-candidate-binding.json
 
       - name: Run packaged identity frame E2E and bind installed library

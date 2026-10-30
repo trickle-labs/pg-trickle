@@ -1,9 +1,11 @@
 # Restricted join endpoint checker
 
 This #1223 slice selects an affected-key endpoint route for a computed root
-projection over an inner join of two keyed base scans. It does not verify
-legacy split-action or nested correction branches. Unsupported proof scope
-keeps its existing product route; no new FULL fallback is used to hide a
+projection over an inner join of two keyed base scans. It also checks the
+row-action polarity and bag equation for the legacy nested-left correction
+with and without Part 1's old-right split. It does not prove branch selection,
+arbitrary nested SQL lowering or deeper correction limits. Unsupported proof
+scope keeps its existing product route; no new FULL fallback is used to hide a
 differential failure. The complete issue remains open until its stated
 qualification and any remaining selected obligations are satisfied.
 
@@ -33,6 +35,23 @@ unchanged multiplicities changes no delta. The executable SQL adapter calls
 the checker with local occurrence IDs 0 and 1. The ordinary binding adapter
 maps those roles to the actual child scans, their aliases and complete keys.
 The proof does not parse SQL names or prove that mapping itself.
+
+## Legacy nested-left correction
+
+`correction_is_delete` supplies the action polarity used to generate the
+legacy Part 3 CASE. If Part 1 is split, left DELETE rows already join the
+pre-change right endpoint, so the correction joins only left INSERT rows and
+cancels their overlap with the right delta. If Part 1 is unsplit, the
+correction reverses the product of both signed actions. The
+`nested_left_correction_matches_endpoints` lemma proves the resulting bag
+equation for arbitrary integer multiplicities under the declared before/after
+relations. The installed nested-semijoin regression changes both sides in one
+refresh and compares the resulting stream table with PostgreSQL.
+
+This does not prove that the planner selects the modeled branch, binds the
+child delta columns correctly, or preserves semantics for unsupported deeper
+join trees. Those remain ordinary SQL/runtime boundaries and broader issue
+acceptance.
 
 ## Production admission and source boundaries
 
@@ -92,11 +111,12 @@ identical complete-identity actions under that path.
 
 ## Qualification and trust boundary
 
-The pinned compatible Verus runner requires six verified obligations and
-zero errors. Five executable mutants must fail their intended postcondition:
-unknown equality type, lost right scope, mixed snapshot, swapped occurrence
-and wrong sign. The separate native SQL control compiles an isolated copy
-of the actual adapter with both terms inserting. It requires a passing
+The pinned compatible Verus runner requires the declared obligations and
+zero errors. Six executable mutants must fail their intended postcondition:
+unknown equality type, lost right scope, mixed snapshot, swapped occurrence,
+wrong sign and wrong nested-correction polarity. The separate native SQL
+control compiles an isolated copy of the actual adapter with both terms
+inserting. It requires a passing
 baseline and an exact signed-action mismatch, not a compiler/setup/SQL error.
 It does not modify or qualify a mutant release library.
 

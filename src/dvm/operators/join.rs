@@ -838,9 +838,9 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     // join children in Part 2, the error is:
     //   Error = (L₁ - L₀) ⋈ ΔR = (ΔL_I - ΔL_D) ⋈ ΔR
     //
-    // Part 3 corrects this by joining both delta CTEs directly:
-    //   - ΔL_I ⋈ ΔR rows are excess in Part 2 → emit with flipped action
-    //   - ΔL_D ⋈ ΔR rows are missing from Part 2 → emit with original action
+    // Part 3 corrects this by joining the delta CTEs. If Part 1 uses R₀,
+    // its left deletes are already correct and Part 3 filters to ΔL_I;
+    // otherwise both left actions need the four-way signed correction.
     //
     // This avoids computing L₀ for nested joins (expensive EXCEPT ALL on
     // full snapshot) and doesn't change the SemiJoin operator's inputs,
@@ -862,6 +862,9 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             let mut hash_corr_args = left_key_exprs_dl.clone();
             hash_corr_args.extend(right_key_exprs_dr.clone());
             let hash_correction = crate::hash::build_composite_hash_expr(&hash_corr_args);
+            let correction_action = crate::join_plan::nested_correction_action_sql(use_r0);
+            let correction_left_filter =
+                crate::join_plan::nested_correction_left_filter_sql(use_r0);
 
             format!(
                 "
@@ -869,19 +872,16 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
 UNION ALL
 
 -- Part 3: Correction for nested join L₁ → L₀
--- Cancels excess ΔL_I ⋈ ΔR and adds missing ΔL_D ⋈ ΔR.
--- For dl.action='I': these rows are in L₁ but not L₀ → flip dr action to cancel
--- For dl.action='D': these rows are in L₀ but not L₁ → keep dr action to add
+-- The action and left-action filter depend on whether Part 1 already used R₀.
 SELECT {hash_correction} AS __pgt_row_id,
-       CASE WHEN dl.__pgt_action = 'I'
-            THEN CASE WHEN dr.__pgt_action = 'I' THEN 'D' ELSE 'I' END
-            ELSE dr.__pgt_action
-       END AS __pgt_action,
+       {correction_action} AS __pgt_action,
        {all_cols_correction}
 FROM {delta_left} dl
-JOIN {delta_right} dr ON {cond}",
+JOIN {delta_right} dr ON {cond} AND ({correction_left_filter})",
                 delta_left = left_result.cte_name,
                 delta_right = right_result.cte_name,
+                correction_action = correction_action,
+                correction_left_filter = correction_left_filter,
             )
         } else {
             // DI-5: Part 3 correction suppressed — either left child is
