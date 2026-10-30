@@ -142,6 +142,170 @@ async fn test_cdc_deferred_key_swap_preserves_complete_images() {
 }
 
 #[tokio::test]
+async fn test_cdc_deferred_key_swap_preserves_protected_consumer_cuts() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    for mode in ["row", "statement"] {
+        let source = format!("window_key_swap_{mode}");
+        let fast = format!("{source}_fast");
+        let slow = format!("{source}_slow");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY DEFERRABLE INITIALLY DEFERRED, v NUMERIC, label TEXT)"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (1,1.0,'alpha'),(2,2.0,'beta')"
+        ))
+        .await;
+
+        let fast_query = format!("SELECT id,v,scale(v) AS v_scale,label FROM {source}");
+        let slow_query = format!("SELECT id,label FROM {source}");
+        for (name, query) in [(&fast, &fast_query), (&slow, &slow_query)] {
+            db.try_execute_with_config(
+                &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+                &format!(
+                    "SELECT pgtrickle.create_stream_table('{name}',$q${query}$q$,'24h','DIFFERENTIAL')"
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "BEGIN; SET CONSTRAINTS ALL DEFERRED; UPDATE {source} \
+             SET id=CASE id WHEN 1 THEN 2 ELSE 1 END WHERE id IN (1,2); COMMIT"
+        )))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let before_fast: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{fast}')"),
+        )
+        .await
+        .unwrap();
+        let fast_differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{fast}' AND h.refresh_id>{before_fast} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            fast_differential,
+            "fast consumer must execute differential work"
+        );
+
+        let source_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        let buffer = db.change_buffer_table(source_oid).await;
+        let retained_for_slow: i64 = db
+            .query_scalar(&format!("SELECT count(*) FROM {buffer}"))
+            .await;
+        assert!(
+            retained_for_slow >= 4,
+            "the slow consumer's deferred swap images must remain after compaction is considered"
+        );
+
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &fast,
+            &fast_query,
+            "fast consumer after deferred key swap",
+        )
+        .await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &slow,
+            "SELECT 1::int AS id,'alpha'::text AS label \
+             UNION ALL SELECT 2::int,'beta'::text",
+            "slow consumer remains at its original cut",
+        )
+        .await;
+
+        db.execute(&format!(
+            "UPDATE {source} SET v=1.00,label='alpha-new' WHERE id=2"
+        ))
+        .await;
+        let before_slow: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{slow}')"),
+        )
+        .await
+        .unwrap();
+        let slow_differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{slow}' AND h.refresh_id>{before_slow} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            slow_differential,
+            "slow consumer must execute differential catch-up"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &fast,
+            "SELECT 2::int AS id,1.0::numeric AS v,1::int AS v_scale,'alpha'::text AS label \
+             UNION ALL SELECT 1::int,2.0::numeric,1::int,'beta'::text",
+            "fast consumer remains at the deferred-swap cut",
+        )
+        .await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &slow,
+            &slow_query,
+            "slow consumer catches up through the payload update",
+        )
+        .await;
+
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{fast}')"),
+        )
+        .await
+        .unwrap();
+        for (name, query) in [(&fast, &fast_query), (&slow, &slow_query)] {
+            e2e::oracle::assert_st_query_exact(
+                &db,
+                name,
+                query,
+                "both consumers converge after protected-window catch-up",
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_cdc_statement_payload_names_do_not_shadow_row_aliases() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled=false")
