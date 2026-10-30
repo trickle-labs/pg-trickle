@@ -554,6 +554,12 @@ async fn test_intersect_differential_public_failure_rolls_back_private_state() {
 
     db.execute("ALTER TABLE isect_rollback_st ADD CONSTRAINT reject_42 CHECK (val <> 42)")
         .await;
+    let frontier_before: String = db
+        .query_scalar(
+            "SELECT frontier::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'isect_rollback_st'",
+        )
+        .await;
     db.execute("INSERT INTO isect_rollback_a (val) VALUES (42)")
         .await;
     db.execute("INSERT INTO isect_rollback_b (val) VALUES (42)")
@@ -564,6 +570,17 @@ async fn test_intersect_differential_public_failure_rolls_back_private_state() {
     assert!(
         failed.is_err(),
         "the public MERGE must hit the test constraint"
+    );
+
+    let frontier_after: String = db
+        .query_scalar(
+            "SELECT frontier::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'isect_rollback_st'",
+        )
+        .await;
+    assert_eq!(
+        frontier_after, frontier_before,
+        "failed public MERGE must not publish the refresh frontier"
     );
 
     let private_count: i64 = db
