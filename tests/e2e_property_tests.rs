@@ -59,8 +59,21 @@ async fn assert_invariant(db: &E2eDb, pgt_name: &str, query: &str, seed: u64, cy
         ))
         .await;
 
+    // Incremental INTERSECT now keeps branch multiplicities in a private
+    // relation; the public stream table already contains only visible rows.
+    // Retain the legacy count filter only for tables using in-row state.
+    let has_private_intersect_state: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS ( \
+                SELECT 1 FROM pgtrickle.pgt_stream_tables s \
+                JOIN pgtrickle.pgt_set_operation_states state USING (pgt_id) \
+                WHERE s.pgt_name = '{pgt_name}' \
+                  AND state.operation = 'INTERSECT' AND NOT state.is_all)"
+        ))
+        .await;
+
     let dq_upper = query.to_uppercase();
-    let set_op_filter = if has_dual_counts {
+    let set_op_filter = if has_dual_counts && !has_private_intersect_state {
         if dq_upper.contains("INTERSECT ALL") {
             " WHERE LEAST(__pgt_count_l, __pgt_count_r) > 0"
         } else if dq_upper.contains("INTERSECT") {

@@ -395,7 +395,7 @@ Each operator knows how to generate a **delta query** — given a set of changes
 | **Aggregate** | Recompute group values where affected keys changed |
 | **Distinct** | COUNT-based duplicate tracking |
 | **UnionAll** | Merge deltas from both branches |
-| **Intersect** | Dual-count multiplicity with LEAST boundary crossing |
+| **Intersect** | Private dual-count state with visibility boundary crossing |
 | **Except** | Dual-count multiplicity with GREATEST(0, L-R) boundary crossing |
 | **Subquery** | Transparent delegation + optional column renaming (CTEs, subselects) |
 | **CteScan** | Shared delta lookup from CTE cache (multi-reference CTEs) |
@@ -914,7 +914,7 @@ src/
 │       ├── aggregate.rs     # GROUP BY + aggregate functions (39 AggFunc variants)
 │       ├── distinct.rs      # DISTINCT deduplication
 │       ├── union_all.rs     # UNION ALL merging
-│       ├── intersect.rs     # INTERSECT / INTERSECT ALL (dual-count LEAST)
+│       ├── intersect.rs     # INTERSECT differential; INTERSECT ALL FULL-only
 │       ├── except.rs        # EXCEPT / EXCEPT ALL (dual-count GREATEST)
 │       ├── subquery.rs      # Subquery / inlined CTE delegation
 │       ├── cte_scan.rs      # Shared CTE delta (multi-reference)

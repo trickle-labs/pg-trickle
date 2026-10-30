@@ -120,7 +120,7 @@ async fn test_view_inline_diff_update_delete() {
     // UPDATE a row in base table
     db.execute("UPDATE vi_ud_base SET val = 99 WHERE id = 2")
         .await;
-    db.refresh_st("vi_st_ud").await;
+    db.refresh_st_with_retry("vi_st_ud").await;
 
     let updated_val: i32 = db
         .query_scalar("SELECT val FROM public.vi_st_ud WHERE id = 2")
@@ -132,7 +132,7 @@ async fn test_view_inline_diff_update_delete() {
 
     // DELETE a row from base table
     db.execute("DELETE FROM vi_ud_base WHERE id = 3").await;
-    db.refresh_st("vi_st_ud").await;
+    db.refresh_st_with_retry("vi_st_ud").await;
 
     assert_eq!(db.count("public.vi_st_ud").await, 2);
     let has_3: bool = db

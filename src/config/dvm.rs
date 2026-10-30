@@ -520,13 +520,9 @@ pub static PGS_TEMPLATE_CACHE_MAX_AGE_HOURS: GucSetting<i32> = GucSetting::<i32>
 /// Default: 100,000. The hard maximum is 1,000,000.
 pub static PGS_MAX_PARSE_NODES: GucSetting<i32> = GucSetting::<i32>::new(100_000);
 
-/// A44-1 (v0.43.0): Maximum number of Scan nodes in the left child for which
-/// Part 3 correction term is emitted in inner-join differentiation.
-///
-/// Raising this value allows more complex join chains to use the algebraically
-/// correct correction path rather than falling back to L₁ + coarser correction.
-/// Lowering it reduces generated SQL complexity for deeply-nested queries.
-///
+/// Maximum number of child scans at which nested-join delta CTEs are forced
+/// NOT MATERIALIZED. The correctness correction is emitted whenever required,
+/// regardless of this performance hint.
 /// Default: 5 (matches the previously hardcoded `PART3_MAX_SCAN_COUNT`).
 /// Range: 1–32.
 pub static PGS_PART3_MAX_SCAN_COUNT: GucSetting<i32> = GucSetting::<i32>::new(5);
@@ -1077,11 +1073,11 @@ pub fn register_dvm_gucs() {
     // A44-1: Deep-join threshold GUCs.
     GucRegistry::define_int_guc(
         c"pg_trickle.part3_max_scan_count",
-        c"A44-1: Max scan nodes in left join child for Part 3 correction term.",
-        c"Controls the maximum number of Scan nodes in the left child of an inner \
-          join for which the Part 3 correction term is emitted during differential \
-          refresh. Lower values reduce SQL complexity; higher values improve \
-          correctness for deep join chains. Default: 5.",
+        c"A44-1: Max scan nodes for forcing Part 3 delta CTE inlining.",
+        c"Controls when the left-child delta CTE used by a required Part 3 join \
+          correction is forced NOT MATERIALIZED. Above this scan count PostgreSQL \
+          chooses its default CTE materialization. The correction is always emitted \
+          when needed; this setting affects planning and performance only. Default: 5.",
         &PGS_PART3_MAX_SCAN_COUNT,
         1,  // min
         32, // max
@@ -1426,7 +1422,7 @@ pub fn pg_trickle_max_parse_nodes() -> usize {
     PGS_MAX_PARSE_NODES.get().clamp(1, MAX_PARSE_NODES as i32) as usize
 }
 
-/// A44-1: Returns the max scan count for Part 3 correction term generation.
+/// A44-1: Returns the max scan count for forcing Part 3 child-delta inlining.
 pub fn pg_trickle_part3_max_scan_count() -> usize {
     #[cfg(test)]
     {

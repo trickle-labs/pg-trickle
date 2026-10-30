@@ -122,11 +122,23 @@ async fn test_tier_frozen_skips_refresh_until_promoted() {
     );
 
     // Promote back to hot
+    // Capture the frontier first so a fast scheduler tick cannot complete
+    // between promotion and the wait helper's baseline read.
+    let before_promotion_ts: Option<String> = db
+        .query_scalar_opt(
+            "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'tier_sched_st1'",
+        )
+        .await;
     db.alter_st("tier_sched_st1", "tier => 'hot'").await;
 
     // Now it should refresh and pick up the new row
     let refreshed = db
-        .wait_for_auto_refresh("tier_sched_st1", Duration::from_secs(30))
+        .wait_for_auto_refresh_since(
+            "tier_sched_st1",
+            before_promotion_ts,
+            Duration::from_secs(30),
+        )
         .await;
     assert!(refreshed, "Promoted ST should resume refreshing");
 

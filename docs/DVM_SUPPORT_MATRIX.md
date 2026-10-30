@@ -176,11 +176,16 @@ SELECT id, amount FROM foreign_orders
 
 ### INTERSECT / EXCEPT
 
-`INTERSECT`, `INTERSECT ALL`, `EXCEPT`, and `EXCEPT ALL` are materialized
-directly in FULL mode. Their branch multiplicity state is not exposed in the
-stream table. AUTO selects FULL; explicit DIFFERENTIAL and IMMEDIATE requests
-are rejected until durable private state and mutation-by-mutation parity are
-proven.
+Ordinary top-level `INTERSECT` is incrementally maintained for two distinct
+base-table scans or name-preserving simple column projections with matching
+types and deterministic collations. Its branch multiplicity state is stored
+in a private relation and is applied atomically with the public result. If
+that state is missing or invalid, refresh falls back to FULL.
+
+`INTERSECT ALL`, `EXCEPT`, nested or filtered set operations, stream-table
+inputs, and IMMEDIATE refresh remain unsupported for differential maintenance.
+AUTO uses DIFFERENTIAL for the admitted ordinary `INTERSECT` shape and FULL
+for the other set-operation forms.
 
 ### Lateral joins
 

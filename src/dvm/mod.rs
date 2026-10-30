@@ -739,6 +739,9 @@ fn generate_delta_query_impl(
         .with_pgt_name(pgt_schema, pgt_name)
         .with_cte_registry(result.cte_registry)
         .with_defining_query(defining_query);
+    if let Some(pgt_id) = stage_pgt_id {
+        ctx = ctx.with_setop_state_relation(crate::setop_state::qualified_state_relation(pgt_id));
+    }
     if crate::config::pg_trickle_dvm_decision_trace() {
         ctx = ctx.with_decision_trace();
     }
@@ -1092,6 +1095,7 @@ pub fn generate_delta_query_cached(
         let mut ctx = DiffContext::new(Frontier::new(), Frontier::new())
             .with_placeholders()
             .with_pgt_name(pgt_schema, pgt_name)
+            .with_setop_state_relation(crate::setop_state::qualified_state_relation(pgt_id))
             .with_cte_registry(result.cte_registry)
             .with_defining_query(defining_query);
         ctx.st_user_columns = Some(st_user_cols);
