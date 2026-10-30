@@ -62,6 +62,19 @@ jobs:
           printf '%s\n' "$archive_sha" > .joint/evidence/pg-trickle-source-archive.sha256
           echo "archive_sha=$archive_sha" >> "$GITHUB_OUTPUT"
           docker info > .joint/evidence/docker-info.txt
+      - name: Stage published pg_trickle 0.108.3 installer
+        run: |
+          set -euo pipefail
+          archive=pg_trickle-0.108.3-pg18-linux-arm64.tar.gz
+          mkdir -p .joint/trickle-predecessor
+          curl --fail --location --retry 3 \
+            "https://github.com/trickle-labs/pg-trickle/releases/download/v0.108.3/${archive}" \
+            --output ".joint/trickle-predecessor/${archive}"
+          echo "498bbe3bc7415a22389d767c0b0fae4d96aa0618c7e64704c500af934835cf99  .joint/trickle-predecessor/${archive}" \
+            | sha256sum --check --status
+          tar xzf ".joint/trickle-predecessor/${archive}" \
+            -C .joint/trickle-predecessor --strip-components=1
+          test -f .joint/trickle-predecessor/extension/pg_trickle--0.108.3.sql
       - name: Build native ARM64 SDK
         run: |
           docker build --platform linux/arm64 --provenance=false \

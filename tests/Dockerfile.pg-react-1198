@@ -42,6 +42,7 @@ ARG PG_TRICKLE_SOURCE_REVISION
 ARG PG_TRICKLE_SOURCE_ARCHIVE_SHA256
 COPY --from=mdm /package-mdm/ /
 COPY --from=trickle /package-trickle/ /
+COPY .joint/trickle-predecessor/extension/pg_trickle--0.108.3.sql /usr/share/postgresql/18/extension/
 COPY --from=react /libpg_react.so /usr/lib/postgresql/18/lib/pg_react.so
 COPY .joint/react/sql/ /usr/share/postgresql/18/extension/
 COPY .joint/react/pg_react.control /usr/share/postgresql/18/extension/
