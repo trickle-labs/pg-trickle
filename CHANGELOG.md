@@ -222,6 +222,9 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Rebind output-delta stream and payload relation OIDs after logical restore,
+  invalidating existing consumers before rebinding so the contract guard remains
+  enabled afterward.
 - Verify the production WAL transaction-boundary scan against complete receipt
   framing, including XID/slot/order and per-transaction LSN bounds, while keeping
   persisted formats and lazy error behavior unchanged (#1222).

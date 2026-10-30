@@ -83,7 +83,15 @@ PROOF_CONTRACTS = {
             "src/refresh/codegen.rs", "src/refresh/merge/mod.rs", "src/hash.rs",
             "verification/cdc_elision.rs", "Cargo.toml", "Cargo.lock",
         ],
-        "mutants": {"unknown-equality-type", "lost-right-scope", "mixed-snapshot-admission", "swapped-binding-admission", "wrong-sign-admission", "wrong-nested-correction-polarity"},
+        "mutants": {
+            "unknown-equality-type",
+            "lost-right-scope",
+            "mixed-snapshot-admission",
+            "swapped-binding-admission",
+            "wrong-sign-admission",
+            "wrong-nested-correction-polarity",
+            "missing-nested-correction-term",
+        },
     },
     "lsn": {
         "schema": EXPECTED_SCHEMA, "obligations": REQUIRED_OBLIGATIONS,

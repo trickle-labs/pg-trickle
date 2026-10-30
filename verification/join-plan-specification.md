@@ -112,13 +112,17 @@ identical complete-identity actions under that path.
 ## Qualification and trust boundary
 
 The pinned compatible Verus runner requires the declared obligations and
-zero errors. Six executable mutants must fail their intended postcondition:
+zero errors. Seven executable mutants must fail their intended postcondition:
 unknown equality type, lost right scope, mixed snapshot, swapped occurrence,
-wrong sign and wrong nested-correction polarity. The separate native SQL
-control compiles an isolated copy of the actual adapter with both terms
-inserting. It requires a passing
-baseline and an exact signed-action mismatch, not a compiler/setup/SQL error.
-It does not modify or qualify a mutant release library.
+wrong sign, wrong nested-correction polarity and removal of the cross-delta
+correction term from the endpoint equation. The missing-term mutant must fail
+the nested endpoint-equivalence postcondition, demonstrating that omission is
+semantically observable in the independent algebraic model. The separate
+native SQL control compiles an isolated copy of the actual endpoint adapter
+with both terms inserting. It requires a passing baseline and an exact
+signed-action mismatch, not a compiler/setup/SQL error. It does not modify or
+qualify a mutant release library. The model mutant does not replace installed
+SQL qualification of the legacy nested-correction branch.
 
 Installed tests cover both trigger modes, all five equality types, ON/USING,
 duplicate join keys, NULLs, direct and IMMUTABLE throwing projections, both
