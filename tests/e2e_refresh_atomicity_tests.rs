@@ -1069,11 +1069,24 @@ async fn test_refresh_two_callers_publish_one_consistent_result() {
 
 async fn advance_scheduler_watermark(db: &E2eDb, stream: &str, query: &str, after: i64) {
     let id = pgt_id(db, stream).await;
-    db.execute(&format!(
-        "UPDATE pgtrickle.pgt_stream_tables \
-            SET last_refresh_at = now() - interval '2 hours' WHERE pgt_id = {id}"
-    ))
-    .await;
+    let mut setup = db.pool.begin().await.expect("begin due-work setup");
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_stream_tables
+            SET last_refresh_at = now() - interval '2 hours' WHERE pgt_id = $1",
+    )
+    .bind(id)
+    .execute(&mut *setup)
+    .await
+    .expect("make the scheduled refresh due");
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_freshness_controller_state
+            SET next_due_at = clock_timestamp() - interval '1 second' WHERE pgt_id = $1",
+    )
+    .bind(id)
+    .execute(&mut *setup)
+    .await
+    .expect("make the scheduler controller due");
+    setup.commit().await.expect("commit due-work setup");
     db.execute(&format!(
         "SELECT pgtrickle.resume_scheduler(ARRAY['public.{stream}'])"
     ))
