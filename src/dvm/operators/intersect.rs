@@ -10,18 +10,22 @@
 //! INSERT or DELETE actions.
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
-use crate::dvm::operators::scan::build_hash_expr_for_domain;
 use crate::dvm::parser::OpTree;
 use crate::dvm::schema::validate_set_operation;
 use crate::error::PgTrickleError;
 
 /// Differentiate an Intersect node.
 pub fn diff_intersect(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgTrickleError> {
-    let OpTree::Intersect { left, right, .. } = op else {
+    let OpTree::Intersect { left, right, all } = op else {
         return Err(PgTrickleError::InternalError(
             "diff_intersect called on non-Intersect node".into(),
         ));
     };
+    if *all {
+        return Err(PgTrickleError::UnsupportedOperator(
+            "INTERSECT ALL differential maintenance is not qualified".into(),
+        ));
+    }
 
     // Differentiate both children
     let left_result = ctx.diff_node(left)?;
@@ -32,20 +36,25 @@ pub fn diff_intersect(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let col_refs: Vec<String> = cols.iter().map(|c| quote_ident(c)).collect();
     let col_list = col_refs.join(", ");
 
-    // Hash all columns for the row_id
-    let hash_exprs: Vec<String> = cols.iter().map(|c| quote_ident(c)).collect();
-    let row_id_expr = build_hash_expr_for_domain("SET_KEY", &hash_exprs);
-
-    let st_table = ctx
-        .st_qualified_name
-        .clone()
-        .unwrap_or_else(|| "/* st_table */".to_string());
+    let row_id_expr = if col_refs.len() == 1 {
+        format!(
+            "pgtrickle.encode_row_id_v3('SET_KEY', ROW({}))",
+            col_refs[0]
+        )
+    } else {
+        crate::hash::build_row_identity_expr("SET_KEY", &col_refs)
+    };
+    let state_table = ctx.setop_state_relation.clone().ok_or_else(|| {
+        PgTrickleError::InternalError(
+            "INTERSECT differentiation requires a bound private state relation".into(),
+        )
+    })?;
 
     // CTE 1: Combine deltas from both branches, tagged with branch indicator
     let delta_cte = ctx.next_cte_name("isect_delta");
     let delta_sql = format!(
         "SELECT {row_id_expr} AS __pgt_row_id, {col_list},\n\
-         SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) AS __net_count,\n\
+         SUM(CASE WHEN __pgt_action = 'I' THEN 1::bigint ELSE -1::bigint END) AS __net_count,\n\
          'L' AS __branch\n\
          FROM {left_cte}\n\
          GROUP BY {col_list}\n\
@@ -53,7 +62,7 @@ pub fn diff_intersect(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
          UNION ALL\n\
          \n\
          SELECT {row_id_expr} AS __pgt_row_id, {col_list},\n\
-         SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) AS __net_count,\n\
+         SUM(CASE WHEN __pgt_action = 'I' THEN 1::bigint ELSE -1::bigint END) AS __net_count,\n\
          'R' AS __branch\n\
          FROM {right_cte}\n\
          GROUP BY {col_list}",
@@ -62,7 +71,7 @@ pub fn diff_intersect(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     );
     ctx.add_cte(delta_cte.clone(), delta_sql);
 
-    // CTE 2: Merge with ST storage to compute old and new per-branch counts
+    // CTE 2: Merge with private state. The public ST contains visible rows only.
     let merge_cte = ctx.next_cte_name("isect_merge");
     let d_cols = cols
         .iter()
@@ -70,17 +79,28 @@ pub fn diff_intersect(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         .collect::<Vec<_>>()
         .join(", ");
 
+    let tuple_eq = cols
+        .iter()
+        .map(|c| {
+            format!(
+                "st.{} IS NOT DISTINCT FROM d.{}",
+                quote_ident(c),
+                quote_ident(c)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
     let merge_sql = format!(
         "SELECT d.__pgt_row_id, {d_cols},\n\
          COALESCE(st.__pgt_count_l, 0)\n\
-             + SUM(CASE WHEN d.__branch = 'L' THEN d.__net_count ELSE 0 END) AS new_count_l,\n\
+             + COALESCE(SUM(d.__net_count) FILTER (WHERE d.__branch = 'L'), 0)::bigint AS new_count_l,\n\
          COALESCE(st.__pgt_count_r, 0)\n\
-             + SUM(CASE WHEN d.__branch = 'R' THEN d.__net_count ELSE 0 END) AS new_count_r,\n\
+             + COALESCE(SUM(d.__net_count) FILTER (WHERE d.__branch = 'R'), 0)::bigint AS new_count_r,\n\
          COALESCE(st.__pgt_count_l, 0) AS old_count_l,\n\
          COALESCE(st.__pgt_count_r, 0) AS old_count_r\n\
          FROM {delta_cte} d\n\
-         LEFT JOIN {st_table} st ON pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id)\n\
-             AND st.__pgt_row_id = d.__pgt_row_id\n\
+         LEFT JOIN {state_table} st ON st.__pgt_row_id = d.__pgt_row_id\n\
+             AND {tuple_eq}\n\
          GROUP BY d.__pgt_row_id, {d_cols}, st.__pgt_count_l, st.__pgt_count_r",
     );
     ctx.add_cte(merge_cte.clone(), merge_sql);
@@ -89,30 +109,16 @@ pub fn diff_intersect(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let final_cte = ctx.next_cte_name("isect_final");
 
     let final_sql = format!(
-        "\
--- Rows are emitted whenever the effective intersection count crosses zero
-SELECT __pgt_row_id, 'I' AS __pgt_action,
-       {col_list}, new_count_l AS __pgt_count_l, new_count_r AS __pgt_count_r
-FROM {merge_cte}
-WHERE LEAST(old_count_l, old_count_r) <= 0
-  AND LEAST(new_count_l, new_count_r) > 0
-
-UNION ALL
-
-SELECT __pgt_row_id, 'D' AS __pgt_action,
-       {col_list}, 0 AS __pgt_count_l, 0 AS __pgt_count_r
-FROM {merge_cte}
-WHERE LEAST(old_count_l, old_count_r) > 0
-  AND LEAST(new_count_l, new_count_r) <= 0
-
-UNION ALL
-
-SELECT __pgt_row_id, 'I' AS __pgt_action,
-       {col_list}, new_count_l AS __pgt_count_l, new_count_r AS __pgt_count_r
-FROM {merge_cte}
-WHERE LEAST(old_count_l, old_count_r) > 0
-  AND LEAST(new_count_l, new_count_r) > 0
-  AND (new_count_l != old_count_l OR new_count_r != old_count_r)",
+        "SELECT __pgt_row_id,\n\
+         CASE WHEN old_count_l > 0 AND old_count_r > 0\n\
+                   AND (new_count_l = 0 OR new_count_r = 0) THEN 'D'\n\
+              WHEN (old_count_l = 0 OR old_count_r = 0)\n\
+                   AND new_count_l > 0 AND new_count_r > 0 THEN 'I'\n\
+              ELSE 'S' END AS __pgt_action,\n\
+         {col_list}, new_count_l AS __pgt_count_l,\n\
+         new_count_r AS __pgt_count_r\n\
+         FROM {merge_cte}\n\
+         WHERE new_count_l <> old_count_l OR new_count_r <> old_count_r",
     );
     ctx.add_cte(final_cte.clone(), final_sql);
 
@@ -129,7 +135,8 @@ WHERE LEAST(old_count_l, old_count_r) > 0
         cte_name: final_cte,
         columns: output_cols,
         schema,
-        is_deduplicated: false,
+        // Grouping by the complete output tuple guarantees one row per set key.
+        is_deduplicated: true,
         has_key_changed: false,
     })
 }
@@ -168,12 +175,9 @@ mod tests {
         let result = diff_intersect(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // INSERT when min crosses 0→positive
-        assert_sql_contains(&sql, "LEAST(old_count_l, old_count_r) <= 0");
-        assert_sql_contains(&sql, "LEAST(new_count_l, new_count_r) > 0");
-        // DELETE when min crosses positive→0
-        assert_sql_contains(&sql, "LEAST(old_count_l, old_count_r) > 0");
-        assert_sql_contains(&sql, "LEAST(new_count_l, new_count_r) <= 0");
+        assert_sql_contains(&sql, "new_count_l > 0 AND new_count_r > 0 THEN 'I'");
+        assert_sql_contains(&sql, "new_count_l = 0 OR new_count_r = 0) THEN 'D'");
+        assert_sql_contains(&sql, "ELSE 'S' END AS __pgt_action");
     }
 
     #[test]
@@ -182,12 +186,7 @@ mod tests {
         let left = scan(1, "a", "public", "a", &["x"]);
         let right = scan(2, "b", "public", "b", &["x"]);
         let tree = intersect(left, right, true);
-        let result = diff_intersect(&mut ctx, &tree).unwrap();
-        let sql = ctx.build_with_query(&result.cte_name);
-
-        // INTERSECT ALL uses LEAST like INTERSECT
-        assert_sql_contains(&sql, "LEAST(old_count_l, old_count_r)");
-        assert_sql_contains(&sql, "LEAST(new_count_l, new_count_r)");
+        assert!(diff_intersect(&mut ctx, &tree).is_err());
     }
 
     #[test]
@@ -217,13 +216,13 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_intersect_not_deduplicated() {
+    fn test_diff_intersect_is_deduplicated_by_semantic_tuple() {
         let mut ctx = test_ctx_with_st("public", "st");
         let left = scan(1, "a", "public", "a", &["x"]);
         let right = scan(2, "b", "public", "b", &["x"]);
         let tree = intersect(left, right, false);
         let result = diff_intersect(&mut ctx, &tree).unwrap();
-        assert!(!result.is_deduplicated);
+        assert!(result.is_deduplicated);
     }
 
     #[test]
@@ -267,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_intersect_storage_table_join() {
+    fn test_diff_intersect_private_state_join() {
         let mut ctx = test_ctx_with_st("myschema", "my_stream");
         let left = scan(1, "a", "public", "a", &["x"]);
         let right = scan(2, "b", "public", "b", &["x"]);
@@ -275,15 +274,16 @@ mod tests {
         let result = diff_intersect(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // Merge CTE should join against the storage table
-        assert_sql_contains(&sql, "\"myschema\".\"my_stream\"");
+        // Old multiplicities come from private state, with full tuple equality.
+        assert_sql_contains(&sql, "pgtrickle.__pgt_setop_state_test");
+        assert_sql_contains(&sql, "st.\"x\" IS NOT DISTINCT FROM d.\"x\"");
         assert_sql_contains(&sql, "st.__pgt_count_l");
         assert_sql_contains(&sql, "st.__pgt_count_r");
         assert_sql_contains(&sql, "LEFT JOIN");
     }
 
     #[test]
-    fn test_diff_intersect_delete_action_zeros_counts() {
+    fn test_diff_intersect_emits_state_only_action() {
         let mut ctx = test_ctx_with_st("public", "st");
         let left = scan(1, "a", "public", "a", &["x"]);
         let right = scan(2, "b", "public", "b", &["x"]);
@@ -291,9 +291,9 @@ mod tests {
         let result = diff_intersect(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // DELETE rows should emit 0 for both counts
-        assert_sql_contains(&sql, "'D' AS __pgt_action");
-        assert_sql_contains(&sql, "0 AS __pgt_count_l, 0 AS __pgt_count_r");
+        assert_sql_contains(&sql, "new_count_l AS __pgt_count_l");
+        assert_sql_contains(&sql, "new_count_r AS __pgt_count_r");
+        assert_sql_contains(&sql, "ELSE 'S' END AS __pgt_action");
     }
 
     #[test]
@@ -304,14 +304,7 @@ mod tests {
         let left = scan(1, "a", "public", "a", &["x"]);
         let right = scan(2, "b", "public", "b", &["x"]);
         let tree = intersect(left, right, true);
-        let result = diff_intersect(&mut ctx, &tree).unwrap();
-        let sql = ctx.build_with_query(&result.cte_name);
-
-        // The "still present" arm checks for count changes
-        assert_sql_contains(
-            &sql,
-            "new_count_l != old_count_l OR new_count_r != old_count_r",
-        );
+        assert!(diff_intersect(&mut ctx, &tree).is_err());
     }
 
     #[test]
@@ -326,44 +319,18 @@ mod tests {
         // Delta CTE aggregates net counts: INSERT=+1, DELETE=-1
         assert_sql_contains(
             &sql,
-            "SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) AS __net_count",
+            "SUM(CASE WHEN __pgt_action = 'I' THEN 1::bigint ELSE -1::bigint END) AS __net_count",
         );
     }
 
     #[test]
-    fn test_diff_intersect_set_and_all_produce_same_structure() {
-        // Both INTERSECT and INTERSECT ALL use LEAST-based boundary detection
-        let mut ctx_set = test_ctx_with_st("public", "st");
-        let tree_set = intersect(
-            scan(1, "a", "public", "a", &["x"]),
-            scan(2, "b", "public", "b", &["x"]),
-            false,
-        );
-        let r_set = diff_intersect(&mut ctx_set, &tree_set).unwrap();
-        let sql_set = ctx_set.build_with_query(&r_set.cte_name);
-
+    fn test_diff_intersect_all_is_rejected() {
         let mut ctx_all = test_ctx_with_st("public", "st");
         let tree_all = intersect(
             scan(1, "a", "public", "a", &["x"]),
             scan(2, "b", "public", "b", &["x"]),
             true,
         );
-        let r_all = diff_intersect(&mut ctx_all, &tree_all).unwrap();
-        let sql_all = ctx_all.build_with_query(&r_all.cte_name);
-
-        // Both should have the same CTE structure
-        assert_sql_contains(&sql_set, "isect_delta");
-        assert_sql_contains(&sql_set, "isect_merge");
-        assert_sql_contains(&sql_set, "isect_final");
-        assert_sql_contains(&sql_all, "isect_delta");
-        assert_sql_contains(&sql_all, "isect_merge");
-        assert_sql_contains(&sql_all, "isect_final");
-
-        // Both use LEAST (same effective-count function)
-        assert_sql_contains(&sql_set, "LEAST(old_count_l, old_count_r)");
-        assert_sql_contains(&sql_all, "LEAST(old_count_l, old_count_r)");
-
-        // Output columns are identical
-        assert_eq!(r_set.columns, r_all.columns);
+        assert!(diff_intersect(&mut ctx_all, &tree_all).is_err());
     }
 }

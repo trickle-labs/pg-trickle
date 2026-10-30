@@ -14,7 +14,7 @@ Release: `0.108.4`
 | `graph-v1` | stable | yes | public_sql | — |
 | `delta-v1` | stable | yes | public_sql | — |
 | `vector-aggregates` | experimental | no | differential | PGT_EXT_CAPABILITY_DISABLED |
-| `set-operation-differential` | unavailable | no | unavailable | UNSUPPORTED_OPERATOR |
+| `set-operation-differential` | experimental | yes | differential | — |
 | `incremental-window-state` | future | no | unavailable | WINDOW_INCREMENTAL_UNIMPLEMENTED |
 
 ## Executed query families
@@ -29,7 +29,7 @@ Release: `0.108.4`
 | `recursive-cte-recomputation-delta` | accepted | DIFFERENTIAL | DIFFERENTIAL | — → — | recursive-result | none | recursive_cte_fallback | `test_recursive_cte_non_monotone_agg_subquery_recomputation` |
 | `window-partition-recomputation` | accepted | DIFFERENTIAL | DIFFERENTIAL | — → — | partition | none | WINDOW_RECOMPUTE_CHEAPER | `test_row_number_rejected_candidate_converges_via_partition_recompute` |
 | `nullable-group-key-rescan` | accepted | DIFFERENTIAL | DIFFERENTIAL | — → — | group | none | — | `test_v0873_mandatory_composition_matrix` |
-| `intersect-auto-full` | accepted | AUTO | FULL | — → — | whole-query | whole-query | UNSUPPORTED_OPERATOR | `test_diff_full_equivalence_intersect` |
+| `intersect-auto-differential` | accepted | AUTO | DIFFERENTIAL | — → — | none | whole-query | — | `test_diff_full_equivalence_intersect` |
 | `mutable-case-aggregate-full-fallback` | accepted | DIFFERENTIAL | DIFFERENTIAL | — → — | whole-query | whole-query | CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK | `test_dvm1_case_in_list_mutable_full_fallback` |
 | `graph-v1-2-capability-details` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | — | `test_v108_capability_details_publish_graph_1_2_and_delta_1_1` |
 | `graph-v1-2-row-identity-table-srf` | accepted | DIFFERENTIAL | DIFFERENTIAL | — → — | none | none | — | `test_v108_graph_row_identity_and_table_srf_stay_differential` |

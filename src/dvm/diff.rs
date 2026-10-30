@@ -119,6 +119,8 @@ pub struct DiffContext {
     optimization: OptimizationContext,
     /// The target stream table's schema.qualified name (for aggregate merge).
     pub st_qualified_name: Option<String>,
+    /// Private set-operation state relation for this target stream table.
+    pub setop_state_relation: Option<String>,
     /// Validated READY row-state mirror for the admitted v0.89 ROW_NUMBER
     /// path. `None` keeps the existing partition-recompute implementation.
     pub window_state_row_relation: Option<String>,
@@ -671,6 +673,7 @@ impl DiffContext {
                 max_diff_ctes,
             },
             st_qualified_name: None,
+            setop_state_relation: None,
             window_state_row_relation: None,
             defining_query: None,
             st_user_columns: None,
@@ -942,6 +945,12 @@ impl DiffContext {
             schema.replace('"', "\"\""),
             name.replace('"', "\"\""),
         ));
+        self
+    }
+
+    /// Bind the private state relation used by a top-level set operation.
+    pub fn with_setop_state_relation(mut self, relation: String) -> Self {
+        self.setop_state_relation = Some(relation);
         self
     }
 

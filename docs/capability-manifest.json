@@ -73,14 +73,20 @@
     },
     {
       "id": "set-operation-differential",
-      "capability": "intersect_except_dvm",
+      "capability": "intersect_dvm",
       "major_version": 0,
-      "minor_version": 0,
-      "status": "unavailable",
-      "enabled": false,
-      "strategy": "unavailable",
-      "reason_code": "UNSUPPORTED_OPERATOR",
-      "target": null
+      "minor_version": 1,
+      "status": "experimental",
+      "enabled": true,
+      "strategy": "differential",
+      "reason_code": null,
+      "target": null,
+      "details": {
+        "supported_shape": "top-level ordinary INTERSECT over two distinct direct base-table scans or name-preserving simple column projections",
+        "immediate": false,
+        "intersect_all": false,
+        "except": false
+      }
     },
     {
       "id": "incremental-window-state",
@@ -196,16 +202,16 @@
       "reason_code": null
     },
     {
-      "id": "intersect-auto-full",
+      "id": "intersect-auto-differential",
       "test": "test_diff_full_equivalence_intersect",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_diff_full_equivalence_tests --filter test_diff_full_equivalence_intersect",
       "sql": "SELECT value FROM left_source INTERSECT SELECT value FROM right_source",
       "outcome": "accepted",
       "declared_mode": "AUTO",
-      "effective_strategy": "FULL",
-      "recomputation_scope": "whole-query",
+      "effective_strategy": "DIFFERENTIAL",
+      "recomputation_scope": "none",
       "fallback_scope": "whole-query",
-      "reason_code": "UNSUPPORTED_OPERATOR"
+      "reason_code": null
     },
     {
       "id": "mutable-case-aggregate-full-fallback",
@@ -444,5 +450,5 @@
       "docs/integrations/extension-contracts.md"
     ]
   },
-  "manifest_digest": "sha256:8d4e477ec2c14e005907c7b3e96136673bb6184fd18af5a29906737e627c245e"
+  "manifest_digest": "sha256:0293125fe4b370759384fce6522d695b1f867dd84272e48d4443856d720e7eb8"
 }

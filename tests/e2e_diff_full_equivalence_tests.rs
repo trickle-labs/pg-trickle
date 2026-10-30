@@ -731,7 +731,7 @@ async fn test_diff_full_equivalence_intersect() {
     let q = "SELECT v FROM dfe_isect_l INTERSECT SELECT v FROM dfe_isect_r";
     db.create_st("dfe_isect_st", q, "1m", "AUTO").await;
     let (_, mode, _, _) = db.pgt_status("dfe_isect_st").await;
-    assert_eq!(mode, "FULL");
+    assert_eq!(mode, "DIFFERENTIAL");
     db.assert_st_matches_query("dfe_isect_st", q).await;
 
     // Cycle 1: add to both to expand intersection

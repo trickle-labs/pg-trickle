@@ -624,9 +624,13 @@ SELECT pgtrickle.create_stream_table(
 
 **Set Operation Examples:**
 
-`INTERSECT`, `INTERSECT ALL`, `EXCEPT`, `EXCEPT ALL`, `UNION`, and `UNION ALL`
-are supported in FULL mode.  INTERSECT/EXCEPT forms are currently guarded
-from DIFFERENTIAL and IMMEDIATE admission; AUTO falls back to FULL.
+All set-operation forms are supported in FULL mode. Ordinary top-level
+`INTERSECT` also supports DIFFERENTIAL and AUTO for two distinct base-table
+scans or name-preserving simple column projections with matching output types
+and deterministic collations. The private branch-count state is kept outside
+the visible stream table and updated atomically with the result. IMMEDIATE,
+`INTERSECT ALL`, `EXCEPT`, and more complex or filtered forms remain outside
+the differential admission contract.
 
 ```sql
 -- INTERSECT: customers who placed orders in BOTH regions
@@ -3178,7 +3182,7 @@ pg_trickle supports 60+ SQL constructs across three refresh modes. The table bel
 | Basic SELECT / WHERE / DISTINCT | ✅ | ✅ | ✅ | |
 | Joins (INNER, LEFT, RIGHT, FULL, CROSS, LATERAL) | ✅ | ✅ | ✅ | Hybrid delta strategy |
 | Subqueries (EXISTS, IN, NOT EXISTS, NOT IN, scalar) | ✅ | ✅ | ✅ | |
-| Set operations (UNION ALL, INTERSECT, EXCEPT) | ✅ | ⚠️ | ⚠️ | INTERSECT/EXCEPT are FULL-only; AUTO falls back to FULL |
+| Set operations (UNION ALL, INTERSECT, EXCEPT) | ✅ | ⚠️ | ⚠️ | Ordinary top-level INTERSECT has a bounded differential subset; other set operations use FULL |
 | Algebraic aggregates (COUNT, SUM, AVG, STDDEV, …) | ✅ | ✅ | ✅ | Fully invertible delta |
 | Semi-algebraic aggregates (MIN, MAX) | ✅ | ✅ | ✅ | Group rescan on ambiguous delete |
 | Group-rescan aggregates (STRING_AGG, ARRAY_AGG, …) | ✅ | ⚠️ | ⚠️ | Warning emitted at creation time |

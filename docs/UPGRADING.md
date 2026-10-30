@@ -739,8 +739,9 @@ Existing stream tables are marked `needs_reinit` with legacy version `1`.
 
 The next protected FULL refresh rebuilds each table from source data and marks
 its row identity version `2`. Incremental refresh remains blocked until that
-reinitialization succeeds. `INTERSECT` and `EXCEPT` continue to use FULL/AUTO
-until their private multiplicity state is admitted by the semantic gate.
+reinitialization succeeds. Ordinary top-level `INTERSECT` can use DIFFERENTIAL
+for the bounded direct-scan shape; `INTERSECT ALL`, `EXCEPT`, and other
+set-operation shapes continue to use FULL/AUTO.
 
 ### 0.83.0 → 0.84.0 catalog and privilege integrity
 

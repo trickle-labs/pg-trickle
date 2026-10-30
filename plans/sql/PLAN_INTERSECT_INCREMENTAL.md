@@ -1,6 +1,6 @@
 # Plan: Bounded incremental INTERSECT
 
-**Status:** Design only. INTERSECT remains FULL-only. This document does not authorize or implement admission changes.
+**Status:** Bounded implementation candidate. Ordinary top-level `INTERSECT` is admitted for differential maintenance only when both branches are direct scans or name-preserving direct-column projections over distinct ordinary or partitioned base tables, with matching output types and deterministic collations. `INTERSECT ALL`, `EXCEPT`, nested/filtered forms, stream-table inputs, and IMMEDIATE refresh remain outside this slice.
 
 ## Audit baseline
 
@@ -68,7 +68,7 @@ The state relation is derived data. FULL refresh must rebuild it from the same l
 
 DROP, ALTER QUERY, identity rebuild, extension upgrade, logical restore, and restart must never leave a differential refresh reading stale or misbound state. Exercise state deletion/recreation and missing/stale registry rows. Confirm extension dump behavior for the registry and dynamic state relations; after restore, require an explicit state-validity check and FULL rebootstrap before differential use when state contents or OIDs are not trustworthy.
 
-## Qualification gates before enabling
+## Qualification gates and evidence
 
 1. Add admission unit tests for the exact accepted AST and for every excluded form. Assert explicit DIFFERENTIAL admission and AUTO behavior only for the accepted ordinary shape; keep all other set-operation fallback/rejection tests.
 2. Add an independent PostgreSQL defining-query bag oracle and private-state oracle. Test asymmetric multiplicities, left-only/right-only rows, simultaneous changes, count transitions across zero, duplicate insertion/deletion, invisible-then-visible rows, NULL tuples, multi-column tuples, and no-change cycles.
@@ -80,4 +80,14 @@ DROP, ALTER QUERY, identity rebuild, extension upgrade, logical restore, and res
 
 ## Decision
 
-The existing private FULL state and transactional refresh framework provide a sound foundation, so a narrow implementation is feasible. The current differential generator is disconnected from private state, and there is no private-state update/apply hook or qualified restore path. This issue therefore remains in design/implementation work: keep admission fail-closed until the private state update, public delta, and frontier can be applied and recovered atomically, and until the exact subset passes the qualification gates above. This plan does not enable or claim incremental INTERSECT support.
+The implementation candidate now connects the admitted differential path to the private multiplicity relation. It validates the state binding and layout, stages branch-count deltas, applies private state and visible rows in the same refresh transaction, and falls back to FULL when state is missing or invalid. It adds admission, exact-result, rollback, lifecycle, and upgrade E2E coverage.
+
+### Local qualification record (2026-10-30)
+
+- Candidate source is now based on current `main` at `943cc7cbed679fd95f9807896edf26afce62282e`; the implementation diff excluding this plan has SHA-256 `8dfd1251f451e537ddb71824e06a7aa516ce2c9d42c05b0aee45672efa35dfb6`.
+- PostgreSQL 18.6, pgrx 0.18.0, rustc/cargo 1.99.1. `just fmt`, `just lint` (with Homebrew Bash 5.3 on this macOS host), and `just test-unit` passed; all 2,675 unit tests passed.
+- Rebased candidate E2E image: `pg_trickle_e2e:1292-candidate-rebased`, image digest `sha256:644eb5d34127dfd1f1607a9351d4c88f05b74ff63f7702cb6183d4dd0a60b474`; packaged `pg_trickle.so` SHA-256 `ac7a46618b64bf54616d28c8253c71fdb4022ac9e34c22db44c6ea43fd51b541`.
+- On the rebased candidate image, `PGS_E2E_IMAGE=pg_trickle_e2e:1292-candidate-rebased ./scripts/run_e2e_tests.sh --test e2e_set_operation_tests test_intersect` passed all 10 matching tests. The same command with filter `test_setop_private_state_` passed all 3 matching tests. The ignored `test_upgrade_v1083_preserves_intersect_private_state_for_differential` passed with `PGS_UPGRADE_FROM=0.108.3`, `PGS_UPGRADE_TO=0.108.4`, and `PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest` built from the rebased candidate.
+- Two separate images based on the rebased source injected semantic defects into `src/dvm/operators/intersect.rs`. Reversing the public delete action produced an exact-oracle extra `{\"val\":7}` row (mutant source SHA-256 `f22c4a26cb2228d341cad936a76297f92ab1fe9c6b28adb7b3f411d60915039a`, loaded library SHA-256 `106a7db3ebeeee0174e7d5b559a562bb0bcc74e6a47a7b3d139c2a1d5517d331`). Requiring both old counts to be zero for a visibility insert produced an exact-oracle missing `{\"val\":7}` row (mutant source SHA-256 `defc7b7ed0e685f942cfe90cd0acd5508a74e22158ab2621bae007bf34af55f8`, loaded library SHA-256 `42a54130f1fdeded26bca15dfa7390131a731b96264d56ab2627e426cc2c1c4d`). Both used `PGS_E2E_IMAGE=<mutant image> ./scripts/run_e2e_tests.sh --test e2e_set_operation_tests test_intersect_differential_presence_transitions_and_private_counts`; both failed only at the intended exact-result mismatch.
+
+This is a bounded candidate, not completion of every proposed acceptance item above. Exact-head CI has not run. Keep the issue open until it passes CI and any remaining source-cut, recovery, and compatibility obligations are verified. Unsupported set-operation shapes remain fail-closed.
