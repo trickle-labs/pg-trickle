@@ -1,8 +1,9 @@
 # Conservative CDC changed-column images
 
-This #1221 slice changes UPDATE masks, retains deferred-key source histories
-and classifies keyed image weights. It does not yet prove complete scan
-normalization, shared-buffer compaction,
+This #1221 slice changes UPDATE masks, retains deferred-key source histories,
+classifies keyed image weights and applies the verified compaction eligibility
+gate to both base and stream-table buffers. It does not yet prove complete scan
+normalization or the reduction SQL's equivalence for every history,
 source incarnation/epoch transitions, complete transaction histories, or all
 protected consumer windows. Those obligations remain open.
 
@@ -23,9 +24,13 @@ separate integration boundaries.
 `verification/cdc_elision.rs` contains the exact production decisions checked
 by Verus: `admitted_image_type`, `keep_change`, `image_action` and
 `can_compact_history`. They require no unchecked preconditions.
-`can_compact_history` admits base-buffer compaction only for an immediate
-primary key, one dependent stream table and a selected LSN range with no
-captured TRUNCATE marker. `keep_change` retains every unknown policy and every unequal
+`can_compact_history` admits compaction only for an immediate unique identity,
+one dependent stream table and a selected LSN range with no captured TRUNCATE
+marker. Base sources supply primary-key metadata; stream-table sources supply
+the immediate unique `__pgt_row_id` index. Both paths inspect the same selected
+window and retain histories across consumers or reset barriers. This proves the
+shared eligibility decision, not the full row-history reduction or every
+consumer-window equivalence. `keep_change` retains every unknown policy and every unequal
 image, and elides only the admitted/equal case. `admitted_image_type` admits
 only the PostgreSQL built-in OIDs for fixed-size boolean, int2/int4/int8 and
 uuid. Actual runtime `pg_typeof` OIDs enforce that

@@ -31,16 +31,16 @@ pub fn image_action(weight: i64) -> (action: ImageAction)
     else { ImageAction::Skip }
 }
 
-/// Base-buffer compaction is safe only for one immediate keyed consumer and a
-/// source window with no TRUNCATE barrier.
+/// Keyed history compaction is safe only for one immediate identity and one
+/// consumer, with no reset barrier in the selected window.
 pub fn can_compact_history(
-    has_immediate_primary_key: bool,
+    has_immediate_unique_identity: bool,
     has_single_consumer: bool,
     has_truncate_barrier: bool,
 ) -> (eligible: bool)
-    ensures eligible == (has_immediate_primary_key && has_single_consumer && !has_truncate_barrier),
+    ensures eligible == (has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier),
 {
-    has_immediate_primary_key && has_single_consumer && !has_truncate_barrier
+    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier
 }
 }
 
@@ -119,13 +119,13 @@ mod tests {
     }
 
     #[test]
-    fn compaction_rejects_missing_keys_shared_consumers_and_truncate_barriers() {
-        for has_key in [false, true] {
+    fn compaction_rejects_missing_identity_shared_consumers_and_truncate_barriers() {
+        for has_identity in [false, true] {
             for single_consumer in [false, true] {
                 for truncate in [false, true] {
                     assert_eq!(
-                        can_compact_history(has_key, single_consumer, truncate),
-                        has_key && single_consumer && !truncate
+                        can_compact_history(has_identity, single_consumer, truncate),
+                        has_identity && single_consumer && !truncate
                     );
                 }
             }
