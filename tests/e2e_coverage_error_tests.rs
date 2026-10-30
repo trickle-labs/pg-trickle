@@ -364,7 +364,7 @@ async fn test_wb2_wide_table_gt63_cols_differential_refresh() {
     db.execute("UPDATE wide_src SET col1 = 999 WHERE id = 1")
         .await;
 
-    db.refresh_st("wide_st").await;
+    db.refresh_st_with_retry("wide_st").await;
 
     // After refresh, the row should reflect the col1 update.
     let val: i32 = db
@@ -378,7 +378,7 @@ async fn test_wb2_wide_table_gt63_cols_differential_refresh() {
     // Insert a second row and verify count.
     db.execute("INSERT INTO wide_src (id, col1, col2) VALUES (2, 11, 21)")
         .await;
-    db.refresh_st("wide_st").await;
+    db.refresh_st_with_retry("wide_st").await;
     assert_eq!(db.count("public.wide_st").await, 2);
 }
 

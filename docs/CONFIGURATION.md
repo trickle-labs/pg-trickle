@@ -1625,55 +1625,34 @@ should be increased.
 
 ---
 
-### COR-10-01 — Deep join chain threshold
+### COR-10-01 — Part 3 delta CTE inlining threshold
 
 ### pg_trickle.part3_max_scan_count
 
-Maximum number of source-table rows the differential engine scans in
-**Part 3** (direct scan strategy) before it escalates to a full deep-join
-delta recomputation.
+Maximum number of source scans in the left child for which the DVM forces the
+delta CTE used by a required Part 3 join correction to be `NOT MATERIALIZED`.
+Above this threshold PostgreSQL chooses its default CTE materialization plan.
+The correction itself is emitted whenever needed to preserve exact results;
+this setting changes planning and performance only.
 
-Part 3 applies when a join chain has depth ≤ `part3_max_scan_count` source
-rows per side. Beyond this threshold the planner falls back to a more
-expensive multi-pass join, which is correct at any depth but generates larger
-SQL plans.
-
-**Default:** `5`  
-**Range:** `1` – `10000`
+**Default:** `5`; **range:** `1`–`32`; **context:** `superuser` (`SUSET`).
 
 ```sql
--- Tighten to Part 3 only for very small dimension tables (≤3 rows):
+-- Keep PostgreSQL's default materialization for join children with more than
+-- three source scans:
 SET pg_trickle.part3_max_scan_count = 3;
 
--- Relax for moderately sized dimensions where Part 3 SQL is manageable:
+-- Force CTE inlining for join children with up to 20 source scans:
 SET pg_trickle.part3_max_scan_count = 20;
 ```
 
-#### Trade-off: SQL complexity vs. delta correctness at depth
+#### Trade-off: inlining vs. materialization
 
 | Threshold | Effect |
 |-----------|--------|
-| Low (1–5) | Part 3 used rarely; deeper join strategy always chosen for non-trivial chains; correct but larger delta SQL and higher planning time. |
-| Default (5) | Balanced; Part 3 applies only to tiny lookup tables (static enums, 1-row config rows). Recommended for most workloads. |
-| High (50+) | Part 3 used aggressively; SQL is simpler but intermediate delta estimates may miss correlated rows at join depth > 6. |
-
-#### Recommendation by join-chain depth
-
-- **≤ 6 table join chains:** Default (`5`) is safe and near-optimal.
-- **> 6 table join chains with small dimension tables:** Increase to `10`–`20`
-  only if you observe excessive delta SQL plan sizes in `EXPLAIN` output.
-- **Analytical workloads with 10+ table star schemas:** Leave at default `5`
-  and rely on the planner's GROUP_RESCAN fallback for correctness.
-
-> **Diagnostic:** Set `pg_trickle.log_format = 'verbose'` and look for
-> `part3_direct_scan` tags in the scheduler log to see how often Part 3
-> is being selected.
-
-| Setting | Value |
-|---------|-------|
-| Default | `5` |
-| Range | `1` – `10000` |
-| Context | `superuser` |
+| Low (1–5) | PostgreSQL keeps default materialization for more deep join deltas. |
+| Default (5) | Smaller join deltas are forced inline; larger ones use PostgreSQL's default choice. |
+| High (20–32) | More deep join deltas are forced inline, which can reduce temporary storage but repeat expensive work. |
 
 ---
 

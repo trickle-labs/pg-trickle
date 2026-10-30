@@ -107,18 +107,18 @@ async fn test_full_join_aggregate_sum_both_sides_same_cycle() {
     // Cycle 1: Update both sides for same key in same cycle
     db.execute("UPDATE fja_l2 SET amt = 150 WHERE k = 1").await;
     db.execute("UPDATE fja_r2 SET amt = 15 WHERE k = 1").await;
-    db.refresh_st("fja_st2").await;
+    db.refresh_st_with_retry("fja_st2").await;
     db.assert_st_matches_query("fja_st2", q).await;
 
     // Cycle 2: Insert right row for previously left-only key
     db.execute("INSERT INTO fja_r2 VALUES (3, 3, 30)").await;
-    db.refresh_st("fja_st2").await;
+    db.refresh_st_with_retry("fja_st2").await;
     db.assert_st_matches_query("fja_st2", q).await;
 
     // Cycle 3: Delete all right rows, add new left-only row
     db.execute("DELETE FROM fja_r2").await;
     db.execute("INSERT INTO fja_l2 VALUES (4, 4, 400)").await;
-    db.refresh_st("fja_st2").await;
+    db.refresh_st_with_retry("fja_st2").await;
     db.assert_st_matches_query("fja_st2", q).await;
 }
 
