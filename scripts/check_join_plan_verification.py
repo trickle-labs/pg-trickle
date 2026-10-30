@@ -39,6 +39,10 @@ MUTATIONS = {
         "    } else {\n        left_insert == right_insert\n    }\n}",
         "    } else {\n        left_insert != right_insert\n    }\n}",
     ),
+    "missing-nested-correction-term": (
+        "        part1_split ==> li * r1 - ld * r0 + l1 * (ri - rd) - li * (ri - rd)\n            == l1 * r1 - l0 * r0,",
+        "        part1_split ==> li * r1 - ld * r0 + l1 * (ri - rd)\n            == l1 * r1 - l0 * r0,",
+    ),
 }
 
 
