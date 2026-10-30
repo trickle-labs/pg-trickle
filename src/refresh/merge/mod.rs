@@ -729,6 +729,19 @@ pub fn execute_differential_refresh_with_tuning(
     set_effective_mode("DIFFERENTIAL");
     validate_differential_refresh_inputs(st, prev_frontier)?;
 
+    let needs_nested_projection_fallback = with_stream_owner(st, || {
+        dvm::query_needs_nested_projection_full_fallback(&st.defining_query)
+    })?;
+    if needs_nested_projection_fallback {
+        crate::refresh::ensure_full_policy(st, "nested computed projection safety fallback")?;
+        pgrx::warning!(
+            "Stream table {}.{}: nested join with computed projection can evaluate invalid mixed-snapshot pairs; using FULL refresh",
+            st.pgt_schema,
+            st.pgt_name
+        );
+        return execute_full_refresh(st);
+    }
+
     // TEST-MODE semantic control: report a pending row without applying its
     // delta so the real finalizer advances progress against unchanged output.
     if crate::config::pg_trickle_test_chaos_for_table() == st.pgt_name

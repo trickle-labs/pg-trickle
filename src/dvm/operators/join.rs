@@ -190,6 +190,41 @@ pub(crate) fn computed_projection_needs_endpoints(tree: &OpTree) -> bool {
         && endpoint_key_columns(condition, left, right).is_some()
 }
 
+/// Return true when a computed top-level projection sits above a nested join.
+/// The keyed endpoint path currently proves expression safety only for one
+/// join over two base scans. The ordinary nested-join delta can expose mixed
+/// source pairs to a throwing projection, so callers must use a whole-query
+/// refresh until that shape has an endpoint-scoped implementation.
+pub(crate) fn computed_projection_needs_nested_join_fallback(tree: &OpTree) -> bool {
+    fn has_nested_join(tree: &OpTree, inside_join: bool) -> bool {
+        match tree {
+            OpTree::InnerJoin { left, right, .. }
+            | OpTree::LeftJoin { left, right, .. }
+            | OpTree::FullJoin { left, right, .. } => {
+                if inside_join {
+                    return true;
+                }
+                has_nested_join(left, true) || has_nested_join(right, true)
+            }
+            OpTree::Filter { child, .. }
+            | OpTree::Project { child, .. }
+            | OpTree::Subquery { child, .. } => has_nested_join(child, inside_join),
+            _ => false,
+        }
+    }
+
+    let OpTree::Project {
+        expressions, child, ..
+    } = tree
+    else {
+        return false;
+    };
+    expressions
+        .iter()
+        .any(|e| !matches!(e, Expr::ColumnRef { .. } | Expr::Literal(_)))
+        && has_nested_join(child, false)
+}
+
 fn scoped_source_endpoints(
     ctx: &mut DiffContext,
     source: &OpTree,
