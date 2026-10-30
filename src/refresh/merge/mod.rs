@@ -729,6 +729,18 @@ pub fn execute_differential_refresh_with_tuning(
     set_effective_mode("DIFFERENTIAL");
     validate_differential_refresh_inputs(st, prev_frontier)?;
 
+    let uses_intersect_private_state =
+        crate::dvm::classify_top_level_set_op(&st.defining_query) == Some(("INTERSECT", false));
+    if uses_intersect_private_state && !crate::setop_state::intersect_state_is_valid(st)? {
+        pgrx::warning!(
+            "[pg_trickle] Falling back to FULL refresh: private INTERSECT state is missing or invalid for {}.{}",
+            st.pgt_schema,
+            st.pgt_name,
+        );
+        set_effective_mode("FULL");
+        return execute_full_refresh(st);
+    }
+
     // TEST-MODE semantic control: report a pending row without applying its
     // delta so the real finalizer advances progress against unchanged output.
     if crate::config::pg_trickle_test_chaos_for_table() == st.pgt_name
@@ -2098,7 +2110,11 @@ pub fn execute_differential_refresh_with_tuning(
         clear_fallback_leaf_oids();
 
         let delta_sql = delta_result.delta_sql;
-        let user_cols = delta_result.output_columns;
+        let user_cols = if uses_intersect_private_state {
+            crate::refresh::get_st_user_columns(st)
+        } else {
+            delta_result.output_columns
+        };
         let source_oids = delta_result.source_oids;
         let is_dedup = delta_result.is_deduplicated;
         let has_key_changed = delta_result.has_key_changed;
@@ -3060,8 +3076,11 @@ pub fn execute_differential_refresh_with_tuning(
         && st.st_partition_key.is_none()
         && !has_pgt_placeholders;
 
-    let materializes_delta =
-        use_delete_insert || use_agg_fast_path || use_explicit_dml || use_vector_agg;
+    let materializes_delta = uses_intersect_private_state
+        || use_delete_insert
+        || use_agg_fast_path
+        || use_explicit_dml
+        || use_vector_agg;
     let delta_table_basename = format!("__pgt_delta_{}", st.pgt_id);
     let delta_select = format!("SELECT * FROM {} AS d", resolved.trigger_using_sql);
     let delta_schema_select = reconciliation_delta.as_ref().map(|delta| {
@@ -3265,6 +3284,46 @@ pub fn execute_differential_refresh_with_tuning(
         } else if let Some(result) = hash_merge_result {
             // A1-3b: HASH parent-level MERGE already executed above.
             result
+        } else if uses_intersect_private_state {
+            // Stage the complete private count delta before changing either
+            // the state relation or the public result. Both writes stay in
+            // this refresh transaction and therefore roll back together.
+            // nosemgrep: rust.spi.run.dynamic-format — the temp-table name and generated delta query come from the extension's validated DVM plan.
+            Spi::run(&format!("INSERT INTO {delta_table} {delta_select}"))
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            crate::setop_state::apply_intersect_delta(st)?;
+            // nosemgrep: rust.spi.run.dynamic-format -- delta_table is a numeric-ID-derived temp table name.
+            Spi::run(&format!(
+                "DELETE FROM {delta_table} WHERE __pgt_action NOT IN ('I', 'D')"
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            // nosemgrep: rust.spi.run.dynamic-format -- delta_table is a numeric-ID-derived temp table name.
+            Spi::run(&format!(
+                "ALTER TABLE {delta_table} DROP COLUMN __pgt_count_l, \
+                 DROP COLUMN __pgt_count_r"
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+            let quoted_table = format!(
+                "\"{}\".\"{}\"",
+                schema.replace('"', "\"\""),
+                name.replace('"', "\"\""),
+            );
+            let public_delta =
+                format!("(SELECT * FROM {delta_table} WHERE __pgt_action IN ('I', 'D'))");
+            let merge_sql = build_merge_sql(
+                &quoted_table,
+                &public_delta,
+                &crate::refresh::get_st_user_columns(st),
+                st.st_partition_key.is_some(),
+            );
+            let applied = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&merge_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            (applied, "intersect_private_state")
         } else if use_pipeline {
             let (count, stats) = crate::refresh::pipeline::execute_merge_pipeline(
                 st.pgt_id,

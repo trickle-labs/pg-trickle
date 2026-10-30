@@ -17,7 +17,8 @@ This document describes the Differential View Maintenance (DVM) operators implem
 | `EXISTS` / `NOT EXISTS` | ✅ | ✅ | ✅ | [Subqueries](#subqueries) |
 | Scalar subquery | ✅ | ✅ | ✅ | [Subqueries](#subqueries) |
 | `UNION ALL` | ✅ | ✅ | ✅ | [Set Operations](#set-operations) |
-| `INTERSECT` / `EXCEPT` | ✅ | ❌ | ❌ | [Set Operations](#set-operations) |
+| `INTERSECT` (bounded direct scans) | ✅ | ✅ | ❌ | [Set Operations](#set-operations) |
+| `INTERSECT ALL` / `EXCEPT` | ✅ | ❌ | ❌ | [Set Operations](#set-operations) |
 | `COUNT`, `SUM`, `AVG` | ✅ | ✅ | ✅ | [Aggregates](#aggregates) |
 | `MIN` / `MAX` | ✅ | ✅ | ✅ | [Aggregates](#aggregates) |
 | `COUNT/SUM/AVG(DISTINCT)` | ✅ | ✅ | ✅ | [Aggregates](#aggregates) |
@@ -96,7 +97,8 @@ The following table shows which SQL constructs are supported under each refresh 
 | Correlated `LATERAL` subquery | ✅ | ✅ | ✅ | |
 | **Set Operations** | | | | |
 | `UNION ALL` | ✅ | ✅ | ✅ | Dual-branch merge |
-| `INTERSECT` / `INTERSECT ALL` | ✅ | ❌ | ❌ | FULL-only; incremental admission is guarded |
+| Ordinary `INTERSECT` | ✅ | ✅ | ❌ | Differential only for two distinct base scans or name-preserving simple column projections |
+| `INTERSECT ALL` | ✅ | ❌ | ❌ | FULL-only |
 | `EXCEPT` / `EXCEPT ALL` | ✅ | ❌ | ❌ | FULL-only; incremental admission is guarded |
 | **Aggregates** | | | | |
 | `COUNT`, `SUM`, `AVG` | ✅ | ✅ | ✅ | Algebraic — fully invertible delta |
@@ -510,10 +512,14 @@ SELECT * FROM (<right_delta>)
 
 **Module:** `src/dvm/operators/intersect.rs`
 
-FULL refreshes materialize the PostgreSQL result directly.  The older
-differential implementation still contains dual-count boundary logic, but
-WP0 admission guards keep these operators out of DIFFERENTIAL and IMMEDIATE
-until private state is complete.
+FULL refreshes materialize the PostgreSQL result directly and rebuild the
+private branch-count state. Differential refresh is admitted only for one
+top-level ordinary `INTERSECT` over two distinct ordinary or partitioned base
+tables, with direct columns or name-preserving simple column projections,
+matching output types, and deterministic collations. Filters, joins, CTEs,
+nested set operations, stream-table sources, `INTERSECT ALL`, and IMMEDIATE
+refresh remain unsupported. Invalid or missing private state triggers a FULL
+refresh.
 
 **Delta Rule:**
 
@@ -522,17 +528,21 @@ $$\Delta(R \cap S): \text{emit rows where } \min(\text{count}_L, \text{count}_R)
 - **INTERSECT** (set): a row is present when both branches contain it.
 - **INTERSECT ALL** (bag): a row appears $\min(\text{count}_L, \text{count}_R)$ times.
 
-**Legacy differential SQL shape (not admitted):**
+**Differential SQL shape:**
 
 1. **Delta CTE** — tags rows from left/right child deltas with branch indicator (`'L'`/`'R'`) and computes per-row net_count.
-2. **Merge CTE** — joins with the storage table to compute old and new per-branch counts (`__pgt_count_l`, `__pgt_count_r`).
-3. **Final CTE** — detects boundary crossings using `LEAST(old_count_l, old_count_r)` vs `LEAST(new_count_l, new_count_r)`.
+2. **Merge CTE** — joins the private state relation to compute old and new per-branch counts (`__pgt_count_l`, `__pgt_count_r`).
+3. **Final CTE** — emits `I` or `D` only when visibility crosses zero, and emits a state-only row for count changes that do not alter the public set.
 
 **Notes:**
 - New FULL tables contain only the defining-query output columns (plus the
   normal internal row identity). Legacy dual-count columns are removed during
   a successful FULL refresh.
-- Both set and bag variants use the same 3-CTE structure; only the boundary logic stays the same (both use LEAST).
+- Private counts and public row changes are applied in the same refresh
+  transaction. The public stream table remains a set and never exposes the
+  private count columns.
+- `INTERSECT ALL` and IMMEDIATE refresh remain FULL-only or rejected,
+  respectively.
 
 ---
 

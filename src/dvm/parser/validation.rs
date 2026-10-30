@@ -84,9 +84,17 @@ pub fn incremental_admission(
     immediate: bool,
 ) -> Result<IncrementalAdmission, PgTrickleError> {
     let mut issues = Vec::new();
-    collect_admission_issues(&result.tree, immediate, &mut issues);
+    let admitted_intersect = if !immediate && result.cte_registry.entries.is_empty() {
+        match direct_intersect_sources(&result.tree) {
+            Some(sources) => supported_intersect_sources(&sources)?,
+            None => false,
+        }
+    } else {
+        false
+    };
+    collect_admission_issues(&result.tree, immediate, admitted_intersect, &mut issues);
     for (_, body) in &result.cte_registry.entries {
-        collect_admission_issues(body, immediate, &mut issues);
+        collect_admission_issues(body, immediate, false, &mut issues);
     }
 
     if volatility >= 's' {
@@ -129,19 +137,215 @@ pub fn incremental_admission(
     }
 }
 
-fn collect_admission_issues(tree: &OpTree, immediate: bool, issues: &mut Vec<ValidationIssue>) {
+fn direct_projection_scan(tree: &OpTree) -> Option<(u32, Vec<String>, Vec<u32>)> {
+    let (table_oid, columns) = match tree {
+        OpTree::Scan {
+            table_oid, columns, ..
+        } => (*table_oid, columns),
+        OpTree::Project {
+            expressions,
+            aliases,
+            child,
+        } => {
+            let OpTree::Scan {
+                table_oid,
+                alias,
+                columns,
+                ..
+            } = child.as_ref()
+            else {
+                return None;
+            };
+            if expressions.len() != aliases.len() {
+                return None;
+            }
+            let mut names = Vec::with_capacity(expressions.len());
+            let mut types = Vec::with_capacity(expressions.len());
+            for expression in expressions {
+                let Expr::ColumnRef {
+                    table_alias,
+                    column_name,
+                } = expression
+                else {
+                    return None;
+                };
+                if table_alias.as_ref().is_some_and(|name| name != alias) {
+                    return None;
+                }
+                let column = columns.iter().find(|column| column.name == *column_name)?;
+                // The current set-op generator uses the left output names in
+                // both branch delta CTEs. Keep the admitted projection shape
+                // name-preserving until positional alias mapping is explicit.
+                if aliases.get(names.len()) != Some(column_name) {
+                    return None;
+                }
+                names.push(column_name.clone());
+                types.push(column.type_oid);
+            }
+            return Some((*table_oid, names, types));
+        }
+        _ => return None,
+    };
+
+    Some((
+        table_oid,
+        columns.iter().map(|column| column.name.clone()).collect(),
+        columns.iter().map(|column| column.type_oid).collect(),
+    ))
+}
+
+fn direct_intersect_sources(tree: &OpTree) -> Option<[(u32, Vec<String>); 2]> {
+    let OpTree::Intersect {
+        left,
+        right,
+        all: false,
+    } = tree
+    else {
+        return None;
+    };
+    let (left_oid, left_columns, left_types) = direct_projection_scan(left)?;
+    let (right_oid, right_columns, right_types) = direct_projection_scan(right)?;
+    (left_oid != 0
+        && right_oid != 0
+        && left_oid != right_oid
+        && left_columns == right_columns
+        && !left_types.is_empty()
+        && left_types == right_types)
+        .then_some([(left_oid, left_columns), (right_oid, right_columns)])
+}
+
+#[cfg(test)]
+mod intersect_shape_tests {
+    use super::*;
+
+    fn scan(table_oid: u32, alias: &str, column_type: u32) -> OpTree {
+        OpTree::Scan {
+            table_oid,
+            table_name: alias.to_string(),
+            schema: "public".to_string(),
+            columns: vec![crate::dvm::parser::Column {
+                name: "value".to_string(),
+                type_oid: column_type,
+                is_nullable: true,
+            }],
+            pk_columns: vec![],
+            alias: alias.to_string(),
+        }
+    }
+
+    fn intersect(left: OpTree, right: OpTree, all: bool) -> OpTree {
+        OpTree::Intersect {
+            left: Box::new(left),
+            right: Box::new(right),
+            all,
+        }
+    }
+
+    #[test]
+    fn test_intersect_shape_accepts_distinct_direct_ordinary_sources() {
+        let tree = intersect(scan(10, "l", 23), scan(20, "r", 23), false);
+        assert_eq!(
+            direct_intersect_sources(&tree),
+            Some([
+                (10, vec!["value".to_string()]),
+                (20, vec!["value".to_string()])
+            ])
+        );
+    }
+
+    #[test]
+    fn test_intersect_shape_rejects_all_same_source_and_type_mismatch() {
+        assert!(
+            direct_intersect_sources(&intersect(scan(10, "l", 23), scan(20, "r", 23), true,))
+                .is_none()
+        );
+        assert!(
+            direct_intersect_sources(&intersect(scan(10, "l", 23), scan(10, "r", 23), false,))
+                .is_none()
+        );
+        assert!(
+            direct_intersect_sources(&intersect(scan(10, "l", 23), scan(20, "r", 25), false,))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_intersect_shape_rejects_filters_and_computed_projections() {
+        let filtered = OpTree::Filter {
+            predicate: Expr::Raw("value > 0".to_string()),
+            child: Box::new(scan(10, "l", 23)),
+        };
+        assert!(direct_intersect_sources(&intersect(filtered, scan(20, "r", 23), false)).is_none());
+
+        let projected = OpTree::Project {
+            expressions: vec![Expr::Raw("value + 1".to_string())],
+            aliases: vec!["value".to_string()],
+            child: Box::new(scan(10, "l", 23)),
+        };
+        assert!(
+            direct_intersect_sources(&intersect(projected, scan(20, "r", 23), false)).is_none()
+        );
+    }
+}
+
+fn supported_intersect_sources(sources: &[(u32, Vec<String>); 2]) -> Result<bool, PgTrickleError> {
+    let supported_relations = Spi::get_one_with_args::<bool>(
+        "SELECT COALESCE(count(*) = 2 AND count(DISTINCT c.oid) = 2 \
+                    AND bool_and(c.relkind IN ('r', 'p')) \
+                    AND bool_and(NOT EXISTS (SELECT 1 \
+                        FROM pgtrickle.pgt_stream_tables st WHERE st.pgt_relid = c.oid)), false) \
+         FROM pg_catalog.pg_class c WHERE c.oid IN ($1, $2)",
+        &[
+            pg_sys::Oid::from(sources[0].0).into(),
+            pg_sys::Oid::from(sources[1].0).into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !supported_relations {
+        return Ok(false);
+    }
+
+    for (oid, columns) in sources {
+        for column in columns {
+            let deterministic_collation = Spi::get_one_with_args::<bool>(
+                "SELECT a.attcollation = 0 OR COALESCE(c.collisdeterministic, false) \
+                 FROM pg_catalog.pg_attribute a \
+                 LEFT JOIN pg_catalog.pg_collation c ON c.oid = a.attcollation \
+                 WHERE a.attrelid = $1 AND a.attname::text = $2 AND a.attnum > 0 \
+                   AND NOT a.attisdropped",
+                &[pg_sys::Oid::from(*oid).into(), column.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(false);
+            if !deterministic_collation {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn collect_admission_issues(
+    tree: &OpTree,
+    immediate: bool,
+    allow_top_level_intersect: bool,
+    issues: &mut Vec<ValidationIssue>,
+) {
     match tree {
-        OpTree::Intersect { left, right, .. } => {
-            issues.push(ValidationIssue {
-                code: "DVM-81-1-SET",
-                operator: "INTERSECT",
-                reason: "INTERSECT state is not yet proven safe for incremental execution"
-                    .to_string(),
-                hint: "Use FULL or AUTO until private set-operation state is available."
-                    .to_string(),
-            });
-            collect_admission_issues(left, immediate, issues);
-            collect_admission_issues(right, immediate, issues);
+        OpTree::Intersect { left, right, all } => {
+            if !(allow_top_level_intersect && !all) {
+                issues.push(ValidationIssue {
+                    code: "DVM-81-1-SET",
+                    operator: "INTERSECT",
+                    reason: "INTERSECT state is not yet proven safe for incremental execution"
+                        .to_string(),
+                    hint: "Use FULL or AUTO until private set-operation state is available."
+                        .to_string(),
+                });
+            }
+            collect_admission_issues(left, immediate, false, issues);
+            collect_admission_issues(right, immediate, false, issues);
         }
         OpTree::Except { left, right, .. } => {
             issues.push(ValidationIssue {
@@ -151,8 +355,8 @@ fn collect_admission_issues(tree: &OpTree, immediate: bool, issues: &mut Vec<Val
                 hint: "Use FULL or AUTO until private set-operation state is available."
                     .to_string(),
             });
-            collect_admission_issues(left, immediate, issues);
-            collect_admission_issues(right, immediate, issues);
+            collect_admission_issues(left, immediate, false, issues);
+            collect_admission_issues(right, immediate, false, issues);
         }
         OpTree::LateralSubquery {
             subquery_source_oids,
@@ -223,23 +427,23 @@ fn collect_admission_issues(tree: &OpTree, immediate: bool, issues: &mut Vec<Val
                         .to_string(),
                 });
             }
-            collect_admission_issues(child, immediate, issues);
+            collect_admission_issues(child, immediate, false, issues);
         }
         OpTree::LateralFunction { child, .. } => {
-            collect_admission_issues(child, immediate, issues);
+            collect_admission_issues(child, immediate, false, issues);
         }
         OpTree::Project { child, .. }
         | OpTree::Filter { child, .. }
         | OpTree::Distinct { child }
         | OpTree::Subquery { child, .. }
-        | OpTree::Window { child, .. } => collect_admission_issues(child, immediate, issues),
+        | OpTree::Window { child, .. } => collect_admission_issues(child, immediate, false, issues),
         OpTree::InnerJoin { left, right, .. }
         | OpTree::LeftJoin { left, right, .. }
         | OpTree::FullJoin { left, right, .. }
         | OpTree::SemiJoin { left, right, .. }
         | OpTree::AntiJoin { left, right, .. } => {
-            collect_admission_issues(left, immediate, issues);
-            collect_admission_issues(right, immediate, issues);
+            collect_admission_issues(left, immediate, false, issues);
+            collect_admission_issues(right, immediate, false, issues);
         }
         OpTree::Aggregate {
             child,
@@ -253,24 +457,24 @@ fn collect_admission_issues(tree: &OpTree, immediate: bool, issues: &mut Vec<Val
                     issues.push(issue);
                 }
             }
-            collect_admission_issues(child, immediate, issues);
+            collect_admission_issues(child, immediate, false, issues);
         }
         OpTree::UnionAll { children } => {
             for child in children {
-                collect_admission_issues(child, immediate, issues);
+                collect_admission_issues(child, immediate, false, issues);
             }
         }
         OpTree::ScalarSubquery {
             child, subquery, ..
         } => {
-            collect_admission_issues(child, immediate, issues);
-            collect_admission_issues(subquery, immediate, issues);
+            collect_admission_issues(child, immediate, false, issues);
+            collect_admission_issues(subquery, immediate, false, issues);
         }
         OpTree::RecursiveCte {
             base, recursive, ..
         } => {
-            collect_admission_issues(base, immediate, issues);
-            collect_admission_issues(recursive, immediate, issues);
+            collect_admission_issues(base, immediate, false, issues);
+            collect_admission_issues(recursive, immediate, false, issues);
         }
         OpTree::Scan { .. }
         | OpTree::CteScan { .. }

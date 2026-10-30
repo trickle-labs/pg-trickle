@@ -13,9 +13,9 @@
 //!
 //! The state is populated during FULL refresh (the authoritative path) and is
 //! the durable source of old branch counts for a future differential path.
-//! Differential maintenance of set operations remains FULL-only (fail-closed)
-//! until it is proven; this module never changes the visible stream-table
-//! contents.
+//! Differential maintenance uses this private state as its durable branch
+//! counts. The DVM and merge executor update visible stream-table contents in
+//! the same refresh transaction; this module only owns the private counts.
 //!
 //! ## Privacy and ownership
 //!
@@ -111,6 +111,197 @@ pub(crate) fn entries_for_stream(pgt_id: i64) -> Result<Vec<SetOpStateEntry>, Pg
         }
         Ok(entries)
     })
+}
+
+fn relation_attributes(oid: pg_sys::Oid) -> Result<Vec<(String, pg_sys::Oid)>, PgTrickleError> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT attname::text, atttypid::oid FROM pg_catalog.pg_attribute \
+                 WHERE attrelid = $1 AND attnum > 0 AND NOT attisdropped \
+                 ORDER BY attnum",
+                None,
+                &[oid.into()],
+            )
+            .map_err(spi_error)?;
+        rows.into_iter()
+            .map(|row| {
+                let name = row.get::<String>(1).map_err(spi_error)?.ok_or_else(|| {
+                    PgTrickleError::InternalError("setop state attribute name was NULL".into())
+                })?;
+                let type_oid = row
+                    .get::<pg_sys::Oid>(2)
+                    .map_err(spi_error)?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError("setop state attribute type was NULL".into())
+                    })?;
+                Ok((name, type_oid))
+            })
+            .collect()
+    })
+}
+
+/// Verify that the registered INTERSECT state still has the exact layout and
+/// ownership produced by FULL refresh. A missing or restored stale binding
+/// must never be used for differential counts.
+pub(crate) fn intersect_state_is_valid(st: &StreamTableMeta) -> Result<bool, PgTrickleError> {
+    if crate::dvm::classify_top_level_set_op(&st.defining_query) != Some(("INTERSECT", false)) {
+        return Ok(false);
+    }
+    let entries = entries_for_stream(st.pgt_id)?;
+    let [entry] = entries.as_slice() else {
+        return Ok(false);
+    };
+    if entry.node_ordinal != 0
+        || entry.operation != "INTERSECT"
+        || entry.is_all
+        || entry.schema_version != SETOP_STATE_SCHEMA_VERSION
+    {
+        return Ok(false);
+    }
+
+    let relation = qualified_state_relation(st.pgt_id);
+    let Some(relation_oid) = Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT pg_catalog.to_regclass($1)::oid",
+        &[relation.clone().into()],
+    )
+    .map_err(spi_error)?
+    else {
+        return Ok(false);
+    };
+    if relation_oid != entry.state_relid || !is_owned_state_relation(st.pgt_id, relation_oid)? {
+        return Ok(false);
+    }
+
+    let has_unique_identity = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (\
+             SELECT 1 FROM pg_catalog.pg_index i \
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid \
+                  AND a.attnum = i.indkey[0] AND a.attname = '__pgt_row_id' \
+                  AND a.attnum > 0 \
+             WHERE i.indrelid = $1 AND i.indisunique AND i.indisvalid \
+               AND i.indnkeyatts = 1 AND i.indnatts = 1)",
+        &[relation_oid.into()],
+    )
+    .map_err(spi_error)?
+    .unwrap_or(false);
+    if !has_unique_identity {
+        return Ok(false);
+    }
+
+    let public = relation_attributes(st.pgt_relid)?;
+    let state = relation_attributes(relation_oid)?;
+    let user_columns = crate::refresh::get_st_user_columns(st);
+    if public.len() != user_columns.len() + 1
+        || public.first().map(|(name, _)| name.as_str()) != Some("__pgt_row_id")
+        || public
+            .iter()
+            .skip(1)
+            .map(|(name, _)| name)
+            .ne(user_columns.iter())
+    {
+        return Ok(false);
+    }
+
+    let mut expected = vec![("__pgt_row_id".to_string(), public[0].1)];
+    expected.extend(public.iter().skip(1).cloned());
+    expected.push(("__pgt_count_l".to_string(), 20.into()));
+    expected.push(("__pgt_count_r".to_string(), 20.into()));
+    Ok(state == expected)
+}
+
+/// Atomically apply the private count payload produced by the INTERSECT delta
+/// query. The caller applies the visible INSERT/DELETE rows in the same
+/// PostgreSQL transaction.
+pub(crate) fn apply_intersect_delta(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+    if !intersect_state_is_valid(st)? {
+        return Err(PgTrickleError::InternalError(format!(
+            "private INTERSECT state is missing or invalid for {}.{}",
+            st.pgt_schema, st.pgt_name
+        )));
+    }
+    let state = qualified_state_relation(st.pgt_id);
+    let delta = format!(
+        "pg_temp.{}",
+        crate::api::quote_identifier(&format!("__pgt_delta_{}", st.pgt_id))
+    );
+    let user_columns = crate::refresh::get_st_user_columns(st);
+    let columns = user_columns
+        .iter()
+        .map(|column| crate::api::quote_identifier(column))
+        .collect::<Vec<_>>();
+    let delta_columns = columns
+        .iter()
+        .map(|column| format!("d.{column}"))
+        .collect::<Vec<_>>();
+    let equality = columns
+        .iter()
+        .map(|column| format!("s.{column} IS NOT DISTINCT FROM d.{column}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+
+    // nosemgrep: rust.spi.query.dynamic-format -- delta is a pg_temp-qualified numeric-ID name; its identifier is escaped.
+    let invalid_counts = Spi::get_one::<i64>(&format!(
+        "SELECT count(*)::bigint FROM {delta} \
+         WHERE __pgt_count_l < 0 OR __pgt_count_r < 0"
+    ))
+    .map_err(spi_error)?
+    .unwrap_or(0);
+    // nosemgrep: rust.spi.query.dynamic-format -- delta is a pg_temp-qualified numeric-ID name; its identifier is escaped.
+    let duplicate_ids = Spi::get_one::<i64>(&format!(
+        "SELECT count(*)::bigint FROM ( \
+             SELECT __pgt_row_id FROM {delta} GROUP BY __pgt_row_id HAVING count(*) > 1 \
+         ) duplicate_rows"
+    ))
+    .map_err(spi_error)?
+    .unwrap_or(0);
+    // nosemgrep: rust.spi.query.dynamic-format -- state/delta names and column references are catalog-derived and quoted.
+    let mismatched_ids = Spi::get_one::<i64>(&format!(
+        "SELECT count(*)::bigint FROM {delta} d \
+         JOIN {state} s ON s.__pgt_row_id = d.__pgt_row_id \
+         WHERE NOT ({equality})"
+    ))
+    .map_err(spi_error)?
+    .unwrap_or(0);
+    if invalid_counts > 0 || duplicate_ids > 0 || mismatched_ids > 0 {
+        return Err(PgTrickleError::InternalError(format!(
+            "invalid private INTERSECT delta for {}.{}: negative_counts={invalid_counts}, duplicate_ids={duplicate_ids}, mismatched_ids={mismatched_ids}",
+            st.pgt_schema, st.pgt_name
+        )));
+    }
+
+    let insert_columns = std::iter::once("__pgt_row_id".to_string())
+        .chain(user_columns.iter().cloned())
+        .chain(["__pgt_count_l".to_string(), "__pgt_count_r".to_string()])
+        .map(|column| crate::api::quote_identifier(&column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let select_columns = std::iter::once("d.__pgt_row_id".to_string())
+        .chain(delta_columns)
+        .chain(["d.__pgt_count_l".to_string(), "d.__pgt_count_r".to_string()])
+        .collect::<Vec<_>>()
+        .join(", ");
+    let updates = ["__pgt_count_l", "__pgt_count_r"]
+        .iter()
+        .map(|column| format!("{0} = EXCLUDED.{0}", crate::api::quote_identifier(column)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // nosemgrep: rust.spi.run.dynamic-format — state/delta names are deterministic quoted identifiers; column lists come from catalog identifiers.
+    Spi::run(&format!(
+        "INSERT INTO {state} ({insert_columns}) \
+         SELECT {select_columns} FROM {delta} d \
+         WHERE d.__pgt_count_l > 0 OR d.__pgt_count_r > 0 \
+         ON CONFLICT (__pgt_row_id) DO UPDATE SET {updates}"
+    ))
+    .map_err(spi_error)?;
+    // nosemgrep: rust.spi.run.dynamic-format — state/delta names and column lists are validated identifiers.
+    Spi::run(&format!(
+        "DELETE FROM {state} s USING {delta} d \
+         WHERE d.__pgt_count_l = 0 AND d.__pgt_count_r = 0 \
+           AND s.__pgt_row_id = d.__pgt_row_id AND {equality}"
+    ))
+    .map_err(spi_error)?;
+    Ok(())
 }
 
 /// Facts about a candidate state relation, used to refuse touching relations

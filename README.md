@@ -172,7 +172,7 @@ reason. `FULL` mode re-runs the entire query on each refresh.
 | **Deduplication** | `DISTINCT ON (…)` | ✅ Full | Auto-rewritten to `ROW_NUMBER()` window subquery |
 | **Set operations** | `UNION ALL` | ✅ Full | |
 | **Set operations** | `UNION` (deduplicated) | ✅ Full | Composed as `UNION ALL` + `DISTINCT` |
-| **Set operations** | `INTERSECT` / `EXCEPT` | ✅ Full | Dual-count multiplicity tracking with LEAST / GREATEST boundary crossing |
+| **Set operations** | Ordinary top-level `INTERSECT` | ✅ Differential (bounded shape) | Two distinct base tables; `INTERSECT ALL`, `EXCEPT`, and other shapes use FULL |
 | **Subqueries** | Subquery in `FROM` | ✅ Full | `(SELECT …) AS alias` |
 | **Subqueries** | `EXISTS` / `NOT EXISTS` in `WHERE` | ✅ Full | Semi-join / anti-join delta operators |
 | **Subqueries** | `IN` / `NOT IN` (subquery) in `WHERE` | ✅ Full | Rewritten to semi-join / anti-join |
