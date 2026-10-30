@@ -454,7 +454,7 @@ async fn test_mixed_regular_table_from_stream_table() {
 
     // Mutate source and refresh
     db.execute("INSERT INTO md_raw VALUES (4, 'd')").await;
-    db.refresh_st("md_st_raw").await;
+    db.refresh_st_with_retry("md_st_raw").await;
 
     // Snapshot table is stale (it's just a regular table)
     assert_eq!(db.count("md_snapshot").await, 3);
