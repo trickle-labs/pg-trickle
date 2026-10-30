@@ -453,11 +453,11 @@ fn validate_consumer_locked(
 pub(crate) fn adopt_database_instance(instance_id: &str) -> Result<(), PgTrickleError> {
     let logs = Spi::connect(|client| {
         let rows = spi(client.select(
-            "SELECT l.pgt_id, st.pgt_relid
+            "SELECT l.pgt_id, st.pgt_schema, st.pgt_name
                FROM pgtrickle.pgt_output_delta_logs l
                JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = l.pgt_id
               ORDER BY l.pgt_id
-              FOR UPDATE OF l",
+              FOR UPDATE OF l, st",
             None,
             &[],
         ))?;
@@ -467,38 +467,91 @@ pub(crate) fn adopt_database_instance(instance_id: &str) -> Result<(), PgTrickle
                 spi(row.get::<i64>(1))?.ok_or_else(|| {
                     delta_error("PGT_EXT_CONSUMER_BLOCKED", "output log has no stream id")
                 })?,
-                spi(row.get::<pg_sys::Oid>(2))?.ok_or_else(|| {
+                spi(row.get::<String>(2))?.ok_or_else(|| {
                     delta_error(
                         "PGT_EXT_CONSUMER_BLOCKED",
-                        "output log stream relation is missing",
+                        "output log stream schema is missing",
+                    )
+                })?,
+                spi(row.get::<String>(3))?.ok_or_else(|| {
+                    delta_error(
+                        "PGT_EXT_CONSUMER_BLOCKED",
+                        "output log stream name is missing",
                     )
                 })?,
             ));
         }
         Ok::<_, PgTrickleError>(logs)
     })?;
-    for (pgt_id, relid) in logs {
-        let meta = StreamTableMeta::get_by_relid(relid)?;
-        let (digest, version) = contract(&meta)?;
-        spi(Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_output_delta_logs
-                SET database_instance_id = $1, output_contract_digest = $2,
-                    row_identity_version = $3, updated_at = now()
-              WHERE pgt_id = $4",
-            &[
-                instance_id.into(),
-                digest.into(),
-                version.into(),
-                pgt_id.into(),
-            ],
-        ))?;
-    }
     spi(Spi::run(
         "UPDATE pgtrickle.pgt_output_delta_consumers
             SET state = 'INVALIDATED', state_reason = 'DATABASE_INSTANCE_CHANGED',
                 updated_at = now()
           WHERE state <> 'DROPPED'",
     ))?;
+    let guard_mode = spi(Spi::get_one::<String>(
+        "SELECT tgenabled::text FROM pg_catalog.pg_trigger
+          WHERE tgrelid = 'pgtrickle.pgt_stream_tables'::regclass
+            AND tgname = 'pgt_stream_tables_output_delta_contract_guard'",
+    ))?;
+    let enable_guard = if logs.is_empty() {
+        None
+    } else {
+        match guard_mode.as_deref() {
+            Some("O") => Some(
+                "ALTER TABLE pgtrickle.pgt_stream_tables ENABLE TRIGGER pgt_stream_tables_output_delta_contract_guard",
+            ),
+            Some("R") => Some(
+                "ALTER TABLE pgtrickle.pgt_stream_tables ENABLE REPLICA TRIGGER pgt_stream_tables_output_delta_contract_guard",
+            ),
+            Some("A") => Some(
+                "ALTER TABLE pgtrickle.pgt_stream_tables ENABLE ALWAYS TRIGGER pgt_stream_tables_output_delta_contract_guard",
+            ),
+            _ => None,
+        }
+    };
+    if enable_guard.is_some() {
+        // Consumers are invalidated above; suspend the contract guard only for the OID rebind.
+        spi(Spi::run(
+            "ALTER TABLE pgtrickle.pgt_stream_tables DISABLE TRIGGER pgt_stream_tables_output_delta_contract_guard",
+        ))?;
+    }
+    for (pgt_id, schema, name) in logs {
+        let relid = spi(Spi::get_one_with_args::<pg_sys::Oid>(
+            "SELECT c.oid
+               FROM pg_catalog.pg_class c
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')",
+            &[schema.as_str().into(), name.as_str().into()],
+        ))?
+        .ok_or_else(|| {
+            delta_error(
+                "PGT_EXT_CONSUMER_BLOCKED",
+                format!("output log stream relation {schema}.{name} is missing"),
+            )
+        })?;
+        let delta_relid = spi(Spi::get_one_with_args::<pg_sys::Oid>(
+            "SELECT to_regclass($1)::oid",
+            &[format!("pgtrickle_changes.{}", payload_name(pgt_id)).into()],
+        ))?;
+        spi(Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables
+                SET pgt_relid = $1, updated_at = now()
+              WHERE pgt_id = $2",
+            &[relid.into(), pgt_id.into()],
+        ))?;
+        // Keep the old contract until the restored graph is rebuilt; consumers are already invalidated.
+        spi(Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_output_delta_logs
+                SET database_instance_id = $1, delta_relid = COALESCE($2, delta_relid),
+                    updated_at = now()
+              WHERE pgt_id = $3",
+            &[instance_id.into(), delta_relid.into(), pgt_id.into()],
+        ))?;
+    }
+    if let Some(sql) = enable_guard {
+        spi(Spi::run(sql))?;
+    }
     spi(Spi::run(
         "DELETE FROM pgtrickle.pgt_output_delta_resnapshots",
     ))
