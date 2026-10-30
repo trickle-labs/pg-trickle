@@ -15,6 +15,7 @@ Release: `0.108.4`
 | `delta-v1` | stable | yes | public_sql | — |
 | `vector-aggregates` | experimental | no | differential | PGT_EXT_CAPABILITY_DISABLED |
 | `set-operation-differential` | experimental | yes | differential | — |
+| `except-differential` | unavailable | no | unavailable | UNSUPPORTED_OPERATOR |
 | `incremental-window-state` | future | no | unavailable | WINDOW_INCREMENTAL_UNIMPLEMENTED |
 
 ## Executed query families
