@@ -240,12 +240,14 @@ pub(crate) fn apply_intersect_delta(st: &StreamTableMeta) -> Result<(), PgTrickl
         .collect::<Vec<_>>()
         .join(" AND ");
 
+    // nosemgrep: rust.spi.query.dynamic-format -- delta is a pg_temp-qualified numeric-ID name; its identifier is escaped.
     let invalid_counts = Spi::get_one::<i64>(&format!(
         "SELECT count(*)::bigint FROM {delta} \
          WHERE __pgt_count_l < 0 OR __pgt_count_r < 0"
     ))
     .map_err(spi_error)?
     .unwrap_or(0);
+    // nosemgrep: rust.spi.query.dynamic-format -- delta is a pg_temp-qualified numeric-ID name; its identifier is escaped.
     let duplicate_ids = Spi::get_one::<i64>(&format!(
         "SELECT count(*)::bigint FROM ( \
              SELECT __pgt_row_id FROM {delta} GROUP BY __pgt_row_id HAVING count(*) > 1 \
@@ -253,6 +255,7 @@ pub(crate) fn apply_intersect_delta(st: &StreamTableMeta) -> Result<(), PgTrickl
     ))
     .map_err(spi_error)?
     .unwrap_or(0);
+    // nosemgrep: rust.spi.query.dynamic-format -- state/delta names and column references are catalog-derived and quoted.
     let mismatched_ids = Spi::get_one::<i64>(&format!(
         "SELECT count(*)::bigint FROM {delta} d \
          JOIN {state} s ON s.__pgt_row_id = d.__pgt_row_id \

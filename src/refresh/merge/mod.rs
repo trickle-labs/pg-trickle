@@ -3292,10 +3292,12 @@ pub fn execute_differential_refresh_with_tuning(
             Spi::run(&format!("INSERT INTO {delta_table} {delta_select}"))
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             crate::setop_state::apply_intersect_delta(st)?;
+            // nosemgrep: rust.spi.run.dynamic-format -- delta_table is a numeric-ID-derived temp table name.
             Spi::run(&format!(
                 "DELETE FROM {delta_table} WHERE __pgt_action NOT IN ('I', 'D')"
             ))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            // nosemgrep: rust.spi.run.dynamic-format -- delta_table is a numeric-ID-derived temp table name.
             Spi::run(&format!(
                 "ALTER TABLE {delta_table} DROP COLUMN __pgt_count_l, \
                  DROP COLUMN __pgt_count_r"

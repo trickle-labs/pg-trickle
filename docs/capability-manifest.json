@@ -89,6 +89,17 @@
       }
     },
     {
+      "id": "except-differential",
+      "capability": "except_dvm",
+      "major_version": 0,
+      "minor_version": 0,
+      "status": "unavailable",
+      "enabled": false,
+      "strategy": "unavailable",
+      "reason_code": "UNSUPPORTED_OPERATOR",
+      "target": null
+    },
+    {
       "id": "incremental-window-state",
       "capability": "incremental_window_state",
       "major_version": 0,
