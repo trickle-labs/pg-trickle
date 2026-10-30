@@ -72,6 +72,76 @@ async fn test_cdc_deferred_replacement_preserves_complete_payload() {
 }
 
 #[tokio::test]
+async fn test_cdc_deferred_key_swap_preserves_complete_images() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    for mode in ["row", "statement"] {
+        let source = format!("key_swap_{mode}");
+        let output = format!("{source}_rows");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY DEFERRABLE INITIALLY DEFERRED, v TEXT, n NUMERIC, j JSON)"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (1,'alpha',1.0,'{{\"x\":1}}'),(2,'beta',2.0,'{{\"x\":2}}')"
+        ))
+        .await;
+        let query = format!("SELECT id,v,n,j FROM {source}");
+        db.try_execute_with_config(
+            &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{output}',$q${query}$q$,'24h','DIFFERENTIAL')"
+            ),
+        )
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "BEGIN; SET CONSTRAINTS ALL DEFERRED; UPDATE {source} \
+             SET id=CASE id WHEN 1 THEN 2 ELSE 1 END WHERE id IN (1,2); COMMIT"
+        )))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let before_refresh: i64 = db
+            .query_scalar("SELECT coalesce(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{output}')"),
+        )
+        .await
+        .unwrap();
+        let differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+             WHERE s.pgt_name='{output}' AND h.refresh_id>{before_refresh} \
+             AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            differential,
+            "deferred key swap must execute differential maintenance"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &output,
+            &query,
+            "deferred primary-key swap with complete payload images",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn test_cdc_statement_payload_names_do_not_shadow_row_aliases() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled=false")
@@ -252,6 +322,14 @@ async fn test_compaction_shared_source_preserves_consumer_boundaries() {
         "SELECT pgtrickle.refresh_stream_table('compact_slow')",
     ])
     .await;
+    e2e::oracle::assert_st_query_exact(
+        &db,
+        "compact_fast",
+        "SELECT id FROM compact_src UNION ALL SELECT 101",
+        "fast source consumer remains at its earlier cut",
+    )
+    .await;
+    db.assert_st_matches_query("compact_slow", query).await;
     db.refresh_st("compact_fast").await;
 
     for name in ["compact_fast", "compact_slow"] {
@@ -290,6 +368,14 @@ async fn test_compaction_shared_stream_preserves_consumer_boundaries() {
         "SELECT pgtrickle.refresh_stream_table('compact_slow')",
     ])
     .await;
+    e2e::oracle::assert_st_query_exact(
+        &db,
+        "compact_fast",
+        "SELECT id FROM compact_upstream UNION ALL SELECT 101",
+        "fast stream consumer remains at its earlier cut",
+    )
+    .await;
+    db.assert_st_matches_query("compact_slow", query).await;
     db.refresh_st("compact_fast").await;
 
     for name in ["compact_fast", "compact_slow"] {
