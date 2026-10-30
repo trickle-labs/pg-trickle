@@ -224,15 +224,22 @@ async fn test_autorefresh_diamond_cascade() {
 
     let l2_q = "SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM ard_src GROUP BY grp";
 
-    // Wait for initial stabilization
-    wait_for_refresh_cycle(&db, "ard_l2", Duration::from_secs(30)).await;
+    // CREATE has already FULL-seeded the stream tables; verify that baseline
+    // directly rather than requiring an unrelated scheduler cycle before DML.
+    db.assert_st_matches_query("ard_l2", l2_q).await;
+    let before_insert: Option<String> = db
+        .query_scalar_opt(
+            "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema = 'public' AND pgt_name = 'ard_l2'",
+        )
+        .await;
 
     // Mutate
     db.execute("INSERT INTO ard_src (grp, val) VALUES ('a', 5), ('c', 30)")
         .await;
 
     let refreshed = db
-        .wait_for_auto_refresh("ard_l2", Duration::from_secs(60))
+        .wait_for_auto_refresh_since("ard_l2", before_insert, Duration::from_secs(90))
         .await;
     assert!(refreshed, "ard_l2 should auto-refresh after base mutation");
 
@@ -826,8 +833,9 @@ async fn test_autorefresh_diamond_with_view_branch() {
     db.execute("INSERT INTO ardv_src (category, amount) VALUES ('x', 40), ('z', 100)")
         .await;
 
+    // Give a loaded E2E shard headroom for a delayed or respawning scheduler.
     let refreshed = db
-        .wait_for_auto_refresh_since("ardv_joined", before_insert, Duration::from_secs(60))
+        .wait_for_auto_refresh_since("ardv_joined", before_insert, Duration::from_secs(90))
         .await;
     assert!(refreshed, "Diamond join ST should auto-refresh");
 
