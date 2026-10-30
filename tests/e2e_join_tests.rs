@@ -921,4 +921,22 @@ async fn test_nested_join_throwing_projection_avoids_invalid_mixed_pair() {
         full_fallback,
         "the differential request must record its FULL fallback"
     );
+
+    let storage_xmin_before_noop: String = sqlx::query_scalar(
+        "SELECT xmin::text FROM pg_class WHERE oid = 'public.njtp_st'::regclass",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    db.refresh_st("njtp_st").await;
+    let storage_xmin_after_noop: String = sqlx::query_scalar(
+        "SELECT xmin::text FROM pg_class WHERE oid = 'public.njtp_st'::regclass",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        storage_xmin_after_noop, storage_xmin_before_noop,
+        "an unchanged refresh must not rerun the nested-projection FULL fallback"
+    );
 }
