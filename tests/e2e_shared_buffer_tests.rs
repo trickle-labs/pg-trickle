@@ -252,6 +252,14 @@ async fn test_compaction_shared_source_preserves_consumer_boundaries() {
         "SELECT pgtrickle.refresh_stream_table('compact_slow')",
     ])
     .await;
+    e2e::oracle::assert_st_query_exact(
+        &db,
+        "compact_fast",
+        "SELECT id FROM compact_src UNION ALL SELECT 101",
+        "fast source consumer remains at its earlier cut",
+    )
+    .await;
+    db.assert_st_matches_query("compact_slow", query).await;
     db.refresh_st("compact_fast").await;
 
     for name in ["compact_fast", "compact_slow"] {
@@ -290,6 +298,14 @@ async fn test_compaction_shared_stream_preserves_consumer_boundaries() {
         "SELECT pgtrickle.refresh_stream_table('compact_slow')",
     ])
     .await;
+    e2e::oracle::assert_st_query_exact(
+        &db,
+        "compact_fast",
+        "SELECT id FROM compact_upstream UNION ALL SELECT 101",
+        "fast stream consumer remains at its earlier cut",
+    )
+    .await;
+    db.assert_st_matches_query("compact_slow", query).await;
     db.refresh_st("compact_fast").await;
 
     for name in ["compact_fast", "compact_slow"] {
