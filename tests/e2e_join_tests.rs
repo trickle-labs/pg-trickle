@@ -899,7 +899,7 @@ async fn test_nested_join_throwing_projection_avoids_invalid_mixed_pair() {
 
     // Both endpoint results are defined: 100/(1-0) and 100/(2-1).
     // A mixed old-left/new-right pair would divide by zero, so refresh must
-    // preserve the endpoint semantics through the nested join plan.
+    // preserve endpoint semantics through a change-key-scoped recomputation.
     db.execute("UPDATE njtp_left SET value = 2 WHERE id = 1")
         .await;
     db.execute("UPDATE njtp_right SET value = 1 WHERE id = 1")
@@ -916,10 +916,19 @@ async fn test_nested_join_throwing_projection_avoids_invalid_mixed_pair() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    assert_eq!(action, "FULL", "unsafe nested projections must use FULL");
+    let operator_tree: String = sqlx::query_scalar(
+        "SELECT value FROM pgtrickle.explain_st('njtp_st') WHERE property = 'operator_tree'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        action, "DIFFERENTIAL",
+        "safe nested equijoins stay differential; parsed tree: {operator_tree}"
+    );
     assert!(
-        full_fallback,
-        "the differential request must record its FULL fallback"
+        !full_fallback,
+        "the nested endpoint plan must avoid whole-table fallback"
     );
 
     let storage_xmin_before_noop: String = sqlx::query_scalar(
