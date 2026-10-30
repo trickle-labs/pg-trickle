@@ -98,6 +98,7 @@ class AllocationTests(unittest.TestCase):
         all_targets = set(ci_pr_suite.targets())
         self.assertIn("e2e_v078_tests", ci_pr_suite.SCHEDULER_ISOLATED)
         self.assertIn("e2e_dvm_strategy_tests", ci_pr_suite.SCHEDULER_ISOLATED)
+        self.assertIn("e2e_bgworker_tests", ci_pr_suite.SCHEDULER_ISOLATED)
         for shard in (1, 2):
             with patch("sys.argv", ["ci_pr_suite.py", "--shard", str(shard)]), patch(
                 "ci_pr_suite.subprocess.run", return_value=SimpleNamespace(returncode=0)
