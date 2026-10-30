@@ -221,24 +221,27 @@ async fn test_intersect_differential_presence_transitions_and_private_counts() {
     )
     .await;
 
-    db.pool.close().await;
-    let restarted = tokio::process::Command::new("docker")
-        .args(["restart", db.container_id()])
-        .output()
-        .await
-        .expect("restart INTERSECT E2E container");
-    assert!(
-        restarted.status.success(),
-        "INTERSECT container restart failed"
-    );
-    db.pool = db.reconnect_after_restart().await;
-    db.assert_st_matches_query("isect_diff_st", query).await;
-    let after_restart_count: i64 = db
-        .query_scalar(&format!(
-            "SELECT __pgt_count_l FROM {state_rel} WHERE val = 7"
-        ))
-        .await;
-    assert_eq!(after_restart_count, 3, "restart preserves private state");
+    #[cfg(not(feature = "light-e2e"))]
+    {
+        db.pool.close().await;
+        let restarted = tokio::process::Command::new("docker")
+            .args(["restart", db.container_id()])
+            .output()
+            .await
+            .expect("restart INTERSECT E2E container");
+        assert!(
+            restarted.status.success(),
+            "INTERSECT container restart failed"
+        );
+        db.pool = db.reconnect_after_restart().await;
+        db.assert_st_matches_query("isect_diff_st", query).await;
+        let after_restart_count: i64 = db
+            .query_scalar(&format!(
+                "SELECT __pgt_count_l FROM {state_rel} WHERE val = 7"
+            ))
+            .await;
+        assert_eq!(after_restart_count, 3, "restart preserves private state");
+    }
     db.execute("INSERT INTO isect_diff_a (val) VALUES (7)")
         .await;
     refresh_st_differential(&db, "isect_diff_st").await;
