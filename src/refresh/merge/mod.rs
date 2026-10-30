@@ -1313,6 +1313,19 @@ pub fn execute_differential_refresh_with_tuning(
         return Ok((0, 0));
     }
 
+    let needs_nested_projection_fallback = with_stream_owner(st, || {
+        dvm::query_needs_nested_projection_full_fallback(&st.defining_query)
+    })?;
+    if needs_nested_projection_fallback {
+        crate::refresh::ensure_full_policy(st, "nested computed projection safety fallback")?;
+        pgrx::warning!(
+            "Stream table {}.{}: nested join with computed projection can evaluate invalid mixed-snapshot pairs; using FULL refresh",
+            st.pgt_schema,
+            st.pgt_name
+        );
+        return execute_full_refresh(st);
+    }
+
     let parsed_query = with_stream_owner(st, || {
         parse_and_enforce_distinct_aggregate_bounds(
             st,

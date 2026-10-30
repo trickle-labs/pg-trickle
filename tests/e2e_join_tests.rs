@@ -920,3 +920,68 @@ async fn test_nested_inner_join_correction_in_semijoin_context_matches_postgres(
         "the generated correction did not exercise the split Part 1 filter"
     );
 }
+
+#[tokio::test]
+async fn test_nested_join_throwing_projection_avoids_invalid_mixed_pair() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE njtp_left (id INT PRIMARY KEY, value INT)")
+        .await;
+    db.execute("CREATE TABLE njtp_middle (id INT PRIMARY KEY, left_id INT, grp INT)")
+        .await;
+    db.execute("CREATE TABLE njtp_right (id INT PRIMARY KEY, grp INT, value INT)")
+        .await;
+    db.execute("INSERT INTO njtp_left VALUES (1, 1)").await;
+    db.execute("INSERT INTO njtp_middle VALUES (1, 1, 1)").await;
+    db.execute("INSERT INTO njtp_right VALUES (1, 1, 0)").await;
+
+    let query = "SELECT l.id AS left_id, r.id AS right_id, \
+                 100 / (l.value - r.value) AS quotient \
+                 FROM njtp_left l \
+                 JOIN njtp_middle m ON l.id = m.left_id \
+                 JOIN njtp_right r ON m.grp = r.grp";
+    db.create_st("njtp_st", query, "1h", "DIFFERENTIAL").await;
+    db.assert_st_matches_query("njtp_st", query).await;
+
+    // Both endpoint results are defined: 100/(1-0) and 100/(2-1).
+    // A mixed old-left/new-right pair would divide by zero, so refresh must
+    // preserve the endpoint semantics through the nested join plan.
+    db.execute("UPDATE njtp_left SET value = 2 WHERE id = 1")
+        .await;
+    db.execute("UPDATE njtp_right SET value = 1 WHERE id = 1")
+        .await;
+    db.refresh_st("njtp_st").await;
+    db.assert_st_matches_query("njtp_st", query).await;
+    let (action, full_fallback): (String, bool) = sqlx::query_as(
+        "SELECT action, coalesce(was_full_fallback, false) \
+         FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+         WHERE s.pgt_name = 'njtp_st' AND h.status = 'COMPLETED' \
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(action, "FULL", "unsafe nested projections must use FULL");
+    assert!(
+        full_fallback,
+        "the differential request must record its FULL fallback"
+    );
+
+    let storage_xmin_before_noop: String = sqlx::query_scalar(
+        "SELECT xmin::text FROM pg_class WHERE oid = 'public.njtp_st'::regclass",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    db.refresh_st("njtp_st").await;
+    let storage_xmin_after_noop: String = sqlx::query_scalar(
+        "SELECT xmin::text FROM pg_class WHERE oid = 'public.njtp_st'::regclass",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        storage_xmin_after_noop, storage_xmin_before_noop,
+        "an unchanged refresh must not rerun the nested-projection FULL fallback"
+    );
+}

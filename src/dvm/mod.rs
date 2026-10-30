@@ -1221,6 +1221,16 @@ pub(crate) fn query_needs_endpoint_join_fence(query: &str) -> Result<bool, PgTri
         .map(|tree| operators::join::computed_projection_needs_endpoints(&tree))
 }
 
+pub(crate) fn query_needs_nested_projection_full_fallback(
+    query: &str,
+) -> Result<bool, PgTrickleError> {
+    if !query.to_ascii_lowercase().contains("join") {
+        return Ok(false);
+    }
+    parse_defining_query(query)
+        .map(|tree| operators::join::computed_projection_needs_nested_join_fallback(&tree))
+}
+
 fn resolve_fenced_endpoint_sources(
     sources: &[u32],
     prev_frontier: &Frontier,

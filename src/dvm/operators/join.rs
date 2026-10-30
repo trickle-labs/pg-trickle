@@ -190,6 +190,74 @@ pub(crate) fn computed_projection_needs_endpoints(tree: &OpTree) -> bool {
         && endpoint_key_columns(condition, left, right).is_some()
 }
 
+/// Return true when a computed top-level projection combines columns from
+/// multiple scan aliases above a nested join. Such an expression can observe
+/// a mixed old/new source pair in the ordinary nested-join delta. Expressions
+/// bound to one source alias do not combine snapshots and keep the established
+/// rowwise path.
+pub(crate) fn computed_projection_needs_nested_join_fallback(tree: &OpTree) -> bool {
+    fn spans_sources(expression: &Expr) -> bool {
+        fn collect_aliases(expression: &Expr, aliases: &mut Vec<String>) -> bool {
+            match expression {
+                Expr::ColumnRef {
+                    table_alias: Some(alias),
+                    ..
+                } => {
+                    aliases.push(alias.clone());
+                    false
+                }
+                Expr::ColumnRef {
+                    table_alias: None, ..
+                }
+                | Expr::Star { .. }
+                | Expr::Raw(_) => true,
+                Expr::Literal(_) => false,
+                Expr::BinaryOp { left, right, .. } => {
+                    collect_aliases(left, aliases) || collect_aliases(right, aliases)
+                }
+                Expr::FuncCall { args, .. } => args
+                    .iter()
+                    .any(|argument| collect_aliases(argument, aliases)),
+            }
+        }
+
+        let mut aliases = Vec::new();
+        let has_unresolved_reference = collect_aliases(expression, &mut aliases);
+        aliases.sort_unstable();
+        aliases.dedup();
+        has_unresolved_reference || aliases.len() > 1
+    }
+
+    fn has_nested_join(tree: &OpTree, inside_join: bool) -> bool {
+        match tree {
+            OpTree::InnerJoin { left, right, .. }
+            | OpTree::LeftJoin { left, right, .. }
+            | OpTree::FullJoin { left, right, .. } => {
+                if inside_join {
+                    return true;
+                }
+                has_nested_join(left, true) || has_nested_join(right, true)
+            }
+            OpTree::Filter { child, .. }
+            | OpTree::Project { child, .. }
+            | OpTree::Subquery { child, .. } => has_nested_join(child, inside_join),
+            _ => false,
+        }
+    }
+
+    let OpTree::Project {
+        expressions, child, ..
+    } = tree
+    else {
+        return false;
+    };
+    has_nested_join(child, false)
+        && expressions.iter().any(|expression| {
+            !matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_))
+                && spans_sources(expression)
+        })
+}
+
 fn scoped_source_endpoints(
     ctx: &mut DiffContext,
     source: &OpTree,
@@ -1598,6 +1666,37 @@ mod tests {
                 assert!(sql.contains("AS __pgt_scope_key"), "{sql}");
             }
         }
+    }
+
+    #[test]
+    fn test_nested_projection_fallback_requires_cross_source_expression() {
+        let left = scan(1, "left_src", "public", "l", &["id", "v"]);
+        let right = scan(2, "right_src", "public", "r", &["id", "v"]);
+        let first = inner_join(eq_cond("l", "id", "r", "id"), left, right);
+        let dim = scan(3, "dim_src", "public", "d", &["id"]);
+        let nested = inner_join(eq_cond("r", "id", "d", "id"), first, dim);
+
+        let single_source_expression = project(
+            vec![binop("+", qcolref("r", "id"), lit("0"))],
+            vec!["id"],
+            nested.clone(),
+        );
+        assert!(!computed_projection_needs_nested_join_fallback(
+            &single_source_expression
+        ));
+
+        let mixed_source_expression = project(
+            vec![binop(
+                "/",
+                lit("100"),
+                binop("-", qcolref("l", "v"), qcolref("r", "v")),
+            )],
+            vec!["quotient"],
+            nested,
+        );
+        assert!(computed_projection_needs_nested_join_fallback(
+            &mixed_source_expression
+        ));
     }
 
     #[test]
