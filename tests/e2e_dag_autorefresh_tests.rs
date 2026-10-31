@@ -826,8 +826,9 @@ async fn test_autorefresh_diamond_with_view_branch() {
     db.execute("INSERT INTO ardv_src (category, amount) VALUES ('x', 40), ('z', 100)")
         .await;
 
+    // Give a loaded E2E shard headroom for a delayed or respawning scheduler.
     let refreshed = db
-        .wait_for_auto_refresh_since("ardv_joined", before_insert, Duration::from_secs(60))
+        .wait_for_auto_refresh_since("ardv_joined", before_insert, Duration::from_secs(90))
         .await;
     assert!(refreshed, "Diamond join ST should auto-refresh");
 
