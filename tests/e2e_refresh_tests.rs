@@ -63,7 +63,7 @@ async fn test_refresh_picks_up_updates() {
 
     db.execute("UPDATE rf_upd SET val = 'new' WHERE id = 1")
         .await;
-    db.refresh_st("rf_upd_st").await;
+    db.refresh_st_with_retry("rf_upd_st").await;
 
     let val: String = db
         .query_scalar("SELECT val FROM public.rf_upd_st WHERE id = 1")
