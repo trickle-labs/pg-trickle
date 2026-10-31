@@ -112,12 +112,13 @@ pub proof fn separate_consumer_cuts_retain_opposing_images(
         window_event_weight_spec(
             ImageEvent::Delete, delete_lsn, shared_cut, later_cut,
         ) == -1,
-        !(true && false && !false),
+        !can_compact_history(true, false, false),
 {
     assert(earlier_cut <= shared_cut);
     assert(shared_cut <= later_cut);
     assert(image_event_weight_spec(ImageEvent::Insert) == 1);
     assert(image_event_weight_spec(ImageEvent::Delete) == -1);
+    assert(!can_compact_history(true, false, false));
 }
 }
 

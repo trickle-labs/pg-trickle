@@ -9,8 +9,16 @@ import sys
 import check_lsn_verification as runner
 
 SOURCE = runner.ROOT / "verification/cdc_elision.rs"
+CHECKER = runner.ROOT / "scripts/check_cdc_elision_verification.py"
 EVIDENCE = runner.ROOT / ".p2p/work/issue-1221-cdc-observations/evidence"
-OBLIGATIONS = ["admitted_image_type", "keep_change", "image_event_weight", "image_action", "can_compact_history"]
+OBLIGATIONS = [
+    "admitted_image_type",
+    "keep_change",
+    "image_event_weight",
+    "image_action",
+    "can_compact_history",
+    "separate_consumer_cuts_retain_opposing_images",
+]
 PRODUCTION_INPUTS = ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "Cargo.toml", "Cargo.lock"]
 MUTATIONS = {
     "lost-image-change": ("    !admitted || !image_equal\n", "    false\n"),
@@ -22,6 +30,10 @@ MUTATIONS = {
     "cross-truncate-barrier": (
         "    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier\n",
         "    has_immediate_unique_identity && has_single_consumer\n",
+    ),
+    "cross-shared-consumer": (
+        "    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier\n",
+        "    has_immediate_unique_identity && !has_truncate_barrier\n",
     ),
 }
 
@@ -37,6 +49,8 @@ def check_contract() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     for name in MUTATIONS:
         mutate(source, name)
+    if "pub proof fn separate_consumer_cuts_retain_opposing_images(" not in source:
+        raise ValueError("consumer-window proof obligation is missing")
     if '#[path = "../verification/cdc_elision.rs"]' not in (runner.ROOT / "src/lib.rs").read_text():
         raise ValueError("production does not import the checked CDC policy")
     for path in ["src/cdc/triggers.rs", "src/cdc/mod.rs"]:
@@ -78,7 +92,8 @@ def run_checks() -> None:
                               "source_sha256": runner.sha256(mutant.encode()), "output_sha256": runner.sha256(result.stdout.encode())}
         record = {
             "schema": "pg-trickle-cdc-elision-verification-v1", "source": "verification/cdc_elision.rs",
-            "source_sha256": runner.sha256(source.encode()), "verus_image": runner.IMAGE,
+            "source_sha256": runner.sha256(source.encode()), "checker_sha256": runner.sha256(CHECKER.read_bytes()),
+            "verus_image": runner.IMAGE,
             "compiler_identity": compiler, "solver_identity": solver, "obligations": OBLIGATIONS,
             "production_inputs": {path: runner.sha256((runner.ROOT / path).read_bytes()) for path in PRODUCTION_INPUTS},
             "baseline": {"returncode": baseline.returncode, "summary": summary[0], "output_sha256": runner.sha256(baseline.stdout.encode())},
