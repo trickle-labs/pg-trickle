@@ -331,9 +331,11 @@ in the storage budget; it replays Docker's retained logs when an intentional
 restart ends a follow stream. A failed log capture fails supervision.
 Run 39268153170 passed the library and actual-binary guards, then both images
 were stopped by `du` racing with deleted PostgreSQL temporary relations. These
-remain explicit supervision failures. Disk sampling now retries only that exact
-temporary-relation ENOENT condition, at most four times 200 ms apart; permission,
-other missing-file, timeout and persistent errors still stop the run.
+remain explicit supervision failures. Disk sampling now retries ENOENT only for
+PostgreSQL relation files under `base/<database_oid>` (numeric relfilenodes and
+`t...` temporary relations, including fork and segment suffixes) and
+`pg_internal.init`, at most four times 200 ms apart. Permission errors, other
+missing paths, timeouts and persistent errors still stop the run.
 
 Run 39275675630 then expired the five-attempt SQL metric retry while PostgreSQL
 was intentionally starting or stopping. The supervisor now continues sampling

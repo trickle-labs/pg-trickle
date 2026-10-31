@@ -29,6 +29,8 @@ async fn test_refresh_picks_up_inserts() {
     .await;
     assert_eq!(db.count("public.rf_ins_st").await, 2);
 
+    // A completed refresh can defer a recent write under the writer-holdback watermark.
+    // Require eventual exact multiset convergence with the defining query.
     // Keep the manual refresh from being skipped by an in-flight scheduler refresh.
     #[cfg(not(feature = "light-e2e"))]
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_ins_st'])")
@@ -37,7 +39,7 @@ async fn test_refresh_picks_up_inserts() {
     // Insert new rows
     db.execute("INSERT INTO rf_ins VALUES (3, 'c'), (4, 'd')")
         .await;
-    db.refresh_st("rf_ins_st").await;
+    db.refresh_st_until_converged("rf_ins_st").await;
 
     assert_eq!(db.count("public.rf_ins_st").await, 4);
 }
@@ -61,7 +63,7 @@ async fn test_refresh_picks_up_updates() {
 
     db.execute("UPDATE rf_upd SET val = 'new' WHERE id = 1")
         .await;
-    db.refresh_st("rf_upd_st").await;
+    db.refresh_st_with_retry("rf_upd_st").await;
 
     let val: String = db
         .query_scalar("SELECT val FROM public.rf_upd_st WHERE id = 1")
@@ -150,6 +152,10 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
         "DIFFERENTIAL",
     )
     .await;
+    // Keep the cost-model assertion deterministic when the scheduler is active.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_cost_st'])")
+        .await;
     let source_oid = i64::from(db.table_oid("rf_cost_src").await);
     let buffer = db.change_buffer_table(source_oid).await;
 

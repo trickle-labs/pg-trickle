@@ -1680,6 +1680,7 @@ fn collect_equijoin_keys(
     match expr {
         Expr::BinaryOp { op, left, right } if op == "=" => {
             // Found an equality — determine which side belongs to which table.
+
             let left_belongs_to = classify_column_side(left, left_alias, right_alias);
             let right_belongs_to = classify_column_side(right, left_alias, right_alias);
 
@@ -2267,6 +2268,31 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_equijoin_keys_escapes_quoted_identifiers() {
+        // USING keys with spaces, reserved words, and embedded quotes
+        // must stay quoted after qualifiers are removed for semi-join probes.
+        for name in ["Case Key", "from", "a\"b"] {
+            let cond = eq_cond("o", name, "c", name);
+            let keys = extract_equijoin_keys(&cond, "o", "c");
+            let quoted = quote_ident(name);
+            assert_eq!(keys, vec![(quoted.clone(), quoted.clone())]);
+
+            let sql = build_semijoin_subquery(
+                "\"public\".\"customers\"",
+                &keys,
+                "__pgt_cte_delta",
+                JoinSide::Right,
+            );
+            assert!(
+                sql.contains(&format!(
+                    "WHERE {quoted} IN (SELECT DISTINCT {quoted} FROM __pgt_cte_delta)"
+                )),
+                "invalid semi-join probe for {name:?}: {sql}"
+            );
+        }
+    }
+
+    #[test]
     fn test_extract_equijoin_keys_non_equality_returns_empty() {
         let cond = binop(">", qcolref("o", "a"), qcolref("c", "b"));
         let keys = extract_equijoin_keys(&cond, "o", "c");
@@ -2473,6 +2499,11 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
         let outer_cte_marker = format!("{} AS", result.cte_name);
         let outer_sql = sql.split(&outer_cte_marker).last().unwrap_or("");
+
+        // Semi-join keys are rendered as identifiers, not bare SQL text.
+        // Preserve quoting even for ordinary names so mixed-case and
+        // whitespace-containing USING keys use the same safe path.
+
         assert_sql_contains(outer_sql, "WHERE \"id\" IN (SELECT DISTINCT \"a__id\" FROM");
         assert_sql_contains(outer_sql, "WHERE \"a__id\" IN (SELECT DISTINCT \"id\" FROM");
         assert!(sql.lines().any(|line| {

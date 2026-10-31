@@ -540,7 +540,7 @@ async fn test_graph_using_composite_keys_preserve_differential_rows() {
             FROM using_left l {join_type} JOIN using_right r USING (id, tenant_key) JOIN using_dim d USING (id, tenant_key)");
         create_stream(&db, "using_graph", query.clone())
             .await
-            .expect("create USING graph");
+            .unwrap_or_else(|error| panic!("create {join_type} USING graph: {error}"));
         let root = "public.using_graph";
         let digest = reference_clients::graph_digest(&db.pool, root).await;
         strict_refresh_result(&db.pool, root, &digest, "ALLOW").await;
