@@ -22,6 +22,7 @@ async fn test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_
                 "'00000000-0000-0000-0000-000000000001'",
                 "'00000000-0000-0000-0000-000000000002'",
             ),
+            ("bytea", "decode('01','hex')", "decode('02','hex')"),
         ]
         .into_iter()
         .enumerate()
@@ -388,6 +389,53 @@ async fn test_inner_join_erroring_non_equi_uses_coherent_endpoint_snapshots() {
     .expect("failed refresh preserves the last committed stream-table rows");
     assert_eq!(stored_rows, vec![(1, 8, 1), (2, 7, 5)]);
     db.pool.close().await;
+}
+
+#[tokio::test]
+async fn test_nested_bytea_equality_keeps_throwing_projection_differential() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute(
+        "CREATE TABLE nested_bytea_left (id INT PRIMARY KEY, k BYTEA NOT NULL, v INT NOT NULL)",
+    )
+    .await;
+    db.execute("CREATE TABLE nested_bytea_middle (id INT PRIMARY KEY, k BYTEA NOT NULL)")
+        .await;
+    db.execute(
+        "CREATE TABLE nested_bytea_right (id INT PRIMARY KEY, k BYTEA NOT NULL, v INT NOT NULL)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO nested_bytea_left VALUES (1,decode('01','hex'),2),(2,decode('02','hex'),9)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO nested_bytea_middle VALUES (10,decode('01','hex')),(20,decode('02','hex'))",
+    )
+    .await;
+    db.execute("INSERT INTO nested_bytea_right VALUES (100,decode('01','hex'),1),(200,decode('02','hex'),5)")
+        .await;
+    let query = "SELECT l.id AS left_id,m.id AS middle_id,r.id AS right_id,100/(l.v-r.v) AS quotient \
+                 FROM nested_bytea_left l JOIN nested_bytea_middle m ON l.k=m.k \
+                 JOIN nested_bytea_right r ON m.k=r.k";
+    db.create_st("nested_bytea_endpoint_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("nested_bytea_endpoint_st", query)
+        .await;
+
+    // The old/old and new/new endpoints are valid, while an old-left/new-right
+    // pair would divide by zero before signed rows could cancel.
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE nested_bytea_left SET v=3 WHERE id=1",
+        "UPDATE nested_bytea_right SET v=2 WHERE id=100",
+        "COMMIT",
+    ])
+    .await;
+    refresh_differential_and_assert(&db, "nested_bytea_endpoint_st", query).await;
 }
 
 #[tokio::test]

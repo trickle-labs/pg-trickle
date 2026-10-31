@@ -64,7 +64,7 @@ over two Scan children of an InnerJoin. Both scans have complete primary-key
 metadata and distinct aliases. Generated payload field names must be unique
 and avoid the reserved action/identity columns. The predicate must be a single equality
 between qualified columns on opposite sides, with the same exact built-in
-bool, int2, int4, int8 or uuid OID. Domains and implicit cross-type comparisons
+bool, bytea, int2, int4, int8 or uuid OID. Domains and implicit cross-type comparisons
 are excluded. The stream-owner namespace must resolve that same-type `=` to
 the actual pg_catalog operator. Single-key USING retains a typed equality in
 the parser; multi-key/raw predicates are outside this slice.

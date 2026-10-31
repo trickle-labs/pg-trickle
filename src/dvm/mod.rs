@@ -1227,8 +1227,14 @@ pub(crate) fn query_needs_nested_projection_full_fallback(
     if !query.to_ascii_lowercase().contains("join") {
         return Ok(false);
     }
-    parse_defining_query(query)
-        .map(|tree| operators::join::computed_projection_needs_nested_join_fallback(&tree))
+    let tree = parse_defining_query(query)?;
+    let builtin_equality_types = resolve_builtin_equality_types()?;
+    Ok(
+        operators::join::computed_projection_needs_nested_join_fallback_with_equality(
+            &tree,
+            |oid| builtin_equality_types.contains(&oid),
+        ),
+    )
 }
 
 fn resolve_fenced_endpoint_sources(
@@ -1283,7 +1289,7 @@ fn resolve_builtin_equality_types() -> Result<std::collections::HashSet<u32>, Pg
                 "SELECT o.oprleft::bigint FROM pg_catalog.pg_operator o \
              JOIN pg_catalog.pg_namespace n ON n.oid=o.oprnamespace \
              WHERE n.nspname='pg_catalog' AND o.oprname='=' AND o.oprleft=o.oprright \
-               AND o.oprleft IN (16,20,21,23,2950) AND pg_catalog.pg_operator_is_visible(o.oid)",
+               AND o.oprleft IN (16,17,20,21,23,2950) AND pg_catalog.pg_operator_is_visible(o.oid)",
                 None,
                 &[],
             )
