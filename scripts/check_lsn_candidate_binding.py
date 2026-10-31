@@ -116,10 +116,10 @@ PROOF_CONTRACTS = {
     },
     "cdc_elision": {
         "schema": "pg-trickle-cdc-elision-verification-v1",
-        "obligations": {"admitted_image_type", "keep_change", "image_action", "can_compact_history"},
+        "obligations": {"admitted_image_type", "keep_change", "image_event_weight", "image_action", "can_compact_history"},
         "cases": CDC_ELISION_CASES,
         "inputs": ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "Cargo.toml", "Cargo.lock"],
-        "mutants": {"lost-image-change", "unknown-type-elision", "lost-positive-image", "reversed-negative-image", "cross-truncate-barrier"},
+        "mutants": {"lost-image-change", "unknown-type-elision", "lost-positive-image", "reversed-negative-image", "wrong-insert-event-weight", "wrong-delete-event-weight", "cross-truncate-barrier"},
     },
 }
 
