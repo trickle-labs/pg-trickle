@@ -1,7 +1,11 @@
 # Restricted join endpoint checker
 
 This #1223 slice selects an affected-key endpoint route for a computed root
-projection over an inner join of two keyed base scans. It also checks the
+projection over an inner join of two keyed base scans. A runtime-only
+extension also routes computed cross-source projections over nested all-inner
+equijoins of keyed scans through the same coherent endpoint difference; it
+keeps FULL for other nested shapes. The nested tree binding is E2E-qualified
+but is not a separate Verus proof obligation in this slice. It also checks the
 row-action polarity and bag equation for the legacy nested-left correction
 with and without Part 1's old-right split. It does not prove branch selection,
 arbitrary nested SQL lowering or deeper correction limits. Unsupported proof
@@ -55,12 +59,12 @@ acceptance.
 
 ## Production admission and source boundaries
 
-The ordinary route requires a root computed Project directly over two Scan
-children of an InnerJoin. Both scans have complete primary-key metadata and
-distinct aliases. Generated payload field names must be unique and avoid the
-reserved action/identity columns. The predicate must be a single equality
+The Verus-qualified ordinary route requires a root computed Project directly
+over two Scan children of an InnerJoin. Both scans have complete primary-key
+metadata and distinct aliases. Generated payload field names must be unique
+and avoid the reserved action/identity columns. The predicate must be a single equality
 between qualified columns on opposite sides, with the same exact built-in
-bool, int2, int4, int8 or uuid OID. Domains and implicit cross-type comparisons
+bool, bytea, int2, int4, int8 or uuid OID. Domains and implicit cross-type comparisons
 are excluded. The stream-owner namespace must resolve that same-type `=` to
 the actual pg_catalog operator. Single-key USING retains a typed equality in
 the parser; multi-key/raw predicates are outside this slice.

@@ -17,9 +17,9 @@ pub struct Term {
 }
 
 pub fn admitted_equality_type(oid: u32) -> (admitted: bool)
-    ensures admitted == (oid == 16 || oid == 20 || oid == 21 || oid == 23 || oid == 2950),
+    ensures admitted == (oid == 16 || oid == 17 || oid == 20 || oid == 21 || oid == 23 || oid == 2950),
 {
-    oid == 16 || oid == 20 || oid == 21 || oid == 23 || oid == 2950
+    oid == 16 || oid == 17 || oid == 20 || oid == 21 || oid == 23 || oid == 2950
 }
 
 pub open spec fn source_weight(
@@ -218,6 +218,12 @@ fn main() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admits_bytea_equality_and_rejects_unknown_types() {
+        assert!(admitted_equality_type(17));
+        assert!(!admitted_equality_type(18));
+    }
 
     #[test]
     fn rejects_mixed_snapshots_wrong_signs_and_occurrences() {

@@ -24,7 +24,10 @@ PRODUCTION_INPUTS = [
     "verification/cdc_elision.rs", "Cargo.toml", "Cargo.lock",
 ]
 MUTATIONS = {
-    "unknown-equality-type": ("    oid == 16 || oid == 20 || oid == 21 || oid == 23 || oid == 2950\n", "    true\n"),
+    "unknown-equality-type": (
+        "    oid == 16 || oid == 17 || oid == 20 || oid == 21 || oid == 23 || oid == 2950\n",
+        "    true\n",
+    ),
     "lost-right-scope": ("    left_changed || right_changed\n", "    left_changed\n"),
     "mixed-snapshot-admission": (
         "        && matches!(insert.left_boundary, Boundary::After) && matches!(insert.right_boundary, Boundary::After)\n",

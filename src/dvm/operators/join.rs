@@ -176,6 +176,9 @@ pub(crate) fn computed_projection_needs_endpoints(tree: &OpTree) -> bool {
     else {
         return false;
     };
+    let computed = expressions
+        .iter()
+        .any(|e| !matches!(e, Expr::ColumnRef { .. } | Expr::Literal(_)));
     let OpTree::InnerJoin {
         condition,
         left,
@@ -184,65 +187,246 @@ pub(crate) fn computed_projection_needs_endpoints(tree: &OpTree) -> bool {
     else {
         return false;
     };
-    expressions
-        .iter()
-        .any(|e| !matches!(e, Expr::ColumnRef { .. } | Expr::Literal(_)))
-        && endpoint_key_columns(condition, left, right).is_some()
+    (computed && endpoint_key_columns(condition, left, right).is_some())
+        || (computed && nested_endpoint_recompute_is_eligible(tree))
 }
 
-/// Return true when a computed top-level projection combines columns from
-/// multiple scan aliases above a nested join. Such an expression can observe
-/// a mixed old/new source pair in the ordinary nested-join delta. Expressions
-/// bound to one source alias do not combine snapshots and keep the established
-/// rowwise path.
-pub(crate) fn computed_projection_needs_nested_join_fallback(tree: &OpTree) -> bool {
-    fn spans_sources(expression: &Expr) -> bool {
-        fn collect_aliases(expression: &Expr, aliases: &mut Vec<String>) -> bool {
-            match expression {
-                Expr::ColumnRef {
-                    table_alias: Some(alias),
-                    ..
-                } => {
-                    aliases.push(alias.clone());
-                    false
-                }
-                Expr::ColumnRef {
-                    table_alias: None, ..
-                }
-                | Expr::Star { .. }
-                | Expr::Raw(_) => true,
-                Expr::Literal(_) => false,
-                Expr::BinaryOp { left, right, .. } => {
-                    collect_aliases(left, aliases) || collect_aliases(right, aliases)
-                }
-                Expr::FuncCall { args, .. } => args
-                    .iter()
-                    .any(|argument| collect_aliases(argument, aliases)),
-            }
-        }
-
-        let mut aliases = Vec::new();
-        let has_unresolved_reference = collect_aliases(expression, &mut aliases);
-        aliases.sort_unstable();
-        aliases.dedup();
-        has_unresolved_reference || aliases.len() > 1
-    }
-
-    fn has_nested_join(tree: &OpTree, inside_join: bool) -> bool {
+fn has_nested_join(tree: &OpTree) -> bool {
+    fn contains_join(tree: &OpTree) -> bool {
         match tree {
-            OpTree::InnerJoin { left, right, .. }
-            | OpTree::LeftJoin { left, right, .. }
-            | OpTree::FullJoin { left, right, .. } => {
-                if inside_join {
-                    return true;
-                }
-                has_nested_join(left, true) || has_nested_join(right, true)
-            }
+            OpTree::InnerJoin { .. } | OpTree::LeftJoin { .. } | OpTree::FullJoin { .. } => true,
             OpTree::Filter { child, .. }
             | OpTree::Project { child, .. }
-            | OpTree::Subquery { child, .. } => has_nested_join(child, inside_join),
+            | OpTree::Subquery { child, .. } => contains_join(child),
             _ => false,
         }
+    }
+
+    match tree {
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. } => contains_join(left) || contains_join(right),
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Subquery { child, .. } => has_nested_join(child),
+        _ => false,
+    }
+}
+
+fn is_simple_equi_condition(condition: &Expr) -> Option<(String, String, String, String)> {
+    let Expr::BinaryOp { op, left, right } = condition else {
+        return None;
+    };
+    if op != "=" {
+        return None;
+    }
+    let (
+        Expr::ColumnRef {
+            table_alias: Some(left_alias),
+            column_name: left_column,
+        },
+        Expr::ColumnRef {
+            table_alias: Some(right_alias),
+            column_name: right_column,
+        },
+    ) = (left.as_ref(), right.as_ref())
+    else {
+        return None;
+    };
+    Some((
+        left_alias.clone(),
+        left_column.clone(),
+        right_alias.clone(),
+        right_column.clone(),
+    ))
+}
+
+fn scan_column_type(tree: &OpTree, alias: &str, column: &str) -> Option<u32> {
+    match tree {
+        OpTree::Scan {
+            alias: scan_alias,
+            columns,
+            ..
+        } if scan_alias == alias => columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .map(|candidate| candidate.type_oid),
+        OpTree::InnerJoin { left, right, .. } => {
+            scan_column_type(left, alias, column).or_else(|| scan_column_type(right, alias, column))
+        }
+        _ => None,
+    }
+}
+
+fn all_inner_joins_have_endpoint_keys(tree: &OpTree) -> bool {
+    match tree {
+        OpTree::Scan {
+            alias,
+            columns,
+            pk_columns,
+            ..
+        } => {
+            !alias.is_empty()
+                && !pk_columns.is_empty()
+                && pk_columns
+                    .iter()
+                    .all(|key| columns.iter().any(|column| column.name == *key))
+        }
+        OpTree::InnerJoin {
+            condition,
+            left,
+            right,
+        } => {
+            let Some((first_alias, first_column, second_alias, second_column)) =
+                is_simple_equi_condition(condition)
+            else {
+                return false;
+            };
+            let (left_column, right_column) = if scan_column_type(left, &first_alias, &first_column)
+                .is_some()
+                && scan_column_type(right, &second_alias, &second_column).is_some()
+            {
+                ((first_alias, first_column), (second_alias, second_column))
+            } else if scan_column_type(left, &second_alias, &second_column).is_some()
+                && scan_column_type(right, &first_alias, &first_column).is_some()
+            {
+                ((second_alias, second_column), (first_alias, first_column))
+            } else {
+                return false;
+            };
+            let Some(left_type) = scan_column_type(left, &left_column.0, &left_column.1) else {
+                return false;
+            };
+            let Some(right_type) = scan_column_type(right, &right_column.0, &right_column.1) else {
+                return false;
+            };
+            left_type == right_type
+                && crate::join_plan::admitted_equality_type(left_type)
+                && all_inner_joins_have_endpoint_keys(left)
+                && all_inner_joins_have_endpoint_keys(right)
+        }
+        _ => false,
+    }
+}
+
+fn nested_endpoint_recompute_is_eligible(tree: &OpTree) -> bool {
+    let OpTree::Project {
+        expressions, child, ..
+    } = tree
+    else {
+        return false;
+    };
+    let root_join = match child.as_ref() {
+        OpTree::InnerJoin { .. } => Some(child.as_ref()),
+        _ => None,
+    };
+    let Some(root_join) = root_join else {
+        return false;
+    };
+    nested_inner_endpoint_recompute_is_eligible(root_join)
+        && expressions.iter().all(|expression| {
+            if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
+                return true;
+            }
+            let mut aliases = Vec::new();
+            collect_qualified_aliases(expression, &mut aliases)
+        })
+        && expressions.iter().any(|expression| {
+            if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
+                return false;
+            }
+            let mut aliases = Vec::new();
+            if collect_qualified_aliases(expression, &mut aliases) {
+                aliases.sort_unstable();
+                aliases.dedup();
+                aliases.len() > 1
+            } else {
+                false
+            }
+        })
+}
+
+fn nested_inner_endpoint_recompute_is_eligible(tree: &OpTree) -> bool {
+    has_nested_join(tree) && all_inner_joins_have_endpoint_keys(tree)
+}
+
+fn nested_endpoint_operators_are_builtin(
+    tree: &OpTree,
+    is_builtin_equality: &impl Fn(u32) -> bool,
+) -> bool {
+    match tree {
+        OpTree::Scan { .. } => true,
+        OpTree::InnerJoin {
+            condition,
+            left,
+            right,
+        } => {
+            let Some((first_alias, first_column, second_alias, second_column)) =
+                is_simple_equi_condition(condition)
+            else {
+                return false;
+            };
+            let equality_type = if scan_column_type(left, &first_alias, &first_column).is_some()
+                && scan_column_type(right, &second_alias, &second_column).is_some()
+            {
+                scan_column_type(left, &first_alias, &first_column)
+            } else if scan_column_type(left, &second_alias, &second_column).is_some()
+                && scan_column_type(right, &first_alias, &first_column).is_some()
+            {
+                scan_column_type(left, &second_alias, &second_column)
+            } else {
+                return false;
+            };
+            equality_type.is_some_and(|oid| {
+                is_builtin_equality(oid)
+                    && nested_endpoint_operators_are_builtin(left, is_builtin_equality)
+                    && nested_endpoint_operators_are_builtin(right, is_builtin_equality)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn collect_qualified_aliases(expression: &Expr, aliases: &mut Vec<String>) -> bool {
+    match expression {
+        Expr::ColumnRef {
+            table_alias: Some(alias),
+            ..
+        } => {
+            aliases.push(alias.clone());
+            true
+        }
+        Expr::ColumnRef {
+            table_alias: None, ..
+        }
+        | Expr::Star { .. }
+        | Expr::Raw(_) => false,
+        Expr::Literal(_) => true,
+        Expr::BinaryOp { left, right, .. } => {
+            collect_qualified_aliases(left, aliases) && collect_qualified_aliases(right, aliases)
+        }
+        Expr::FuncCall { args, .. } => args
+            .iter()
+            .all(|argument| collect_qualified_aliases(argument, aliases)),
+    }
+}
+
+/// Unsafe nested computed projections use endpoint recomputation only for
+/// all-inner equijoins over keyed scans; preserve FULL for every other shape.
+pub(crate) fn computed_projection_needs_nested_join_fallback(tree: &OpTree) -> bool {
+    fn projection_has_unsafe_cross_source_expression(expressions: &[Expr]) -> bool {
+        expressions.iter().any(|expression| {
+            if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
+                return false;
+            }
+            let mut aliases = Vec::new();
+            if !collect_qualified_aliases(expression, &mut aliases) {
+                return true;
+            }
+            aliases.sort_unstable();
+            aliases.dedup();
+            aliases.len() > 1
+        })
     }
 
     let OpTree::Project {
@@ -251,11 +435,24 @@ pub(crate) fn computed_projection_needs_nested_join_fallback(tree: &OpTree) -> b
     else {
         return false;
     };
-    has_nested_join(child, false)
-        && expressions.iter().any(|expression| {
-            !matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_))
-                && spans_sources(expression)
-        })
+    has_nested_join(child)
+        && projection_has_unsafe_cross_source_expression(expressions)
+        && !nested_endpoint_recompute_is_eligible(tree)
+}
+
+pub(crate) fn computed_projection_needs_nested_join_fallback_with_equality(
+    tree: &OpTree,
+    is_builtin_equality: impl Fn(u32) -> bool,
+) -> bool {
+    computed_projection_needs_nested_join_fallback(tree)
+        || (nested_endpoint_recompute_is_eligible(tree)
+            && !nested_endpoint_operators_are_builtin(
+                match tree {
+                    OpTree::Project { child, .. } => child,
+                    _ => tree,
+                },
+                &is_builtin_equality,
+            ))
 }
 
 fn scoped_source_endpoints(
@@ -645,6 +842,35 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
         "__pgt_left",
         "__pgt_right",
     );
+
+    if ctx.endpoint_join_required && nested_inner_endpoint_recompute_is_eligible(op) {
+        if !nested_endpoint_operators_are_builtin(op, &|oid| ctx.has_builtin_equality(oid)) {
+            return Err(PgTrickleError::UnsupportedOperator(
+                "nested endpoint recomputation requires visible pg_catalog equality operators"
+                    .into(),
+            ));
+        }
+        let safe_scope_keys = equi_keys
+            .iter()
+            .filter(|(left_key, right_key)| {
+                has_builtin_type_for_sql_column(&left_result.schema, left, left_key)
+                    && has_builtin_type_for_sql_column(&right_result.schema, right, right_key)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if safe_scope_keys.is_empty() {
+            return Err(PgTrickleError::InternalError(
+                "nested endpoint plan lost its admitted equality scope".into(),
+            ));
+        }
+        return diff_inner_join_by_endpoints(
+            ctx,
+            op,
+            &left_result,
+            &right_result,
+            &safe_scope_keys,
+        );
+    }
 
     // Cross-epoch pairs in the algebraic delta can fail while PostgreSQL
     // evaluates the join predicate, before their signed rows cancel. For
@@ -1697,6 +1923,108 @@ mod tests {
         assert!(computed_projection_needs_nested_join_fallback(
             &mixed_source_expression
         ));
+    }
+
+    #[test]
+    fn test_nested_projection_uses_endpoint_route_only_for_keyed_inner_tree() {
+        let left = scan_with_pk(1, "left_src", "public", "l", &["id", "v"], &["id"]);
+        let right = scan_with_pk(2, "right_src", "public", "r", &["id", "v"], &["id"]);
+        let first = inner_join(eq_cond("l", "id", "r", "id"), left, right);
+        let dim = scan_with_pk(3, "dim_src", "public", "d", &["id"], &["id"]);
+        let nested = inner_join(eq_cond("r", "id", "d", "id"), first, dim);
+        let tree = project(
+            vec![binop(
+                "/",
+                lit("100"),
+                binop("-", qcolref("l", "v"), qcolref("r", "v")),
+            )],
+            vec!["quotient"],
+            nested,
+        );
+
+        assert!(nested_endpoint_recompute_is_eligible(&tree));
+        assert!(computed_projection_needs_endpoints(&tree));
+        assert!(!computed_projection_needs_nested_join_fallback(&tree));
+
+        let unresolved_expression = project(
+            vec![
+                binop(
+                    "/",
+                    lit("100"),
+                    binop("-", qcolref("l", "v"), qcolref("r", "v")),
+                ),
+                Expr::Raw("unresolved_sql()".into()),
+            ],
+            vec!["quotient", "unresolved"],
+            match &tree {
+                OpTree::Project { child, .. } => child.as_ref().clone(),
+                _ => unreachable!(),
+            },
+        );
+        assert!(!nested_endpoint_recompute_is_eligible(
+            &unresolved_expression
+        ));
+        assert!(!computed_projection_needs_endpoints(&unresolved_expression));
+        assert!(computed_projection_needs_nested_join_fallback(
+            &unresolved_expression
+        ));
+    }
+
+    #[test]
+    fn test_nested_projection_endpoint_route_requires_visible_bytea_equality() {
+        let with_bytea_key = |mut tree: OpTree| {
+            if let OpTree::Scan { columns, .. } = &mut tree {
+                columns
+                    .iter_mut()
+                    .find(|column| column.name == "key")
+                    .expect("key column exists")
+                    .type_oid = 17;
+            }
+            tree
+        };
+        let left = with_bytea_key(scan_with_pk(
+            1,
+            "left_src",
+            "public",
+            "l",
+            &["id", "key", "v"],
+            &["id"],
+        ));
+        let middle = with_bytea_key(scan_with_pk(
+            2,
+            "middle_src",
+            "public",
+            "m",
+            &["id", "key"],
+            &["id"],
+        ));
+        let right = with_bytea_key(scan_with_pk(
+            3,
+            "right_src",
+            "public",
+            "r",
+            &["id", "key", "v"],
+            &["id"],
+        ));
+        let tree = project(
+            vec![binop(
+                "/",
+                lit("100"),
+                binop("-", qcolref("l", "v"), qcolref("r", "v")),
+            )],
+            vec!["quotient"],
+            inner_join(
+                eq_cond("m", "key", "r", "key"),
+                inner_join(eq_cond("l", "key", "m", "key"), left, middle),
+                right,
+            ),
+        );
+
+        assert!(nested_endpoint_recompute_is_eligible(&tree));
+        assert!(
+            !computed_projection_needs_nested_join_fallback_with_equality(&tree, |oid| oid == 17,)
+        );
+        assert!(computed_projection_needs_nested_join_fallback_with_equality(&tree, |_| false,));
     }
 
     #[test]
