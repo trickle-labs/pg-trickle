@@ -1097,6 +1097,37 @@ async fn advance_scheduler_watermark(db: &E2eDb, stream: &str, query: &str, afte
     .await;
 }
 
+async fn wait_for_scheduler_refresh_after_creation(db: &E2eDb, stream: &str) {
+    let id = pgt_id(db, stream).await;
+    let initial: Option<String> = sqlx::query_scalar(
+        "SELECT last_refresh_at::text FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read initial scheduler watermark");
+    let condition = match initial {
+        Some(initial) => format!(
+            "SELECT last_refresh_at > '{initial}'::timestamptz \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {id}"
+        ),
+        None => format!(
+            "SELECT last_refresh_at IS NOT NULL \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {id}"
+        ),
+    };
+    assert!(
+        db.wait_for_condition(
+            "initial scheduler cycle after stream creation",
+            &condition,
+            Duration::from_secs(30),
+            Duration::from_millis(25),
+        )
+        .await,
+        "scheduler did not finish its initial cycle for {stream}"
+    );
+}
+
 #[tokio::test]
 async fn test_pause_scheduler_drains_inline_refresh_until_commit() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
@@ -1129,8 +1160,12 @@ async fn test_pause_scheduler_drains_inline_refresh_until_commit() {
         .await;
         db.execute(&format!("INSERT INTO public.{source} VALUES (1, 10)"))
             .await;
-        db.create_st(&stream, &query, "1m", "DIFFERENTIAL").await;
-        db.create_st(&control, &query, "1m", "DIFFERENTIAL").await;
+        db.create_st(&stream, &query, "1s", "DIFFERENTIAL").await;
+        db.create_st(&control, &query, "1s", "DIFFERENTIAL").await;
+        wait_for_scheduler_refresh_after_creation(&db, &stream).await;
+        wait_for_scheduler_refresh_after_creation(&db, &control).await;
+        db.alter_st(&stream, "schedule => '1m'").await;
+        db.alter_st(&control, "schedule => '1m'").await;
         db.execute(&format!(
             "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}', 'public.{control}'])"
         ))
