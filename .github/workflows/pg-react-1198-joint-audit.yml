@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: trickle-labs/pg-mdm
-          ref: 06471e647ee54a80973fb5ad6709830f9955dbff
+          ref: ad2597f72ee657cb946c5bbd7ae5eb2bfd1ac1b3
           path: .joint/mdm
           persist-credentials: false
       - uses: actions/checkout@v7
@@ -52,7 +52,7 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = aarch64
           test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
-          test "$(git -C .joint/mdm rev-parse HEAD)" = 06471e647ee54a80973fb5ad6709830f9955dbff
+          test "$(git -C .joint/mdm rev-parse HEAD)" = ad2597f72ee657cb946c5bbd7ae5eb2bfd1ac1b3
           test "$(git -C .joint/react rev-parse HEAD)" = 1c7cb21c685677ec9447c19b89d69a002948cc6c
           mkdir -p .joint/evidence
           archive_sha=$(git archive HEAD | sha256sum | cut -d' ' -f1)
@@ -87,7 +87,7 @@ jobs:
           set -euo pipefail
           docker build --platform linux/arm64 --progress=plain \
             --build-arg S1_BUILDER=pg-react-1198-arm64-sdk:qualification \
-            --build-arg PG_MDM_SOURCE_REVISION=06471e647ee54a80973fb5ad6709830f9955dbff \
+            --build-arg PG_MDM_SOURCE_REVISION=ad2597f72ee657cb946c5bbd7ae5eb2bfd1ac1b3 \
             --build-arg PG_REACT_SOURCE_REVISION=1c7cb21c685677ec9447c19b89d69a002948cc6c \
             --build-arg PG_TRICKLE_SOURCE_REVISION="$PR_HEAD_SHA" \
             --build-arg PG_TRICKLE_SOURCE_ARCHIVE_SHA256="${{ steps.source.outputs.archive_sha }}" \
@@ -111,7 +111,7 @@ jobs:
           assert "future-idle-mdm-receipt" in checks, checks
           labels = observed["image_labels"]
           assert observed["react_revision"] == "1c7cb21c685677ec9447c19b89d69a002948cc6c"
-          assert labels["pg_mdm.source_revision"] == "06471e647ee54a80973fb5ad6709830f9955dbff"
+          assert labels["pg_mdm.source_revision"] == "ad2597f72ee657cb946c5bbd7ae5eb2bfd1ac1b3"
           assert labels["pg_react.source_revision"] == "1c7cb21c685677ec9447c19b89d69a002948cc6c"
           assert labels["pg_trickle.source_revision"] == (root / "pg-trickle-commit.txt").read_text().strip()
           assert labels["pg_trickle.source_archive_sha256"] == (root / "pg-trickle-source-archive.sha256").read_text().strip()
