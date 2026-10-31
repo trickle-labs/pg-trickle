@@ -539,6 +539,82 @@ async fn test_intersect_differential_missing_state_falls_back_to_full() {
 }
 
 #[tokio::test]
+async fn test_intersect_differential_stale_state_binding_falls_back_and_rebuilds() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE isect_stale_a (id SERIAL PRIMARY KEY, val INT)")
+        .await;
+    db.execute("CREATE TABLE isect_stale_b (id SERIAL PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO isect_stale_a (val) VALUES (1)")
+        .await;
+    db.execute("INSERT INTO isect_stale_b (val) VALUES (1)")
+        .await;
+
+    let query = "SELECT val FROM isect_stale_a INTERSECT SELECT val FROM isect_stale_b";
+    db.create_st("isect_stale_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    let pgt_id = setop_pgt_id(&db, "isect_stale_st").await;
+    let state_rel = format!("pgtrickle.\"__pgt_setop_state_{pgt_id}\"");
+    db.execute("CREATE TABLE isect_stale_decoy (value INT)")
+        .await;
+    let decoy_oid: i64 = db
+        .query_scalar("SELECT 'isect_stale_decoy'::regclass::oid::bigint")
+        .await;
+    db.execute(&format!(
+        "UPDATE pgtrickle.pgt_set_operation_states SET state_relid = {decoy_oid} \
+         WHERE pgt_id = {pgt_id}"
+    ))
+    .await;
+
+    db.execute("INSERT INTO isect_stale_a (val) VALUES (2)")
+        .await;
+    db.execute("INSERT INTO isect_stale_b (val) VALUES (2)")
+        .await;
+    db.refresh_st("isect_stale_st").await;
+    db.assert_st_matches_query("isect_stale_st", query).await;
+
+    let (action, was_full_fallback): (String, bool) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT action, was_full_fallback FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = {pgt_id} AND initiated_by = 'MANUAL' \
+             ORDER BY refresh_id DESC LIMIT 1"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .expect("read refresh route after stale state fallback");
+    assert_eq!((action.as_str(), was_full_fallback), ("FULL", true));
+
+    let (registered_oid, actual_oid): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT state.state_relid::bigint, '{state_rel}'::regclass::oid::bigint \
+             FROM pgtrickle.pgt_set_operation_states state WHERE state.pgt_id = {pgt_id}"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .expect("read rebuilt state binding");
+    assert_eq!(
+        registered_oid, actual_oid,
+        "rebuilt state binding must be current"
+    );
+    assert_ne!(
+        registered_oid, decoy_oid,
+        "a restored stale OID must not bind the decoy"
+    );
+    let decoy_survived: bool = db
+        .query_scalar("SELECT to_regclass('isect_stale_decoy') IS NOT NULL")
+        .await;
+    assert!(
+        decoy_survived,
+        "rebuilding set-op state must preserve the unrelated table"
+    );
+    let (left_count, right_count): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT __pgt_count_l, __pgt_count_r FROM {state_rel} WHERE val = 2"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .expect("read rebuilt branch counts");
+    assert_eq!((left_count, right_count), (1, 1));
+}
+
+#[tokio::test]
 async fn test_intersect_differential_public_failure_rolls_back_private_state() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE isect_rollback_a (id SERIAL PRIMARY KEY, val INT)")
