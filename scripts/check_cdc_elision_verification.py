@@ -10,13 +10,14 @@ import check_lsn_verification as runner
 
 SOURCE = runner.ROOT / "verification/cdc_elision.rs"
 EVIDENCE = runner.ROOT / ".p2p/work/issue-1221-cdc-observations/evidence"
-OBLIGATIONS = ["admitted_image_type", "keep_change", "image_action", "can_compact_history"]
+OBLIGATIONS = ["admitted_image_type", "keep_change", "image_event_weight", "image_action", "can_compact_history"]
 PRODUCTION_INPUTS = ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "Cargo.toml", "Cargo.lock"]
 MUTATIONS = {
     "lost-image-change": ("    !admitted || !image_equal\n", "    false\n"),
     "unknown-type-elision": ("    !admitted || !image_equal\n", "    admitted && !image_equal\n"),
     "lost-positive-image": ("if weight > 0 { ImageAction::Insert }", "if weight > 0 { ImageAction::Skip }"),
     "reversed-negative-image": ("else if weight < 0 { ImageAction::Delete }", "else if weight < 0 { ImageAction::Insert }"),
+    "wrong-delete-event-weight": ("ImageEvent::Delete => -1,", "ImageEvent::Delete => 1,"),
     "cross-truncate-barrier": (
         "    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier\n",
         "    has_immediate_unique_identity && has_single_consumer\n",
@@ -42,6 +43,8 @@ def check_contract() -> None:
             raise ValueError(f"{path} bypasses the checked CDC policy")
     if "crate::cdc_elision::keyed_weight_sql(" not in (runner.ROOT / "src/refresh/codegen.rs").read_text():
         raise ValueError("keyed MERGE does not execute the checked image action adapter")
+    if 'image_event_weight_sql("__pgt_action")' not in source:
+        raise ValueError("keyed image weights bypass the checked signed event coefficients")
     if "crate::cdc_elision::can_compact_history(" not in (runner.ROOT / "src/cdc/mod.rs").read_text():
         raise ValueError("base-buffer compaction bypasses the checked barrier decision")
     cdc = (runner.ROOT / "src/cdc/mod.rs").read_text()
