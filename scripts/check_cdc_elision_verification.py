@@ -22,6 +22,7 @@ OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "separate_consumer_cuts_retain_opposing_images",
     "transaction_window_membership_is_atomic",
     "payload_replacement_preserves_complete_image_delta",
+    "append_captured_image_bucket_delta",
     "transient_same_image_cancels_within_incarnation",
     "source_incarnation_prevents_cross_epoch_cancellation",
 ]
@@ -55,6 +56,7 @@ MUTATIONS = {
         "first.commit_lsn == second.commit_lsn,",
         "first.commit_lsn <= second.commit_lsn,",
     ),
+    "reverse-history-weight": ("prefix + event_weight", "prefix - event_weight"),
 }
 
 

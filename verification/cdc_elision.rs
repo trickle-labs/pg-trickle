@@ -136,6 +136,98 @@ pub open spec fn captured_image_weight(
     }
 }
 
+/// Signed multiplicity for a complete-image bucket over any finite captured
+/// history prefix.
+pub open spec fn captured_image_bucket_delta(
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> int
+    decreases count,
+{
+    if count <= 0 || count > history.len() {
+        0
+    } else {
+        let prefix = captured_image_bucket_delta(
+            history, count - 1, row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        );
+        let event_weight = captured_image_weight(
+            history[count - 1], row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        );
+        prefix + event_weight
+    }
+}
+
+pub proof fn append_prefix_bucket_delta_is_unchanged(
+    history: Seq<CapturedImageEvent>,
+    appended: CapturedImageEvent,
+    count: int,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires 0 <= count <= history.len(),
+    ensures
+        captured_image_bucket_delta(
+            history.push(appended), count, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) == captured_image_bucket_delta(
+            history, count, row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        ),
+    decreases count,
+{
+    if count > 0 {
+        reveal(captured_image_bucket_delta);
+        assert(history.push(appended).len() == history.len() + 1);
+        assert(history.push(appended)[count - 1] == history[count - 1]);
+        append_prefix_bucket_delta_is_unchanged(
+            history, appended, count - 1, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        );
+    }
+}
+
+/// Appending one captured event adds exactly its signed weight to its full-row
+/// bucket; this is the sequence-level sum used by grouped SQL reduction.
+pub proof fn append_captured_image_bucket_delta(
+    history: Seq<CapturedImageEvent>,
+    appended: CapturedImageEvent,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    ensures
+        captured_image_bucket_delta(
+            history.push(appended), history.len() as int + 1, row_identity,
+            row_image, source_incarnation, previous_cut, new_cut,
+        ) == captured_image_bucket_delta(
+            history, history.len() as int, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) + captured_image_weight(
+            appended, row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        ),
+{
+    reveal(captured_image_bucket_delta);
+    assert(history.push(appended).len() == history.len() + 1);
+    assert(history.push(appended)[history.len() as int] == appended);
+    append_prefix_bucket_delta_is_unchanged(
+        history, appended, history.len() as int, row_identity, row_image,
+        source_incarnation, previous_cut, new_cut,
+    );
+}
+
 /// All captured rows from one committed source transaction share a single
 /// LSN, so a consumer cut cannot admit only part of that transaction.
 pub proof fn transaction_window_membership_is_atomic(

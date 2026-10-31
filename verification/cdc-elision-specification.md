@@ -139,16 +139,18 @@ case. This is a parameterized counterexample to cross-window cancellation,
 not a proof that the PostgreSQL reducer preserves arbitrary histories or every
 consumer window.
 
-The complete-image event model adds four bounded lemmas. Events carry a row
+The complete-image event model adds five bounded lemmas. Events carry a row
 identity, full row-image bytes, source-incarnation identifier, transaction
 identifier and commit LSN. It proves that events from one transaction share a
 consumer-window membership when their commit LSN is shared; a same-key payload
 replacement contributes `-1` and `+1` in distinct image buckets; an identical
 image insert/delete pair cancels within one incarnation and window; and an
 event from an earlier incarnation contributes nothing to the current
-incarnation's bucket. Three executable Verus mutants reject key-only image
-grouping, cross-incarnation grouping and a transaction cut that admits
-different commit LSNs.
+incarnation's bucket. Its recursive sequence delta also proves that appending
+any captured event adds exactly that event's signed weight to its selected
+complete-image bucket. Four executable Verus mutants reject key-only image
+grouping, cross-incarnation grouping, a transaction cut that admits different
+commit LSNs and a reversed history weight.
 
 These lemmas specify the event semantics that the production adapter must
 preserve. They assume captured events already represent committed transactions
@@ -165,14 +167,16 @@ The pinned Verus/Z3 runner checks five executable decisions:
 `separate_consumer_cuts_retain_opposing_images`,
 `transaction_window_membership_is_atomic`,
 `payload_replacement_preserves_complete_image_delta`,
+`append_captured_image_bucket_delta`,
 `transient_same_image_cancels_within_incarnation` and
 `source_incarnation_prevents_cross_epoch_cancellation`. Eleven executable
-mutants must fail a postcondition:
+Twelve executable mutants must fail a postcondition:
 `lost-image-change`, `unknown-type-elision`, `lost-positive-image`,
 `reversed-negative-image`, `wrong-insert-event-weight`,
 `wrong-delete-event-weight`, `cross-truncate-barrier`,
 `cross-shared-consumer`, `key-only-image-bucket`, `cross-incarnation-bucket` and
-`split-transaction-cut`; compilation/setup failures do not count. The
+`split-transaction-cut`, `reverse-history-weight`; compilation/setup failures
+do not count. The
 candidate-binding helper requires these obligations and controls, hashes the
 production callers and the installed test sources, requires all eight named
 installed cases, and checks identical packaged/installed library bytes. CI
