@@ -61,14 +61,6 @@ pub fn can_compact_history(
     has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier
 }
 
-pub open spec fn compaction_eligible_spec(
-    has_immediate_unique_identity: bool,
-    has_single_consumer: bool,
-    has_truncate_barrier: bool,
-) -> bool {
-    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier
-}
-
 pub open spec fn image_event_in_window_spec(
     event_lsn: u64,
     previous_cut: u64,
@@ -120,7 +112,7 @@ pub proof fn separate_consumer_cuts_retain_opposing_images(
         window_event_weight_spec(
             ImageEvent::Delete, delete_lsn, shared_cut, later_cut,
         ) == -1,
-        !compaction_eligible_spec(true, false, false),
+        !(true && false && !false),
 {
     assert(earlier_cut <= shared_cut);
     assert(shared_cut <= later_cut);
