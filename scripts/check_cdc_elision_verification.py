@@ -18,8 +18,19 @@ EXECUTABLE_OBLIGATIONS = [
     "image_action",
     "can_compact_history",
 ]
-OBLIGATIONS = EXECUTABLE_OBLIGATIONS + ["separate_consumer_cuts_retain_opposing_images"]
-PRODUCTION_INPUTS = ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "Cargo.toml", "Cargo.lock"]
+OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
+    "separate_consumer_cuts_retain_opposing_images",
+    "transaction_window_membership_is_atomic",
+    "payload_replacement_preserves_complete_image_delta",
+    "transient_same_image_cancels_within_incarnation",
+    "source_incarnation_prevents_cross_epoch_cancellation",
+]
+PRODUCTION_INPUTS = [
+    "src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs",
+    "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs",
+    "src/refresh/codegen.rs", "tests/e2e_shared_buffer_tests.rs", "tests/e2e_cdc_tests.rs",
+    "tests/e2e_schema_evolution_tests.rs", "Cargo.toml", "Cargo.lock",
+]
 MUTATIONS = {
     "lost-image-change": ("    !admitted || !image_equal\n", "    false\n"),
     "unknown-type-elision": ("    !admitted || !image_equal\n", "    admitted && !image_equal\n"),
@@ -35,6 +46,15 @@ MUTATIONS = {
         "    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier\n",
         "    has_immediate_unique_identity && !has_truncate_barrier\n",
     ),
+    "key-only-image-bucket": ("&& event.row_image == row_image", "&& true"),
+    "cross-incarnation-bucket": (
+        "event.source_incarnation == source_incarnation\n        && image_event_in_window_spec",
+        "true\n        && image_event_in_window_spec",
+    ),
+    "split-transaction-cut": (
+        "first.commit_lsn == second.commit_lsn,",
+        "first.commit_lsn <= second.commit_lsn,",
+    ),
 }
 
 
@@ -49,8 +69,9 @@ def check_contract() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     for name in MUTATIONS:
         mutate(source, name)
-    if "pub proof fn separate_consumer_cuts_retain_opposing_images(" not in source:
-        raise ValueError("consumer-window proof obligation is missing")
+    for obligation in OBLIGATIONS[len(EXECUTABLE_OBLIGATIONS):]:
+        if f"pub proof fn {obligation}(" not in source:
+            raise ValueError(f"CDC history proof obligation is missing: {obligation}")
     if '#[path = "../verification/cdc_elision.rs"]' not in (runner.ROOT / "src/lib.rs").read_text():
         raise ValueError("production does not import the checked CDC policy")
     for path in ["src/cdc/triggers.rs", "src/cdc/mod.rs"]:

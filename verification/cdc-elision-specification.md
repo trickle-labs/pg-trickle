@@ -122,10 +122,10 @@ requires a valid keyed endpoint; it is not a general multiplicity-expanding
 bag consumer. A repeated-image integration case checks that an intermediate
 I/D pair cancels while the final payload survives.
 
-Verus proves the weight classifier only. It does **not** prove PostgreSQL's
-image comparisons, SQL sums/window functions, field binding, complete committed
-cuts, catalog metadata, keyed endpoint uniqueness or upsert equivalence. This
-is not yet the full R1/R2 bag/window theorem. Native SQL conformance checks
+Verus proves the weight classifier and the event-level bucket lemmas below. It
+does **not** prove PostgreSQL's image comparisons, SQL sums/window functions,
+field binding, complete committed cuts, catalog metadata, keyed endpoint
+uniqueness or upsert equivalence. This is not yet the full R1/R2 bag/window theorem. Native SQL conformance checks
 numeric scale, json and NULL cancellation; the installed history checks
 same-key replacement, transient cancellation and savepoint rollback for both
 trigger modes against independent source queries. Shared-buffer compaction,
@@ -139,18 +139,44 @@ case. This is a parameterized counterexample to cross-window cancellation,
 not a proof that the PostgreSQL reducer preserves arbitrary histories or every
 consumer window.
 
+The complete-image event model adds four bounded lemmas. Events carry a row
+identity, full row-image bytes, source-incarnation identifier, transaction
+identifier and commit LSN. It proves that events from one transaction share a
+consumer-window membership when their commit LSN is shared; a same-key payload
+replacement contributes `-1` and `+1` in distinct image buckets; an identical
+image insert/delete pair cancels within one incarnation and window; and an
+event from an earlier incarnation contributes nothing to the current
+incarnation's bucket. Three executable Verus mutants reject key-only image
+grouping, cross-incarnation grouping and a transaction cut that admits
+different commit LSNs.
+
+These lemmas specify the event semantics that the production adapter must
+preserve. They assume captured events already represent committed transactions
+with correct source-incarnation identifiers and full row images. They do not
+prove that PostgreSQL capture, commit-LSN assignment, schema changes or source
+recreation construct those records correctly; the installed SQL and lifecycle
+tests remain separate evidence for those boundaries.
+
 ## Controls and candidate binding
 
-The pinned Verus/Z3 runner checks five obligations:
+The pinned Verus/Z3 runner checks five executable decisions:
 `admitted_image_type`, `keep_change`, `image_event_weight`, `image_action` and
-`can_compact_history`. Seven executable mutants must fail a postcondition:
+`can_compact_history`, plus five proof obligations:
+`separate_consumer_cuts_retain_opposing_images`,
+`transaction_window_membership_is_atomic`,
+`payload_replacement_preserves_complete_image_delta`,
+`transient_same_image_cancels_within_incarnation` and
+`source_incarnation_prevents_cross_epoch_cancellation`. Eleven executable
+mutants must fail a postcondition:
 `lost-image-change`, `unknown-type-elision`, `lost-positive-image`,
 `reversed-negative-image`, `wrong-insert-event-weight`,
-`wrong-delete-event-weight` and `cross-truncate-barrier`; compilation/setup
-failures do not count. The candidate-binding helper requires these obligations
-and controls, source/caller/build hashes, all three named installed cases, and
-identical packaged/installed library bytes. CI uses the existing proof and
-candidate jobs, without introducing a tier.
+`wrong-delete-event-weight`, `cross-truncate-barrier`,
+`cross-shared-consumer`, `key-only-image-bucket`, `cross-incarnation-bucket` and
+`split-transaction-cut`; compilation/setup failures do not count. The
+candidate-binding helper requires these obligations and controls, hashes the
+production callers and the installed test sources, requires all eight named
+installed cases, and checks identical packaged/installed library bytes. CI
+uses the existing proof and candidate jobs, without introducing a tier.
 
 Binding requires the runtime's declared candidate commit to match the requested
 commit. It trusts the build/test runner for build origin and successful named

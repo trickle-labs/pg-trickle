@@ -174,6 +174,14 @@ class CandidateBindingTests(unittest.TestCase):
     def test_cdc_binding_requires_both_controls_and_trigger_callers(self) -> None:
         self.source = binding.ROOT / "verification/cdc_elision.rs"
         contract = binding.PROOF_CONTRACTS["cdc_elision"]
+        import check_cdc_elision_verification as driver
+        self.assertEqual(contract["inputs"], driver.PRODUCTION_INPUTS)
+        workflow = (binding.ROOT / ".github/workflows/ci.yml").read_text()
+        for case in contract["cases"]:
+            module, test = case.split("::")
+            self.assertIn(f"--test {module}", workflow)
+            self.assertIn(f"--runtime-case {case}", workflow)
+            self.assertIn(f"async fn {test}(", (binding.ROOT / "tests" / f"{module}.rs").read_text())
         self.proof.update({
             "schema": contract["schema"], "source_sha256": binding.digest(self.source),
             "obligations": sorted(contract["obligations"]),

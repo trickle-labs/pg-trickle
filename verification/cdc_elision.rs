@@ -92,6 +92,176 @@ pub open spec fn window_event_weight_spec(
     }
 }
 
+/// One committed change-buffer image, keyed by the complete logical identity
+/// and complete row representation. `source_incarnation` prevents reuse of a
+/// key from joining histories across a recreated source; all rows from one
+/// transaction share its commit LSN.
+#[allow(dead_code)]
+pub struct CapturedImageEvent {
+    pub row_identity: Seq<u8>,
+    pub row_image: Seq<u8>,
+    pub source_incarnation: u64,
+    pub transaction_id: u64,
+    pub commit_lsn: u64,
+    pub action: ImageEvent,
+}
+
+pub open spec fn captured_event_in_window(
+    event: CapturedImageEvent,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> bool {
+    event.source_incarnation == source_incarnation
+        && image_event_in_window_spec(event.commit_lsn, previous_cut, new_cut)
+}
+
+/// Signed multiplicity for one complete row-image bucket in one source
+/// incarnation and one consumer's `(previous_cut, new_cut]` window.
+pub open spec fn captured_image_weight(
+    event: CapturedImageEvent,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> int {
+    if event.row_identity == row_identity
+        && event.row_image == row_image
+        && captured_event_in_window(event, source_incarnation, previous_cut, new_cut)
+    {
+        image_event_weight_spec(event.action)
+    } else {
+        0
+    }
+}
+
+/// All captured rows from one committed source transaction share a single
+/// LSN, so a consumer cut cannot admit only part of that transaction.
+pub proof fn transaction_window_membership_is_atomic(
+    first: CapturedImageEvent,
+    second: CapturedImageEvent,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        first.transaction_id == second.transaction_id,
+        first.source_incarnation == second.source_incarnation,
+        first.commit_lsn == second.commit_lsn,
+    ensures
+        captured_event_in_window(first, source_incarnation, previous_cut, new_cut)
+            == captured_event_in_window(second, source_incarnation, previous_cut, new_cut),
+{
+}
+
+/// A same-key payload replacement contributes a delete and insert to distinct
+/// complete-image buckets; key equality alone cannot cancel the history.
+pub proof fn payload_replacement_preserves_complete_image_delta(
+    row_identity: Seq<u8>,
+    old_image: Seq<u8>,
+    new_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+    delete_lsn: u64,
+    insert_lsn: u64,
+)
+    requires
+        old_image != new_image,
+        previous_cut < delete_lsn <= new_cut,
+        previous_cut < insert_lsn <= new_cut,
+    ensures
+        captured_image_weight(
+            CapturedImageEvent {
+                row_identity, row_image: old_image, source_incarnation,
+                transaction_id: 1, commit_lsn: delete_lsn, action: ImageEvent::Delete,
+            },
+            row_identity, old_image, source_incarnation, previous_cut, new_cut,
+        ) == -1,
+        captured_image_weight(
+            CapturedImageEvent {
+                row_identity, row_image: new_image, source_incarnation,
+                transaction_id: 2, commit_lsn: insert_lsn, action: ImageEvent::Insert,
+            },
+            row_identity, new_image, source_incarnation, previous_cut, new_cut,
+        ) == 1,
+        captured_image_weight(
+            CapturedImageEvent {
+                row_identity, row_image: old_image, source_incarnation,
+                transaction_id: 1, commit_lsn: delete_lsn, action: ImageEvent::Delete,
+            },
+            row_identity, new_image, source_incarnation, previous_cut, new_cut,
+        ) == 0,
+{
+}
+
+/// An insert/delete pair for the same complete image cancels only when both
+/// events belong to the same source incarnation and selected consumer window.
+pub proof fn transient_same_image_cancels_within_incarnation(
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+    insert_lsn: u64,
+    delete_lsn: u64,
+)
+    requires
+        previous_cut < insert_lsn <= new_cut,
+        previous_cut < delete_lsn <= new_cut,
+    ensures
+        captured_image_weight(
+            CapturedImageEvent {
+                row_identity, row_image, source_incarnation,
+                transaction_id: 1, commit_lsn: insert_lsn, action: ImageEvent::Insert,
+            },
+            row_identity, row_image, source_incarnation, previous_cut, new_cut,
+        )
+            + captured_image_weight(
+                CapturedImageEvent {
+                    row_identity, row_image, source_incarnation,
+                    transaction_id: 2, commit_lsn: delete_lsn, action: ImageEvent::Delete,
+                },
+                row_identity, row_image, source_incarnation, previous_cut, new_cut,
+            ) == 0,
+{
+}
+
+/// Identical keys and images from different source incarnations remain
+/// separate histories; only the selected incarnation contributes to a cut.
+pub proof fn source_incarnation_prevents_cross_epoch_cancellation(
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    old_incarnation: u64,
+    current_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+    old_lsn: u64,
+    current_lsn: u64,
+)
+    requires
+        old_incarnation != current_incarnation,
+        previous_cut < old_lsn <= new_cut,
+        previous_cut < current_lsn <= new_cut,
+    ensures
+        captured_image_weight(
+            CapturedImageEvent {
+                row_identity, row_image, source_incarnation: old_incarnation,
+                transaction_id: 1, commit_lsn: old_lsn, action: ImageEvent::Delete,
+            },
+            row_identity, row_image, current_incarnation, previous_cut, new_cut,
+        ) == 0,
+        captured_image_weight(
+            CapturedImageEvent {
+                row_identity, row_image, source_incarnation: current_incarnation,
+                transaction_id: 2, commit_lsn: current_lsn, action: ImageEvent::Insert,
+            },
+            row_identity, row_image, current_incarnation, previous_cut, new_cut,
+        ) == 1,
+{
+}
+
 /// Opposite images can cancel over a combined LSN range while remaining
 /// observable in two consumers' separate windows. The production eligibility
 /// decision must therefore reject shared-consumer compaction.
