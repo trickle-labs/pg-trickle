@@ -124,6 +124,29 @@ fn coverage_mount() -> Option<Mount> {
 }
 
 #[cfg(not(feature = "light-e2e"))]
+fn with_mutation_package(image: ContainerRequest<GenericImage>) -> ContainerRequest<GenericImage> {
+    let Some(package_root) = std::env::var_os("PGT_E2E_MUTATION_PACKAGE_DIR") else {
+        return image;
+    };
+    let package_root = std::path::PathBuf::from(package_root);
+    let extension_dir = package_root.join("usr/share/postgresql/18/extension");
+    let library_dir = package_root.join("usr/lib/postgresql/18/lib");
+    assert!(
+        extension_dir.is_dir(),
+        "missing candidate extension package at {extension_dir:?}"
+    );
+    assert!(
+        library_dir.is_dir(),
+        "missing candidate extension library at {library_dir:?}"
+    );
+
+    // Testcontainers copies these after create_container and before start_container.
+    image
+        .with_copy_to("/usr/share/postgresql/18/extension", extension_dir)
+        .with_copy_to("/usr/lib/postgresql/18/lib", library_dir)
+}
+
+#[cfg(not(feature = "light-e2e"))]
 fn attest_release_installation(container_id: &str) {
     let (Some(output), Some(candidate_root)) = (
         std::env::var_os("PGT_RELEASE_ATTESTATION_PATH"),
@@ -475,7 +498,7 @@ async fn shared_container() -> &'static SharedContainer {
                 ]);
             }
 
-            let container = start_e2e_image(image).await.expect(
+            let container = start_e2e_image(with_mutation_package(image)).await.expect(
                 "Failed to start shared pg_trickle E2E container. \
                  Did you run ./tests/build_e2e_image.sh first?",
             );
@@ -741,7 +764,7 @@ impl E2eDb {
             ]);
         }
 
-        let container = start_e2e_image(image).await.expect(
+        let container = start_e2e_image(with_mutation_package(image)).await.expect(
             "Failed to start pg_trickle E2E container. \
                      Did you run ./tests/build_e2e_image.sh first?",
         );
@@ -798,7 +821,7 @@ impl E2eDb {
             image = image.with_mount(mount);
         }
 
-        let container = start_e2e_image(image).await.expect(
+        let container = start_e2e_image(with_mutation_package(image)).await.expect(
             "Failed to start bench container. \
              Did you run ./tests/build_e2e_image.sh first?",
         );
