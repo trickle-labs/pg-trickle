@@ -51,12 +51,22 @@ pub fn image_action(weight: i64) -> (action: ImageAction)
 
 /// Keyed history compaction is safe only for one immediate identity and one
 /// consumer, with no reset barrier in the selected window.
+pub open spec fn can_compact_history_spec(
+    has_immediate_unique_identity: bool,
+    has_single_consumer: bool,
+    has_truncate_barrier: bool,
+) -> bool {
+    has_immediate_unique_identity && (has_single_consumer && !has_truncate_barrier)
+}
+
 pub fn can_compact_history(
     has_immediate_unique_identity: bool,
     has_single_consumer: bool,
     has_truncate_barrier: bool,
 ) -> (eligible: bool)
-    ensures eligible == (has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier),
+    ensures eligible == can_compact_history_spec(
+        has_immediate_unique_identity, has_single_consumer, has_truncate_barrier,
+    ),
 {
     has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier
 }
@@ -112,13 +122,13 @@ pub proof fn separate_consumer_cuts_retain_opposing_images(
         window_event_weight_spec(
             ImageEvent::Delete, delete_lsn, shared_cut, later_cut,
         ) == -1,
-        !can_compact_history(true, false, false),
+        !can_compact_history_spec(true, false, false),
 {
     assert(earlier_cut <= shared_cut);
     assert(shared_cut <= later_cut);
     assert(image_event_weight_spec(ImageEvent::Insert) == 1);
     assert(image_event_weight_spec(ImageEvent::Delete) == -1);
-    assert(!can_compact_history(true, false, false));
+    assert(!can_compact_history_spec(true, false, false));
 }
 }
 
