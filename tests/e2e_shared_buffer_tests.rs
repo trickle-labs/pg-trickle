@@ -72,6 +72,117 @@ async fn test_cdc_deferred_replacement_preserves_complete_payload() {
 }
 
 #[tokio::test]
+async fn test_cdc_committed_history_preserves_latest_complete_payload() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    for mode in ["row", "statement"] {
+        let source = format!("committed_history_{mode}");
+        let output = format!("{source}_rows");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, v INT, n NUMERIC, j JSON)"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (1,10,1.0,'{{\"revision\":0}}')"
+        ))
+        .await;
+
+        let query = format!("SELECT id,v,n,j FROM {source}");
+        db.try_execute_with_config(
+            &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{output}',$q${query}$q$,'24h','DIFFERENTIAL')"
+            ),
+        )
+        .await
+        .unwrap();
+
+        // Each statement commits separately before the consumer advances its cut.
+        db.execute(&format!(
+            "UPDATE {source} SET v=11,n=1.00,j='{{\"revision\":1}}' WHERE id=1"
+        ))
+        .await;
+        db.execute(&format!(
+            "UPDATE {source} SET v=12,n=2.00,j='{{\"revision\":2}}' WHERE id=1"
+        ))
+        .await;
+        db.execute(&format!("DELETE FROM {source} WHERE id=1"))
+            .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (1,99,9.00,'{{\"revision\":99}}')"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (2,20,2.00,'{{\"transient\":true}}')"
+        ))
+        .await;
+        db.execute(&format!("DELETE FROM {source} WHERE id=2"))
+            .await;
+
+        let source_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        let buffer = db.change_buffer_table(source_oid).await;
+        let images: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*)::bigint FROM {buffer} WHERE action IN ('I','D')"
+            ))
+            .await;
+        let transactions: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(DISTINCT source_xid::text)::bigint FROM {buffer} \
+                 WHERE action IN ('I','D')"
+            ))
+            .await;
+        assert_eq!(
+            images, 8,
+            "six separately committed DML statements capture eight images"
+        );
+        assert_eq!(
+            transactions, 6,
+            "each committed statement retains its transaction identity"
+        );
+
+        let before: i64 = db
+            .query_scalar("SELECT coalesce(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{output}')"),
+        )
+        .await
+        .unwrap();
+        let differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{output}' AND h.refresh_id>{before} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            differential,
+            "the committed history must be reduced differentially"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &output,
+            &query,
+            "multiple committed replacements and transient cancellation in one consumer window",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn test_cdc_deferred_key_swap_preserves_complete_images() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")

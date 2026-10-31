@@ -224,9 +224,9 @@ async fn test_autorefresh_diamond_cascade() {
 
     let l2_q = "SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM ard_src GROUP BY grp";
 
-    // Let the scheduler finish its first dependency-chain cycle before testing
-    // propagation of the later source mutation.
-    wait_for_refresh_cycle(&db, "ard_l2", Duration::from_secs(30)).await;
+    // Stream-table creation performs the initial refresh. Check that baseline
+    // directly; with no upstream data change, the scheduler has no reason to
+    // refresh this leaf and advance last_refresh_at again.
     db.assert_st_matches_query("ard_l2", l2_q).await;
     let before_insert: Option<String> = db
         .query_scalar_opt(

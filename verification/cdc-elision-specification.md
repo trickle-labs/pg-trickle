@@ -22,8 +22,12 @@ The existing union of consumer columns and scan-side mask intersection remain
 separate integration boundaries.
 
 `verification/cdc_elision.rs` contains the exact production decisions checked
-by Verus: `admitted_image_type`, `keep_change`, `image_action` and
-`can_compact_history`. They require no unchecked preconditions.
+by Verus: `admitted_image_type`, `keep_change`, `image_event_weight`,
+`image_action` and `can_compact_history`. They require no unchecked
+preconditions. `keyed_weight_sql` obtains the `I` and `D` coefficients from
+`image_event_weight` before lowering them into PostgreSQL's per-image `SUM`.
+This proves the signed coefficient decision; PostgreSQL's aggregate execution
+and complete history equivalence remain runtime conformance boundaries.
 `can_compact_history` admits compaction only for an immediate unique identity,
 one dependent stream table and a selected LSN range with no captured TRUNCATE
 marker. Base sources supply primary-key metadata; stream-table sources supply
@@ -109,11 +113,14 @@ each complete row identity. PostgreSQL's
 distinguish representations that SQL equality merges and work without a
 scalar equality/send/output function, including json. Dense ranks using binary
 record ordering identify equal images; signed SQL sums cancel only within an
-image. `image_action` checks positive=insert, negative=delete and zero=skip.
-The SQL adapter obtains its action predicates from that executable. The
-existing keyed-target rule prefers a surviving insert over an old delete of
-the same identity, implementing an upsert. This requires a valid keyed endpoint;
-it is not a general multiplicity-expanding bag consumer.
+image. `image_event_weight` proves that each insert contributes +1 and each
+delete contributes -1; `image_action` checks positive=insert, negative=delete
+and zero=skip. The SQL adapter obtains its coefficients and action predicates
+from those executables. The existing keyed-target rule prefers a surviving
+insert over an old delete of the same identity, implementing an upsert. This
+requires a valid keyed endpoint; it is not a general multiplicity-expanding
+bag consumer. A repeated-image integration case checks that an intermediate
+I/D pair cancels while the final payload survives.
 
 Verus proves the weight classifier only. It does **not** prove PostgreSQL's
 image comparisons, SQL sums/window functions, field binding, complete committed
@@ -126,12 +133,15 @@ epoch transitions and every protected consumer window remain outside the proof.
 
 ## Controls and candidate binding
 
-The existing pinned Verus/Z3 runner checks all three obligations. Executable
-lost-image-change, unknown-type-elision, lost-positive-image and
-reversed-negative-image mutants must fail a postcondition;
-compilation/setup failures do not count. The existing candidate-binding helper
-requires all four controls, source/caller/build hashes, all three named installed cases,
-and identical packaged/installed library bytes. CI uses the existing proof and
+The pinned Verus/Z3 runner checks five obligations:
+`admitted_image_type`, `keep_change`, `image_event_weight`, `image_action` and
+`can_compact_history`. Seven executable mutants must fail a postcondition:
+`lost-image-change`, `unknown-type-elision`, `lost-positive-image`,
+`reversed-negative-image`, `wrong-insert-event-weight`,
+`wrong-delete-event-weight` and `cross-truncate-barrier`; compilation/setup
+failures do not count. The candidate-binding helper requires these obligations
+and controls, source/caller/build hashes, all three named installed cases, and
+identical packaged/installed library bytes. CI uses the existing proof and
 candidate jobs, without introducing a tier.
 
 Binding requires the runtime's declared candidate commit to match the requested
