@@ -133,12 +133,15 @@ epoch transitions and every protected consumer window remain outside the proof.
 
 ## Controls and candidate binding
 
-The existing pinned Verus/Z3 runner checks all three obligations. Executable
-lost-image-change, unknown-type-elision, lost-positive-image and
-reversed-negative-image mutants must fail a postcondition;
-compilation/setup failures do not count. The existing candidate-binding helper
-requires all four controls, source/caller/build hashes, all three named installed cases,
-and identical packaged/installed library bytes. CI uses the existing proof and
+The pinned Verus/Z3 runner checks five obligations:
+`admitted_image_type`, `keep_change`, `image_event_weight`, `image_action` and
+`can_compact_history`. Seven executable mutants must fail a postcondition:
+`lost-image-change`, `unknown-type-elision`, `lost-positive-image`,
+`reversed-negative-image`, `wrong-insert-event-weight`,
+`wrong-delete-event-weight` and `cross-truncate-barrier`; compilation/setup
+failures do not count. The candidate-binding helper requires these obligations
+and controls, source/caller/build hashes, all three named installed cases, and
+identical packaged/installed library bytes. CI uses the existing proof and
 candidate jobs, without introducing a tier.
 
 Binding requires the runtime's declared candidate commit to match the requested
