@@ -17,6 +17,7 @@ MUTATIONS = {
     "unknown-type-elision": ("    !admitted || !image_equal\n", "    admitted && !image_equal\n"),
     "lost-positive-image": ("if weight > 0 { ImageAction::Insert }", "if weight > 0 { ImageAction::Skip }"),
     "reversed-negative-image": ("else if weight < 0 { ImageAction::Delete }", "else if weight < 0 { ImageAction::Insert }"),
+    "wrong-insert-event-weight": ("ImageEvent::Insert => 1,", "ImageEvent::Insert => 2,"),
     "wrong-delete-event-weight": ("ImageEvent::Delete => -1,", "ImageEvent::Delete => 1,"),
     "cross-truncate-barrier": (
         "    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier\n",
@@ -84,7 +85,7 @@ def run_checks() -> None:
             "semantic_mutation": controls["lost-image-change"], "semantic_mutations": controls,
         }
         (EVIDENCE / "cdc-elision-verification.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        print(f"CDC policy verified; all five executable mutants rejected. Evidence: {EVIDENCE.relative_to(runner.ROOT)}")
+        print(f"CDC policy verified; all {len(MUTATIONS)} executable mutants rejected.")
     finally:
         temporary.unlink(missing_ok=True)
 
