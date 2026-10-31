@@ -56,11 +56,7 @@ pub fn can_compact_history(
     has_single_consumer: bool,
     has_truncate_barrier: bool,
 ) -> (eligible: bool)
-    ensures eligible == compaction_eligible_spec(
-        has_immediate_unique_identity,
-        has_single_consumer,
-        has_truncate_barrier,
-    ),
+    ensures eligible == (has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier),
 {
     has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier
 }
