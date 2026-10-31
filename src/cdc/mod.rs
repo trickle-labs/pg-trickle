@@ -192,6 +192,9 @@ pub fn lock_source_relations(source_oids: &[pg_sys::Oid]) -> Result<(), PgTrickl
     let mut relation_oids: Vec<u32> = relation_oids.into_iter().collect();
     relation_oids.sort_unstable();
     for oid in relation_oids {
+        let Some(table) = resolve_relation_name(pg_sys::Oid::from(oid))? else {
+            continue;
+        };
         let relkind = Spi::get_one_with_args::<String>(
             "SELECT relkind::text FROM pg_class WHERE oid = $1",
             &[pg_sys::Oid::from(oid).into()],
@@ -200,9 +203,6 @@ pub fn lock_source_relations(source_oids: &[pg_sys::Oid]) -> Result<(), PgTrickl
         if relkind.as_deref() == Some("f") {
             continue;
         }
-        let Some(table) = resolve_relation_name(pg_sys::Oid::from(oid))? else {
-            continue;
-        };
         Spi::run(&format!("LOCK TABLE {table} IN SHARE MODE")) // nosemgrep: rust.spi.run.dynamic-format — table is returned by PostgreSQL format('%I.%I') from a catalog OID.
             .map_err(|e| {
                 PgTrickleError::LockTimeout(format!("could not lock source {table}: {e}"))
