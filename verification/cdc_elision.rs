@@ -24,8 +24,12 @@ pub enum ImageAction { Insert, Delete, Skip }
 pub enum ImageEvent { Insert, Delete }
 
 /// INSERT adds one image occurrence and DELETE removes one.
+pub open spec fn image_event_weight_spec(action: ImageEvent) -> int {
+    if action == ImageEvent::Insert { 1 } else { -1 }
+}
+
 pub fn image_event_weight(action: ImageEvent) -> (weight: i64)
-    ensures weight == if action == ImageEvent::Insert { 1 } else { -1 },
+    ensures (weight as int) == image_event_weight_spec(action),
 {
     match action {
         ImageEvent::Insert => 1,
@@ -52,9 +56,80 @@ pub fn can_compact_history(
     has_single_consumer: bool,
     has_truncate_barrier: bool,
 ) -> (eligible: bool)
-    ensures eligible == (has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier),
+    ensures eligible == compaction_eligible_spec(
+        has_immediate_unique_identity,
+        has_single_consumer,
+        has_truncate_barrier,
+    ),
 {
     has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier
+}
+
+pub open spec fn compaction_eligible_spec(
+    has_immediate_unique_identity: bool,
+    has_single_consumer: bool,
+    has_truncate_barrier: bool,
+) -> bool {
+    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier
+}
+
+pub open spec fn image_event_in_window_spec(
+    event_lsn: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> bool {
+    event_lsn > previous_cut && event_lsn <= new_cut
+}
+
+pub open spec fn window_event_weight_spec(
+    action: ImageEvent,
+    event_lsn: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> int {
+    if image_event_in_window_spec(event_lsn, previous_cut, new_cut) {
+        image_event_weight_spec(action)
+    } else {
+        0
+    }
+}
+
+/// Opposite images can cancel over a combined LSN range while remaining
+/// observable in two consumers' separate windows. The production eligibility
+/// decision must therefore reject shared-consumer compaction.
+pub proof fn separate_consumer_cuts_retain_opposing_images(
+    insert_lsn: u64,
+    delete_lsn: u64,
+    earlier_cut: u64,
+    shared_cut: u64,
+    later_cut: u64,
+)
+    requires
+        earlier_cut < insert_lsn,
+        insert_lsn <= shared_cut,
+        shared_cut < delete_lsn,
+        delete_lsn <= later_cut,
+    ensures
+        image_event_weight_spec(ImageEvent::Insert)
+            + image_event_weight_spec(ImageEvent::Delete) == 0,
+        window_event_weight_spec(
+            ImageEvent::Insert, insert_lsn, earlier_cut, shared_cut,
+        ) == 1,
+        window_event_weight_spec(
+            ImageEvent::Delete, delete_lsn, earlier_cut, shared_cut,
+        ) == 0,
+        window_event_weight_spec(
+            ImageEvent::Insert, insert_lsn, shared_cut, later_cut,
+        ) == 0,
+        window_event_weight_spec(
+            ImageEvent::Delete, delete_lsn, shared_cut, later_cut,
+        ) == -1,
+        !compaction_eligible_spec(true, false, false),
+{
+    assert(earlier_cut <= shared_cut);
+    assert(shared_cut <= later_cut);
+    assert(image_event_weight_spec(ImageEvent::Insert) == 1);
+    assert(image_event_weight_spec(ImageEvent::Delete) == -1);
 }
 }
 

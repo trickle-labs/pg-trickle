@@ -131,6 +131,14 @@ same-key replacement, transient cancellation and savepoint rollback for both
 trigger modes against independent source queries. Shared-buffer compaction,
 epoch transitions and every protected consumer window remain outside the proof.
 
+The verifier also proves `separate_consumer_cuts_retain_opposing_images`: for
+any ordered insert/delete LSNs split by two consumers' cuts, the combined
+signed weight is zero while the first consumer observes `+1` and the second
+observes `-1`; the production-used compaction gate rejects the shared-consumer
+case. This is a parameterized counterexample to cross-window cancellation,
+not a proof that the PostgreSQL reducer preserves arbitrary histories or every
+consumer window.
+
 ## Controls and candidate binding
 
 The pinned Verus/Z3 runner checks five obligations:
