@@ -127,7 +127,7 @@ PROOF_CONTRACTS = {
             "transient_same_image_cancels_within_incarnation", "source_incarnation_prevents_cross_epoch_cancellation",
         },
         "cases": CDC_ELISION_CASES,
-        "inputs": ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "tests/e2e_shared_buffer_tests.rs", "tests/e2e_cdc_tests.rs", "tests/e2e_schema_evolution_tests.rs", "Cargo.toml", "Cargo.lock"],
+        "inputs": ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "tests/e2e_shared_buffer_tests.rs", "tests/e2e_cdc_tests.rs", "tests/e2e_schema_evolution_tests.rs", "tests/dvm_aggregate_execution_tests.rs", "Cargo.toml", "Cargo.lock"],
         "mutants": {
             "lost-image-change", "unknown-type-elision", "lost-positive-image", "reversed-negative-image",
             "wrong-insert-event-weight", "wrong-delete-event-weight", "cross-truncate-barrier", "cross-shared-consumer",

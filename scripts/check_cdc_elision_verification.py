@@ -30,7 +30,8 @@ PRODUCTION_INPUTS = [
     "src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs",
     "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs",
     "src/refresh/codegen.rs", "tests/e2e_shared_buffer_tests.rs", "tests/e2e_cdc_tests.rs",
-    "tests/e2e_schema_evolution_tests.rs", "Cargo.toml", "Cargo.lock",
+    "tests/e2e_schema_evolution_tests.rs", "tests/dvm_aggregate_execution_tests.rs",
+    "Cargo.toml", "Cargo.lock",
 ]
 MUTATIONS = {
     "lost-image-change": ("    !admitted || !image_equal\n", "    false\n"),
@@ -83,6 +84,8 @@ def check_contract() -> None:
         raise ValueError("keyed MERGE does not execute the checked image action adapter")
     if 'image_event_weight_sql("__pgt_action")' not in source:
         raise ValueError("keyed image weights bypass the checked signed event coefficients")
+    if "SUM({event_weight})" not in source or "PARTITION BY __pgt_row_id,{image_column}" not in source:
+        raise ValueError("keyed image weights must sum within complete row-image buckets")
     if "crate::cdc_elision::can_compact_history(" not in (runner.ROOT / "src/cdc/mod.rs").read_text():
         raise ValueError("base-buffer compaction bypasses the checked barrier decision")
     cdc = (runner.ROOT / "src/cdc/mod.rs").read_text()

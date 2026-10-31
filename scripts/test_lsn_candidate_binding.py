@@ -182,6 +182,11 @@ class CandidateBindingTests(unittest.TestCase):
             self.assertIn(f"--test {module}", workflow)
             self.assertIn(f"--runtime-case {case}", workflow)
             self.assertIn(f"async fn {test}(", (binding.ROOT / "tests" / f"{module}.rs").read_text())
+        dvm_suite = "test_cdc_keyed_weight_uses_complete_images_without_scalar_equality"
+        dvm_runner = (binding.ROOT / "scripts/run_dvm_integration_tests.sh").read_text()
+        self.assertIn("dvm_aggregate_execution_tests", dvm_runner)
+        self.assertIn("bash ./scripts/run_dvm_integration_tests.sh pg18", workflow)
+        self.assertIn(f"async fn {dvm_suite}(", (binding.ROOT / "tests/dvm_aggregate_execution_tests.rs").read_text())
         self.proof.update({
             "schema": contract["schema"], "source_sha256": binding.digest(self.source),
             "obligations": sorted(contract["obligations"]),
