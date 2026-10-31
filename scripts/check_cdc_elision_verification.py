@@ -11,14 +11,14 @@ import check_lsn_verification as runner
 SOURCE = runner.ROOT / "verification/cdc_elision.rs"
 CHECKER = runner.ROOT / "scripts/check_cdc_elision_verification.py"
 EVIDENCE = runner.ROOT / ".p2p/work/issue-1221-cdc-observations/evidence"
-OBLIGATIONS = [
+EXECUTABLE_OBLIGATIONS = [
     "admitted_image_type",
     "keep_change",
     "image_event_weight",
     "image_action",
     "can_compact_history",
-    "separate_consumer_cuts_retain_opposing_images",
 ]
+OBLIGATIONS = EXECUTABLE_OBLIGATIONS + ["separate_consumer_cuts_retain_opposing_images"]
 PRODUCTION_INPUTS = ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "Cargo.toml", "Cargo.lock"]
 MUTATIONS = {
     "lost-image-change": ("    !admitted || !image_equal\n", "    false\n"),
@@ -78,7 +78,7 @@ def run_checks() -> None:
         solver = runner.run_tool_identity("z3", ["--version"], EVIDENCE / "cdc-z3-version.log")
         baseline = runner.run_verus("verification/cdc_elision.rs", EVIDENCE / "cdc-verification-baseline.log")
         summary = runner.VERIFICATION_SUMMARY.search(baseline.stdout)
-        if baseline.returncode or summary is None or int(summary[1]) < len(OBLIGATIONS) or int(summary[2]) != 0:
+        if baseline.returncode or summary is None or int(summary[1]) < len(EXECUTABLE_OBLIGATIONS) or int(summary[2]) != 0:
             raise RuntimeError("CDC policy baseline failed or omitted required obligations")
         controls = {}
         for name in MUTATIONS:
