@@ -235,6 +235,10 @@ class AllocationTests(unittest.TestCase):
         paths = (ci_pr_suite.ROOT / ".github/ci-paths.yml").read_text()
         self.assertIn("'scripts/ci_prepare_disk.sh'", paths.split("harness:\n")[1].split("benchmarks:\n")[0])
         self.assertIn("'scripts/ci_prepare_disk.sh'", paths.split("failure_recovery_changed:\n")[1].split("unsafe_boundary_changed:\n")[0])
+        intersect_paths = paths.split("intersect_mutants:\n")[1].split("benchmarks:\n")[0]
+        for path in ("'src/dvm/**'", "'src/refresh/**'", "'src/setop_state.rs'", "'sql/*.sql'",
+                     "'tests/Dockerfile.e2e'", "'scripts/run_e2e_tests.sh'"):
+            self.assertIn(path, intersect_paths)
 
     def test_proof_consolidation_cannot_skip_verification_or_ungate_package(self):
         workflow = (ci_pr_suite.ROOT / ".github/workflows/ci.yml").read_text()
@@ -434,6 +438,7 @@ class VerdictTests(unittest.TestCase):
         needs["release-qualification-contract"]["outputs"]["runtime"] = str(runtime).lower()
         needs["release-qualification-contract"]["outputs"].update({
             "unsafe_boundary_changed": "false", "failure_recovery_changed": "false",
+            "intersect_mutants": "false",
         })
         if runtime:
             for name in ("unit-tests", "integration-tests", "otel-collector-contract"):
@@ -457,6 +462,7 @@ class VerdictTests(unittest.TestCase):
         for job in needs.values():
             job["result"] = "success"
         needs["release-qualification-contract"]["outputs"]["unsafe_boundary_changed"] = "true"
+        needs["release-qualification-contract"]["outputs"]["intersect_mutants"] = "true"
         for name in needs:
             for status in ("failure", "cancelled", "skipped", "missing"):
                 with self.subTest(name=name, status=status):
@@ -482,13 +488,26 @@ class VerdictTests(unittest.TestCase):
         )
 
     def test_missing_sensitive_selection_cannot_skip_qualification(self):
-        for flag in ("unsafe_boundary_changed", "failure_recovery_changed"):
+        for flag in ("unsafe_boundary_changed", "failure_recovery_changed", "intersect_mutants"):
             needs = self.needs()
             del needs["release-qualification-contract"]["outputs"][flag]
             self.assertIn(
                 f"release-qualification-contract: missing/invalid {flag}",
                 check_ci_results.check(needs, draft=False),
             )
+
+    def test_intersect_mutations_are_required_when_intersect_paths_change(self):
+        needs = self.needs()
+        for job in needs.values():
+            job["result"] = "success"
+        needs["release-qualification-contract"]["outputs"]["intersect_mutants"] = "true"
+        needs["intersect-semantic-mutants"]["result"] = "skipped"
+        self.assertIn(
+            "intersect-semantic-mutants: skipped",
+            check_ci_results.check(needs, draft=False),
+        )
+        needs["intersect-semantic-mutants"] = {"result": "success", "outputs": {}}
+        self.assertEqual(check_ci_results.check(needs, draft=False), [])
 
 
 if __name__ == "__main__":
