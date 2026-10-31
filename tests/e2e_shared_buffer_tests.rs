@@ -684,8 +684,8 @@ async fn test_compaction_shared_stream_preserves_consumer_boundaries() {
     }
 
     db.execute("INSERT INTO compact_src VALUES (101)").await;
-    db.refresh_st("compact_upstream").await;
-    db.refresh_st("compact_fast").await;
+    db.refresh_st_with_retry("compact_upstream").await;
+    db.refresh_st_with_retry("compact_fast").await;
     assert_eq!(db.count("compact_fast").await, 101);
     db.execute("DELETE FROM compact_src WHERE id = 101").await;
     db.refresh_st("compact_upstream").await;
