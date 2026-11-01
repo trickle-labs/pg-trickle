@@ -417,7 +417,7 @@ async fn test_cdc_deferred_key_swap_preserves_protected_consumer_cuts() {
 }
 
 #[tokio::test]
-async fn test_cdc_shared_source_compaction_preserves_interior_consumer_cut() {
+async fn test_cdc_shared_source_skip_compaction_preserves_interior_consumer_cut() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
         .await;
@@ -486,9 +486,9 @@ async fn test_cdc_shared_source_compaction_preserves_interior_consumer_cut() {
         )
         .await;
 
-        // The fast consumer's range now spans changes from both sides of the
-        // slow consumer's cut. With two consumers, compaction must retain all
-        // four D/I images so the slow consumer can consume only its own suffix.
+        // With two consumers, production excludes this buffer from keyed
+        // compaction. All four D/I images must remain for the slow consumer's
+        // protected suffix.
         db.execute(&format!("UPDATE {source} SET v=3,label='final' WHERE id=1"))
             .await;
         let before_fast: i64 = db
@@ -580,7 +580,7 @@ async fn test_cdc_shared_source_compaction_preserves_interior_consumer_cut() {
 }
 
 #[tokio::test]
-async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
+async fn test_cdc_keyless_shared_consumers_retain_three_protected_windows() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
         .await;
@@ -670,6 +670,15 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
             "middle keyless consumer after duplicate and NULL insertions",
         )
         .await;
+        let retained_after_middle: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM {buffer} WHERE action IN ('D','I')"
+            ))
+            .await;
+        assert_eq!(
+            retained_after_middle, 2,
+            "shared keyless history remains intact after the middle consumer refresh"
+        );
 
         // The slow consumer advances to an intermediate cut after one
         // duplicate retraction.
@@ -698,6 +707,15 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
             "slow keyless consumer after the duplicate retraction",
         )
         .await;
+        let retained_after_slow: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM {buffer} WHERE action IN ('D','I')"
+            ))
+            .await;
+        assert_eq!(
+            retained_after_slow, 3,
+            "shared keyless history retains both consumer windows after the later cut"
+        );
 
         // Delete one NULL occurrence. The fast consumer now sees a net-zero
         // bag change across the insert and both delete transactions.
@@ -731,6 +749,15 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
         assert!(
             fast_advanced,
             "fast keyless consumer must advance differentially"
+        );
+        let retained_after_fast: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM {buffer} WHERE action IN ('D','I')"
+            ))
+            .await;
+        assert_eq!(
+            retained_after_fast, 4,
+            "shared keyless history must retain every image while consumer cuts differ"
         );
         e2e::oracle::assert_st_query_exact(
             &db,

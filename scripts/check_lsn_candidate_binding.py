@@ -46,7 +46,8 @@ LIFECYCLE_CASES = [
 CDC_ELISION_CASES = [
     "e2e_shared_buffer_tests::test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders",
     "e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload",
-    "e2e_shared_buffer_tests::test_cdc_shared_source_compaction_preserves_interior_consumer_cut",
+    "e2e_shared_buffer_tests::test_cdc_shared_source_skip_compaction_preserves_interior_consumer_cut",
+    "e2e_shared_buffer_tests::test_cdc_keyless_shared_consumers_retain_three_protected_windows",
     "e2e_shared_buffer_tests::test_cdc_statement_payload_names_do_not_shadow_row_aliases",
     "e2e_cdc_tests::test_sf10_truncate_then_insert_post_truncate_rows_captured",
 ]
