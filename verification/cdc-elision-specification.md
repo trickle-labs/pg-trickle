@@ -4,10 +4,15 @@ This #1221 slice changes UPDATE masks, retains deferred-key source histories,
 classifies keyed image weights and applies the verified compaction eligibility
 gate to both base and stream-table buffers. It does not yet prove complete scan
 normalization or the reduction SQL's equivalence for every history. The
-history model now proves per-image deltas for valid unique-row transitions in
-one source incarnation and one consumer window. PostgreSQL SQL reduction,
-general multi-row bags, transaction boundaries and all protected consumer
-windows remain separate or incomplete obligations.
+history model proves per-image deltas for valid unique-row transitions and,
+for arbitrary finite event prefixes, equates each complete-image bucket's
+signed sum with its initial-to-final bag multiplicity change. The latter
+permits duplicate row identities. Consumer-window additivity and equal-LSN
+transaction membership are also modeled. PostgreSQL SQL execution equivalence,
+per-bucket rejection of unmatched deletes, and nonnegative bag counts are
+modeled. Whole-batch validity for every production multi-row history, SQL
+execution equivalence, and all protected consumer windows remain separate or
+incomplete obligations.
 
 ## Independent observation contract
 
@@ -28,8 +33,13 @@ by Verus: `admitted_image_type`, `keep_change`, `image_event_weight`,
 `image_action` and `can_compact_history`. They require no unchecked
 preconditions. `keyed_weight_sql` obtains the `I` and `D` coefficients from
 `image_event_weight` before lowering them into PostgreSQL's per-image `SUM`.
-This proves the signed coefficient decision; PostgreSQL's aggregate execution
-and complete history equivalence remain runtime conformance boundaries.
+`captured_image_bucket_delta_matches_bag_count` proves the generic accumulator
+equation for an arbitrary finite event prefix and complete-image bucket. This
+proves the signed count semantics, not PostgreSQL's aggregate execution or the
+whole-batch validity of every production history; those remain runtime
+conformance and caller-assumption boundaries. The bucket history predicate
+rejects an unmatched delete and its lemma establishes nonnegative multiplicity
+for every accepted prefix.
 `can_compact_history` admits compaction only for an immediate unique identity,
 one dependent stream table and a selected LSN range with no captured TRUNCATE
 marker. Base sources supply primary-key metadata; stream-table sources supply
