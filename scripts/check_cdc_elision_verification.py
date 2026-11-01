@@ -37,6 +37,7 @@ PRODUCTION_INPUTS = [
     "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs",
     "src/refresh/codegen.rs", "tests/e2e_shared_buffer_tests.rs", "tests/e2e_cdc_tests.rs",
     "tests/e2e_schema_evolution_tests.rs", "tests/dvm_aggregate_execution_tests.rs",
+    "tests/e2e_keyless_tests.rs",
     "Cargo.toml", "Cargo.lock",
 ]
 MUTATIONS = {
