@@ -122,6 +122,7 @@ PROOF_CONTRACTS = {
         "obligations": {
             "admitted_image_type", "keep_change", "image_event_weight", "image_action", "can_compact_history",
             "separate_consumer_cuts_retain_opposing_images",
+            "captured_image_bucket_delta_splits_at_consumer_cut",
             "transaction_window_membership_is_atomic", "payload_replacement_preserves_complete_image_delta",
             "append_captured_image_bucket_delta",
             "transient_same_image_cancels_within_incarnation", "source_incarnation_prevents_cross_epoch_cancellation",
@@ -132,6 +133,7 @@ PROOF_CONTRACTS = {
             "lost-image-change", "unknown-type-elision", "lost-positive-image", "reversed-negative-image",
             "wrong-insert-event-weight", "wrong-delete-event-weight", "cross-truncate-barrier", "cross-shared-consumer",
             "key-only-image-bucket", "cross-incarnation-bucket", "split-transaction-cut", "reverse-history-weight",
+            "overlapping-consumer-boundary",
         },
     },
 }

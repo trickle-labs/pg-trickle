@@ -164,6 +164,90 @@ pub open spec fn captured_image_bucket_delta(
     }
 }
 
+/// Splitting one consumer range at a cut preserves every image bucket's delta
+/// over an arbitrary finite captured history. The two half-open-by-boundary
+/// windows are disjoint because membership is `(previous_cut, new_cut]`.
+pub proof fn captured_image_bucket_delta_splits_at_consumer_cut(
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    earlier_cut: u64,
+    middle_cut: u64,
+    later_cut: u64,
+)
+    requires
+        0 <= count <= history.len(),
+        earlier_cut <= middle_cut <= later_cut,
+    ensures
+        captured_image_bucket_delta(
+            history, count, row_identity, row_image, source_incarnation,
+            earlier_cut, later_cut,
+        ) == captured_image_bucket_delta(
+            history, count, row_identity, row_image, source_incarnation,
+            earlier_cut, middle_cut,
+        ) + captured_image_bucket_delta(
+            history, count, row_identity, row_image, source_incarnation,
+            middle_cut, later_cut,
+        ),
+    decreases count,
+{
+    if count > 0 {
+        reveal(captured_image_bucket_delta);
+        captured_image_bucket_delta_splits_at_consumer_cut(
+            history, count - 1, row_identity, row_image, source_incarnation,
+            earlier_cut, middle_cut, later_cut,
+        );
+        captured_image_weight_splits_at_consumer_cut(
+            history[count - 1], row_identity, row_image, source_incarnation,
+            earlier_cut, middle_cut, later_cut,
+        );
+    }
+}
+
+/// One event contributes to exactly one side of an adjacent consumer cut.
+pub proof fn captured_image_weight_splits_at_consumer_cut(
+    event: CapturedImageEvent,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    earlier_cut: u64,
+    middle_cut: u64,
+    later_cut: u64,
+)
+    requires earlier_cut <= middle_cut <= later_cut,
+    ensures
+        captured_image_weight(
+            event, row_identity, row_image, source_incarnation,
+            earlier_cut, later_cut,
+        ) == captured_image_weight(
+            event, row_identity, row_image, source_incarnation,
+            earlier_cut, middle_cut,
+        ) + captured_image_weight(
+            event, row_identity, row_image, source_incarnation,
+            middle_cut, later_cut,
+        ),
+{
+    reveal(captured_image_weight);
+    reveal(captured_event_in_window);
+    reveal(image_event_in_window_spec);
+    if event.row_identity == row_identity
+        && event.row_image == row_image
+        && event.source_incarnation == source_incarnation
+    {
+        if event.commit_lsn > earlier_cut && event.commit_lsn <= later_cut {
+            if event.commit_lsn <= middle_cut {
+                assert(event.commit_lsn > earlier_cut && event.commit_lsn <= middle_cut);
+                assert(!(event.commit_lsn > middle_cut && event.commit_lsn <= later_cut));
+            } else {
+                assert(!(event.commit_lsn > earlier_cut && event.commit_lsn <= middle_cut));
+                assert(event.commit_lsn > middle_cut && event.commit_lsn <= later_cut);
+            }
+        }
+    }
+}
+
 pub proof fn append_prefix_bucket_delta_is_unchanged(
     history: Seq<CapturedImageEvent>,
     appended: CapturedImageEvent,

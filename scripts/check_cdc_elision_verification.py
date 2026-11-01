@@ -20,6 +20,7 @@ EXECUTABLE_OBLIGATIONS = [
 ]
 OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "separate_consumer_cuts_retain_opposing_images",
+    "captured_image_bucket_delta_splits_at_consumer_cut",
     "transaction_window_membership_is_atomic",
     "payload_replacement_preserves_complete_image_delta",
     "append_captured_image_bucket_delta",
@@ -48,7 +49,10 @@ MUTATIONS = {
         "    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier\n",
         "    has_immediate_unique_identity && !has_truncate_barrier\n",
     ),
-    "key-only-image-bucket": ("&& event.row_image == row_image", "&& true"),
+    "key-only-image-bucket": (
+        "if event.row_identity == row_identity\n        && event.row_image == row_image\n        && captured_event_in_window",
+        "if event.row_identity == row_identity\n        && true\n        && captured_event_in_window",
+    ),
     "cross-incarnation-bucket": (
         "event.source_incarnation == source_incarnation\n        && image_event_in_window_spec",
         "true\n        && image_event_in_window_spec",
@@ -58,6 +62,10 @@ MUTATIONS = {
         "first.commit_lsn <= second.commit_lsn,",
     ),
     "reverse-history-weight": ("prefix + event_weight", "prefix - event_weight"),
+    "overlapping-consumer-boundary": (
+        "event_lsn > previous_cut && event_lsn <= new_cut",
+        "event_lsn >= previous_cut && event_lsn <= new_cut",
+    ),
 }
 
 
