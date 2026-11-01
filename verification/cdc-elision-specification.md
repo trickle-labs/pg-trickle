@@ -3,9 +3,11 @@
 This #1221 slice changes UPDATE masks, retains deferred-key source histories,
 classifies keyed image weights and applies the verified compaction eligibility
 gate to both base and stream-table buffers. It does not yet prove complete scan
-normalization or the reduction SQL's equivalence for every history,
-source incarnation/epoch transitions, complete transaction histories, or all
-protected consumer windows. Those obligations remain open.
+normalization or the reduction SQL's equivalence for every history. The
+history model now proves per-image deltas for valid unique-row transitions in
+one source incarnation and one consumer window. PostgreSQL SQL reduction,
+general multi-row bags, transaction boundaries and all protected consumer
+windows remain separate or incomplete obligations.
 
 ## Independent observation contract
 
@@ -147,7 +149,7 @@ the shared cut belongs only to the first interval. This establishes partitioning
 for the model; PostgreSQL capture, SQL grouping/aggregation, and runtime
 compaction equivalence remain separate boundaries.
 
-The complete-image event model adds six bounded lemmas. Events carry a row
+The complete-image event model adds six bounded event lemmas. Events carry a row
 identity, full row-image bytes, source-incarnation identifier, transaction
 identifier and commit LSN. It proves that events from one transaction share a
 consumer-window membership when their commit LSN is shared; a same-key payload
@@ -167,18 +169,29 @@ prove that PostgreSQL capture, commit-LSN assignment, schema changes or source
 recreation construct those records correctly; the installed SQL and lifecycle
 tests remain separate evidence for those boundaries.
 
+`valid_single_identity_history_preserves_image_delta` adds a valid-transition
+model for one unique row identity. Walking backward from the final state, an
+insert must match the active final image and a delete must remove the active
+image. For every complete image, the sum of its signed events in the selected
+incarnation and consumer window equals final multiplicity minus initial
+multiplicity. This connects valid history transitions to bucket arithmetic;
+it does not prove that production capture enforces these transitions or that
+PostgreSQL's `record_send`, `dense_rank`, window `SUM`, or keyed upsert executes
+this abstract reduction exactly.
+
 ## Controls and candidate binding
 
 The pinned Verus/Z3 runner checks five executable decisions:
 `admitted_image_type`, `keep_change`, `image_event_weight`, `image_action` and
-`can_compact_history`, plus seven proof obligations:
+`can_compact_history`, plus eight proof obligations:
 `separate_consumer_cuts_retain_opposing_images`,
 `captured_image_bucket_delta_splits_at_consumer_cut`,
 `transaction_window_membership_is_atomic`,
 `payload_replacement_preserves_complete_image_delta`,
 `append_captured_image_bucket_delta`,
 `transient_same_image_cancels_within_incarnation` and
-`source_incarnation_prevents_cross_epoch_cancellation`. Thirteen executable
+`source_incarnation_prevents_cross_epoch_cancellation`, and
+`valid_single_identity_history_preserves_image_delta`. Thirteen executable
 mutants must fail a postcondition:
 `lost-image-change`, `unknown-type-elision`, `lost-positive-image`,
 `reversed-negative-image`, `wrong-insert-event-weight`,

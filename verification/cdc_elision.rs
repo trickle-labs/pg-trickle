@@ -164,6 +164,140 @@ pub open spec fn captured_image_bucket_delta(
     }
 }
 
+/// The state before an event when walking a valid one-row history backward.
+pub open spec fn previous_image_state(
+    after: Option<Seq<u8>>,
+    event: CapturedImageEvent,
+) -> Option<Seq<u8>> {
+    match (after, event.action) {
+        (Some(_), ImageEvent::Insert) => None,
+        (None, ImageEvent::Delete) => Some(event.row_image),
+        _ => after,
+    }
+}
+
+/// A valid history for one unique row identity, traversed from its final state.
+/// Inserts must create the final image; deletes must remove the active image.
+pub open spec fn valid_history_from_state(
+    after: Option<Seq<u8>>,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> bool
+    decreases count,
+{
+    if count <= 0 {
+        true
+    } else if count > history.len() {
+        false
+    } else {
+        let event = history[count - 1];
+        event.row_identity == row_identity
+            && event.source_incarnation == source_incarnation
+            && image_event_in_window_spec(event.commit_lsn, previous_cut, new_cut)
+            && (match (after, event.action) {
+                (Some(after_image), ImageEvent::Insert) => after_image == event.row_image,
+                (None, ImageEvent::Delete) => true,
+                _ => false,
+            })
+            && valid_history_from_state(
+                previous_image_state(after, event), history, count - 1,
+                row_identity, source_incarnation, previous_cut, new_cut,
+            )
+    }
+}
+
+/// Reconstruct the row image before a history prefix by reversing its events.
+pub open spec fn image_state_before(
+    after: Option<Seq<u8>>,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+) -> Option<Seq<u8>>
+    decreases count,
+{
+    if count <= 0 || count > history.len() {
+        after
+    } else {
+        let event = history[count - 1];
+        image_state_before(previous_image_state(after, event), history, count - 1)
+    }
+}
+
+pub open spec fn image_presence(state: Option<Seq<u8>>, image: Seq<u8>) -> int {
+    if state == Some(image) { 1 } else { 0 }
+}
+
+/// For a valid unique-row history, each complete-image bucket's signed event
+/// sum equals that image's final multiplicity minus its initial multiplicity.
+pub proof fn valid_single_identity_history_preserves_image_delta(
+    final_state: Option<Seq<u8>>,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+    image: Seq<u8>,
+)
+    requires
+        0 <= count <= history.len(),
+        previous_cut <= new_cut,
+        valid_history_from_state(
+            final_state, history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ),
+    ensures
+        captured_image_bucket_delta(
+            history, count, row_identity, image, source_incarnation,
+            previous_cut, new_cut,
+        ) == image_presence(final_state, image)
+            - image_presence(image_state_before(final_state, history, count), image),
+    decreases count,
+{
+    if count > 0 {
+        let event = history[count - 1];
+        let before = previous_image_state(final_state, event);
+        reveal(valid_history_from_state);
+        reveal(captured_image_bucket_delta);
+        valid_single_identity_history_preserves_image_delta(
+            before, history, count - 1, row_identity, source_incarnation,
+            previous_cut, new_cut, image,
+        );
+        assert(image_state_before(final_state, history, count)
+            == image_state_before(before, history, count - 1));
+        assert(captured_image_bucket_delta(
+            history, count, row_identity, image, source_incarnation,
+            previous_cut, new_cut,
+        ) == captured_image_bucket_delta(
+            history, count - 1, row_identity, image, source_incarnation,
+            previous_cut, new_cut,
+        ) + captured_image_weight(
+            event, row_identity, image, source_incarnation, previous_cut, new_cut,
+        ));
+        match (final_state, event.action) {
+            (Some(after_image), ImageEvent::Insert) => {
+                assert(after_image == event.row_image);
+                assert(before == Option::<Seq<u8>>::None);
+                assert(captured_image_weight(
+                    event, row_identity, image, source_incarnation,
+                    previous_cut, new_cut,
+                ) == image_presence(final_state, image) - image_presence(before, image));
+            }
+            (None, ImageEvent::Delete) => {
+                assert(before == Some(event.row_image));
+                assert(captured_image_weight(
+                    event, row_identity, image, source_incarnation,
+                    previous_cut, new_cut,
+                ) == image_presence(final_state, image) - image_presence(before, image));
+            }
+            _ => assert(false),
+        }
+    }
+}
+
 /// Splitting one consumer range at a cut preserves every image bucket's delta
 /// over an arbitrary finite captured history. The two half-open-by-boundary
 /// windows are disjoint because membership is `(previous_cut, new_cut]`.
