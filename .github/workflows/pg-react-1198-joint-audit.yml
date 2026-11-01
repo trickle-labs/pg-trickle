@@ -17,6 +17,7 @@ on:
       - 'benches/**'
       - 'scripts/gen_test_schema.py'
       - 'tests/e2e_v104_conformance_tests.rs'
+      - 'tests/e2e_view_tests.rs'
 
 permissions:
   contents: read
