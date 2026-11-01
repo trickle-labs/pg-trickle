@@ -164,6 +164,92 @@ pub open spec fn captured_image_bucket_delta(
     }
 }
 
+/// Apply the selected history prefix to one complete-image bucket, starting
+/// with its existing bag multiplicity. Multiple logical rows may share an
+/// image, so the count is an integer multiplicity rather than row presence.
+pub open spec fn captured_image_count_after(
+    initial_multiplicity: int,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> int
+    decreases count,
+{
+    if count <= 0 || count > history.len() {
+        initial_multiplicity
+    } else {
+        captured_image_count_after(
+            initial_multiplicity, history, count - 1, row_identity,
+            row_image, source_incarnation, previous_cut, new_cut,
+        ) + captured_image_weight(
+            history[count - 1], row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        )
+    }
+}
+
+/// For any finite event history, the signed SQL bucket sum is exactly the
+/// final bag multiplicity minus its initial multiplicity. This permits
+/// duplicate rows and makes the accumulator semantics explicit independently
+/// of the one-row transition proof below.
+pub proof fn captured_image_bucket_delta_matches_bag_count(
+    initial_multiplicity: int,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        initial_multiplicity >= 0,
+        0 <= count <= history.len(),
+        previous_cut <= new_cut,
+    ensures
+        captured_image_count_after(
+            initial_multiplicity, history, count, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) == initial_multiplicity + captured_image_bucket_delta(
+            history, count, row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        ),
+    decreases count,
+{
+    reveal(captured_image_count_after);
+    reveal(captured_image_bucket_delta);
+    if count > 0 {
+        captured_image_bucket_delta_matches_bag_count(
+            initial_multiplicity, history, count - 1, row_identity,
+            row_image, source_incarnation, previous_cut, new_cut,
+        );
+        assert(captured_image_count_after(
+            initial_multiplicity, history, count, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) == captured_image_count_after(
+            initial_multiplicity, history, count - 1, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) + captured_image_weight(
+            history[count - 1], row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        ));
+        assert(captured_image_bucket_delta(
+            history, count, row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        ) == captured_image_bucket_delta(
+            history, count - 1, row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        ) + captured_image_weight(
+            history[count - 1], row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        ));
+    }
+}
+
 /// The state before an event when walking a valid one-row history backward.
 pub open spec fn previous_image_state(
     after: Option<Seq<u8>>,
