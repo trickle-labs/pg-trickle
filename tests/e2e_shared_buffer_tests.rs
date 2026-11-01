@@ -610,6 +610,39 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
             .unwrap();
         }
 
+        let source_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        let buffer = db.change_buffer_table(source_oid).await;
+        let before_rollback: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM {buffer} WHERE action IN ('D','I')"
+            ))
+            .await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "BEGIN; INSERT INTO {source} VALUES (1,'rolled back'); \
+             DELETE FROM {source} WHERE v=1 AND label='duplicate'; ROLLBACK"
+        )))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let after_rollback: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM {buffer} WHERE action IN ('D','I')"
+            ))
+            .await;
+        assert_eq!(
+            after_rollback, before_rollback,
+            "rolled-back row and statement trigger images must not remain in the shared buffer"
+        );
+        let source_rows: i64 = db
+            .query_scalar(&format!("SELECT count(*) FROM {source}"))
+            .await;
+        assert_eq!(
+            source_rows, 4,
+            "rollback must restore duplicate and NULL rows"
+        );
+
         // The slow consumer advances to a cut that includes a duplicate
         // insertion while the fast consumer still starts at the initial bag.
         db.execute(&format!(
