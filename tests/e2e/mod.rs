@@ -35,8 +35,9 @@ pub mod oracle;
 pub mod property_support;
 
 // ── Full E2E harness (default) ─────────────────────────────────────────
+use sqlx::PgPool;
 #[cfg(not(feature = "light-e2e"))]
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::postgres::PgPoolOptions;
 #[cfg(not(feature = "light-e2e"))]
 use std::sync::{
     Arc, LazyLock, Mutex,
