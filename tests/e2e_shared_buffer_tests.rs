@@ -589,6 +589,7 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
     for mode in ["row", "statement"] {
         let source = format!("keyless_cut_{mode}");
         let fast = format!("{source}_fast");
+        let middle = format!("{source}_middle");
         let slow = format!("{source}_slow");
         db.execute(&format!("CREATE TABLE {source} (v INT, label TEXT)"))
             .await;
@@ -599,7 +600,7 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
         .await;
 
         let query = format!("SELECT v,label FROM {source}");
-        for name in [&fast, &slow] {
+        for name in [&fast, &middle, &slow] {
             db.try_execute_with_config(
                 &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
                 &format!(
@@ -643,10 +644,38 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
             "rollback must restore duplicate and NULL rows"
         );
 
-        // The slow consumer advances to a cut that includes a duplicate
-        // insertion while the fast consumer still starts at the initial bag.
+        // The middle consumer advances past one insert transaction while the
+        // fast and slow consumers still start at the initial bag.
         db.execute(&format!(
             "INSERT INTO {source} VALUES (1,'duplicate'),(NULL,NULL)"
+        ))
+        .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{middle}')"),
+        )
+        .await
+        .unwrap();
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &middle,
+            "SELECT * FROM (VALUES \
+             (1,'duplicate'),(1,'duplicate'),(1,'duplicate'), \
+             (NULL::int,NULL::text),(NULL::int,NULL::text),(NULL::int,NULL::text) \
+             ) AS expected(v,label)",
+            "middle keyless consumer after duplicate and NULL insertions",
+        )
+        .await;
+
+        // The slow consumer advances to an intermediate cut after one
+        // duplicate retraction.
+        db.execute(&format!(
+            "DELETE FROM {source} WHERE ctid = ( \
+             SELECT ctid FROM {source} WHERE v=1 AND label='duplicate' LIMIT 1)"
         ))
         .await;
         db.try_execute_with_config(
@@ -663,21 +692,15 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
             &db,
             &slow,
             "SELECT * FROM (VALUES \
-             (1,'duplicate'),(1,'duplicate'),(1,'duplicate'), \
+             (1,'duplicate'),(1,'duplicate'), \
              (NULL::int,NULL::text),(NULL::int,NULL::text),(NULL::int,NULL::text) \
              ) AS expected(v,label)",
-            "keyless slow consumer at its interior cut",
+            "slow keyless consumer after the duplicate retraction",
         )
         .await;
 
-        // Delete one occurrence from each group. The fast consumer sees a
-        // net-zero bag change across these three commits, while the slow
-        // consumer must retain this suffix.
-        db.execute(&format!(
-            "DELETE FROM {source} WHERE ctid = ( \
-             SELECT ctid FROM {source} WHERE v=1 AND label='duplicate' LIMIT 1)"
-        ))
-        .await;
+        // Delete one NULL occurrence. The fast consumer now sees a net-zero
+        // bag change across the insert and both delete transactions.
         db.execute(&format!(
             "DELETE FROM {source} WHERE ctid = ( \
              SELECT ctid FROM {source} WHERE v IS NULL AND label IS NULL LIMIT 1)"
@@ -718,12 +741,59 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
         .await;
         e2e::oracle::assert_st_query_exact(
             &db,
-            &slow,
+            &middle,
             "SELECT * FROM (VALUES \
              (1,'duplicate'),(1,'duplicate'),(1,'duplicate'), \
              (NULL::int,NULL::text),(NULL::int,NULL::text),(NULL::int,NULL::text) \
              ) AS expected(v,label)",
-            "slow keyless consumer remains at its interior cut",
+            "middle keyless consumer remains at its protected cut",
+        )
+        .await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &slow,
+            "SELECT * FROM (VALUES \
+             (1,'duplicate'),(1,'duplicate'), \
+             (NULL::int,NULL::text),(NULL::int,NULL::text),(NULL::int,NULL::text) \
+             ) AS expected(v,label)",
+            "slow keyless consumer remains at its later protected cut",
+        )
+        .await;
+
+        let before_middle: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{middle}')"),
+        )
+        .await
+        .unwrap();
+        let middle_caught_up: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{middle}' AND h.refresh_id>{before_middle} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            middle_caught_up,
+            "middle keyless consumer must catch up differentially from its protected cut"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &middle,
+            "SELECT * FROM (VALUES \
+             (1,'duplicate'),(1,'duplicate'), \
+             (NULL::int,NULL::text),(NULL::int,NULL::text) \
+             ) AS expected(v,label)",
+            "middle consumer catches up through both keyless retractions",
         )
         .await;
 
@@ -760,10 +830,10 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
              (1,'duplicate'),(1,'duplicate'), \
              (NULL::int,NULL::text),(NULL::int,NULL::text) \
              ) AS expected(v,label)",
-            "slow consumer consumes one retraction from each keyless image group",
+            "slow consumer consumes the NULL retraction from its later cut",
         )
         .await;
-        for name in [&fast, &slow] {
+        for name in [&fast, &middle, &slow] {
             e2e::oracle::assert_st_query_exact(
                 &db,
                 name,
