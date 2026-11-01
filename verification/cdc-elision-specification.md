@@ -30,9 +30,11 @@ separate integration boundaries.
 
 `verification/cdc_elision.rs` contains the exact production decisions checked
 by Verus: `admitted_image_type`, `keep_change`, `image_event_weight`,
-`image_action` and `can_compact_history`. They require no unchecked
-preconditions. `keyed_weight_sql` obtains the `I` and `D` coefficients from
-`image_event_weight` before lowering them into PostgreSQL's per-image `SUM`.
+`image_action`, `image_action_priority` and `can_compact_history`. They require
+no unchecked preconditions. `keyed_weight_sql` obtains the `I` and `D`
+coefficients from `image_event_weight` before lowering them into PostgreSQL's
+per-image `SUM`; it obtains the insert-before-delete endpoint ordering from
+`image_action_priority`.
 `captured_image_bucket_delta_matches_bag_count` proves the generic accumulator
 equation for an arbitrary finite event prefix and complete-image bucket. This
 proves the signed count semantics, not PostgreSQL's aggregate execution or the
@@ -189,11 +191,20 @@ it does not prove that production capture enforces these transitions or that
 PostgreSQL's `record_send`, `dense_rank`, window `SUM`, or keyed upsert executes
 this abstract reduction exactly.
 
+`valid_history_has_unique_signed_image_endpoints` composes the per-image
+transition theorem: for a valid history of one unique row identity, at most
+one image has a positive delta and at most one has a negative delta. The
+production keyed adapter prefers the positive insert image when both exist,
+which is the endpoint for an update; the generated SQL integration test flips
+that priority as a semantic mutant and observes the old delete image instead.
+This proves the selection policy under the unique-row history model, not the
+database implementation of record ordering, aggregation or MERGE.
+
 ## Controls and candidate binding
 
-The pinned Verus/Z3 runner checks five executable decisions:
-`admitted_image_type`, `keep_change`, `image_event_weight`, `image_action` and
-`can_compact_history`, plus eight proof obligations:
+The pinned Verus/Z3 runner checks six executable decisions:
+`admitted_image_type`, `keep_change`, `image_event_weight`, `image_action`,
+`image_action_priority` and `can_compact_history`, plus nine proof obligations:
 `separate_consumer_cuts_retain_opposing_images`,
 `captured_image_bucket_delta_splits_at_consumer_cut`,
 `transaction_window_membership_is_atomic`,
@@ -201,11 +212,12 @@ The pinned Verus/Z3 runner checks five executable decisions:
 `append_captured_image_bucket_delta`,
 `transient_same_image_cancels_within_incarnation` and
 `source_incarnation_prevents_cross_epoch_cancellation`, and
-`valid_single_identity_history_preserves_image_delta`. Thirteen executable
+`valid_single_identity_history_preserves_image_delta` and
+`valid_history_has_unique_signed_image_endpoints`. Fourteen executable
 mutants must fail a postcondition:
 `lost-image-change`, `unknown-type-elision`, `lost-positive-image`,
 `reversed-negative-image`, `wrong-insert-event-weight`,
-`wrong-delete-event-weight`, `cross-truncate-barrier`,
+`wrong-delete-event-weight`, `prefer-deleted-image`, `cross-truncate-barrier`,
 `cross-shared-consumer`, `key-only-image-bucket`, `cross-incarnation-bucket`,
 `split-transaction-cut`, `reverse-history-weight`, and
 `overlapping-consumer-boundary`; compilation/setup failures do not count. The

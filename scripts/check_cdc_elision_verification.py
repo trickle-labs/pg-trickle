@@ -16,6 +16,7 @@ EXECUTABLE_OBLIGATIONS = [
     "keep_change",
     "image_event_weight",
     "image_action",
+    "image_action_priority",
     "can_compact_history",
 ]
 OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
@@ -27,6 +28,7 @@ OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "transient_same_image_cancels_within_incarnation",
     "source_incarnation_prevents_cross_epoch_cancellation",
     "valid_single_identity_history_preserves_image_delta",
+    "valid_history_has_unique_signed_image_endpoints",
 ]
 PRODUCTION_INPUTS = [
     "src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs",
@@ -42,6 +44,10 @@ MUTATIONS = {
     "reversed-negative-image": ("else if weight < 0 { ImageAction::Delete }", "else if weight < 0 { ImageAction::Insert }"),
     "wrong-insert-event-weight": ("ImageEvent::Insert => 1,", "ImageEvent::Insert => 2,"),
     "wrong-delete-event-weight": ("ImageEvent::Delete => -1,", "ImageEvent::Delete => 1,"),
+    "prefer-deleted-image": (
+        "ImageAction::Insert => 0,\n        ImageAction::Delete => 1,",
+        "ImageAction::Insert => 1,\n        ImageAction::Delete => 0,",
+    ),
     "cross-truncate-barrier": (
         "    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier\n",
         "    has_immediate_unique_identity && has_single_consumer\n",
@@ -93,6 +99,10 @@ def check_contract() -> None:
         raise ValueError("keyed MERGE does not execute the checked image action adapter")
     if 'image_event_weight_sql("__pgt_action")' not in source:
         raise ValueError("keyed image weights bypass the checked signed event coefficients")
+    if "image_action_priority(ImageAction::Insert)" not in source or "image_action_priority(ImageAction::Delete)" not in source:
+        raise ValueError("keyed image preference bypasses the checked action-priority decision")
+    if "THEN {insert_priority} ELSE {delete_priority} END" not in source:
+        raise ValueError("keyed endpoint SQL does not use the checked insert-before-delete priority")
     if "SUM({event_weight})" not in source or "PARTITION BY __pgt_row_id,{image_column}" not in source:
         raise ValueError("keyed image weights must sum within complete row-image buckets")
     if "crate::cdc_elision::can_compact_history(" not in (runner.ROOT / "src/cdc/mod.rs").read_text():
