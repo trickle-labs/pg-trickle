@@ -49,6 +49,20 @@ pub fn image_action(weight: i64) -> (action: ImageAction)
     else { ImageAction::Skip }
 }
 
+/// Keyed endpoint reduction prefers an inserted final image to a deleted old image.
+pub fn image_action_priority(action: ImageAction) -> (priority: u8)
+    ensures
+        (action == ImageAction::Insert) ==> priority == 0,
+        (action == ImageAction::Delete) ==> priority == 1,
+        (action == ImageAction::Skip) ==> priority == 2,
+{
+    match action {
+        ImageAction::Insert => 0,
+        ImageAction::Delete => 1,
+        ImageAction::Skip => 2,
+    }
+}
+
 /// Keyed history compaction is safe only for one immediate identity and one
 /// consumer, with no reset barrier in the selected window.
 pub open spec fn can_compact_history_spec(
@@ -474,6 +488,114 @@ pub proof fn valid_single_identity_history_preserves_image_delta(
     }
 }
 
+/// A valid unique-identity history has at most one positive and one negative
+/// complete-image delta, exactly the shape selected by the keyed SQL adapter.
+pub proof fn valid_history_has_unique_signed_image_endpoints(
+    final_state: Option<Seq<u8>>,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+    first_image: Seq<u8>,
+    second_image: Seq<u8>,
+)
+    requires
+        0 <= count <= history.len(),
+        previous_cut <= new_cut,
+        valid_history_from_state(
+            final_state, history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ),
+    ensures
+        (captured_image_bucket_delta(
+            history, count, row_identity, first_image, source_incarnation,
+            previous_cut, new_cut,
+        ) > 0 && captured_image_bucket_delta(
+            history, count, row_identity, second_image, source_incarnation,
+            previous_cut, new_cut,
+        ) > 0) ==> first_image == second_image,
+        (captured_image_bucket_delta(
+            history, count, row_identity, first_image, source_incarnation,
+            previous_cut, new_cut,
+        ) < 0 && captured_image_bucket_delta(
+            history, count, row_identity, second_image, source_incarnation,
+            previous_cut, new_cut,
+        ) < 0) ==> first_image == second_image,
+{
+    valid_single_identity_history_preserves_image_delta(
+        final_state, history, count, row_identity, source_incarnation,
+        previous_cut, new_cut, first_image,
+    );
+    valid_single_identity_history_preserves_image_delta(
+        final_state, history, count, row_identity, source_incarnation,
+        previous_cut, new_cut, second_image,
+    );
+    let initial_state = image_state_before(final_state, history, count);
+    let first_delta = captured_image_bucket_delta(
+        history, count, row_identity, first_image, source_incarnation,
+        previous_cut, new_cut,
+    );
+    let second_delta = captured_image_bucket_delta(
+        history, count, row_identity, second_image, source_incarnation,
+        previous_cut, new_cut,
+    );
+    assert(first_delta == image_presence(final_state, first_image)
+        - image_presence(initial_state, first_image));
+    assert(second_delta == image_presence(final_state, second_image)
+        - image_presence(initial_state, second_image));
+    reveal(image_presence);
+    if first_delta > 0 && second_delta > 0 {
+        match final_state {
+            Some(final_image) => {
+                if final_image != first_image {
+                    assert(image_presence(final_state, first_image) == 0);
+                    assert(first_delta <= 0);
+                    assert(false);
+                }
+                if final_image != second_image {
+                    assert(image_presence(final_state, second_image) == 0);
+                    assert(second_delta <= 0);
+                    assert(false);
+                }
+                assert(first_image == final_image);
+                assert(second_image == final_image);
+                assert(first_image == second_image);
+            },
+            None => {
+                assert(image_presence(final_state, first_image) == 0);
+                assert(first_delta <= 0);
+                assert(false);
+            },
+        }
+    }
+    if first_delta < 0 && second_delta < 0 {
+        match initial_state {
+            Some(initial_image) => {
+                if initial_image != first_image {
+                    assert(image_presence(initial_state, first_image) == 0);
+                    assert(first_delta >= 0);
+                    assert(false);
+                }
+                if initial_image != second_image {
+                    assert(image_presence(initial_state, second_image) == 0);
+                    assert(second_delta >= 0);
+                    assert(false);
+                }
+                assert(first_image == initial_image);
+                assert(second_image == initial_image);
+                assert(first_image == second_image);
+            },
+            None => {
+                assert(image_presence(initial_state, first_image) == 0);
+                assert(first_delta >= 0);
+                assert(false);
+            },
+        }
+    }
+}
+
 /// Splitting one consumer range at a cut preserves every image bucket's delta
 /// over an arbitrary finite captured history. The two half-open-by-boundary
 /// windows are disjoint because membership is `(previous_cut, new_cut]`.
@@ -829,6 +951,8 @@ pub fn keyed_weight_sql(delta_sql: &str, columns: &str) -> String {
     let image_column = vacant("__pgt_image");
     let weight_column = vacant("__pgt_weight");
     let event_weight = image_event_weight_sql("__pgt_action");
+    let insert_priority = image_action_priority(ImageAction::Insert);
+    let delete_priority = image_action_priority(ImageAction::Delete);
     let mut signs = Vec::new();
     for (weight, test) in [(1, "> 0"), (-1, "< 0"), (0, "= 0")] {
         let action = match image_action(weight) {
@@ -847,9 +971,11 @@ pub fn keyed_weight_sql(delta_sql: &str, columns: &str) -> String {
                FROM (SELECT __raw.*, dense_rank() OVER (PARTITION BY __pgt_row_id \
                      ORDER BY ROW({columns}) USING OPERATOR(pg_catalog.*<)) AS {image_column} \
                      FROM ({delta_sql}) __raw) __images) __weighted \
-         WHERE {signs} ORDER BY __pgt_row_id, CASE WHEN __pgt_action='I' THEN 0 ELSE 1 END)",
+         WHERE {signs} ORDER BY __pgt_row_id, CASE WHEN __pgt_action='I' THEN {insert_priority} ELSE {delete_priority} END)",
         signs = signs.join(" OR "),
         event_weight = event_weight,
+        insert_priority = insert_priority,
+        delete_priority = delete_priority,
     )
 }
 
@@ -893,5 +1019,12 @@ mod tests {
             image_event_weight_sql("delta.__pgt_action"),
             "CASE WHEN delta.__pgt_action = 'I' THEN 1 ELSE -1 END"
         );
+    }
+
+    #[test]
+    fn keyed_action_priority_prefers_the_final_insert_image() {
+        assert_eq!(image_action_priority(ImageAction::Insert), 0);
+        assert_eq!(image_action_priority(ImageAction::Delete), 1);
+        assert_eq!(image_action_priority(ImageAction::Skip), 2);
     }
 }

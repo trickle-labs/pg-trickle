@@ -436,6 +436,22 @@ async fn test_cdc_keyed_weight_uses_complete_images_without_scalar_equality() {
         (action, scale, json),
         ("I".to_string(), 2, "{\"x\":2}".to_string())
     );
+    let delete_first = rendered.replace("THEN 0 ELSE 1 END", "THEN 1 ELSE 0 END");
+    assert_ne!(
+        delete_first, rendered,
+        "priority mutation must reach generated SQL"
+    );
+    let (action, scale, json): (String, i32, String) = sqlx::query_as(sqlx::AssertSqlSafe(
+        format!("SELECT __pgt_action,scale(n),j::text FROM {delete_first} d"),
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (action, scale, json),
+        ("D".to_string(), 1, "{\"x\":1}".to_string()),
+        "the executable mutation must choose the old image when delete is preferred"
+    );
     let scale_delta = "SELECT decode('01','hex') AS __pgt_row_id, 'D'::text AS __pgt_action, 1 AS id, 1.0::numeric AS n \
                        UNION ALL SELECT decode('01','hex'),'I',1,1.00::numeric";
     let rendered = cdc_elision::keyed_weight_sql(scale_delta, "id,n");
