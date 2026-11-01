@@ -44,6 +44,7 @@ LIFECYCLE_CASES = [
     "e2e_having_transition_tests::test_having_grouped_and_global_empty_lifecycle_match_postgresql",
 ]
 CDC_ELISION_CASES = [
+    "e2e_keyless_tests::test_keyless_multiset_same_window_insert_delete_preserves_multiplicity",
     "e2e_shared_buffer_tests::test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders",
     "e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload",
     "e2e_shared_buffer_tests::test_cdc_committed_history_preserves_latest_complete_payload",
@@ -128,7 +129,7 @@ PROOF_CONTRACTS = {
             "transient_same_image_cancels_within_incarnation", "source_incarnation_prevents_cross_epoch_cancellation",
         },
         "cases": CDC_ELISION_CASES,
-        "inputs": ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "tests/e2e_shared_buffer_tests.rs", "tests/e2e_cdc_tests.rs", "tests/e2e_schema_evolution_tests.rs", "tests/dvm_aggregate_execution_tests.rs", "Cargo.toml", "Cargo.lock"],
+        "inputs": ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "tests/e2e_shared_buffer_tests.rs", "tests/e2e_cdc_tests.rs", "tests/e2e_schema_evolution_tests.rs", "tests/dvm_aggregate_execution_tests.rs", "tests/e2e_keyless_tests.rs", "Cargo.toml", "Cargo.lock"],
         "mutants": {
             "lost-image-change", "unknown-type-elision", "lost-positive-image", "reversed-negative-image",
             "wrong-insert-event-weight", "wrong-delete-event-weight", "cross-truncate-barrier", "cross-shared-consumer",
