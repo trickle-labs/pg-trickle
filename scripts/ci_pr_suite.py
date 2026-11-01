@@ -45,8 +45,6 @@ SERIAL_CASES = [
     ("e2e_dag_autorefresh_tests", "test_autorefresh_no_spurious_3_layer"),
     ("e2e_refresh_tests", "test_stddev_samp_differential_mode"),
     ("e2e_v0878_security_tests", "test_v0878_revoked_source_preserves_state_and_stages"),
-    # Keep the physical container restart outside the parallel E2E sweep.
-    ("e2e_window_state_recovery_tests", "test_window_state_and_frontier_survive_restart_then_differential_converges"),
 ]
 
 

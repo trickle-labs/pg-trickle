@@ -39,8 +39,7 @@ class AllocationTests(unittest.TestCase):
             "--test", "e2e_wal_receipt_recovery_tests", "--test", "e2e_v043_tests",
             "--test", "e2e_lsn_contract_tests",
             "--test", "e2e_property_circular_tests",
-            "--test", "e2e_refresh_tests", "--test", "e2e_v0878_security_tests",
-            "--test", "e2e_window_state_recovery_tests", "-E",
+            "--test", "e2e_refresh_tests", "--test", "e2e_v0878_security_tests", "-E",
             "test(=test_wal_recovery_before_receipt_commit_preserves_committed_changes) | "
             "test(=test_wal_recovery_after_receipt_commit_before_ack_converges_once) | "
             "test(=test_wal_recovery_after_apply_before_ack_does_not_reapply) | "
@@ -55,8 +54,7 @@ class AllocationTests(unittest.TestCase):
             "test(=test_lsn_scheduler_cdc_holdback_recovers_after_long_writer) | "
             "test(=test_prop_monotone_cycle_small_graph_converges) | "
             "test(=test_stddev_samp_differential_mode) | "
-            "test(=test_v0878_revoked_source_preserves_state_and_stages) | "
-            "test(=test_window_state_and_frontier_survive_restart_then_differential_converges)",
+            "test(=test_v0878_revoked_source_preserves_state_and_stages)",
         ]
         with patch("sys.argv", ["ci_pr_suite.py"]), patch(
             "ci_pr_suite.subprocess.run", return_value=SimpleNamespace(returncode=0),
