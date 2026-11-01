@@ -192,6 +192,96 @@ pub open spec fn captured_image_count_after(
     }
 }
 
+/// A captured DELETE is valid for this bag bucket only when an occurrence of
+/// that complete image was present immediately before the event. INSERTs and
+/// events outside the selected source/window do not require a prior image.
+pub open spec fn valid_captured_image_bucket_history(
+    initial_multiplicity: int,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> bool
+    decreases count,
+{
+    if count <= 0 {
+        true
+    } else if count > history.len() {
+        false
+    } else {
+        let event_weight = captured_image_weight(
+            history[count - 1], row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        );
+        let before = captured_image_count_after(
+            initial_multiplicity, history, count - 1, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        );
+        valid_captured_image_bucket_history(
+            initial_multiplicity, history, count - 1, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) && (event_weight != -1 || before > 0)
+    }
+}
+
+/// A valid finite event prefix never drives a complete-image bag bucket below
+/// zero. This admits repeated occurrences while rejecting unmatched deletes.
+pub proof fn valid_captured_image_bucket_history_is_nonnegative(
+    initial_multiplicity: int,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        initial_multiplicity >= 0,
+        0 <= count <= history.len(),
+        previous_cut <= new_cut,
+        valid_captured_image_bucket_history(
+            initial_multiplicity, history, count, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ),
+    ensures
+        captured_image_count_after(
+            initial_multiplicity, history, count, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) >= 0,
+    decreases count,
+{
+    if count > 0 {
+        reveal(valid_captured_image_bucket_history);
+        valid_captured_image_bucket_history_is_nonnegative(
+            initial_multiplicity, history, count - 1, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        );
+        reveal(captured_image_count_after);
+        let event_weight = captured_image_weight(
+            history[count - 1], row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        );
+        let before = captured_image_count_after(
+            initial_multiplicity, history, count - 1, row_identity, row_image,
+            source_incarnation, previous_cut, new_cut,
+        );
+        assert(-1 <= event_weight <= 1) by {
+            reveal(captured_image_weight);
+            reveal(captured_event_in_window);
+            reveal(image_event_in_window_spec);
+            reveal(image_event_weight_spec);
+        }
+        if event_weight == -1 {
+            assert(before > 0);
+        }
+        assert(before + event_weight >= 0);
+    }
+}
+
 /// For any finite event history, the signed SQL bucket sum is exactly the
 /// final bag multiplicity minus its initial multiplicity. This permits
 /// duplicate rows and makes the accumulator semantics explicit independently

@@ -9,8 +9,10 @@ for arbitrary finite event prefixes, equates each complete-image bucket's
 signed sum with its initial-to-final bag multiplicity change. The latter
 permits duplicate row identities. Consumer-window additivity and equal-LSN
 transaction membership are also modeled. PostgreSQL SQL execution equivalence,
-validity of every multi-row history, and all protected consumer windows remain
-separate or incomplete obligations.
+per-bucket rejection of unmatched deletes, and nonnegative bag counts are
+modeled. Whole-batch validity for every production multi-row history, SQL
+execution equivalence, and all protected consumer windows remain separate or
+incomplete obligations.
 
 ## Independent observation contract
 
@@ -34,8 +36,10 @@ preconditions. `keyed_weight_sql` obtains the `I` and `D` coefficients from
 `captured_image_bucket_delta_matches_bag_count` proves the generic accumulator
 equation for an arbitrary finite event prefix and complete-image bucket. This
 proves the signed count semantics, not PostgreSQL's aggregate execution or the
-validity of every production history; those remain runtime conformance and
-caller-assumption boundaries.
+whole-batch validity of every production history; those remain runtime
+conformance and caller-assumption boundaries. The bucket history predicate
+rejects an unmatched delete and its lemma establishes nonnegative multiplicity
+for every accepted prefix.
 `can_compact_history` admits compaction only for an immediate unique identity,
 one dependent stream table and a selected LSN range with no captured TRUNCATE
 marker. Base sources supply primary-key metadata; stream-table sources supply
