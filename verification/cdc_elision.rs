@@ -130,6 +130,22 @@ pub open spec fn captured_event_in_window(
         && image_event_in_window_spec(event.commit_lsn, previous_cut, new_cut)
 }
 
+/// Whether one event belongs to a selected identity's source-incarnation cut.
+/// Other identities may be interleaved in the global captured history; keyed
+/// reduction must keep their image buckets independent.
+pub open spec fn identity_event_in_window(
+    event: CapturedImageEvent,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> bool {
+    event.row_identity == row_identity
+        && captured_event_in_window(
+            event, source_incarnation, previous_cut, new_cut,
+        )
+}
+
 /// Signed multiplicity for one complete row-image bucket in one source
 /// incarnation and one consumer's `(previous_cut, new_cut]` window.
 pub open spec fn captured_image_weight(
@@ -140,14 +156,33 @@ pub open spec fn captured_image_weight(
     previous_cut: u64,
     new_cut: u64,
 ) -> int {
-    if event.row_identity == row_identity
-        && event.row_image == row_image
-        && captured_event_in_window(event, source_incarnation, previous_cut, new_cut)
+    if identity_event_in_window(
+        event, row_identity, source_incarnation, previous_cut, new_cut,
+    ) && event.row_image == row_image
     {
         image_event_weight_spec(event.action)
     } else {
         0
     }
+}
+
+/// A row with another complete identity cannot add or cancel weight in this
+/// identity's image bucket, even when its image and consumer window match.
+pub proof fn different_identity_has_zero_image_weight(
+    event: CapturedImageEvent,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires event.row_identity != row_identity,
+    ensures captured_image_weight(
+        event, row_identity, row_image, source_incarnation, previous_cut, new_cut,
+    ) == 0,
+{
+    reveal(captured_image_weight);
+    reveal(identity_event_in_window);
 }
 
 /// Signed multiplicity for a complete-image bucket over any finite captured
@@ -366,8 +401,9 @@ pub open spec fn previous_image_state(
     }
 }
 
-/// A valid history for one unique row identity, traversed from its final state.
-/// Inserts must create the final image; deletes must remove the active image.
+/// A valid projection of a global history onto one unique row identity and
+/// consumer window, traversed from its final state. Events for other identities,
+/// source incarnations or cuts are interleaved but do not change this row's state.
 pub open spec fn valid_history_from_state(
     after: Option<Seq<u8>>,
     history: Seq<CapturedImageEvent>,
@@ -385,26 +421,36 @@ pub open spec fn valid_history_from_state(
         false
     } else {
         let event = history[count - 1];
-        event.row_identity == row_identity
-            && event.source_incarnation == source_incarnation
-            && image_event_in_window_spec(event.commit_lsn, previous_cut, new_cut)
-            && (match (after, event.action) {
+        if identity_event_in_window(
+            event, row_identity, source_incarnation, previous_cut, new_cut,
+        ) {
+            (match (after, event.action) {
                 (Some(after_image), ImageEvent::Insert) => after_image == event.row_image,
                 (None, ImageEvent::Delete) => true,
                 _ => false,
-            })
-            && valid_history_from_state(
+            }) && valid_history_from_state(
                 previous_image_state(after, event), history, count - 1,
                 row_identity, source_incarnation, previous_cut, new_cut,
             )
+        } else {
+            valid_history_from_state(
+                after, history, count - 1,
+                row_identity, source_incarnation, previous_cut, new_cut,
+            )
+        }
     }
 }
 
-/// Reconstruct the row image before a history prefix by reversing its events.
+/// Reconstruct one identity's row image before a history prefix, ignoring
+/// interleaved events outside its source-incarnation and consumer window.
 pub open spec fn image_state_before(
     after: Option<Seq<u8>>,
     history: Seq<CapturedImageEvent>,
     count: int,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
 ) -> Option<Seq<u8>>
     decreases count,
 {
@@ -412,7 +458,17 @@ pub open spec fn image_state_before(
         after
     } else {
         let event = history[count - 1];
-        image_state_before(previous_image_state(after, event), history, count - 1)
+        if identity_event_in_window(event, row_identity, source_incarnation, previous_cut, new_cut) {
+            image_state_before(
+                previous_image_state(after, event), history, count - 1,
+                row_identity, source_incarnation, previous_cut, new_cut,
+            )
+        } else {
+            image_state_before(
+                after, history, count - 1, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            )
+        }
     }
 }
 
@@ -444,20 +500,31 @@ pub proof fn valid_single_identity_history_preserves_image_delta(
             history, count, row_identity, image, source_incarnation,
             previous_cut, new_cut,
         ) == image_presence(final_state, image)
-            - image_presence(image_state_before(final_state, history, count), image),
+            - image_presence(image_state_before(
+                final_state, history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ), image),
     decreases count,
 {
     if count > 0 {
         let event = history[count - 1];
-        let before = previous_image_state(final_state, event);
+        let selected = identity_event_in_window(
+            event, row_identity, source_incarnation, previous_cut, new_cut,
+        );
+        let before = if selected { previous_image_state(final_state, event) } else { final_state };
         reveal(valid_history_from_state);
         reveal(captured_image_bucket_delta);
         valid_single_identity_history_preserves_image_delta(
             before, history, count - 1, row_identity, source_incarnation,
             previous_cut, new_cut, image,
         );
-        assert(image_state_before(final_state, history, count)
-            == image_state_before(before, history, count - 1));
+        assert(image_state_before(
+            final_state, history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ) == image_state_before(
+            before, history, count - 1, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ));
         assert(captured_image_bucket_delta(
             history, count, row_identity, image, source_incarnation,
             previous_cut, new_cut,
@@ -467,23 +534,30 @@ pub proof fn valid_single_identity_history_preserves_image_delta(
         ) + captured_image_weight(
             event, row_identity, image, source_incarnation, previous_cut, new_cut,
         ));
-        match (final_state, event.action) {
-            (Some(after_image), ImageEvent::Insert) => {
-                assert(after_image == event.row_image);
-                assert(before == Option::<Seq<u8>>::None);
-                assert(captured_image_weight(
-                    event, row_identity, image, source_incarnation,
-                    previous_cut, new_cut,
-                ) == image_presence(final_state, image) - image_presence(before, image));
+        if selected {
+            match (final_state, event.action) {
+                (Some(after_image), ImageEvent::Insert) => {
+                    assert(after_image == event.row_image);
+                    assert(before == Option::<Seq<u8>>::None);
+                    assert(captured_image_weight(
+                        event, row_identity, image, source_incarnation,
+                        previous_cut, new_cut,
+                    ) == image_presence(final_state, image) - image_presence(before, image));
+                }
+                (None, ImageEvent::Delete) => {
+                    assert(before == Some(event.row_image));
+                    assert(captured_image_weight(
+                        event, row_identity, image, source_incarnation,
+                        previous_cut, new_cut,
+                    ) == image_presence(final_state, image) - image_presence(before, image));
+                }
+                _ => assert(false),
             }
-            (None, ImageEvent::Delete) => {
-                assert(before == Some(event.row_image));
-                assert(captured_image_weight(
-                    event, row_identity, image, source_incarnation,
-                    previous_cut, new_cut,
-                ) == image_presence(final_state, image) - image_presence(before, image));
-            }
-            _ => assert(false),
+        } else {
+            assert(captured_image_weight(
+                event, row_identity, image, source_incarnation, previous_cut, new_cut,
+            ) == 0);
+            assert(image_presence(final_state, image) == image_presence(before, image));
         }
     }
 }
@@ -532,7 +606,10 @@ pub proof fn valid_history_has_unique_signed_image_endpoints(
         final_state, history, count, row_identity, source_incarnation,
         previous_cut, new_cut, second_image,
     );
-    let initial_state = image_state_before(final_state, history, count);
+    let initial_state = image_state_before(
+        final_state, history, count, row_identity, source_incarnation,
+        previous_cut, new_cut,
+    );
     let first_delta = captured_image_bucket_delta(
         history, count, row_identity, first_image, source_incarnation,
         previous_cut, new_cut,
@@ -594,6 +671,163 @@ pub proof fn valid_history_has_unique_signed_image_endpoints(
             },
         }
     }
+}
+
+/// Two independent unique rows may have the same old and new payload images
+/// in one interleaved committed history. Their endpoint deltas must remain
+/// partitioned by row identity, as keyed SQL partitions its image SUMs.
+pub proof fn interleaved_row_identity_histories_preserve_endpoints(
+    first_identity: Seq<u8>,
+    second_identity: Seq<u8>,
+    old_image: Seq<u8>,
+    new_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        first_identity != second_identity,
+        old_image != new_image,
+        previous_cut < new_cut,
+    ensures
+        valid_history_from_state(
+            Some(new_image), interleaved_identity_history(
+                first_identity, second_identity, old_image, new_image,
+                source_incarnation, new_cut,
+            ), 4, first_identity, source_incarnation, previous_cut, new_cut,
+        ),
+        valid_history_from_state(
+            Some(old_image), interleaved_identity_history(
+                first_identity, second_identity, old_image, new_image,
+                source_incarnation, new_cut,
+            ), 4, second_identity, source_incarnation, previous_cut, new_cut,
+        ),
+        captured_image_bucket_delta(
+            interleaved_identity_history(
+                first_identity, second_identity, old_image, new_image,
+                source_incarnation, new_cut,
+            ), 4, first_identity, old_image, source_incarnation,
+            previous_cut, new_cut,
+        ) == -1,
+        captured_image_bucket_delta(
+            interleaved_identity_history(
+                first_identity, second_identity, old_image, new_image,
+                source_incarnation, new_cut,
+            ), 4, first_identity, new_image, source_incarnation,
+            previous_cut, new_cut,
+        ) == 1,
+        captured_image_bucket_delta(
+            interleaved_identity_history(
+                first_identity, second_identity, old_image, new_image,
+                source_incarnation, new_cut,
+            ), 4, second_identity, old_image, source_incarnation,
+            previous_cut, new_cut,
+        ) == 1,
+        captured_image_bucket_delta(
+            interleaved_identity_history(
+                first_identity, second_identity, old_image, new_image,
+                source_incarnation, new_cut,
+            ), 4, second_identity, new_image, source_incarnation,
+            previous_cut, new_cut,
+        ) == -1,
+{
+    let history = interleaved_identity_history(
+        first_identity, second_identity, old_image, new_image,
+        source_incarnation, new_cut,
+    );
+    assert(history.len() == 4);
+    reveal(interleaved_identity_history);
+    reveal_with_fuel(valid_history_from_state, 5);
+    assert(valid_history_from_state(
+        Some(new_image), history, 4, first_identity, source_incarnation,
+        previous_cut, new_cut,
+    ));
+    assert(valid_history_from_state(
+        Some(old_image), history, 4, second_identity, source_incarnation,
+        previous_cut, new_cut,
+    ));
+    valid_single_identity_history_preserves_image_delta(
+        Some(new_image), history, 4, first_identity, source_incarnation,
+        previous_cut, new_cut, old_image,
+    );
+    valid_single_identity_history_preserves_image_delta(
+        Some(new_image), history, 4, first_identity, source_incarnation,
+        previous_cut, new_cut, new_image,
+    );
+    valid_single_identity_history_preserves_image_delta(
+        Some(old_image), history, 4, second_identity, source_incarnation,
+        previous_cut, new_cut, old_image,
+    );
+    valid_single_identity_history_preserves_image_delta(
+        Some(old_image), history, 4, second_identity, source_incarnation,
+        previous_cut, new_cut, new_image,
+    );
+    reveal_with_fuel(image_state_before, 5);
+    assert(image_state_before(
+        Some(new_image), history, 4, first_identity, source_incarnation,
+        previous_cut, new_cut,
+    ) == Some(old_image));
+    assert(image_state_before(
+        Some(old_image), history, 4, second_identity, source_incarnation,
+        previous_cut, new_cut,
+    ) == Some(new_image));
+    reveal(image_presence);
+    assert(captured_image_bucket_delta(
+        history, 4, first_identity, old_image, source_incarnation,
+        previous_cut, new_cut,
+    ) == 0 - 1);
+    assert(captured_image_bucket_delta(
+        history, 4, first_identity, new_image, source_incarnation,
+        previous_cut, new_cut,
+    ) == 1 - 0);
+    assert(captured_image_bucket_delta(
+        history, 4, second_identity, old_image, source_incarnation,
+        previous_cut, new_cut,
+    ) == 1 - 0);
+    assert(captured_image_bucket_delta(
+        history, 4, second_identity, new_image, source_incarnation,
+        previous_cut, new_cut,
+    ) == 0 - 1);
+}
+
+/// A committed key swap with two identities deliberately interleaved by source
+/// trigger order. The rows exchange images, so each image's global signed sum
+/// is zero while each identity still has a distinct final endpoint.
+pub open spec fn interleaved_identity_history(
+    first_identity: Seq<u8>,
+    second_identity: Seq<u8>,
+    old_image: Seq<u8>,
+    new_image: Seq<u8>,
+    source_incarnation: u64,
+    commit_lsn: u64,
+) -> Seq<CapturedImageEvent> {
+    Seq::new(4, |index: int| {
+        if index == 0 {
+            CapturedImageEvent {
+                row_identity: first_identity, row_image: old_image,
+                source_incarnation, transaction_id: 7, commit_lsn,
+                action: ImageEvent::Delete,
+            }
+        } else if index == 1 {
+            CapturedImageEvent {
+                row_identity: second_identity, row_image: new_image,
+                source_incarnation, transaction_id: 7, commit_lsn,
+                action: ImageEvent::Delete,
+            }
+        } else if index == 2 {
+            CapturedImageEvent {
+                row_identity: first_identity, row_image: new_image,
+                source_incarnation, transaction_id: 7, commit_lsn,
+                action: ImageEvent::Insert,
+            }
+        } else {
+            CapturedImageEvent {
+                row_identity: second_identity, row_image: old_image,
+                source_incarnation, transaction_id: 7, commit_lsn,
+                action: ImageEvent::Insert,
+            }
+        }
+    })
 }
 
 /// Splitting one consumer range at a cut preserves every image bucket's delta

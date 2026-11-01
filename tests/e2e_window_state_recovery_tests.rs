@@ -38,7 +38,7 @@ async fn test_window_state_and_frontier_survive_restart_then_differential_conver
     .execute(&db.pool)
     .await
     .expect("enable recovery-test state candidate");
-    db.refresh_st("ws_restart_st").await;
+    db.refresh_st_with_retry("ws_restart_st").await;
     let (
         before_partition_oid,
         before_row_oid,
@@ -186,10 +186,7 @@ async fn test_window_state_and_frontier_survive_restart_then_differential_conver
         .await
         .expect("drop state failpoint function");
 
-    sqlx::query("SELECT pgtrickle.refresh_stream_table('ws_restart_st')")
-        .execute(&restored_pool)
-        .await
-        .expect("differential refresh after restart");
+    E2eDb::refresh_st_with_retry_on(&restored_pool, "ws_restart_st").await;
     let (row_name, partition_name, generation_after): (String, String, i64) = sqlx::query_as(
         "SELECT rows.relname::text, parts.relname::text, ws.state_generation \
          FROM pgtrickle.pgt_window_states ws \

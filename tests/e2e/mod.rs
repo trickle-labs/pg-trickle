@@ -35,8 +35,9 @@ pub mod oracle;
 pub mod property_support;
 
 // ── Full E2E harness (default) ─────────────────────────────────────────
+use sqlx::PgPool;
 #[cfg(not(feature = "light-e2e"))]
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::postgres::PgPoolOptions;
 #[cfg(not(feature = "light-e2e"))]
 use std::sync::{
     Arc, LazyLock, Mutex,
@@ -1544,9 +1545,14 @@ impl E2eDb {
     /// Writer holdback can still defer changes in a completed attempt; use
     /// `wait_for_condition` when asserting eventual scheduler propagation.
     pub async fn refresh_st_with_retry(&self, name: &str) {
+        Self::refresh_st_with_retry_on(&self.pool, name).await;
+    }
+
+    /// Retry a manual refresh through a replacement pool after PostgreSQL restarts.
+    pub async fn refresh_st_with_retry_on(pool: &PgPool, name: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let mut tx = self.pool.begin().await.expect("begin refresh attempt");
+            let mut tx = pool.begin().await.expect("begin refresh attempt");
             sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
                 .bind(name)
                 .execute(&mut *tx)

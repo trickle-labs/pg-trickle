@@ -200,6 +200,19 @@ that priority as a semantic mutant and observes the old delete image instead.
 This proves the selection policy under the unique-row history model, not the
 database implementation of record ordering, aggregation or MERGE.
 
+The valid-history predicate projects an interleaved captured history onto one
+row identity, source incarnation and consumer window. The
+`interleaved_row_identity_histories_preserve_endpoints` obligation checks two
+unique rows that exchange the same visible old/new images in one committed
+transaction. Their global signed sum is zero for both images, while each
+identity has its own delete/insert endpoint. The executable
+`cross-row-identity-bucket` mutant removes identity filtering from the model;
+the generated PostgreSQL bag-oracle case removes `__pgt_row_id` from the
+per-image `SUM` partition and observes both endpoints disappear. This covers
+identity separation for that interleaved key-swap history; it does not prove
+PostgreSQL's general sort/aggregate implementation or every multi-row source
+history.
+
 ## Controls and candidate binding
 
 The pinned Verus/Z3 runner checks six executable decisions:
@@ -213,14 +226,17 @@ The pinned Verus/Z3 runner checks six executable decisions:
 `transient_same_image_cancels_within_incarnation` and
 `source_incarnation_prevents_cross_epoch_cancellation`, and
 `valid_single_identity_history_preserves_image_delta` and
-`valid_history_has_unique_signed_image_endpoints`. Fourteen executable
+`valid_history_has_unique_signed_image_endpoints`,
+`different_identity_has_zero_image_weight` and
+`interleaved_row_identity_histories_preserve_endpoints`. Fifteen executable
 mutants must fail a postcondition:
 `lost-image-change`, `unknown-type-elision`, `lost-positive-image`,
 `reversed-negative-image`, `wrong-insert-event-weight`,
 `wrong-delete-event-weight`, `prefer-deleted-image`, `cross-truncate-barrier`,
 `cross-shared-consumer`, `key-only-image-bucket`, `cross-incarnation-bucket`,
 `split-transaction-cut`, `reverse-history-weight`, and
-`overlapping-consumer-boundary`; compilation/setup failures do not count. The
+`overlapping-consumer-boundary` and `cross-row-identity-bucket`;
+compilation/setup failures do not count. The
 candidate-binding helper requires these obligations and controls, hashes the
 production callers and the installed test sources, requires all eight named
 installed cases, and checks identical packaged/installed library bytes. CI

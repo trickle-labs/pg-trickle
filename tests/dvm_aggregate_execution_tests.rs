@@ -636,6 +636,37 @@ async fn test_cdc_keyed_weight_matches_multiro_image_bag_oracle() {
             payload: Some("inserted"),
             revision: 4,
         },
+        // Two rows exchange the same visible images in one commit. The global
+        // sum for either image is zero, but each hidden row identity has a
+        // different endpoint and must remain independent in the SQL reducer.
+        Event {
+            row_id: 8,
+            action: 'D',
+            id: 99,
+            payload: Some("left"),
+            revision: 0,
+        },
+        Event {
+            row_id: 9,
+            action: 'D',
+            id: 99,
+            payload: Some("right"),
+            revision: 0,
+        },
+        Event {
+            row_id: 8,
+            action: 'I',
+            id: 99,
+            payload: Some("right"),
+            revision: 0,
+        },
+        Event {
+            row_id: 9,
+            action: 'I',
+            id: 99,
+            payload: Some("left"),
+            revision: 0,
+        },
     ];
     let rows = events
         .iter()
@@ -728,6 +759,30 @@ async fn test_cdc_keyed_weight_matches_multiro_image_bag_oracle() {
         render_result(&db, key_only_mutant).await,
         expected,
         "a key-only weighting mutant must lose endpoint payload changes"
+    );
+
+    let globally_ranked = generated.replace(
+        "dense_rank() OVER (PARTITION BY __pgt_row_id ORDER BY ROW(",
+        "dense_rank() OVER (ORDER BY ROW(",
+    );
+    assert_ne!(
+        globally_ranked, generated,
+        "global image rank mutation must reach SQL"
+    );
+    let cross_identity_mutant = globally_ranked.replace(
+        "PARTITION BY __pgt_row_id,__pgt_image",
+        "PARTITION BY __pgt_image",
+    );
+    assert_ne!(
+        cross_identity_mutant, globally_ranked,
+        "cross-identity sum mutation must reach SQL"
+    );
+    let cross_identity_rows = render_result(&db, cross_identity_mutant).await;
+    assert!(
+        cross_identity_rows
+            .iter()
+            .all(|row| row.0 != "08" && row.0 != "09"),
+        "global image sums should cancel both exchanged endpoints; got {cross_identity_rows:?}"
     );
 }
 
