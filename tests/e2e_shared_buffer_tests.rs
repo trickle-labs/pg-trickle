@@ -580,6 +580,146 @@ async fn test_cdc_shared_source_compaction_preserves_interior_consumer_cut() {
 }
 
 #[tokio::test]
+async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    for mode in ["row", "statement"] {
+        let source = format!("keyless_cut_{mode}");
+        let fast = format!("{source}_fast");
+        let slow = format!("{source}_slow");
+        db.execute(&format!("CREATE TABLE {source} (v INT, label TEXT)"))
+            .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (1,'duplicate'),(1,'duplicate')"
+        ))
+        .await;
+
+        let query = format!("SELECT v,label FROM {source}");
+        for name in [&fast, &slow] {
+            db.try_execute_with_config(
+                &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+                &format!(
+                    "SELECT pgtrickle.create_stream_table('{name}',$q${query}$q$,'24h','DIFFERENTIAL')"
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        // The slow consumer advances to a cut that includes a duplicate
+        // insertion while the fast consumer still starts at the initial bag.
+        db.execute(&format!("INSERT INTO {source} VALUES (1,'duplicate')"))
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{slow}')"),
+        )
+        .await
+        .unwrap();
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &slow,
+            "SELECT 1::int AS v,'duplicate'::text AS label UNION ALL \
+             SELECT 1::int,'duplicate'::text UNION ALL SELECT 1::int,'duplicate'::text",
+            "keyless slow consumer at its interior cut",
+        )
+        .await;
+
+        // Delete one occurrence. The fast consumer sees a net-zero bag change
+        // across both commits, while the slow consumer must retain this suffix.
+        db.execute(&format!(
+            "DELETE FROM {source} WHERE ctid = \
+             (SELECT ctid FROM {source} LIMIT 1)"
+        ))
+        .await;
+        let before_fast: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{fast}')"),
+        )
+        .await
+        .unwrap();
+        let fast_advanced: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{fast}' AND h.refresh_id>{before_fast} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            fast_advanced,
+            "fast keyless consumer must advance differentially"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &fast,
+            &query,
+            "fast keyless consumer after net-zero duplicate history",
+        )
+        .await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &slow,
+            "SELECT 1::int AS v,'duplicate'::text AS label UNION ALL \
+             SELECT 1::int,'duplicate'::text UNION ALL SELECT 1::int,'duplicate'::text",
+            "slow keyless consumer remains at its interior cut",
+        )
+        .await;
+
+        let before_slow: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{slow}')"),
+        )
+        .await
+        .unwrap();
+        let slow_caught_up: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{slow}' AND h.refresh_id>{before_slow} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            slow_caught_up,
+            "slow keyless consumer must catch up differentially from its protected cut"
+        );
+        for name in [&fast, &slow] {
+            e2e::oracle::assert_st_query_exact(
+                &db,
+                name,
+                &query,
+                "keyless consumers converge after protected-window compaction",
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_cdc_statement_payload_names_do_not_shadow_row_aliases() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled=false")
