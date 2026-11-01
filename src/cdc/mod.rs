@@ -130,11 +130,13 @@ pub fn get_cdc_name_for_source(source_oid: pg_sys::Oid) -> String {
     .unwrap_or_else(|| source_oid.to_u32().to_string())
 }
 
-fn resolve_relation_name(source_oid: pg_sys::Oid) -> Result<Option<String>, PgTrickleError> {
+fn resolve_relation_info(
+    source_oid: pg_sys::Oid,
+) -> Result<Option<(String, String)>, PgTrickleError> {
     Spi::connect(|client| {
         let rows = client
             .select(
-                "SELECT format('%I.%I', n.nspname, c.relname) \
+                "SELECT format('%I.%I', n.nspname, c.relname), c.relkind::text \
                  FROM pg_class c \
                  JOIN pg_namespace n ON n.oid = c.relnamespace \
                  WHERE c.oid = $1 AND c.relkind <> 'm'",
@@ -145,12 +147,21 @@ fn resolve_relation_name(source_oid: pg_sys::Oid) -> Result<Option<String>, PgTr
         rows.into_iter()
             .next()
             .map(|row| {
-                row.get::<String>(1)
-                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+                let name = row
+                    .get::<String>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                let relkind = row
+                    .get::<String>(2)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok(name.zip(relkind))
             })
             .transpose()
             .map(Option::flatten)
     })
+}
+
+fn resolve_relation_name(source_oid: pg_sys::Oid) -> Result<Option<String>, PgTrickleError> {
+    Ok(resolve_relation_info(source_oid)?.map(|(name, _)| name))
 }
 
 /// Lock all managed source relations, including partition descendants, in OID
@@ -192,15 +203,10 @@ pub fn lock_source_relations(source_oids: &[pg_sys::Oid]) -> Result<(), PgTrickl
     let mut relation_oids: Vec<u32> = relation_oids.into_iter().collect();
     relation_oids.sort_unstable();
     for oid in relation_oids {
-        let Some(table) = resolve_relation_name(pg_sys::Oid::from(oid))? else {
+        let Some((table, relkind)) = resolve_relation_info(pg_sys::Oid::from(oid))? else {
             continue;
         };
-        let relkind = Spi::get_one_with_args::<String>(
-            "SELECT relkind::text FROM pg_class WHERE oid = $1",
-            &[pg_sys::Oid::from(oid).into()],
-        )
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        if relkind.as_deref() == Some("f") {
+        if relkind == "f" {
             continue;
         }
         Spi::run(&format!("LOCK TABLE {table} IN SHARE MODE")) // nosemgrep: rust.spi.run.dynamic-format — table is returned by PostgreSQL format('%I.%I') from a catalog OID.

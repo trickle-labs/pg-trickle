@@ -44,6 +44,9 @@ SERIAL_CASES = [
     ("e2e_property_circular_tests", "test_prop_monotone_cycle_small_graph_converges"),
     ("e2e_dag_autorefresh_tests", "test_autorefresh_no_spurious_3_layer"),
     ("e2e_refresh_tests", "test_stddev_samp_differential_mode"),
+    # Keep immediate manual-refresh assertions out of concurrent E2E load.
+    ("e2e_refresh_tests", "test_refresh_mixed_dml"),
+    ("e2e_refresh_tests", "test_cost_model_full_fallback_records_effective_action_and_reason"),
     ("e2e_v0878_security_tests", "test_v0878_revoked_source_preserves_state_and_stages"),
 ]
 

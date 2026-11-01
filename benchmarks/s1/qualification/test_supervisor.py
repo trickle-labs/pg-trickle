@@ -180,6 +180,16 @@ for failures, expected_calls in ((2, 3), (5, 5)):
         result = bounded.disk_metrics([])
     assert run_mock.call_count == expected_calls
     assert result is (healthy if failures == 2 else vanished)
+vanished_relations = subprocess.CompletedProcess(
+    [], 1, "1024 /data\n",
+    "du: cannot access '/var/lib/postgresql/18/docker/base/22305/117762': No such file or directory\n"
+    "du: cannot access '/var/lib/postgresql/18/docker/base/22305/117763.1': No such file or directory\n")
+for failures, expected_calls in ((2, 3), (5, 5)):
+    with patch.object(bounded.subprocess, "run", side_effect=[vanished_relations] * failures + [healthy]) as run_mock, \
+         patch.object(bounded.time, "sleep"):
+        result = bounded.disk_metrics([])
+    assert run_mock.call_count == expected_calls
+    assert result is (healthy if failures == 2 else vanished_relations)
 vanished_internal = subprocess.CompletedProcess(
     [], 1, "1024 /data\n",
     "du: cannot access '/var/lib/postgresql/18/docker/base/27081/pg_internal.init': No such file or directory\n")

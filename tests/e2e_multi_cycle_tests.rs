@@ -438,7 +438,7 @@ async fn test_ec16_function_body_change_marks_reinit() {
 
     // First differential refresh — establishes function hash baseline
     db.execute("INSERT INTO ec16_src VALUES (3, 5)").await;
-    db.refresh_st("ec16_fn_st").await;
+    db.refresh_st_with_retry("ec16_fn_st").await;
 
     let sum2: i64 = db
         .query_scalar("SELECT SUM(computed) FROM public.ec16_fn_st")
@@ -477,7 +477,7 @@ async fn test_ec16_function_body_change_marks_reinit() {
     // Insert data + refresh — should automatically perform a FULL reinit
     // because needs_reinit is set, then clear the flag.
     db.execute("INSERT INTO ec16_src VALUES (4, 1)").await;
-    db.refresh_st("ec16_fn_st").await;
+    db.refresh_st_with_retry("ec16_fn_st").await;
 
     // After full reinit with new function (v*3):
     // id=1: 10*3=30, id=2: 20*3=60, id=3: 5*3=15, id=4: 1*3=3

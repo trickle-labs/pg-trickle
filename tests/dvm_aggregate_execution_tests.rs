@@ -436,6 +436,22 @@ async fn test_cdc_keyed_weight_uses_complete_images_without_scalar_equality() {
         (action, scale, json),
         ("I".to_string(), 2, "{\"x\":2}".to_string())
     );
+    let delete_first = rendered.replace("THEN 0 ELSE 1 END", "THEN 1 ELSE 0 END");
+    assert_ne!(
+        delete_first, rendered,
+        "priority mutation must reach generated SQL"
+    );
+    let (action, scale, json): (String, i32, String) = sqlx::query_as(sqlx::AssertSqlSafe(
+        format!("SELECT __pgt_action,scale(n),j::text FROM {delete_first} d"),
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (action, scale, json),
+        ("D".to_string(), 1, "{\"x\":1}".to_string()),
+        "the executable mutation must choose the old image when delete is preferred"
+    );
     let scale_delta = "SELECT decode('01','hex') AS __pgt_row_id, 'D'::text AS __pgt_action, 1 AS id, 1.0::numeric AS n \
                        UNION ALL SELECT decode('01','hex'),'I',1,1.00::numeric";
     let rendered = cdc_elision::keyed_weight_sql(scale_delta, "id,n");
@@ -490,6 +506,284 @@ async fn test_cdc_keyed_weight_uses_complete_images_without_scalar_equality() {
     .await
     .unwrap();
     assert_eq!(payload, (7, 9, 11, 13), "63-byte payload names survive");
+}
+
+#[tokio::test]
+async fn test_cdc_keyed_weight_matches_multiro_image_bag_oracle() {
+    use std::collections::BTreeMap;
+
+    let db = TestDb::new().await;
+
+    async fn render_result(
+        db: &TestDb,
+        sql: String,
+    ) -> Vec<(String, String, i32, Option<String>, i32)> {
+        let query = format!(
+            "SELECT encode(__pgt_row_id,'hex'),__pgt_action,id,payload,revision \
+             FROM {sql} d ORDER BY 1"
+        );
+        sqlx::query_as::<_, (String, String, i32, Option<String>, i32)>(sqlx::AssertSqlSafe(query))
+            .fetch_all(&db.pool)
+            .await
+            .unwrap()
+    }
+
+    #[derive(Clone)]
+    struct Event {
+        row_id: u8,
+        action: char,
+        id: i32,
+        payload: Option<&'static str>,
+        revision: i32,
+    }
+
+    let events = [
+        Event {
+            row_id: 1,
+            action: 'D',
+            id: 1,
+            payload: Some("old"),
+            revision: 0,
+        },
+        Event {
+            row_id: 1,
+            action: 'I',
+            id: 1,
+            payload: Some("middle"),
+            revision: 1,
+        },
+        Event {
+            row_id: 1,
+            action: 'D',
+            id: 1,
+            payload: Some("middle"),
+            revision: 1,
+        },
+        Event {
+            row_id: 1,
+            action: 'I',
+            id: 1,
+            payload: Some("current"),
+            revision: 2,
+        },
+        Event {
+            row_id: 2,
+            action: 'I',
+            id: 2,
+            payload: None,
+            revision: 0,
+        },
+        Event {
+            row_id: 2,
+            action: 'D',
+            id: 2,
+            payload: None,
+            revision: 0,
+        },
+        Event {
+            row_id: 3,
+            action: 'D',
+            id: 3,
+            payload: Some("deleted"),
+            revision: 0,
+        },
+        Event {
+            row_id: 5,
+            action: 'D',
+            id: 5,
+            payload: Some("a"),
+            revision: 0,
+        },
+        Event {
+            row_id: 5,
+            action: 'I',
+            id: 5,
+            payload: Some("b"),
+            revision: 1,
+        },
+        Event {
+            row_id: 5,
+            action: 'D',
+            id: 5,
+            payload: Some("b"),
+            revision: 1,
+        },
+        Event {
+            row_id: 5,
+            action: 'I',
+            id: 5,
+            payload: Some("a"),
+            revision: 0,
+        },
+        Event {
+            row_id: 5,
+            action: 'D',
+            id: 5,
+            payload: Some("a"),
+            revision: 0,
+        },
+        Event {
+            row_id: 5,
+            action: 'I',
+            id: 5,
+            payload: Some("b"),
+            revision: 1,
+        },
+        Event {
+            row_id: 7,
+            action: 'I',
+            id: 7,
+            payload: Some("inserted"),
+            revision: 4,
+        },
+        // Two rows exchange the same visible images in one commit. The global
+        // sum for either image is zero, but each hidden row identity has a
+        // different endpoint and must remain independent in the SQL reducer.
+        Event {
+            row_id: 8,
+            action: 'D',
+            id: 99,
+            payload: Some("left"),
+            revision: 0,
+        },
+        Event {
+            row_id: 9,
+            action: 'D',
+            id: 99,
+            payload: Some("right"),
+            revision: 0,
+        },
+        Event {
+            row_id: 8,
+            action: 'I',
+            id: 99,
+            payload: Some("right"),
+            revision: 0,
+        },
+        Event {
+            row_id: 9,
+            action: 'I',
+            id: 99,
+            payload: Some("left"),
+            revision: 0,
+        },
+    ];
+    let rows = events
+        .iter()
+        .map(|event| {
+            let payload = event
+                .payload
+                .map(|value| format!("'{value}'::text"))
+                .unwrap_or_else(|| "NULL::text".to_string());
+            format!(
+                "SELECT decode('{:02x}','hex') AS __pgt_row_id, \
+                 '{}'::text AS __pgt_action, {}::int AS id, {payload} AS payload, \
+                 {}::int AS revision",
+                event.row_id, event.action, event.id, event.revision
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    let columns = "id,payload,revision";
+    let generated = cdc_elision::keyed_weight_sql(&rows, columns);
+
+    // Independent complete-image bag model: each D subtracts one occurrence;
+    // each I adds one. A surviving identity has one positive image, or one
+    // negative image when the source row was deleted.
+    let mut weights = BTreeMap::<(u8, i32, Option<String>, i32), i64>::new();
+    for event in &events {
+        *weights
+            .entry((
+                event.row_id,
+                event.id,
+                event.payload.map(str::to_string),
+                event.revision,
+            ))
+            .or_default() += if event.action == 'I' { 1 } else { -1 };
+    }
+    let mut by_identity = BTreeMap::<u8, Vec<((u8, i32, Option<String>, i32), i64)>>::new();
+    for (image, weight) in weights {
+        if weight != 0 {
+            by_identity
+                .entry(image.0)
+                .or_default()
+                .push((image, weight));
+        }
+    }
+    let expected = by_identity
+        .into_iter()
+        .map(|(row_id, images)| {
+            let positive = images
+                .iter()
+                .filter(|(_, weight)| *weight > 0)
+                .collect::<Vec<_>>();
+            let negative = images
+                .iter()
+                .filter(|(_, weight)| *weight < 0)
+                .collect::<Vec<_>>();
+            assert!(
+                positive.len() <= 1,
+                "a unique row identity has at most one final image"
+            );
+            assert!(
+                positive.len() == 1 || negative.len() == 1,
+                "deleted identity has one old image"
+            );
+            let selected = positive.first().copied().unwrap_or_else(|| negative[0]);
+            let ((_, id, payload, revision), weight) = selected;
+            (
+                format!("{row_id:02x}"),
+                if *weight > 0 {
+                    "I".to_string()
+                } else {
+                    "D".to_string()
+                },
+                *id,
+                payload.clone(),
+                *revision,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let actual = render_result(&db, generated.clone()).await;
+    assert_eq!(
+        actual, expected,
+        "generated SQL must preserve the full-image bag result"
+    );
+
+    let key_only_mutant = generated.replace(
+        "PARTITION BY __pgt_row_id,__pgt_image",
+        "PARTITION BY __pgt_row_id",
+    );
+    assert_ne!(
+        render_result(&db, key_only_mutant).await,
+        expected,
+        "a key-only weighting mutant must lose endpoint payload changes"
+    );
+
+    let globally_ranked = generated.replace(
+        "dense_rank() OVER (PARTITION BY __pgt_row_id ORDER BY ROW(",
+        "dense_rank() OVER (ORDER BY ROW(",
+    );
+    assert_ne!(
+        globally_ranked, generated,
+        "global image rank mutation must reach SQL"
+    );
+    let cross_identity_mutant = globally_ranked.replace(
+        "PARTITION BY __pgt_row_id,__pgt_image",
+        "PARTITION BY __pgt_image",
+    );
+    assert_ne!(
+        cross_identity_mutant, globally_ranked,
+        "cross-identity sum mutation must reach SQL"
+    );
+    let cross_identity_rows = render_result(&db, cross_identity_mutant).await;
+    assert!(
+        cross_identity_rows
+            .iter()
+            .all(|row| row.0 != "08" && row.0 != "09"),
+        "global image sums should cancel both exchanged endpoints; got {cross_identity_rows:?}"
+    );
 }
 
 #[tokio::test]

@@ -9,9 +9,36 @@ import sys
 import check_lsn_verification as runner
 
 SOURCE = runner.ROOT / "verification/cdc_elision.rs"
+CHECKER = runner.ROOT / "scripts/check_cdc_elision_verification.py"
 EVIDENCE = runner.ROOT / ".p2p/work/issue-1221-cdc-observations/evidence"
-OBLIGATIONS = ["admitted_image_type", "keep_change", "image_event_weight", "image_action", "can_compact_history"]
-PRODUCTION_INPUTS = ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "Cargo.toml", "Cargo.lock"]
+EXECUTABLE_OBLIGATIONS = [
+    "admitted_image_type",
+    "keep_change",
+    "image_event_weight",
+    "image_action",
+    "image_action_priority",
+    "can_compact_history",
+]
+OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
+    "separate_consumer_cuts_retain_opposing_images",
+    "captured_image_bucket_delta_splits_at_consumer_cut",
+    "transaction_window_membership_is_atomic",
+    "payload_replacement_preserves_complete_image_delta",
+    "append_captured_image_bucket_delta",
+    "transient_same_image_cancels_within_incarnation",
+    "source_incarnation_prevents_cross_epoch_cancellation",
+    "valid_single_identity_history_preserves_image_delta",
+    "valid_history_has_unique_signed_image_endpoints",
+    "different_identity_has_zero_image_weight",
+    "interleaved_row_identity_histories_preserve_endpoints",
+]
+PRODUCTION_INPUTS = [
+    "src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs",
+    "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs",
+    "src/refresh/codegen.rs", "tests/e2e_shared_buffer_tests.rs", "tests/e2e_cdc_tests.rs",
+    "tests/e2e_schema_evolution_tests.rs", "tests/dvm_aggregate_execution_tests.rs",
+    "Cargo.toml", "Cargo.lock",
+]
 MUTATIONS = {
     "lost-image-change": ("    !admitted || !image_equal\n", "    false\n"),
     "unknown-type-elision": ("    !admitted || !image_equal\n", "    admitted && !image_equal\n"),
@@ -19,9 +46,38 @@ MUTATIONS = {
     "reversed-negative-image": ("else if weight < 0 { ImageAction::Delete }", "else if weight < 0 { ImageAction::Insert }"),
     "wrong-insert-event-weight": ("ImageEvent::Insert => 1,", "ImageEvent::Insert => 2,"),
     "wrong-delete-event-weight": ("ImageEvent::Delete => -1,", "ImageEvent::Delete => 1,"),
+    "prefer-deleted-image": (
+        "ImageAction::Insert => 0,\n        ImageAction::Delete => 1,",
+        "ImageAction::Insert => 1,\n        ImageAction::Delete => 0,",
+    ),
     "cross-truncate-barrier": (
         "    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier\n",
         "    has_immediate_unique_identity && has_single_consumer\n",
+    ),
+    "cross-shared-consumer": (
+        "    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier\n",
+        "    has_immediate_unique_identity && !has_truncate_barrier\n",
+    ),
+    "key-only-image-bucket": (
+        ") && event.row_image == row_image",
+        ") && true",
+    ),
+    "cross-row-identity-bucket": (
+        "    event.row_identity == row_identity\n        && captured_event_in_window(",
+        "    true\n        && captured_event_in_window(",
+    ),
+    "cross-incarnation-bucket": (
+        "event.source_incarnation == source_incarnation\n        && image_event_in_window_spec",
+        "true\n        && image_event_in_window_spec",
+    ),
+    "split-transaction-cut": (
+        "first.commit_lsn == second.commit_lsn,",
+        "first.commit_lsn <= second.commit_lsn,",
+    ),
+    "reverse-history-weight": ("prefix + event_weight", "prefix - event_weight"),
+    "overlapping-consumer-boundary": (
+        "event_lsn > previous_cut && event_lsn <= new_cut",
+        "event_lsn >= previous_cut && event_lsn <= new_cut",
     ),
 }
 
@@ -37,6 +93,9 @@ def check_contract() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     for name in MUTATIONS:
         mutate(source, name)
+    for obligation in OBLIGATIONS[len(EXECUTABLE_OBLIGATIONS):]:
+        if f"pub proof fn {obligation}(" not in source:
+            raise ValueError(f"CDC history proof obligation is missing: {obligation}")
     if '#[path = "../verification/cdc_elision.rs"]' not in (runner.ROOT / "src/lib.rs").read_text():
         raise ValueError("production does not import the checked CDC policy")
     for path in ["src/cdc/triggers.rs", "src/cdc/mod.rs"]:
@@ -46,6 +105,12 @@ def check_contract() -> None:
         raise ValueError("keyed MERGE does not execute the checked image action adapter")
     if 'image_event_weight_sql("__pgt_action")' not in source:
         raise ValueError("keyed image weights bypass the checked signed event coefficients")
+    if "image_action_priority(ImageAction::Insert)" not in source or "image_action_priority(ImageAction::Delete)" not in source:
+        raise ValueError("keyed image preference bypasses the checked action-priority decision")
+    if "THEN {insert_priority} ELSE {delete_priority} END" not in source:
+        raise ValueError("keyed endpoint SQL does not use the checked insert-before-delete priority")
+    if "SUM({event_weight})" not in source or "PARTITION BY __pgt_row_id,{image_column}" not in source:
+        raise ValueError("keyed image weights must sum within complete row-image buckets")
     if "crate::cdc_elision::can_compact_history(" not in (runner.ROOT / "src/cdc/mod.rs").read_text():
         raise ValueError("base-buffer compaction bypasses the checked barrier decision")
     cdc = (runner.ROOT / "src/cdc/mod.rs").read_text()
@@ -78,7 +143,8 @@ def run_checks() -> None:
                               "source_sha256": runner.sha256(mutant.encode()), "output_sha256": runner.sha256(result.stdout.encode())}
         record = {
             "schema": "pg-trickle-cdc-elision-verification-v1", "source": "verification/cdc_elision.rs",
-            "source_sha256": runner.sha256(source.encode()), "verus_image": runner.IMAGE,
+            "source_sha256": runner.sha256(source.encode()), "checker_sha256": runner.sha256(CHECKER.read_bytes()),
+            "verus_image": runner.IMAGE,
             "compiler_identity": compiler, "solver_identity": solver, "obligations": OBLIGATIONS,
             "production_inputs": {path: runner.sha256((runner.ROOT / path).read_bytes()) for path in PRODUCTION_INPUTS},
             "baseline": {"returncode": baseline.returncode, "summary": summary[0], "output_sha256": runner.sha256(baseline.stdout.encode())},

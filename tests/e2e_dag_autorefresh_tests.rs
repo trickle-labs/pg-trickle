@@ -868,7 +868,11 @@ async fn test_autorefresh_diamond_with_view_branch() {
     db.execute("INSERT INTO ardv_src (category, amount) VALUES ('x', 40), ('z', 100)")
         .await;
 
-    // Give a loaded E2E shard headroom for a delayed or respawning scheduler.
+    // A slow or respawning scheduler can miss the source write until the
+    // launcher notices it. Ensure the worker is live before waiting for refresh.
+    let scheduler_running = db.wait_for_scheduler(Duration::from_secs(30)).await;
+    assert!(scheduler_running, "pg_trickle scheduler should be running");
+
     let refreshed = db
         .wait_for_auto_refresh_since("ardv_joined", before_insert, Duration::from_secs(90))
         .await;

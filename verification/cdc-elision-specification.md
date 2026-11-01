@@ -3,9 +3,16 @@
 This #1221 slice changes UPDATE masks, retains deferred-key source histories,
 classifies keyed image weights and applies the verified compaction eligibility
 gate to both base and stream-table buffers. It does not yet prove complete scan
-normalization or the reduction SQL's equivalence for every history,
-source incarnation/epoch transitions, complete transaction histories, or all
-protected consumer windows. Those obligations remain open.
+normalization or the reduction SQL's equivalence for every history. The
+history model proves per-image deltas for valid unique-row transitions and,
+for arbitrary finite event prefixes, equates each complete-image bucket's
+signed sum with its initial-to-final bag multiplicity change. The latter
+permits duplicate row identities. Consumer-window additivity and equal-LSN
+transaction membership are also modeled. PostgreSQL SQL execution equivalence,
+per-bucket rejection of unmatched deletes, and nonnegative bag counts are
+modeled. Whole-batch validity for every production multi-row history, SQL
+execution equivalence, and all protected consumer windows remain separate or
+incomplete obligations.
 
 ## Independent observation contract
 
@@ -23,11 +30,18 @@ separate integration boundaries.
 
 `verification/cdc_elision.rs` contains the exact production decisions checked
 by Verus: `admitted_image_type`, `keep_change`, `image_event_weight`,
-`image_action` and `can_compact_history`. They require no unchecked
-preconditions. `keyed_weight_sql` obtains the `I` and `D` coefficients from
-`image_event_weight` before lowering them into PostgreSQL's per-image `SUM`.
-This proves the signed coefficient decision; PostgreSQL's aggregate execution
-and complete history equivalence remain runtime conformance boundaries.
+`image_action`, `image_action_priority` and `can_compact_history`. They require
+no unchecked preconditions. `keyed_weight_sql` obtains the `I` and `D`
+coefficients from `image_event_weight` before lowering them into PostgreSQL's
+per-image `SUM`; it obtains the insert-before-delete endpoint ordering from
+`image_action_priority`.
+`captured_image_bucket_delta_matches_bag_count` proves the generic accumulator
+equation for an arbitrary finite event prefix and complete-image bucket. This
+proves the signed count semantics, not PostgreSQL's aggregate execution or the
+whole-batch validity of every production history; those remain runtime
+conformance and caller-assumption boundaries. The bucket history predicate
+rejects an unmatched delete and its lemma establishes nonnegative multiplicity
+for every accepted prefix.
 `can_compact_history` admits compaction only for an immediate unique identity,
 one dependent stream table and a selected LSN range with no captured TRUNCATE
 marker. Base sources supply primary-key metadata; stream-table sources supply
@@ -122,27 +136,111 @@ requires a valid keyed endpoint; it is not a general multiplicity-expanding
 bag consumer. A repeated-image integration case checks that an intermediate
 I/D pair cancels while the final payload survives.
 
-Verus proves the weight classifier only. It does **not** prove PostgreSQL's
-image comparisons, SQL sums/window functions, field binding, complete committed
-cuts, catalog metadata, keyed endpoint uniqueness or upsert equivalence. This
-is not yet the full R1/R2 bag/window theorem. Native SQL conformance checks
+Verus proves the weight classifier and the event-level bucket lemmas below. It
+does **not** prove PostgreSQL's image comparisons, SQL sums/window functions,
+field binding, complete committed cuts, catalog metadata, keyed endpoint
+uniqueness or upsert equivalence. This is not yet the full R1/R2 bag/window theorem. Native SQL conformance checks
 numeric scale, json and NULL cancellation; the installed history checks
 same-key replacement, transient cancellation and savepoint rollback for both
 trigger modes against independent source queries. Shared-buffer compaction,
 epoch transitions and every protected consumer window remain outside the proof.
 
+The verifier also proves `separate_consumer_cuts_retain_opposing_images`: for
+any ordered insert/delete LSNs split by two consumers' cuts, the combined
+signed weight is zero while the first consumer observes `+1` and the second
+observes `-1`; the production-used compaction gate rejects the shared-consumer
+case. This is a parameterized counterexample to cross-window cancellation,
+not a proof that the PostgreSQL reducer preserves arbitrary histories or every
+consumer window.
+
+The event model also proves `captured_image_bucket_delta_splits_at_consumer_cut`
+for any finite captured history prefix and complete-image bucket. The signed
+delta over `(earlier_cut, later_cut]` equals the sum over adjacent
+`(earlier_cut, middle_cut]` and `(middle_cut, later_cut]` windows. An event at
+the shared cut belongs only to the first interval. This establishes partitioning
+for the model; PostgreSQL capture, SQL grouping/aggregation, and runtime
+compaction equivalence remain separate boundaries.
+
+The complete-image event model adds six bounded event lemmas. Events carry a row
+identity, full row-image bytes, source-incarnation identifier, transaction
+identifier and commit LSN. It proves that events from one transaction share a
+consumer-window membership when their commit LSN is shared; a same-key payload
+replacement contributes `-1` and `+1` in distinct image buckets; an identical
+image insert/delete pair cancels within one incarnation and window; and an
+event from an earlier incarnation contributes nothing to the current
+incarnation's bucket. Its recursive sequence delta also proves that appending
+any captured event adds exactly that event's signed weight to its selected
+complete-image bucket. Four executable Verus mutants reject key-only image
+grouping, cross-incarnation grouping, a transaction cut that admits different
+commit LSNs and a reversed history weight.
+
+These lemmas specify the event semantics that the production adapter must
+preserve. They assume captured events already represent committed transactions
+with correct source-incarnation identifiers and full row images. They do not
+prove that PostgreSQL capture, commit-LSN assignment, schema changes or source
+recreation construct those records correctly; the installed SQL and lifecycle
+tests remain separate evidence for those boundaries.
+
+`valid_single_identity_history_preserves_image_delta` adds a valid-transition
+model for one unique row identity. Walking backward from the final state, an
+insert must match the active final image and a delete must remove the active
+image. For every complete image, the sum of its signed events in the selected
+incarnation and consumer window equals final multiplicity minus initial
+multiplicity. This connects valid history transitions to bucket arithmetic;
+it does not prove that production capture enforces these transitions or that
+PostgreSQL's `record_send`, `dense_rank`, window `SUM`, or keyed upsert executes
+this abstract reduction exactly.
+
+`valid_history_has_unique_signed_image_endpoints` composes the per-image
+transition theorem: for a valid history of one unique row identity, at most
+one image has a positive delta and at most one has a negative delta. The
+production keyed adapter prefers the positive insert image when both exist,
+which is the endpoint for an update; the generated SQL integration test flips
+that priority as a semantic mutant and observes the old delete image instead.
+This proves the selection policy under the unique-row history model, not the
+database implementation of record ordering, aggregation or MERGE.
+
+The valid-history predicate projects an interleaved captured history onto one
+row identity, source incarnation and consumer window. The
+`interleaved_row_identity_histories_preserve_endpoints` obligation checks two
+unique rows that exchange the same visible old/new images in one committed
+transaction. Their global signed sum is zero for both images, while each
+identity has its own delete/insert endpoint. The executable
+`cross-row-identity-bucket` mutant removes identity filtering from the model;
+the generated PostgreSQL bag-oracle case removes `__pgt_row_id` from the
+per-image `SUM` partition and observes both endpoints disappear. This covers
+identity separation for that interleaved key-swap history; it does not prove
+PostgreSQL's general sort/aggregate implementation or every multi-row source
+history.
+
 ## Controls and candidate binding
 
-The pinned Verus/Z3 runner checks five obligations:
-`admitted_image_type`, `keep_change`, `image_event_weight`, `image_action` and
-`can_compact_history`. Seven executable mutants must fail a postcondition:
+The pinned Verus/Z3 runner checks six executable decisions:
+`admitted_image_type`, `keep_change`, `image_event_weight`, `image_action`,
+`image_action_priority` and `can_compact_history`, plus nine proof obligations:
+`separate_consumer_cuts_retain_opposing_images`,
+`captured_image_bucket_delta_splits_at_consumer_cut`,
+`transaction_window_membership_is_atomic`,
+`payload_replacement_preserves_complete_image_delta`,
+`append_captured_image_bucket_delta`,
+`transient_same_image_cancels_within_incarnation` and
+`source_incarnation_prevents_cross_epoch_cancellation`, and
+`valid_single_identity_history_preserves_image_delta` and
+`valid_history_has_unique_signed_image_endpoints`,
+`different_identity_has_zero_image_weight` and
+`interleaved_row_identity_histories_preserve_endpoints`. Fifteen executable
+mutants must fail a postcondition:
 `lost-image-change`, `unknown-type-elision`, `lost-positive-image`,
 `reversed-negative-image`, `wrong-insert-event-weight`,
-`wrong-delete-event-weight` and `cross-truncate-barrier`; compilation/setup
-failures do not count. The candidate-binding helper requires these obligations
-and controls, source/caller/build hashes, all three named installed cases, and
-identical packaged/installed library bytes. CI uses the existing proof and
-candidate jobs, without introducing a tier.
+`wrong-delete-event-weight`, `prefer-deleted-image`, `cross-truncate-barrier`,
+`cross-shared-consumer`, `key-only-image-bucket`, `cross-incarnation-bucket`,
+`split-transaction-cut`, `reverse-history-weight`, and
+`overlapping-consumer-boundary` and `cross-row-identity-bucket`;
+compilation/setup failures do not count. The
+candidate-binding helper requires these obligations and controls, hashes the
+production callers and the installed test sources, requires all eight named
+installed cases, and checks identical packaged/installed library bytes. CI
+uses the existing proof and candidate jobs, without introducing a tier.
 
 Binding requires the runtime's declared candidate commit to match the requested
 commit. It trusts the build/test runner for build origin and successful named
