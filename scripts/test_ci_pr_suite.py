@@ -54,6 +54,8 @@ class AllocationTests(unittest.TestCase):
             "test(=test_lsn_scheduler_cdc_holdback_recovers_after_long_writer) | "
             "test(=test_prop_monotone_cycle_small_graph_converges) | "
             "test(=test_stddev_samp_differential_mode) | "
+            "test(=test_refresh_mixed_dml) | "
+            "test(=test_cost_model_full_fallback_records_effective_action_and_reason) | "
             "test(=test_v0878_revoked_source_preserves_state_and_stages)",
         ]
         with patch("sys.argv", ["ci_pr_suite.py"]), patch(
