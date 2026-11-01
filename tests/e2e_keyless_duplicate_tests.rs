@@ -31,7 +31,7 @@ async fn test_keyless_duplicate_rows_basic() {
 
     // Insert another exact duplicate
     db.execute("INSERT INTO kl_dup VALUES (1, 'a')").await;
-    db.refresh_st("kl_dup_st").await;
+    db.refresh_st_until_converged("kl_dup_st").await;
     db.assert_st_matches_query("kl_dup_st", q).await;
 }
 

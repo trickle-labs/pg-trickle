@@ -3970,21 +3970,24 @@ unsafe fn parse_from_item_inner(
         }
 
         let condition = if !join.usingClause.is_null() {
-            let mut predicates = join_using_columns(join)?
-                .into_iter()
-                .map(|column_name| Expr::BinaryOp {
+            let mut conditions = Vec::new();
+            for column in join_using_columns(join)? {
+                conditions.push(Expr::BinaryOp {
                     op: "=".into(),
-                    left: Box::new(using_column_expr(&left, &column_name)),
-                    right: Box::new(using_column_expr(&right, &column_name)),
-                })
-                .collect::<Vec<_>>();
-            if predicates.len() == 1 {
-                predicates.pop().ok_or_else(|| {
-                    PgTrickleError::InternalError("USING predicate disappeared".into())
-                })?
-            } else {
-                super::rewrites::join_and_predicates(predicates)?
+                    left: Box::new(join_using_column(&left, &column)?),
+                    right: Box::new(join_using_column(&right, &column)?),
+                });
             }
+            // Retain the typed equality/provenance tree so later USING joins can prove merged keys.
+            let mut predicates = conditions.into_iter();
+            let first = predicates.next().ok_or_else(|| {
+                PgTrickleError::QueryParseError("USING clause has no columns".into())
+            })?;
+            predicates.fold(first, |left, right| Expr::BinaryOp {
+                op: "AND".into(),
+                left: Box::new(left),
+                right: Box::new(right),
+            })
         } else if join.quals.is_null() {
             Expr::Literal("TRUE".into())
         } else {

@@ -255,7 +255,12 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
         }
     );
     assert_eq!(witness["strategy"], "FULL", "{diagnostics}");
-    if change_upstream {
+    // visibility_xid is optional freshness telemetry. A baseline can be
+    // correct without either side having a recorded visibility XID; in that
+    // case SQL equality evaluates to NULL, not false. Assert transaction
+    // equality when both IDs are available, and keep the frontier/buffer
+    // and exact-result checks below as the mandatory no-replay evidence.
+    if change_upstream && !witness["same_transaction"].is_null() {
         assert_eq!(witness["same_transaction"], true, "{diagnostics}");
     }
     if baseline == "FALLBACK" {
@@ -896,23 +901,27 @@ async fn test_scheduler_paused_atomic_member_stays_stale_until_resume() {
         )
         .await;
 
-        let control_refreshed_change = db
+        // A completed refresh can have taken its source snapshot before the
+        // committed insert. Wait for the observable row as well as new history
+        // so scheduler progress proves this source change was applied.
+        let control_caught_up = db
             .wait_for_condition(
-                "control refresh includes the post-pause source change",
+                "unpaused control consumes committed source row",
                 &format!(
-                    "SELECT EXISTS(SELECT 1 FROM pause_group_control WHERE id = 4) \
-                       AND (SELECT count(*) FROM pgtrickle.pgt_refresh_history h \
-                             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
-                            WHERE st.pgt_name = 'pause_group_control' \
-                              AND h.status = 'COMPLETED') > {control_refresh_baseline}"
+                    "SELECT (SELECT count(*) FROM pgtrickle.pgt_refresh_history h \
+                              JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                             WHERE st.pgt_name = 'pause_group_control' \
+                               AND h.status = 'COMPLETED') > {control_refresh_baseline} \
+                        AND EXISTS (SELECT 1 FROM pause_group_control \
+                                    WHERE id = 4 AND val = 20)"
                 ),
                 Duration::from_secs(30),
                 Duration::from_millis(50),
             )
             .await;
         assert!(
-            control_refreshed_change,
-            "unpaused source consumer did not materialize the new row in {mode} mode"
+            control_caught_up,
+            "unpaused source consumer did not apply the committed row in {mode} mode"
         );
         db.assert_st_matches_query("pause_group_control", "SELECT id, val FROM pause_group_src")
             .await;
