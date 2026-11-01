@@ -57,31 +57,33 @@ async fn test_view_inline_chained_inner_using_proves_merged_key() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute_seq(&[
         "SET pg_trickle.differential_max_change_ratio = 1",
-        "CREATE TABLE vi_chain_cases (id int PRIMARY KEY, value text)",
-        "CREATE TABLE vi_chain_selected (id int PRIMARY KEY)",
-        "CREATE TABLE vi_chain_allowed (id int PRIMARY KEY)",
-        "INSERT INTO vi_chain_cases VALUES (1, 'one'), (2, 'two'), (3, 'three')",
-        "INSERT INTO vi_chain_selected VALUES (1), (2)",
-        "INSERT INTO vi_chain_allowed VALUES (2), (3)",
-        "CREATE VIEW vi_chain_projection AS SELECT id, value FROM vi_chain_cases",
+        "CREATE TABLE vi_chain_cases (id int PRIMARY KEY, join_key int, value text)",
+        "CREATE TABLE vi_chain_selected (id int PRIMARY KEY, join_key int)",
+        "CREATE TABLE vi_chain_allowed (id int PRIMARY KEY, join_key int)",
+        "INSERT INTO vi_chain_cases VALUES (1, 10, 'one'), (2, 20, 'two'), (3, NULL, 'null'), (4, 40, 'four')",
+        "INSERT INTO vi_chain_selected VALUES (1, 10), (2, 20), (3, NULL), (4, 40)",
+        "INSERT INTO vi_chain_allowed VALUES (2, 20), (3, NULL), (4, 41)",
+        "CREATE VIEW vi_chain_projection AS SELECT id, join_key, value FROM vi_chain_cases",
     ])
     .await;
 
-    // Both earlier inputs expose id, but their INNER USING condition proves
+    // Both earlier inputs expose join_key, but their INNER USING condition proves
     // equality. The third JOIN USING must not silently become a cross join.
     let query = "SELECT a.id, a.value FROM vi_chain_projection a \
-                 JOIN vi_chain_selected b USING (id) \
-                 JOIN vi_chain_allowed c USING (id)";
+                 JOIN vi_chain_selected b USING (join_key) \
+                 JOIN vi_chain_allowed c USING (join_key)";
     db.create_st("vi_chain_result", query, "1h", "DIFFERENTIAL")
         .await;
     db.assert_st_matches_query("vi_chain_result", query).await;
 
-    // No matching id=1 until a new allowed row is inserted.
-    db.execute("INSERT INTO vi_chain_allowed VALUES (1)").await;
+    // Nullable keys do not match, and 40 vs. 41 is a mismatched key. A fresh
+    // matching row makes id=1 visible only after the third input changes.
+    db.execute("INSERT INTO vi_chain_allowed VALUES (1, 10)")
+        .await;
     db.refresh_st("vi_chain_result").await;
     db.assert_st_matches_query("vi_chain_result", query).await;
 
-    // Delete a matching id and change the surviving row's payload.
+    // Delete a matching row and change the surviving row's payload.
     db.execute("DELETE FROM vi_chain_selected WHERE id = 2")
         .await;
     db.execute("UPDATE vi_chain_cases SET value = 'updated' WHERE id = 1")
