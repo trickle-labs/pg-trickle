@@ -739,6 +739,142 @@ async fn test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_or
 }
 
 #[tokio::test]
+async fn test_shared_float_images_preserve_sql_equal_distinct_binary_values() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.cdc_mode = 'trigger'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    for mode in ["row", "statement"] {
+        for wide_first in [true, false] {
+            let source = format!("float_images_{mode}_{wide_first}");
+            let wide = format!("{source}_wide");
+            let narrow = format!("{source}_narrow");
+            let wide_query = format!("SELECT id, v, pad FROM {source}");
+            let narrow_query = format!("SELECT id, v FROM {source}");
+            db.execute(&format!(
+                "CREATE TABLE {source} (id INT PRIMARY KEY, v DOUBLE PRECISION NOT NULL, pad INT NOT NULL)"
+            ))
+            .await;
+            db.execute(&format!("INSERT INTO {source} VALUES (1, 0.0, 7)"))
+                .await;
+
+            let consumers = if wide_first {
+                [(&wide, &wide_query), (&narrow, &narrow_query)]
+            } else {
+                [(&narrow, &narrow_query), (&wide, &wide_query)]
+            };
+            for (name, query) in consumers {
+                db.try_execute_with_config(
+                    &[&format!("SET pg_trickle.cdc_trigger_mode = '{mode}'")],
+                    &format!(
+                        "SELECT pgtrickle.create_stream_table('{name}', $q${query}$q$, '24h', 'DIFFERENTIAL')"
+                    ),
+                )
+                .await
+                .expect("admit consumer with selected trigger mode");
+            }
+
+            let equal_with_positive_zero: bool = db
+                .query_scalar(&format!(
+                    "SELECT v = 0.0::float8 FROM {source} WHERE id = 1"
+                ))
+                .await;
+            let binary_matches_positive_zero: bool = db
+                .query_scalar(&format!(
+                    "SELECT pg_catalog.float8send(v) IS NOT DISTINCT FROM \
+                     pg_catalog.float8send(0.0::float8) FROM {source} WHERE id = 1"
+                ))
+                .await;
+            assert!(equal_with_positive_zero);
+            assert!(binary_matches_positive_zero);
+
+            let source_oid = db.table_oid(&source).await as i64;
+            let buffer = db.change_buffer_table(source_oid).await;
+            let before: i64 = db
+                .query_scalar(&format!("SELECT COALESCE(max(change_id), 0) FROM {buffer}"))
+                .await;
+            db.execute(&format!(
+                "UPDATE {source} SET v = '-0'::float8 WHERE id = 1"
+            ))
+            .await;
+            let equal_with_positive_zero: bool = db
+                .query_scalar(&format!(
+                    "SELECT v = 0.0::float8 FROM {source} WHERE id = 1"
+                ))
+                .await;
+            let binary_differs_from_positive_zero: bool = db
+                .query_scalar(&format!(
+                    "SELECT pg_catalog.float8send(v) IS DISTINCT FROM \
+                     pg_catalog.float8send(0.0::float8) FROM {source} WHERE id = 1"
+                ))
+                .await;
+            assert!(equal_with_positive_zero);
+            assert!(binary_differs_from_positive_zero);
+            let (captured, changed): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*), count(*) FILTER (WHERE get_bit(changed_cols, 1) = 1) \
+                     FROM {buffer} WHERE change_id > {before} AND action IN ('D', 'I')"
+            )))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(captured, 2, "{mode}/{wide_first}: capture both images");
+            assert_eq!(
+                changed, 2,
+                "{mode}/{wide_first}: retain float8's changed bit"
+            );
+
+            for (name, query) in [(&wide, &wide_query), (&narrow, &narrow_query)] {
+                let before_refresh: i64 = db
+                    .query_scalar(
+                        "SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history",
+                    )
+                    .await;
+                db.try_execute_with_config(
+                    &[
+                        "SET pg_trickle.refresh_strategy = 'differential'",
+                        "SET pg_trickle.differential_max_change_ratio = 0",
+                    ],
+                    &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+                )
+                .await
+                .expect("consume the signed-zero image change");
+                let differential: bool = db
+                    .query_scalar(&format!(
+                        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+                         WHERE s.pgt_name = '{name}' AND h.refresh_id > {before_refresh} \
+                           AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' \
+                           AND NOT h.was_full_fallback)"
+                    ))
+                    .await;
+                assert!(differential, "{name}: execute the differential route");
+                e2e::oracle::assert_st_query_exact(
+                    &db,
+                    name,
+                    query,
+                    "float8 signed-zero source result",
+                )
+                .await;
+                let stored_image_matches_source: bool = db
+                    .query_scalar(&format!(
+                        "SELECT pg_catalog.float8send(st.v) = pg_catalog.float8send(src.v) \
+                         AND pg_catalog.float8send(st.v) <> pg_catalog.float8send(0.0::float8) \
+                         FROM public.{name} st JOIN public.{source} src USING (id)"
+                    ))
+                    .await;
+                assert!(
+                    stored_image_matches_source,
+                    "{name}: preserve negative-zero payload despite SQL equality"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_compaction_shared_source_preserves_consumer_boundaries() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE compact_src (id INT PRIMARY KEY)")
