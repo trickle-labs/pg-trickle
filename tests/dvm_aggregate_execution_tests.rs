@@ -450,6 +450,18 @@ async fn test_cdc_keyed_weight_uses_complete_images_without_scalar_equality() {
         .query_scalar(&format!("SELECT count(*) FROM {rendered} d"))
         .await;
     assert_eq!(count, 0, "genuine same-image cancellation");
+    let repeated = "SELECT decode('02','hex') AS __pgt_row_id,'D'::text AS __pgt_action,2 AS id,'old'::text AS payload \
+                    UNION ALL SELECT decode('02','hex'),'I',2,'middle' \
+                    UNION ALL SELECT decode('02','hex'),'D',2,'middle' \
+                    UNION ALL SELECT decode('02','hex'),'I',2,'new'";
+    let rendered = cdc_elision::keyed_weight_sql(repeated, "id,payload");
+    let row: (String, String) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT __pgt_action,payload FROM {rendered} d"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(row, ("I".to_string(), "new".to_string()));
     let collision = "SELECT decode('01','hex') AS __pgt_row_id,'I'::text AS __pgt_action,7 AS __pgt_image,9 AS __pgt_weight";
     let rendered = cdc_elision::keyed_weight_sql(collision, "__pgt_image,__pgt_weight");
     let payload: (i32, i32) = sqlx::query_as(sqlx::AssertSqlSafe(format!(

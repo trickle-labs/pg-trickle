@@ -89,6 +89,7 @@ jobs:
       getting_started: ${{ steps.paths.outputs.getting_started }}
       failure_recovery_changed: ${{ steps.paths.outputs.failure_recovery_changed }}
       unsafe_boundary_changed: ${{ steps.paths.outputs.unsafe_boundary_changed }}
+      intersect_mutants: ${{ steps.paths.outputs.intersect_mutants }}
     steps:
       - uses: actions/checkout@v7
 
@@ -406,6 +407,33 @@ jobs:
           report_paths: 'target/nextest/ci/junit.xml'
           annotate_only: true
           commit: ${{github.event.pull_request.head.sha}}
+
+  intersect-semantic-mutants:
+    name: INTERSECT packaged semantic mutants
+    needs: release-qualification-contract
+    if: (github.event_name == 'workflow_dispatch' || needs.release-qualification-contract.outputs.intersect_mutants == 'true') && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Qualify exact packaged INTERSECT mutations
+        run: python3 scripts/check_intersect_semantic_mutants.py
+
+      - name: Upload INTERSECT mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: intersect-semantic-mutant-evidence
+          path: target/intersect-semantic-mutants/
+          retention-days: 30
+          if-no-files-found: warn
 
   # ── v0.87 paired pgbench overhead gate ─────────────────────────────────
   # This is intentionally separate from the long weekly E2E benchmark history.
@@ -728,8 +756,8 @@ jobs:
           PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
           PGT_RELEASE_ATTESTATION_PATH: target/cdc-elision-full-install-attestation.json
         run: |
-          ./scripts/run_e2e_tests.sh --test e2e_shared_buffer_tests \
-            -E 'test(=test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders) | test(=test_cdc_deferred_replacement_preserves_complete_payload) | test(=test_cdc_statement_payload_names_do_not_shadow_row_aliases)' --retries 0
+          ./scripts/run_e2e_tests.sh --test e2e_shared_buffer_tests --test e2e_cdc_tests \
+            -E 'test(=test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders) | test(=test_cdc_deferred_replacement_preserves_complete_payload) | test(=test_cdc_shared_source_compaction_preserves_interior_consumer_cut) | test(=test_cdc_statement_payload_names_do_not_shadow_row_aliases) | test(=test_sf10_truncate_then_insert_post_truncate_rows_captured)' --retries 0
           python3 scripts/check_lsn_candidate_binding.py --proof-kind cdc_elision \
             --proof-record .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-verification.json \
             --package-dir target/release/pg_trickle-pg18 \
@@ -737,7 +765,9 @@ jobs:
             --candidate-commit "$GITHUB_SHA" \
             --runtime-case e2e_shared_buffer_tests::test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders \
             --runtime-case e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload \
+            --runtime-case e2e_shared_buffer_tests::test_cdc_shared_source_compaction_preserves_interior_consumer_cut \
             --runtime-case e2e_shared_buffer_tests::test_cdc_statement_payload_names_do_not_shadow_row_aliases \
+            --runtime-case e2e_cdc_tests::test_sf10_truncate_then_insert_post_truncate_rows_captured \
             --output .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-candidate-binding.json
 
       - name: Run packaged join endpoint E2E and bind installed library
@@ -748,7 +778,7 @@ jobs:
         run: |
           mkdir -p artifacts/join-endpoints
           ./scripts/run_e2e_tests.sh --test e2e_join_tests --test e2e_refresh_atomicity_tests \
-            -E 'test(=test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows) | test(=test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut)' \
+            -E 'test(=test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows) | test(=test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut) | test(=test_nested_inner_join_correction_in_semijoin_context_matches_postgres)' \
             --retries 0 2>&1 | tee artifacts/join-endpoints/runtime.log
           python3 scripts/check_lsn_candidate_binding.py --proof-kind join_plan \
             --proof-record .p2p/work/issue-1223-join-checker/evidence/join-plan-verification.json \
@@ -757,6 +787,7 @@ jobs:
             --candidate-commit "$GITHUB_SHA" \
             --runtime-case e2e_join_tests::test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows \
             --runtime-case e2e_refresh_atomicity_tests::test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut \
+            --runtime-case e2e_join_tests::test_nested_inner_join_correction_in_semijoin_context_matches_postgres \
             --output .p2p/work/issue-1223-join-checker/evidence/join-plan-candidate-binding.json
 
       - name: Run packaged identity frame E2E and bind installed library
@@ -2109,6 +2140,7 @@ jobs:
       - e2e-sensitive-gate
       - unsafe-boundary-asan
       - shipping-image-upgrade
+      - intersect-semantic-mutants
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

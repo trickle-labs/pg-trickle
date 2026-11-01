@@ -31,6 +31,10 @@ def check(needs: dict, *, draft: bool) -> list[str]:
                 errors.append(f"release-qualification-contract: missing/invalid {name}")
         if flags.get("unsafe_boundary_changed") == "true":
             required.add("unsafe-boundary-asan")
+        if flags.get("intersect_mutants") not in {"true", "false"}:
+            errors.append("release-qualification-contract: missing/invalid intersect_mutants")
+        elif flags.get("intersect_mutants") == "true":
+            required.add("intersect-semantic-mutants")
     if not draft and (runtime or outputs.get("shipping") == "true"):
         required.add("shipping-image-upgrade")
     for name in sorted(required | needs.keys()):

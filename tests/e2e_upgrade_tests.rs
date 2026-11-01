@@ -2251,3 +2251,109 @@ async fn test_upgrade_v1082_rebuilds_bpchar_identity_before_differential() {
     )
     .await;
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_v1083_preserves_intersect_private_state_for_differential() {
+    if !upgrade_image_available()
+        || std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.108.3")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        eprintln!("SKIP: requires the 0.108.3 -> current INTERSECT state upgrade image");
+        return;
+    }
+
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.108.3' CASCADE")
+        .await;
+    db.execute("CREATE TABLE isect_upgrade_a (id INT PRIMARY KEY, val INT NOT NULL)")
+        .await;
+    db.execute("CREATE TABLE isect_upgrade_b (id INT PRIMARY KEY, val INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO isect_upgrade_a VALUES (1, 7), (2, 7), (3, 8)")
+        .await;
+    db.execute("INSERT INTO isect_upgrade_b VALUES (1, 7), (2, 8)")
+        .await;
+    let query = "SELECT val FROM isect_upgrade_a INTERSECT SELECT val FROM isect_upgrade_b";
+    db.create_st("isect_upgrade_st", query, "1m", "FULL").await;
+    db.refresh_st_with_retry("isect_upgrade_st").await;
+    db.assert_st_matches_query("isect_upgrade_st", query).await;
+
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'isect_upgrade_st'",
+        )
+        .await;
+    let state_relation = format!("pgtrickle.\"__pgt_setop_state_{pgt_id}\"");
+    let state_oid_before: i64 = db
+        .query_scalar(&format!("SELECT '{state_relation}'::regclass::oid::bigint"))
+        .await;
+    let initial_counts: (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT __pgt_count_l, __pgt_count_r FROM {state_relation} WHERE val = 7"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .expect("read pre-upgrade private counts");
+    assert_eq!(initial_counts, (2, 1));
+
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.108.4'")
+        .await;
+    let installed_version: String = db
+        .query_scalar("SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")
+        .await;
+    assert_eq!(installed_version, "0.108.4");
+    let state_oid_after: i64 = db
+        .query_scalar(&format!("SELECT '{state_relation}'::regclass::oid::bigint"))
+        .await;
+    assert_eq!(
+        state_oid_after, state_oid_before,
+        "upgrade keeps state binding"
+    );
+    let catalogued_states: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM pgtrickle.pgt_set_operation_states \
+             WHERE pgt_id = {pgt_id} AND state_relid = {state_oid_before} \
+               AND operation = 'INTERSECT' AND is_all = false"
+        ))
+        .await;
+    assert_eq!(
+        catalogued_states, 1,
+        "upgrade preserves the state registry row"
+    );
+
+    db.execute(
+        "SELECT pgtrickle.alter_stream_table(\
+             'isect_upgrade_st', refresh_mode => 'DIFFERENTIAL')",
+    )
+    .await;
+    db.execute("DELETE FROM isect_upgrade_a WHERE val = 7")
+        .await;
+    db.refresh_st_with_retry("isect_upgrade_st").await;
+    e2e::oracle::assert_effective_refresh_mode(&db, "isect_upgrade_st", "DIFFERENTIAL")
+        .await
+        .unwrap();
+    db.assert_st_matches_query("isect_upgrade_st", query).await;
+    let hidden_counts: (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT __pgt_count_l, __pgt_count_r FROM {state_relation} WHERE val = 7"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .expect("read preserved invisible private counts");
+    assert_eq!(hidden_counts, (0, 1));
+
+    db.execute("INSERT INTO isect_upgrade_a VALUES (4, 7)")
+        .await;
+    db.refresh_st_with_retry("isect_upgrade_st").await;
+    e2e::oracle::assert_effective_refresh_mode(&db, "isect_upgrade_st", "DIFFERENTIAL")
+        .await
+        .unwrap();
+    db.assert_st_matches_query("isect_upgrade_st", query).await;
+    let visible_counts: (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT __pgt_count_l, __pgt_count_r FROM {state_relation} WHERE val = 7"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .expect("read post-upgrade reintroduced private counts");
+    assert_eq!(visible_counts, (1, 1));
+}

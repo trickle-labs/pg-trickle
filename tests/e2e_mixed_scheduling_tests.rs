@@ -61,6 +61,10 @@ async fn configure_scheduler(db: &E2eDb, mode: ScheduleMode) {
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
         .await;
+    // Keep the correctness matrix independent of host load; load shedding has
+    // its own scheduler tests and can otherwise defer these short fixtures.
+    db.execute("ALTER SYSTEM SET pg_trickle.load_shed_threshold = 0")
+        .await;
 
     match mode {
         ScheduleMode::Serial => {
@@ -82,6 +86,8 @@ async fn configure_scheduler(db: &E2eDb, mode: ScheduleMode) {
     db.wait_for_setting("pg_trickle.min_schedule_seconds", "1")
         .await;
     db.wait_for_setting("pg_trickle.auto_backoff", "off").await;
+    db.wait_for_setting("pg_trickle.load_shed_threshold", "0")
+        .await;
 
     match mode {
         ScheduleMode::Serial => {

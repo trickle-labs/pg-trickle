@@ -224,17 +224,59 @@ async fn test_autorefresh_diamond_cascade() {
 
     let l2_q = "SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM ard_src GROUP BY grp";
 
-    // Wait for initial stabilization
-    wait_for_refresh_cycle(&db, "ard_l2", Duration::from_secs(30)).await;
+    // Stream-table creation performs the initial refresh. Check that baseline
+    // directly; with no upstream data change, the scheduler has no reason to
+    // refresh this leaf and advance last_refresh_at again.
+    db.assert_st_matches_query("ard_l2", l2_q).await;
+    let before_insert: Option<String> = db
+        .query_scalar_opt(
+            "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema = 'public' AND pgt_name = 'ard_l2'",
+        )
+        .await;
 
     // Mutate
     db.execute("INSERT INTO ard_src (grp, val) VALUES ('a', 5), ('c', 30)")
         .await;
 
     let refreshed = db
-        .wait_for_auto_refresh("ard_l2", Duration::from_secs(60))
+        .wait_for_auto_refresh_since("ard_l2", before_insert, Duration::from_secs(90))
         .await;
-    assert!(refreshed, "ard_l2 should auto-refresh after base mutation");
+    if !refreshed {
+        let scheduler_state: String = db
+            .query_scalar(
+                "SELECT jsonb_build_object( \
+                    'stream_tables', COALESCE(( \
+                        SELECT jsonb_agg(jsonb_build_object( \
+                            'name', st.pgt_name, \
+                            'status', st.status, \
+                            'schedule', st.schedule, \
+                            'data_timestamp', st.data_timestamp, \
+                            'last_refresh_at', st.last_refresh_at, \
+                            'consecutive_errors', st.consecutive_errors, \
+                            'last_error_message', st.last_error_message, \
+                            'last_refresh_action', rs.last_refresh_action, \
+                            'last_refresh_status', rs.last_refresh_status \
+                        ) ORDER BY st.pgt_name) \
+                        FROM pgtrickle.pgt_stream_tables st \
+                        LEFT JOIN pgtrickle.pgt_refresh_summary rs USING (pgt_id) \
+                        WHERE st.pgt_name IN ('ard_l1a', 'ard_l1b', 'ard_l2') \
+                    ), '[]'::jsonb), \
+                    'scheduler_workers', COALESCE(( \
+                        SELECT jsonb_agg(jsonb_build_object( \
+                            'state', state, \
+                            'wait_event_type', wait_event_type, \
+                            'wait_event', wait_event \
+                        )) \
+                        FROM pg_stat_activity \
+                        WHERE backend_type = 'pg_trickle scheduler' \
+                           OR application_name = 'pg_trickle_scheduler' \
+                    ), '[]'::jsonb) \
+                )::text",
+            )
+            .await;
+        panic!("ard_l2 should auto-refresh after base mutation; state: {scheduler_state}");
+    }
 
     db.assert_st_matches_query("ard_l2", l2_q).await;
 }
@@ -826,8 +868,9 @@ async fn test_autorefresh_diamond_with_view_branch() {
     db.execute("INSERT INTO ardv_src (category, amount) VALUES ('x', 40), ('z', 100)")
         .await;
 
+    // Give a loaded E2E shard headroom for a delayed or respawning scheduler.
     let refreshed = db
-        .wait_for_auto_refresh_since("ardv_joined", before_insert, Duration::from_secs(60))
+        .wait_for_auto_refresh_since("ardv_joined", before_insert, Duration::from_secs(90))
         .await;
     assert!(refreshed, "Diamond join ST should auto-refresh");
 

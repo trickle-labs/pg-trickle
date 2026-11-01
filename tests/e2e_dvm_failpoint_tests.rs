@@ -250,14 +250,22 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
         .expect("failure marker must include the scheduler backend PID");
     assert!(scheduler_pid > 0);
 
-    let (requested_mode, refresh_mode, effective_mode, needs_reinit): (
-        String,
-        String,
-        Option<String>,
-        bool,
-    ) = sqlx::query_as(
-        "SELECT requested_refresh_mode, refresh_mode, effective_refresh_mode, needs_reinit
-         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $1",
+    let (
+        requested_mode,
+        refresh_mode,
+        effective_mode,
+        needs_reinit,
+        latest_completed_action,
+        latest_completed_refresh_id,
+    ): (String, String, Option<String>, bool, String, i64) = sqlx::query_as(
+        "SELECT st.requested_refresh_mode, st.refresh_mode, st.effective_refresh_mode, st.needs_reinit,
+                (SELECT h.action FROM pgtrickle.pgt_refresh_history h
+                 WHERE h.pgt_id = st.pgt_id AND h.status = 'COMPLETED'
+                 ORDER BY h.refresh_id DESC LIMIT 1),
+                (SELECT h.refresh_id FROM pgtrickle.pgt_refresh_history h
+                 WHERE h.pgt_id = st.pgt_id AND h.status = 'COMPLETED'
+                 ORDER BY h.refresh_id DESC LIMIT 1)
+         FROM pgtrickle.pgt_stream_tables st WHERE st.pgt_name = $1",
     )
     .bind(pgt_name)
     .fetch_one(&db.pool)
@@ -265,7 +273,23 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     .expect("failed to inspect scheduler failure path");
     assert_eq!(requested_mode, "DIFFERENTIAL");
     assert_eq!(refresh_mode, "DIFFERENTIAL");
-    assert_eq!(effective_mode.as_deref(), Some("DIFFERENTIAL"));
+    let latest_completed_mode = match latest_completed_action.as_str() {
+        "DIFFERENTIAL" => "DIFFERENTIAL",
+        "NO_DATA" => "NO_DATA",
+        other => panic!("unexpected completed action after failpoint: {other}"),
+    };
+    assert_eq!(effective_mode.as_deref(), Some(latest_completed_mode));
+    if latest_completed_action == "NO_DATA" {
+        assert!(
+            latest_completed_refresh_id > refresh_id,
+            "NO_DATA may replace the prior effective mode only after a successful no-data refresh"
+        );
+    } else {
+        assert!(
+            latest_completed_refresh_id < refresh_id,
+            "the failed refresh must not replace the last completed mode"
+        );
+    }
     assert!(!needs_reinit);
 
     let suspended = wait_for_suspended(&db, pgt_name, Duration::from_secs(60)).await;

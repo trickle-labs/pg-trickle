@@ -59,10 +59,10 @@
 //! - For ΔQ_I rows (inserts): emit with FLIPPED dr action (cancels excess)
 //! - For ΔQ_D rows (deletes): emit with dr action (adds missing contribution)
 //!
-//! The correction is only applied when the left child is a **shallow** join
-//! (both of its children are simple Scan nodes).  For deeper chains (e.g.
-//! Q08 with 8 tables), cascading corrections at every level generate SQL
-//! too complex for PostgreSQL's planner, so the correction is skipped.
+//! The correction is applied whenever the left child is a nested join. The
+//! `part3_max_scan_count` GUC controls whether PostgreSQL is forced to inline
+//! the child delta CTE; it never suppresses a correction required for exact
+//! results.
 //!
 //! ## Semi-join optimization
 //!
@@ -85,8 +85,8 @@ use crate::config;
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{
     build_base_table_key_exprs, build_filtered_leaf_snapshot_sql, build_snapshot_sql,
-    is_join_child, is_simple_child, join_scan_count, rewrite_expr_for_join, rewrite_join_condition,
-    snapshot_join_column_name,
+    is_join_child, is_simple_child, rewrite_expr_for_join, rewrite_join_condition,
+    snapshot_join_column_name, total_scan_count,
 };
 use crate::dvm::parser::{Expr, OpTree};
 use crate::dvm::snapshot::SnapshotPlan;
@@ -176,6 +176,9 @@ pub(crate) fn computed_projection_needs_endpoints(tree: &OpTree) -> bool {
     else {
         return false;
     };
+    let computed = expressions
+        .iter()
+        .any(|e| !matches!(e, Expr::ColumnRef { .. } | Expr::Literal(_)));
     let OpTree::InnerJoin {
         condition,
         left,
@@ -184,10 +187,272 @@ pub(crate) fn computed_projection_needs_endpoints(tree: &OpTree) -> bool {
     else {
         return false;
     };
-    expressions
-        .iter()
-        .any(|e| !matches!(e, Expr::ColumnRef { .. } | Expr::Literal(_)))
-        && endpoint_key_columns(condition, left, right).is_some()
+    (computed && endpoint_key_columns(condition, left, right).is_some())
+        || (computed && nested_endpoint_recompute_is_eligible(tree))
+}
+
+fn has_nested_join(tree: &OpTree) -> bool {
+    fn contains_join(tree: &OpTree) -> bool {
+        match tree {
+            OpTree::InnerJoin { .. } | OpTree::LeftJoin { .. } | OpTree::FullJoin { .. } => true,
+            OpTree::Filter { child, .. }
+            | OpTree::Project { child, .. }
+            | OpTree::Subquery { child, .. } => contains_join(child),
+            _ => false,
+        }
+    }
+
+    match tree {
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. } => contains_join(left) || contains_join(right),
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Subquery { child, .. } => has_nested_join(child),
+        _ => false,
+    }
+}
+
+fn is_simple_equi_condition(condition: &Expr) -> Option<(String, String, String, String)> {
+    let Expr::BinaryOp { op, left, right } = condition else {
+        return None;
+    };
+    if op != "=" {
+        return None;
+    }
+    let (
+        Expr::ColumnRef {
+            table_alias: Some(left_alias),
+            column_name: left_column,
+        },
+        Expr::ColumnRef {
+            table_alias: Some(right_alias),
+            column_name: right_column,
+        },
+    ) = (left.as_ref(), right.as_ref())
+    else {
+        return None;
+    };
+    Some((
+        left_alias.clone(),
+        left_column.clone(),
+        right_alias.clone(),
+        right_column.clone(),
+    ))
+}
+
+fn scan_column_type(tree: &OpTree, alias: &str, column: &str) -> Option<u32> {
+    match tree {
+        OpTree::Scan {
+            alias: scan_alias,
+            columns,
+            ..
+        } if scan_alias == alias => columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .map(|candidate| candidate.type_oid),
+        OpTree::InnerJoin { left, right, .. } => {
+            scan_column_type(left, alias, column).or_else(|| scan_column_type(right, alias, column))
+        }
+        _ => None,
+    }
+}
+
+fn all_inner_joins_have_endpoint_keys(tree: &OpTree) -> bool {
+    match tree {
+        OpTree::Scan {
+            alias,
+            columns,
+            pk_columns,
+            ..
+        } => {
+            !alias.is_empty()
+                && !pk_columns.is_empty()
+                && pk_columns
+                    .iter()
+                    .all(|key| columns.iter().any(|column| column.name == *key))
+        }
+        OpTree::InnerJoin {
+            condition,
+            left,
+            right,
+        } => {
+            let Some((first_alias, first_column, second_alias, second_column)) =
+                is_simple_equi_condition(condition)
+            else {
+                return false;
+            };
+            let (left_column, right_column) = if scan_column_type(left, &first_alias, &first_column)
+                .is_some()
+                && scan_column_type(right, &second_alias, &second_column).is_some()
+            {
+                ((first_alias, first_column), (second_alias, second_column))
+            } else if scan_column_type(left, &second_alias, &second_column).is_some()
+                && scan_column_type(right, &first_alias, &first_column).is_some()
+            {
+                ((second_alias, second_column), (first_alias, first_column))
+            } else {
+                return false;
+            };
+            let Some(left_type) = scan_column_type(left, &left_column.0, &left_column.1) else {
+                return false;
+            };
+            let Some(right_type) = scan_column_type(right, &right_column.0, &right_column.1) else {
+                return false;
+            };
+            left_type == right_type
+                && crate::join_plan::admitted_equality_type(left_type)
+                && all_inner_joins_have_endpoint_keys(left)
+                && all_inner_joins_have_endpoint_keys(right)
+        }
+        _ => false,
+    }
+}
+
+fn nested_endpoint_recompute_is_eligible(tree: &OpTree) -> bool {
+    let OpTree::Project {
+        expressions, child, ..
+    } = tree
+    else {
+        return false;
+    };
+    let root_join = match child.as_ref() {
+        OpTree::InnerJoin { .. } => Some(child.as_ref()),
+        _ => None,
+    };
+    let Some(root_join) = root_join else {
+        return false;
+    };
+    nested_inner_endpoint_recompute_is_eligible(root_join)
+        && expressions.iter().all(|expression| {
+            if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
+                return true;
+            }
+            let mut aliases = Vec::new();
+            collect_qualified_aliases(expression, &mut aliases)
+        })
+        && expressions.iter().any(|expression| {
+            if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
+                return false;
+            }
+            let mut aliases = Vec::new();
+            if collect_qualified_aliases(expression, &mut aliases) {
+                aliases.sort_unstable();
+                aliases.dedup();
+                aliases.len() > 1
+            } else {
+                false
+            }
+        })
+}
+
+fn nested_inner_endpoint_recompute_is_eligible(tree: &OpTree) -> bool {
+    has_nested_join(tree) && all_inner_joins_have_endpoint_keys(tree)
+}
+
+fn nested_endpoint_operators_are_builtin(
+    tree: &OpTree,
+    is_builtin_equality: &impl Fn(u32) -> bool,
+) -> bool {
+    match tree {
+        OpTree::Scan { .. } => true,
+        OpTree::InnerJoin {
+            condition,
+            left,
+            right,
+        } => {
+            let Some((first_alias, first_column, second_alias, second_column)) =
+                is_simple_equi_condition(condition)
+            else {
+                return false;
+            };
+            let equality_type = if scan_column_type(left, &first_alias, &first_column).is_some()
+                && scan_column_type(right, &second_alias, &second_column).is_some()
+            {
+                scan_column_type(left, &first_alias, &first_column)
+            } else if scan_column_type(left, &second_alias, &second_column).is_some()
+                && scan_column_type(right, &first_alias, &first_column).is_some()
+            {
+                scan_column_type(left, &second_alias, &second_column)
+            } else {
+                return false;
+            };
+            equality_type.is_some_and(|oid| {
+                is_builtin_equality(oid)
+                    && nested_endpoint_operators_are_builtin(left, is_builtin_equality)
+                    && nested_endpoint_operators_are_builtin(right, is_builtin_equality)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn collect_qualified_aliases(expression: &Expr, aliases: &mut Vec<String>) -> bool {
+    match expression {
+        Expr::ColumnRef {
+            table_alias: Some(alias),
+            ..
+        } => {
+            aliases.push(alias.clone());
+            true
+        }
+        Expr::ColumnRef {
+            table_alias: None, ..
+        }
+        | Expr::Star { .. }
+        | Expr::Raw(_) => false,
+        Expr::Literal(_) => true,
+        Expr::BinaryOp { left, right, .. } => {
+            collect_qualified_aliases(left, aliases) && collect_qualified_aliases(right, aliases)
+        }
+        Expr::FuncCall { args, .. } => args
+            .iter()
+            .all(|argument| collect_qualified_aliases(argument, aliases)),
+    }
+}
+
+/// Unsafe nested computed projections use endpoint recomputation only for
+/// all-inner equijoins over keyed scans; preserve FULL for every other shape.
+pub(crate) fn computed_projection_needs_nested_join_fallback(tree: &OpTree) -> bool {
+    fn projection_has_unsafe_cross_source_expression(expressions: &[Expr]) -> bool {
+        expressions.iter().any(|expression| {
+            if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
+                return false;
+            }
+            let mut aliases = Vec::new();
+            if !collect_qualified_aliases(expression, &mut aliases) {
+                return true;
+            }
+            aliases.sort_unstable();
+            aliases.dedup();
+            aliases.len() > 1
+        })
+    }
+
+    let OpTree::Project {
+        expressions, child, ..
+    } = tree
+    else {
+        return false;
+    };
+    has_nested_join(child)
+        && projection_has_unsafe_cross_source_expression(expressions)
+        && !nested_endpoint_recompute_is_eligible(tree)
+}
+
+pub(crate) fn computed_projection_needs_nested_join_fallback_with_equality(
+    tree: &OpTree,
+    is_builtin_equality: impl Fn(u32) -> bool,
+) -> bool {
+    computed_projection_needs_nested_join_fallback(tree)
+        || (nested_endpoint_recompute_is_eligible(tree)
+            && !nested_endpoint_operators_are_builtin(
+                match tree {
+                    OpTree::Project { child, .. } => child,
+                    _ => tree,
+                },
+                &is_builtin_equality,
+            ))
 }
 
 fn scoped_source_endpoints(
@@ -363,9 +628,8 @@ fn diff_keyed_endpoints(
 // PostgreSQL reserves lower OIDs for built-in catalog types and operators.
 const FIRST_NORMAL_OBJECT_ID: u32 = 16_384;
 
-// A44-1 (v0.43.0): Part 3 correction term scan count limit is now controlled
-// by the `pg_trickle.part3_max_scan_count` GUC (default 5, previously hardcoded).
-// The default value of 5 was chosen to cover 6-table semi-join chains.
+// A44-1 (v0.43.0): Part 3 child-delta inlining threshold is controlled by the
+// `pg_trickle.part3_max_scan_count` GUC (default 5).
 // A44-1 (v0.43.0): Deep-join L0 snapshot threshold is now controlled
 // by the `pg_trickle.deep_join_l0_scan_threshold` GUC (default 4, previously hardcoded).
 
@@ -549,30 +813,23 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     let join_cond_part2 = rewrite_join_condition(condition, left, "l", right, "dr");
 
     // Part 3 correction condition: dl (delta left) + dr (delta right).
-    // Used when Part 2 uses L₁ (post-change) instead of L₀.  The
-    // correction cancels the (ΔL ⋈ ΔR) double-counting error introduced
-    // by using L₁.  Generated for join children up to PART3_MAX_SCAN_COUNT
-    // scan nodes.  This fixes Q07-type revenue drift in multi-table join
-    // chains that contain semi-joins.
+    // Used when Part 2 uses L₁ (post-change) instead of L₀. The correction
+    // cancels the (ΔL ⋈ ΔR) double-counting error introduced by using L₁.
+    // It is required for correctness at every nested-join depth.
     //
-    // DI-5: Threshold raised from 3 to 5 — DI-1's named CTE L₀ snapshots
-    // make delta CTEs cheaper, and the Part 3 correction joins two
-    // already-computed delta CTEs (NOT MATERIALIZED), so temp file
-    // pressure is lower than the pre-DI-1 era where full snapshot CTEs
-    // were inlined. Covers 6-table semi-join chains (e.g. Q21 variants).
+    // The configured scan threshold controls whether the child delta CTE is
+    // forced inline or left to PostgreSQL's default materialization choice.
     //
-    // The correction is computed eagerly here but only emitted when
-    // `!use_l0` (see `correction_sql` below).
-    let left_scan_count = join_scan_count(left);
-    // A44-1: Read deep-join threshold from GUC (default 5, previously hardcoded).
+    // The correction is computed eagerly here but only needed when `!use_l0`
+    // (see `correction_sql` below). Count every scan, including those below a
+    // semi/anti join, so this GUC controls only the inline/materialize hint.
+    let left_scan_count = total_scan_count(left);
     let part3_max_scan_count = config::pg_trickle_part3_max_scan_count();
-    let join_cond_correction =
-        if !is_simple_child(left) && is_join_child(left) && left_scan_count <= part3_max_scan_count
-        {
-            Some(rewrite_join_condition(condition, left, "dl", right, "dr"))
-        } else {
-            None
-        };
+    let join_cond_correction = if !is_simple_child(left) && is_join_child(left) {
+        Some(rewrite_join_condition(condition, left, "dl", right, "dr"))
+    } else {
+        None
+    };
 
     // Extract equi-join key pairs for semi-join optimization.
     // If we can identify (left_key, right_key) pairs from the condition,
@@ -585,6 +842,35 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
         "__pgt_left",
         "__pgt_right",
     );
+
+    if ctx.endpoint_join_required && nested_inner_endpoint_recompute_is_eligible(op) {
+        if !nested_endpoint_operators_are_builtin(op, &|oid| ctx.has_builtin_equality(oid)) {
+            return Err(PgTrickleError::UnsupportedOperator(
+                "nested endpoint recomputation requires visible pg_catalog equality operators"
+                    .into(),
+            ));
+        }
+        let safe_scope_keys = equi_keys
+            .iter()
+            .filter(|(left_key, right_key)| {
+                has_builtin_type_for_sql_column(&left_result.schema, left, left_key)
+                    && has_builtin_type_for_sql_column(&right_result.schema, right, right_key)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if safe_scope_keys.is_empty() {
+            return Err(PgTrickleError::InternalError(
+                "nested endpoint plan lost its admitted equality scope".into(),
+            ));
+        }
+        return diff_inner_join_by_endpoints(
+            ctx,
+            op,
+            &left_result,
+            &right_result,
+            &safe_scope_keys,
+        );
+    }
 
     // Cross-epoch pairs in the algebraic delta can fail while PostgreSQL
     // evaluates the join predicate, before their signed rows cancel. For
@@ -838,9 +1124,9 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     // join children in Part 2, the error is:
     //   Error = (L₁ - L₀) ⋈ ΔR = (ΔL_I - ΔL_D) ⋈ ΔR
     //
-    // Part 3 corrects this by joining both delta CTEs directly:
-    //   - ΔL_I ⋈ ΔR rows are excess in Part 2 → emit with flipped action
-    //   - ΔL_D ⋈ ΔR rows are missing from Part 2 → emit with original action
+    // Part 3 corrects this by joining the delta CTEs. If Part 1 uses R₀,
+    // its left deletes are already correct and Part 3 filters to ΔL_I;
+    // otherwise both left actions need the four-way signed correction.
     //
     // This avoids computing L₀ for nested joins (expensive EXCEPT ALL on
     // full snapshot) and doesn't change the SemiJoin operator's inputs,
@@ -853,8 +1139,11 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             // The correction adds a second FROM-clause reference to
             // delta_left.  PostgreSQL (12+) auto-materializes CTEs with
             // >= 2 references, which can spill huge temp files for join
-            // delta CTEs.  Mark it NOT MATERIALIZED so PG inlines it.
-            ctx.mark_cte_not_materialized(&left_result.cte_name);
+            // delta CTEs. Force inlining only for smaller join trees; larger
+            // delta CTEs keep PostgreSQL's default materialization choice.
+            if left_scan_count <= part3_max_scan_count {
+                ctx.mark_cte_not_materialized(&left_result.cte_name);
+            }
 
             // Row ID for correction rows: hash of both sides' PK columns,
             // using the same canonical left-first, right-second order as
@@ -862,6 +1151,9 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             let mut hash_corr_args = left_key_exprs_dl.clone();
             hash_corr_args.extend(right_key_exprs_dr.clone());
             let hash_correction = crate::hash::build_composite_hash_expr(&hash_corr_args);
+            let correction_action = crate::join_plan::nested_correction_action_sql(use_r0);
+            let correction_left_filter =
+                crate::join_plan::nested_correction_left_filter_sql(use_r0);
 
             format!(
                 "
@@ -869,24 +1161,19 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
 UNION ALL
 
 -- Part 3: Correction for nested join L₁ → L₀
--- Cancels excess ΔL_I ⋈ ΔR and adds missing ΔL_D ⋈ ΔR.
--- For dl.action='I': these rows are in L₁ but not L₀ → flip dr action to cancel
--- For dl.action='D': these rows are in L₀ but not L₁ → keep dr action to add
+-- The action and left-action filter depend on whether Part 1 already used R₀.
 SELECT {hash_correction} AS __pgt_row_id,
-       CASE WHEN dl.__pgt_action = 'I'
-            THEN CASE WHEN dr.__pgt_action = 'I' THEN 'D' ELSE 'I' END
-            ELSE dr.__pgt_action
-       END AS __pgt_action,
+       {correction_action} AS __pgt_action,
        {all_cols_correction}
 FROM {delta_left} dl
-JOIN {delta_right} dr ON {cond}",
+JOIN {delta_right} dr ON {cond} AND ({correction_left_filter})",
                 delta_left = left_result.cte_name,
                 delta_right = right_result.cte_name,
+                correction_action = correction_action,
+                correction_left_filter = correction_left_filter,
             )
         } else {
-            // DI-5: Part 3 correction suppressed — either left child is
-            // not a join, or scan count exceeds PART3_MAX_SCAN_COUNT.
-            // This may cause minor drift for very deep semi-join chains.
+            // The left child is not a nested join, so no Part 3 term applies.
             String::new()
         }
     } else {
@@ -1552,6 +1839,7 @@ pub fn mark_leaf_delta_ctes_not_materialized(op: &OpTree, ctx: &mut DiffContext)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dvm::operators::join_common::join_scan_count;
     use crate::dvm::operators::test_helpers::*;
     use proptest::prelude::*;
 
@@ -1605,6 +1893,139 @@ mod tests {
                 assert!(sql.contains("AS __pgt_scope_key"), "{sql}");
             }
         }
+    }
+
+    #[test]
+    fn test_nested_projection_fallback_requires_cross_source_expression() {
+        let left = scan(1, "left_src", "public", "l", &["id", "v"]);
+        let right = scan(2, "right_src", "public", "r", &["id", "v"]);
+        let first = inner_join(eq_cond("l", "id", "r", "id"), left, right);
+        let dim = scan(3, "dim_src", "public", "d", &["id"]);
+        let nested = inner_join(eq_cond("r", "id", "d", "id"), first, dim);
+
+        let single_source_expression = project(
+            vec![binop("+", qcolref("r", "id"), lit("0"))],
+            vec!["id"],
+            nested.clone(),
+        );
+        assert!(!computed_projection_needs_nested_join_fallback(
+            &single_source_expression
+        ));
+
+        let mixed_source_expression = project(
+            vec![binop(
+                "/",
+                lit("100"),
+                binop("-", qcolref("l", "v"), qcolref("r", "v")),
+            )],
+            vec!["quotient"],
+            nested,
+        );
+        assert!(computed_projection_needs_nested_join_fallback(
+            &mixed_source_expression
+        ));
+    }
+
+    #[test]
+    fn test_nested_projection_uses_endpoint_route_only_for_keyed_inner_tree() {
+        let left = scan_with_pk(1, "left_src", "public", "l", &["id", "v"], &["id"]);
+        let right = scan_with_pk(2, "right_src", "public", "r", &["id", "v"], &["id"]);
+        let first = inner_join(eq_cond("l", "id", "r", "id"), left, right);
+        let dim = scan_with_pk(3, "dim_src", "public", "d", &["id"], &["id"]);
+        let nested = inner_join(eq_cond("r", "id", "d", "id"), first, dim);
+        let tree = project(
+            vec![binop(
+                "/",
+                lit("100"),
+                binop("-", qcolref("l", "v"), qcolref("r", "v")),
+            )],
+            vec!["quotient"],
+            nested,
+        );
+
+        assert!(nested_endpoint_recompute_is_eligible(&tree));
+        assert!(computed_projection_needs_endpoints(&tree));
+        assert!(!computed_projection_needs_nested_join_fallback(&tree));
+
+        let unresolved_expression = project(
+            vec![
+                binop(
+                    "/",
+                    lit("100"),
+                    binop("-", qcolref("l", "v"), qcolref("r", "v")),
+                ),
+                Expr::Raw("unresolved_sql()".into()),
+            ],
+            vec!["quotient", "unresolved"],
+            match &tree {
+                OpTree::Project { child, .. } => child.as_ref().clone(),
+                _ => unreachable!(),
+            },
+        );
+        assert!(!nested_endpoint_recompute_is_eligible(
+            &unresolved_expression
+        ));
+        assert!(!computed_projection_needs_endpoints(&unresolved_expression));
+        assert!(computed_projection_needs_nested_join_fallback(
+            &unresolved_expression
+        ));
+    }
+
+    #[test]
+    fn test_nested_projection_endpoint_route_requires_visible_bytea_equality() {
+        let with_bytea_key = |mut tree: OpTree| {
+            if let OpTree::Scan { columns, .. } = &mut tree {
+                columns
+                    .iter_mut()
+                    .find(|column| column.name == "key")
+                    .expect("key column exists")
+                    .type_oid = 17;
+            }
+            tree
+        };
+        let left = with_bytea_key(scan_with_pk(
+            1,
+            "left_src",
+            "public",
+            "l",
+            &["id", "key", "v"],
+            &["id"],
+        ));
+        let middle = with_bytea_key(scan_with_pk(
+            2,
+            "middle_src",
+            "public",
+            "m",
+            &["id", "key"],
+            &["id"],
+        ));
+        let right = with_bytea_key(scan_with_pk(
+            3,
+            "right_src",
+            "public",
+            "r",
+            &["id", "key", "v"],
+            &["id"],
+        ));
+        let tree = project(
+            vec![binop(
+                "/",
+                lit("100"),
+                binop("-", qcolref("l", "v"), qcolref("r", "v")),
+            )],
+            vec!["quotient"],
+            inner_join(
+                eq_cond("m", "key", "r", "key"),
+                inner_join(eq_cond("l", "key", "m", "key"), left, middle),
+                right,
+            ),
+        );
+
+        assert!(nested_endpoint_recompute_is_eligible(&tree));
+        assert!(
+            !computed_projection_needs_nested_join_fallback_with_equality(&tree, |oid| oid == 17,)
+        );
+        assert!(computed_projection_needs_nested_join_fallback_with_equality(&tree, |_| false,));
     }
 
     #[test]
@@ -2276,11 +2697,9 @@ mod tests {
     }
 
     #[test]
-    fn test_di5_part3_threshold_raised_covers_4_scan_semijoin_chain() {
-        // DI-5: Part 3 correction threshold raised from 3 → 5.
-        // Build a left child with join_scan_count = 4 that contains a
-        // semi-join — this triggers `use_l0 = false` (semi-join present)
-        // and should emit Part 3 correction at the outer join.
+    fn test_part3_correction_for_nested_semijoin_child() {
+        // Build a left child with four ordinary join scans and a semi-join.
+        // This triggers `use_l0 = false` and requires Part 3 at the outer join.
         //
         // Structure: inner_join(
         //   left = inner_join(
@@ -2299,7 +2718,7 @@ mod tests {
         //
         // Use structure where left child = inner_join(chain4, semi_join(E, F)):
         //   chain4 = (A ⋈ B) ⋈ C ⋈ D  (4 scans)
-        //   left = chain4 ⋈ semi_join(E, F)  → 4 + 0 = 4 scan_count
+        //   left = chain4 ⋈ semi_join(E, F)  → join_scan_count = 4
         //   contains_semijoin(left) = true
         let a = scan(1, "a", "public", "a", &["id"]);
         let b = scan(2, "b", "public", "b", &["id"]);
@@ -2320,12 +2739,13 @@ mod tests {
         // calling diff_node on each child separately.
         // The outer diff_inner_join sees left = inner_join(chain4, semi_join(e,f))
         // → is_join_child(left) = true, contains_semijoin(left) = true
-        // → join_scan_count(left) = 4 + 0 = 4
+        // → join_scan_count(left) = 4; total_scan_count(left) = 6
         let sj = semi_join(eq_cond("e", "id", "f", "id"), e, f);
         let left = inner_join(eq_cond("a", "id", "e", "id"), chain4, sj);
 
         // Verify preconditions
         assert_eq!(join_scan_count(&left), 4);
+        assert_eq!(total_scan_count(&left), 6);
         assert!(is_join_child(&left));
 
         // Outer join: left ⋈ g
@@ -2335,20 +2755,14 @@ mod tests {
         let result = diff_inner_join(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // DI-5: With threshold 5, scan_count 4 is within range →
-        // Part 3 correction should be emitted.
+        // The nested cross-delta correction is emitted for this semijoin tree.
         assert_sql_contains(&sql, "Correction for nested join");
     }
 
     #[test]
-    fn test_di5_part3_suppressed_above_threshold() {
-        // DI-5: Part 3 correction suppressed at the outermost join when
-        // left_scan_count > PART3_MAX_SCAN_COUNT (5).
-        //
-        // DI-11: Inner join levels with 4+ scan children now use L₁ + Part 3
-        // (instead of L₀ per-leaf). So "Correction for nested join" may appear
-        // at inner levels. We verify the outermost join CTE does NOT contain
-        // the correction.
+    fn test_di5_part3_preserved_above_inline_threshold() {
+        // The Part 3 correction remains required above the configured inline
+        // threshold. Only the CTE materialization hint changes with depth.
         let a = scan(1, "a", "public", "a", &["id"]);
         let b = scan(2, "b", "public", "b", &["id"]);
         let c = scan(3, "c", "public", "c", &["id"]);
@@ -2371,6 +2785,7 @@ mod tests {
         let left = inner_join(eq_cond("a", "id", "g", "id"), chain6, sj);
 
         assert_eq!(join_scan_count(&left), 6);
+        assert_eq!(total_scan_count(&left), 8);
 
         let tree = inner_join(eq_cond("a", "id", "i", "id"), left, i);
 
@@ -2382,11 +2797,12 @@ mod tests {
             .cte_sql(&result.cte_name)
             .expect("outer CTE should exist");
 
-        // scan_count 6 > PART3_MAX_SCAN_COUNT (5) → outermost correction
-        // suppressed (inner levels may still have corrections due to DI-11).
+        // The left child has six join scans (eight including the semi join),
+        // above the test threshold of five, but suppressing the correction
+        // would lose the simultaneous-change cross term.
         assert!(
-            !outer_cte_sql.contains("Correction for nested join"),
-            "Outermost CTE should NOT contain Part 3 correction, got:\n{}",
+            outer_cte_sql.contains("Correction for nested join"),
+            "Outermost CTE should retain the Part 3 correction, got:\n{}",
             &outer_cte_sql[..outer_cte_sql.len().min(500)]
         );
     }

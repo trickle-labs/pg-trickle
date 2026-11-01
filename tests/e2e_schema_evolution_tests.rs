@@ -246,3 +246,110 @@ async fn test_schema_evolution_recreated_source_uses_new_oid() {
         .await;
     assert_eq!(status, "SUSPENDED:SOURCE_RECREATED");
 }
+
+#[tokio::test]
+async fn test_cdc_recreated_source_does_not_replay_previous_incarnation() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    db.execute("CREATE TABLE se6_src (id INT PRIMARY KEY, value TEXT)")
+        .await;
+    db.execute("INSERT INTO se6_src VALUES (1, 'old')").await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.cdc_mode = 'trigger'"],
+        "SELECT pgtrickle.create_stream_table(\
+            'se6_st', $$SELECT id, value FROM se6_src$$, '24h', 'DIFFERENTIAL')",
+    )
+    .await
+    .unwrap();
+
+    let old_oid = db.table_oid("se6_src").await;
+    db.execute("UPDATE se6_src SET value = 'pending old change' WHERE id = 1")
+        .await;
+    let old_buffer = db.change_buffer_table(i64::from(old_oid)).await;
+    let old_events: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {old_buffer} WHERE action IN ('D', 'I')"
+        ))
+        .await;
+    assert!(
+        old_events >= 2,
+        "old incarnation must have pending CDC images"
+    );
+
+    db.execute("DROP TABLE se6_src").await;
+    db.execute("CREATE TABLE se6_src (id INT PRIMARY KEY, value TEXT)")
+        .await;
+    db.execute("INSERT INTO se6_src VALUES (2, 'new incarnation')")
+        .await;
+    let new_oid = db.table_oid("se6_src").await;
+    assert_ne!(old_oid, new_oid);
+
+    let status: String = db
+        .query_scalar(
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'se6_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED:SOURCE_RECREATED");
+
+    db.try_execute(
+        "SELECT pgtrickle.alter_stream_table(\
+        'se6_st', query => $$SELECT id, value FROM se6_src$$)",
+    )
+    .await
+    .unwrap();
+    let dependency_oid: i64 = db
+        .query_scalar(
+            "SELECT d.source_relid::bigint FROM pgtrickle.pgt_dependencies d \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'se6_st' AND d.source_type = 'TABLE'",
+        )
+        .await;
+    assert_eq!(dependency_oid, i64::from(new_oid));
+    e2e::oracle::assert_st_query_exact(
+        &db,
+        "se6_st",
+        "SELECT id, value FROM se6_src",
+        "reinitialization starts from the recreated source",
+    )
+    .await;
+
+    db.execute("UPDATE se6_src SET value = 'new change' WHERE id = 2")
+        .await;
+    let before_refresh: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+            "SET pg_trickle.compact_threshold = 1",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('se6_st')",
+    )
+    .await
+    .unwrap();
+    let refreshed_differentially: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'se6_st' AND h.refresh_id > {before_refresh} \
+               AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' \
+               AND NOT h.was_full_fallback)"
+        ))
+        .await;
+    assert!(
+        refreshed_differentially,
+        "the new incarnation must resume through differential CDC"
+    );
+    e2e::oracle::assert_st_query_exact(
+        &db,
+        "se6_st",
+        "SELECT id, value FROM se6_src",
+        "differential refresh excludes the previous source incarnation",
+    )
+    .await;
+}

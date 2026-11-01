@@ -22,6 +22,7 @@ async fn test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_
                 "'00000000-0000-0000-0000-000000000001'",
                 "'00000000-0000-0000-0000-000000000002'",
             ),
+            ("bytea", "decode('01','hex')", "decode('02','hex')"),
         ]
         .into_iter()
         .enumerate()
@@ -218,16 +219,24 @@ async fn test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_
 }
 
 async fn refresh_differential_and_assert(db: &E2eDb, name: &str, query: &str) {
+    refresh_differential_and_assert_with_config(db, name, query, &[]).await;
+}
+
+async fn refresh_differential_and_assert_with_config(
+    db: &E2eDb,
+    name: &str,
+    query: &str,
+    extra_config: &[&str],
+) {
     let refresh = format!("SELECT pgtrickle.refresh_stream_table('{name}')");
-    db.try_execute_with_config(
-        &[
-            "SET pg_trickle.refresh_strategy = 'differential'",
-            "SET pg_trickle.differential_max_change_ratio = 0",
-        ],
-        &refresh,
-    )
-    .await
-    .unwrap_or_else(|error| panic!("{name}: differential refresh failed: {error}"));
+    let mut config = vec![
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+    ];
+    config.extend_from_slice(extra_config);
+    db.try_execute_with_config(&config, &refresh)
+        .await
+        .unwrap_or_else(|error| panic!("{name}: differential refresh failed: {error}"));
     let (action, status, full_fallback): (String, String, bool) = sqlx::query_as(
         "SELECT h.action, h.status, h.was_full_fallback \
          FROM pgtrickle.pgt_refresh_history h \
@@ -242,6 +251,51 @@ async fn refresh_differential_and_assert(db: &E2eDb, name: &str, query: &str) {
     assert_eq!(status, "COMPLETED", "{name} refresh status");
     assert!(!full_fallback, "{name} unexpectedly used full fallback");
     db.assert_st_matches_query(name, query).await;
+}
+
+#[tokio::test]
+async fn test_nested_semijoin_correction_is_emitted_past_scan_threshold() {
+    let mut db = E2eDb::new().await.with_extension().await;
+    let options = db
+        .pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .options([("pg_trickle.part3_max_scan_count", "1")]);
+    db.pool.close().await;
+    db.pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await
+        .expect("connect with low Part 3 scan threshold");
+
+    db.execute("CREATE TABLE deep_corr_a (id INT PRIMARY KEY)")
+        .await;
+    db.execute("CREATE TABLE deep_corr_b (id INT PRIMARY KEY)")
+        .await;
+    db.execute("CREATE TABLE deep_corr_c (id INT PRIMARY KEY)")
+        .await;
+    db.execute("CREATE TABLE deep_corr_gate (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO deep_corr_a VALUES (2)").await;
+    let query = "SELECT a.id FROM deep_corr_a a JOIN deep_corr_b b ON b.id = a.id \
+                 JOIN deep_corr_c c ON c.id = b.id \
+                 WHERE EXISTS (SELECT 1 FROM deep_corr_gate g WHERE g.id = a.id)";
+    db.create_st("deep_corr_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("deep_corr_st", query).await;
+
+    db.execute_seq(&[
+        "BEGIN",
+        "INSERT INTO deep_corr_a VALUES (1)",
+        "INSERT INTO deep_corr_b VALUES (1)",
+        "INSERT INTO deep_corr_c VALUES (1)",
+        "INSERT INTO deep_corr_gate VALUES (1)",
+        "DELETE FROM deep_corr_a WHERE id = 2",
+        "COMMIT",
+    ])
+    .await;
+    refresh_differential_and_assert(&db, "deep_corr_st", query).await;
 }
 
 #[tokio::test]
@@ -335,6 +389,53 @@ async fn test_inner_join_erroring_non_equi_uses_coherent_endpoint_snapshots() {
     .expect("failed refresh preserves the last committed stream-table rows");
     assert_eq!(stored_rows, vec![(1, 8, 1), (2, 7, 5)]);
     db.pool.close().await;
+}
+
+#[tokio::test]
+async fn test_nested_bytea_equality_keeps_throwing_projection_differential() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute(
+        "CREATE TABLE nested_bytea_left (id INT PRIMARY KEY, k BYTEA NOT NULL, v INT NOT NULL)",
+    )
+    .await;
+    db.execute("CREATE TABLE nested_bytea_middle (id INT PRIMARY KEY, k BYTEA NOT NULL)")
+        .await;
+    db.execute(
+        "CREATE TABLE nested_bytea_right (id INT PRIMARY KEY, k BYTEA NOT NULL, v INT NOT NULL)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO nested_bytea_left VALUES (1,decode('01','hex'),2),(2,decode('02','hex'),9)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO nested_bytea_middle VALUES (10,decode('01','hex')),(20,decode('02','hex'))",
+    )
+    .await;
+    db.execute("INSERT INTO nested_bytea_right VALUES (100,decode('01','hex'),1),(200,decode('02','hex'),5)")
+        .await;
+    let query = "SELECT l.id AS left_id,m.id AS middle_id,r.id AS right_id,100/(l.v-r.v) AS quotient \
+                 FROM nested_bytea_left l JOIN nested_bytea_middle m ON l.k=m.k \
+                 JOIN nested_bytea_right r ON m.k=r.k";
+    db.create_st("nested_bytea_endpoint_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("nested_bytea_endpoint_st", query)
+        .await;
+
+    // The old/old and new/new endpoints are valid, while an old-left/new-right
+    // pair would divide by zero before signed rows could cancel.
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE nested_bytea_left SET v=3 WHERE id=1",
+        "UPDATE nested_bytea_right SET v=2 WHERE id=100",
+        "COMMIT",
+    ])
+    .await;
+    refresh_differential_and_assert(&db, "nested_bytea_endpoint_st", query).await;
 }
 
 #[tokio::test]
@@ -806,4 +907,138 @@ async fn test_join_r0_multi_cycle_after_codelete() {
     db.execute("DELETE FROM r0c_items WHERE id = 12").await;
     db.refresh_st("r0c_st").await;
     db.assert_st_matches_query("r0c_st", q).await;
+}
+
+#[tokio::test]
+async fn test_nested_inner_join_correction_in_semijoin_context_matches_postgres() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE nc_left (id INT PRIMARY KEY)")
+        .await;
+    db.execute("CREATE TABLE nc_middle (id INT PRIMARY KEY, left_id INT, grp INT)")
+        .await;
+    db.execute("CREATE TABLE nc_right (id INT PRIMARY KEY, grp INT)")
+        .await;
+    db.execute("CREATE TABLE nc_gate (left_id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO nc_left VALUES (1)").await;
+    db.execute("INSERT INTO nc_middle VALUES (1, 1, 1)").await;
+    db.execute("INSERT INTO nc_right VALUES (1, 1)").await;
+    db.execute("INSERT INTO nc_gate VALUES (1)").await;
+
+    let query = "SELECT l.id AS left_id, m.id AS middle_id, r.id AS right_id, \
+                 m.grp AS middle_group, r.grp AS right_group \
+                 FROM nc_left l JOIN nc_middle m ON l.id = m.left_id \
+                 JOIN nc_right r ON m.grp = r.grp \
+                 WHERE EXISTS (SELECT 1 FROM nc_gate g WHERE g.left_id = l.id)";
+    db.create_st("nc_join_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.refresh_st("nc_join_st").await;
+    db.assert_st_matches_query("nc_join_st", query).await;
+
+    // Both nested-join inputs change in one window. This semijoin plan splits
+    // Part 1 on R₀, so the correction covers left inserts against both right
+    // actions; left deletes are already handled by Part 1.
+    db.execute("UPDATE nc_middle SET grp = 2 WHERE id = 1")
+        .await;
+    db.execute("UPDATE nc_right SET grp = 2 WHERE id = 1").await;
+    refresh_differential_and_assert_with_config(
+        &db,
+        "nc_join_st",
+        query,
+        &["SET pg_trickle.dvm_decision_trace = on"],
+    )
+    .await;
+
+    let logs = tokio::process::Command::new("docker")
+        .args(["logs", db.container_id()])
+        .output()
+        .await
+        .expect("read PostgreSQL logs for the generated delta witness");
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&logs.stdout),
+        String::from_utf8_lossy(&logs.stderr)
+    );
+    assert!(
+        logs.contains("Correction for nested join"),
+        "the differential refresh did not generate the nested-join correction"
+    );
+    assert!(
+        logs.contains("dl.__pgt_action = 'I'"),
+        "the generated correction did not exercise the split Part 1 filter"
+    );
+}
+
+#[tokio::test]
+async fn test_nested_join_throwing_projection_avoids_invalid_mixed_pair() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE njtp_left (id INT PRIMARY KEY, value INT)")
+        .await;
+    db.execute("CREATE TABLE njtp_middle (id INT PRIMARY KEY, left_id INT, grp INT)")
+        .await;
+    db.execute("CREATE TABLE njtp_right (id INT PRIMARY KEY, grp INT, value INT)")
+        .await;
+    db.execute("INSERT INTO njtp_left VALUES (1, 1)").await;
+    db.execute("INSERT INTO njtp_middle VALUES (1, 1, 1)").await;
+    db.execute("INSERT INTO njtp_right VALUES (1, 1, 0)").await;
+
+    let query = "SELECT l.id AS left_id, r.id AS right_id, \
+                 100 / (l.value - r.value) AS quotient \
+                 FROM njtp_left l \
+                 JOIN njtp_middle m ON l.id = m.left_id \
+                 JOIN njtp_right r ON m.grp = r.grp";
+    db.create_st("njtp_st", query, "1h", "DIFFERENTIAL").await;
+    db.assert_st_matches_query("njtp_st", query).await;
+
+    // Both endpoint results are defined: 100/(1-0) and 100/(2-1).
+    // A mixed old-left/new-right pair would divide by zero, so refresh must
+    // preserve endpoint semantics through a change-key-scoped recomputation.
+    db.execute("UPDATE njtp_left SET value = 2 WHERE id = 1")
+        .await;
+    db.execute("UPDATE njtp_right SET value = 1 WHERE id = 1")
+        .await;
+    db.refresh_st("njtp_st").await;
+    db.assert_st_matches_query("njtp_st", query).await;
+    let (action, full_fallback): (String, bool) = sqlx::query_as(
+        "SELECT action, coalesce(was_full_fallback, false) \
+         FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+         WHERE s.pgt_name = 'njtp_st' AND h.status = 'COMPLETED' \
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let operator_tree: String = sqlx::query_scalar(
+        "SELECT value FROM pgtrickle.explain_st('njtp_st') WHERE property = 'operator_tree'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        action, "DIFFERENTIAL",
+        "safe nested equijoins stay differential; parsed tree: {operator_tree}"
+    );
+    assert!(
+        !full_fallback,
+        "the nested endpoint plan must avoid whole-table fallback"
+    );
+
+    let storage_xmin_before_noop: String = sqlx::query_scalar(
+        "SELECT xmin::text FROM pg_class WHERE oid = 'public.njtp_st'::regclass",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    db.refresh_st("njtp_st").await;
+    let storage_xmin_after_noop: String = sqlx::query_scalar(
+        "SELECT xmin::text FROM pg_class WHERE oid = 'public.njtp_st'::regclass",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        storage_xmin_after_noop, storage_xmin_before_noop,
+        "an unchanged refresh must not rerun the nested-projection FULL fallback"
+    );
 }

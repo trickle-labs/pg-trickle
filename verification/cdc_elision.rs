@@ -19,6 +19,20 @@ pub fn keep_change(admitted: bool, image_equal: bool) -> (keep: bool)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageAction { Insert, Delete, Skip }
 
+/// Signed contributions used for each complete captured image event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageEvent { Insert, Delete }
+
+/// INSERT adds one image occurrence and DELETE removes one.
+pub fn image_event_weight(action: ImageEvent) -> (weight: i64)
+    ensures weight == if action == ImageEvent::Insert { 1 } else { -1 },
+{
+    match action {
+        ImageEvent::Insert => 1,
+        ImageEvent::Delete => -1,
+    }
+}
+
 /// The signed multiplicity belongs to a complete captured image, not its key.
 pub fn image_action(weight: i64) -> (action: ImageAction)
     ensures
@@ -30,6 +44,25 @@ pub fn image_action(weight: i64) -> (action: ImageAction)
     else if weight < 0 { ImageAction::Delete }
     else { ImageAction::Skip }
 }
+
+/// Keyed history compaction is safe only for one immediate identity and one
+/// consumer, with no reset barrier in the selected window.
+pub fn can_compact_history(
+    has_immediate_unique_identity: bool,
+    has_single_consumer: bool,
+    has_truncate_barrier: bool,
+) -> (eligible: bool)
+    ensures eligible == (has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier),
+{
+    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier
+}
+}
+
+/// Lower the checked per-event signed coefficients for the SQL window sum.
+pub fn image_event_weight_sql(action_column: &str) -> String {
+    let insert_weight = image_event_weight(ImageEvent::Insert);
+    let delete_weight = image_event_weight(ImageEvent::Delete);
+    format!("CASE WHEN {action_column} = 'I' THEN {insert_weight} ELSE {delete_weight} END")
 }
 
 /// Unknown types never invoke a send/equality function and retain their bit.
@@ -65,6 +98,7 @@ pub fn keyed_weight_sql(delta_sql: &str, columns: &str) -> String {
     };
     let image_column = vacant("__pgt_image");
     let weight_column = vacant("__pgt_weight");
+    let event_weight = image_event_weight_sql("__pgt_action");
     let mut signs = Vec::new();
     for (weight, test) in [(1, "> 0"), (-1, "< 0"), (0, "= 0")] {
         let action = match image_action(weight) {
@@ -78,13 +112,14 @@ pub fn keyed_weight_sql(delta_sql: &str, columns: &str) -> String {
     }
     format!(
         "(SELECT DISTINCT ON (__pgt_row_id) __pgt_row_id, __pgt_action, {columns} \
-         FROM (SELECT __images.*, SUM(CASE WHEN __pgt_action='I' THEN 1 ELSE -1 END) \
+         FROM (SELECT __images.*, SUM({event_weight}) \
                OVER (PARTITION BY __pgt_row_id,{image_column}) AS {weight_column} \
                FROM (SELECT __raw.*, dense_rank() OVER (PARTITION BY __pgt_row_id \
                      ORDER BY ROW({columns}) USING OPERATOR(pg_catalog.*<)) AS {image_column} \
                      FROM ({delta_sql}) __raw) __images) __weighted \
          WHERE {signs} ORDER BY __pgt_row_id, CASE WHEN __pgt_action='I' THEN 0 ELSE 1 END)",
         signs = signs.join(" OR "),
+        event_weight = event_weight,
     )
 }
 
@@ -104,5 +139,29 @@ mod tests {
         }
         assert!(!admitted_image_type(0));
         assert!(!admitted_image_type(u32::MAX));
+    }
+
+    #[test]
+    fn compaction_rejects_missing_identity_shared_consumers_and_truncate_barriers() {
+        for has_identity in [false, true] {
+            for single_consumer in [false, true] {
+                for truncate in [false, true] {
+                    assert_eq!(
+                        can_compact_history(has_identity, single_consumer, truncate),
+                        has_identity && single_consumer && !truncate
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn signed_event_weights_match_complete_image_actions() {
+        assert_eq!(image_event_weight(ImageEvent::Insert), 1);
+        assert_eq!(image_event_weight(ImageEvent::Delete), -1);
+        assert_eq!(
+            image_event_weight_sql("delta.__pgt_action"),
+            "CASE WHEN delta.__pgt_action = 'I' THEN 1 ELSE -1 END"
+        );
     }
 }

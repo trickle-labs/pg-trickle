@@ -739,6 +739,9 @@ fn generate_delta_query_impl(
         .with_pgt_name(pgt_schema, pgt_name)
         .with_cte_registry(result.cte_registry)
         .with_defining_query(defining_query);
+    if let Some(pgt_id) = stage_pgt_id {
+        ctx = ctx.with_setop_state_relation(crate::setop_state::qualified_state_relation(pgt_id));
+    }
     if crate::config::pg_trickle_dvm_decision_trace() {
         ctx = ctx.with_decision_trace();
     }
@@ -1092,6 +1095,7 @@ pub fn generate_delta_query_cached(
         let mut ctx = DiffContext::new(Frontier::new(), Frontier::new())
             .with_placeholders()
             .with_pgt_name(pgt_schema, pgt_name)
+            .with_setop_state_relation(crate::setop_state::qualified_state_relation(pgt_id))
             .with_cte_registry(result.cte_registry)
             .with_defining_query(defining_query);
         ctx.st_user_columns = Some(st_user_cols);
@@ -1217,6 +1221,22 @@ pub(crate) fn query_needs_endpoint_join_fence(query: &str) -> Result<bool, PgTri
         .map(|tree| operators::join::computed_projection_needs_endpoints(&tree))
 }
 
+pub(crate) fn query_needs_nested_projection_full_fallback(
+    query: &str,
+) -> Result<bool, PgTrickleError> {
+    if !query.to_ascii_lowercase().contains("join") {
+        return Ok(false);
+    }
+    let tree = parse_defining_query(query)?;
+    let builtin_equality_types = resolve_builtin_equality_types()?;
+    Ok(
+        operators::join::computed_projection_needs_nested_join_fallback_with_equality(
+            &tree,
+            |oid| builtin_equality_types.contains(&oid),
+        ),
+    )
+}
+
 fn resolve_fenced_endpoint_sources(
     sources: &[u32],
     prev_frontier: &Frontier,
@@ -1269,7 +1289,7 @@ fn resolve_builtin_equality_types() -> Result<std::collections::HashSet<u32>, Pg
                 "SELECT o.oprleft::bigint FROM pg_catalog.pg_operator o \
              JOIN pg_catalog.pg_namespace n ON n.oid=o.oprnamespace \
              WHERE n.nspname='pg_catalog' AND o.oprname='=' AND o.oprleft=o.oprright \
-               AND o.oprleft IN (16,20,21,23,2950) AND pg_catalog.pg_operator_is_visible(o.oid)",
+               AND o.oprleft IN (16,17,20,21,23,2950) AND pg_catalog.pg_operator_is_visible(o.oid)",
                 None,
                 &[],
             )

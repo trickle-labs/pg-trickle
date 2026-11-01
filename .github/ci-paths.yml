@@ -51,6 +51,23 @@ harness:
   - 'scripts/ci_prepare_disk.sh'
   - '!**/*.md'
 
+intersect_mutants:
+  - 'src/dvm/diff.rs'
+  - 'src/dvm/mod.rs'
+  - 'src/dvm/operators/intersect.rs'
+  - 'src/dvm/parser/**'
+  - 'src/refresh/merge/**'
+  - 'src/refresh/orchestrator.rs'
+  - 'src/setop_state.rs'
+  - 'tests/e2e_set_operation_tests.rs'
+  - 'tests/e2e/oracle.rs'
+  - 'scripts/check_intersect_semantic_mutants.py'
+  - 'scripts/run_e2e_tests.sh'
+  - 'tests/Dockerfile.e2e'
+  - 'tests/Dockerfile.e2e-base-lite'
+  - '.github/workflows/ci.yml'
+  - '.github/ci-paths.yml'
+
 benchmarks:
   - 'benches/**'
   - 'benchmarks/**'

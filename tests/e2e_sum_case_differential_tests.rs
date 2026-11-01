@@ -56,18 +56,18 @@ async fn test_sum_case_differential_inserts() {
 
     // Cycle 1: INSERT above threshold
     db.execute("INSERT INTO sc_src1 VALUES (4, 20, 30)").await;
-    db.refresh_st("sc_st1").await;
+    db.refresh_st_until_converged("sc_st1").await;
     db.assert_st_matches_query("sc_st1", q).await;
     assert_group_rescan_mode(&db, "sc_st1").await;
 
     // Cycle 2: INSERT below threshold (should not affect total)
     db.execute("INSERT INTO sc_src1 VALUES (5, 2, 100)").await;
-    db.refresh_st("sc_st1").await;
+    db.refresh_st_until_converged("sc_st1").await;
     db.assert_st_matches_query("sc_st1", q).await;
 
     // Cycle 3: DELETE above-threshold row
     db.execute("DELETE FROM sc_src1 WHERE id = 2").await;
-    db.refresh_st("sc_st1").await;
+    db.refresh_st_until_converged("sc_st1").await;
     db.assert_st_matches_query("sc_st1", q).await;
 }
 
@@ -86,18 +86,18 @@ async fn test_sum_case_differential_threshold_crossing() {
 
     // Cycle 1: UPDATE row crossing threshold from below to above
     db.execute("UPDATE sc_src2 SET x = 15 WHERE id = 1").await;
-    db.refresh_st("sc_st2").await;
+    db.refresh_st_until_converged("sc_st2").await;
     db.assert_st_matches_query("sc_st2", q).await;
     assert_group_rescan_mode(&db, "sc_st2").await;
 
     // Cycle 2: Update row crossing threshold from above to below
     db.execute("UPDATE sc_src2 SET x = 5 WHERE id = 2").await;
-    db.refresh_st("sc_st2").await;
+    db.refresh_st_until_converged("sc_st2").await;
     db.assert_st_matches_query("sc_st2", q).await;
 
     // Cycle 3: Update y value for above-threshold row
     db.execute("UPDATE sc_src2 SET y = 50 WHERE id = 3").await;
-    db.refresh_st("sc_st2").await;
+    db.refresh_st_until_converged("sc_st2").await;
     db.assert_st_matches_query("sc_st2", q).await;
 }
 
@@ -131,18 +131,18 @@ async fn test_sum_case_differential_multi_cycle() {
             i * 3
         ))
         .await;
-        db.refresh_st("sc_st3").await;
+        db.refresh_st_until_converged("sc_st3").await;
         db.assert_st_matches_query("sc_st3", q).await;
     }
 
     // Bulk DELETE
     db.execute("DELETE FROM sc_src3 WHERE id % 2 = 0").await;
-    db.refresh_st("sc_st3").await;
+    db.refresh_st_until_converged("sc_st3").await;
     db.assert_st_matches_query("sc_st3", q).await;
 
     // Bulk UPDATE crossing threshold
     db.execute("UPDATE sc_src3 SET x = x + 20").await;
-    db.refresh_st("sc_st3").await;
+    db.refresh_st_until_converged("sc_st3").await;
     db.assert_st_matches_query("sc_st3", q).await;
 }
 
@@ -166,18 +166,18 @@ async fn test_sum_case_differential_with_group_by() {
 
     // Move group B row above threshold
     db.execute("UPDATE sc_src4 SET x = 15 WHERE id = 3").await;
-    db.refresh_st("sc_st4").await;
+    db.refresh_st_until_converged("sc_st4").await;
     db.assert_st_matches_query("sc_st4", q).await;
 
     // Delete all group A rows
     db.execute("DELETE FROM sc_src4 WHERE grp = 'A'").await;
-    db.refresh_st("sc_st4").await;
+    db.refresh_st_until_converged("sc_st4").await;
     db.assert_st_matches_query("sc_st4", q).await;
 
     // Insert new group C rows
     db.execute("INSERT INTO sc_src4 VALUES (5,'C',20,40),(6,'C',3,10)")
         .await;
-    db.refresh_st("sc_st4").await;
+    db.refresh_st_until_converged("sc_st4").await;
     db.assert_st_matches_query("sc_st4", q).await;
 }
 
@@ -200,6 +200,6 @@ async fn test_sum_case_wrapped_in_cast_is_non_invertible() {
 
     // Cross threshold
     db.execute("UPDATE sc_src5 SET x = 15 WHERE id = 1").await;
-    db.refresh_st("sc_st5").await;
+    db.refresh_st_until_converged("sc_st5").await;
     db.assert_st_matches_query("sc_st5", q).await;
 }

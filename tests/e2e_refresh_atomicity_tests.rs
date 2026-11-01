@@ -1069,11 +1069,24 @@ async fn test_refresh_two_callers_publish_one_consistent_result() {
 
 async fn advance_scheduler_watermark(db: &E2eDb, stream: &str, query: &str, after: i64) {
     let id = pgt_id(db, stream).await;
-    db.execute(&format!(
-        "UPDATE pgtrickle.pgt_stream_tables \
-            SET last_refresh_at = now() - interval '2 hours' WHERE pgt_id = {id}"
-    ))
-    .await;
+    let mut setup = db.pool.begin().await.expect("begin due-work setup");
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_stream_tables
+            SET last_refresh_at = now() - interval '2 hours' WHERE pgt_id = $1",
+    )
+    .bind(id)
+    .execute(&mut *setup)
+    .await
+    .expect("make the scheduled refresh due");
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_freshness_controller_state
+            SET next_due_at = clock_timestamp() - interval '1 second' WHERE pgt_id = $1",
+    )
+    .bind(id)
+    .execute(&mut *setup)
+    .await
+    .expect("make the scheduler controller due");
+    setup.commit().await.expect("commit due-work setup");
     db.execute(&format!(
         "SELECT pgtrickle.resume_scheduler(ARRAY['public.{stream}'])"
     ))
@@ -1095,6 +1108,37 @@ async fn advance_scheduler_watermark(db: &E2eDb, stream: &str, query: &str, afte
         "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
     ))
     .await;
+}
+
+async fn wait_for_scheduler_refresh_after_creation(db: &E2eDb, stream: &str) {
+    let id = pgt_id(db, stream).await;
+    let initial: Option<String> = sqlx::query_scalar(
+        "SELECT last_refresh_at::text FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read initial scheduler watermark");
+    let condition = match initial {
+        Some(initial) => format!(
+            "SELECT last_refresh_at > '{initial}'::timestamptz \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {id}"
+        ),
+        None => format!(
+            "SELECT last_refresh_at IS NOT NULL \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {id}"
+        ),
+    };
+    assert!(
+        db.wait_for_condition(
+            "initial scheduler cycle after stream creation",
+            &condition,
+            Duration::from_secs(30),
+            Duration::from_millis(25),
+        )
+        .await,
+        "scheduler did not finish its initial cycle for {stream}"
+    );
 }
 
 #[tokio::test]
@@ -1129,8 +1173,12 @@ async fn test_pause_scheduler_drains_inline_refresh_until_commit() {
         .await;
         db.execute(&format!("INSERT INTO public.{source} VALUES (1, 10)"))
             .await;
-        db.create_st(&stream, &query, "1m", "DIFFERENTIAL").await;
-        db.create_st(&control, &query, "1m", "DIFFERENTIAL").await;
+        db.create_st(&stream, &query, "1s", "DIFFERENTIAL").await;
+        db.create_st(&control, &query, "1s", "DIFFERENTIAL").await;
+        wait_for_scheduler_refresh_after_creation(&db, &stream).await;
+        wait_for_scheduler_refresh_after_creation(&db, &control).await;
+        db.alter_st(&stream, "schedule => '1m'").await;
+        db.alter_st(&control, "schedule => '1m'").await;
         db.execute(&format!(
             "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}', 'public.{control}'])"
         ))

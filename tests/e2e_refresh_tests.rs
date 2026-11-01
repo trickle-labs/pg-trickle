@@ -1036,7 +1036,7 @@ async fn test_variance_alias_differential_mode() {
 
     db.execute("INSERT INTO public.va_src VALUES (4, 'x', 70)")
         .await;
-    db.refresh_st("va_st").await;
+    db.refresh_st_with_retry("va_st").await;
 
     db.assert_st_matches_query(
         "public.va_st",

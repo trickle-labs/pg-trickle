@@ -435,6 +435,7 @@ class VerdictTests(unittest.TestCase):
         needs["release-qualification-contract"]["outputs"]["runtime"] = str(runtime).lower()
         needs["release-qualification-contract"]["outputs"].update({
             "unsafe_boundary_changed": "false", "failure_recovery_changed": "false",
+            "intersect_mutants": "false",
         })
         if runtime:
             for name in ("unit-tests", "integration-tests", "otel-collector-contract"):
@@ -458,6 +459,7 @@ class VerdictTests(unittest.TestCase):
         for job in needs.values():
             job["result"] = "success"
         needs["release-qualification-contract"]["outputs"]["unsafe_boundary_changed"] = "true"
+        needs["release-qualification-contract"]["outputs"]["intersect_mutants"] = "true"
         for name in needs:
             for status in ("failure", "cancelled", "skipped", "missing"):
                 with self.subTest(name=name, status=status):
@@ -483,13 +485,26 @@ class VerdictTests(unittest.TestCase):
         )
 
     def test_missing_sensitive_selection_cannot_skip_qualification(self):
-        for flag in ("unsafe_boundary_changed", "failure_recovery_changed"):
+        for flag in ("unsafe_boundary_changed", "failure_recovery_changed", "intersect_mutants"):
             needs = self.needs()
             del needs["release-qualification-contract"]["outputs"][flag]
             self.assertIn(
                 f"release-qualification-contract: missing/invalid {flag}",
                 check_ci_results.check(needs, draft=False),
             )
+
+    def test_intersect_mutations_are_required_when_intersect_paths_change(self):
+        needs = self.needs()
+        for job in needs.values():
+            job["result"] = "success"
+        needs["release-qualification-contract"]["outputs"]["intersect_mutants"] = "true"
+        needs["intersect-semantic-mutants"]["result"] = "skipped"
+        self.assertIn(
+            "intersect-semantic-mutants: skipped",
+            check_ci_results.check(needs, draft=False),
+        )
+        needs["intersect-semantic-mutants"] = {"result": "success", "outputs": {}}
+        self.assertEqual(check_ci_results.check(needs, draft=False), [])
 
 
 if __name__ == "__main__":

@@ -1,9 +1,15 @@
 # Restricted join endpoint checker
 
 This #1223 slice selects an affected-key endpoint route for a computed root
-projection over an inner join of two keyed base scans. It does not verify
-legacy split-action or nested correction branches. Unsupported proof scope
-keeps its existing product route; no new FULL fallback is used to hide a
+projection over an inner join of two keyed base scans. A runtime-only
+extension also routes computed cross-source projections over nested all-inner
+equijoins of keyed scans through the same coherent endpoint difference; it
+keeps FULL for other nested shapes. The nested tree binding is E2E-qualified
+but is not a separate Verus proof obligation in this slice. It also checks the
+row-action polarity and bag equation for the legacy nested-left correction
+with and without Part 1's old-right split. It does not prove branch selection,
+arbitrary nested SQL lowering or deeper correction limits. Unsupported proof
+scope keeps its existing product route; no new FULL fallback is used to hide a
 differential failure. The complete issue remains open until its stated
 qualification and any remaining selected obligations are satisfied.
 
@@ -34,14 +40,31 @@ the checker with local occurrence IDs 0 and 1. The ordinary binding adapter
 maps those roles to the actual child scans, their aliases and complete keys.
 The proof does not parse SQL names or prove that mapping itself.
 
+## Legacy nested-left correction
+
+`correction_is_delete` supplies the action polarity used to generate the
+legacy Part 3 CASE. If Part 1 is split, left DELETE rows already join the
+pre-change right endpoint, so the correction joins only left INSERT rows and
+cancels their overlap with the right delta. If Part 1 is unsplit, the
+correction reverses the product of both signed actions. The
+`nested_left_correction_matches_endpoints` lemma proves the resulting bag
+equation for arbitrary integer multiplicities under the declared before/after
+relations. The installed nested-semijoin regression changes both sides in one
+refresh and compares the resulting stream table with PostgreSQL.
+
+This does not prove that the planner selects the modeled branch, binds the
+child delta columns correctly, or preserves semantics for unsupported deeper
+join trees. Those remain ordinary SQL/runtime boundaries and broader issue
+acceptance.
+
 ## Production admission and source boundaries
 
-The ordinary route requires a root computed Project directly over two Scan
-children of an InnerJoin. Both scans have complete primary-key metadata and
-distinct aliases. Generated payload field names must be unique and avoid the
-reserved action/identity columns. The predicate must be a single equality
+The Verus-qualified ordinary route requires a root computed Project directly
+over two Scan children of an InnerJoin. Both scans have complete primary-key
+metadata and distinct aliases. Generated payload field names must be unique
+and avoid the reserved action/identity columns. The predicate must be a single equality
 between qualified columns on opposite sides, with the same exact built-in
-bool, int2, int4, int8 or uuid OID. Domains and implicit cross-type comparisons
+bool, bytea, int2, int4, int8 or uuid OID. Domains and implicit cross-type comparisons
 are excluded. The stream-owner namespace must resolve that same-type `=` to
 the actual pg_catalog operator. Single-key USING retains a typed equality in
 the parser; multi-key/raw predicates are outside this slice.
@@ -92,13 +115,18 @@ identical complete-identity actions under that path.
 
 ## Qualification and trust boundary
 
-The pinned compatible Verus runner requires six verified obligations and
-zero errors. Five executable mutants must fail their intended postcondition:
-unknown equality type, lost right scope, mixed snapshot, swapped occurrence
-and wrong sign. The separate native SQL control compiles an isolated copy
-of the actual adapter with both terms inserting. It requires a passing
-baseline and an exact signed-action mismatch, not a compiler/setup/SQL error.
-It does not modify or qualify a mutant release library.
+The pinned compatible Verus runner requires the declared obligations and
+zero errors. Seven executable mutants must fail their intended postcondition:
+unknown equality type, lost right scope, mixed snapshot, swapped occurrence,
+wrong sign, wrong nested-correction polarity and removal of the cross-delta
+correction term from the endpoint equation. The missing-term mutant must fail
+the nested endpoint-equivalence postcondition, demonstrating that omission is
+semantically observable in the independent algebraic model. The separate
+native SQL control compiles an isolated copy of the actual endpoint adapter
+with both terms inserting. It requires a passing baseline and an exact
+signed-action mismatch, not a compiler/setup/SQL error. It does not modify or
+qualify a mutant release library. The model mutant does not replace installed
+SQL qualification of the legacy nested-correction branch.
 
 Installed tests cover both trigger modes, all five equality types, ON/USING,
 duplicate join keys, NULLs, direct and IMMUTABLE throwing projections, both
