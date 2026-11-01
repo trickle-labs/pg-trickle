@@ -593,7 +593,8 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
         db.execute(&format!("CREATE TABLE {source} (v INT, label TEXT)"))
             .await;
         db.execute(&format!(
-            "INSERT INTO {source} VALUES (1,'duplicate'),(1,'duplicate')"
+            "INSERT INTO {source} VALUES \
+             (1,'duplicate'),(1,'duplicate'),(NULL,NULL),(NULL,NULL)"
         ))
         .await;
 
@@ -611,8 +612,10 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
 
         // The slow consumer advances to a cut that includes a duplicate
         // insertion while the fast consumer still starts at the initial bag.
-        db.execute(&format!("INSERT INTO {source} VALUES (1,'duplicate')"))
-            .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (1,'duplicate'),(NULL,NULL)"
+        ))
+        .await;
         db.try_execute_with_config(
             &[
                 "SET pg_trickle.refresh_strategy='differential'",
@@ -626,17 +629,25 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
         e2e::oracle::assert_st_query_exact(
             &db,
             &slow,
-            "SELECT 1::int AS v,'duplicate'::text AS label UNION ALL \
-             SELECT 1::int,'duplicate'::text UNION ALL SELECT 1::int,'duplicate'::text",
+            "SELECT * FROM (VALUES \
+             (1,'duplicate'),(1,'duplicate'),(1,'duplicate'), \
+             (NULL::int,NULL::text),(NULL::int,NULL::text),(NULL::int,NULL::text) \
+             ) AS expected(v,label)",
             "keyless slow consumer at its interior cut",
         )
         .await;
 
-        // Delete one occurrence. The fast consumer sees a net-zero bag change
-        // across both commits, while the slow consumer must retain this suffix.
+        // Delete one occurrence from each group. The fast consumer sees a
+        // net-zero bag change across these three commits, while the slow
+        // consumer must retain this suffix.
         db.execute(&format!(
-            "DELETE FROM {source} WHERE ctid = \
-             (SELECT ctid FROM {source} LIMIT 1)"
+            "DELETE FROM {source} WHERE ctid = ( \
+             SELECT ctid FROM {source} WHERE v=1 AND label='duplicate' LIMIT 1)"
+        ))
+        .await;
+        db.execute(&format!(
+            "DELETE FROM {source} WHERE ctid = ( \
+             SELECT ctid FROM {source} WHERE v IS NULL AND label IS NULL LIMIT 1)"
         ))
         .await;
         let before_fast: i64 = db
@@ -675,8 +686,10 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
         e2e::oracle::assert_st_query_exact(
             &db,
             &slow,
-            "SELECT 1::int AS v,'duplicate'::text AS label UNION ALL \
-             SELECT 1::int,'duplicate'::text UNION ALL SELECT 1::int,'duplicate'::text",
+            "SELECT * FROM (VALUES \
+             (1,'duplicate'),(1,'duplicate'),(1,'duplicate'), \
+             (NULL::int,NULL::text),(NULL::int,NULL::text),(NULL::int,NULL::text) \
+             ) AS expected(v,label)",
             "slow keyless consumer remains at its interior cut",
         )
         .await;
@@ -707,6 +720,16 @@ async fn test_cdc_keyless_compaction_preserves_interior_consumer_cut() {
             slow_caught_up,
             "slow keyless consumer must catch up differentially from its protected cut"
         );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &slow,
+            "SELECT * FROM (VALUES \
+             (1,'duplicate'),(1,'duplicate'), \
+             (NULL::int,NULL::text),(NULL::int,NULL::text) \
+             ) AS expected(v,label)",
+            "slow consumer consumes one retraction from each keyless image group",
+        )
+        .await;
         for name in [&fast, &slow] {
             e2e::oracle::assert_st_query_exact(
                 &db,
