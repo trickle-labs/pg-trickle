@@ -2075,4 +2075,41 @@ mod tests {
             Err(RowIdV2Error::InvalidSourceKey { .. })
         ));
     }
+
+    #[test]
+    fn source_key_policy_accepts_primary_and_not_null_unique_keys() {
+        let valid = SourceKeyContract {
+            primary: false,
+            columns_not_null: false,
+            nulls_not_distinct: true,
+            partial: false,
+            expression: false,
+            deferrable: false,
+            immediate: true,
+            default_btree_operator_class: true,
+        };
+        assert!(
+            validate_source_key(
+                "orders_order_id_key",
+                SourceKeyContract {
+                    columns_not_null: true,
+                    nulls_not_distinct: false,
+                    ..valid
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_source_key(
+                "orders_pkey",
+                SourceKeyContract {
+                    primary: true,
+                    columns_not_null: true,
+                    nulls_not_distinct: false,
+                    ..valid
+                }
+            )
+            .is_ok()
+        );
+    }
 }
