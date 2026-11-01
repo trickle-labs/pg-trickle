@@ -254,8 +254,110 @@ fn scan_column_type(tree: &OpTree, alias: &str, column: &str) -> Option<u32> {
         OpTree::InnerJoin { left, right, .. } => {
             scan_column_type(left, alias, column).or_else(|| scan_column_type(right, alias, column))
         }
+        OpTree::LateralFunction { child, .. } => scan_column_type(child, alias, column),
         _ => None,
     }
+}
+
+fn cast_parts(sql: &str) -> Option<(&str, &str)> {
+    let sql = sql.trim();
+    if !sql.get(..5)?.eq_ignore_ascii_case("CAST(") {
+        return None;
+    }
+    let body = sql.strip_suffix(')')?.get(5..)?;
+    let split = body.to_ascii_uppercase().rfind(" AS ")?;
+    Some((body[..split].trim(), body[split + 4..].trim()))
+}
+
+fn parse_sql_identifier_prefix(sql: &str) -> Option<(String, &str)> {
+    let sql = sql.trim_start();
+    if let Some(quoted) = sql.strip_prefix('"') {
+        let mut value = String::new();
+        let mut chars = quoted.char_indices().peekable();
+        while let Some((index, ch)) = chars.next() {
+            if ch == '"' {
+                if chars.peek().is_some_and(|(_, next)| *next == '"') {
+                    chars.next();
+                    value.push('"');
+                } else {
+                    return Some((value, &quoted[index + 1..]));
+                }
+            } else {
+                value.push(ch);
+            }
+        }
+        return None;
+    }
+    let end = sql
+        .char_indices()
+        .find(|(index, ch)| {
+            if *index == 0 {
+                !(*ch == '_' || ch.is_ascii_alphabetic())
+            } else {
+                !(*ch == '_' || *ch == '$' || ch.is_ascii_alphanumeric())
+            }
+        })
+        .map_or(sql.len(), |(index, _)| index);
+    (end > 0).then(|| (sql[..end].to_string(), &sql[end..]))
+}
+
+fn parse_qualified_sql_column(sql: &str) -> Option<(String, String)> {
+    let (alias, rest) = parse_sql_identifier_prefix(sql)?;
+    let rest = rest.trim_start().strip_prefix('.')?;
+    let (column, rest) = parse_sql_identifier_prefix(rest)?;
+    rest.trim().is_empty().then_some((alias, column))
+}
+
+fn is_simple_sql_literal(sql: &str) -> bool {
+    let sql = sql.trim();
+    if sql.starts_with('\'') && sql.ends_with('\'') && sql.len() >= 2 {
+        return !sql[1..sql.len() - 1].replace("''", "").contains('\'');
+    }
+    if matches!(sql.to_ascii_uppercase().as_str(), "NULL" | "TRUE" | "FALSE") {
+        return true;
+    }
+    let numeric = sql.strip_prefix(['+', '-']).unwrap_or(sql);
+    !numeric.is_empty()
+        && numeric.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+        && numeric.chars().any(|ch| ch.is_ascii_digit())
+        && numeric.chars().filter(|ch| *ch == '.').count() <= 1
+}
+
+fn identity_cast_type_oid(type_name: &str) -> Option<u32> {
+    let normalized = type_name
+        .replace('"', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "text" | "pg_catalog.text" => Some(25),
+        "timestamptz"
+        | "timestamp with time zone"
+        | "pg_catalog.timestamptz"
+        | "pg_catalog.timestamp with time zone" => Some(1184),
+        _ => None,
+    }
+}
+
+fn raw_expression_aliases(sql: &str, tree: &OpTree, aliases: &mut Vec<String>) -> bool {
+    let Some((argument, type_name)) = cast_parts(sql) else {
+        return false;
+    };
+    if is_simple_sql_literal(argument) {
+        return true;
+    }
+    let Some((alias, column)) = parse_qualified_sql_column(argument) else {
+        return false;
+    };
+    let Some(target_type) = identity_cast_type_oid(type_name) else {
+        return false;
+    };
+    if scan_column_type(tree, &alias, &column) != Some(target_type) {
+        return false;
+    }
+    aliases.push(alias);
+    true
 }
 
 fn all_inner_joins_have_endpoint_keys(tree: &OpTree) -> bool {
@@ -329,14 +431,14 @@ fn nested_endpoint_recompute_is_eligible(tree: &OpTree) -> bool {
                 return true;
             }
             let mut aliases = Vec::new();
-            collect_qualified_aliases(expression, &mut aliases)
+            collect_qualified_aliases(expression, &mut aliases, child)
         })
         && expressions.iter().any(|expression| {
             if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
                 return false;
             }
             let mut aliases = Vec::new();
-            if collect_qualified_aliases(expression, &mut aliases) {
+            if collect_qualified_aliases(expression, &mut aliases, child) {
                 aliases.sort_unstable();
                 aliases.dedup();
                 aliases.len() > 1
@@ -387,7 +489,7 @@ fn nested_endpoint_operators_are_builtin(
     }
 }
 
-fn collect_qualified_aliases(expression: &Expr, aliases: &mut Vec<String>) -> bool {
+fn collect_qualified_aliases(expression: &Expr, aliases: &mut Vec<String>, tree: &OpTree) -> bool {
     match expression {
         Expr::ColumnRef {
             table_alias: Some(alias),
@@ -399,28 +501,32 @@ fn collect_qualified_aliases(expression: &Expr, aliases: &mut Vec<String>) -> bo
         Expr::ColumnRef {
             table_alias: None, ..
         }
-        | Expr::Star { .. }
-        | Expr::Raw(_) => false,
+        | Expr::Star { .. } => false,
+        Expr::Raw(sql) => raw_expression_aliases(sql, tree, aliases),
         Expr::Literal(_) => true,
         Expr::BinaryOp { left, right, .. } => {
-            collect_qualified_aliases(left, aliases) && collect_qualified_aliases(right, aliases)
+            collect_qualified_aliases(left, aliases, tree)
+                && collect_qualified_aliases(right, aliases, tree)
         }
         Expr::FuncCall { args, .. } => args
             .iter()
-            .all(|argument| collect_qualified_aliases(argument, aliases)),
+            .all(|argument| collect_qualified_aliases(argument, aliases, tree)),
     }
 }
 
 /// Unsafe nested computed projections use endpoint recomputation only for
 /// all-inner equijoins over keyed scans; preserve FULL for every other shape.
 pub(crate) fn computed_projection_needs_nested_join_fallback(tree: &OpTree) -> bool {
-    fn projection_has_unsafe_cross_source_expression(expressions: &[Expr]) -> bool {
+    fn projection_has_unsafe_cross_source_expression(
+        expressions: &[Expr],
+        source_tree: &OpTree,
+    ) -> bool {
         expressions.iter().any(|expression| {
             if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
                 return false;
             }
             let mut aliases = Vec::new();
-            if !collect_qualified_aliases(expression, &mut aliases) {
+            if !collect_qualified_aliases(expression, &mut aliases, source_tree) {
                 return true;
             }
             aliases.sort_unstable();
@@ -436,7 +542,7 @@ pub(crate) fn computed_projection_needs_nested_join_fallback(tree: &OpTree) -> b
         return false;
     };
     has_nested_join(child)
-        && projection_has_unsafe_cross_source_expression(expressions)
+        && projection_has_unsafe_cross_source_expression(expressions, child)
         && !nested_endpoint_recompute_is_eligible(tree)
 }
 
@@ -1924,6 +2030,73 @@ mod tests {
         assert!(computed_projection_needs_nested_join_fallback(
             &mixed_source_expression
         ));
+    }
+
+    #[test]
+    fn test_nested_projection_identity_casts_do_not_force_full_fallback() {
+        let mut left = scan_with_pk(
+            1,
+            "left_src",
+            "public",
+            "l",
+            &["id", "email", "changed_at"],
+            &["id"],
+        );
+        if let OpTree::Scan { columns, .. } = &mut left {
+            columns
+                .iter_mut()
+                .find(|column| column.name == "email")
+                .unwrap()
+                .type_oid = 25;
+            columns
+                .iter_mut()
+                .find(|column| column.name == "changed_at")
+                .unwrap()
+                .type_oid = 1184;
+        }
+        let lateral = OpTree::LateralFunction {
+            func_sql: "normalize_text(l.email)".into(),
+            alias: "normalized".into(),
+            column_aliases: vec!["value".into()],
+            declared_columns: vec![],
+            with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
+            child: Box::new(left),
+        };
+        let middle = scan_with_pk(2, "middle_src", "public", "m", &["id", "left_id"], &["id"]);
+        let nested = inner_join(
+            eq_cond("m", "id", "d", "id"),
+            inner_join(eq_cond("l", "id", "m", "left_id"), lateral, middle),
+            scan_with_pk(3, "dim_src", "public", "d", &["id"], &["id"]),
+        );
+
+        let safe = project(
+            vec![
+                Expr::Raw("CAST(\"l\".\"email\" AS text)".into()),
+                Expr::Raw("CAST(\"l\".\"changed_at\" AS timestamp with time zone)".into()),
+                Expr::Raw("CAST('policy' AS text)".into()),
+            ],
+            vec!["email", "changed_at", "source_name"],
+            nested.clone(),
+        );
+        assert!(!computed_projection_needs_nested_join_fallback(&safe));
+
+        for unsafe_expression in [
+            "CAST(\"l\".\"email\" AS timestamp with time zone)",
+            "CAST(\"l\".\"email\" || \"m\".\"name\" AS text)",
+            "CASE WHEN \"l\".\"email\" IS NULL THEN '' ELSE \"l\".\"email\" END",
+        ] {
+            let unsafe_tree = project(
+                vec![Expr::Raw(unsafe_expression.into())],
+                vec!["value"],
+                nested.clone(),
+            );
+            assert!(
+                computed_projection_needs_nested_join_fallback(&unsafe_tree),
+                "expression must remain fail-closed: {unsafe_expression}"
+            );
+        }
     }
 
     #[test]

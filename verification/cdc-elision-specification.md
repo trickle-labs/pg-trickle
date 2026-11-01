@@ -122,27 +122,74 @@ requires a valid keyed endpoint; it is not a general multiplicity-expanding
 bag consumer. A repeated-image integration case checks that an intermediate
 I/D pair cancels while the final payload survives.
 
-Verus proves the weight classifier only. It does **not** prove PostgreSQL's
-image comparisons, SQL sums/window functions, field binding, complete committed
-cuts, catalog metadata, keyed endpoint uniqueness or upsert equivalence. This
-is not yet the full R1/R2 bag/window theorem. Native SQL conformance checks
+Verus proves the weight classifier and the event-level bucket lemmas below. It
+does **not** prove PostgreSQL's image comparisons, SQL sums/window functions,
+field binding, complete committed cuts, catalog metadata, keyed endpoint
+uniqueness or upsert equivalence. This is not yet the full R1/R2 bag/window theorem. Native SQL conformance checks
 numeric scale, json and NULL cancellation; the installed history checks
 same-key replacement, transient cancellation and savepoint rollback for both
 trigger modes against independent source queries. Shared-buffer compaction,
 epoch transitions and every protected consumer window remain outside the proof.
 
+The verifier also proves `separate_consumer_cuts_retain_opposing_images`: for
+any ordered insert/delete LSNs split by two consumers' cuts, the combined
+signed weight is zero while the first consumer observes `+1` and the second
+observes `-1`; the production-used compaction gate rejects the shared-consumer
+case. This is a parameterized counterexample to cross-window cancellation,
+not a proof that the PostgreSQL reducer preserves arbitrary histories or every
+consumer window.
+
+The event model also proves `captured_image_bucket_delta_splits_at_consumer_cut`
+for any finite captured history prefix and complete-image bucket. The signed
+delta over `(earlier_cut, later_cut]` equals the sum over adjacent
+`(earlier_cut, middle_cut]` and `(middle_cut, later_cut]` windows. An event at
+the shared cut belongs only to the first interval. This establishes partitioning
+for the model; PostgreSQL capture, SQL grouping/aggregation, and runtime
+compaction equivalence remain separate boundaries.
+
+The complete-image event model adds six bounded lemmas. Events carry a row
+identity, full row-image bytes, source-incarnation identifier, transaction
+identifier and commit LSN. It proves that events from one transaction share a
+consumer-window membership when their commit LSN is shared; a same-key payload
+replacement contributes `-1` and `+1` in distinct image buckets; an identical
+image insert/delete pair cancels within one incarnation and window; and an
+event from an earlier incarnation contributes nothing to the current
+incarnation's bucket. Its recursive sequence delta also proves that appending
+any captured event adds exactly that event's signed weight to its selected
+complete-image bucket. Four executable Verus mutants reject key-only image
+grouping, cross-incarnation grouping, a transaction cut that admits different
+commit LSNs and a reversed history weight.
+
+These lemmas specify the event semantics that the production adapter must
+preserve. They assume captured events already represent committed transactions
+with correct source-incarnation identifiers and full row images. They do not
+prove that PostgreSQL capture, commit-LSN assignment, schema changes or source
+recreation construct those records correctly; the installed SQL and lifecycle
+tests remain separate evidence for those boundaries.
+
 ## Controls and candidate binding
 
-The pinned Verus/Z3 runner checks five obligations:
+The pinned Verus/Z3 runner checks five executable decisions:
 `admitted_image_type`, `keep_change`, `image_event_weight`, `image_action` and
-`can_compact_history`. Seven executable mutants must fail a postcondition:
+`can_compact_history`, plus seven proof obligations:
+`separate_consumer_cuts_retain_opposing_images`,
+`captured_image_bucket_delta_splits_at_consumer_cut`,
+`transaction_window_membership_is_atomic`,
+`payload_replacement_preserves_complete_image_delta`,
+`append_captured_image_bucket_delta`,
+`transient_same_image_cancels_within_incarnation` and
+`source_incarnation_prevents_cross_epoch_cancellation`. Thirteen executable
+mutants must fail a postcondition:
 `lost-image-change`, `unknown-type-elision`, `lost-positive-image`,
 `reversed-negative-image`, `wrong-insert-event-weight`,
-`wrong-delete-event-weight` and `cross-truncate-barrier`; compilation/setup
-failures do not count. The candidate-binding helper requires these obligations
-and controls, source/caller/build hashes, all three named installed cases, and
-identical packaged/installed library bytes. CI uses the existing proof and
-candidate jobs, without introducing a tier.
+`wrong-delete-event-weight`, `cross-truncate-barrier`,
+`cross-shared-consumer`, `key-only-image-bucket`, `cross-incarnation-bucket`,
+`split-transaction-cut`, `reverse-history-weight`, and
+`overlapping-consumer-boundary`; compilation/setup failures do not count. The
+candidate-binding helper requires these obligations and controls, hashes the
+production callers and the installed test sources, requires all eight named
+installed cases, and checks identical packaged/installed library bytes. CI
+uses the existing proof and candidate jobs, without introducing a tier.
 
 Binding requires the runtime's declared candidate commit to match the requested
 commit. It trusts the build/test runner for build origin and successful named

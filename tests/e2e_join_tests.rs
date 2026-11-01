@@ -1042,3 +1042,71 @@ async fn test_nested_join_throwing_projection_avoids_invalid_mixed_pair() {
         "an unchanged refresh must not rerun the nested-projection FULL fallback"
     );
 }
+
+#[tokio::test]
+async fn test_nested_lateral_identity_cast_projection_stays_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE cast_lateral_left (id INT PRIMARY KEY, join_key INT NOT NULL, \
+         email TEXT NOT NULL, changed_at TIMESTAMPTZ NOT NULL)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE cast_lateral_middle (id INT PRIMARY KEY, left_key INT NOT NULL, \
+         right_key INT NOT NULL)",
+    )
+    .await;
+    db.execute("CREATE TABLE cast_lateral_right (id INT PRIMARY KEY, join_key INT NOT NULL)")
+        .await;
+    db.execute(
+        "CREATE FUNCTION public.cast_lateral_normalize(value TEXT) RETURNS TEXT \
+         LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS 'SELECT lower($1)'",
+    )
+    .await;
+    db.execute("INSERT INTO cast_lateral_left VALUES (1, 10, 'ALPHA', '2026-01-01 00:00:00+00')")
+        .await;
+    db.execute("INSERT INTO cast_lateral_middle VALUES (2, 10, 20)")
+        .await;
+    db.execute("INSERT INTO cast_lateral_right VALUES (3, 20)")
+        .await;
+
+    let query = "SELECT l.id AS left_id, m.id AS middle_id, r.id AS right_id, \
+                 CAST(l.email AS TEXT) AS email, \
+                 CAST(l.changed_at AS TIMESTAMPTZ) AS changed_at, \
+                 normalized.normalized_email \
+                 FROM public.cast_lateral_left l \
+                 CROSS JOIN LATERAL public.cast_lateral_normalize(l.email) \
+                   AS normalized(normalized_email) \
+                 JOIN public.cast_lateral_middle m ON l.join_key = m.left_key \
+                 JOIN public.cast_lateral_right r ON m.right_key = r.join_key";
+    db.create_st("cast_lateral_nested_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("cast_lateral_nested_st", query)
+        .await;
+
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE public.cast_lateral_left SET email = 'BETA', changed_at = '2026-01-02 00:00:00+00' WHERE id = 1",
+        "UPDATE public.cast_lateral_middle SET right_key = 21 WHERE id = 2",
+        "UPDATE public.cast_lateral_right SET join_key = 21 WHERE id = 3",
+        "COMMIT",
+    ])
+    .await;
+    refresh_differential_and_assert(&db, "cast_lateral_nested_st", query).await;
+
+    let (action, full_fallback): (String, bool) = sqlx::query_as(
+        "SELECT action, coalesce(was_full_fallback, false) \
+         FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+         WHERE s.pgt_name = 'cast_lateral_nested_st' AND h.status = 'COMPLETED' \
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("refresh history row exists");
+    assert_eq!(action, "DIFFERENTIAL");
+    assert!(
+        !full_fallback,
+        "identity casts must not force nested FULL refresh"
+    );
+}
