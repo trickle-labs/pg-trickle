@@ -189,8 +189,12 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     ))
     .await;
     db.refresh_st_with_retry(&scenario.query.stream_table).await;
-    let prior_mode: Option<String> = sqlx::query_scalar(
-        "SELECT effective_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $1",
+    let (prior_mode, prior_completed_refresh_id): (Option<String>, i64) = sqlx::query_as(
+        "SELECT st.effective_refresh_mode,
+                (SELECT h.refresh_id FROM pgtrickle.pgt_refresh_history h
+                 WHERE h.pgt_id = st.pgt_id AND h.status = 'COMPLETED'
+                 ORDER BY h.refresh_id DESC LIMIT 1)
+         FROM pgtrickle.pgt_stream_tables st WHERE st.pgt_name = $1",
     )
     .bind(pgt_name)
     .fetch_one(&db.pool)
@@ -281,7 +285,7 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     assert_eq!(effective_mode.as_deref(), Some(latest_completed_mode));
     if latest_completed_action == "NO_DATA" {
         assert!(
-            latest_completed_refresh_id > refresh_id,
+            latest_completed_refresh_id > prior_completed_refresh_id,
             "NO_DATA may replace the prior effective mode only after a successful no-data refresh"
         );
     } else {
