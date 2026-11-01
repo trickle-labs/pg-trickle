@@ -29,6 +29,8 @@ OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "source_incarnation_prevents_cross_epoch_cancellation",
     "valid_single_identity_history_preserves_image_delta",
     "valid_history_has_unique_signed_image_endpoints",
+    "different_identity_has_zero_image_weight",
+    "interleaved_row_identity_histories_preserve_endpoints",
 ]
 PRODUCTION_INPUTS = [
     "src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs",
@@ -57,8 +59,12 @@ MUTATIONS = {
         "    has_immediate_unique_identity && !has_truncate_barrier\n",
     ),
     "key-only-image-bucket": (
-        "if event.row_identity == row_identity\n        && event.row_image == row_image\n        && captured_event_in_window",
-        "if event.row_identity == row_identity\n        && true\n        && captured_event_in_window",
+        ") && event.row_image == row_image",
+        ") && true",
+    ),
+    "cross-row-identity-bucket": (
+        "    event.row_identity == row_identity\n        && captured_event_in_window(",
+        "    true\n        && captured_event_in_window(",
     ),
     "cross-incarnation-bucket": (
         "event.source_incarnation == source_incarnation\n        && image_event_in_window_spec",
