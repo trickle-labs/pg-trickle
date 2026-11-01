@@ -26,6 +26,7 @@ OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "append_captured_image_bucket_delta",
     "transient_same_image_cancels_within_incarnation",
     "source_incarnation_prevents_cross_epoch_cancellation",
+    "valid_single_identity_history_preserves_image_delta",
 ]
 PRODUCTION_INPUTS = [
     "src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs",
@@ -112,7 +113,7 @@ def run_checks() -> None:
         solver = runner.run_tool_identity("z3", ["--version"], EVIDENCE / "cdc-z3-version.log")
         baseline = runner.run_verus("verification/cdc_elision.rs", EVIDENCE / "cdc-verification-baseline.log")
         summary = runner.VERIFICATION_SUMMARY.search(baseline.stdout)
-        if baseline.returncode or summary is None or int(summary[1]) < len(EXECUTABLE_OBLIGATIONS) or int(summary[2]) != 0:
+        if baseline.returncode or summary is None or int(summary[1]) < len(OBLIGATIONS) or int(summary[2]) != 0:
             raise RuntimeError("CDC policy baseline failed or omitted required obligations")
         controls = {}
         for name in MUTATIONS:
