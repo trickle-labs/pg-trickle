@@ -264,10 +264,36 @@ pub async fn refresh_target(db: &E2eDb, name: &str, expected_case: &str) {
         "DVM_MUTATION_ROUTE_FAILURE: generated delta SQL did not contain target fragment {expected_sql:?}; saved logs to {}",
         artifact_dir.join("target-delta.log").display()
     );
+    let phase = env::var("PGT_DVM_MUTATION_PHASE").unwrap_or_default();
     if case == "having-unknown-retraction" {
         assert!(
             logs.contains("aggregate updates that no longer satisfy HAVING"),
             "DVM_MUTATION_ROUTE_FAILURE: generated delta SQL omitted the HAVING retraction arm"
+        );
+    } else if case == "left-join-l0-snapshot" {
+        let marker = "-- Part 2: pre-change left (L₀) JOIN delta_right";
+        let part2 = logs
+            .rsplit_once(marker)
+            .map(|(_, after)| after.split("UNION ALL").next().unwrap_or(after))
+            .expect("DVM_MUTATION_ROUTE_FAILURE: generated delta SQL omitted Part 2");
+        let uses_l0_snapshot = part2.contains("__pgt_cte_l0_snap");
+        assert_eq!(
+            uses_l0_snapshot,
+            phase == "baseline",
+            "DVM_MUTATION_ROUTE_FAILURE: Part 2 source does not match the {phase} candidate"
+        );
+    } else if case == "full-join-old-match-guard" {
+        let marker =
+            "-- Part 5: Insert NULL-padded left rows when a left row loses ALL right matches.";
+        let part5 = logs
+            .rsplit_once(marker)
+            .map(|(_, after)| after.split("UNION ALL").next().unwrap_or(after))
+            .expect("DVM_MUTATION_ROUTE_FAILURE: generated delta SQL omitted Part 5");
+        let has_old_match_guard = part5.contains("__pgt_r_old WHERE");
+        assert_eq!(
+            has_old_match_guard,
+            phase == "baseline",
+            "DVM_MUTATION_ROUTE_FAILURE: Part 5 old-match guard does not match the {phase} candidate"
         );
     }
 

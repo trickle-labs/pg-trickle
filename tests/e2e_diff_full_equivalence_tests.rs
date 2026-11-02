@@ -303,6 +303,59 @@ async fn test_diff_full_equivalence_left_join() {
     assert_differential_mode(&db, "dfe_lj_st").await;
 }
 
+#[tokio::test]
+async fn test_diff_full_equivalence_left_join_l0_snapshot_mutation() {
+    let db = E2eDb::new().await.with_extension().await;
+    let campaign = dvm_mutation_pilot::preflight(&db, "left-join-l0-snapshot").await;
+    db.execute("CREATE TABLE dfe_ljm_l (id INT PRIMARY KEY, label TEXT)")
+        .await;
+    db.execute("CREATE TABLE dfe_ljm_r (id INT PRIMARY KEY, l_id INT, payload TEXT)")
+        .await;
+    db.execute("INSERT INTO dfe_ljm_l VALUES (6, 'left-six')")
+        .await;
+    db.execute("INSERT INTO dfe_ljm_r VALUES (60, 6, 'right-six')")
+        .await;
+
+    let q = "SELECT l.id AS lid, l.label, r.id AS rid, r.payload \
+             FROM dfe_ljm_l l LEFT JOIN dfe_ljm_r r ON r.l_id = l.id";
+    if campaign {
+        dvm_mutation_pilot::create_differential_stream_table(&db, "dfe_ljm_st", q).await;
+    } else {
+        db.create_st("dfe_ljm_st", q, "1m", "DIFFERENTIAL").await;
+    }
+    db.assert_st_matches_query("dfe_ljm_st", q).await;
+    assert_differential_mode(&db, "dfe_ljm_st").await;
+
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE dfe_ljm_l SET id = 7 WHERE id = 6",
+        "UPDATE dfe_ljm_r SET l_id = 7, payload = 'right-seven' WHERE id = 60",
+        "COMMIT",
+    ])
+    .await;
+    if campaign {
+        dvm_mutation_pilot::refresh_target(&db, "dfe_ljm_st", "left-join-l0-snapshot").await;
+        dvm_mutation_pilot::record_target_bags(
+            &db,
+            "dfe_ljm_st",
+            q,
+            "M-LJ-SNAPSHOT same-refresh join-key rename",
+        )
+        .await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            "dfe_ljm_st",
+            q,
+            "M-LJ-SNAPSHOT same-refresh join-key rename",
+        )
+        .await;
+    } else {
+        db.refresh_st("dfe_ljm_st").await;
+        db.assert_st_matches_query("dfe_ljm_st", q).await;
+    }
+    assert_differential_mode(&db, "dfe_ljm_st").await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // FULL JOIN
 // ═══════════════════════════════════════════════════════════════════════
@@ -356,6 +409,60 @@ async fn test_diff_full_equivalence_full_join() {
     db.refresh_st("dfe_fj_st").await;
     db.assert_st_matches_query("dfe_fj_st", q).await;
     assert_differential_mode(&db, "dfe_fj_st").await;
+}
+
+#[tokio::test]
+async fn test_diff_full_equivalence_full_join_old_match_guard_mutation() {
+    let db = E2eDb::new().await.with_extension().await;
+    let campaign = dvm_mutation_pilot::preflight(&db, "full-join-old-match-guard").await;
+    db.execute("CREATE TABLE dfe_fjm_l (id INT PRIMARY KEY, group_key INT, payload TEXT)")
+        .await;
+    db.execute("CREATE TABLE dfe_fjm_r (id INT PRIMARY KEY, group_key INT, payload TEXT)")
+        .await;
+    db.execute("INSERT INTO dfe_fjm_l VALUES (1, 1, 'was-unmatched'), (2, 2, 'was-matched')")
+        .await;
+    db.execute("INSERT INTO dfe_fjm_r VALUES (20, 2, 'right-two')")
+        .await;
+
+    let q = "SELECT l.id AS lid, l.group_key AS lkey, l.payload AS lp, \
+                    r.id AS rid, r.payload AS rp \
+             FROM dfe_fjm_l l FULL JOIN dfe_fjm_r r ON l.group_key = r.group_key";
+    if campaign {
+        dvm_mutation_pilot::create_differential_stream_table(&db, "dfe_fjm_st", q).await;
+    } else {
+        db.create_st("dfe_fjm_st", q, "1m", "DIFFERENTIAL").await;
+    }
+    db.assert_st_matches_query("dfe_fjm_st", q).await;
+    assert_differential_mode(&db, "dfe_fjm_st").await;
+
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE dfe_fjm_l SET group_key = 2 WHERE id = 1",
+        "DELETE FROM dfe_fjm_r WHERE id = 20",
+        "COMMIT",
+    ])
+    .await;
+    if campaign {
+        dvm_mutation_pilot::refresh_target(&db, "dfe_fjm_st", "full-join-old-match-guard").await;
+        dvm_mutation_pilot::record_target_bags(
+            &db,
+            "dfe_fjm_st",
+            q,
+            "M-FJ-OLD-MATCH-GUARD right delete and left key rename",
+        )
+        .await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            "dfe_fjm_st",
+            q,
+            "M-FJ-OLD-MATCH-GUARD right delete and left key rename",
+        )
+        .await;
+    } else {
+        db.refresh_st("dfe_fjm_st").await;
+        db.assert_st_matches_query("dfe_fjm_st", q).await;
+    }
+    assert_differential_mode(&db, "dfe_fjm_st").await;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

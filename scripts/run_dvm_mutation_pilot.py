@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -22,13 +23,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER_IMAGE = "pg_trickle_builder:pg18"
-RUNTIME_IMAGE = "pg_trickle_i1289_runtime:pg18"
+RUNTIME_IMAGE = "pg_trickle_dvm_mutation_runtime:pg18"
 PACKAGE_SO = "/artefacts/pg_trickle-pg18/usr/lib/postgresql/18/lib/pg_trickle.so"
 INSTALLED_SO = "/usr/lib/postgresql/18/lib/pg_trickle.so"
 PACKAGE_ROOT = "/artefacts/pg_trickle-pg18"
 RUN_LABEL = "com.pgtrickle.run-id"
 SUITE_LABEL = "com.pgtrickle.suite"
-MUTATION_SUITE = "issue-1289-mutation"
+MUTATION_SUITE = "source-dvm-mutation"
 INFRA_MARKERS = (
     "Cannot connect to the Docker daemon",
     "error during connect",
@@ -55,7 +56,7 @@ class Mutant:
     assertion: str
 
 
-MUTANTS = (
+MUTANTS_1289 = (
     Mutant(
         name="having-unknown-retraction",
         source="src/dvm/operators/filter.rs",
@@ -77,6 +78,74 @@ MUTANTS = (
         assertion="M-COUNT-NULL-DELETE SQL-NULL payload deletion cycle",
     ),
 )
+
+MUTANTS_1291 = (
+    Mutant(
+        name="left-join-l0-snapshot",
+        source="src/dvm/operators/outer_join.rs",
+        anchor="""let left_part2_source = if use_per_leaf_l0 {
+        let pre_change = ctx.get_or_register_snapshot_cte(left);
+        mark_leaf_delta_ctes_not_materialized(left, ctx);
+        pre_change""",
+        replacement="""let left_part2_source = if use_per_leaf_l0 {
+        left_table.clone()""",
+        test="test_diff_full_equivalence_left_join_l0_snapshot_mutation",
+        expected_sql="-- Part 2: pre-change left (L₀) JOIN delta_right",
+        mutant_sql="-- Part 2: pre-change left (L₀) JOIN delta_right",
+        assertion="M-LJ-SNAPSHOT same-refresh join-key rename",
+    ),
+    Mutant(
+        name="full-join-old-match-guard",
+        source="src/dvm/operators/full_join.rs",
+        anchor="""-- Guard AND EXISTS R_old: fires only when left row previously had a match.
+-- Guard AND NOT EXISTS ΔL_I same-key: prevents duplicate with Part 3a when a
+-- left INSERT (from UPDATE) and a right DELETE happen for the same key in the
+-- same cycle — Part 3a handles new left rows; Part 5 handles pre-existing ones.
+SELECT pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
+       'I'::TEXT AS __pgt_action,
+       {l_null_right_padded}
+FROM {left_table} l
+WHERE (SELECT has_del FROM {right_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'D' AND {join_cond_part2}
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM {right_table} r WHERE {not_exists_cond_lr}
+  )
+  AND EXISTS (
+    SELECT 1 FROM {r_old_snapshot} __pgt_r_old WHERE {r_old_cond}
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM {delta_left} dl2 WHERE dl2.__pgt_action = 'I' AND {part5_excl_cond}
+  )""",
+        replacement="""-- Guard AND EXISTS R_old: fires only when left row previously had a match.
+-- Guard AND NOT EXISTS ΔL_I same-key: prevents duplicate with Part 3a when a
+-- left INSERT (from UPDATE) and a right DELETE happen for the same key in the
+-- same cycle — Part 3a handles new left rows; Part 5 handles pre-existing ones.
+SELECT pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
+       'I'::TEXT AS __pgt_action,
+       {l_null_right_padded}
+FROM {left_table} l
+WHERE (SELECT has_del FROM {right_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'D' AND {join_cond_part2}
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM {right_table} r WHERE {not_exists_cond_lr}
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM {delta_left} dl2 WHERE dl2.__pgt_action = 'I' AND {part5_excl_cond}
+  )""",
+        test="test_diff_full_equivalence_full_join_old_match_guard_mutation",
+        expected_sql="__pgt_r_old WHERE",
+        mutant_sql="-- Part 5: Insert NULL-padded left rows when a left row loses ALL right matches.",
+        assertion="M-FJ-OLD-MATCH-GUARD right delete and left key rename",
+    ),
+)
+
+MUTANTS_BY_ISSUE = {"1289": MUTANTS_1289, "1291": MUTANTS_1291}
 
 
 class CampaignError(RuntimeError):
@@ -219,7 +288,7 @@ class DiskMonitor:
         return sample
 
     def start(self) -> None:
-        self.thread = threading.Thread(target=self._sample_loop, name="i1289-disk-monitor", daemon=True)
+        self.thread = threading.Thread(target=self._sample_loop, name="dvm-mutation-disk-monitor", daemon=True)
         self.thread.start()
 
     def _sample_loop(self) -> None:
@@ -582,7 +651,7 @@ def build_runtime_image(tag: str, builder_image: str, artifacts: Path, platform_
         metadata = require_command(
             [
                 "docker", "image", "inspect", tag, "--format",
-                '{{index .Config.Labels "com.pgtrickle.issue-1289.runtime-source-sha"}}|{{.Os}}/{{.Architecture}}',
+                '{{index .Config.Labels "com.pgtrickle.dvm-mutation.runtime-source-sha"}}|{{.Os}}/{{.Architecture}}',
             ],
             ROOT,
             artifacts / "runtime-image-existing-metadata.log",
@@ -597,7 +666,7 @@ def build_runtime_image(tag: str, builder_image: str, artifacts: Path, platform_
         "docker", "build", "--platform", platform_name, "--provenance=false",
         "--tag", tag, "--file", "tests/Dockerfile.e2e", "--target", "runtime-base",
         "--build-arg", f"BUILDER_IMAGE={builder_image}",
-        "--build-arg", f"ISSUE_1289_RUNTIME_SOURCE_SHA={dockerfile_sha}",
+        "--build-arg", f"DVM_MUTATION_RUNTIME_SOURCE_SHA={dockerfile_sha}",
     ]
     require_command(
         argv + [str(ROOT)],
@@ -608,7 +677,7 @@ def build_runtime_image(tag: str, builder_image: str, artifacts: Path, platform_
     metadata = require_command(
         [
             "docker", "image", "inspect", tag, "--format",
-            '{{index .Config.Labels "com.pgtrickle.issue-1289.runtime-source-sha"}}|{{.Os}}/{{.Architecture}}',
+            '{{index .Config.Labels "com.pgtrickle.dvm-mutation.runtime-source-sha"}}|{{.Os}}/{{.Architecture}}',
         ],
         ROOT,
         artifacts / "runtime-image-built-metadata.log",
@@ -714,6 +783,7 @@ def run_test(
             "PGT_E2E_RUN_ID": run_id,
             "PGT_E2E_MUTATION_PACKAGE_DIR": str(package_dir),
             "PGT_DVM_MUTATION_CASE": case.name,
+            "PGT_DVM_MUTATION_PHASE": phase,
             "PGT_DVM_MUTATION_EXPECTED_LIBRARY_SHA256": library_sha,
             "PGT_DVM_MUTATION_EXPECTED_SQL_FRAGMENT": sql_fragment,
             "PGT_DVM_MUTATION_ARTIFACT_DIR": str(evidence_dir),
@@ -822,24 +892,25 @@ def worktree_patch(
 
 
 def write_summary(artifacts: Path, payload: dict) -> None:
+    issue = payload.get("issue", "1289")
     (artifacts / "outcomes.json").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    rows = [
-        "| Mutant | Outcome | Evidence |",
-        "|---|---|---|",
-        "| M-IS-DELETE-SIGN (superseded) | inconclusive | INTERSECT is FullOnly; no admitted incremental path |",
-        "| M-IS-ZERO-BOUNDARY (superseded) | inconclusive | INTERSECT is FullOnly; no admitted incremental path |",
-    ]
+    rows = ["| Mutant | Outcome | Evidence |", "|---|---|---|"]
+    if issue == "1289":
+        rows.extend([
+            "| M-IS-DELETE-SIGN (superseded) | inconclusive | INTERSECT is FullOnly; no admitted incremental path |",
+            "| M-IS-ZERO-BOUNDARY (superseded) | inconclusive | INTERSECT is FullOnly; no admitted incremental path |",
+        ])
     for result in payload.get("mutants", []):
         rows.append(
             f"| {result['name']} | {result['status']} | {result.get('artifacts', 'see outcomes.json')} |"
         )
     text = (
-        "# Issue #1289 source-level DVM mutation pilot\n\n"
+        f"# Issue #{issue} source-level DVM mutation pilot\n\n"
         f"Candidate: `{payload.get('candidate_commit', 'unknown')}`\n\n"
-        "The superseded INTERSECT candidates were not built or counted as kills.\n\n"
-        f"Campaign status: `{payload.get('status', 'running')}`\n\n"
+        + ("The superseded INTERSECT candidates were not built or counted as kills.\n\n" if issue == "1289" else "")
+        + f"Campaign status: `{payload.get('status', 'running')}`\n\n"
         + "\n".join(rows)
         + "\n"
     )
@@ -847,7 +918,7 @@ def write_summary(artifacts: Path, payload: dict) -> None:
 
 
 def self_test() -> None:
-    for case in MUTANTS:
+    for case in (*MUTANTS_1289, *MUTANTS_1291):
         source = (ROOT / case.source).read_text(encoding="utf-8")
         changed = replace_unique(source, case.anchor, case.replacement)
         assert changed != source
@@ -864,8 +935,18 @@ def self_test() -> None:
         "EXACT ORACLE INVARIANT VIOLATION in M-HAVING-UNKNOWN-RETRACTION TRUE-to-UNKNOWN cycle\n"
         "Counts: actual=0, expected=1, extra=0, missing=1"
     )
-    assert test_outcome(MUTANTS[0], 101, exact_mismatch, True)[0] == "detected"
-    assert test_outcome(MUTANTS[0], 101, "assertion failed", True)[0] == "inconclusive"
+    assert test_outcome(MUTANTS_1289[0], 101, exact_mismatch, True)[0] == "detected"
+    assert test_outcome(MUTANTS_1289[0], 101, "assertion failed", True)[0] == "inconclusive"
+    join_mismatch = (
+        "EXACT ORACLE INVARIANT VIOLATION in M-LJ-SNAPSHOT same-refresh join-key rename\n"
+        "Counts: actual=2, expected=1, extra=1, missing=0"
+    )
+    assert test_outcome(MUTANTS_1291[0], 101, join_mismatch, True)[0] == "detected"
+    full_join_mismatch = (
+        "EXACT ORACLE INVARIANT VIOLATION in M-FJ-OLD-MATCH-GUARD right delete and left key rename\n"
+        "Counts: actual=3, expected=2, extra=1, missing=0"
+    )
+    assert test_outcome(MUTANTS_1291[1], 101, full_join_mismatch, True)[0] == "detected"
     assert parse_size("1.5GiB") == 1_610_612_736
     assert parse_size("10MB") == 10_000_000
     assert builder_image_for("linux/amd64") == "pg_trickle_builder:pg18-amd64"
@@ -897,9 +978,10 @@ def run_cleanup_probe(
     commit: str,
     run_dir: Path,
     resources: RunResources,
+    mutants: tuple[Mutant, ...],
 ) -> dict:
-    sentinel_name = f"pgtrickle-i1289-unrelated-{run_id}"
-    sentinel_label = "com.pgtrickle.i1289-cleanup-probe"
+    sentinel_name = f"pgtrickle-dvm-mutation-unrelated-{run_id}"
+    sentinel_label = "com.pgtrickle.dvm-mutation-cleanup-probe"
     sentinel_id = None
     result = {"unrelated_sentinel_name": sentinel_name}
     try:
@@ -915,7 +997,7 @@ def run_cleanup_probe(
             "create unrelated cleanup sentinel",
         ).splitlines()[0]
         result["unrelated_sentinel_id"] = sentinel_id
-        probe_image = f"pg_trickle_i1289_cleanup_probe:{run_id}"
+        probe_image = f"pg_trickle_dvm_mutation_cleanup_probe:{run_id}"
         if docker_exists(probe_image, ROOT, artifacts / "cleanup-probe-image-preexistence.log"):
             raise CampaignError("stale", f"refusing to retag existing cleanup probe image {probe_image}")
         resources.ephemeral_images.append(probe_image)
@@ -938,7 +1020,7 @@ def run_cleanup_probe(
         scratch.mkdir(parents=True, exist_ok=False)
         (scratch / "owned.txt").write_text("run-owned scratch\n", encoding="utf-8")
 
-        case = MUTANTS[0]
+        case = mutants[0]
         code, output = run_test(
             case,
             runtime_image,
@@ -996,13 +1078,14 @@ def run_cleanup_probe(
     return result
 
 
-def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decimal, interval: int) -> int:
+def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decimal, interval: int, issue: str) -> int:
     status = subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True)
     if status.strip():
         raise CampaignError("inconclusive", "campaign requires a clean candidate worktree")
     candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     artifacts = artifacts.resolve()
-    run_id = f"i1289-{datetime.now(timezone.utc).strftime('%y%m%d%H%M%S%f')}-{os.getpid()}"
+    mutants = MUTANTS_BY_ISSUE[issue]
+    run_id = f"i{issue}-{datetime.now(timezone.utc).strftime('%y%m%d%H%M%S%f')}-{os.getpid()}"
     platform_name = docker_platform()
     artifacts.mkdir(parents=True, exist_ok=False)
     run_dir = artifacts / "worktrees"
@@ -1018,6 +1101,7 @@ def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decim
     started = time.monotonic()
     original_sigterm = signal.getsignal(signal.SIGTERM)
     payload: dict = {
+        "issue": issue,
         "candidate_commit": candidate,
         "target": "main",
         "platform": platform_name,
@@ -1025,13 +1109,14 @@ def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decim
         "run_id": run_id,
         "configured_host_free_floor_bytes": monitor.floor_bytes,
         "retained_artifact_cap_bytes": artifact_cap,
-        "superseded_intersect_mutants": {
-            "M-IS-DELETE-SIGN": {"status": "inconclusive", "reason": "INTERSECT is FullOnly"},
-            "M-IS-ZERO-BOUNDARY": {"status": "inconclusive", "reason": "INTERSECT is FullOnly"},
-        },
         "baselines": [],
         "mutants": [],
     }
+    if issue == "1289":
+        payload["superseded_intersect_mutants"] = {
+            "M-IS-DELETE-SIGN": {"status": "inconclusive", "reason": "INTERSECT is FullOnly"},
+            "M-IS-ZERO-BOUNDARY": {"status": "inconclusive", "reason": "INTERSECT is FullOnly"},
+        }
     write_summary(artifacts, payload)
 
     def handle_sigterm(signum: int, frame: object) -> None:
@@ -1053,7 +1138,7 @@ def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decim
         }
         monitor.snapshot("after-runtime-image")
 
-        baseline_tag = f"pg_trickle_i1289_package:{run_id}-baseline"
+        baseline_tag = f"pg_trickle_dvm_mutation_package:{run_id}-baseline"
         monitor.check_before("baseline package build")
         baseline_image_id = build_package_image(
             ROOT, baseline_tag, builder_image, artifacts, platform_name, resources
@@ -1069,7 +1154,7 @@ def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decim
         remove_image(baseline_tag, artifacts)
         enforce_artifact_cap(artifacts, artifact_cap, payload)
 
-        for case in MUTANTS:
+        for case in mutants:
             monitor.check_before(f"baseline {case.name}")
             code, output = run_test(
                 case, runtime_image, baseline_package_dir, baseline_package["library_sha256"],
@@ -1097,13 +1182,13 @@ def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decim
 
         payload["cleanup_failure_probe"] = run_cleanup_probe(
             artifacts, runtime_image, baseline_package_dir, baseline_package["library_sha256"],
-            run_id, candidate, run_dir, resources,
+            run_id, candidate, run_dir, resources, mutants,
         )
         monitor.snapshot("after-forced-failure-cleanup-probe")
         payload["mutant_base_package_library_sha256"] = baseline_package["library_sha256"]
         # The baseline package staging directory was removed by the scoped cleanup probe.
 
-        for case in MUTANTS:
+        for case in mutants:
             record = {
                 "name": case.name,
                 "test": case.test,
@@ -1123,7 +1208,7 @@ def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decim
                         "mutated_source_sha256": mutated_source_sha,
                     }
                 )
-                build_tag = f"pg_trickle_i1289_package:{run_id}-{case.name}"
+                build_tag = f"pg_trickle_dvm_mutation_package:{run_id}-{case.name}"
                 build_dir = artifacts / case.name / "build"
                 build_dir.mkdir(parents=True)
                 package_image_id = build_package_image(
@@ -1229,7 +1314,8 @@ def run_campaign(artifacts: Path, min_free_gib: Decimal, max_retained_mib: Decim
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true", help="assert patch anchors are unique and fail closed")
-    parser.add_argument("--artifacts-dir", type=Path, help="artifact destination (defaults under ~/.p2p/work)")
+    parser.add_argument("--issue", choices=tuple(MUTANTS_BY_ISSUE), default="1289", help="quality issue mutation campaign")
+    parser.add_argument("--artifacts-dir", type=Path, help="artifact destination (defaults under the system temp directory)")
     parser.add_argument("--min-free-gib", type=Decimal, default=Decimal("10"), help="minimum host filesystem free space (default: 10 GiB)")
     parser.add_argument("--max-retained-artifact-mib", type=Decimal, default=Decimal("512"), help="maximum retained campaign artifacts (default: 512 MiB)")
     parser.add_argument("--sample-interval-seconds", type=int, default=10, help="Docker and host disk sampling interval")
@@ -1238,11 +1324,11 @@ def main() -> int:
         self_test()
         return 0
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    artifacts = args.artifacts_dir or Path.home() / ".p2p" / "work" / "issue-1289-dvm-mutation-pilot" / run_id
+    artifacts = args.artifacts_dir or Path(tempfile.gettempdir()) / "pg-trickle-dvm-mutation-pilot" / run_id
     try:
         if args.min_free_gib <= 0 or args.max_retained_artifact_mib <= 0 or args.sample_interval_seconds < 1:
             raise CampaignError("disk_budget", "disk floors/caps must be positive and sample interval at least 1 second")
-        result = run_campaign(artifacts, args.min_free_gib, args.max_retained_artifact_mib, args.sample_interval_seconds)
+        result = run_campaign(artifacts, args.min_free_gib, args.max_retained_artifact_mib, args.sample_interval_seconds, args.issue)
     except CampaignError as error:
         artifacts.mkdir(parents=True, exist_ok=True)
         (artifacts / "campaign-error.txt").write_text(f"{error.status}: {error}\n", encoding="utf-8")
