@@ -784,6 +784,92 @@ async fn test_cdc_keyed_weight_matches_multiro_image_bag_oracle() {
             .all(|row| row.0 != "08" && row.0 != "09"),
         "global image sums should cancel both exchanged endpoints; got {cross_identity_rows:?}"
     );
+
+    let states = [None, Some("a"), Some("b")];
+    let build_path = |row_id, id, initial, targets: Vec<Option<&'static str>>| {
+        let mut current = initial;
+        let mut path = Vec::new();
+        for next in targets {
+            if current == next {
+                continue;
+            }
+            if let Some(payload) = current {
+                path.push(Event {
+                    row_id,
+                    action: 'D',
+                    id,
+                    payload: Some(payload),
+                    revision: 0,
+                });
+            }
+            if let Some(payload) = next {
+                path.push(Event {
+                    row_id,
+                    action: 'I',
+                    id,
+                    payload: Some(payload),
+                    revision: 0,
+                });
+            }
+            current = next;
+        }
+        path
+    };
+
+    // Enumerate all initial/final image pairs while interleaving each with a
+    // second identity that traverses a cancelling history.
+    for initial in states {
+        for final_state in states {
+            let first = build_path(1, 1, initial, vec![Some("a"), Some("b"), None, final_state]);
+            let second = build_path(2, 2, Some("b"), vec![Some("a"), None, Some("b")]);
+            let mut events = Vec::new();
+            for index in 0..first.len().max(second.len()) {
+                events.extend(first.get(index).cloned());
+                events.extend(second.get(index).cloned());
+            }
+            let rows = events
+                .iter()
+                .map(|event| {
+                    let payload = event
+                        .payload
+                        .map(|value| format!("'{value}'::text"))
+                        .unwrap_or_else(|| "NULL::text".to_string());
+                    format!(
+                        "SELECT decode('{:02x}','hex') AS __pgt_row_id, \
+                         '{}'::text AS __pgt_action, {}::int AS id, {payload} AS payload, \
+                         {}::int AS revision",
+                        event.row_id, event.action, event.id, event.revision
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" UNION ALL ");
+            let generated = cdc_elision::keyed_weight_sql(&rows, "id,payload,revision");
+            let actual = render_result(&db, generated).await;
+            let expected = if initial == final_state {
+                Vec::new()
+            } else if let Some(payload) = final_state {
+                vec![(
+                    "01".to_string(),
+                    "I".to_string(),
+                    1,
+                    Some(payload.to_string()),
+                    0,
+                )]
+            } else {
+                vec![(
+                    "01".to_string(),
+                    "D".to_string(),
+                    1,
+                    initial.map(str::to_string),
+                    0,
+                )]
+            };
+            assert_eq!(
+                actual, expected,
+                "generated SQL must match the endpoint oracle for {initial:?} -> {final_state:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
