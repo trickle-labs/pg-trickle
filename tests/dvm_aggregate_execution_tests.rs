@@ -790,6 +790,7 @@ async fn test_cdc_keyed_weight_matches_multiro_image_bag_oracle() {
 async fn test_cdc_image_policy_preserves_native_scalar_observations() {
     let db = TestDb::new().await;
     db.execute("CREATE DOMAIN image_numeric AS numeric").await;
+    db.execute("CREATE DOMAIN image_int4 AS integer").await;
     let rendered = cdc_elision::changed_column_sql("a.v", "b.v");
     let mut observed = 0;
     for (data_type, values, admitted) in [
@@ -845,6 +846,11 @@ async fn test_cdc_image_policy_preserves_native_scalar_observations() {
             "(NULL::image_numeric),(1.0::image_numeric),(1.00::image_numeric)",
             false,
         ),
+        (
+            "image_int4",
+            "(NULL::image_int4),(0::image_int4),(1::image_int4)",
+            false,
+        ),
     ] {
         let oid: i64 = db
             .query_scalar(&format!("SELECT '{data_type}'::regtype::oid::bigint"))
@@ -870,7 +876,7 @@ async fn test_cdc_image_policy_preserves_native_scalar_observations() {
             observed += 1;
         }
     }
-    assert_eq!(observed, 186);
+    assert_eq!(observed, 195);
     let scale_control: (bool, String) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT a.v IS DISTINCT FROM b.v, ({rendered})::text FROM (VALUES(1.0::numeric)) a(v) CROSS JOIN (VALUES(1.00::numeric)) b(v)"
     ))).fetch_one(&db.pool).await.unwrap();

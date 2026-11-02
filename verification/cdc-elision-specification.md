@@ -71,9 +71,11 @@ observation. Fixed expression/environment and source-schema epochs remain
 assumptions of any stronger consumer-equivalence claim. No such whole-query
 proof is asserted here.
 
-The independent native PostgreSQL conformance test enumerates 186 pairs across
-every admitted type, plus variable-length types, json (without SQL equality)
-and a numeric domain.
+The independent native PostgreSQL conformance test enumerates 195 pairs across
+every admitted type, plus variable-length types, json (without SQL equality),
+a numeric domain and a domain over admitted `integer` values. The admitted-base
+domain confirms that the runtime catalog OID guard does not widen admission to
+domain types.
 It checks actual catalog OIDs and compares mask results against independent
 public text/NULL observations, including integer bounds, embedded zero bytes,
 NULLs, numeric scale and special values. Unknown types always retain changes.
