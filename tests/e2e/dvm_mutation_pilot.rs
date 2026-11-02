@@ -276,7 +276,8 @@ pub async fn refresh_target(db: &E2eDb, name: &str, expected_case: &str) {
             .rsplit_once(marker)
             .map(|(_, after)| after.split("UNION ALL").next().unwrap_or(after))
             .expect("DVM_MUTATION_ROUTE_FAILURE: generated delta SQL omitted Part 2");
-        let uses_l0_snapshot = part2.contains("__pgt_cte_l0_snap");
+        let uses_l0_snapshot =
+            part2.contains("__pgt_cte_l0_snap") || part2.contains("FROM (SELECT");
         assert_eq!(
             uses_l0_snapshot,
             phase == "baseline",

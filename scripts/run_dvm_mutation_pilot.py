@@ -86,9 +86,19 @@ MUTANTS_1291 = (
         anchor="""let left_part2_source = if use_per_leaf_l0 {
         let pre_change = ctx.get_or_register_snapshot_cte(left);
         mark_leaf_delta_ctes_not_materialized(left, ctx);
-        pre_change""",
-        replacement="""let left_part2_source = if use_per_leaf_l0 {
-        left_table.clone()""",
+        pre_change
+    } else if use_combined_l0 {
+        build_leaf_snapshot_sql(
+            left,
+            &left_result.cte_name,
+            left_cols,
+            ctx.fallback_leaf_oids(),
+            ctx.st_source_pgt_ids(),
+        )
+    } else {
+        left_table.clone()
+    };""",
+        replacement="let left_part2_source = left_table.clone();",
         test="test_diff_full_equivalence_left_join_l0_snapshot_mutation",
         expected_sql="-- Part 2: pre-change left (L₀) JOIN delta_right",
         mutant_sql="-- Part 2: pre-change left (L₀) JOIN delta_right",
