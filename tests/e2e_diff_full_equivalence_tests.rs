@@ -309,14 +309,14 @@ async fn test_diff_full_equivalence_left_join_l0_snapshot_mutation() {
     let campaign = dvm_mutation_pilot::preflight(&db, "left-join-l0-snapshot").await;
     db.execute("CREATE TABLE dfe_ljm_dept (id INT PRIMARY KEY, name TEXT, parent_id INT)")
         .await;
-    db.execute("CREATE TABLE dfe_ljm_emp (id INT PRIMARY KEY, department_id INT, name TEXT)")
+    db.execute("CREATE TABLE dfe_ljm_emp (id INT PRIMARY KEY, department_id INT, salary INT)")
         .await;
     db.execute(
         "INSERT INTO dfe_ljm_dept VALUES
             (1, 'Company', NULL), (2, 'Engineering', 1), (3, 'Backend', 2), (4, 'Frontend', 2)",
     )
     .await;
-    db.execute("INSERT INTO dfe_ljm_emp VALUES (10, 3, 'Alice'), (11, 3, 'Bob')")
+    db.execute("INSERT INTO dfe_ljm_emp VALUES (10, 3, 120), (11, 3, 115)")
         .await;
 
     let tree_query = "WITH RECURSIVE tree AS (
@@ -333,8 +333,10 @@ async fn test_diff_full_equivalence_left_join_l0_snapshot_mutation() {
         db.create_st("dfe_ljm_tree", tree_query, "1m", "DIFFERENTIAL")
             .await;
     }
-    let q = "SELECT t.id AS department_id, t.path, e.id AS employee_id, e.name AS employee_name \
-             FROM dfe_ljm_tree t LEFT JOIN dfe_ljm_emp e ON e.department_id = t.id";
+    let q = "SELECT t.id AS department_id, t.path, COUNT(e.id) AS headcount, \
+                    COALESCE(SUM(e.salary), 0) AS total_salary \
+             FROM dfe_ljm_tree t LEFT JOIN dfe_ljm_emp e ON e.department_id = t.id \
+             GROUP BY t.id, t.path";
 
     if campaign {
         dvm_mutation_pilot::create_differential_stream_table(&db, "dfe_ljm_st", q).await;
