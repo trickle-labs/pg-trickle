@@ -85,6 +85,48 @@ async fn test_keyless_multiset_duplicate_rows() {
         .await;
 }
 
+/// Keyless differential scans must expand the signed multiplicity within one refresh window.
+#[tokio::test]
+async fn test_keyless_multiset_same_window_insert_delete_preserves_multiplicity() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE km_window (v INT, label TEXT)")
+        .await;
+    db.execute("INSERT INTO km_window VALUES (1,'same')").await;
+
+    let query = "SELECT v,label FROM km_window";
+    db.create_st("km_window_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("km_window_st", query).await;
+
+    // Three identical inserts and one identical delete have net multiplicity +2.
+    db.execute("INSERT INTO km_window VALUES (1,'same'),(1,'same'),(1,'same')")
+        .await;
+    db.execute(
+        "DELETE FROM km_window WHERE ctid = (SELECT ctid FROM km_window \
+         WHERE v = 1 AND label = 'same' LIMIT 1)",
+    )
+    .await;
+    db.refresh_st("km_window_st").await;
+    db.assert_st_matches_query("km_window_st", query).await;
+    let count: i64 = db
+        .query_scalar("SELECT count(*) FROM km_window_st WHERE v=1 AND label='same'")
+        .await;
+    assert_eq!(count, 3, "the positive net count expands to two new rows");
+
+    // Removing two of those identical rows must retract exactly two occurrences.
+    db.execute(
+        "DELETE FROM km_window WHERE ctid IN (SELECT ctid FROM km_window \
+         WHERE v = 1 AND label = 'same' LIMIT 2)",
+    )
+    .await;
+    db.refresh_st("km_window_st").await;
+    db.assert_st_matches_query("km_window_st", query).await;
+    let count: i64 = db
+        .query_scalar("SELECT count(*) FROM km_window_st WHERE v=1 AND label='same'")
+        .await;
+    assert_eq!(count, 1, "the negative net count retracts two rows");
+}
+
 /// A42-15: Keyless multiset — 10 random cycles of mixed operations.
 ///
 /// Property: ∀ cycle: multiset(km_prop_st) == multiset(SELECT * FROM km_prop)
