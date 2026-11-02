@@ -92,6 +92,13 @@ transitions and same-image no-ops are compared against native defining queries.
 Changed cycles require fresh completed DIFFERENTIAL history without fallback.
 Numeric same-image no-ops remain captured conservatively.
 
+The installed-trigger case `test_shared_domain_over_admitted_base_retains_changed_bit`
+also exercises a domain over admitted `integer`. In both row and statement
+trigger modes, a same-value update produces both D/I images and retains the
+domain column's changed bit. This checks the production-generated type-OID
+guard for that domain case; it does not generalize to every user type or
+PostgreSQL catalog behavior.
+
 The generated histories also exposed a separate concrete-window cache defect:
 decision tracing bypassed the inner delta cache but the outer MERGE cache
 stored literal LSN cuts. The deterministic traced-window regression observes
@@ -214,6 +221,13 @@ per-image `SUM` partition and observes both endpoints disappear. This covers
 identity separation for that interleaved key-swap history; it does not prove
 PostgreSQL's general sort/aggregate implementation or every multi-row source
 history.
+
+The SQL bag-oracle test also enumerates nine initial/final image pairs over
+absent, `a` and `b` states. Each path passes through intermediate updates and a
+delete/insert cycle, interleaved with a second identity whose history cancels.
+The generated SQL is compared with an independent endpoint oracle. These
+finite cases broaden the runtime sample but do not establish equivalence for
+arbitrary production histories.
 
 ## Controls and candidate binding
 
