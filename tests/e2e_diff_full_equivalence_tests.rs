@@ -307,17 +307,35 @@ async fn test_diff_full_equivalence_left_join() {
 async fn test_diff_full_equivalence_left_join_l0_snapshot_mutation() {
     let db = E2eDb::new().await.with_extension().await;
     let campaign = dvm_mutation_pilot::preflight(&db, "left-join-l0-snapshot").await;
-    db.execute("CREATE TABLE dfe_ljm_l (id INT PRIMARY KEY, label TEXT)")
+    db.execute("CREATE TABLE dfe_ljm_dept (id INT PRIMARY KEY, name TEXT, parent_id INT)")
         .await;
-    db.execute("CREATE TABLE dfe_ljm_r (id INT PRIMARY KEY, l_id INT, payload TEXT)")
+    db.execute("CREATE TABLE dfe_ljm_emp (id INT PRIMARY KEY, department_id INT, name TEXT)")
         .await;
-    db.execute("INSERT INTO dfe_ljm_l VALUES (6, 'left-six')")
-        .await;
-    db.execute("INSERT INTO dfe_ljm_r VALUES (60, 6, 'right-six')")
+    db.execute(
+        "INSERT INTO dfe_ljm_dept VALUES
+            (1, 'Company', NULL), (2, 'Engineering', 1), (3, 'Backend', 2), (4, 'Frontend', 2)",
+    )
+    .await;
+    db.execute("INSERT INTO dfe_ljm_emp VALUES (10, 3, 'Alice'), (11, 3, 'Bob')")
         .await;
 
-    let q = "SELECT l.id AS lid, l.label, r.id AS rid, r.payload \
-             FROM dfe_ljm_l l LEFT JOIN dfe_ljm_r r ON r.l_id = l.id";
+    let tree_query = "WITH RECURSIVE tree AS (
+                SELECT id, name, parent_id, name::text AS path, 0 AS depth
+                FROM dfe_ljm_dept WHERE parent_id IS NULL
+                UNION ALL
+                SELECT d.id, d.name, d.parent_id, tree.path || ' > ' || d.name, tree.depth + 1
+                FROM dfe_ljm_dept d JOIN tree ON d.parent_id = tree.id
+            )
+            SELECT id, name, parent_id, path, depth FROM tree";
+    if campaign {
+        dvm_mutation_pilot::create_differential_stream_table(&db, "dfe_ljm_tree", tree_query).await;
+    } else {
+        db.create_st("dfe_ljm_tree", tree_query, "1m", "DIFFERENTIAL")
+            .await;
+    }
+    let q = "SELECT t.id AS department_id, t.path, e.id AS employee_id, e.name AS employee_name \
+             FROM dfe_ljm_tree t LEFT JOIN dfe_ljm_emp e ON e.department_id = t.id";
+
     if campaign {
         dvm_mutation_pilot::create_differential_stream_table(&db, "dfe_ljm_st", q).await;
     } else {
@@ -326,27 +344,27 @@ async fn test_diff_full_equivalence_left_join_l0_snapshot_mutation() {
     db.assert_st_matches_query("dfe_ljm_st", q).await;
     assert_differential_mode(&db, "dfe_ljm_st").await;
 
-    db.execute_seq(&[
-        "BEGIN",
-        "UPDATE dfe_ljm_l SET id = 7 WHERE id = 6",
-        "DELETE FROM dfe_ljm_r WHERE id = 60",
-        "COMMIT",
-    ])
-    .await;
+    // A recursive source refresh emits D+I rows for the renamed node and its
+    // descendants. Keep those changes pending on the LEFT input while deleting
+    // a matching employee on the RIGHT input before refreshing the target.
+    db.execute("UPDATE dfe_ljm_dept SET name = 'Research' WHERE id = 2")
+        .await;
+    db.refresh_st("dfe_ljm_tree").await;
+    db.execute("DELETE FROM dfe_ljm_emp WHERE id = 10").await;
     if campaign {
         dvm_mutation_pilot::refresh_target(&db, "dfe_ljm_st", "left-join-l0-snapshot").await;
         dvm_mutation_pilot::record_target_bags(
             &db,
             "dfe_ljm_st",
             q,
-            "M-LJ-SNAPSHOT same-refresh left-key rename and right delete",
+            "M-LJ-SNAPSHOT recursive left rename and right delete",
         )
         .await;
         e2e::oracle::assert_st_query_exact(
             &db,
             "dfe_ljm_st",
             q,
-            "M-LJ-SNAPSHOT same-refresh left-key rename and right delete",
+            "M-LJ-SNAPSHOT recursive left rename and right delete",
         )
         .await;
     } else {
