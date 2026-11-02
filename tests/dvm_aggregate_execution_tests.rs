@@ -870,6 +870,82 @@ async fn test_cdc_keyed_weight_matches_multiro_image_bag_oracle() {
             );
         }
     }
+
+    // Exercise every endpoint pair for two identities at once. All identities
+    // share the same visible key, and their histories repeatedly cross the
+    // same complete-image buckets. The expected endpoints are derived only
+    // from each identity's initial and final state.
+    let mut exhaustive_events = Vec::new();
+    let mut exhaustive_expected = Vec::new();
+    let mut next_row_id = 16u8;
+    for first_initial in states {
+        for first_final in states {
+            for second_initial in states {
+                for second_final in states {
+                    let first_id = next_row_id;
+                    let second_id = next_row_id + 1;
+                    next_row_id += 2;
+                    for event in build_path(
+                        first_id,
+                        99,
+                        first_initial,
+                        vec![Some("a"), Some("b"), None, first_final],
+                    )
+                    .into_iter()
+                    .chain(build_path(
+                        second_id,
+                        99,
+                        second_initial,
+                        vec![Some("a"), Some("b"), None, second_final],
+                    )) {
+                        exhaustive_events.push(event);
+                    }
+                    for (row_id, initial, final_state) in [
+                        (first_id, first_initial, first_final),
+                        (second_id, second_initial, second_final),
+                    ] {
+                        if initial == final_state {
+                            continue;
+                        }
+                        let (action, payload) = match final_state {
+                            Some(payload) => ("I", Some(payload.to_string())),
+                            None => ("D", initial.map(str::to_string)),
+                        };
+                        exhaustive_expected.push((
+                            format!("{row_id:02x}"),
+                            action.to_string(),
+                            99,
+                            payload,
+                            0,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    exhaustive_expected.sort_by(|left, right| left.0.cmp(&right.0));
+    let rows = exhaustive_events
+        .iter()
+        .map(|event| {
+            let payload = event
+                .payload
+                .map(|value| format!("'{value}'::text"))
+                .unwrap_or_else(|| "NULL::text".to_string());
+            format!(
+                "SELECT decode('{:02x}','hex') AS __pgt_row_id, \
+                 '{}'::text AS __pgt_action, {}::int AS id, {payload} AS payload, \
+                 {}::int AS revision",
+                event.row_id, event.action, event.id, event.revision
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    let generated = cdc_elision::keyed_weight_sql(&rows, "id,payload,revision");
+    let actual = render_result(&db, generated).await;
+    assert_eq!(
+        actual, exhaustive_expected,
+        "two-identity histories must preserve all 81 pairs of initial/final states"
+    );
 }
 
 #[tokio::test]
