@@ -1,0 +1,34 @@
+# pg_trickle
+
+> pg_trickle is a PostgreSQL 18 extension for automatically maintained stream tables: SQL query results refreshed through incremental view maintenance, with full-refresh fallback where needed.
+
+pg_trickle is pre-1.0; APIs and configuration may change. Use the current SQL reference and limitations when generating examples or recommending features.
+The extension is named `pg_trickle`; SQL functions generally live in the `pgtrickle` schema. Scheduled stream tables may lag source-table changes; `IMMEDIATE` refresh mode provides synchronous maintenance.
+
+## Start here
+
+- [What is pg_trickle?](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/ESSENCE.md): Project concepts and how stream tables work
+- [5-minute quickstart](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/QUICKSTART_5MIN.md): Create and query your first stream table
+- [Installation](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/INSTALL.md): Prerequisites, supported environment, and installation steps
+- [Getting started](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/GETTING_STARTED.md): Hands-on tutorial
+
+## SQL API and usage
+
+- [SQL reference](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/SQL_REFERENCE.md): Functions, signatures, and SQL examples
+- [SQL API catalog](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/SQL_API_CATALOG.md): Generated catalog of exposed SQL functions
+- [Patterns](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/PATTERNS.md): Recommended query and application patterns
+- [Limitations](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/LIMITATIONS.md): Constraints and unsupported cases
+
+## Configuration and operations
+
+- [Configuration](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/CONFIGURATION.md): Configuration guidance and important settings
+- [GUC catalog](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/GUC_CATALOG.md): Generated reference of configuration parameters
+- [Pre-deployment checklist](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/PRE_DEPLOYMENT.md): Production readiness checks
+- [Troubleshooting](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/TROUBLESHOOTING.md): Diagnostics and recovery procedures
+
+## Optional
+
+- [Architecture](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/ARCHITECTURE.md): Engine, CDC, and scheduler internals
+- [CDC modes](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/CDC_MODES.md): Change-capture modes and tradeoffs
+- [Documentation ownership](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/docs/DOCS_OWNERSHIP.md): Canonical sources for API and configuration facts
+- [Contributor agent guidance](https://raw.githubusercontent.com/trickle-labs/pg-trickle/main/AGENTS.md): Instructions for agents modifying this repository
