@@ -23,6 +23,38 @@ pub enum ImageAction { Insert, Delete, Skip }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageEvent { Insert, Delete }
 
+/// The scan reducer emits an old image only if the history began with a row.
+pub fn scan_initial_row_present(first_action: ImageEvent) -> (present: bool)
+    ensures present == (first_action == ImageEvent::Delete),
+{
+    first_action == ImageEvent::Delete
+}
+
+/// The scan reducer emits a new image only if the history ends with a row.
+pub fn scan_final_row_present(last_action: ImageEvent) -> (present: bool)
+    ensures present == (last_action == ImageEvent::Insert),
+{
+    last_action == ImageEvent::Insert
+}
+
+/// A DELETE row is a scan endpoint only when the row existed before the window.
+pub fn scan_delete_candidate(first_action: ImageEvent, action: ImageEvent) -> (candidate: bool)
+    ensures candidate == (
+        first_action == ImageEvent::Delete && action == ImageEvent::Delete
+    ),
+{
+    scan_initial_row_present(first_action) && action == ImageEvent::Delete
+}
+
+/// An INSERT row is a scan endpoint only when the row exists after the window.
+pub fn scan_insert_candidate(last_action: ImageEvent, action: ImageEvent) -> (candidate: bool)
+    ensures candidate == (
+        last_action == ImageEvent::Insert && action == ImageEvent::Insert
+    ),
+{
+    scan_final_row_present(last_action) && action == ImageEvent::Insert
+}
+
 /// INSERT adds one image occurrence and DELETE removes one.
 pub open spec fn image_event_weight_spec(action: ImageEvent) -> int {
     if action == ImageEvent::Insert { 1 } else { -1 }
@@ -1151,6 +1183,61 @@ pub fn image_event_weight_sql(action_column: &str) -> String {
     format!("CASE WHEN {action_column} = 'I' THEN {insert_weight} ELSE {delete_weight} END")
 }
 
+fn scan_action_sql(action: ImageEvent) -> &'static str {
+    match action {
+        ImageEvent::Insert => "I",
+        ImageEvent::Delete => "D",
+    }
+}
+
+/// SQL guard for a history that had an old row before its first captured event.
+pub fn scan_initial_row_present_sql(first_action_column: &str) -> String {
+    let expected = if scan_initial_row_present(ImageEvent::Delete) {
+        ImageEvent::Delete
+    } else {
+        ImageEvent::Insert
+    };
+    format!("{first_action_column} = '{}'", scan_action_sql(expected))
+}
+
+/// SQL guard for a history that has a row after its last captured event.
+pub fn scan_final_row_present_sql(last_action_column: &str) -> String {
+    let expected = if scan_final_row_present(ImageEvent::Insert) {
+        ImageEvent::Insert
+    } else {
+        ImageEvent::Delete
+    };
+    format!("{last_action_column} = '{}'", scan_action_sql(expected))
+}
+
+/// SQL candidate predicate used before selecting the earliest DELETE image.
+pub fn scan_delete_candidate_sql(first_action_column: &str, action_column: &str) -> String {
+    let candidate_action = if scan_delete_candidate(ImageEvent::Delete, ImageEvent::Delete) {
+        ImageEvent::Delete
+    } else {
+        ImageEvent::Insert
+    };
+    format!(
+        "{} AND {action_column} = '{}'",
+        scan_initial_row_present_sql(first_action_column),
+        scan_action_sql(candidate_action)
+    )
+}
+
+/// SQL candidate predicate used before selecting the latest INSERT image.
+pub fn scan_insert_candidate_sql(last_action_column: &str, action_column: &str) -> String {
+    let candidate_action = if scan_insert_candidate(ImageEvent::Insert, ImageEvent::Insert) {
+        ImageEvent::Insert
+    } else {
+        ImageEvent::Delete
+    };
+    format!(
+        "{} AND {action_column} = '{}'",
+        scan_final_row_present_sql(last_action_column),
+        scan_action_sql(candidate_action)
+    )
+}
+
 /// Unknown types never invoke a send/equality function and retain their bit.
 pub fn changed_column_sql(old: &str, new: &str) -> String {
     let admitted = [16, 20, 21, 23, 2950]
@@ -1252,6 +1339,34 @@ mod tests {
         assert_eq!(
             image_event_weight_sql("delta.__pgt_action"),
             "CASE WHEN delta.__pgt_action = 'I' THEN 1 ELSE -1 END"
+        );
+    }
+
+    #[test]
+    fn test_cdc_scan_endpoints_require_matching_initial_final_and_event_actions() {
+        for first in [ImageEvent::Insert, ImageEvent::Delete] {
+            for current in [ImageEvent::Insert, ImageEvent::Delete] {
+                assert_eq!(
+                    scan_delete_candidate(first, current),
+                    first == ImageEvent::Delete && current == ImageEvent::Delete,
+                );
+            }
+        }
+        for last in [ImageEvent::Insert, ImageEvent::Delete] {
+            for current in [ImageEvent::Insert, ImageEvent::Delete] {
+                assert_eq!(
+                    scan_insert_candidate(last, current),
+                    last == ImageEvent::Insert && current == ImageEvent::Insert,
+                );
+            }
+        }
+        assert_eq!(
+            scan_delete_candidate_sql("s.__first_action", "s.action"),
+            "s.__first_action = 'D' AND s.action = 'D'",
+        );
+        assert_eq!(
+            scan_insert_candidate_sql("s.__last_action", "s.action"),
+            "s.__last_action = 'I' AND s.action = 'I'",
         );
     }
 

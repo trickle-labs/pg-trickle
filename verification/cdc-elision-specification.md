@@ -65,6 +65,19 @@ defining queries. This qualifies those finite base/ST cases; the SQL
 reducer is not yet covered by the Verus proof, and other capture histories and
 consumer cuts remain subject to the limits below.
 
+The PK scan reducer now uses the checked `scan_initial_row_present`,
+`scan_final_row_present`, `scan_delete_candidate` and
+`scan_insert_candidate` decisions when generating its SQL endpoint filters.
+An old image candidate requires both an initially present row and a DELETE
+event; a new image candidate requires both a finally present row and an INSERT
+event. The merge-safe path uses the same checked initial/final presence guards.
+Truth-table unit tests and two executable mutants protect these decisions.
+This proves the finite action predicates and binds their SQL adapter to the
+production scan source; it does not prove PostgreSQL's `FIRST_VALUE`,
+`LAST_VALUE`, `DISTINCT ON` or ordering execution, nor arbitrary invalid
+histories. The installed committed-history regression continues to check the
+actual differential result with FULL fallback disabled.
+
 Both trigger builders call the same `changed_column_sql` adapter. It lowers
 the checked decisions into a CASE with a type-OID guard, followed by equality
 of `pg_catalog.record_send(ROW(value))` bytea images. NULL fields have explicit
