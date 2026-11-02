@@ -282,3 +282,12 @@ The ordinary same-image no-op remains elidable for admitted fixed-size built-ins
 throughput improvement or benchmark result is claimed.
 Binary image ranking adds sorting work to keyed weight reduction; no throughput
 claim is made for that change either.
+
+The focused PostgreSQL Testcontainers oracle also exercises the full `3^4`
+endpoint state space for two distinct row identities, where each initial and
+final state is absent, `a` or `b`. Both identities share the same visible key
+and traverse repeated `a`/`b`/absent transitions before their final states.
+The generated `keyed_weight_sql` result is compared with an independent
+per-identity endpoint oracle. This checks simultaneous identity grouping and
+image cancellation for these finite histories; it does not establish arbitrary
+multi-row SQL equivalence or every protected consumer window.
