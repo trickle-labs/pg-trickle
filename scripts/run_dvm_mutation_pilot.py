@@ -102,7 +102,7 @@ MUTANTS_1291 = (
         test="test_diff_full_equivalence_left_join_l0_snapshot_mutation",
         expected_sql="-- Part 2: pre-change left (L₀) JOIN delta_right",
         mutant_sql="-- Part 2: pre-change left (L₀) JOIN delta_right",
-        assertion="M-LJ-SNAPSHOT same-refresh join-key rename",
+        assertion="M-LJ-SNAPSHOT recursive left rename and right delete",
     ),
     Mutant(
         name="full-join-old-match-guard",
@@ -948,7 +948,7 @@ def self_test() -> None:
     assert test_outcome(MUTANTS_1289[0], 101, exact_mismatch, True)[0] == "detected"
     assert test_outcome(MUTANTS_1289[0], 101, "assertion failed", True)[0] == "inconclusive"
     join_mismatch = (
-        "EXACT ORACLE INVARIANT VIOLATION in M-LJ-SNAPSHOT same-refresh join-key rename\n"
+        "EXACT ORACLE INVARIANT VIOLATION in M-LJ-SNAPSHOT recursive left rename and right delete\n"
         "Counts: actual=2, expected=1, extra=1, missing=0"
     )
     assert test_outcome(MUTANTS_1291[0], 101, join_mismatch, True)[0] == "detected"
