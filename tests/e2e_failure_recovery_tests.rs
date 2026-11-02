@@ -869,6 +869,148 @@ async fn test_drop_source_and_reinit_recovery() {
     // If DROP was blocked by the extension, that is also correct behavior.
 }
 
+/// A source recreated under the same qualified name is a new capture
+/// incarnation even though its stable change-buffer name is reused. Pending
+/// images from the dropped relation must not leak into the replacement ST's
+/// first differential refresh.
+#[tokio::test]
+async fn test_cdc_source_recreation_ignores_pending_old_incarnation_images() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.cdc_mode = 'trigger'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    for mode in ["row", "statement"] {
+        let source = format!("fr_incarnation_src_{mode}");
+        let old_st = format!("fr_incarnation_old_{mode}");
+        let new_st = format!("fr_incarnation_new_{mode}");
+        let query = format!("SELECT id, val FROM {source}");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, val TEXT)"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (1, 'old'), (2, 'old-only')"
+        ))
+        .await;
+        let create_old_st = format!(
+            "SELECT pgtrickle.create_stream_table('{old_st}', '{query}', '1m', 'DIFFERENTIAL')"
+        );
+        let trigger_mode = format!("SET pg_trickle.cdc_trigger_mode = '{mode}'");
+        db.try_execute_with_config(&[&trigger_mode], &create_old_st)
+            .await
+            .expect("create stream table for original source incarnation");
+        db.assert_st_matches_query(&old_st, &query).await;
+
+        let old_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        let old_buffer = db.change_buffer_table(old_oid).await;
+        let before_old_changes: i64 = db
+            .query_scalar(&format!(
+                "SELECT COALESCE(max(change_id), 0) FROM {old_buffer}"
+            ))
+            .await;
+        db.execute(&format!(
+            "UPDATE {source} SET val = 'stale-replacement' WHERE id = 1"
+        ))
+        .await;
+        db.execute(&format!("INSERT INTO {source} VALUES (3, 'stale-insert')"))
+            .await;
+        let old_images: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM {old_buffer} \
+                 WHERE change_id > {before_old_changes} AND action IN ('D', 'I')"
+            ))
+            .await;
+        assert_eq!(old_images, 3, "capture pending old-incarnation images");
+
+        db.execute_seq(&[
+            "SET pg_trickle.block_source_ddl = false",
+            &format!("DROP TABLE {source} CASCADE"),
+            "SET pg_trickle.block_source_ddl = true",
+        ])
+        .await;
+        let old_st_exists: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_stream_tables \
+                 WHERE pgt_name = '{old_st}')"
+            ))
+            .await;
+        if old_st_exists {
+            db.try_execute(&format!("SELECT pgtrickle.drop_stream_table('{old_st}')"))
+                .await
+                .expect("remove suspended stream table for dropped source");
+        }
+
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, val TEXT)"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (1, 'fresh'), (4, 'fresh-only')"
+        ))
+        .await;
+        let new_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        assert_ne!(new_oid, old_oid, "recreated source must have a new OID");
+        let new_stable_name: String = db
+            .query_scalar(&format!(
+                "SELECT pgtrickle.source_stable_name({new_oid}::oid)"
+            ))
+            .await;
+        let recreated_buffer = format!("pgtrickle_changes.changes_{new_stable_name}");
+        assert_eq!(
+            recreated_buffer, old_buffer,
+            "same qualified source name reuses its stable buffer name"
+        );
+
+        let create_new_st = format!(
+            "SELECT pgtrickle.create_stream_table('{new_st}', '{query}', '1m', 'DIFFERENTIAL')"
+        );
+        db.try_execute_with_config(&[&trigger_mode], &create_new_st)
+            .await
+            .expect("create stream table for recreated source incarnation");
+        db.assert_st_matches_query(&new_st, &query).await;
+
+        db.execute(&format!("UPDATE {source} SET val = 'current' WHERE id = 1"))
+            .await;
+        db.execute(&format!("INSERT INTO {source} VALUES (5, 'current-only')"))
+            .await;
+        let before_refresh: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy = 'differential'",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+                &trigger_mode,
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{new_st}')"),
+        )
+        .await
+        .expect("differentially refresh recreated source");
+
+        let differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+                 WHERE s.pgt_name = '{new_st}' AND h.refresh_id > {before_refresh} \
+                   AND h.status = 'COMPLETED' AND h.action = 'DIFFERENTIAL' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            differential,
+            "execute the new incarnation's differential route"
+        );
+        db.assert_st_matches_query(&new_st, &query).await;
+    }
+}
+
 // ── FR-7: pg_cancel_backend() during refresh ────────────────────────────────
 
 /// Start a refresh that takes non-trivial time (large source table), cancel
