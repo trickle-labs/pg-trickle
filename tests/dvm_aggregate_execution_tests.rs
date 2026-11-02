@@ -946,6 +946,32 @@ async fn test_cdc_keyed_weight_matches_multiro_image_bag_oracle() {
         actual, exhaustive_expected,
         "two-identity histories must preserve all 81 pairs of initial/final states"
     );
+
+    // NULL is a row image here, not the absent-row state used by the endpoint
+    // enumerator above. Its ordering bucket must stay distinct from non-NULL
+    // payloads, and the two identities must remain independent.
+    let null_payload_events = "SELECT decode('0a','hex') AS __pgt_row_id,'D'::text AS __pgt_action,99::int AS id,NULL::text AS payload,0::int AS revision \
+        UNION ALL SELECT decode('0a','hex'),'I',99,'a',1 \
+        UNION ALL SELECT decode('0a','hex'),'D',99,'a',1 \
+        UNION ALL SELECT decode('0a','hex'),'I',99,'b',2 \
+        UNION ALL SELECT decode('0b','hex'),'D',99,'b',0 \
+        UNION ALL SELECT decode('0b','hex'),'I',99,NULL::text,1";
+    let generated = cdc_elision::keyed_weight_sql(null_payload_events, "id,payload,revision");
+    let actual = render_result(&db, generated).await;
+    assert_eq!(
+        actual,
+        vec![
+            (
+                "0a".to_string(),
+                "I".to_string(),
+                99,
+                Some("b".to_string()),
+                2
+            ),
+            ("0b".to_string(), "I".to_string(), 99, None, 1),
+        ],
+        "NULL image buckets must preserve each identity's final complete row"
+    );
 }
 
 #[tokio::test]
