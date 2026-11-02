@@ -14,6 +14,8 @@
 //!
 //! Prerequisites: `./tests/build_e2e_image.sh` or `just test-e2e`
 
+#[path = "e2e/dvm_mutation_pilot.rs"]
+mod dvm_mutation_pilot;
 mod e2e;
 #[allow(dead_code)]
 #[path = "conformance/reference_clients.rs"]
@@ -400,6 +402,7 @@ async fn test_diff_full_equivalence_aggregate_sum_count() {
 
 async fn assert_composite_count_equivalence(query: &str) {
     let db = E2eDb::new().await.with_extension().await;
+    let campaign = dvm_mutation_pilot::preflight(&db, "count-null-delete").await;
     db.execute("CREATE TYPE dfe_pair AS (a INT, b INT)").await;
     db.execute(
         "CREATE TABLE dfe_composite (id INT PRIMARY KEY, grp INT, \
@@ -408,21 +411,15 @@ async fn assert_composite_count_equivalence(query: &str) {
     .await;
     db.execute("INSERT INTO dfe_composite VALUES (1, 1, ROW(1,1), 10, true)")
         .await;
-    db.execute_seq(&[
-        "LOAD 'pg_trickle'",
-        "SET pg_trickle.cdc_mode = 'trigger'",
-        &format!(
-            "SELECT pgtrickle.create_stream_table('dfe_composite_st', \
-             $q${query}$q$, '1m', 'DIFFERENTIAL')"
-        ),
-    ])
-    .await;
+    dvm_mutation_pilot::create_differential_stream_table(&db, "dfe_composite_st", query).await;
     db.assert_st_matches_query("dfe_composite_st", query).await;
 
     for mutation in [
         "INSERT INTO dfe_composite VALUES \
          (2,1,ROW(1,NULL),NULL,true), (3,1,ROW(NULL,NULL),30,false), (4,1,NULL,40,NULL)",
-        // Each datum shape transitions to another, including SQL NULL in both directions.
+        // Delete id=4 while its SQL-NULL payload is still unchanged.
+        "DELETE FROM dfe_composite WHERE id = 4",
+        // Other datum shapes transition, including SQL NULL in both directions.
         "UPDATE dfe_composite SET payload = CASE id \
          WHEN 1 THEN NULL::dfe_pair WHEN 2 THEN ROW(NULL,NULL)::dfe_pair \
          WHEN 3 THEN ROW(1,1)::dfe_pair ELSE ROW(1,NULL)::dfe_pair END, \
@@ -433,22 +430,33 @@ async fn assert_composite_count_equivalence(query: &str) {
          grp = 2, scalar = 42, keep = true",
         "DELETE FROM dfe_composite WHERE id = 2",
         "DELETE FROM dfe_composite WHERE id = 3",
-        "DELETE FROM dfe_composite WHERE id = 4",
         "DELETE FROM dfe_composite WHERE id = 1",
         "INSERT INTO dfe_composite VALUES \
          (5,1,ROW(NULL,NULL),NULL,true), (6,2,NULL,60,false)",
         "DELETE FROM dfe_composite",
     ] {
         db.execute(mutation).await;
-        db.execute_seq(&[
-            "LOAD 'pg_trickle'",
-            "SET pg_trickle.refresh_strategy = 'differential'",
-            "SET pg_trickle.differential_max_change_ratio = 0",
-            // Exercise the generated SQL rather than the separate vector executor.
-            "SET pg_trickle.aggregate_fast_path = off",
-            "SELECT pgtrickle.refresh_stream_table('dfe_composite_st')",
-        ])
-        .await;
+        let target_cycle = mutation == "DELETE FROM dfe_composite WHERE id = 4";
+        if campaign && target_cycle {
+            dvm_mutation_pilot::refresh_target(&db, "dfe_composite_st", "count-null-delete").await;
+            dvm_mutation_pilot::record_target_bags(
+                &db,
+                "dfe_composite_st",
+                query,
+                "M-COUNT-NULL-DELETE SQL-NULL payload deletion cycle",
+            )
+            .await;
+        } else {
+            db.execute_seq(&[
+                "LOAD 'pg_trickle'",
+                "SET pg_trickle.refresh_strategy = 'differential'",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+                // Exercise the generated SQL rather than the separate vector executor.
+                "SET pg_trickle.aggregate_fast_path = off",
+                "SELECT pgtrickle.refresh_stream_table('dfe_composite_st')",
+            ])
+            .await;
+        }
         assert_differential_mode(&db, "dfe_composite_st").await;
         let (action, status, fallback, delta_rows): (String, String, bool, i64) = sqlx::query_as(
             "SELECT h.action, h.status, h.was_full_fallback, h.delta_row_count \
@@ -464,7 +472,17 @@ async fn assert_composite_count_equivalence(query: &str) {
         assert_eq!(status, "COMPLETED", "mutation: {mutation}");
         assert!(!fallback, "FULL fallback after: {mutation}");
         assert!(delta_rows > 0, "no differential output after: {mutation}");
-        db.assert_st_matches_query("dfe_composite_st", query).await;
+        if campaign && target_cycle {
+            e2e::oracle::assert_st_query_exact(
+                &db,
+                "dfe_composite_st",
+                query,
+                "M-COUNT-NULL-DELETE SQL-NULL payload deletion cycle",
+            )
+            .await;
+        } else {
+            db.assert_st_matches_query("dfe_composite_st", query).await;
+        }
     }
 }
 
@@ -918,6 +936,7 @@ async fn test_diff_full_equivalence_having_clause() {
 #[tokio::test]
 async fn test_diff_full_equivalence_having_unknown_transitions() {
     let db = E2eDb::new().await.with_extension().await;
+    let campaign = dvm_mutation_pilot::preflight(&db, "having-unknown-retraction").await;
     db.execute("CREATE TABLE dfe_hav_unknown (id INT PRIMARY KEY, grp INT, val INT)")
         .await;
     db.execute(
@@ -928,8 +947,7 @@ async fn test_diff_full_equivalence_having_unknown_transitions() {
 
     let query = "SELECT grp, SUM(val) AS s FROM dfe_hav_unknown \
                  GROUP BY grp HAVING SUM(val) > 0";
-    db.create_st("dfe_hav_sum", query, "1m", "DIFFERENTIAL")
-        .await;
+    dvm_mutation_pilot::create_differential_stream_table(&db, "dfe_hav_sum", query).await;
     db.assert_st_matches_query("dfe_hav_sum", query).await;
 
     for mutation in [
@@ -948,8 +966,28 @@ async fn test_diff_full_equivalence_having_unknown_transitions() {
         "INSERT INTO dfe_hav_unknown VALUES (6,6,5)",     // repopulate
     ] {
         db.execute(mutation).await;
-        db.refresh_st("dfe_hav_sum").await;
-        db.assert_st_matches_query("dfe_hav_sum", query).await;
+        let target_cycle = mutation == "UPDATE dfe_hav_unknown SET val=NULL WHERE id=1";
+        if campaign && target_cycle {
+            dvm_mutation_pilot::refresh_target(&db, "dfe_hav_sum", "having-unknown-retraction")
+                .await;
+            dvm_mutation_pilot::record_target_bags(
+                &db,
+                "dfe_hav_sum",
+                query,
+                "M-HAVING-UNKNOWN-RETRACTION TRUE-to-UNKNOWN cycle",
+            )
+            .await;
+            e2e::oracle::assert_st_query_exact(
+                &db,
+                "dfe_hav_sum",
+                query,
+                "M-HAVING-UNKNOWN-RETRACTION TRUE-to-UNKNOWN cycle",
+            )
+            .await;
+        } else {
+            db.refresh_st("dfe_hav_sum").await;
+            db.assert_st_matches_query("dfe_hav_sum", query).await;
+        }
         assert_differential_mode(&db, "dfe_hav_sum").await;
         let differential_completed: bool = db
             .query_scalar(
