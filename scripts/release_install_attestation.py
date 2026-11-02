@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -111,14 +113,29 @@ def installed_files(container: str, files: list[dict[str, int | str]]) -> list[d
 
 
 def append_observation(path: Path, observation: dict[str, object]) -> None:
-    previous = []
-    if path.is_file():
-        previous = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(previous, list):
-            raise ValueError("release installation attestation must contain a list")
-    previous.append(observation)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(previous, indent=2) + "\n", encoding="utf-8")
+    with path.with_suffix(path.suffix + ".lock").open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        previous = []
+        if path.is_file():
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(previous, list):
+                raise ValueError("release installation attestation must contain a list")
+        previous.append(observation)
+
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent, delete=False
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+                temporary_file.write(json.dumps(previous, indent=2) + "\n")
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
 
 def main() -> int:
