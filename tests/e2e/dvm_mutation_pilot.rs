@@ -288,7 +288,12 @@ pub async fn refresh_target(db: &E2eDb, name: &str, expected_case: &str) {
             "-- Part 5: Insert NULL-padded left rows when a left row loses ALL right matches.";
         let part5 = logs
             .rsplit_once(marker)
-            .map(|(_, after)| after.split("UNION ALL").next().unwrap_or(after))
+            .map(|(_, after)| {
+                after
+                    .split("-- Part 6a: delta_right INSERTS anti-join L₁")
+                    .next()
+                    .unwrap_or(after)
+            })
             .expect("DVM_MUTATION_ROUTE_FAILURE: generated delta SQL omitted Part 5");
         let has_old_match_guard = part5.contains("__pgt_r_old WHERE");
         assert_eq!(
