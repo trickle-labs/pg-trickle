@@ -303,6 +303,64 @@ async fn test_diff_full_equivalence_left_join() {
     assert_differential_mode(&db, "dfe_lj_st").await;
 }
 
+#[tokio::test]
+async fn test_diff_full_equivalence_left_join_l0_snapshot_mutation() {
+    let db = E2eDb::new().await.with_extension().await;
+    let campaign = dvm_mutation_pilot::preflight(&db, "left-join-l0-snapshot").await;
+    db.execute("CREATE TABLE dfe_lj_mut_l (id INT PRIMARY KEY, join_key INT, bucket INT)")
+        .await;
+    db.execute("CREATE TABLE dfe_lj_mut_r (id INT PRIMARY KEY, left_key INT, value TEXT)")
+        .await;
+    db.execute("INSERT INTO dfe_lj_mut_l VALUES (1,5,10),(2,8,20)")
+        .await;
+    db.execute("INSERT INTO dfe_lj_mut_r VALUES (101,5,'deleted'),(102,8,'before')")
+        .await;
+
+    let query = "SELECT l.id AS left_id, l.join_key, l.bucket, r.id AS right_id, r.value \
+                 FROM dfe_lj_mut_l l LEFT JOIN dfe_lj_mut_r r ON r.left_key = l.join_key";
+    dvm_mutation_pilot::create_differential_stream_table(&db, "dfe_lj_mut_st", query).await;
+    db.assert_st_matches_query("dfe_lj_mut_st", query).await;
+    // Keep EC01-2 from repairing a bad delta before the exact bag oracle sees it.
+    db.execute(
+        "CREATE FUNCTION dfe_lj_mut_noop() RETURNS trigger LANGUAGE plpgsql \
+         AS $$ BEGIN RETURN NULL; END $$",
+    )
+    .await;
+    db.execute(
+        "CREATE TRIGGER dfe_lj_mut_noop AFTER INSERT OR UPDATE OR DELETE \
+         ON dfe_lj_mut_st FOR EACH ROW EXECUTE FUNCTION dfe_lj_mut_noop()",
+    )
+    .await;
+
+    // Rename a left row's join key while updating and deleting right rows.
+    db.execute("UPDATE dfe_lj_mut_l SET join_key = 6, bucket = 11 WHERE id = 1")
+        .await;
+    db.execute("UPDATE dfe_lj_mut_r SET value = 'after' WHERE id = 102")
+        .await;
+    db.execute("DELETE FROM dfe_lj_mut_r WHERE id = 101").await;
+    if campaign {
+        dvm_mutation_pilot::refresh_target(&db, "dfe_lj_mut_st", "left-join-l0-snapshot").await;
+        dvm_mutation_pilot::record_target_bags(
+            &db,
+            "dfe_lj_mut_st",
+            query,
+            "M-LJ-SNAPSHOT same-key left rename + right update/delete cycle",
+        )
+        .await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            "dfe_lj_mut_st",
+            query,
+            "M-LJ-SNAPSHOT same-key left rename + right update/delete cycle",
+        )
+        .await;
+    } else {
+        db.refresh_st("dfe_lj_mut_st").await;
+        db.assert_st_matches_query("dfe_lj_mut_st", query).await;
+    }
+    assert_differential_mode(&db, "dfe_lj_mut_st").await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // FULL JOIN
 // ═══════════════════════════════════════════════════════════════════════
@@ -356,6 +414,78 @@ async fn test_diff_full_equivalence_full_join() {
     db.refresh_st("dfe_fj_st").await;
     db.assert_st_matches_query("dfe_fj_st", q).await;
     assert_differential_mode(&db, "dfe_fj_st").await;
+}
+
+#[tokio::test]
+async fn test_diff_full_equivalence_full_join_old_match_guard_mutation() {
+    let db = E2eDb::new().await.with_extension().await;
+    let campaign = dvm_mutation_pilot::preflight(&db, "full-join-old-match-guard").await;
+    db.execute("CREATE TABLE dfe_fj_guard_l (id INT PRIMARY KEY, join_key INT, label TEXT)")
+        .await;
+    db.execute("CREATE TABLE dfe_fj_guard_a (id INT PRIMARY KEY, join_key INT, value TEXT)")
+        .await;
+    db.execute("CREATE TABLE dfe_fj_guard_b (id INT PRIMARY KEY, a_id INT, value TEXT)")
+        .await;
+    db.execute("INSERT INTO dfe_fj_guard_l VALUES (1,10,'matched'),(2,20,'unmatched-sibling'),(3,30,'matched-other'),(4,20,'unmatched-witness')")
+        .await;
+    db.execute("INSERT INTO dfe_fj_guard_a VALUES (100,10,'a10'),(200,20,'a20'),(300,30,'a30')")
+        .await;
+    db.execute("INSERT INTO dfe_fj_guard_b VALUES (1000,100,'b10'),(3000,300,'b30')")
+        .await;
+
+    let query = "SELECT l.id AS left_id, l.join_key, l.label, r.a_id, r.join_key AS right_key, r.a_value, r.b_value \
+                 FROM dfe_fj_guard_l l FULL JOIN ( \
+                     SELECT a.id AS a_id, a.join_key, a.value AS a_value, b.value AS b_value \
+                     FROM dfe_fj_guard_a a JOIN dfe_fj_guard_b b ON b.a_id = a.id \
+                 ) r ON l.join_key = r.join_key";
+    dvm_mutation_pilot::create_differential_stream_table(&db, "dfe_fj_guard_st", query).await;
+    db.assert_st_matches_query("dfe_fj_guard_st", query).await;
+    // Keep EC01-2 from repairing a bad delta before the exact bag oracle sees it.
+    db.execute(
+        "CREATE FUNCTION dfe_fj_guard_noop() RETURNS trigger LANGUAGE plpgsql \
+         AS $$ BEGIN RETURN NULL; END $$",
+    )
+    .await;
+    db.execute(
+        "CREATE TRIGGER dfe_fj_guard_noop AFTER INSERT OR UPDATE OR DELETE \
+         ON dfe_fj_guard_st FOR EACH ROW EXECUTE FUNCTION dfe_fj_guard_noop()",
+    )
+    .await;
+
+    // Create and remove a transient right match for a previously unmatched left key.
+    db.execute("INSERT INTO dfe_fj_guard_b VALUES (2000,200,'b20')")
+        .await;
+    db.execute("DELETE FROM dfe_fj_guard_a WHERE id = 200")
+        .await;
+    // Delete an old match and update another right row in the same cycle.
+    db.execute("DELETE FROM dfe_fj_guard_b WHERE id = 1000")
+        .await;
+    db.execute("UPDATE dfe_fj_guard_b SET value = 'b30-updated' WHERE id = 3000")
+        .await;
+    // A same-key left DELETE suppresses Part 4's broader same-key exclusion.
+    db.execute("DELETE FROM dfe_fj_guard_l WHERE id = 2").await;
+    if campaign {
+        dvm_mutation_pilot::refresh_target(&db, "dfe_fj_guard_st", "full-join-old-match-guard")
+            .await;
+        dvm_mutation_pilot::record_target_bags(
+            &db,
+            "dfe_fj_guard_st",
+            query,
+            "M-FJ-OLD-MATCH-GUARD old-match delete + transient branch delete + same-key left sibling delete",
+        )
+        .await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            "dfe_fj_guard_st",
+            query,
+            "M-FJ-OLD-MATCH-GUARD old-match delete + transient branch delete + same-key left sibling delete",
+        )
+        .await;
+    } else {
+        db.refresh_st("dfe_fj_guard_st").await;
+        db.assert_st_matches_query("dfe_fj_guard_st", query).await;
+    }
+    assert_differential_mode(&db, "dfe_fj_guard_st").await;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
