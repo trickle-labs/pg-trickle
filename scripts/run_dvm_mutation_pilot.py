@@ -102,7 +102,7 @@ MUTANTS_1291 = (
         test="test_diff_full_equivalence_left_join_l0_snapshot_mutation",
         expected_sql="-- Part 2: pre-change left (L₀) JOIN delta_right",
         mutant_sql="-- Part 2: pre-change left (L₀) JOIN delta_right",
-        assertion="M-LJ-SNAPSHOT recursive left rename and right delete",
+        assertion="M-LJ-SNAPSHOT same-key left rename + right update/delete cycle",
     ),
     Mutant(
         name="full-join-old-match-guard",
@@ -151,7 +151,7 @@ WHERE (SELECT has_del FROM {right_flags_cte})
         test="test_diff_full_equivalence_full_join_old_match_guard_mutation",
         expected_sql="__pgt_r_old WHERE",
         mutant_sql="-- Part 5: Insert NULL-padded left rows when a left row loses ALL right matches.",
-        assertion="M-FJ-OLD-MATCH-GUARD right delete and left key rename",
+        assertion="M-FJ-OLD-MATCH-GUARD old-match delete + transient branch delete + same-key left sibling delete",
     ),
 )
 
@@ -948,12 +948,12 @@ def self_test() -> None:
     assert test_outcome(MUTANTS_1289[0], 101, exact_mismatch, True)[0] == "detected"
     assert test_outcome(MUTANTS_1289[0], 101, "assertion failed", True)[0] == "inconclusive"
     join_mismatch = (
-        "EXACT ORACLE INVARIANT VIOLATION in M-LJ-SNAPSHOT recursive left rename and right delete\n"
+        f"EXACT ORACLE INVARIANT VIOLATION in {MUTANTS_1291[0].assertion}\n"
         "Counts: actual=2, expected=1, extra=1, missing=0"
     )
     assert test_outcome(MUTANTS_1291[0], 101, join_mismatch, True)[0] == "detected"
     full_join_mismatch = (
-        "EXACT ORACLE INVARIANT VIOLATION in M-FJ-OLD-MATCH-GUARD right delete and left key rename\n"
+        f"EXACT ORACLE INVARIANT VIOLATION in {MUTANTS_1291[1].assertion}\n"
         "Counts: actual=3, expected=2, extra=1, missing=0"
     )
     assert test_outcome(MUTANTS_1291[1], 101, full_join_mismatch, True)[0] == "detected"

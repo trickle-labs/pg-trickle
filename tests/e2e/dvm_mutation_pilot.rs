@@ -224,6 +224,10 @@ pub async fn refresh_target(db: &E2eDb, name: &str, expected_case: &str) {
     .fetch_one(&mut *conn)
     .await
     .expect("capture targeted refresh configuration");
+    let source_cut_lsn: String = sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("capture committed source cut before refresh");
 
     sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
         .bind(name)
@@ -306,7 +310,7 @@ pub async fn refresh_target(db: &E2eDb, name: &str, expected_case: &str) {
     let (version, cdc, strategy, change_ratio, fast_path, log_delta_sql, log_min_messages) =
         settings;
     let evidence = format!(
-        "case={case}\nstream_table={name}\nserver_version={version}\ncdc_mode={cdc}\nrefresh_strategy={strategy}\ndifferential_max_change_ratio={change_ratio}\naggregate_fast_path={fast_path}\nlog_delta_sql={log_delta_sql}\nlog_min_messages={log_min_messages}\naction={}\nstatus={}\nwas_full_fallback={}\ndelta_row_count={}\neffective_refresh_mode={}\nexpected_sql_fragment={expected_sql}\npostgres_logs=target-delta.log\n",
+        "case={case}\nstream_table={name}\nserver_version={version}\nsource_cut_lsn={source_cut_lsn}\ncdc_mode={cdc}\nrefresh_strategy={strategy}\ndifferential_max_change_ratio={change_ratio}\naggregate_fast_path={fast_path}\nlog_delta_sql={log_delta_sql}\nlog_min_messages={log_min_messages}\naction={}\nstatus={}\nwas_full_fallback={}\ndelta_row_count={}\neffective_refresh_mode={}\nexpected_sql_fragment={expected_sql}\npostgres_logs=target-delta.log\n",
         history.0, history.1, history.2, history.3, history.4,
     );
     fs::write(artifact_dir.join("target-refresh.txt"), evidence)
