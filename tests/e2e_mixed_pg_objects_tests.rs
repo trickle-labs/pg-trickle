@@ -1525,7 +1525,7 @@ async fn test_mixed_matview_on_st_stays_stale_until_refreshed() {
     // Add data, refresh ST only
     db.execute("INSERT INTO ms_src VALUES (3, 30), (4, 40)")
         .await;
-    db.refresh_st("ms_st").await;
+    db.refresh_st_until_converged("ms_st").await;
 
     // ST is fresh
     assert_eq!(db.count("public.ms_st").await, 4);

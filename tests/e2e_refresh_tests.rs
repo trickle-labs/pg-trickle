@@ -29,6 +29,8 @@ async fn test_refresh_picks_up_inserts() {
     .await;
     assert_eq!(db.count("public.rf_ins_st").await, 2);
 
+    // A completed refresh can defer a recent write under the writer-holdback watermark.
+    // Require eventual exact multiset convergence with the defining query.
     // Keep the manual refresh from being skipped by an in-flight scheduler refresh.
     #[cfg(not(feature = "light-e2e"))]
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_ins_st'])")
@@ -37,7 +39,7 @@ async fn test_refresh_picks_up_inserts() {
     // Insert new rows
     db.execute("INSERT INTO rf_ins VALUES (3, 'c'), (4, 'd')")
         .await;
-    db.refresh_st("rf_ins_st").await;
+    db.refresh_st_until_converged("rf_ins_st").await;
 
     assert_eq!(db.count("public.rf_ins_st").await, 4);
 }
@@ -61,7 +63,7 @@ async fn test_refresh_picks_up_updates() {
 
     db.execute("UPDATE rf_upd SET val = 'new' WHERE id = 1")
         .await;
-    db.refresh_st("rf_upd_st").await;
+    db.refresh_st_with_retry("rf_upd_st").await;
 
     let val: String = db
         .query_scalar("SELECT val FROM public.rf_upd_st WHERE id = 1")
@@ -150,6 +152,10 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
         "DIFFERENTIAL",
     )
     .await;
+    // Keep the cost-model assertion deterministic when the scheduler is active.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_cost_st'])")
+        .await;
     let source_oid = i64::from(db.table_oid("rf_cost_src").await);
     let buffer = db.change_buffer_table(source_oid).await;
 
@@ -167,15 +173,40 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
     db.execute("INSERT INTO rf_cost_src VALUES (3, 'c')").await;
     let pending_changes = format!("SELECT count(*) FROM {buffer} WHERE action IN ('I', 'D')");
     assert!(db.query_scalar::<i64>(&pending_changes).await > 0);
-    db.try_execute_with_config(
-        &[
-            "SET pg_trickle.refresh_strategy = 'auto'",
-            "SET pg_trickle.differential_max_change_ratio = 0.8",
-        ],
-        "SELECT pgtrickle.refresh_stream_table('rf_cost_st')",
-    )
-    .await
-    .expect("cost model fallback should succeed");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let refresh_id = loop {
+        let mut tx = db.pool.begin().await.expect("begin cost-model refresh");
+        for setting in [
+            "SET LOCAL pg_trickle.refresh_strategy = 'auto'",
+            "SET LOCAL pg_trickle.differential_max_change_ratio = 0.8",
+        ] {
+            sqlx::query(setting)
+                .execute(&mut *tx)
+                .await
+                .expect("set cost-model refresh setting");
+        }
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('rf_cost_st')")
+            .execute(&mut *tx)
+            .await
+            .expect("cost model fallback should succeed");
+        let refresh_id: Option<i64> = sqlx::query_scalar(
+            "SELECT refresh_id FROM pgtrickle.pgt_refresh_history \
+             WHERE xmin = pg_current_xact_id()::xid \
+               AND initiated_by = 'MANUAL' AND status = 'COMPLETED'",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .expect("read completed manual refresh");
+        tx.commit().await.expect("commit cost-model refresh");
+        if let Some(refresh_id) = refresh_id {
+            break refresh_id;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for cost-model manual refresh to complete"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
 
     let (action, strategy, full_fallback, reason, detail): (String, String, bool, String, String) =
         sqlx::query_as(
@@ -183,9 +214,9 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
                 h.refresh_reason, h.refresh_reason_detail
            FROM pgtrickle.pgt_refresh_history h
            JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
-          WHERE st.pgt_name = 'rf_cost_st'
-          ORDER BY h.refresh_id DESC LIMIT 1",
+          WHERE h.refresh_id = $1",
         )
+        .bind(refresh_id)
         .fetch_one(&db.pool)
         .await
         .expect("read refresh history");

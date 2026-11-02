@@ -643,7 +643,7 @@ async fn test_repair_stream_table_data_correct_after_refresh() {
         .await;
 
     // Refresh should produce correct result
-    db.refresh_st("rep_data_st").await;
+    db.refresh_st_until_converged("rep_data_st").await;
     db.assert_st_matches_query("rep_data_st", q).await;
 }
 

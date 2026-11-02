@@ -1044,6 +1044,39 @@ async fn test_nested_join_throwing_projection_avoids_invalid_mixed_pair() {
 }
 
 #[tokio::test]
+async fn test_nested_left_join_projection_preserves_null_extension_and_endpoints() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE nljp_left (id INT PRIMARY KEY, value INT)")
+        .await;
+    db.execute("CREATE TABLE nljp_middle (id INT PRIMARY KEY, left_id INT, grp INT)")
+        .await;
+    db.execute("CREATE TABLE nljp_right (id INT PRIMARY KEY, grp INT, value INT)")
+        .await;
+    db.execute("INSERT INTO nljp_left VALUES (1, 1), (2, 5)")
+        .await;
+    db.execute("INSERT INTO nljp_middle VALUES (1, 1, 1), (2, 2, 2)")
+        .await;
+    db.execute("INSERT INTO nljp_right VALUES (1, 1, 0)").await;
+
+    let query = "SELECT a.id AS left_id, c.id AS right_id, \
+                 CASE WHEN c.id IS NULL THEN 0 \
+                      ELSE 100::numeric / (a.value - c.value) END::numeric AS quotient \
+                 FROM nljp_left a \
+                 JOIN nljp_middle b ON a.id = b.left_id \
+                 LEFT JOIN nljp_right c ON b.grp = c.grp";
+    db.create_st("nljp_st", query, "1h", "DIFFERENTIAL").await;
+    db.assert_st_matches_query("nljp_st", query).await;
+
+    // The new endpoints are safe (2 - 1), but an old-left/new-right pair
+    // would divide by zero. The second left row also checks NULL extension.
+    db.execute("UPDATE nljp_left SET value = 2 WHERE id = 1")
+        .await;
+    db.execute("UPDATE nljp_right SET value = 1 WHERE id = 1")
+        .await;
+    refresh_differential_and_assert(&db, "nljp_st", query).await;
+}
+
+#[tokio::test]
 async fn test_nested_lateral_identity_cast_projection_stays_differential() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute(

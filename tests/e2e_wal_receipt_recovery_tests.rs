@@ -1400,6 +1400,8 @@ async fn run_trigger_fallback_case(phase: &str) {
     let db = &fixture.db;
     // The witnessed restart below is the recovery event under test.
     wait_for_cdc_mode(db, &fixture.source, "WAL").await;
+    // Ignore older CDC rows retained for other consumers.
+    let pending_start_lsn: String = db.query_scalar("SELECT pg_current_wal_lsn()::text").await;
     let (barrier, blocker_pid) = hold_wal_barrier(db, fixture.oid, phase).await;
     commit_row(db, &fixture.source, &fixture.journal, 2, &value).await;
     wait_for_wal_barrier(db, fixture.oid, phase, blocker_pid).await;
@@ -1411,7 +1413,8 @@ async fn run_trigger_fallback_case(phase: &str) {
         .await;
     assert_eq!(
         db.query_scalar::<i64>(&format!(
-            "SELECT count(*) FROM {buffer} WHERE action <> 'S' AND id = 2"
+            "SELECT count(*) FROM {buffer} \
+             WHERE action <> 'S' AND id = 2 AND lsn > '{pending_start_lsn}'::pg_lsn"
         ))
         .await,
         0,

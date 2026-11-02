@@ -279,6 +279,132 @@ pub use types::*;
 pub use validation::*;
 pub use window_plan::*;
 
+// Only a *structured* equality predicate between these exact two key
+// expressions proves they represent one merged USING key. Arbitrary ON, OR,
+// or SQL-text substrings must never be accepted as a provenance proof.
+fn join_proves_using_equality(condition: &Expr, left: &Expr, right: &Expr) -> bool {
+    match condition {
+        Expr::BinaryOp {
+            op,
+            left: lhs,
+            right: rhs,
+        } if op == "=" => {
+            (lhs.to_sql() == left.to_sql() && rhs.to_sql() == right.to_sql())
+                || (lhs.to_sql() == right.to_sql() && rhs.to_sql() == left.to_sql())
+        }
+        Expr::BinaryOp {
+            op,
+            left: lhs,
+            right: rhs,
+        } if op.eq_ignore_ascii_case("AND") => {
+            join_proves_using_equality(lhs, left, right)
+                || join_proves_using_equality(rhs, left, right)
+        }
+        _ => false,
+    }
+}
+
+fn join_using_column(tree: &OpTree, column: &str) -> Result<Expr, PgTrickleError> {
+    match tree {
+        OpTree::InnerJoin {
+            condition,
+            left,
+            right,
+        } => match (
+            left.output_columns().iter().any(|name| name == column),
+            right.output_columns().iter().any(|name| name == column),
+        ) {
+            (true, false) => join_using_column(left, column),
+            (false, true) => join_using_column(right, column),
+            (true, true) => {
+                let left_key = join_using_column(left, column)?;
+                let right_key = join_using_column(right, column)?;
+                if join_proves_using_equality(condition, &left_key, &right_key) {
+                    // INNER matching rows have equal keys, so choosing the
+                    // left representative preserves PostgreSQL USING results.
+                    Ok(left_key)
+                } else {
+                    Err(PgTrickleError::UnsupportedOperator(format!(
+                        "USING column '{column}' lacks proven equality in a nested inner join; use an explicit JOIN ... ON condition"
+                    )))
+                }
+            }
+            _ => Err(PgTrickleError::UnsupportedOperator(format!(
+                "USING column '{column}' is absent from both inputs"
+            ))),
+        },
+        OpTree::LeftJoin {
+            condition,
+            left,
+            right,
+        } => {
+            let left_has_column = left.output_columns().iter().any(|name| name == column);
+            let right_has_column = right.output_columns().iter().any(|name| name == column);
+            match (left_has_column, right_has_column) {
+                (true, false) => join_using_column(left, column),
+                (false, true) => join_using_column(right, column),
+                (true, true) => {
+                    let left_key = join_using_column(left, column)?;
+                    let right_key = join_using_column(right, column)?;
+                    if join_proves_using_equality(condition, &left_key, &right_key) {
+                        Ok(left_key)
+                    } else {
+                        Err(PgTrickleError::UnsupportedOperator(format!(
+                            "USING column '{column}' lacks proven equality in a nested left join; use an explicit JOIN ... ON condition"
+                        )))
+                    }
+                }
+                (false, false) => Err(PgTrickleError::UnsupportedOperator(format!(
+                    "USING column '{column}' is absent from both inputs"
+                ))),
+            }
+        }
+        OpTree::FullJoin {
+            condition,
+            left,
+            right,
+        } => {
+            let left_has_column = left.output_columns().iter().any(|name| name == column);
+            let right_has_column = right.output_columns().iter().any(|name| name == column);
+            match (left_has_column, right_has_column) {
+                (true, true) => {
+                    let left_key = join_using_column(left, column)?;
+                    let right_key = join_using_column(right, column)?;
+                    if join_proves_using_equality(condition, &left_key, &right_key) {
+                        Ok(Expr::FuncCall {
+                            func_name: "COALESCE".into(),
+                            args: vec![left_key, right_key],
+                        })
+                    } else {
+                        Err(PgTrickleError::UnsupportedOperator(format!(
+                            "USING column '{column}' lacks proven equality in a nested full join; use an explicit JOIN ... ON condition"
+                        )))
+                    }
+                }
+                (true, false) => join_using_column(left, column),
+                (false, true) => join_using_column(right, column),
+                (false, false) => Err(PgTrickleError::UnsupportedOperator(format!(
+                    "USING column '{column}' is absent from both inputs"
+                ))),
+            }
+        }
+        OpTree::Filter { child, .. }
+            if child.output_columns().iter().any(|name| name == column) =>
+        {
+            join_using_column(child, column)
+        }
+        OpTree::LateralFunction { child, .. } | OpTree::LateralSubquery { child, .. }
+            if child.output_columns().iter().any(|name| name == column) =>
+        {
+            join_using_column(child, column)
+        }
+        _ => Ok(Expr::ColumnRef {
+            table_alias: Some(tree.alias().to_string()),
+            column_name: column.to_string(),
+        }),
+    }
+}
+
 // ── SAF-2: Safe façades for common unsafe FFI operations ──────────────────
 //
 // These thin wrappers encapsulate the single `// SAFETY:` reasoning block
@@ -4153,6 +4279,99 @@ mod tests {
     }
 
     #[test]
+
+    fn test_using_column_resolves_nested_input_and_rejects_ambiguous_input() {
+        let mut tree = OpTree::InnerJoin {
+            condition: Expr::Literal("TRUE".into()),
+            left: Box::new(make_scan(1, "cases", "c", &["case_key"])),
+            right: Box::new(make_scan(2, "bindings", "b", &["binding_id"])),
+        };
+        assert_eq!(
+            join_using_column(&tree, "binding_id").unwrap().to_sql(),
+            "\"b\".\"binding_id\""
+        );
+        if let OpTree::InnerJoin { left, .. } = &mut tree {
+            **left = make_scan(1, "cases", "c", &["binding_id"]);
+        }
+        assert!(join_using_column(&tree, "binding_id").is_err());
+    }
+
+    #[test]
+    fn test_using_column_reuses_only_proven_inner_equality() {
+        let key = |alias: &str| Expr::ColumnRef {
+            table_alias: Some(alias.into()),
+            column_name: "id".into(),
+        };
+        let equal = |a: &str, b: &str| Expr::BinaryOp {
+            op: "=".into(),
+            left: Box::new(key(a)),
+            right: Box::new(key(b)),
+        };
+        let first = OpTree::InnerJoin {
+            condition: equal("a", "b"),
+            left: Box::new(make_scan(1, "src", "a", &["id"])),
+            right: Box::new(make_scan(2, "src", "b", &["id"])),
+        };
+        let second = OpTree::InnerJoin {
+            condition: equal("a", "c"),
+            left: Box::new(first),
+            right: Box::new(make_scan(3, "src", "c", &["id"])),
+        };
+        assert_eq!(
+            join_using_column(&second, "id").unwrap().to_sql(),
+            key("a").to_sql()
+        );
+
+        // An arbitrary nested ON condition must not silently substitute a
+        // key when both inputs expose id but equality is unproven.
+        let unrelated = OpTree::InnerJoin {
+            condition: Expr::Literal("TRUE".into()),
+            left: Box::new(make_scan(1, "src", "a", &["id"])),
+            right: Box::new(make_scan(2, "src", "b", &["id"])),
+        };
+        assert!(join_using_column(&unrelated, "id").is_err());
+        let full = OpTree::FullJoin {
+            condition: equal("a", "b"),
+            left: Box::new(make_scan(1, "src", "a", &["id"])),
+            right: Box::new(make_scan(2, "src", "b", &["id"])),
+        };
+        assert_eq!(
+            join_using_column(&full, "id").unwrap().to_sql(),
+            "COALESCE(\"a\".\"id\", \"b\".\"id\")"
+        );
+        let left = OpTree::LeftJoin {
+            condition: equal("a", "b"),
+            left: Box::new(make_scan(1, "src", "a", &["id"])),
+            right: Box::new(make_scan(2, "src", "b", &["id"])),
+        };
+        assert_eq!(
+            join_using_column(&left, "id").unwrap().to_sql(),
+            key("a").to_sql()
+        );
+        let ambiguous_left = OpTree::LeftJoin {
+            condition: Expr::Literal("TRUE".into()),
+            left: Box::new(make_scan(1, "src", "a", &["id"])),
+            right: Box::new(make_scan(2, "src", "b", &["id"])),
+        };
+        assert!(join_using_column(&ambiguous_left, "id").is_err());
+        let ambiguous_full = OpTree::FullJoin {
+            condition: Expr::Literal("TRUE".into()),
+            left: Box::new(make_scan(1, "src", "a", &["id"])),
+            right: Box::new(make_scan(2, "src", "b", &["id"])),
+        };
+        assert!(join_using_column(&ambiguous_full, "id").is_err());
+        let filtered_full = OpTree::Filter {
+            predicate: Expr::Literal("TRUE".into()),
+            child: Box::new(full),
+        };
+        assert_eq!(
+            join_using_column(&filtered_full, "id").unwrap().to_sql(),
+            "COALESCE(\"a\".\"id\", \"b\".\"id\")"
+        );
+    }
+
+    #[test]
+
     fn test_semi_join_alias() {
         let tree = OpTree::SemiJoin {
             condition: Expr::Literal("TRUE".into()),

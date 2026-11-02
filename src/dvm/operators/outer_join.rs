@@ -65,6 +65,60 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let left_result = ctx.diff_node(left)?;
     let right_result = ctx.diff_node(right)?;
 
+    if ctx.endpoint_join_required
+        && crate::dvm::operators::join::nested_endpoint_join_recompute_is_eligible(op)
+    {
+        if !crate::dvm::operators::join::nested_endpoint_operators_are_builtin(op, &|oid| {
+            ctx.has_builtin_equality(oid)
+        }) {
+            return Err(PgTrickleError::UnsupportedOperator(
+                "nested endpoint recomputation requires visible pg_catalog equality operators"
+                    .into(),
+            ));
+        }
+        let rewritten_condition = crate::dvm::operators::join_common::rewrite_expr_for_join(
+            condition,
+            left,
+            "__pgt_left",
+            right,
+            "__pgt_right",
+        );
+        let equi_keys = crate::dvm::operators::join::extract_equijoin_keys(
+            &rewritten_condition,
+            "__pgt_left",
+            "__pgt_right",
+        );
+        let safe_scope_keys = equi_keys
+            .iter()
+            .filter(|(left_key, right_key)| {
+                crate::dvm::operators::join::has_builtin_type_for_sql_column(
+                    &left_result.schema,
+                    left,
+                    left_key,
+                ) && crate::dvm::operators::join::has_builtin_type_for_sql_column(
+                    &right_result.schema,
+                    right,
+                    right_key,
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if safe_scope_keys.is_empty()
+            && !matches!(condition, crate::dvm::parser::Expr::Literal(value) if value.eq_ignore_ascii_case("TRUE") || value.eq_ignore_ascii_case("FALSE"))
+        {
+            return Err(PgTrickleError::InternalError(
+                "nested left endpoint plan lost its admitted equality scope".into(),
+            ));
+        }
+        return crate::dvm::operators::join::diff_join_by_endpoints(
+            ctx,
+            op,
+            &left_result,
+            &right_result,
+            &safe_scope_keys,
+        );
+    }
+
     // Rewrite join condition aliases for each part of the delta query.
     // For nested join children, column names are disambiguated with the
     // original table alias prefix (e.g., o.cust_id → dl."o__cust_id").

@@ -313,7 +313,7 @@ async fn test_t_a44_10_net_effect_idempotency() {
         "DIFFERENTIAL",
     )
     .await;
-    db.refresh_st("a44_net_st").await;
+    db.refresh_st_with_retry("a44_net_st").await;
 
     // Three updates before the next refresh
     db.execute("UPDATE a44_net_src SET val = 2 WHERE id = 1")
@@ -323,7 +323,7 @@ async fn test_t_a44_10_net_effect_idempotency() {
     db.execute("UPDATE a44_net_src SET val = 99 WHERE id = 1")
         .await;
 
-    db.refresh_st("a44_net_st").await;
+    db.refresh_st_with_retry("a44_net_st").await;
 
     let val: i32 = db
         .query_scalar("SELECT val FROM public.a44_net_st WHERE id = 1")

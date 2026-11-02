@@ -28,6 +28,7 @@ scripts/
 
 # Keep the specific Dockerfiles used by builds
 !tests/Dockerfile.e2e
+!tests/Dockerfile.pg-react-1198
 !tests/Dockerfile.e2e-asan
 !tests/fixtures/
 !tests/fixtures/asan_probe.c

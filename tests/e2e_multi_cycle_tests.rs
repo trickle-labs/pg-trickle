@@ -742,29 +742,29 @@ async fn test_multi_cycle_full_join_differential() {
 
     // Cycle 1: add matched pair
     db.execute("INSERT INTO fj_a VALUES (3, 'a3')").await;
-    db.refresh_st("fj_st").await;
+    db.refresh_st_with_retry("fj_st").await;
     db.assert_st_matches_query("fj_st", q).await;
 
     // Cycle 2: insert unmatched on each side
     db.execute("INSERT INTO fj_a VALUES (4, 'a4')").await;
     db.execute("INSERT INTO fj_b VALUES (5, 'b5')").await;
-    db.refresh_st("fj_st").await;
+    db.refresh_st_with_retry("fj_st").await;
     db.assert_st_matches_query("fj_st", q).await;
 
     // Cycle 3: UPDATE to create new match (was previously unmatched)
     db.execute("INSERT INTO fj_b VALUES (4, 'b4')").await;
-    db.refresh_st("fj_st").await;
+    db.refresh_st_with_retry("fj_st").await;
     db.assert_st_matches_query("fj_st", q).await;
 
     // Cycle 4: DELETE from one side — partner becomes NULL-padded
     db.execute("DELETE FROM fj_a WHERE k = 3").await;
-    db.refresh_st("fj_st").await;
+    db.refresh_st_with_retry("fj_st").await;
     db.assert_st_matches_query("fj_st", q).await;
 
     // Cycle 5: DELETE from both sides of a matched pair
     db.execute("DELETE FROM fj_a WHERE k = 2").await;
     db.execute("DELETE FROM fj_b WHERE k = 2").await;
-    db.refresh_st("fj_st").await;
+    db.refresh_st_with_retry("fj_st").await;
     db.assert_st_matches_query("fj_st", q).await;
 }
 

@@ -179,16 +179,26 @@ pub(crate) fn computed_projection_needs_endpoints(tree: &OpTree) -> bool {
     let computed = expressions
         .iter()
         .any(|e| !matches!(e, Expr::ColumnRef { .. } | Expr::Literal(_)));
-    let OpTree::InnerJoin {
-        condition,
-        left,
-        right,
-    } = child.as_ref()
-    else {
-        return false;
+    let (condition, left, right) = match child.as_ref() {
+        OpTree::InnerJoin {
+            condition,
+            left,
+            right,
+        }
+        | OpTree::LeftJoin {
+            condition,
+            left,
+            right,
+        } => (condition, left, right),
+        _ => return false,
     };
-    (computed && endpoint_key_columns(condition, left, right).is_some())
-        || (computed && nested_endpoint_recompute_is_eligible(tree))
+    let simple_inner_endpoint = matches!(child.as_ref(), OpTree::InnerJoin { .. })
+        && endpoint_key_columns(condition, left, right).is_some();
+    computed
+        && (simple_inner_endpoint
+            .then_some(())
+            .or_else(|| nested_endpoint_recompute_is_eligible(tree).then_some(()))
+            .is_some())
 }
 
 fn has_nested_join(tree: &OpTree) -> bool {
@@ -211,6 +221,106 @@ fn has_nested_join(tree: &OpTree) -> bool {
         | OpTree::Subquery { child, .. } => has_nested_join(child),
         _ => false,
     }
+}
+
+fn is_boolean_join_literal(condition: &Expr) -> Option<bool> {
+    match condition {
+        Expr::Literal(value) if value.eq_ignore_ascii_case("TRUE") => Some(true),
+        Expr::Literal(value) if value.eq_ignore_ascii_case("FALSE") => Some(false),
+        _ => None,
+    }
+}
+
+fn endpoint_join_equality_type(condition: &Expr, left: &OpTree, right: &OpTree) -> Option<u32> {
+    let (first_alias, first_column, second_alias, second_column) =
+        is_simple_equi_condition(condition)?;
+    let (left_column, right_column) = if scan_column_type(left, &first_alias, &first_column)
+        .is_some()
+        && scan_column_type(right, &second_alias, &second_column).is_some()
+    {
+        ((first_alias, first_column), (second_alias, second_column))
+    } else if scan_column_type(left, &second_alias, &second_column).is_some()
+        && scan_column_type(right, &first_alias, &first_column).is_some()
+    {
+        ((second_alias, second_column), (first_alias, first_column))
+    } else {
+        return None;
+    };
+    let left_type = scan_column_type(left, &left_column.0, &left_column.1)?;
+    let right_type = scan_column_type(right, &right_column.0, &right_column.1)?;
+    (left_type == right_type && crate::join_plan::admitted_equality_type(left_type))
+        .then_some(left_type)
+}
+
+pub(crate) fn nested_endpoint_join_recompute_is_eligible(tree: &OpTree) -> bool {
+    has_nested_join(tree) && all_endpoint_joins_have_keys(tree)
+}
+
+fn all_endpoint_joins_have_keys(tree: &OpTree) -> bool {
+    match tree {
+        OpTree::Scan {
+            alias,
+            columns,
+            pk_columns,
+            ..
+        } => {
+            !alias.is_empty()
+                && !pk_columns.is_empty()
+                && pk_columns
+                    .iter()
+                    .all(|key| columns.iter().any(|column| column.name == *key))
+        }
+        OpTree::InnerJoin {
+            condition,
+            left,
+            right,
+        } => {
+            endpoint_join_equality_type(condition, left, right).is_some()
+                && all_endpoint_joins_have_keys(left)
+                && all_endpoint_joins_have_keys(right)
+        }
+        OpTree::LeftJoin {
+            condition,
+            left,
+            right,
+        } => {
+            (endpoint_join_equality_type(condition, left, right).is_some()
+                || is_boolean_join_literal(condition).is_some())
+                && all_endpoint_joins_have_keys(left)
+                && all_endpoint_joins_have_keys(right)
+        }
+        _ => false,
+    }
+}
+
+fn nested_endpoint_recompute_is_eligible(tree: &OpTree) -> bool {
+    let OpTree::Project {
+        expressions, child, ..
+    } = tree
+    else {
+        return false;
+    };
+    nested_endpoint_join_recompute_is_eligible(child)
+        && expressions.iter().all(|expression| {
+            if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
+                return true;
+            }
+            let mut aliases = Vec::new();
+            collect_qualified_aliases(expression, &mut aliases, child)
+        })
+        && expressions.iter().any(|expression| {
+            if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
+                return false;
+            }
+            let mut aliases = Vec::new();
+            if collect_qualified_aliases(expression, &mut aliases, child) {
+                aliases.sort_unstable();
+                aliases.dedup();
+                aliases.len() > 1
+            } else {
+                false
+            }
+        })
 }
 
 fn is_simple_equi_condition(condition: &Expr) -> Option<(String, String, String, String)> {
@@ -251,7 +361,7 @@ fn scan_column_type(tree: &OpTree, alias: &str, column: &str) -> Option<u32> {
             .iter()
             .find(|candidate| candidate.name == column)
             .map(|candidate| candidate.type_oid),
-        OpTree::InnerJoin { left, right, .. } => {
+        OpTree::InnerJoin { left, right, .. } | OpTree::LeftJoin { left, right, .. } => {
             scan_column_type(left, alias, column).or_else(|| scan_column_type(right, alias, column))
         }
         OpTree::LateralFunction { child, .. } => scan_column_type(child, alias, column),
@@ -341,118 +451,198 @@ fn identity_cast_type_oid(type_name: &str) -> Option<u32> {
 }
 
 fn raw_expression_aliases(sql: &str, tree: &OpTree, aliases: &mut Vec<String>) -> bool {
-    let Some((argument, type_name)) = cast_parts(sql) else {
-        return false;
-    };
-    if is_simple_sql_literal(argument) {
-        return true;
+    if let Some((argument, type_name)) = cast_parts(sql) {
+        if is_simple_sql_literal(argument) {
+            return identity_cast_type_oid(type_name).is_some();
+        }
+        if let Some((alias, column)) = parse_qualified_sql_column(argument)
+            && identity_cast_type_oid(type_name)
+                .is_some_and(|target| scan_column_type(tree, &alias, &column) == Some(target))
+        {
+            aliases.push(alias);
+            return true;
+        }
     }
-    let Some((alias, column)) = parse_qualified_sql_column(argument) else {
-        return false;
-    };
-    let Some(target_type) = identity_cast_type_oid(type_name) else {
-        return false;
-    };
-    if scan_column_type(tree, &alias, &column) != Some(target_type) {
-        return false;
-    }
-    aliases.push(alias);
-    true
+    collect_raw_sql_aliases(sql, tree, aliases)
 }
 
-fn all_inner_joins_have_endpoint_keys(tree: &OpTree) -> bool {
+#[derive(Debug, PartialEq, Eq)]
+enum RawSqlToken {
+    Identifier(String),
+    Literal,
+    Symbol(String),
+}
+
+fn raw_sql_tokens(sql: &str) -> Option<Vec<RawSqlToken>> {
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_whitespace() {
+            index += 1;
+        } else if byte == b'\'' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\'' {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 2;
+                    } else {
+                        index += 1;
+                        break;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            if index > bytes.len() || bytes.get(index.saturating_sub(1)) != Some(&b'\'') {
+                return None;
+            }
+            tokens.push(RawSqlToken::Literal);
+        } else if byte == b'"' {
+            index += 1;
+            let mut identifier = String::new();
+            let mut closed = false;
+            while index < bytes.len() {
+                if bytes[index] == b'"' {
+                    if bytes.get(index + 1) == Some(&b'"') {
+                        identifier.push('"');
+                        index += 2;
+                    } else {
+                        index += 1;
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    identifier.push(bytes[index] as char);
+                    index += 1;
+                }
+            }
+            if !closed {
+                return None;
+            }
+            tokens.push(RawSqlToken::Identifier(identifier));
+        } else if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'$'))
+            {
+                index += 1;
+            }
+            tokens.push(RawSqlToken::Identifier(
+                sql[start..index].to_ascii_lowercase(),
+            ));
+        } else if byte.is_ascii_digit() {
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'.' | b'_'))
+            {
+                index += 1;
+            }
+            tokens.push(RawSqlToken::Literal);
+        } else if matches!(bytes.get(index..index + 2), Some(b"::")) {
+            tokens.push(RawSqlToken::Symbol("::".into()));
+            index += 2;
+        } else {
+            tokens.push(RawSqlToken::Symbol((byte as char).to_string()));
+            index += 1;
+        }
+    }
+    Some(tokens)
+}
+
+fn collect_raw_sql_aliases(sql: &str, tree: &OpTree, aliases: &mut Vec<String>) -> bool {
+    let Some(tokens) = raw_sql_tokens(sql) else {
+        return false;
+    };
+    let keywords = [
+        "and", "as", "between", "case", "distinct", "else", "end", "false", "from", "in", "is",
+        "like", "not", "null", "or", "then", "true", "when",
+    ];
+    let cast_types = [
+        "bigint",
+        "boolean",
+        "bytea",
+        "decimal",
+        "int",
+        "integer",
+        "int2",
+        "int4",
+        "int8",
+        "numeric",
+        "smallint",
+        "text",
+        "timestamptz",
+        "uuid",
+        "varchar",
+    ];
+    let mut index = 0;
+    while index < tokens.len() {
+        match &tokens[index] {
+            RawSqlToken::Literal | RawSqlToken::Symbol(_) => index += 1,
+            RawSqlToken::Identifier(identifier) => {
+                if let [RawSqlToken::Symbol(dot), RawSqlToken::Identifier(next)] =
+                    tokens.get(index + 1..index + 3).unwrap_or(&[])
+                    && dot == "."
+                {
+                    let is_scan_alias = tree_has_scan_alias(tree, identifier);
+                    let is_function = matches!(tokens.get(index + 3), Some(RawSqlToken::Symbol(open)) if open == "(");
+                    if is_scan_alias {
+                        if is_function {
+                            return false;
+                        }
+                        aliases.push(identifier.clone());
+                        index += 3;
+                    } else if is_function
+                        || (identifier.eq_ignore_ascii_case("pg_catalog")
+                            && cast_types.contains(&next.as_str()))
+                        || (tokens.get(index.wrapping_sub(1))
+                            == Some(&RawSqlToken::Symbol("::".into()))
+                            && cast_types.contains(&next.as_str()))
+                    {
+                        index += 3;
+                    } else {
+                        return false;
+                    }
+                } else if keywords.contains(&identifier.as_str())
+                    || cast_types.contains(&identifier.as_str())
+                    || matches!(tokens.get(index + 1), Some(RawSqlToken::Symbol(open)) if open == "(")
+                    || (tokens.get(index.wrapping_sub(1))
+                        == Some(&RawSqlToken::Symbol("::".into()))
+                        && cast_types.contains(&identifier.as_str()))
+                    || (identifier == "e" && tokens.get(index + 1) == Some(&RawSqlToken::Literal))
+                {
+                    index += 1;
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    !aliases.is_empty()
+}
+
+fn tree_has_scan_alias(tree: &OpTree, alias: &str) -> bool {
     match tree {
         OpTree::Scan {
-            alias,
-            columns,
-            pk_columns,
-            ..
-        } => {
-            !alias.is_empty()
-                && !pk_columns.is_empty()
-                && pk_columns
-                    .iter()
-                    .all(|key| columns.iter().any(|column| column.name == *key))
+            alias: scan_alias, ..
+        } => scan_alias == alias,
+        OpTree::InnerJoin { left, right, .. } | OpTree::LeftJoin { left, right, .. } => {
+            tree_has_scan_alias(left, alias) || tree_has_scan_alias(right, alias)
         }
-        OpTree::InnerJoin {
-            condition,
-            left,
-            right,
-        } => {
-            let Some((first_alias, first_column, second_alias, second_column)) =
-                is_simple_equi_condition(condition)
-            else {
-                return false;
-            };
-            let (left_column, right_column) = if scan_column_type(left, &first_alias, &first_column)
-                .is_some()
-                && scan_column_type(right, &second_alias, &second_column).is_some()
-            {
-                ((first_alias, first_column), (second_alias, second_column))
-            } else if scan_column_type(left, &second_alias, &second_column).is_some()
-                && scan_column_type(right, &first_alias, &first_column).is_some()
-            {
-                ((second_alias, second_column), (first_alias, first_column))
-            } else {
-                return false;
-            };
-            let Some(left_type) = scan_column_type(left, &left_column.0, &left_column.1) else {
-                return false;
-            };
-            let Some(right_type) = scan_column_type(right, &right_column.0, &right_column.1) else {
-                return false;
-            };
-            left_type == right_type
-                && crate::join_plan::admitted_equality_type(left_type)
-                && all_inner_joins_have_endpoint_keys(left)
-                && all_inner_joins_have_endpoint_keys(right)
-        }
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Subquery { child, .. } => tree_has_scan_alias(child, alias),
         _ => false,
     }
 }
 
-fn nested_endpoint_recompute_is_eligible(tree: &OpTree) -> bool {
-    let OpTree::Project {
-        expressions, child, ..
-    } = tree
-    else {
-        return false;
-    };
-    let root_join = match child.as_ref() {
-        OpTree::InnerJoin { .. } => Some(child.as_ref()),
-        _ => None,
-    };
-    let Some(root_join) = root_join else {
-        return false;
-    };
-    nested_inner_endpoint_recompute_is_eligible(root_join)
-        && expressions.iter().all(|expression| {
-            if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
-                return true;
-            }
-            let mut aliases = Vec::new();
-            collect_qualified_aliases(expression, &mut aliases, child)
-        })
-        && expressions.iter().any(|expression| {
-            if matches!(expression, Expr::ColumnRef { .. } | Expr::Literal(_)) {
-                return false;
-            }
-            let mut aliases = Vec::new();
-            if collect_qualified_aliases(expression, &mut aliases, child) {
-                aliases.sort_unstable();
-                aliases.dedup();
-                aliases.len() > 1
-            } else {
-                false
-            }
-        })
-}
-
 fn nested_inner_endpoint_recompute_is_eligible(tree: &OpTree) -> bool {
-    has_nested_join(tree) && all_inner_joins_have_endpoint_keys(tree)
+    nested_endpoint_join_recompute_is_eligible(tree)
 }
 
-fn nested_endpoint_operators_are_builtin(
+pub(crate) fn nested_endpoint_operators_are_builtin(
     tree: &OpTree,
     is_builtin_equality: &impl Fn(u32) -> bool,
 ) -> bool {
@@ -463,27 +653,20 @@ fn nested_endpoint_operators_are_builtin(
             left,
             right,
         } => {
-            let Some((first_alias, first_column, second_alias, second_column)) =
-                is_simple_equi_condition(condition)
-            else {
-                return false;
-            };
-            let equality_type = if scan_column_type(left, &first_alias, &first_column).is_some()
-                && scan_column_type(right, &second_alias, &second_column).is_some()
-            {
-                scan_column_type(left, &first_alias, &first_column)
-            } else if scan_column_type(left, &second_alias, &second_column).is_some()
-                && scan_column_type(right, &first_alias, &first_column).is_some()
-            {
-                scan_column_type(left, &second_alias, &second_column)
-            } else {
-                return false;
-            };
-            equality_type.is_some_and(|oid| {
-                is_builtin_equality(oid)
-                    && nested_endpoint_operators_are_builtin(left, is_builtin_equality)
-                    && nested_endpoint_operators_are_builtin(right, is_builtin_equality)
-            })
+            endpoint_join_equality_type(condition, left, right).is_some_and(is_builtin_equality)
+                && nested_endpoint_operators_are_builtin(left, is_builtin_equality)
+                && nested_endpoint_operators_are_builtin(right, is_builtin_equality)
+        }
+        OpTree::LeftJoin {
+            condition,
+            left,
+            right,
+        } => {
+            (is_boolean_join_literal(condition).is_some()
+                || endpoint_join_equality_type(condition, left, right)
+                    .is_some_and(is_builtin_equality))
+                && nested_endpoint_operators_are_builtin(left, is_builtin_equality)
+                && nested_endpoint_operators_are_builtin(right, is_builtin_equality)
         }
         _ => false,
     }
@@ -515,7 +698,7 @@ fn collect_qualified_aliases(expression: &Expr, aliases: &mut Vec<String>, tree:
 }
 
 /// Unsafe nested computed projections use endpoint recomputation only for
-/// all-inner equijoins over keyed scans; preserve FULL for every other shape.
+/// keyed inner/left join trees with supported endpoint predicates.
 pub(crate) fn computed_projection_needs_nested_join_fallback(tree: &OpTree) -> bool {
     fn projection_has_unsafe_cross_source_expression(
         expressions: &[Expr],
@@ -949,7 +1132,7 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
         "__pgt_right",
     );
 
-    if ctx.endpoint_join_required && nested_inner_endpoint_recompute_is_eligible(op) {
+    if ctx.endpoint_join_required && nested_endpoint_join_recompute_is_eligible(op) {
         if !nested_endpoint_operators_are_builtin(op, &|oid| ctx.has_builtin_equality(oid)) {
             return Err(PgTrickleError::UnsupportedOperator(
                 "nested endpoint recomputation requires visible pg_catalog equality operators"
@@ -969,13 +1152,7 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
                 "nested endpoint plan lost its admitted equality scope".into(),
             ));
         }
-        return diff_inner_join_by_endpoints(
-            ctx,
-            op,
-            &left_result,
-            &right_result,
-            &safe_scope_keys,
-        );
+        return diff_join_by_endpoints(ctx, op, &left_result, &right_result, &safe_scope_keys);
     }
 
     // Cross-epoch pairs in the algebraic delta can fail while PostgreSQL
@@ -999,13 +1176,7 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             })
             .cloned()
             .collect::<Vec<_>>();
-        return diff_inner_join_by_endpoints(
-            ctx,
-            op,
-            &left_result,
-            &right_result,
-            &safe_scope_keys,
-        );
+        return diff_join_by_endpoints(ctx, op, &left_result, &right_result, &safe_scope_keys);
     }
 
     if !equi_keys.is_empty() {
@@ -1388,22 +1559,29 @@ JOIN {delta_right} dr ON {join_cond_part2}{correction_sql}",
 /// Recompute the affected output bag at each coherent endpoint, then subtract
 /// the old bag from the new one. This keeps erroring ON expressions away from
 /// cross-snapshot row combinations while preserving duplicate multiplicities.
-fn diff_inner_join_by_endpoints(
+pub(crate) fn diff_join_by_endpoints(
     ctx: &mut DiffContext,
     op: &OpTree,
     left_result: &DiffResult,
     right_result: &DiffResult,
     equi_keys: &[EquiKeyPair],
 ) -> Result<DiffResult, PgTrickleError> {
-    let OpTree::InnerJoin {
-        condition,
-        left,
-        right,
-    } = op
-    else {
-        return Err(PgTrickleError::InternalError(
-            "endpoint delta called on non-InnerJoin node".into(),
-        ));
+    let (condition, left, right, is_left_join) = match op {
+        OpTree::InnerJoin {
+            condition,
+            left,
+            right,
+        } => (condition, left, right, false),
+        OpTree::LeftJoin {
+            condition,
+            left,
+            right,
+        } => (condition, left, right, true),
+        _ => {
+            return Err(PgTrickleError::InternalError(
+                "endpoint delta called on a non-inner/non-left join node".into(),
+            ));
+        }
     };
     let left_prefix = left.alias();
     let right_prefix = right.alias();
@@ -1412,7 +1590,7 @@ fn diff_inner_join_by_endpoints(
         let plan = SnapshotPlan::for_tree(tree);
         if !plan.uses_pre_change() {
             return Err(PgTrickleError::UnsupportedOperator(format!(
-                "error-safe inner join delta requires an exact pre-change {side} snapshot; planner selected {}",
+                "error-safe endpoint join delta requires an exact pre-change {side} snapshot; planner selected {}",
                 plan.kind()
             )));
         }
@@ -1434,13 +1612,22 @@ fn diff_inner_join_by_endpoints(
         .collect();
     let output_cols = [left_output_cols.as_slice(), right_output_cols.as_slice()].concat();
 
-    let scope = endpoint_scope_condition(
-        equi_keys,
-        left_cols,
-        right_cols,
-        &left_result.cte_name,
-        &right_result.cte_name,
-    );
+    let scope = if is_left_join {
+        left_endpoint_scope_condition(
+            condition,
+            equi_keys,
+            &left_result.cte_name,
+            &right_result.cte_name,
+        )
+    } else {
+        endpoint_scope_condition(
+            equi_keys,
+            left_cols,
+            right_cols,
+            &left_result.cte_name,
+            &right_result.cte_name,
+        )
+    };
     let mut hash_args = build_base_table_key_exprs(left, "l");
     hash_args.extend(build_base_table_key_exprs(right, "r"));
     let row_id = crate::hash::build_composite_hash_expr(&hash_args);
@@ -1463,10 +1650,11 @@ fn diff_inner_join_by_endpoints(
         .collect::<Vec<_>>()
         .join(", ");
     let condition_sql = rewrite_join_condition(condition, left, "l", right, "r");
+    let join_keyword = if is_left_join { "LEFT JOIN" } else { "JOIN" };
     let endpoint = |left_source: &str, right_source: &str| {
         format!(
             "SELECT {row_id} AS __pgt_row_id, {selected_cols} \
-             FROM {left_source} l JOIN {right_source} r ON {condition_sql} \
+             FROM {left_source} l {join_keyword} {right_source} r ON {condition_sql} \
              WHERE {scope}"
         )
     };
@@ -1505,10 +1693,16 @@ fn diff_inner_join_by_endpoints(
     let cte_name = ctx.next_cte_name("join");
     ctx.add_cte(cte_name.clone(), sql);
 
+    let right_schema = right_result.schema.renamed(&right_output_cols);
+    let right_schema = if is_left_join {
+        right_schema.nullable()
+    } else {
+        right_schema
+    };
     let schema = left_result
         .schema
         .renamed(&left_output_cols)
-        .concat(&right_result.schema.renamed(&right_output_cols));
+        .concat(&right_schema);
     Ok(DiffResult {
         cte_name,
         columns: output_cols,
@@ -1516,6 +1710,40 @@ fn diff_inner_join_by_endpoints(
         is_deduplicated: false,
         has_key_changed: false,
     })
+}
+
+fn left_endpoint_scope_condition(
+    condition: &Expr,
+    equi_keys: &[EquiKeyPair],
+    delta_left: &str,
+    delta_right: &str,
+) -> String {
+    if !equi_keys.is_empty() {
+        let key_match = |delta: &str, match_right_key: bool| {
+            let predicates = equi_keys
+                .iter()
+                .map(|(left_key, right_key)| {
+                    let changed_key = if match_right_key { right_key } else { left_key };
+                    format!("l.{left_key} IS NOT DISTINCT FROM __pgt_changed.{changed_key}")
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            format!("EXISTS (SELECT 1 FROM {delta} __pgt_changed WHERE {predicates})")
+        };
+        return format!(
+            "({} OR {})",
+            key_match(delta_left, false),
+            key_match(delta_right, true),
+        );
+    }
+
+    match is_boolean_join_literal(condition) {
+        Some(true) => {
+            format!("(EXISTS (SELECT 1 FROM {delta_left}) OR EXISTS (SELECT 1 FROM {delta_right}))")
+        }
+        Some(false) => format!("EXISTS (SELECT 1 FROM {delta_left})"),
+        None => "FALSE".to_string(),
+    }
 }
 
 /// Restrict endpoint recomputation to join-key values touched by either child.
@@ -1657,7 +1885,7 @@ fn has_builtin_type_for_column(
         .is_some_and(|oid| oid < FIRST_NORMAL_OBJECT_ID)
 }
 
-fn has_builtin_type_for_sql_column(
+pub(crate) fn has_builtin_type_for_sql_column(
     schema: &crate::dvm::schema::RelationSchema,
     tree: &OpTree,
     column_sql: &str,
@@ -1760,7 +1988,7 @@ type EquiKeyPair = (String, String);
 /// Falls back gracefully: if the condition is too complex (OR, functions,
 /// non-equality operators), returns an empty vec and we skip the
 /// semi-join optimization.
-fn extract_equijoin_keys(
+pub(crate) fn extract_equijoin_keys(
     condition: &Expr,
     left_alias: &str,
     right_alias: &str,
@@ -1786,6 +2014,7 @@ fn collect_equijoin_keys(
     match expr {
         Expr::BinaryOp { op, left, right } if op == "=" => {
             // Found an equality — determine which side belongs to which table.
+
             let left_belongs_to = classify_column_side(left, left_alias, right_alias);
             let right_belongs_to = classify_column_side(right, left_alias, right_alias);
 
@@ -2099,6 +2328,42 @@ mod tests {
     }
 
     #[test]
+    fn test_nested_raw_case_with_qualified_sources_uses_endpoint_route() {
+        let nested = left_join(
+            eq_cond("b", "id", "c", "id"),
+            inner_join(
+                eq_cond("a", "id", "b", "id"),
+                scan_with_pk(1, "a_src", "public", "a", &["id", "value"], &["id"]),
+                scan_with_pk(2, "b_src", "public", "b", &["id", "value"], &["id"]),
+            ),
+            scan_with_pk(3, "c_src", "public", "c", &["id", "value"], &["id"]),
+        );
+        let safe = project(
+            vec![Expr::Raw(
+                "CAST(CASE WHEN \"c\".\"id\" IS NULL THEN 0 ELSE \
+                 (CAST(100 AS pg_catalog.numeric) / (\"a\".\"value\" - \
+                 \"c\".\"value\")) END AS pg_catalog.numeric)"
+                    .into(),
+            )],
+            vec!["combined"],
+            nested.clone(),
+        );
+        assert!(!computed_projection_needs_nested_join_fallback(&safe));
+        assert!(
+            !computed_projection_needs_nested_join_fallback_with_equality(&safe, |oid| oid == 23)
+        );
+
+        let unresolved = project(
+            vec![Expr::Raw(
+                "CASE WHEN v IS NULL THEN 0 ELSE a.v + b.v END".into(),
+            )],
+            vec!["combined"],
+            nested,
+        );
+        assert!(computed_projection_needs_nested_join_fallback(&unresolved));
+    }
+
+    #[test]
     fn test_nested_projection_uses_endpoint_route_only_for_keyed_inner_tree() {
         let left = scan_with_pk(1, "left_src", "public", "l", &["id", "v"], &["id"]);
         let right = scan_with_pk(2, "right_src", "public", "r", &["id", "v"], &["id"]);
@@ -2141,6 +2406,58 @@ mod tests {
         assert!(computed_projection_needs_nested_join_fallback(
             &unresolved_expression
         ));
+    }
+
+    #[test]
+    fn test_nested_left_join_projection_uses_endpoint_route_for_null_extension() {
+        let first = left_join(
+            eq_cond("a", "id", "b", "id"),
+            scan_with_pk(1, "a_src", "public", "a", &["id", "v"], &["id"]),
+            scan_with_pk(2, "b_src", "public", "b", &["id", "v"], &["id"]),
+        );
+        let nested = left_join(
+            Expr::Literal("FALSE".into()),
+            first,
+            scan_with_pk(3, "c_src", "public", "c", &["id", "v"], &["id"]),
+        );
+        let tree = project(
+            vec![binop("+", qcolref("a", "v"), qcolref("b", "v"))],
+            vec!["combined"],
+            nested,
+        );
+
+        assert!(nested_endpoint_recompute_is_eligible(&tree));
+        assert!(computed_projection_needs_endpoints(&tree));
+        assert!(!computed_projection_needs_nested_join_fallback(&tree));
+        assert!(nested_endpoint_operators_are_builtin(
+            match &tree {
+                OpTree::Project { child, .. } => child,
+                _ => unreachable!(),
+            },
+            &|oid| oid == 23,
+        ));
+    }
+
+    #[test]
+    fn test_nested_left_join_projection_rejects_unsupported_predicate() {
+        let first = left_join(
+            eq_cond("a", "id", "b", "id"),
+            scan_with_pk(1, "a_src", "public", "a", &["id", "v"], &["id"]),
+            scan_with_pk(2, "b_src", "public", "b", &["id", "v"], &["id"]),
+        );
+        let nested = left_join(
+            binop("<", qcolref("b", "id"), qcolref("c", "id")),
+            first,
+            scan_with_pk(3, "c_src", "public", "c", &["id", "v"], &["id"]),
+        );
+        let tree = project(
+            vec![binop("+", qcolref("a", "v"), qcolref("b", "v"))],
+            vec!["combined"],
+            nested,
+        );
+
+        assert!(!nested_endpoint_recompute_is_eligible(&tree));
+        assert!(computed_projection_needs_nested_join_fallback(&tree));
     }
 
     #[test]
@@ -2440,6 +2757,31 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_equijoin_keys_escapes_quoted_identifiers() {
+        // USING keys with spaces, reserved words, and embedded quotes
+        // must stay quoted after qualifiers are removed for semi-join probes.
+        for name in ["Case Key", "from", "a\"b"] {
+            let cond = eq_cond("o", name, "c", name);
+            let keys = extract_equijoin_keys(&cond, "o", "c");
+            let quoted = quote_ident(name);
+            assert_eq!(keys, vec![(quoted.clone(), quoted.clone())]);
+
+            let sql = build_semijoin_subquery(
+                "\"public\".\"customers\"",
+                &keys,
+                "__pgt_cte_delta",
+                JoinSide::Right,
+            );
+            assert!(
+                sql.contains(&format!(
+                    "WHERE {quoted} IN (SELECT DISTINCT {quoted} FROM __pgt_cte_delta)"
+                )),
+                "invalid semi-join probe for {name:?}: {sql}"
+            );
+        }
+    }
+
+    #[test]
     fn test_extract_equijoin_keys_non_equality_returns_empty() {
         let cond = binop(">", qcolref("o", "a"), qcolref("c", "b"));
         let keys = extract_equijoin_keys(&cond, "o", "c");
@@ -2646,6 +2988,11 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
         let outer_cte_marker = format!("{} AS", result.cte_name);
         let outer_sql = sql.split(&outer_cte_marker).last().unwrap_or("");
+
+        // Semi-join keys are rendered as identifiers, not bare SQL text.
+        // Preserve quoting even for ordinary names so mixed-case and
+        // whitespace-containing USING keys use the same safe path.
+
         assert_sql_contains(outer_sql, "WHERE \"id\" IN (SELECT DISTINCT \"a__id\" FROM");
         assert_sql_contains(outer_sql, "WHERE \"a__id\" IN (SELECT DISTINCT \"id\" FROM");
         assert!(sql.lines().any(|line| {
