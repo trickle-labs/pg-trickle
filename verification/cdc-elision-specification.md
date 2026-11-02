@@ -186,9 +186,15 @@ commit LSNs and a reversed history weight.
 These lemmas specify the event semantics that the production adapter must
 preserve. They assume captured events already represent committed transactions
 with correct source-incarnation identifiers and full row images. They do not
-prove that PostgreSQL capture, commit-LSN assignment, schema changes or source
-recreation construct those records correctly; the installed SQL and lifecycle
-tests remain separate evidence for those boundaries.
+prove arbitrary PostgreSQL capture, commit-LSN assignment, schema changes or
+source-recreation behavior. The installed
+`test_cdc_source_recreation_ignores_pending_old_incarnation_images` case covers
+one source-recreation sequence in row and statement trigger modes: it leaves
+old UPDATE/INSERT images pending, recreates the same qualified source name with
+a new OID and stable buffer name, and checks the replacement's initial and
+differential results against its live query. This finite runtime check does
+not prove every incarnation transition, concurrent DDL/capture race or
+PostgreSQL reduction history.
 
 `valid_single_identity_history_preserves_image_delta` adds a valid-transition
 model for one unique row identity. Walking backward from the final state, an
