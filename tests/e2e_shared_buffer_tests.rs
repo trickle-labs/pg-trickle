@@ -183,6 +183,104 @@ async fn test_cdc_committed_history_preserves_latest_complete_payload() {
 }
 
 #[tokio::test]
+async fn test_cdc_interleaved_identity_history_preserves_complete_bag() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    for mode in ["row", "statement"] {
+        let source = format!("interleaved_images_{mode}");
+        let output = format!("{source}_rows");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, category TEXT, amount NUMERIC, metadata TEXT)"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES \
+             (1, 'alpha', 1.0, '{{\"image\":\"a\"}}'), \
+             (2, 'beta', 2.00, '{{\"image\":\"b\"}}')"
+        ))
+        .await;
+
+        // Exclude the source key from the output so different identities can
+        // contribute to the same complete row-image bucket in the output bag.
+        let query = format!(
+            "SELECT category, amount, scale(amount) AS amount_scale, metadata FROM {source}"
+        );
+        db.try_execute_with_config(
+            &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{output}',$q${query}$q$,'24h','DIFFERENTIAL')"
+            ),
+        )
+        .await
+        .unwrap();
+
+        // Each statement commits independently. The rows exchange and then
+        // revisit complete images while their source identities stay distinct.
+        db.execute(&format!(
+            "UPDATE {source} SET \
+               category = CASE id WHEN 1 THEN 'beta' ELSE 'gamma' END, \
+               amount = CASE id WHEN 1 THEN 2.00 ELSE 3.00 END, \
+               metadata = CASE id WHEN 1 THEN '{{\"image\":\"b\"}}' \
+                                  ELSE '{{\"image\":\"c\"}}' END"
+        ))
+        .await;
+        db.execute(&format!(
+            "UPDATE {source} SET \
+               category = CASE id WHEN 1 THEN 'gamma' ELSE 'alpha' END, \
+               amount = CASE id WHEN 1 THEN 3.00 ELSE 1.0 END, \
+               metadata = CASE id WHEN 1 THEN '{{\"image\":\"c\"}}' \
+                                  ELSE '{{\"image\":\"a\"}}' END"
+        ))
+        .await;
+        db.execute(&format!(
+            "UPDATE {source} SET \
+               category = CASE id WHEN 1 THEN 'delta' ELSE 'beta' END, \
+               amount = CASE id WHEN 1 THEN 4.0 ELSE 2.00 END, \
+               metadata = CASE id WHEN 1 THEN '{{\"image\":\"d\"}}' \
+                                  ELSE '{{\"image\":\"b\"}}' END"
+        ))
+        .await;
+
+        let before: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{output}')"),
+        )
+        .await
+        .unwrap();
+        let differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{output}' AND h.refresh_id>{before} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            differential,
+            "interleaved committed identities should use differential compaction"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &output,
+            &query,
+            "interleaved identities sharing complete row-image buckets",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn test_cdc_deferred_key_swap_preserves_complete_images() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
