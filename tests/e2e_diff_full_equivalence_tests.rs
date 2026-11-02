@@ -329,7 +329,7 @@ async fn test_diff_full_equivalence_left_join_l0_snapshot_mutation() {
     db.execute_seq(&[
         "BEGIN",
         "UPDATE dfe_ljm_l SET id = 7 WHERE id = 6",
-        "UPDATE dfe_ljm_r SET l_id = 7, payload = 'right-seven' WHERE id = 60",
+        "DELETE FROM dfe_ljm_r WHERE id = 60",
         "COMMIT",
     ])
     .await;
@@ -339,14 +339,14 @@ async fn test_diff_full_equivalence_left_join_l0_snapshot_mutation() {
             &db,
             "dfe_ljm_st",
             q,
-            "M-LJ-SNAPSHOT same-refresh join-key rename",
+            "M-LJ-SNAPSHOT same-refresh left-key rename and right delete",
         )
         .await;
         e2e::oracle::assert_st_query_exact(
             &db,
             "dfe_ljm_st",
             q,
-            "M-LJ-SNAPSHOT same-refresh join-key rename",
+            "M-LJ-SNAPSHOT same-refresh left-key rename and right delete",
         )
         .await;
     } else {
