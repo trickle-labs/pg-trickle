@@ -27,14 +27,20 @@ pub enum ImageEvent { Insert, Delete }
 pub fn scan_initial_row_present(first_action: ImageEvent) -> (present: bool)
     ensures present == (first_action == ImageEvent::Delete),
 {
-    first_action == ImageEvent::Delete
+    match first_action {
+        ImageEvent::Delete => true,
+        ImageEvent::Insert => false,
+    }
 }
 
 /// The scan reducer emits a new image only if the history ends with a row.
 pub fn scan_final_row_present(last_action: ImageEvent) -> (present: bool)
     ensures present == (last_action == ImageEvent::Insert),
 {
-    last_action == ImageEvent::Insert
+    match last_action {
+        ImageEvent::Insert => true,
+        ImageEvent::Delete => false,
+    }
 }
 
 /// A DELETE row is a scan endpoint only when the row existed before the window.
@@ -43,7 +49,7 @@ pub fn scan_delete_candidate(first_action: ImageEvent, action: ImageEvent) -> (c
         first_action == ImageEvent::Delete && action == ImageEvent::Delete
     ),
 {
-    scan_initial_row_present(first_action) && action == ImageEvent::Delete
+    scan_initial_row_present(first_action) && scan_initial_row_present(action)
 }
 
 /// An INSERT row is a scan endpoint only when the row exists after the window.
@@ -52,7 +58,7 @@ pub fn scan_insert_candidate(last_action: ImageEvent, action: ImageEvent) -> (ca
         last_action == ImageEvent::Insert && action == ImageEvent::Insert
     ),
 {
-    scan_final_row_present(last_action) && action == ImageEvent::Insert
+    scan_final_row_present(last_action) && scan_final_row_present(action)
 }
 
 /// INSERT adds one image occurrence and DELETE removes one.

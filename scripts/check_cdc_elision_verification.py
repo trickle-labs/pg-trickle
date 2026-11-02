@@ -85,12 +85,12 @@ MUTATIONS = {
         "event_lsn >= previous_cut && event_lsn <= new_cut",
     ),
     "lost-scan-delete-initial-state": (
-        "scan_initial_row_present(first_action) && action == ImageEvent::Delete",
-        "true && action == ImageEvent::Delete",
+        "scan_initial_row_present(first_action) && scan_initial_row_present(action)",
+        "true && scan_initial_row_present(action)",
     ),
     "lost-scan-insert-final-state": (
-        "scan_final_row_present(last_action) && action == ImageEvent::Insert",
-        "true && action == ImageEvent::Insert",
+        "scan_final_row_present(last_action) && scan_final_row_present(action)",
+        "true && scan_final_row_present(action)",
     ),
 }
 
