@@ -183,6 +183,246 @@ async fn test_cdc_committed_history_preserves_latest_complete_payload() {
 }
 
 #[tokio::test]
+async fn test_cdc_compaction_keeps_final_insert_after_insert_update() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("ALTER SYSTEM SET log_min_messages = 'info'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    for mode in ["row", "statement"] {
+        let source = format!("insert_update_compaction_{mode}");
+        let output = format!("{source}_rows");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, value TEXT NOT NULL)"
+        ))
+        .await;
+        db.execute(&format!("INSERT INTO {source} VALUES (1, 'existing')"))
+            .await;
+
+        let query = format!("SELECT id,value FROM {source}");
+        db.try_execute_with_config(
+            &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{output}',$q${query}$q$,'24h','DIFFERENTIAL')"
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.count(&output).await, 1, "initial baseline is populated");
+
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "BEGIN; INSERT INTO {source} VALUES (2, 'a_intermediate'); \
+             UPDATE {source} SET value='z_final' WHERE id=2; COMMIT"
+        )))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let source_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        let buffer = db.change_buffer_table(source_oid).await;
+        let captured: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT action,value FROM {buffer} WHERE id=2 AND action IN ('I','D') \
+             ORDER BY change_id"
+        )))
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            captured,
+            vec![
+                ("I".to_string(), "a_intermediate".to_string()),
+                ("D".to_string(), "a_intermediate".to_string()),
+                ("I".to_string(), "z_final".to_string()),
+            ],
+            "one committed insert then update must capture its complete I/D/I history"
+        );
+        let transaction_count: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(DISTINCT source_xid::text)::bigint FROM {buffer} \
+                 WHERE id=2 AND action IN ('I','D')"
+            ))
+            .await;
+        assert_eq!(
+            transaction_count, 1,
+            "all captured images share one source transaction"
+        );
+
+        let before: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{output}')"),
+        )
+        .await
+        .unwrap();
+        let differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{output}' AND h.refresh_id>{before} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            differential,
+            "the captured history must use differential compaction"
+        );
+        let logs = tokio::process::Command::new("docker")
+            .args(["logs", db.container_id()])
+            .output()
+            .await
+            .expect("read PostgreSQL logs to witness compaction");
+        let logs = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&logs.stdout),
+            String::from_utf8_lossy(&logs.stderr)
+        );
+        assert!(
+            logs.contains(&format!(
+                "C-4: compacted changes_{source_oid} — removed 2 rows"
+            )),
+            "expected the production base-buffer compactor to remove the superseded insert and its matching delete"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &output,
+            &query,
+            "compacted insert-update history retains only the final inserted image",
+        )
+        .await;
+
+        let upstream_source = format!("{source}_st_source");
+        let upstream = format!("{source}_upstream");
+        let downstream = format!("{source}_downstream");
+        db.execute(&format!(
+            "CREATE TABLE {upstream_source} (id INT PRIMARY KEY, value TEXT NOT NULL)"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {upstream_source} VALUES (1, 'existing')"
+        ))
+        .await;
+        let upstream_query = format!("SELECT id,value FROM {upstream_source}");
+        db.try_execute_with_config(
+            &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{upstream}',$q${upstream_query}$q$,'24h','DIFFERENTIAL')"
+            ),
+        )
+        .await
+        .unwrap();
+        db.try_execute_with_config(
+            &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{downstream}',$q$SELECT id,value FROM {upstream}$q$,'24h','DIFFERENTIAL')"
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.count(&downstream).await,
+            1,
+            "downstream baseline is populated"
+        );
+
+        db.execute(&format!(
+            "INSERT INTO {upstream_source} VALUES (2, 'a_intermediate')"
+        ))
+        .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1000",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{upstream}')"),
+        )
+        .await
+        .unwrap();
+        db.execute(&format!(
+            "UPDATE {upstream_source} SET value='z_final' WHERE id=2"
+        ))
+        .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1000",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{upstream}')"),
+        )
+        .await
+        .unwrap();
+
+        let upstream_id: i64 = db
+            .query_scalar(&format!(
+                "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name='{upstream}'"
+            ))
+            .await;
+        let st_buffer = format!("pgtrickle_changes.changes_pgt_{upstream_id}");
+        let st_captured: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT action,value FROM {st_buffer} WHERE id=2 AND action IN ('I','D') \
+             ORDER BY change_id"
+        )))
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            st_captured,
+            vec![
+                ("I".to_string(), "a_intermediate".to_string()),
+                ("D".to_string(), "a_intermediate".to_string()),
+                ("I".to_string(), "z_final".to_string()),
+            ],
+            "the stream-table buffer must retain the complete I/D/I history before reduction"
+        );
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{downstream}')"),
+        )
+        .await
+        .unwrap();
+        let st_compact_seen = tokio::process::Command::new("docker")
+            .args(["logs", db.container_id()])
+            .output()
+            .await
+            .expect("read PostgreSQL logs to witness ST compaction");
+        let st_compact_seen = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&st_compact_seen.stdout),
+            String::from_utf8_lossy(&st_compact_seen.stderr)
+        );
+        assert!(
+            st_compact_seen.contains(&format!(
+                "DAG-5: compacted changes_pgt_{upstream_id} — removed 2 rows"
+            )),
+            "expected the production ST-buffer compactor to remove both superseded events"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &downstream,
+            &format!("SELECT id,value FROM {upstream}"),
+            "compacted ST insert-update history retains only the final inserted image",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn test_cdc_interleaved_identity_history_preserves_complete_bag() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")

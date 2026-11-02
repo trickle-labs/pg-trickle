@@ -54,6 +54,17 @@ only the PostgreSQL built-in OIDs for fixed-size boolean, int2/int4/int8 and
 uuid. Actual runtime `pg_typeof` OIDs enforce that
 set; formatted type names, domains and user types cannot impersonate it.
 
+The base and stream-table buffer compactors retain the minimal actions for a
+valid unique-identity endpoint: no rows for I→D, both endpoints for D→I, only
+the last INSERT for I→I, and only the first DELETE for D→D. The same predicate
+is used by both SQL paths. An installed PostgreSQL 18 regression exercises
+captured I/D/I histories in row and statement trigger modes, checks the
+base-source history's transaction identity, observes both compactors remove
+the superseded rows, and compares both resulting stream tables with their
+defining queries. This qualifies those finite base/ST cases; the SQL
+reducer is not yet covered by the Verus proof, and other capture histories and
+consumer cuts remain subject to the limits below.
+
 Both trigger builders call the same `changed_column_sql` adapter. It lowers
 the checked decisions into a CASE with a type-OID guard, followed by equality
 of `pg_catalog.record_send(ROW(value))` bytea images. NULL fields have explicit

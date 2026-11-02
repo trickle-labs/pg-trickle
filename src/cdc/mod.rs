@@ -1404,9 +1404,13 @@ pub fn count_downstream_st_consumers(pgt_id: i64) -> i64 {
 // QUAL-3: CompactionResult moved to src/cdc/compact.rs.
 pub use compact::CompactionResult;
 
-/// C-4: Compact a change buffer by eliminating net-zero __pgt_row_id groups
-/// (INSERT followed by DELETE that cancel out) and collapsing multi-change
-/// groups to retain only the first and last entries per __pgt_row_id.
+const COMPACTION_PRUNE_PREDICATE: &str = "(first_act = 'I' AND last_act = 'D') \
+    OR (rn_asc > 1 AND rn_desc > 1) \
+    OR (first_act = 'I' AND last_act = 'I' AND rn_asc = 1 AND rn_desc > 1) \
+    OR (first_act = 'D' AND last_act = 'D' AND rn_desc = 1 AND rn_asc > 1)";
+
+/// C-4: Compact a change buffer to the minimal endpoint actions per
+/// `__pgt_row_id`, removing net-zero histories and superseded events.
 ///
 /// COR-4: Returns [`CompactionResult`] instead of `Result<i64>` so callers
 /// can distinguish "contended" from "nothing to compact".
@@ -1514,15 +1518,8 @@ pub fn compact_change_buffer(
         return Ok(CompactionResult::Contended);
     }
 
-    // Compact: remove net-zero groups (INSERT→DELETE) and intermediate rows.
-    //
-    // For each __pgt_row_id in the pending LSN range:
-    // - If first_action='I' and last_action='D' → all rows are net no-op
-    // - For remaining groups, keep only first (rn_asc=1) and last (rn_desc=1)
-    //   rows, removing intermediates.
-    //
-    // The delta query pipeline handles 2-row groups (first + last) correctly
-    // via FIRST_VALUE/LAST_VALUE window functions.
+    // Keep the minimal endpoints for each identity: nothing for I→D, both for
+    // D→I, only the last row for I→I, and only the first row for D→D.
     let compact_sql = format!(
         "DELETE FROM \"{schema}\".{buf} \
          WHERE change_id IN (\
@@ -1541,11 +1538,11 @@ pub fn compact_change_buffer(
              WHERE action IN ('I', 'D') \
                AND lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn\
            ) __pgt_ranked \
-           WHERE (first_act = 'I' AND last_act = 'D') \
-              OR (rn_asc > 1 AND rn_desc > 1)\
+           WHERE {prune_predicate}\
          )",
         schema = change_schema,
         buf = buf_name,
+        prune_predicate = COMPACTION_PRUNE_PREDICATE,
     );
 
     let deleted = Spi::connect_mut(|client| {
@@ -1575,9 +1572,8 @@ pub fn compact_change_buffer(
 /// rounds of I/D pairs for the same `__pgt_row_id` accumulate between downstream
 /// reads. This function:
 ///
-/// 1. Removes net-zero groups (INSERT followed by DELETE for the same `__pgt_row_id`).
-/// 2. Removes intermediate rows in multi-change groups, keeping only the first
-///    and last rows per `__pgt_row_id`.
+/// Keeps the minimal endpoints for each `__pgt_row_id`: none for I→D, both for
+/// D→I, only the last row for I→I, and only the first row for D→D.
 ///
 /// Called from `execute_refresh()` before the downstream reads its ST sources'
 /// change buffers. Uses the same compaction threshold as base-table compaction.
@@ -1706,9 +1702,8 @@ pub fn compact_st_change_buffer(
 
 /// DAG-5: Build the compaction SQL for an ST change buffer.
 ///
-/// Pure function for unit-testability. Generates a DELETE that removes:
-/// - Net-zero groups: first_action='I' and last_action='D' for the same __pgt_row_id.
-/// - Intermediate rows: all rows except the first and last per __pgt_row_id group.
+/// Pure function for unit-testability. Generates a DELETE that retains only
+/// the minimal endpoint events for each `__pgt_row_id` history.
 fn build_st_compact_sql(change_schema: &str, pgt_id: i64, prev_lsn: &str, new_lsn: &str) -> String {
     format!(
         "DELETE FROM \"{schema}\".changes_pgt_{id} \
@@ -1728,11 +1723,11 @@ fn build_st_compact_sql(change_schema: &str, pgt_id: i64, prev_lsn: &str, new_ls
              WHERE action IN ('I', 'D') \
                AND lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn\
            ) __pgt_ranked \
-           WHERE (first_act = 'I' AND last_act = 'D') \
-              OR (rn_asc > 1 AND rn_desc > 1)\
+           WHERE {prune_predicate}\
          )",
         schema = change_schema,
         id = pgt_id,
+        prune_predicate = COMPACTION_PRUNE_PREDICATE,
     )
 }
 
@@ -4354,6 +4349,14 @@ mod tests {
         assert!(
             sql.contains("rn_asc > 1 AND rn_desc > 1"),
             "Should remove intermediate rows, got: {sql}"
+        );
+        assert!(
+            sql.contains("first_act = 'I' AND last_act = 'I' AND rn_asc = 1 AND rn_desc > 1"),
+            "Should keep only the final INSERT when the history begins and ends absent, got: {sql}"
+        );
+        assert!(
+            sql.contains("first_act = 'D' AND last_act = 'D' AND rn_desc = 1 AND rn_asc > 1"),
+            "Should keep only the first DELETE when the history begins and ends present, got: {sql}"
         );
     }
 
