@@ -954,6 +954,64 @@ async fn test_cdc_traced_refreshes_consume_each_current_window() {
 }
 
 #[tokio::test]
+async fn test_shared_domain_over_admitted_base_retains_changed_bit() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.cdc_mode = 'trigger'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE DOMAIN image_int4 AS integer").await;
+
+    let domain_oid: i64 = db
+        .query_scalar("SELECT 'image_int4'::regtype::oid::bigint")
+        .await;
+    assert_ne!(
+        domain_oid, 23,
+        "the source column must retain its domain OID"
+    );
+
+    for mode in ["row", "statement"] {
+        let source = format!("domain_image_{mode}");
+        let stream = format!("{source}_st");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, v image_int4)"
+        ))
+        .await;
+        db.execute(&format!("INSERT INTO {source} VALUES (1, 1)"))
+            .await;
+        db.try_execute_with_config(
+            &[&format!("SET pg_trickle.cdc_trigger_mode = '{mode}'")],
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{stream}', 'SELECT id, v FROM {source}', '24h', 'DIFFERENTIAL')"
+            ),
+        )
+        .await
+        .expect("admit domain-backed source with selected trigger mode");
+
+        let source_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        let buffer = db.change_buffer_table(source_oid).await;
+        let before: i64 = db
+            .query_scalar(&format!("SELECT COALESCE(max(change_id), 0) FROM {buffer}"))
+            .await;
+        db.execute(&format!("UPDATE {source} SET v = 1 WHERE id = 1"))
+            .await;
+
+        let (captured, changed): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*), count(*) FILTER (WHERE get_bit(changed_cols, 1) = 1) \
+             FROM {buffer} WHERE change_id > {before} AND action IN ('D', 'I')"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(captured, 2, "{mode}: capture both UPDATE images");
+        assert_eq!(changed, 2, "{mode}: conservatively retain the domain bit");
+    }
+}
+
+#[tokio::test]
 async fn test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
