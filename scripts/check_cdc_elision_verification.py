@@ -43,8 +43,10 @@ OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
 ]
 PRODUCTION_INPUTS = [
     "src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs",
+    "src/api/refresh_ops.rs", "src/scheduler/watermark.rs",
     "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs",
     "src/refresh/codegen.rs", "tests/e2e_shared_buffer_tests.rs", "tests/e2e_cdc_tests.rs",
+    "tests/e2e_lsn_contract_tests.rs", "tests/e2e_long_txn_visibility_tests.rs",
     "tests/e2e_schema_evolution_tests.rs", "tests/dvm_aggregate_execution_tests.rs",
     "tests/e2e_keyless_tests.rs",
     "Cargo.toml", "Cargo.lock",
@@ -93,8 +95,8 @@ MUTATIONS = {
         "true\n        && image_event_in_window_spec",
     ),
     "split-transaction-cut": (
-        "first.commit_lsn == second.commit_lsn,",
-        "first.commit_lsn <= second.commit_lsn,",
+        "first.visibility_lsn == second.visibility_lsn,",
+        "first.visibility_lsn <= second.visibility_lsn,",
     ),
     "reverse-history-weight": ("prefix + event_weight", "prefix - event_weight"),
     "overlapping-consumer-boundary": (
@@ -150,6 +152,22 @@ def check_contract() -> None:
         raise ValueError("base and stream-table compaction must use the checked prune decision")
     if "COMPACTION_PRUNE_PREDICATE" in cdc:
         raise ValueError("compaction SQL must not bypass the checked prune adapter")
+    scheduler_watermark = (runner.ROOT / "src/scheduler/watermark.rs").read_text()
+    manual_refresh = (runner.ROOT / "src/api/refresh_ops.rs").read_text()
+    if "pg_current_wal_insert_lsn()" not in cdc or "transition_writer_fences" not in cdc:
+        raise ValueError("CDC event LSNs are not bound to the production writer-fence path")
+    if "cdc::compute_safe_upper_bound(" not in scheduler_watermark:
+        raise ValueError("scheduler frontiers bypass the checked safe CDC upper bound")
+    if "refresh::current_safe_bound()" not in manual_refresh:
+        raise ValueError("manual refresh does not use its selected CDC writer-safe bound")
+    lsn_tests = (runner.ROOT / "tests/e2e_lsn_contract_tests.rs").read_text()
+    for evidence in [
+        "test_lsn_manual_refresh_late_commit_preserves_exact_results",
+        "count(DISTINCT source_xid::text)::bigint",
+        "completed_past_writer",
+    ]:
+        if evidence not in lsn_tests:
+            raise ValueError(f"transaction-window runtime evidence is missing: {evidence}")
     scan = (runner.ROOT / "src/dvm/operators/scan.rs").read_text()
     for adapter in [
         "scan_initial_row_present_sql(", "scan_final_row_present_sql(",

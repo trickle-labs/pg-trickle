@@ -220,22 +220,35 @@ compaction equivalence remain separate boundaries.
 
 The complete-image event model adds six bounded event lemmas. Events carry a row
 identity, full row-image bytes, source-incarnation identifier, transaction
-identifier and commit LSN. It proves that events from one transaction share a
-consumer-window membership when their commit LSN is shared; a same-key payload
-replacement contributes `-1` and `+1` in distinct image buckets; an identical
-image insert/delete pair cancels within one incarnation and window; and an
-event from an earlier incarnation contributes nothing to the current
-incarnation's bucket. Its recursive sequence delta also proves that appending
-any captured event adds exactly that event's signed weight to its selected
-complete-image bucket. Four executable Verus mutants reject key-only image
-grouping, cross-incarnation grouping, a transaction cut that admits different
-commit LSNs and a reversed history weight.
+identifier and an abstract transaction-visibility LSN. This model coordinate
+is not the per-event `lsn` value stored by trigger capture: each trigger writes
+`pg_current_wal_insert_lsn()`, so several rows in one transaction can have
+different captured LSNs. The theorem that one transaction occupies one model
+window therefore depends on the production writer fence: a safe frontier must
+stay before every event of a still-open transaction and advance across its
+events only after commit. The installed late-commit regression exercises this
+mapping with an insert plus update in one open transaction, checks all three
+complete images share one `source_xid`, and verifies the frontier stays before
+the first event until commit then advances through the last event.
+
+Under that visibility assumption, the model proves that events from one
+transaction share a consumer-window membership; a same-key payload replacement
+contributes `-1` and `+1` in distinct image buckets; an identical image
+insert/delete pair cancels within one incarnation and window; and an event from
+an earlier incarnation contributes nothing to the current incarnation's
+bucket. Its recursive sequence delta also proves that appending any captured
+event adds exactly that event's signed weight to its selected complete-image
+bucket. Four executable Verus mutants reject key-only image grouping,
+cross-incarnation grouping, a transaction cut that admits different model
+visibility coordinates and a reversed history weight.
 
 These lemmas specify the event semantics that the production adapter must
 preserve. They assume captured events already represent committed transactions
-with correct source-incarnation identifiers and full row images. They do not
-prove arbitrary PostgreSQL capture, commit-LSN assignment, schema changes or
-source-recreation behavior. The installed
+with correct source-incarnation identifiers and full row images. The model
+does not prove the production writer-fence algorithm or its PostgreSQL snapshot
+behavior; the installed late-commit case is finite runtime evidence, not that
+general proof. They also do not prove schema changes or every
+source-recreation/concurrent-DDL behavior. The installed
 `test_cdc_source_recreation_ignores_pending_old_incarnation_images` case covers
 one source-recreation sequence in row and statement trigger modes: it leaves
 old UPDATE/INSERT images pending, recreates the same qualified source name with
