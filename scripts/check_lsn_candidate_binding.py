@@ -59,6 +59,7 @@ CDC_ELISION_CASES = [
     "e2e_shared_buffer_tests::test_cdc_interleaved_identity_history_preserves_protected_cuts",
     "e2e_shared_buffer_tests::test_cdc_many_identity_histories_preserve_staggered_consumer_cuts",
     "e2e_shared_buffer_tests::test_cdc_deferred_key_swap_preserves_complete_images",
+    "e2e_shared_buffer_tests::test_cdc_deferred_key_swap_preserves_protected_consumer_cuts",
     "e2e_shared_buffer_tests::test_cdc_shared_source_skip_compaction_preserves_interior_consumer_cut",
     "e2e_shared_buffer_tests::test_cdc_keyless_shared_consumers_retain_three_protected_windows",
     "e2e_shared_buffer_tests::test_cdc_statement_payload_names_do_not_shadow_row_aliases",
