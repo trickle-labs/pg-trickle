@@ -716,6 +716,126 @@ async fn test_cdc_compaction_immediate_key_changes_preserve_per_identity_endpoin
 }
 
 #[tokio::test]
+async fn test_cdc_immediate_key_move_preserves_protected_consumer_cut() {
+    async fn refresh_differential(db: &E2eDb, name: &str) {
+        let before: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+        )
+        .await
+        .unwrap();
+        let differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+                 WHERE s.pgt_name='{name}' AND h.refresh_id>{before} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(differential, "{name} must refresh differentially");
+    }
+
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("ALTER SYSTEM SET log_min_messages = 'info'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    for mode in ["row", "statement"] {
+        let source = format!("moving_key_cut_{mode}");
+        let fast = format!("{source}_fast");
+        let slow = format!("{source}_slow");
+        let query = format!("SELECT id, payload FROM {source}");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, payload TEXT NOT NULL)"
+        ))
+        .await;
+        db.execute(&format!("INSERT INTO {source} VALUES (1, 'initial')"))
+            .await;
+        for name in [&fast, &slow] {
+            db.try_execute_with_config(
+                &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+                &format!(
+                    "SELECT pgtrickle.create_stream_table('{name}',$q${query}$q$,'24h','DIFFERENTIAL')"
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        db.execute(&format!(
+            "UPDATE {source} SET id=2, payload='intermediate' WHERE id=1"
+        ))
+        .await;
+        refresh_differential(&db, &fast).await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &fast,
+            "SELECT 2::int AS id, 'intermediate'::text AS payload",
+            "fast consumer materializes the intermediate primary key",
+        )
+        .await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &slow,
+            "SELECT 1::int AS id, 'initial'::text AS payload",
+            "slow consumer remains at the earlier protected cut",
+        )
+        .await;
+
+        db.execute(&format!(
+            "UPDATE {source} SET id=3, payload='final' WHERE id=2"
+        ))
+        .await;
+        refresh_differential(&db, &slow).await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &slow,
+            &query,
+            "slow consumer catches up across the intermediate identity",
+        )
+        .await;
+
+        let source_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        let buffer = db.change_buffer_table(source_oid).await;
+        let retained: Vec<(String, i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT action,id,payload FROM {buffer} WHERE action IN ('D','I') ORDER BY change_id"
+        )))
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            retained.iter().any(|(action, id, payload)| {
+                action == "D" && *id == 2 && payload == "intermediate"
+            }),
+            "the delete after the fast consumer's cut must survive slow-window processing"
+        );
+
+        refresh_differential(&db, &fast).await;
+        for name in [&fast, &slow] {
+            e2e::oracle::assert_st_query_exact(
+                &db,
+                name,
+                &query,
+                "both consumers reach the final key after protected-cut catch-up",
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_cdc_interleaved_identity_history_preserves_complete_bag() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")

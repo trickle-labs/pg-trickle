@@ -56,6 +56,7 @@ CDC_ELISION_CASES = [
     "e2e_shared_buffer_tests::test_cdc_compaction_keeps_final_insert_after_insert_update",
     "e2e_shared_buffer_tests::test_cdc_compaction_matches_all_short_valid_row_histories",
     "e2e_shared_buffer_tests::test_cdc_compaction_immediate_key_changes_preserve_per_identity_endpoints",
+    "e2e_shared_buffer_tests::test_cdc_immediate_key_move_preserves_protected_consumer_cut",
     "e2e_shared_buffer_tests::test_cdc_compaction_preserves_multi_identity_bag_delta",
     "e2e_shared_buffer_tests::test_cdc_interleaved_identity_history_preserves_complete_bag",
     "e2e_shared_buffer_tests::test_cdc_interleaved_identity_history_preserves_protected_cuts",
