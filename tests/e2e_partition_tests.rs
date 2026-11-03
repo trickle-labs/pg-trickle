@@ -1693,6 +1693,63 @@ async fn test_partitioned_st_list_multi_column_rejected() {
 // ── A1-1c: ALTER partition_by support ──────────────────────────────────
 
 #[tokio::test]
+async fn test_alter_st_partition_key_preserves_dependent_view() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE alt_view_src (id INT PRIMARY KEY, sale_date DATE NOT NULL)")
+        .await;
+    db.execute("INSERT INTO alt_view_src VALUES (1, '2026-01-10'), (2, '2026-02-15')")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('alt_view_st', \
+         $$SELECT id, sale_date FROM alt_view_src$$, '1m', 'DIFFERENTIAL')",
+    )
+    .await;
+    db.refresh_st("alt_view_st").await;
+    db.execute("CREATE VIEW alt_dependent_view AS SELECT * FROM alt_view_st")
+        .await;
+
+    let oid_before: i64 = db
+        .query_scalar("SELECT 'alt_view_st'::regclass::oid::bigint")
+        .await;
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.alter_stream_table('alt_view_st', partition_by => 'sale_date')",
+        )
+        .await;
+
+    let view_exists: bool = db
+        .query_scalar("SELECT to_regclass('public.alt_dependent_view') IS NOT NULL")
+        .await;
+    assert!(
+        view_exists,
+        "dependent view was removed; ALTER result: {result:?}"
+    );
+    db.assert_st_matches_query(
+        "alt_dependent_view",
+        "SELECT id, sale_date FROM alt_view_src",
+    )
+    .await;
+    db.assert_st_matches_query("alt_view_st", "SELECT id, sale_date FROM alt_view_src")
+        .await;
+    let partition_key: Option<String> = db.query_scalar_opt(
+        "SELECT st_partition_key FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'alt_view_st'",
+    ).await;
+    if result.is_ok() {
+        assert_eq!(partition_key.as_deref(), Some("sale_date"));
+    } else {
+        let oid_after: i64 = db
+            .query_scalar("SELECT 'alt_view_st'::regclass::oid::bigint")
+            .await;
+        assert_eq!(oid_after, oid_before);
+        assert_eq!(partition_key, None);
+        let is_partitioned: bool = db
+            .query_scalar("SELECT relkind = 'p' FROM pg_class WHERE oid = 'alt_view_st'::regclass")
+            .await;
+        assert!(!is_partitioned);
+    }
+}
+
+#[tokio::test]
 async fn test_alter_st_add_partition_key() {
     let db = E2eDb::new().await.with_extension().await;
 

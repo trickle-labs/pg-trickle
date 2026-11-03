@@ -1206,7 +1206,7 @@ pgtrickle.alter_stream_table(
 | `fuse` | `text` | `NULL` | Fuse (circuit breaker) mode: `'off'`, `'on'`, or `'auto'`. `'auto'` blows the fuse when FULL would be cheaper than DIFFERENTIAL. Pass `NULL` to leave unchanged. |
 | `fuse_ceiling` | `bigint` | `NULL` | Change-count threshold that triggers the fuse. `NULL` uses the global `pg_trickle.fuse_default_ceiling`. |
 | `fuse_sensitivity` | `integer` | `NULL` | Number of consecutive over-ceiling cycles before the fuse blows. `NULL` means 1 (blow immediately). |
-| `partition_by` | `text` | `NULL` | Partition key column for the storage table. Pass `NULL` to leave unchanged. |
+| `partition_by` | `text` | `NULL` | Partition key column for the storage table. Pass `NULL` to leave unchanged. Changing the key rebuilds storage and is rejected if external objects depend on it. |
 | `max_differential_joins` | `integer` | `NULL` | Per-stream-table cap on join combinations during differential refresh. Pass `NULL` to leave unchanged. |
 | `max_delta_fraction` | `float8` | `NULL` | Per-stream-table AUTO cost model threshold (0.0–1.0). Pass `NULL` to leave unchanged. |
 | `post_refresh_action` | `text` | `NULL` | Action to take after each successful refresh: `'reindex'` (rebuild indexes when drift exceeds threshold) or `NULL` (no action). |
