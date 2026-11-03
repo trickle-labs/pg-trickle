@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.109.0 — CDC and differential refresh correctness](#01090--cdc-and-differential-refresh-correctness)
 - [0.108.1 — IMMEDIATE cascade consistency and recovery](#01081--immediate-cascade-consistency-and-recovery)
 - [0.108.0 — Incremental graph and consumer recovery qualification](#01080--incremental-graph-and-consumer-recovery-qualification)
 - [0.107.0 — Verified support and operator procedures](#01070--verified-support-and-operator-procedures)
@@ -222,6 +223,14 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+Future changes will be listed here.
+
+## [0.109.0] — CDC and differential refresh correctness
+
+v0.109.0 hardens CDC, differential refresh, and recovery under concurrent
+workloads. It also qualifies the candidate against the published v0.108.3
+package and preserves the existing CDC and delta persistence formats.
+
 - Rebind output-delta stream and payload relation OIDs after logical restore,
   invalidating existing consumers before rebinding so the contract guard remains
   enabled afterward.
@@ -235,7 +244,7 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 - Retire local WAL slots only after consumer removal or trigger fallback commits.
   Caller rollback preserves the original slot; durable cleanup reservations also
   cover interrupted creation and restart after physical removal. This requires
-  the `0.108.3` to `0.108.4` catalog upgrade (#1222).
+  the `0.108.3` to `0.109.0` catalog upgrade (#1222).
 - Reject initial population under REPEATABLE READ or SERIALIZABLE rather than
   publish a newer capture frontier over rows from an older snapshot. Retry
   under READ COMMITTED, or defer initial population until the first refresh
@@ -318,8 +327,6 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 - Keep differential SUM and AVG correct when changes include `Infinity`, `-Infinity`, or `NaN`, rescanning only affected groups (#1209).
 - Keep differential STDDEV/VAR correct after non-finite values are removed, rescanning affected groups and rebuilding their sum and sum-of-squares state (#1206).
 - Preserve numeric scale changes in CDC masks so scale-dependent consumers stay current in row and statement trigger modes (#1210).
-
-Future changes will be listed here.
 
 ## [0.108.1] — IMMEDIATE cascade consistency and recovery
 

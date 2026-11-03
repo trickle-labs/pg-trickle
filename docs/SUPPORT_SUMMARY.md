@@ -3,7 +3,7 @@
 This file is generated from the release admission fixtures. Run
 `python3 scripts/generate_capability_manifest.py` to update it.
 
-Release: `0.108.4`
+Release: `0.109.0`
 
 ## Capability status
 

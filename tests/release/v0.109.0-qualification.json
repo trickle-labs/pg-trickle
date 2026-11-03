@@ -1,6 +1,6 @@
 {
   "contract_version": 3,
-  "release_version": "0.108.4",
+  "release_version": "0.109.0",
   "source_versions": [
     "0.108.3",
     "0.106.1"
@@ -142,11 +142,11 @@
       "runtime": false,
       "upgrade": false,
       "requires_postgresql": false,
-      "suite_version": "0.108.4",
-      "command": "python3 scripts/v0_108_4_release_gate.py",
+      "suite_version": "0.109.0",
+      "command": "python3 scripts/v0_109_0_release_gate.py",
       "command_argv": [
         "python3",
-        "scripts/v0_108_4_release_gate.py"
+        "scripts/v0_109_0_release_gate.py"
       ],
       "workload": "qualification contract, workflow publication dependencies, and failed-evidence negative controls"
     },
@@ -158,7 +158,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_v108_conformance.sh",
       "command_argv": [
         "bash",
@@ -175,7 +175,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_v108_conformance.sh --test-threads 1 --test e2e_v108_conformance_tests",
       "command_argv": [
         "bash",
@@ -196,7 +196,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_e2e_tests.sh --test e2e_output_delta_qualification_disabled_tests",
       "command_argv": [
         "bash",
@@ -215,7 +215,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_diff_full_equivalence_tests --filter test_diff_full_equivalence_exists_and_not_exists_simultaneous_changes",
       "command_argv": [
         "bash",
@@ -235,7 +235,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "nextest_retries": 0,
       "command": "bash scripts/run_e2e_tests.sh --test-threads 1 --test e2e_failure_recovery_tests --test e2e_dvm_failpoint_tests --test e2e_refresh_atomicity_tests -E test(/^(test_lock_timeout_during_refresh|test_statement_timeout_during_refresh_recovers|test_cancel_backend_during_refresh_recovers|test_dvm_failpoint_preserves_last_committed_result_and_recovers|test_refresh_after_apply_failure_rolls_back|test_refresh_finalization_failure_rolls_back|test_refresh_caller_rollback_preserves_committed_state|test_refresh_savepoint_rollback_preserves_outer_transaction|test_refresh_two_callers_publish_one_consistent_result|test_refresh_concurrent_writer_preserves_next_batch|test_refresh_auxiliary_state_failure_rolls_back|test_refresh_partial_finalization_control_is_detected|test_refresh_early_progress_control_is_detected)$/)",
       "command_argv": [
@@ -287,7 +287,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_sensitivity_baseline_tests",
       "command_argv": [
         "bash",
@@ -316,7 +316,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_v098_stability_tests",
       "command_argv": [
         "bash",
@@ -334,15 +334,15 @@
       "runtime": true,
       "upgrade": true,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
-      "command": "bash scripts/qualify_live_package_upgrade.sh 0.106.1 0.108.4",
+      "suite_version": "0.109.0",
+      "command": "bash scripts/qualify_live_package_upgrade.sh 0.106.1 0.109.0",
       "command_argv": [
         "bash",
         "scripts/qualify_live_package_upgrade.sh",
         "0.106.1",
-        "0.108.4"
+        "0.109.0"
       ],
-      "workload": "pg-mdm-pinned v0.106.1 package upgraded to v0.108.4: reject active consumers, require explicit resnapshot and protected FULL rebuild, preserve pending changes and durable consumer data, reject stale resnapshot tokens, then activate fresh baselines"
+      "workload": "pg-mdm-pinned v0.106.1 package upgraded to v0.109.0: reject active consumers, require explicit resnapshot and protected FULL rebuild, preserve pending changes and durable consumer data, reject stale resnapshot tokens, then activate fresh baselines"
     },
     {
       "id": "recreation",
@@ -352,7 +352,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_upgrade_tests --filter test_upgrade_drop_recreate_roundtrip",
       "command_argv": [
         "bash",
@@ -375,7 +375,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_pg_dump_tests",
       "command_argv": [
         "bash",
@@ -393,7 +393,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_failure_recovery_tests --filter test_recovery_clone_isolation_requires_explicit_adoption --ignored",
       "command_argv": [
         "bash",
@@ -417,7 +417,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_smoke_tests",
       "command_argv": [
         "bash",
@@ -435,12 +435,12 @@
       "runtime": false,
       "upgrade": true,
       "requires_postgresql": false,
-      "suite_version": "0.108.4",
-      "command": "scripts/check_upgrade_completeness.sh 0.108.3 0.108.4",
+      "suite_version": "0.109.0",
+      "command": "scripts/check_upgrade_completeness.sh 0.108.3 0.109.0",
       "command_argv": [
         "scripts/check_upgrade_completeness.sh",
         "0.108.3",
-        "0.108.4"
+        "0.109.0"
       ],
       "workload": "supported prior-package migration path and catalog completeness"
     },
@@ -452,12 +452,12 @@
       "runtime": false,
       "upgrade": false,
       "requires_postgresql": false,
-      "suite_version": "0.108.4",
-      "command": "scripts/check_version_sync.sh --expected-tag v0.108.4",
+      "suite_version": "0.109.0",
+      "command": "scripts/check_version_sync.sh --expected-tag v0.109.0",
       "command_argv": [
         "scripts/check_version_sync.sh",
         "--expected-tag",
-        "v0.108.4"
+        "v0.109.0"
       ],
       "workload": "release metadata, archive, upgrade, and package layout validation"
     },
@@ -469,7 +469,7 @@
       "runtime": false,
       "upgrade": false,
       "requires_postgresql": false,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "python3 scripts/check_monitoring_contract.py",
       "command_argv": [
         "python3",
@@ -485,7 +485,7 @@
       "runtime": false,
       "upgrade": false,
       "requires_postgresql": false,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "python3 scripts/run_release_criterion.py",
       "command_argv": [
         "python3",
@@ -502,7 +502,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "cargo test --features pg18 --test e2e_bench_tests bench_release_database_workloads -- --ignored --exact --nocapture",
       "command_argv": [
         "cargo",
@@ -529,7 +529,7 @@
       "runtime": false,
       "upgrade": false,
       "requires_postgresql": false,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "python3 scripts/generate_capability_manifest.py --check",
       "command_argv": [
         "python3",
@@ -546,7 +546,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_dvm_composition_tests --filter test_v0873_mandatory_composition_matrix",
       "command_argv": [
         "bash",
@@ -566,7 +566,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_dvm_negative_control_tests",
       "command_argv": [
         "bash",
@@ -584,7 +584,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_v107_operator_route_tests",
       "command_argv": [
         "bash",
@@ -602,7 +602,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_v107_operator_route_tests",
       "command_argv": [
         "bash",
@@ -620,7 +620,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --no-capture --test e2e_publication_crash_recovery_tests",
       "command_argv": [
         "bash",
@@ -651,7 +651,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_v107_resource_tests.sh",
       "command_argv": [
         "bash",
@@ -672,7 +672,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_v107_support_tests.sh",
       "command_argv": [
         "bash",
@@ -696,7 +696,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "cargo test --features pg18 --test e2e_v107_wal_transition_tests test_v107_auto_wal_transition_captures_changes -- --exact --nocapture",
       "command_argv": [
         "cargo",
@@ -721,12 +721,12 @@
       "runtime": true,
       "upgrade": true,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
-      "command": "bash -c PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 0.108.4 && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO=0.108.4 scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture",
+      "suite_version": "0.109.0",
+      "command": "bash -c PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 0.109.0 && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO=0.109.0 scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture",
       "command_argv": [
         "bash",
         "-c",
-        "PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 0.108.4 && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO=0.108.4 scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture"
+        "PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 0.109.0 && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO=0.109.0 scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture"
       ],
       "required_cases": [
         "e2e_upgrade_tests::test_upgrade_v1082_rebuilds_bpchar_identity_before_differential"
@@ -746,7 +746,7 @@
       "runtime": true,
       "upgrade": false,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
+      "suite_version": "0.109.0",
       "command": "bash scripts/run_light_e2e_tests.sh --no-capture --test e2e_wal_receipt_recovery_tests",
       "command_argv": [
         "bash",
@@ -781,15 +781,15 @@
       "runtime": true,
       "upgrade": true,
       "requires_postgresql": true,
-      "suite_version": "0.108.4",
-      "command": "bash scripts/qualify_live_package_upgrade.sh 0.108.3 0.108.4",
+      "suite_version": "0.109.0",
+      "command": "bash scripts/qualify_live_package_upgrade.sh 0.108.3 0.109.0",
       "command_argv": [
         "bash",
         "scripts/qualify_live_package_upgrade.sh",
         "0.108.3",
-        "0.108.4"
+        "0.109.0"
       ],
-      "workload": "published v0.108.3 binary and live WAL slot upgraded to v0.108.4: preserve rows/frontier, private logged queue, rollback and committed retirement"
+      "workload": "published v0.108.3 binary and live WAL slot upgraded to v0.109.0: preserve rows/frontier, private logged queue, rollback and committed retirement"
     }
   ],
   "artifacts": [
@@ -799,7 +799,7 @@
       "support_tier": "runtime-qualified",
       "required": true,
       "postgresql_major": 18,
-      "version": "0.108.4"
+      "version": "0.109.0"
     },
     {
       "id": "linux-arm64",
@@ -807,7 +807,7 @@
       "support_tier": "build-only",
       "required": true,
       "postgresql_major": 18,
-      "version": "0.108.4"
+      "version": "0.109.0"
     },
     {
       "id": "macos-arm64",
@@ -815,7 +815,7 @@
       "support_tier": "build-only",
       "required": true,
       "postgresql_major": 18,
-      "version": "0.108.4"
+      "version": "0.109.0"
     },
     {
       "id": "windows-amd64",
@@ -823,7 +823,7 @@
       "support_tier": "best-effort",
       "required": false,
       "postgresql_major": 18,
-      "version": "0.108.4"
+      "version": "0.109.0"
     }
   ],
   "workloads": [

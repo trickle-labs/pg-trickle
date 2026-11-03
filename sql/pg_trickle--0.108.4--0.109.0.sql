@@ -1,0 +1,3 @@
+-- pg_trickle v0.108.4 -> v0.109.0
+-- The v0.109.0 release adds no catalog changes beyond the WAL retirement table
+-- introduced in the 0.108.4 development candidate.

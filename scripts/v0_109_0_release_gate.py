@@ -35,7 +35,7 @@ PAUSE_CASES = {
 def check_retirement_contract(contract: dict) -> None:
     release_gate = next(item for item in contract["required_suites"] if item["id"] == "release-gate")
     prior.shared.require(
-        release_gate["command_argv"] == ["python3", "scripts/v0_108_4_release_gate.py"],
+        release_gate["command_argv"] == ["python3", "scripts/v0_109_0_release_gate.py"],
         "release qualification must invoke the current retirement gate",
     )
     suite = next(item for item in contract["required_suites"] if item["id"] == "wal-retirement")
@@ -50,20 +50,20 @@ def check_retirement_contract(contract: dict) -> None:
     )
     upgrade = next(item for item in contract["required_suites"] if item["id"] == "wal-retirement-upgrade")
     prior.shared.require(
-        upgrade["command_argv"] == ["bash", "scripts/qualify_live_package_upgrade.sh", "0.108.3", "0.108.4"],
+        upgrade["command_argv"] == ["bash", "scripts/qualify_live_package_upgrade.sh", "0.108.3", "0.109.0"],
         "retirement upgrade must start from the actual published predecessor package",
     )
 
 
 def main() -> None:
-    prior.VERSION = "0.108.4"
+    prior.VERSION = "0.109.0"
     prior.PREVIOUS_VERSION = "0.108.3"
     prior.SOURCE_VERSIONS = ["0.108.3", "0.106.1"]
-    prior.GATE_SCRIPT = "v0_108_4_release_gate.py"
+    prior.GATE_SCRIPT = "v0_109_0_release_gate.py"
     prior.REQUIRED_CASES = prior.REQUIRED_CASES | CASES | PAUSE_CASES
     prior.REQUIRED_SHARDS = prior.REQUIRED_SHARDS | {"wal-retirement"}
     prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {"wal-retirement", "wal-retirement-upgrade"}
-    contract = json.loads((prior.ROOT / "tests/release/v0.108.4-qualification.json").read_text())
+    contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
     check_retirement_contract(contract)
     prior.main()
 

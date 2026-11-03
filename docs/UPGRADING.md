@@ -2,6 +2,41 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.108.3 to 0.109.0
+
+Install the v0.109.0 library and extension files, then apply the upgrade:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.109.0';
+```
+
+The migration adds an internal durable reservation table for local WAL-slot
+retirement. It preserves rollback and restart recovery while a slot is being
+removed; existing stream tables and consumer payloads are retained.
+
+This release also corrects several differential-refresh and CDC cases. Review
+existing stream tables that use casted or complex aggregates, count composite
+values containing NULL fields, or use filtered `AVG`, statistical, or
+covariance aggregates. If they could have refreshed under the affected
+behavior, reinitialize and refresh only those tables:
+
+```sql
+SELECT pgtrickle.reinitialize_stream_table('public.my_stream_table');
+SELECT pgtrickle.refresh_stream_table('public.my_stream_table');
+```
+
+For existing installations that use trigger CDC, rebuild the trigger masks so
+numeric scale-only updates are captured by the new library, then reinitialize
+any affected stream tables whose results may already be stale:
+
+```sql
+SELECT pgtrickle.rebuild_cdc_triggers();
+```
+
+The release notes describe the affected query shapes and any narrower recovery
+conditions. Other stream tables do not require a full rebuild solely because
+of this upgrade.
+
 ## 0.108.1 to 0.108.2
 
 Install the v0.108.2 library and extension files, then apply the upgrade:

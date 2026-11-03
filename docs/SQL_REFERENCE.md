@@ -1304,7 +1304,7 @@ SELECT pgtrickle.drop_stream_table('order_totals');
 - Local WAL slot removal is queued transactionally and performed by the
   scheduler after commit. Rolling back the call preserves the slot. A disabled
   scheduler defers physical cleanup and WAL release. Upgrade the extension
-  catalog to `0.108.4` before using this behavior.
+  catalog to `0.109.0` before using this behavior.
 - Reusing a dropped source's name can conflict with its pending WAL slot
   reservation. Drop the old suspended consumer, let the scheduler finish that
   retirement, then retry registering the replacement source.

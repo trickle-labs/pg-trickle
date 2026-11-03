@@ -7,7 +7,7 @@ class ReleaseCriterionTests(unittest.TestCase):
     def test_baseline_matches_previous_release_in_current_contract(self) -> None:
         self.assertEqual(BASELINE_TAG, "v0.108.3")
         self.assertEqual(BASELINE_VERSION, "0.108.3")
-        self.assertEqual(QUALIFICATION.name, "v0.108.4-qualification.json")
+        self.assertEqual(QUALIFICATION.name, "v0.109.0-qualification.json")
 
 
 if __name__ == "__main__":
