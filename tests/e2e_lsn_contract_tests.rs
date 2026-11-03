@@ -104,7 +104,7 @@ async fn manual_late_commit_preserves_exact_results(warm_transaction: bool) {
     let (a_first_lsn, a_last_lsn, captured_rows, captured_xids): (String, String, i64, i64) =
         sqlx::query_as(AssertSqlSafe(format!(
             "SELECT MIN(lsn)::text, MAX(lsn)::text, count(*)::bigint, \
-                    count(DISTINCT source_xid)::bigint \
+                    count(DISTINCT source_xid::text)::bigint \
              FROM {buffer} WHERE id = 2 AND action IN ('I', 'D')"
         )))
         .fetch_one(&mut *writer_a)
