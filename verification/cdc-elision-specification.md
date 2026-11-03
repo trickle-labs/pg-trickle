@@ -42,7 +42,12 @@ proves the signed count semantics, not PostgreSQL's aggregate execution or the
 whole-batch validity of every production history; those remain runtime
 conformance and caller-assumption boundaries. The bucket history predicate
 rejects an unmatched delete and its lemma establishes nonnegative multiplicity
-for every accepted prefix.
+for every accepted prefix. `identity_window_projection` now projects an
+interleaved global capture log onto one complete identity, source incarnation,
+and consumer cut, and `identity_projection_preserves_image_bucket_delta` proves
+that projection preserves each complete-image bucket's signed sum. This closes
+the model-side projection gap; production SQL partitioning, transaction
+visibility and database window execution remain adapter boundaries.
 `can_compact_history` admits compaction only for an immediate unique identity,
 one dependent stream table and a selected LSN range with no captured TRUNCATE
 marker. Base sources supply primary-key metadata; stream-table sources supply

@@ -346,6 +346,36 @@ pub open spec fn identity_event_in_window(
         )
 }
 
+/// Project a global capture log onto one row identity, source incarnation,
+/// and consumer LSN window while preserving the original event order.
+pub open spec fn identity_window_projection(
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> Seq<CapturedImageEvent>
+    decreases count,
+{
+    if count <= 0 || count > history.len() {
+        Seq::<CapturedImageEvent>::empty()
+    } else {
+        let prefix = identity_window_projection(
+            history, count - 1, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        );
+        if identity_event_in_window(
+            history[count - 1], row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ) {
+            prefix.push(history[count - 1])
+        } else {
+            prefix
+        }
+    }
+}
+
 /// Signed multiplicity for one complete row-image bucket in one source
 /// incarnation and one consumer's `(previous_cut, new_cut]` window.
 pub open spec fn captured_image_weight(
@@ -1602,6 +1632,76 @@ pub proof fn append_captured_image_bucket_delta(
         history, appended, history.len() as int, row_identity, row_image,
         source_incarnation, previous_cut, new_cut,
     );
+}
+
+/// Filtering an interleaved capture log to one identity, incarnation, and
+/// consumer window preserves that bucket's signed image delta.
+pub proof fn identity_projection_preserves_image_bucket_delta(
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        0 <= count <= history.len(),
+        previous_cut <= new_cut,
+    ensures
+        captured_image_bucket_delta(
+            history, count, row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        ) == captured_image_bucket_delta(
+            identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ),
+            identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ).len() as int,
+            row_identity, row_image, source_incarnation, previous_cut, new_cut,
+        ),
+    decreases count,
+{
+    if count > 0 {
+        let event = history[count - 1];
+        let prefix = identity_window_projection(
+            history, count - 1, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        );
+        let selected = identity_event_in_window(
+            event, row_identity, source_incarnation, previous_cut, new_cut,
+        );
+        identity_projection_preserves_image_bucket_delta(
+            history, count - 1, row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        );
+        reveal(identity_window_projection);
+        reveal(captured_image_bucket_delta);
+        if selected {
+            append_captured_image_bucket_delta(
+                prefix, event, row_identity, row_image, source_incarnation,
+                previous_cut, new_cut,
+            );
+            assert(identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ) == prefix.push(event));
+        } else {
+            reveal(captured_image_weight);
+            reveal(identity_event_in_window);
+            assert(captured_image_weight(
+                event, row_identity, row_image, source_incarnation,
+                previous_cut, new_cut,
+            ) == 0);
+            assert(identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ) == prefix);
+        }
+    }
 }
 
 /// Events from one committed source transaction share one abstract visibility

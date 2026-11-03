@@ -39,6 +39,7 @@ OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "valid_history_endpoint_states",
     "valid_history_compaction_preserves_image_delta",
     "different_identity_has_zero_image_weight",
+    "identity_projection_preserves_image_bucket_delta",
     "interleaved_row_identity_histories_preserve_endpoints",
     "multi_identity_compaction_preserves_bag_delta",
     "multi_identity_history_preserves_bag_delta",
@@ -92,6 +93,14 @@ MUTATIONS = {
         "    event.row_identity == row_identity\n        && captured_event_in_window(",
         "    true\n        && captured_event_in_window(",
     ),
+    "include-outside-window-in-identity-projection": (
+        "if identity_event_in_window(\n            history[count - 1], row_identity, source_incarnation,\n            previous_cut, new_cut,\n        ) {\n            prefix.push(history[count - 1])\n        } else {\n            prefix\n        }",
+        "if true {\n            prefix.push(history[count - 1])\n        } else {\n            prefix\n        }",
+    ),
+    "drop-selected-event-from-identity-projection": (
+        "if identity_event_in_window(\n            history[count - 1], row_identity, source_incarnation,\n            previous_cut, new_cut,\n        ) {\n            prefix.push(history[count - 1])\n        } else {\n            prefix\n        }",
+        "if false {\n            prefix.push(history[count - 1])\n        } else {\n            prefix\n        }",
+    ),
     "lost-identity-compaction-delta": (
         "        compacted_image_bucket_delta(\n            histories[index], histories[index].len() as int,\n            histories[index].len() as int, row_image,\n        ) + multi_identity_compacted_bucket_delta(",
         "        multi_identity_compacted_bucket_delta(",
@@ -124,6 +133,8 @@ MUTATIONS = {
 }
 MUTATION_FAILURE_MARKERS = {
     "lost-identity-bag-delta": "assertion failed",
+    "include-outside-window-in-identity-projection": "assertion failed",
+    "drop-selected-event-from-identity-projection": "assertion failed",
 }
 
 
