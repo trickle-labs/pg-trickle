@@ -96,6 +96,13 @@ stream table with its defining query. The focused PostgreSQL 18 Testcontainers
 case passed locally (1/1). This qualifies a finite key-movement history; the
 proof still assumes the complete production history has already been
 partitioned by the same exact identity.
+The companion `test_cdc_immediate_key_move_preserves_protected_consumer_cut`
+case advances a fast consumer after key 1→2, lets a lagging consumer process
+the later 2→3 move, then catches the fast consumer up. It verifies that the
+delete for key 2 remains available after the slow refresh and that both
+consumers reach the final result in both trigger modes. Its focused PostgreSQL
+18 Testcontainers run passed (1/1); this is a finite witness for the shared
+consumer gate and does not prove all consumer schedules.
 
 The PK scan reducer now uses the checked `scan_initial_row_present`,
 `scan_final_row_present`, `scan_delete_candidate` and
@@ -367,7 +374,7 @@ postcondition, including:
 `lost-identity-bag-delta`;
 compilation/setup failures do not count. The
 candidate-binding helper requires these obligations and controls, hashes the
-production callers and the installed test sources, requires all 25 named
+production callers and the installed test sources, requires all 26 named
 installed cases in `CDC_ELISION_CASES`, and checks identical
 packaged/installed library bytes. CI uses the existing proof and candidate
 jobs, without introducing a tier.
@@ -390,10 +397,10 @@ remains excluded.
 The earlier three-case/62-test report records the initial candidate binding;
 it is superseded by the expanded selection. On 2026-11-03, the local PostgreSQL
 18 E2E runner passed all 24 cases then in `CDC_ELISION_CASES` across four test
-binaries. The gate now contains 25 cases; the added immediate-key movement
-case passed its focused local run, but the full 25-case selection and hosted
-exact-candidate binding remain to be checked. Hosted binding must verify the
-requested commit and packaged/installed bytes.
+binaries. The gate now contains 26 cases; the immediate-key movement and
+protected-cut cases each passed focused local runs, but the full 26-case
+selection and hosted exact-candidate binding remain to be checked. Hosted
+binding must verify the requested commit and packaged/installed bytes.
 The generated semantic floor remains red at 16/34 passes; that separate floor
 does not measure the installed CDC case selection.
 
