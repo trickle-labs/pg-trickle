@@ -1929,6 +1929,8 @@ async fn test_shared_domain_over_admitted_base_retains_changed_bit() {
         )
         .await
         .expect("admit domain-backed source with selected trigger mode");
+        let expected_query = format!("SELECT id, v FROM {source}");
+        db.assert_st_matches_query(&stream, &expected_query).await;
 
         let source_oid: i64 = db
             .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
@@ -1937,7 +1939,7 @@ async fn test_shared_domain_over_admitted_base_retains_changed_bit() {
         let before: i64 = db
             .query_scalar(&format!("SELECT COALESCE(max(change_id), 0) FROM {buffer}"))
             .await;
-        db.execute(&format!("UPDATE {source} SET v = 1 WHERE id = 1"))
+        db.execute(&format!("UPDATE {source} SET v = 2 WHERE id = 1"))
             .await;
 
         let (captured, changed): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -1948,7 +1950,52 @@ async fn test_shared_domain_over_admitted_base_retains_changed_bit() {
         .await
         .unwrap();
         assert_eq!(captured, 2, "{mode}: capture both UPDATE images");
-        assert_eq!(changed, 2, "{mode}: conservatively retain the domain bit");
+        assert_eq!(changed, 2, "{mode}: retain the changed domain value");
+
+        let before_refresh: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy = 'differential'",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
+        )
+        .await
+        .expect("consume the changed unknown-type image incrementally");
+        let differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+                 WHERE s.pgt_name = '{stream}' AND h.refresh_id > {before_refresh} \
+                   AND h.status = 'COMPLETED' AND h.action = 'DIFFERENTIAL' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(differential, "{mode}: update used the differential route");
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &stream,
+            &expected_query,
+            "unknown domain type update",
+        )
+        .await;
+
+        let before: i64 = db
+            .query_scalar(&format!("SELECT COALESCE(max(change_id), 0) FROM {buffer}"))
+            .await;
+        db.execute(&format!("UPDATE {source} SET v = 2 WHERE id = 1"))
+            .await;
+        let (captured, changed): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*), count(*) FILTER (WHERE get_bit(changed_cols, 1) = 1) \
+             FROM {buffer} WHERE change_id > {before} AND action IN ('D', 'I')"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(captured, 2, "{mode}: capture same-value UPDATE images");
+        assert_eq!(changed, 2, "{mode}: retain the same-value domain bit");
     }
 }
 
