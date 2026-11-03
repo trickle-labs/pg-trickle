@@ -18,6 +18,7 @@ EXECUTABLE_OBLIGATIONS = [
     "image_action",
     "image_action_priority",
     "can_compact_history",
+    "compact_event_pruned",
     "scan_initial_row_present",
     "scan_final_row_present",
     "scan_delete_candidate",
@@ -62,6 +63,14 @@ MUTATIONS = {
     "cross-shared-consumer": (
         "    has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier\n",
         "    has_immediate_unique_identity && !has_truncate_barrier\n",
+    ),
+    "lost-intermediate-compaction": (
+        "(ImageEvent::Delete, ImageEvent::Insert) => interior,",
+        "(ImageEvent::Delete, ImageEvent::Insert) => false,",
+    ),
+    "keep-extra-first-insert": (
+        "(ImageEvent::Insert, ImageEvent::Insert) => interior || (rn_asc == 1 && rn_desc > 1),",
+        "(ImageEvent::Insert, ImageEvent::Insert) => interior,",
     ),
     "key-only-image-bucket": (
         ") && event.row_image == row_image",
@@ -129,6 +138,10 @@ def check_contract() -> None:
     cdc = (runner.ROOT / "src/cdc/mod.rs").read_text()
     if cdc.count("crate::cdc_elision::can_compact_history(") != 2:
         raise ValueError("base and stream-table compaction must use the checked barrier decision")
+    if cdc.count("crate::cdc_elision::compaction_prune_sql(") != 2:
+        raise ValueError("base and stream-table compaction must use the checked prune decision")
+    if "COMPACTION_PRUNE_PREDICATE" in cdc:
+        raise ValueError("compaction SQL must not bypass the checked prune adapter")
     scan = (runner.ROOT / "src/dvm/operators/scan.rs").read_text()
     for adapter in [
         "scan_initial_row_present_sql(", "scan_final_row_present_sql(",

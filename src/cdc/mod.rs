@@ -1404,11 +1404,6 @@ pub fn count_downstream_st_consumers(pgt_id: i64) -> i64 {
 // QUAL-3: CompactionResult moved to src/cdc/compact.rs.
 pub use compact::CompactionResult;
 
-const COMPACTION_PRUNE_PREDICATE: &str = "(first_act = 'I' AND last_act = 'D') \
-    OR (rn_asc > 1 AND rn_desc > 1) \
-    OR (first_act = 'I' AND last_act = 'I' AND rn_asc = 1 AND rn_desc > 1) \
-    OR (first_act = 'D' AND last_act = 'D' AND rn_desc = 1 AND rn_asc > 1)";
-
 /// C-4: Compact a change buffer to the minimal endpoint actions per
 /// `__pgt_row_id`, removing net-zero histories and superseded events.
 ///
@@ -1520,6 +1515,8 @@ pub fn compact_change_buffer(
 
     // Keep the minimal endpoints for each identity: nothing for I→D, both for
     // D→I, only the last row for I→I, and only the first row for D→D.
+    let prune_predicate =
+        crate::cdc_elision::compaction_prune_sql("first_act", "last_act", "rn_asc", "rn_desc");
     let compact_sql = format!(
         "DELETE FROM \"{schema}\".{buf} \
          WHERE change_id IN (\
@@ -1542,7 +1539,7 @@ pub fn compact_change_buffer(
          )",
         schema = change_schema,
         buf = buf_name,
-        prune_predicate = COMPACTION_PRUNE_PREDICATE,
+        prune_predicate = prune_predicate,
     );
 
     let deleted = Spi::connect_mut(|client| {
@@ -1705,6 +1702,8 @@ pub fn compact_st_change_buffer(
 /// Pure function for unit-testability. Generates a DELETE that retains only
 /// the minimal endpoint events for each `__pgt_row_id` history.
 fn build_st_compact_sql(change_schema: &str, pgt_id: i64, prev_lsn: &str, new_lsn: &str) -> String {
+    let prune_predicate =
+        crate::cdc_elision::compaction_prune_sql("first_act", "last_act", "rn_asc", "rn_desc");
     format!(
         "DELETE FROM \"{schema}\".changes_pgt_{id} \
          WHERE change_id IN (\
@@ -1727,7 +1726,7 @@ fn build_st_compact_sql(change_schema: &str, pgt_id: i64, prev_lsn: &str, new_ls
          )",
         schema = change_schema,
         id = pgt_id,
-        prune_predicate = COMPACTION_PRUNE_PREDICATE,
+        prune_predicate = prune_predicate,
     )
 }
 
