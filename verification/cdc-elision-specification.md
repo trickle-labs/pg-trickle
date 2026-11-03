@@ -88,6 +88,14 @@ statement trigger modes. It checks captured images and transaction grouping,
 requires the production base compactor to prune rows, and compares the final
 stream table with its defining query. The existing I/D/I test continues to
 exercise actual ranked-window execution in both base and stream-table buffers.
+The installed `test_cdc_compaction_immediate_key_changes_preserve_per_identity_endpoints`
+regression also moves an immediate primary key through three identities in
+both trigger modes. It checks all four captured D/I images, requires the
+intermediate identity's I/D pair to be pruned, and compares the resulting
+stream table with its defining query. The focused PostgreSQL 18 Testcontainers
+case passed locally (1/1). This qualifies a finite key-movement history; the
+proof still assumes the complete production history has already been
+partitioned by the same exact identity.
 
 The PK scan reducer now uses the checked `scan_initial_row_present`,
 `scan_final_row_present`, `scan_delete_candidate` and
@@ -359,7 +367,7 @@ postcondition, including:
 `lost-identity-bag-delta`;
 compilation/setup failures do not count. The
 candidate-binding helper requires these obligations and controls, hashes the
-production callers and the installed test sources, requires all 24 named
+production callers and the installed test sources, requires all 25 named
 installed cases in `CDC_ELISION_CASES`, and checks identical
 packaged/installed library bytes. CI uses the existing proof and candidate
 jobs, without introducing a tier.
@@ -380,10 +388,12 @@ accepted `db909f1b0a97f06b999a68a478258aa21e2e7e73` for the bounded classifier
 claim and inspected ordinary repairs. Full R1/R2/window/compaction correctness
 remains excluded.
 The earlier three-case/62-test report records the initial candidate binding;
-it is superseded by the expanded 24-case selection. On 2026-11-03, the local
-PostgreSQL 18 E2E runner passed all 24 current `CDC_ELISION_CASES` across four
-test binaries. This local result does not replace the hosted exact-candidate
-binding, which must verify the requested commit and packaged/installed bytes.
+it is superseded by the expanded selection. On 2026-11-03, the local PostgreSQL
+18 E2E runner passed all 24 cases then in `CDC_ELISION_CASES` across four test
+binaries. The gate now contains 25 cases; the added immediate-key movement
+case passed its focused local run, but the full 25-case selection and hosted
+exact-candidate binding remain to be checked. Hosted binding must verify the
+requested commit and packaged/installed bytes.
 The generated semantic floor remains red at 16/34 passes; that separate floor
 does not measure the installed CDC case selection.
 
