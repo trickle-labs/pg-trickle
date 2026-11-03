@@ -40,6 +40,11 @@ OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "valid_history_compaction_preserves_image_delta",
     "different_identity_has_zero_image_weight",
     "identity_projection_preserves_image_bucket_delta",
+    "identity_window_projection_contains_only_selected_events",
+    "identity_window_projection_len_at_most_count",
+    "appended_suffix_preserves_history_prefix_validity",
+    "identity_window_projection_preserves_valid_history",
+    "projected_history_compaction_preserves_image_bucket_delta",
     "interleaved_row_identity_histories_preserve_endpoints",
     "multi_identity_compaction_preserves_bag_delta",
     "multi_identity_history_preserves_bag_delta",
@@ -100,6 +105,10 @@ MUTATIONS = {
     "drop-selected-event-from-identity-projection": (
         "if identity_event_in_window(\n            history[count - 1], row_identity, source_incarnation,\n            previous_cut, new_cut,\n        ) {\n            prefix.push(history[count - 1])\n        } else {\n            prefix\n        }",
         "if false {\n            prefix.push(history[count - 1])\n        } else {\n            prefix\n        }",
+    ),
+    "compact-global-history-before-projection": (
+        "ensures\n        compacted_image_bucket_delta(\n            identity_window_projection(\n                history, count, row_identity, source_incarnation,\n                previous_cut, new_cut,\n            ),",
+        "ensures\n        compacted_image_bucket_delta(\n            history,",
     ),
     "lost-identity-compaction-delta": (
         "        compacted_image_bucket_delta(\n            histories[index], histories[index].len() as int,\n            histories[index].len() as int, row_image,\n        ) + multi_identity_compacted_bucket_delta(",
