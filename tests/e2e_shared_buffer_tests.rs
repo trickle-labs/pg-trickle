@@ -871,6 +871,154 @@ async fn test_cdc_interleaved_identity_history_preserves_protected_cuts() {
 }
 
 #[tokio::test]
+async fn test_cdc_many_identity_histories_preserve_staggered_consumer_cuts() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    async fn refresh_differential(db: &E2eDb, name: &str) {
+        let before: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+        )
+        .await
+        .unwrap();
+        let differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{name}' AND h.refresh_id>{before} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            differential,
+            "{name} must refresh differentially without fallback"
+        );
+    }
+
+    for mode in ["row", "statement"] {
+        let source = format!("many_identity_cuts_{mode}");
+        let fast = format!("{source}_fast");
+        let slow = format!("{source}_slow");
+        let query = format!("SELECT payload FROM {source}");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, payload TEXT NOT NULL)"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES \
+             (1,'a'),(2,'a'),(3,'b'),(4,'b'),(5,'c'),(6,'c')"
+        ))
+        .await;
+        for name in [&fast, &slow] {
+            db.try_execute_with_config(
+                &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+                &format!(
+                    "SELECT pgtrickle.create_stream_table('{name}',$q${query}$q$,'24h','DIFFERENTIAL')"
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        // Six source identities repeatedly share the same visible complete-row
+        // images. The slow consumer takes the first cut while the fast consumer
+        // advances twice through overlapping image buckets.
+        db.execute(&format!(
+            "UPDATE {source} SET payload = CASE id \
+             WHEN 1 THEN 'b' WHEN 2 THEN 'c' WHEN 3 THEN 'a' \
+             WHEN 4 THEN 'd' WHEN 5 THEN 'd' WHEN 6 THEN 'a' END"
+        ))
+        .await;
+        refresh_differential(&db, &slow).await;
+        let slow_first_cut = "SELECT * FROM (VALUES \
+            ('b'::text),('c'::text),('a'::text),('d'::text),('d'::text),('a'::text)\
+            ) AS expected(payload)";
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &slow,
+            slow_first_cut,
+            "six identities at the protected first consumer cut",
+        )
+        .await;
+
+        db.execute(&format!(
+            "UPDATE {source} SET payload = CASE id \
+             WHEN 1 THEN 'd' WHEN 2 THEN 'd' WHEN 3 THEN 'c' \
+             WHEN 4 THEN 'a' WHEN 5 THEN 'b' WHEN 6 THEN 'e' END"
+        ))
+        .await;
+        refresh_differential(&db, &fast).await;
+        let fast_second_cut = "SELECT * FROM (VALUES \
+            ('d'::text),('d'::text),('c'::text),('a'::text),('b'::text),('e'::text)\
+            ) AS expected(payload)";
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &fast,
+            fast_second_cut,
+            "fast consumer crossing two committed multi-row histories",
+        )
+        .await;
+
+        db.execute(&format!(
+            "UPDATE {source} SET payload = CASE id \
+             WHEN 1 THEN 'e' WHEN 2 THEN 'e' WHEN 3 THEN 'a' \
+             WHEN 4 THEN 'b' WHEN 5 THEN 'c' WHEN 6 THEN 'd' END"
+        ))
+        .await;
+        refresh_differential(&db, &fast).await;
+        let source_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        let buffer = db.change_buffer_table(source_oid).await;
+        let retained: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM {buffer} WHERE action IN ('D','I')"
+            ))
+            .await;
+        assert!(
+            retained >= 24,
+            "the two later six-row histories must remain available to the slow consumer"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &fast,
+            &query,
+            "fast consumer at the latest six-identity cut",
+        )
+        .await;
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &slow,
+            slow_first_cut,
+            "slow consumer remains at its earlier protected cut",
+        )
+        .await;
+
+        refresh_differential(&db, &slow).await;
+        for name in [&fast, &slow] {
+            e2e::oracle::assert_st_query_exact(
+                &db,
+                name,
+                &query,
+                "both consumers after six-identity catch-up",
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_cdc_deferred_key_swap_preserves_complete_images() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
