@@ -1,5 +1,5 @@
-//! Conservative changed-column and keyed image-action decisions. PostgreSQL
-//! images and SQL lowering remain separate conformance boundaries.
+//! Conservative changed-column, keyed image-action and compaction decisions.
+//! PostgreSQL images and SQL lowering remain separate conformance boundaries.
 
 use vstd::prelude::*;
 
@@ -121,6 +121,44 @@ pub fn can_compact_history(
     ),
 {
     has_immediate_unique_identity && has_single_consumer && !has_truncate_barrier
+}
+
+/// Whether the ranked event is removed by the endpoint compaction policy.
+pub open spec fn compact_event_pruned_spec(
+    first_action: ImageEvent,
+    last_action: ImageEvent,
+    rn_asc: u64,
+    rn_desc: u64,
+) -> bool {
+    match (first_action, last_action) {
+        (ImageEvent::Insert, ImageEvent::Delete) => true,
+        (ImageEvent::Insert, ImageEvent::Insert) => {
+            (rn_asc > 1 && rn_desc > 1) || (rn_asc == 1 && rn_desc > 1)
+        },
+        (ImageEvent::Delete, ImageEvent::Delete) => {
+            (rn_asc > 1 && rn_desc > 1) || (rn_desc == 1 && rn_asc > 1)
+        },
+        (ImageEvent::Delete, ImageEvent::Insert) => rn_asc > 1 && rn_desc > 1,
+    }
+}
+
+/// Checked production decision for pruning one ranked row from a valid
+/// unique-identity history. SQL window execution remains an integration claim.
+pub fn compact_event_pruned(
+    first_action: ImageEvent,
+    last_action: ImageEvent,
+    rn_asc: u64,
+    rn_desc: u64,
+) -> (pruned: bool)
+    ensures pruned == compact_event_pruned_spec(first_action, last_action, rn_asc, rn_desc),
+{
+    let interior = rn_asc > 1 && rn_desc > 1;
+    match (first_action, last_action) {
+        (ImageEvent::Insert, ImageEvent::Delete) => true,
+        (ImageEvent::Insert, ImageEvent::Insert) => interior || (rn_asc == 1 && rn_desc > 1),
+        (ImageEvent::Delete, ImageEvent::Delete) => interior || (rn_desc == 1 && rn_asc > 1),
+        (ImageEvent::Delete, ImageEvent::Insert) => interior,
+    }
 }
 
 pub open spec fn image_event_in_window_spec(
@@ -1244,6 +1282,35 @@ pub fn scan_insert_candidate_sql(last_action_column: &str, action_column: &str) 
     )
 }
 
+/// SQL predicate for events removed by keyed endpoint compaction.
+pub fn compaction_prune_sql(
+    first_action_column: &str,
+    last_action_column: &str,
+    rn_asc_column: &str,
+    rn_desc_column: &str,
+) -> String {
+    let mut clauses = Vec::new();
+    if compact_event_pruned(ImageEvent::Insert, ImageEvent::Delete, 1, 1) {
+        clauses.push(format!(
+            "({first_action_column} = 'I' AND {last_action_column} = 'D')"
+        ));
+    }
+    if compact_event_pruned(ImageEvent::Delete, ImageEvent::Insert, 2, 2) {
+        clauses.push(format!("({rn_asc_column} > 1 AND {rn_desc_column} > 1)"));
+    }
+    if compact_event_pruned(ImageEvent::Insert, ImageEvent::Insert, 1, 2) {
+        clauses.push(format!(
+            "({first_action_column} = 'I' AND {last_action_column} = 'I' AND {rn_asc_column} = 1 AND {rn_desc_column} > 1)"
+        ));
+    }
+    if compact_event_pruned(ImageEvent::Delete, ImageEvent::Delete, 2, 1) {
+        clauses.push(format!(
+            "({first_action_column} = 'D' AND {last_action_column} = 'D' AND {rn_desc_column} = 1 AND {rn_asc_column} > 1)"
+        ));
+    }
+    clauses.join(" OR ")
+}
+
 /// Unknown types never invoke a send/equality function and retain their bit.
 pub fn changed_column_sql(old: &str, new: &str) -> String {
     let admitted = [16, 20, 21, 23, 2950]
@@ -1336,6 +1403,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn compaction_prune_decision_matches_endpoint_sql_for_ranked_rows() {
+        for first in [ImageEvent::Insert, ImageEvent::Delete] {
+            for last in [ImageEvent::Insert, ImageEvent::Delete] {
+                for rn_asc in 1..=4 {
+                    for rn_desc in 1..=4 {
+                        let interior = rn_asc > 1 && rn_desc > 1;
+                        let expected = match (first, last) {
+                            (ImageEvent::Insert, ImageEvent::Delete) => true,
+                            (ImageEvent::Insert, ImageEvent::Insert) => {
+                                (rn_asc == 1 && rn_desc > 1) || interior
+                            }
+                            (ImageEvent::Delete, ImageEvent::Delete) => {
+                                interior || (rn_desc == 1 && rn_asc > 1)
+                            }
+                            (ImageEvent::Delete, ImageEvent::Insert) => rn_asc > 1 && rn_desc > 1,
+                        };
+                        assert_eq!(compact_event_pruned(first, last, rn_asc, rn_desc), expected);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            compaction_prune_sql("first_act", "last_act", "rn_asc", "rn_desc"),
+            "(first_act = 'I' AND last_act = 'D') OR (rn_asc > 1 AND rn_desc > 1) OR (first_act = 'I' AND last_act = 'I' AND rn_asc = 1 AND rn_desc > 1) OR (first_act = 'D' AND last_act = 'D' AND rn_desc = 1 AND rn_asc > 1)",
+        );
     }
 
     #[test]

@@ -30,8 +30,9 @@ separate integration boundaries.
 
 `verification/cdc_elision.rs` contains the exact production decisions checked
 by Verus: `admitted_image_type`, `keep_change`, `image_event_weight`,
-`image_action`, `image_action_priority` and `can_compact_history`. They require
-no unchecked preconditions. `keyed_weight_sql` obtains the `I` and `D`
+`image_action`, `image_action_priority`, `can_compact_history`, and
+`compact_event_pruned`. They require no unchecked preconditions.
+`keyed_weight_sql` obtains the `I` and `D`
 coefficients from `image_event_weight` before lowering them into PostgreSQL's
 per-image `SUM`; it obtains the insert-before-delete endpoint ordering from
 `image_action_priority`.
@@ -61,9 +62,20 @@ is used by both SQL paths. An installed PostgreSQL 18 regression exercises
 captured I/D/I histories in row and statement trigger modes, checks the
 base-source history's transaction identity, observes both compactors remove
 the superseded rows, and compares both resulting stream tables with their
-defining queries. This qualifies those finite base/ST cases; the SQL
+defining queries. This qualifies those finite base/ST cases; the full SQL
 reducer is not yet covered by the Verus proof, and other capture histories and
 consumer cuts remain subject to the limits below.
+
+The production compaction SQL now obtains its prune predicate from
+`compaction_prune_sql`, which emits each SQL branch only when the checked
+`compact_event_pruned` decision selects its representative endpoint/rank case.
+Exhaustive Rust truth-table coverage checks both action endpoints and rank
+pairs from 1 through 4; the pinned Verus job verifies the executable decision
+and rejects mutations that retain an extra first INSERT or drop a D→I interior
+event. The installed test still exercises PostgreSQL's actual ranked-window
+execution for the I/D/I case. This binds the endpoint policy to both SQL
+builders, but does not prove the database window-function evaluation or every
+valid history's full-row bag delta.
 
 The PK scan reducer now uses the checked `scan_initial_row_present`,
 `scan_final_row_present`, `scan_delete_candidate` and
