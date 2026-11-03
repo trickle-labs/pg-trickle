@@ -52,6 +52,11 @@ interleaved history, pruning its selected identity/incarnation/consumer-window
 projection preserves that window's full image delta. Production SQL
 partitioning, transaction visibility and database window execution remain
 adapter boundaries.
+`multi_identity_projected_compaction_preserves_bag_delta` sums those results
+over distinct covered row identities and proves the result equals the selected
+batch's final-minus-initial complete-row multiplicity. This lifts the model to
+an interleaved multi-row batch; identity-list completeness and actual SQL
+window execution still require production adapter conformance.
 `can_compact_history` admits compaction only for an immediate unique identity,
 one dependent stream table and a selected LSN range with no captured TRUNCATE
 marker. Base sources supply primary-key metadata; stream-table sources supply
