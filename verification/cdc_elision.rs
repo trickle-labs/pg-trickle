@@ -161,6 +161,128 @@ pub fn compact_event_pruned(
     }
 }
 
+/// The checked prune decision retains exactly the endpoint ranks that encode
+/// the initial-to-final row-image delta.
+pub proof fn compact_event_pruned_matches_endpoint_ranks(
+    first_action: ImageEvent,
+    last_action: ImageEvent,
+    rn_asc: u64,
+    rn_desc: u64,
+    total: u64,
+)
+    requires
+        0 < total < u64::MAX,
+        0 < rn_asc <= total,
+        0 < rn_desc <= total,
+        rn_asc + rn_desc == total + 1,
+    ensures
+        !compact_event_pruned_spec(first_action, last_action, rn_asc, rn_desc)
+            == match (first_action, last_action) {
+                (ImageEvent::Insert, ImageEvent::Delete) => false,
+                (ImageEvent::Insert, ImageEvent::Insert) => rn_desc == 1,
+                (ImageEvent::Delete, ImageEvent::Delete) => rn_asc == 1,
+                (ImageEvent::Delete, ImageEvent::Insert) => rn_asc == 1 || rn_desc == 1,
+            },
+{
+    reveal(compact_event_pruned_spec);
+}
+
+pub open spec fn compacted_image_bucket_delta(
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    total: int,
+    row_image: Seq<u8>,
+) -> int
+    decreases count,
+{
+    if count <= 0 || count > total || total <= 0 || total > history.len() {
+        0
+    } else {
+        let event = history[count - 1];
+        let first_action = history[0].action;
+        let last_action = history[total - 1].action;
+        let rank_asc = count as u64;
+        let rank_desc = (total - count + 1) as u64;
+        let kept = !compact_event_pruned_spec(
+            first_action, last_action, rank_asc, rank_desc,
+        );
+        compacted_image_bucket_delta(history, count - 1, total, row_image)
+            + if kept && event.row_image == row_image {
+                image_event_weight_spec(event.action)
+            } else {
+                0
+            }
+    }
+}
+
+pub open spec fn endpoint_image_bucket_delta(
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    total: int,
+    row_image: Seq<u8>,
+) -> int {
+    if count <= 0 || count > total || total <= 0 || total > history.len() {
+        0
+    } else {
+        let first = history[0];
+        let last = history[total - 1];
+        (if first.action == ImageEvent::Delete && first.row_image == row_image {
+            -1int
+        } else {
+            0
+        }) + (if count == total && last.action == ImageEvent::Insert && last.row_image == row_image {
+            1int
+        } else {
+            0
+        })
+    }
+}
+
+/// The SQL compaction rank policy preserves the complete-image signed delta
+/// for any ranked history; transition validity is a separate caller contract.
+pub proof fn compaction_prune_preserves_complete_image_delta(
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    total: int,
+    row_image: Seq<u8>,
+)
+    requires
+        0 <= count <= total,
+        0 < total <= history.len(),
+        total < u64::MAX as int,
+    ensures
+        compacted_image_bucket_delta(history, count, total, row_image)
+            == endpoint_image_bucket_delta(history, count, total, row_image),
+    decreases count,
+{
+    reveal(compacted_image_bucket_delta);
+    reveal(endpoint_image_bucket_delta);
+    if count > 0 {
+        compaction_prune_preserves_complete_image_delta(
+            history, count - 1, total, row_image,
+        );
+        let event = history[count - 1];
+        let rank_asc = count as u64;
+        let rank_desc = (total - count + 1) as u64;
+        assert(0 < rank_asc <= total as u64);
+        assert(0 < rank_desc <= total as u64);
+        assert(rank_asc + rank_desc == (total + 1) as u64);
+        compact_event_pruned_matches_endpoint_ranks(
+            history[0].action,
+            history[total - 1].action,
+            rank_asc,
+            rank_desc,
+            total as u64,
+        );
+        if rank_asc == 1 {
+            assert(event == history[0]);
+        }
+        if rank_asc == total as u64 {
+            assert(event == history[total - 1]);
+        }
+    }
+}
+
 pub open spec fn image_event_in_window_spec(
     event_lsn: u64,
     previous_cut: u64,
@@ -636,6 +758,133 @@ pub proof fn valid_single_identity_history_preserves_image_delta(
             assert(image_presence(final_state, image) == image_presence(before, image));
         }
     }
+}
+
+/// A valid projected history's first and last actions name its initial and
+/// final row-image states.
+pub proof fn valid_history_endpoint_states(
+    final_state: Option<Seq<u8>>,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        0 < count <= history.len(),
+        previous_cut <= new_cut,
+        forall|index: int| 0 <= index < count ==> identity_event_in_window(
+            history[index], row_identity, source_incarnation, previous_cut, new_cut,
+        ),
+        valid_history_from_state(
+            final_state, history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ),
+    ensures
+        (history[0].action == ImageEvent::Insert)
+            ==> image_state_before(
+                final_state, history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ) == None::<Seq<u8>>,
+        (history[0].action == ImageEvent::Delete)
+            ==> image_state_before(
+                final_state, history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ) == Some(history[0].row_image),
+        (history[count - 1].action == ImageEvent::Insert)
+            ==> final_state == Some(history[count - 1].row_image),
+        (history[count - 1].action == ImageEvent::Delete)
+            ==> final_state == None::<Seq<u8>>,
+    decreases count,
+{
+    let last = history[count - 1];
+    let before_last = previous_image_state(final_state, last);
+    reveal(valid_history_from_state);
+    match (final_state, last.action) {
+        (Some(after_image), ImageEvent::Insert) => assert(after_image == last.row_image),
+        (None, ImageEvent::Delete) => {},
+        _ => assert(false),
+    }
+    if count == 1 {
+        reveal(image_state_before);
+        assert(identity_event_in_window(
+            last, row_identity, source_incarnation, previous_cut, new_cut,
+        ));
+        match (final_state, last.action) {
+            (Some(_), ImageEvent::Insert) => assert(before_last == None::<Seq<u8>>),
+            (None, ImageEvent::Delete) => assert(before_last == Some(last.row_image)),
+            _ => assert(false),
+        }
+        assert(history[0] == last);
+    } else {
+        valid_history_endpoint_states(
+            before_last, history, count - 1, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        );
+        reveal(image_state_before);
+        assert(identity_event_in_window(
+            last, row_identity, source_incarnation, previous_cut, new_cut,
+        ));
+        assert(image_state_before(
+            final_state, history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ) == image_state_before(
+            before_last, history, count - 1, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ));
+    }
+}
+
+/// Production's checked compaction policy preserves every complete-image bag
+/// delta for a valid unique-row history in one source-incarnation consumer cut.
+pub proof fn valid_history_compaction_preserves_image_delta(
+    final_state: Option<Seq<u8>>,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+    row_image: Seq<u8>,
+)
+    requires
+        0 < count <= history.len(),
+        count < u64::MAX as int,
+        previous_cut <= new_cut,
+        forall|index: int| 0 <= index < count ==> identity_event_in_window(
+            history[index], row_identity, source_incarnation, previous_cut, new_cut,
+        ),
+        valid_history_from_state(
+            final_state, history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ),
+    ensures
+        compacted_image_bucket_delta(history, count, count, row_image)
+            == captured_image_bucket_delta(
+                history, count, row_identity, row_image, source_incarnation,
+                previous_cut, new_cut,
+            ),
+{
+    compaction_prune_preserves_complete_image_delta(
+        history, count, count, row_image,
+    );
+    valid_single_identity_history_preserves_image_delta(
+        final_state, history, count, row_identity, source_incarnation,
+        previous_cut, new_cut, row_image,
+    );
+    valid_history_endpoint_states(
+        final_state, history, count, row_identity, source_incarnation,
+        previous_cut, new_cut,
+    );
+    reveal(endpoint_image_bucket_delta);
+    reveal(image_presence);
+    assert(endpoint_image_bucket_delta(history, count, count, row_image)
+        == image_presence(final_state, row_image)
+            - image_presence(image_state_before(
+                final_state, history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ), row_image));
 }
 
 /// A valid unique-identity history has at most one positive and one negative

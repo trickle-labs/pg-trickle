@@ -34,6 +34,10 @@ OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "source_incarnation_prevents_cross_epoch_cancellation",
     "valid_single_identity_history_preserves_image_delta",
     "valid_history_has_unique_signed_image_endpoints",
+    "compact_event_pruned_matches_endpoint_ranks",
+    "compaction_prune_preserves_complete_image_delta",
+    "valid_history_endpoint_states",
+    "valid_history_compaction_preserves_image_delta",
     "different_identity_has_zero_image_weight",
     "interleaved_row_identity_histories_preserve_endpoints",
 ]
@@ -71,6 +75,10 @@ MUTATIONS = {
     "keep-extra-first-insert": (
         "(ImageEvent::Insert, ImageEvent::Insert) => interior || (rn_asc == 1 && rn_desc > 1),",
         "(ImageEvent::Insert, ImageEvent::Insert) => interior,",
+    ),
+    "extra-initial-insert-spec": (
+        "(ImageEvent::Insert, ImageEvent::Insert) => {\n            (rn_asc > 1 && rn_desc > 1) || (rn_asc == 1 && rn_desc > 1)\n        },",
+        "(ImageEvent::Insert, ImageEvent::Insert) => {\n            rn_asc > 1 && rn_desc > 1\n        },",
     ),
     "key-only-image-bucket": (
         ") && event.row_image == row_image",

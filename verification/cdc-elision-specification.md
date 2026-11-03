@@ -74,8 +74,16 @@ pairs from 1 through 4; the pinned Verus job verifies the executable decision
 and rejects mutations that retain an extra first INSERT or drop a D→I interior
 event. The installed test still exercises PostgreSQL's actual ranked-window
 execution for the I/D/I case. This binds the endpoint policy to both SQL
-builders, but does not prove the database window-function evaluation or every
-valid history's full-row bag delta.
+builders. `compaction_prune_preserves_complete_image_delta` proves that the
+checked rank policy preserves each complete-image signed delta for every
+ranked sequence. `valid_history_compaction_preserves_image_delta` composes
+that result with the valid unique-row history model and proves equivalence to
+the original bag delta within one source-incarnation consumer cut. Its input
+is the SQL partition for one row identity and selected LSN window; projection,
+transaction-cut membership, and PostgreSQL window execution remain explicit
+adapters. The proof covers arbitrarily long projected histories under those
+assumptions, while the installed test still checks PostgreSQL's actual
+ranked-window execution for I/D/I.
 
 The PK scan reducer now uses the checked `scan_initial_row_present`,
 `scan_final_row_present`, `scan_delete_candidate` and
@@ -273,9 +281,9 @@ arbitrary production histories.
 
 ## Controls and candidate binding
 
-The pinned Verus/Z3 runner checks six executable decisions:
-`admitted_image_type`, `keep_change`, `image_event_weight`, `image_action`,
-`image_action_priority` and `can_compact_history`, plus nine proof obligations:
+The pinned Verus/Z3 runner checks the executable decisions and proof
+obligations listed in `scripts/check_cdc_elision_verification.py`, including
+the compaction rank and valid-history preservation results:
 `separate_consumer_cuts_retain_opposing_images`,
 `captured_image_bucket_delta_splits_at_consumer_cut`,
 `transaction_window_membership_is_atomic`,
@@ -285,15 +293,22 @@ The pinned Verus/Z3 runner checks six executable decisions:
 `source_incarnation_prevents_cross_epoch_cancellation`, and
 `valid_single_identity_history_preserves_image_delta` and
 `valid_history_has_unique_signed_image_endpoints`,
+`compact_event_pruned_matches_endpoint_ranks`,
+`compaction_prune_preserves_complete_image_delta`,
+`valid_history_endpoint_states` and
+`valid_history_compaction_preserves_image_delta`,
 `different_identity_has_zero_image_weight` and
-`interleaved_row_identity_histories_preserve_endpoints`. Fifteen executable
-mutants must fail a postcondition:
+`interleaved_row_identity_histories_preserve_endpoints`. Every semantic mutant
+declared by the checker must fail a postcondition, including:
 `lost-image-change`, `unknown-type-elision`, `lost-positive-image`,
 `reversed-negative-image`, `wrong-insert-event-weight`,
 `wrong-delete-event-weight`, `prefer-deleted-image`, `cross-truncate-barrier`,
-`cross-shared-consumer`, `key-only-image-bucket`, `cross-incarnation-bucket`,
-`split-transaction-cut`, `reverse-history-weight`, and
-`overlapping-consumer-boundary` and `cross-row-identity-bucket`;
+`cross-shared-consumer`, `lost-intermediate-compaction`,
+`keep-extra-first-insert`, `extra-initial-insert-spec`, `key-only-image-bucket`,
+`cross-row-identity-bucket`, `cross-incarnation-bucket`,
+`split-transaction-cut`, `reverse-history-weight`,
+`overlapping-consumer-boundary`, `lost-scan-delete-initial-state`, and
+`lost-scan-insert-final-state`;
 compilation/setup failures do not count. The
 candidate-binding helper requires these obligations and controls, hashes the
 production callers and the installed test sources, requires all eight named
