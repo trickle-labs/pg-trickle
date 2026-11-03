@@ -45,6 +45,7 @@ LIFECYCLE_CASES = [
 ]
 CDC_ELISION_CASES = [
     "e2e_keyless_tests::test_keyless_multiset_same_window_insert_delete_preserves_multiplicity",
+    "e2e_shared_buffer_tests::test_shared_domain_over_admitted_base_retains_changed_bit",
     "e2e_shared_buffer_tests::test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders",
     "e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload",
     "e2e_shared_buffer_tests::test_cdc_committed_history_preserves_latest_complete_payload",
