@@ -9,14 +9,14 @@ for details.
 pg_trickle keeps PostgreSQL query results fresh through incremental view
 maintenance. The v0.109.0 release candidate consolidates CDC and differential
 refresh correctness fixes and qualifies recovery against the published
-v0.108.3 package. See the [release notes](CHANGELOG.md#01090--cdc-and-differential-refresh-correctness).
+v0.108.3 package. See the [release notes](CHANGELOG.md#01090--more-dependable-live-data).
 
 | Version | Focus | Status |
 |---------|-------|--------|
 | [v0.106.0](roadmap/v0.106.0.md) | Verify package support, pending-data upgrades, platform tiers, and database resource budgets with executed evidence. | Released |
 | [v0.107.0](roadmap/v0.107.0.md) | Back support claims and operator procedures with runtime tests. | Released |
 | [v0.108.0](roadmap/v0.108.0.md) | Qualify incremental graph and consumer recovery. | Released |
-| [v0.109.0](CHANGELOG.md#01090--cdc-and-differential-refresh-correctness) | Harden CDC and differential refresh correctness; qualify the published-package upgrade path. | Preparing release |
+| [v0.109.0](CHANGELOG.md#01090--more-dependable-live-data) | Harden CDC and differential refresh correctness; qualify the published-package upgrade path. | Preparing release |
 
 ## Release constraints
 
