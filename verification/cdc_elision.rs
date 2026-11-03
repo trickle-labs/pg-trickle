@@ -889,6 +889,130 @@ pub proof fn valid_history_compaction_preserves_image_delta(
             ), row_image));
 }
 
+/// Sum the production rank-pruning result across independently partitioned
+/// row-identity histories. Each nested sequence is one SQL `PARTITION BY` group.
+pub open spec fn multi_identity_compacted_bucket_delta(
+    histories: Seq<Seq<CapturedImageEvent>>,
+    identity_count: int,
+    row_image: Seq<u8>,
+) -> int
+    decreases identity_count,
+{
+    if identity_count <= 0 {
+        0
+    } else {
+        let index = identity_count - 1;
+        compacted_image_bucket_delta(
+            histories[index], histories[index].len() as int,
+            histories[index].len() as int, row_image,
+        ) + multi_identity_compacted_bucket_delta(
+            histories, identity_count - 1, row_image,
+        )
+    }
+}
+
+/// Sum the endpoint bag change for each distinct row identity.
+pub open spec fn multi_identity_compacted_endpoint_bag_delta(
+    final_states: Seq<Option<Seq<u8>>>,
+    histories: Seq<Seq<CapturedImageEvent>>,
+    identities: Seq<Seq<u8>>,
+    identity_count: int,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> int
+    decreases identity_count,
+{
+    if identity_count <= 0 {
+        0
+    } else {
+        let index = identity_count - 1;
+        image_presence(final_states[index], row_image)
+            - image_presence(image_state_before(
+                final_states[index], histories[index], histories[index].len() as int,
+                identities[index], source_incarnation, previous_cut, new_cut,
+            ), row_image)
+            + multi_identity_compacted_endpoint_bag_delta(
+                final_states, histories, identities, identity_count - 1,
+                row_image, source_incarnation, previous_cut, new_cut,
+            )
+    }
+}
+
+/// Compose the checked rank-prune policy across any number of SQL identity
+/// partitions. The histories are already partitioned by logical row identity;
+/// the production adapter must preserve that partition when assigning ranks.
+pub proof fn multi_identity_compaction_preserves_bag_delta(
+    final_states: Seq<Option<Seq<u8>>>,
+    histories: Seq<Seq<CapturedImageEvent>>,
+    identities: Seq<Seq<u8>>,
+    identity_count: int,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        final_states.len() == histories.len(),
+        identities.len() == histories.len(),
+        0 <= identity_count <= histories.len(),
+        previous_cut <= new_cut,
+        forall|left: int, right: int| 0 <= left < right < identity_count
+            ==> identities[left] != identities[right],
+        forall|index: int| 0 <= index < identity_count
+            ==> histories[index].len() < u64::MAX as int,
+        forall|index: int, event_index: int| 0 <= index < identity_count
+            && 0 <= event_index < histories[index].len()
+            ==> identity_event_in_window(
+                histories[index][event_index], identities[index],
+                source_incarnation, previous_cut, new_cut,
+            ),
+        forall|index: int| 0 <= index < identity_count ==> valid_history_from_state(
+            final_states[index], histories[index], histories[index].len() as int,
+            identities[index], source_incarnation, previous_cut, new_cut,
+        ),
+    ensures
+        multi_identity_compacted_bucket_delta(
+            histories, identity_count, row_image,
+        ) == multi_identity_compacted_endpoint_bag_delta(
+            final_states, histories, identities, identity_count, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ),
+    decreases identity_count,
+{
+    if identity_count > 0 {
+        let index = identity_count - 1;
+        let history = histories[index];
+        let count = history.len() as int;
+        if count > 0 {
+            valid_history_compaction_preserves_image_delta(
+                final_states[index], history, count, identities[index],
+                source_incarnation, previous_cut, new_cut, row_image,
+            );
+            valid_single_identity_history_preserves_image_delta(
+                final_states[index], history, count, identities[index],
+                source_incarnation, previous_cut, new_cut, row_image,
+            );
+        }
+        multi_identity_compaction_preserves_bag_delta(
+            final_states, histories, identities, identity_count - 1,
+            row_image, source_incarnation, previous_cut, new_cut,
+        );
+        reveal(multi_identity_compacted_bucket_delta);
+        reveal(multi_identity_compacted_endpoint_bag_delta);
+        if count == 0 {
+            reveal(compacted_image_bucket_delta);
+            reveal(image_state_before);
+            assert(compacted_image_bucket_delta(history, count, count, row_image) == 0);
+            assert(image_state_before(
+                final_states[index], history, count, identities[index],
+                source_incarnation, previous_cut, new_cut,
+            ) == final_states[index]);
+        }
+    }
+}
+
 /// A valid unique-identity history has at most one positive and one negative
 /// complete-image delta, exactly the shape selected by the keyed SQL adapter.
 pub proof fn valid_history_has_unique_signed_image_endpoints(

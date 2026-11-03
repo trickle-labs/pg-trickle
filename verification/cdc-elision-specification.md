@@ -296,6 +296,21 @@ The generated SQL is compared with an independent endpoint oracle. These
 finite cases broaden the runtime sample but do not establish equivalence for
 arbitrary production histories.
 
+`multi_identity_compaction_preserves_bag_delta` composes the checked rank
+pruning theorem across any finite set of per-identity histories. Each history
+is independently valid for one unique row identity, source incarnation and
+consumer cut; summing the compacted complete-image deltas equals the sum of
+final-minus-initial row-image multiplicities. The model takes histories after
+identity partitioning, matching the production `ROW_NUMBER` partitions. The
+production SQL must preserve that grouping; this proof does not establish
+PostgreSQL's window execution, prove the partition adapter itself, or extend
+the eligibility gate across multiple consumers or reset barriers.
+The packaged `test_cdc_compaction_preserves_multi_identity_bag_delta` case
+qualifies that adapter for six identities and three committed updates in both
+trigger modes. It observes 36 captured signed events, requires compaction to
+remove the 24 superseded interior events, and compares the remaining stream
+table result against the live source query.
+
 `multi_identity_history_preserves_bag_delta` now composes the per-identity
 complete-image theorem across any finite sequence of distinct logical row
 identities that covers every event in the selected source-incarnation consumer
@@ -328,6 +343,7 @@ the compaction rank and valid-history preservation results:
 `valid_history_compaction_preserves_image_delta`,
 `different_identity_has_zero_image_weight` and
 `interleaved_row_identity_histories_preserve_endpoints`, and
+`multi_identity_compaction_preserves_bag_delta` and
 `multi_identity_history_preserves_bag_delta`. Every semantic mutant declared
 by the checker must be rejected by the intended proof obligation or executable
 postcondition, including:
@@ -338,8 +354,9 @@ postcondition, including:
 `keep-extra-first-insert`, `extra-initial-insert-spec`, `key-only-image-bucket`,
 `cross-row-identity-bucket`, `cross-incarnation-bucket`,
 `split-transaction-cut`, `reverse-history-weight`,
-`overlapping-consumer-boundary`, `lost-scan-delete-initial-state`, and
-`lost-scan-insert-final-state`;
+`overlapping-consumer-boundary`, `lost-scan-delete-initial-state`,
+`lost-scan-insert-final-state`, `lost-identity-compaction-delta`, and
+`lost-identity-bag-delta`;
 compilation/setup failures do not count. The
 candidate-binding helper requires these obligations and controls, hashes the
 production callers and the installed test sources, requires all eight named

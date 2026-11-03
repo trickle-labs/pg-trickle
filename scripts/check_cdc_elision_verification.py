@@ -40,6 +40,7 @@ OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "valid_history_compaction_preserves_image_delta",
     "different_identity_has_zero_image_weight",
     "interleaved_row_identity_histories_preserve_endpoints",
+    "multi_identity_compaction_preserves_bag_delta",
     "multi_identity_history_preserves_bag_delta",
 ]
 PRODUCTION_INPUTS = [
@@ -90,6 +91,10 @@ MUTATIONS = {
     "cross-row-identity-bucket": (
         "    event.row_identity == row_identity\n        && captured_event_in_window(",
         "    true\n        && captured_event_in_window(",
+    ),
+    "lost-identity-compaction-delta": (
+        "        compacted_image_bucket_delta(\n            histories[index], histories[index].len() as int,\n            histories[index].len() as int, row_image,\n        ) + multi_identity_compacted_bucket_delta(",
+        "        multi_identity_compacted_bucket_delta(",
     ),
     "lost-identity-bag-delta": (
         "        captured_image_bucket_delta(\n            history, event_count, identities[identity_count - 1], row_image,\n            source_incarnation, previous_cut, new_cut,\n        ) + multi_identity_bucket_delta(",
@@ -158,6 +163,9 @@ def check_contract() -> None:
         raise ValueError("base and stream-table compaction must use the checked barrier decision")
     if cdc.count("crate::cdc_elision::compaction_prune_sql(") != 2:
         raise ValueError("base and stream-table compaction must use the checked prune decision")
+    if cdc.count("ROW_NUMBER() OVER (PARTITION BY __pgt_row_id ORDER BY change_id)") != 2 or \
+            cdc.count("ROW_NUMBER() OVER (PARTITION BY __pgt_row_id ORDER BY change_id DESC)") != 2:
+        raise ValueError("base and stream-table compaction must rank independently by row identity")
     if "COMPACTION_PRUNE_PREDICATE" in cdc:
         raise ValueError("compaction SQL must not bypass the checked prune adapter")
     scheduler_watermark = (runner.ROOT / "src/scheduler/watermark.rs").read_text()
