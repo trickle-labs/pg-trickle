@@ -126,6 +126,8 @@ PROOF_CONTRACTS = {
         "schema": "pg-trickle-cdc-elision-verification-v1",
         "obligations": {
             "admitted_image_type", "keep_change", "image_event_weight", "image_action", "can_compact_history",
+            "scan_initial_row_present", "scan_final_row_present",
+            "scan_delete_candidate", "scan_insert_candidate",
             "separate_consumer_cuts_retain_opposing_images",
             "captured_image_bucket_delta_splits_at_consumer_cut",
             "transaction_window_membership_is_atomic", "payload_replacement_preserves_complete_image_delta",
@@ -138,7 +140,8 @@ PROOF_CONTRACTS = {
             "lost-image-change", "unknown-type-elision", "lost-positive-image", "reversed-negative-image",
             "wrong-insert-event-weight", "wrong-delete-event-weight", "cross-truncate-barrier", "cross-shared-consumer",
             "key-only-image-bucket", "cross-incarnation-bucket", "split-transaction-cut", "reverse-history-weight",
-            "overlapping-consumer-boundary",
+            "overlapping-consumer-boundary", "lost-scan-delete-initial-state",
+            "lost-scan-insert-final-state",
         },
     },
 }

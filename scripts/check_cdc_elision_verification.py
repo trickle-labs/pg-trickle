@@ -18,6 +18,10 @@ EXECUTABLE_OBLIGATIONS = [
     "image_action",
     "image_action_priority",
     "can_compact_history",
+    "scan_initial_row_present",
+    "scan_final_row_present",
+    "scan_delete_candidate",
+    "scan_insert_candidate",
 ]
 OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "separate_consumer_cuts_retain_opposing_images",
@@ -80,6 +84,14 @@ MUTATIONS = {
         "event_lsn > previous_cut && event_lsn <= new_cut",
         "event_lsn >= previous_cut && event_lsn <= new_cut",
     ),
+    "lost-scan-delete-initial-state": (
+        "scan_initial_row_present(first_action) && scan_initial_row_present(action)",
+        "true && scan_initial_row_present(action)",
+    ),
+    "lost-scan-insert-final-state": (
+        "scan_final_row_present(last_action) && scan_final_row_present(action)",
+        "true && scan_final_row_present(action)",
+    ),
 }
 
 
@@ -117,6 +129,13 @@ def check_contract() -> None:
     cdc = (runner.ROOT / "src/cdc/mod.rs").read_text()
     if cdc.count("crate::cdc_elision::can_compact_history(") != 2:
         raise ValueError("base and stream-table compaction must use the checked barrier decision")
+    scan = (runner.ROOT / "src/dvm/operators/scan.rs").read_text()
+    for adapter in [
+        "scan_initial_row_present_sql(", "scan_final_row_present_sql(",
+        "scan_delete_candidate_sql(", "scan_insert_candidate_sql(",
+    ]:
+        if f"crate::cdc_elision::{adapter}" not in scan:
+            raise ValueError(f"scan endpoint SQL bypasses checked CDC policy: {adapter}")
 
 
 def run_checks() -> None:

@@ -679,6 +679,12 @@ SELECT * FROM {multi_cte}",
         ""
     };
     let key_changed_col_ins = key_changed_col_del; // Same for both branches.
+    let first_delete_guard = crate::cdc_elision::scan_initial_row_present_sql("s.__first_action");
+    let last_insert_guard = crate::cdc_elision::scan_final_row_present_sql("s.__last_action");
+    let delete_candidate_filter =
+        crate::cdc_elision::scan_delete_candidate_sql("s.__first_action", "s.action");
+    let insert_candidate_filter =
+        crate::cdc_elision::scan_insert_candidate_sql("s.__last_action", "s.action");
 
     let sql = if ctx.merge_safe_dedup {
         // ── Merge-safe dedup mode ──────────────────────────────────────
@@ -699,7 +705,7 @@ FROM (
   SELECT DISTINCT ON (s.__pk_hash_old)
          s.*
   FROM {raw_cte_name} s
-  WHERE s.__first_action != 'I'
+  WHERE {first_delete_guard}
     AND (s.__last_action = 'D' OR s.__pk_hash_old != s.__pk_hash)
   ORDER BY s.__pk_hash_old, s.change_id
 ) c{del_pushed_filter}
@@ -714,13 +720,15 @@ FROM (
   SELECT DISTINCT ON (s.__pk_hash)
          s.*
   FROM {raw_cte_name} s
-  WHERE s.__last_action != 'D'
+  WHERE {last_insert_guard}
   ORDER BY s.__pk_hash, s.change_id DESC
 ) c{ins_pushed_filter}",
             old_col_refs = old_col_refs.join(",\n       "),
             new_col_refs = new_col_refs.join(",\n       "),
             key_del = key_changed_col_del,
             key_ins = key_changed_col_ins,
+            first_delete_guard = first_delete_guard,
+            last_insert_guard = last_insert_guard,
         )
     } else {
         // ── Standard mode (D+I pairs for updates) ──────────────────────
@@ -739,7 +747,7 @@ FROM (
   SELECT DISTINCT ON (s.__pk_hash)
          s.*
   FROM {raw_cte_name} s
-  WHERE s.action != 'I' AND s.__first_action != 'I'
+  WHERE {delete_candidate_filter}
   ORDER BY s.__pk_hash, s.change_id
 ) c{del_pushed_filter}
 
@@ -754,13 +762,15 @@ FROM (
   SELECT DISTINCT ON (s.__pk_hash)
          s.*
   FROM {raw_cte_name} s
-  WHERE s.action != 'D' AND s.__last_action != 'D'
+  WHERE {insert_candidate_filter}
   ORDER BY s.__pk_hash, s.change_id DESC
 ) c{ins_pushed_filter}",
             old_col_refs = old_col_refs.join(",\n       "),
             new_col_refs = new_col_refs.join(",\n       "),
             key_del = key_changed_col_del,
             key_ins = key_changed_col_ins,
+            delete_candidate_filter = delete_candidate_filter,
+            insert_candidate_filter = insert_candidate_filter,
         )
     };
 
