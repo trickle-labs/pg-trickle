@@ -305,16 +305,18 @@ pub open spec fn window_event_weight_spec(
 }
 
 /// One committed change-buffer image, keyed by the complete logical identity
-/// and complete row representation. `source_incarnation` prevents reuse of a
-/// key from joining histories across a recreated source; all rows from one
-/// transaction share its commit LSN.
+/// and complete row representation. `visibility_lsn` is the model's transaction
+/// visibility coordinate, not the per-event `lsn` stored in the buffer.
+/// Production triggers store `pg_current_wal_insert_lsn()` per event; the
+/// writer-fenced frontier must keep every event from one open transaction on
+/// the same side of a consumer cut. The LSN regression tests this mapping.
 #[allow(dead_code)]
 pub struct CapturedImageEvent {
     pub row_identity: Seq<u8>,
     pub row_image: Seq<u8>,
     pub source_incarnation: u64,
     pub transaction_id: u64,
-    pub commit_lsn: u64,
+    pub visibility_lsn: u64,
     pub action: ImageEvent,
 }
 
@@ -325,7 +327,7 @@ pub open spec fn captured_event_in_window(
     new_cut: u64,
 ) -> bool {
     event.source_incarnation == source_incarnation
-        && image_event_in_window_spec(event.commit_lsn, previous_cut, new_cut)
+        && image_event_in_window_spec(event.visibility_lsn, previous_cut, new_cut)
 }
 
 /// Whether one event belongs to a selected identity's source-incarnation cut.
@@ -1124,31 +1126,31 @@ pub open spec fn interleaved_identity_history(
     old_image: Seq<u8>,
     new_image: Seq<u8>,
     source_incarnation: u64,
-    commit_lsn: u64,
+    visibility_lsn: u64,
 ) -> Seq<CapturedImageEvent> {
     Seq::new(4, |index: int| {
         if index == 0 {
             CapturedImageEvent {
                 row_identity: first_identity, row_image: old_image,
-                source_incarnation, transaction_id: 7, commit_lsn,
+                source_incarnation, transaction_id: 7, visibility_lsn,
                 action: ImageEvent::Delete,
             }
         } else if index == 1 {
             CapturedImageEvent {
                 row_identity: second_identity, row_image: new_image,
-                source_incarnation, transaction_id: 7, commit_lsn,
+                source_incarnation, transaction_id: 7, visibility_lsn,
                 action: ImageEvent::Delete,
             }
         } else if index == 2 {
             CapturedImageEvent {
                 row_identity: first_identity, row_image: new_image,
-                source_incarnation, transaction_id: 7, commit_lsn,
+                source_incarnation, transaction_id: 7, visibility_lsn,
                 action: ImageEvent::Insert,
             }
         } else {
             CapturedImageEvent {
                 row_identity: second_identity, row_image: old_image,
-                source_incarnation, transaction_id: 7, commit_lsn,
+                source_incarnation, transaction_id: 7, visibility_lsn,
                 action: ImageEvent::Insert,
             }
         }
@@ -1227,13 +1229,13 @@ pub proof fn captured_image_weight_splits_at_consumer_cut(
         && event.row_image == row_image
         && event.source_incarnation == source_incarnation
     {
-        if event.commit_lsn > earlier_cut && event.commit_lsn <= later_cut {
-            if event.commit_lsn <= middle_cut {
-                assert(event.commit_lsn > earlier_cut && event.commit_lsn <= middle_cut);
-                assert(!(event.commit_lsn > middle_cut && event.commit_lsn <= later_cut));
+        if event.visibility_lsn > earlier_cut && event.visibility_lsn <= later_cut {
+            if event.visibility_lsn <= middle_cut {
+                assert(event.visibility_lsn > earlier_cut && event.visibility_lsn <= middle_cut);
+                assert(!(event.visibility_lsn > middle_cut && event.visibility_lsn <= later_cut));
             } else {
-                assert(!(event.commit_lsn > earlier_cut && event.commit_lsn <= middle_cut));
-                assert(event.commit_lsn > middle_cut && event.commit_lsn <= later_cut);
+                assert(!(event.visibility_lsn > earlier_cut && event.visibility_lsn <= middle_cut));
+                assert(event.visibility_lsn > middle_cut && event.visibility_lsn <= later_cut);
             }
         }
     }
@@ -1303,8 +1305,10 @@ pub proof fn append_captured_image_bucket_delta(
     );
 }
 
-/// All captured rows from one committed source transaction share a single
-/// LSN, so a consumer cut cannot admit only part of that transaction.
+/// Events from one committed source transaction share one abstract visibility
+/// coordinate, so the model's consumer cut cannot admit only part of it.
+/// Mapping this coordinate to per-event capture LSNs relies on the production
+/// writer fence and its installed late-commit regression.
 pub proof fn transaction_window_membership_is_atomic(
     first: CapturedImageEvent,
     second: CapturedImageEvent,
@@ -1315,7 +1319,7 @@ pub proof fn transaction_window_membership_is_atomic(
     requires
         first.transaction_id == second.transaction_id,
         first.source_incarnation == second.source_incarnation,
-        first.commit_lsn == second.commit_lsn,
+        first.visibility_lsn == second.visibility_lsn,
     ensures
         captured_event_in_window(first, source_incarnation, previous_cut, new_cut)
             == captured_event_in_window(second, source_incarnation, previous_cut, new_cut),
@@ -1342,21 +1346,21 @@ pub proof fn payload_replacement_preserves_complete_image_delta(
         captured_image_weight(
             CapturedImageEvent {
                 row_identity, row_image: old_image, source_incarnation,
-                transaction_id: 1, commit_lsn: delete_lsn, action: ImageEvent::Delete,
+                transaction_id: 1, visibility_lsn: delete_lsn, action: ImageEvent::Delete,
             },
             row_identity, old_image, source_incarnation, previous_cut, new_cut,
         ) == -1,
         captured_image_weight(
             CapturedImageEvent {
                 row_identity, row_image: new_image, source_incarnation,
-                transaction_id: 2, commit_lsn: insert_lsn, action: ImageEvent::Insert,
+                transaction_id: 2, visibility_lsn: insert_lsn, action: ImageEvent::Insert,
             },
             row_identity, new_image, source_incarnation, previous_cut, new_cut,
         ) == 1,
         captured_image_weight(
             CapturedImageEvent {
                 row_identity, row_image: old_image, source_incarnation,
-                transaction_id: 1, commit_lsn: delete_lsn, action: ImageEvent::Delete,
+                transaction_id: 1, visibility_lsn: delete_lsn, action: ImageEvent::Delete,
             },
             row_identity, new_image, source_incarnation, previous_cut, new_cut,
         ) == 0,
@@ -1381,14 +1385,14 @@ pub proof fn transient_same_image_cancels_within_incarnation(
         captured_image_weight(
             CapturedImageEvent {
                 row_identity, row_image, source_incarnation,
-                transaction_id: 1, commit_lsn: insert_lsn, action: ImageEvent::Insert,
+                transaction_id: 1, visibility_lsn: insert_lsn, action: ImageEvent::Insert,
             },
             row_identity, row_image, source_incarnation, previous_cut, new_cut,
         )
             + captured_image_weight(
                 CapturedImageEvent {
                     row_identity, row_image, source_incarnation,
-                    transaction_id: 2, commit_lsn: delete_lsn, action: ImageEvent::Delete,
+                    transaction_id: 2, visibility_lsn: delete_lsn, action: ImageEvent::Delete,
                 },
                 row_identity, row_image, source_incarnation, previous_cut, new_cut,
             ) == 0,
@@ -1415,14 +1419,14 @@ pub proof fn source_incarnation_prevents_cross_epoch_cancellation(
         captured_image_weight(
             CapturedImageEvent {
                 row_identity, row_image, source_incarnation: old_incarnation,
-                transaction_id: 1, commit_lsn: old_lsn, action: ImageEvent::Delete,
+                transaction_id: 1, visibility_lsn: old_lsn, action: ImageEvent::Delete,
             },
             row_identity, row_image, current_incarnation, previous_cut, new_cut,
         ) == 0,
         captured_image_weight(
             CapturedImageEvent {
                 row_identity, row_image, source_incarnation: current_incarnation,
-                transaction_id: 2, commit_lsn: current_lsn, action: ImageEvent::Insert,
+                transaction_id: 2, visibility_lsn: current_lsn, action: ImageEvent::Insert,
             },
             row_identity, row_image, current_incarnation, previous_cut, new_cut,
         ) == 1,

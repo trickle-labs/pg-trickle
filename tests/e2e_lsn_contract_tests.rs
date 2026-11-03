@@ -90,17 +90,57 @@ async fn manual_late_commit_preserves_exact_results(warm_transaction: bool) {
     .execute(&mut *writer_a)
     .await
     .expect("writer A captures CDC before writer B starts");
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {source} SET value = 'late commit final' WHERE id = 2"
+    )))
+    .execute(&mut *writer_a)
+    .await
+    .expect("writer A captures a second statement before writer B starts");
     let (writer_pid, writer_xid): (i32, String) =
         sqlx::query_as("SELECT pg_backend_pid(), pg_current_xact_id()::text")
             .fetch_one(&mut *writer_a)
             .await
             .expect("capture open writer identity");
-    let a_lsn: String = sqlx::query_scalar(AssertSqlSafe(format!(
-        "SELECT MAX(lsn)::text FROM {buffer}"
+    let (a_first_lsn, a_last_lsn, captured_rows, captured_xids): (String, String, i64, i64) =
+        sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT MIN(lsn)::text, MAX(lsn)::text, count(*)::bigint, \
+                    count(DISTINCT source_xid)::bigint \
+             FROM {buffer} WHERE id = 2 AND action IN ('I', 'D')"
+        )))
+        .fetch_one(&mut *writer_a)
+        .await
+        .expect("read writer A captured transaction history");
+    assert_eq!(
+        captured_rows, 3,
+        "insert and update capture three complete images"
+    );
+    assert_eq!(captured_xids, 1, "all three images belong to writer A");
+    let capture_positions_advance: bool = sqlx::query_scalar("SELECT $1::pg_lsn < $2::pg_lsn")
+        .bind(&a_first_lsn)
+        .bind(&a_last_lsn)
+        .fetch_one(&mut *writer_a)
+        .await
+        .expect("compare capture LSNs from separate statements");
+    assert!(
+        capture_positions_advance,
+        "the transaction contains distinct per-event LSN positions"
+    );
+    let captured_images: Vec<(String, String)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT action::text, value FROM {buffer} \
+         WHERE id = 2 AND action IN ('I', 'D') ORDER BY change_id"
     )))
-    .fetch_one(&mut *writer_a)
+    .fetch_all(&mut *writer_a)
     .await
-    .expect("writer A must see its captured CDC row");
+    .expect("read writer A complete images in capture order");
+    assert_eq!(
+        captured_images,
+        vec![
+            ("I".to_string(), "late commit".to_string()),
+            ("D".to_string(), "late commit".to_string()),
+            ("I".to_string(), "late commit final".to_string()),
+        ],
+        "one committed transaction retains its complete multi-statement history"
+    );
 
     let mut writer_b = db.pool.begin().await.expect("begin writer B");
     sqlx::query(AssertSqlSafe(format!(
@@ -113,7 +153,7 @@ async fn manual_late_commit_preserves_exact_results(warm_transaction: bool) {
     let ordered: bool = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT MAX(lsn) > $1::pg_lsn FROM {buffer}"
     )))
-    .bind(&a_lsn)
+    .bind(&a_last_lsn)
     .fetch_one(&db.pool)
     .await
     .expect("witness a < b using committed CDC rows");
@@ -139,6 +179,15 @@ async fn manual_late_commit_preserves_exact_results(warm_transaction: bool) {
         .execute(&mut *refresher)
         .await
         .expect("manual refresh must finish while writer A is open");
+    let writer_a_visible: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lsn_late_commit_stream WHERE id = 2)")
+            .fetch_one(&mut *refresher)
+            .await
+            .expect("check that no part of writer A became visible");
+    assert!(
+        !writer_a_visible,
+        "no image from open writer A may be applied"
+    );
     let frontier_before_commit: String = sqlx::query_scalar(
         "SELECT frontier->'sources'->($1::text)->>'lsn' \
          FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $2",
@@ -163,12 +212,31 @@ async fn manual_late_commit_preserves_exact_results(warm_transaction: bool) {
 
     let safe_frontier: bool = sqlx::query_scalar("SELECT $1::pg_lsn < $2::pg_lsn")
         .bind(&frontier_before_commit)
-        .bind(&a_lsn)
+        .bind(&a_first_lsn)
         .fetch_one(&db.pool)
         .await
         .expect("compare the first refresh frontier to writer A");
+    let completed_frontier: String = sqlx::query_scalar(
+        "SELECT frontier->'sources'->($1::text)->>'lsn' \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $2",
+    )
+    .bind(source_oid.to_string())
+    .bind(stream)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the frontier after writer A commits");
+    let completed_past_writer: bool = sqlx::query_scalar("SELECT $1::pg_lsn >= $2::pg_lsn")
+        .bind(&completed_frontier)
+        .bind(&a_last_lsn)
+        .fetch_one(&db.pool)
+        .await
+        .expect("compare the recovered frontier with writer A final image");
     db.assert_st_matches_query(stream, &query).await;
     assert!(safe_frontier, "manual refresh advanced past an open writer");
+    assert!(
+        completed_past_writer,
+        "after commit, the recovered frontier must include every writer A image"
+    );
     let modes: Vec<(String, String, bool)> = sqlx::query_as(
         "SELECT action, initiated_by, was_full_fallback FROM pgtrickle.pgt_refresh_history \
          WHERE refresh_id > $1 ORDER BY refresh_id",
