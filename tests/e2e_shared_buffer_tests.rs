@@ -423,6 +423,191 @@ async fn test_cdc_compaction_keeps_final_insert_after_insert_update() {
 }
 
 #[tokio::test]
+async fn test_cdc_compaction_matches_all_short_valid_row_histories() {
+    fn extend_paths(
+        histories: &mut Vec<Vec<Option<&'static str>>>,
+        path: &mut Vec<Option<&'static str>>,
+        remaining: usize,
+    ) {
+        if remaining == 0 {
+            histories.push(path.clone());
+            return;
+        }
+        let current = path[path.len() - 1];
+        for next in [None, Some("a"), Some("b")] {
+            if next != current {
+                path.push(next);
+                extend_paths(histories, path, remaining - 1);
+                path.pop();
+            }
+        }
+    }
+
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("ALTER SYSTEM SET log_min_messages = 'info'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    let mut histories = Vec::new();
+    for initial in [None, Some("a"), Some("b")] {
+        for transitions in 1..=4 {
+            extend_paths(&mut histories, &mut vec![initial], transitions);
+        }
+    }
+    assert_eq!(histories.len(), 90, "all paths through four transitions");
+
+    for mode in ["row", "statement"] {
+        let source = format!("ranked_compaction_{mode}");
+        let output = format!("{source}_rows");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, value TEXT NOT NULL)"
+        ))
+        .await;
+        let initial_rows = histories
+            .iter()
+            .enumerate()
+            .filter_map(|(index, path)| path[0].map(|value| format!("({}, '{value}')", index + 1)))
+            .collect::<Vec<_>>();
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES {}",
+            initial_rows.join(",")
+        ))
+        .await;
+
+        let query = format!("SELECT id,value FROM {source}");
+        db.try_execute_with_config(
+            &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{output}',$q${query}$q$,'24h','DIFFERENTIAL')"
+            ),
+        )
+        .await
+        .unwrap();
+
+        for transition in 1..=4 {
+            let statements = histories
+                .iter()
+                .enumerate()
+                .filter_map(|(index, path)| {
+                    if path.len() <= transition {
+                        return None;
+                    }
+                    let id = index + 1;
+                    match (path[transition - 1], path[transition]) {
+                        (None, Some(next)) => {
+                            Some(format!("INSERT INTO {source} VALUES ({id}, '{next}')"))
+                        }
+                        (Some(_), None) => Some(format!("DELETE FROM {source} WHERE id={id}")),
+                        (Some(_), Some(next)) => {
+                            Some(format!("UPDATE {source} SET value='{next}' WHERE id={id}"))
+                        }
+                        (None, None) => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !statements.is_empty() {
+                let transaction = format!("BEGIN; {}; COMMIT", statements.join(";"));
+                sqlx::raw_sql(sqlx::AssertSqlSafe(transaction))
+                    .execute(&db.pool)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let source_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        let buffer = db.change_buffer_table(source_oid).await;
+        for (index, path) in histories.iter().enumerate() {
+            let mut expected = Vec::new();
+            for transition in 1..path.len() {
+                match (path[transition - 1], path[transition]) {
+                    (None, Some(next)) => expected.push(("I".to_string(), next.to_string())),
+                    (Some(previous), None) => {
+                        expected.push(("D".to_string(), previous.to_string()))
+                    }
+                    (Some(previous), Some(next)) => {
+                        expected.push(("D".to_string(), previous.to_string()));
+                        expected.push(("I".to_string(), next.to_string()));
+                    }
+                    (None, None) => unreachable!("generated histories have no no-op transition"),
+                }
+            }
+            let actual: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT action,value FROM {buffer} WHERE id={} AND action IN ('I','D') ORDER BY change_id",
+                index + 1
+            )))
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(actual, expected, "captured history for row {}", index + 1);
+
+            let transactions: i64 = db
+                .query_scalar(&format!(
+                    "SELECT count(DISTINCT source_xid::text)::bigint FROM {buffer} \
+                     WHERE id={} AND action IN ('I','D')",
+                    index + 1
+                ))
+                .await;
+            assert_eq!(
+                transactions,
+                (path.len() - 1) as i64,
+                "every state transition for row {} commits atomically",
+                index + 1
+            );
+        }
+
+        let before: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{output}')"),
+        )
+        .await
+        .unwrap();
+        let differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{output}' AND h.refresh_id>{before} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(differential, "all cases must use differential compaction");
+
+        let logs = tokio::process::Command::new("docker")
+            .args(["logs", db.container_id()])
+            .output()
+            .await
+            .expect("read PostgreSQL logs to witness compaction");
+        let logs = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&logs.stdout),
+            String::from_utf8_lossy(&logs.stderr)
+        );
+        assert!(
+            logs.contains(&format!("C-4: compacted changes_{source_oid} — removed ")),
+            "the production base-buffer compactor must prune redundant ranked events"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &output,
+            &query,
+            "all short valid row histories after ranked compaction",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn test_cdc_interleaved_identity_history_preserves_complete_bag() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
