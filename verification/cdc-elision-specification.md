@@ -410,8 +410,16 @@ built from `a84786c3`; the subsequent `c0e0df9d` change only added tests,
 workflow selection and documentation, leaving the extension library
 unchanged. Hosted exact-candidate binding is still queued and must verify the
 requested commit and packaged/installed bytes.
-The generated semantic floor remains red at 16/34 passes; that separate floor
-does not measure the installed CDC case selection.
+The earlier 16/34 semantic-floor result is superseded by a current-main local
+recheck. At source commit `b32440c891cbbdcfe243594442bd0a24e3c2ea6e`, after
+building the PostgreSQL 18 E2E image from that checkout, the generated
+semantic floor passed 34/34 PR cases and 54/54 scheduled cases, with zero
+retries or failures. The same image passed all 26 current `CDC_ELISION_CASES`
+(48 unrelated cases filtered, zero retries). The semantic observation reports
+`candidate_commit: unbound`; these are local source-built Testcontainers
+results, not hosted exact-candidate binding or package-byte attestation.
+They do not close #1221: arbitrary SQL reduction, all protected consumer
+windows, and the remaining R1/R2 obligations are still unproved.
 
 ## Existing installations and limits
 
