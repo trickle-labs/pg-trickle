@@ -135,6 +135,7 @@ PROOF_CONTRACTS = {
             "append_captured_image_bucket_delta",
             "transient_same_image_cancels_within_incarnation", "source_incarnation_prevents_cross_epoch_cancellation",
             "multi_identity_compaction_preserves_bag_delta",
+            "multi_identity_history_preserves_bag_delta",
         },
         "cases": CDC_ELISION_CASES,
         "inputs": [
@@ -153,6 +154,7 @@ PROOF_CONTRACTS = {
             "overlapping-consumer-boundary", "lost-scan-delete-initial-state",
             "lost-scan-insert-final-state",
             "lost-identity-compaction-delta",
+            "lost-identity-bag-delta",
         },
     },
 }
@@ -184,11 +186,12 @@ def proof_source_digest(proof: dict[str, Any], source: Path, proof_kind: str = "
                 f"{proof_kind} proof omits a required executable mutant")
         for name in required:
             control = controls[name]
+            expected_failure_kind = "assertion" if name == "lost-identity-bag-delta" else "postcondition"
             require(isinstance(control, dict) and control.get("returncode", 0) != 0
-                    and control.get("failure_kind") == "postcondition"
+                    and control.get("failure_kind") == expected_failure_kind
                     and re.search(r"verification results::\s+\d+ verified,\s+[1-9]\d* errors",
                                   control.get("summary", "")) is not None,
-                    f"{proof_kind} mutant did not fail its intended postcondition: {name}")
+                    f"{proof_kind} mutant did not fail its intended proof obligation: {name}")
     for path in contract["inputs"]:
         require(proof.get("production_inputs", {}).get(path) == digest(ROOT / path),
                 f"{proof_kind} production input differs from verified candidate: {path}")

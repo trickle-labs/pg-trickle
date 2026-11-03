@@ -41,6 +41,7 @@ OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "different_identity_has_zero_image_weight",
     "interleaved_row_identity_histories_preserve_endpoints",
     "multi_identity_compaction_preserves_bag_delta",
+    "multi_identity_history_preserves_bag_delta",
 ]
 PRODUCTION_INPUTS = [
     "src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs",
@@ -95,6 +96,10 @@ MUTATIONS = {
         "        compacted_image_bucket_delta(\n            histories[index], histories[index].len() as int,\n            histories[index].len() as int, row_image,\n        ) + multi_identity_compacted_bucket_delta(",
         "        multi_identity_compacted_bucket_delta(",
     ),
+    "lost-identity-bag-delta": (
+        "        captured_image_bucket_delta(\n            history, event_count, identities[identity_count - 1], row_image,\n            source_incarnation, previous_cut, new_cut,\n        ) + multi_identity_bucket_delta(",
+        "        multi_identity_bucket_delta(",
+    ),
     "cross-incarnation-bucket": (
         "event.source_incarnation == source_incarnation\n        && image_event_in_window_spec",
         "true\n        && image_event_in_window_spec",
@@ -116,6 +121,9 @@ MUTATIONS = {
         "scan_final_row_present(last_action) && scan_final_row_present(action)",
         "true && scan_final_row_present(action)",
     ),
+}
+MUTATION_FAILURE_MARKERS = {
+    "lost-identity-bag-delta": "assertion failed",
 }
 
 
@@ -204,9 +212,11 @@ def run_checks() -> None:
             temporary.write_text(mutant, encoding="utf-8")
             result = runner.run_verus(".p2p/tmp/cdc-elision-mutant.rs", EVIDENCE / f"cdc-mutant-{name}.log")
             rejected = runner.VERIFICATION_SUMMARY.search(result.stdout)
-            if result.returncode == 0 or rejected is None or int(rejected[2]) == 0 or "postcondition not satisfied" not in result.stdout:
-                raise RuntimeError(f"{name}: executable mutant did not fail its postcondition")
-            controls[name] = {"returncode": result.returncode, "summary": rejected[0], "failure_kind": "postcondition",
+            failure_marker = MUTATION_FAILURE_MARKERS.get(name, "postcondition not satisfied")
+            if result.returncode == 0 or rejected is None or int(rejected[2]) == 0 or failure_marker not in result.stdout:
+                raise RuntimeError(f"{name}: semantic mutant was not rejected for the intended reason")
+            failure_kind = "assertion" if name in MUTATION_FAILURE_MARKERS else "postcondition"
+            controls[name] = {"returncode": result.returncode, "summary": rejected[0], "failure_kind": failure_kind,
                               "source_sha256": runner.sha256(mutant.encode()), "output_sha256": runner.sha256(result.stdout.encode())}
         record = {
             "schema": "pg-trickle-cdc-elision-verification-v1", "source": "verification/cdc_elision.rs",
