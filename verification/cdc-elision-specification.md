@@ -82,8 +82,8 @@ the original bag delta within one source-incarnation consumer cut. Its input
 is the SQL partition for one row identity and selected LSN window; projection,
 transaction-cut membership, and PostgreSQL window execution remain explicit
 adapters. The proof covers arbitrarily long projected histories under those
-assumptions. An installed PostgreSQL test now enumerates all 90 valid paths of
-up to four transitions through absent, `a` and `b` row states in both row and
+assumptions. An installed PostgreSQL test now enumerates all 1,530 valid paths of
+up to eight transitions through absent, `a` and `b` row states in both row and
 statement trigger modes. It checks captured images and transaction grouping,
 requires the production base compactor to prune rows, and compares the final
 stream table with its defining query. The existing I/D/I test continues to
