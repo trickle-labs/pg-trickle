@@ -608,6 +608,114 @@ async fn test_cdc_compaction_matches_all_short_valid_row_histories() {
 }
 
 #[tokio::test]
+async fn test_cdc_compaction_immediate_key_changes_preserve_per_identity_endpoints() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("ALTER SYSTEM SET log_min_messages = 'info'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    for mode in ["row", "statement"] {
+        let source = format!("moving_key_{mode}");
+        let output = format!("{source}_rows");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, payload TEXT NOT NULL)"
+        ))
+        .await;
+        db.execute(&format!("INSERT INTO {source} VALUES (1, 'initial')"))
+            .await;
+        let query = format!("SELECT id, payload FROM {source}");
+        db.try_execute_with_config(
+            &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{output}',$q${query}$q$,'24h','DIFFERENTIAL')"
+            ),
+        )
+        .await
+        .unwrap();
+
+        db.execute(&format!(
+            "UPDATE {source} SET id=2, payload='intermediate' WHERE id=1"
+        ))
+        .await;
+        db.execute(&format!(
+            "UPDATE {source} SET id=3, payload='final' WHERE id=2"
+        ))
+        .await;
+
+        let source_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        let buffer = db.change_buffer_table(source_oid).await;
+        let captured: Vec<(String, i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT action,id,payload FROM {buffer} WHERE action IN ('I','D') ORDER BY change_id"
+        )))
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            captured,
+            vec![
+                ("D".to_string(), 1, "initial".to_string()),
+                ("I".to_string(), 2, "intermediate".to_string()),
+                ("D".to_string(), 2, "intermediate".to_string()),
+                ("I".to_string(), 3, "final".to_string()),
+            ],
+            "each immediate-key update must capture complete images under their own identities"
+        );
+
+        let before: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{output}')"),
+        )
+        .await
+        .unwrap();
+        let differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+                 WHERE s.pgt_name='{output}' AND h.refresh_id>{before} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(differential, "key changes must use differential compaction");
+
+        let logs = tokio::process::Command::new("docker")
+            .args(["logs", db.container_id()])
+            .output()
+            .await
+            .expect("read PostgreSQL logs to witness immediate-key compaction");
+        let logs = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&logs.stdout),
+            String::from_utf8_lossy(&logs.stderr)
+        );
+        assert!(
+            logs.contains(&format!(
+                "C-4: compacted changes_{source_oid} — removed 2 rows"
+            )),
+            "the intermediate identity's I/D pair must be pruned"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &output,
+            &query,
+            "immediate primary-key changes retain the initial delete and final insert",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn test_cdc_interleaved_identity_history_preserves_complete_bag() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
