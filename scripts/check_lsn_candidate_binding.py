@@ -67,6 +67,7 @@ CDC_ELISION_CASES = [
     "e2e_shared_buffer_tests::test_cdc_traced_refreshes_consume_each_current_window",
     "e2e_shared_buffer_tests::test_compaction_shared_stream_preserves_consumer_boundaries",
     "e2e_cdc_tests::test_sf10_truncate_then_insert_post_truncate_rows_captured",
+    "e2e_cdc_tests::test_t4_truncate_lsn_insert_ordering_regression",
     "e2e_schema_evolution_tests::test_cdc_recreated_source_does_not_replay_previous_incarnation",
 ]
 JOIN_PLAN_CASES = [
