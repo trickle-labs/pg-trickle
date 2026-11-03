@@ -452,11 +452,11 @@ async fn test_cdc_compaction_matches_all_short_valid_row_histories() {
 
     let mut histories = Vec::new();
     for initial in [None, Some("a"), Some("b")] {
-        for transitions in 1..=4 {
+        for transitions in 1..=8 {
             extend_paths(&mut histories, &mut vec![initial], transitions);
         }
     }
-    assert_eq!(histories.len(), 90, "all paths through four transitions");
+    assert_eq!(histories.len(), 1530, "all paths through eight transitions");
 
     for mode in ["row", "statement"] {
         let source = format!("ranked_compaction_{mode}");
@@ -486,7 +486,7 @@ async fn test_cdc_compaction_matches_all_short_valid_row_histories() {
         .await
         .unwrap();
 
-        for transition in 1..=4 {
+        for transition in 1..=8 {
             let statements = histories
                 .iter()
                 .enumerate()
