@@ -912,7 +912,7 @@ pub open spec fn multi_identity_compacted_bucket_delta(
 }
 
 /// Sum the endpoint bag change for each distinct row identity.
-pub open spec fn multi_identity_endpoint_bag_delta(
+pub open spec fn multi_identity_compacted_endpoint_bag_delta(
     final_states: Seq<Option<Seq<u8>>>,
     histories: Seq<Seq<CapturedImageEvent>>,
     identities: Seq<Seq<u8>>,
@@ -933,7 +933,7 @@ pub open spec fn multi_identity_endpoint_bag_delta(
                 final_states[index], histories[index], histories[index].len() as int,
                 identities[index], source_incarnation, previous_cut, new_cut,
             ), row_image)
-            + multi_identity_endpoint_bag_delta(
+            + multi_identity_compacted_endpoint_bag_delta(
                 final_states, histories, identities, identity_count - 1,
                 row_image, source_incarnation, previous_cut, new_cut,
             )
@@ -975,7 +975,7 @@ pub proof fn multi_identity_compaction_preserves_bag_delta(
     ensures
         multi_identity_compacted_bucket_delta(
             histories, identity_count, row_image,
-        ) == multi_identity_endpoint_bag_delta(
+        ) == multi_identity_compacted_endpoint_bag_delta(
             final_states, histories, identities, identity_count, row_image,
             source_incarnation, previous_cut, new_cut,
         ),
@@ -1000,7 +1000,7 @@ pub proof fn multi_identity_compaction_preserves_bag_delta(
             row_image, source_incarnation, previous_cut, new_cut,
         );
         reveal(multi_identity_compacted_bucket_delta);
-        reveal(multi_identity_endpoint_bag_delta);
+        reveal(multi_identity_compacted_endpoint_bag_delta);
         if count == 0 {
             reveal(compacted_image_bucket_delta);
             reveal(image_state_before);
