@@ -706,6 +706,111 @@ async fn test_cdc_interleaved_identity_history_preserves_complete_bag() {
 }
 
 #[tokio::test]
+async fn test_cdc_compaction_preserves_multi_identity_bag_delta() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+
+    for mode in ["row", "statement"] {
+        let source = format!("multi_identity_compact_{mode}");
+        let output = format!("{source}_rows");
+        let query = format!("SELECT payload FROM {source}");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY, payload TEXT NOT NULL)"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES \
+             (1,'a'),(2,'a'),(3,'b'),(4,'b'),(5,'c'),(6,'c')"
+        ))
+        .await;
+        db.try_execute_with_config(
+            &[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")],
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{output}',$q${query}$q$,'24h','DIFFERENTIAL')"
+            ),
+        )
+        .await
+        .unwrap();
+
+        // Every row changes in every committed update. Distinct source
+        // identities repeatedly share complete output-image buckets.
+        for update in [
+            "UPDATE SOURCE SET payload = CASE id \
+             WHEN 1 THEN 'b' WHEN 2 THEN 'c' WHEN 3 THEN 'a' \
+             WHEN 4 THEN 'd' WHEN 5 THEN 'd' WHEN 6 THEN 'a' END",
+            "UPDATE SOURCE SET payload = CASE id \
+             WHEN 1 THEN 'd' WHEN 2 THEN 'd' WHEN 3 THEN 'c' \
+             WHEN 4 THEN 'a' WHEN 5 THEN 'b' WHEN 6 THEN 'e' END",
+            "UPDATE SOURCE SET payload = CASE id \
+             WHEN 1 THEN 'e' WHEN 2 THEN 'e' WHEN 3 THEN 'a' \
+             WHEN 4 THEN 'b' WHEN 5 THEN 'c' WHEN 6 THEN 'd' END",
+        ] {
+            db.execute(&update.replace("SOURCE", &source)).await;
+        }
+
+        let source_oid: i64 = db
+            .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+            .await;
+        let buffer = db.change_buffer_table(source_oid).await;
+        let pending_before: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM {buffer} WHERE action IN ('D','I')"
+            ))
+            .await;
+        assert_eq!(
+            pending_before, 36,
+            "six identities across three updates must capture 36 signed events"
+        );
+
+        let before: i64 = db
+            .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy='differential'",
+                "SET pg_trickle.differential_max_change_ratio=0",
+                "SET pg_trickle.compact_threshold=1",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{output}')"),
+        )
+        .await
+        .unwrap();
+        let differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{output}' AND h.refresh_id>{before} \
+                   AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' \
+                   AND NOT h.was_full_fallback)"
+            ))
+            .await;
+        assert!(
+            differential,
+            "multi-identity compaction must stay differential"
+        );
+
+        let pending_after: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM {buffer} WHERE action IN ('D','I')"
+            ))
+            .await;
+        assert_eq!(
+            pending_after, 12,
+            "ranked compaction must retain the first delete and final insert for each identity"
+        );
+        e2e::oracle::assert_st_query_exact(
+            &db,
+            &output,
+            &query,
+            "six-identity complete-image bag after ranked compaction",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn test_cdc_interleaved_identity_history_preserves_protected_cuts() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")

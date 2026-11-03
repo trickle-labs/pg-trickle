@@ -49,6 +49,7 @@ CDC_ELISION_CASES = [
     "e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload",
     "e2e_shared_buffer_tests::test_cdc_committed_history_preserves_latest_complete_payload",
     "e2e_shared_buffer_tests::test_cdc_compaction_keeps_final_insert_after_insert_update",
+    "e2e_shared_buffer_tests::test_cdc_compaction_preserves_multi_identity_bag_delta",
     "e2e_shared_buffer_tests::test_cdc_interleaved_identity_history_preserves_complete_bag",
     "e2e_shared_buffer_tests::test_cdc_interleaved_identity_history_preserves_protected_cuts",
     "e2e_shared_buffer_tests::test_cdc_deferred_key_swap_preserves_complete_images",
@@ -133,6 +134,7 @@ PROOF_CONTRACTS = {
             "transaction_window_membership_is_atomic", "payload_replacement_preserves_complete_image_delta",
             "append_captured_image_bucket_delta",
             "transient_same_image_cancels_within_incarnation", "source_incarnation_prevents_cross_epoch_cancellation",
+            "multi_identity_compaction_preserves_bag_delta",
         },
         "cases": CDC_ELISION_CASES,
         "inputs": [
@@ -150,6 +152,7 @@ PROOF_CONTRACTS = {
             "key-only-image-bucket", "cross-incarnation-bucket", "split-transaction-cut", "reverse-history-weight",
             "overlapping-consumer-boundary", "lost-scan-delete-initial-state",
             "lost-scan-insert-final-state",
+            "lost-identity-compaction-delta",
         },
     },
 }
