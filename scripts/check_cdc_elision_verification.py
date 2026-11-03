@@ -45,6 +45,7 @@ OBLIGATIONS = EXECUTABLE_OBLIGATIONS + [
     "appended_suffix_preserves_history_prefix_validity",
     "identity_window_projection_preserves_valid_history",
     "projected_history_compaction_preserves_image_bucket_delta",
+    "multi_identity_projected_compaction_preserves_bag_delta",
     "interleaved_row_identity_histories_preserve_endpoints",
     "multi_identity_compaction_preserves_bag_delta",
     "multi_identity_history_preserves_bag_delta",
@@ -109,6 +110,10 @@ MUTATIONS = {
     "compact-global-history-before-projection": (
         "ensures\n        compacted_image_bucket_delta(\n            identity_window_projection(\n                history, count, row_identity, source_incarnation,\n                previous_cut, new_cut,\n            ),",
         "ensures\n        compacted_image_bucket_delta(\n            history,",
+    ),
+    "compact-global-history-for-each-identity": (
+        "        compacted_image_bucket_delta(\n            projected, projected.len() as int, projected.len() as int, row_image,\n        ) + projected_multi_identity_compacted_bucket_delta(",
+        "        compacted_image_bucket_delta(\n            history, event_count, event_count, row_image,\n        ) + projected_multi_identity_compacted_bucket_delta(",
     ),
     "lost-identity-compaction-delta": (
         "        compacted_image_bucket_delta(\n            histories[index], histories[index].len() as int,\n            histories[index].len() as int, row_image,\n        ) + multi_identity_compacted_bucket_delta(",

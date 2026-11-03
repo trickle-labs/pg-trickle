@@ -2085,6 +2085,140 @@ pub proof fn projected_history_compaction_preserves_image_bucket_delta(
     }
 }
 
+/// Sum compaction deltas after projecting each identity from one global
+/// interleaved capture history.
+pub open spec fn projected_multi_identity_compacted_bucket_delta(
+    history: Seq<CapturedImageEvent>,
+    event_count: int,
+    identities: Seq<Seq<u8>>,
+    identity_count: int,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> int
+    decreases identity_count,
+{
+    if identity_count <= 0 {
+        0
+    } else {
+        let index = identity_count - 1;
+        let projected = identity_window_projection(
+            history, event_count, identities[index], source_incarnation,
+            previous_cut, new_cut,
+        );
+        compacted_image_bucket_delta(
+            projected, projected.len() as int, projected.len() as int, row_image,
+        ) + projected_multi_identity_compacted_bucket_delta(
+            history, event_count, identities, identity_count - 1, row_image,
+            source_incarnation, previous_cut, new_cut,
+        )
+    }
+}
+
+/// Compaction over all covered identities in a valid global history preserves
+/// the batch's complete-row bag delta at every selected consumer window.
+proof fn projected_multi_identity_compaction_matches_identity_deltas(
+    final_states: Seq<Option<Seq<u8>>>,
+    history: Seq<CapturedImageEvent>,
+    event_count: int,
+    identities: Seq<Seq<u8>>,
+    identity_count: int,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        0 <= event_count <= history.len(),
+        event_count < u64::MAX as int,
+        identities.len() == final_states.len(),
+        0 <= identity_count <= identities.len(),
+        previous_cut <= new_cut,
+        forall|index: int| 0 <= index < identity_count ==> valid_history_from_state(
+            final_states[index], history, event_count, identities[index],
+            source_incarnation, previous_cut, new_cut,
+        ),
+    ensures
+        projected_multi_identity_compacted_bucket_delta(
+            history, event_count, identities, identity_count, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) == multi_identity_bucket_delta(
+            history, event_count, identities, identity_count, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ),
+    decreases identity_count,
+{
+    if identity_count > 0 {
+        let index = identity_count - 1;
+        projected_history_compaction_preserves_image_bucket_delta(
+            final_states[index], history, event_count, identities[index],
+            row_image, source_incarnation, previous_cut, new_cut,
+        );
+        projected_multi_identity_compaction_matches_identity_deltas(
+            final_states, history, event_count, identities,
+            identity_count - 1, row_image, source_incarnation,
+            previous_cut, new_cut,
+        );
+        reveal(projected_multi_identity_compacted_bucket_delta);
+        reveal(multi_identity_bucket_delta);
+    }
+}
+
+pub proof fn multi_identity_projected_compaction_preserves_bag_delta(
+    final_states: Seq<Option<Seq<u8>>>,
+    history: Seq<CapturedImageEvent>,
+    event_count: int,
+    identities: Seq<Seq<u8>>,
+    identity_count: int,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        0 <= event_count <= history.len(),
+        event_count < u64::MAX as int,
+        identities.len() == final_states.len(),
+        0 <= identity_count <= identities.len(),
+        previous_cut <= new_cut,
+        forall|left: int, right: int| 0 <= left < right < identity_count
+            ==> identities[left] != identities[right],
+        forall|event_index: int| 0 <= event_index < event_count
+            && captured_event_in_window(
+                history[event_index], source_incarnation, previous_cut, new_cut,
+            ) ==> exists|identity_index: int| 0 <= identity_index < identity_count
+                && history[event_index].row_identity == identities[identity_index],
+        forall|index: int| 0 <= index < identity_count ==> valid_history_from_state(
+            final_states[index], history, event_count, identities[index],
+            source_incarnation, previous_cut, new_cut,
+        ),
+    ensures
+        projected_multi_identity_compacted_bucket_delta(
+            history, event_count, identities, identity_count, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) == multi_identity_bucket_delta(
+            history, event_count, identities, identity_count, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ),
+        multi_identity_bucket_delta(
+            history, event_count, identities, identity_count, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) == multi_identity_endpoint_bag_delta(
+            final_states, history, event_count, identities, identity_count,
+            row_image, source_incarnation, previous_cut, new_cut,
+        ),
+{
+    projected_multi_identity_compaction_matches_identity_deltas(
+        final_states, history, event_count, identities, identity_count,
+        row_image, source_incarnation, previous_cut, new_cut,
+    );
+    multi_identity_history_preserves_bag_delta(
+        final_states, history, event_count, identities, identity_count,
+        row_image, source_incarnation, previous_cut, new_cut,
+    );
+}
+
 /// Events from one committed source transaction share one abstract visibility
 /// coordinate, so the model's consumer cut cannot admit only part of it.
 /// Mapping this coordinate to per-event capture LSNs relies on the production
