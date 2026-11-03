@@ -383,6 +383,14 @@ Binding requires the runtime's declared candidate commit to match the requested
 commit. It trusts the build/test runner for build origin and successful named
 test execution; byte equality is not a source-to-binary compilation proof.
 
+At source commit `d64b870e`, a direct run of the pinned Verus image reported
+45 verified obligations and zero errors. All 22 semantic mutants declared by
+the checker were rejected with their expected failure class: 21 postcondition
+failures and the one assertion failure for `lost-identity-bag-delta`. This
+rechecks the model and its controls locally; it does not bind the packaged and
+installed extension bytes. The hosted exact-candidate workflow was still
+queued at the time of this check.
+
 Independent read-only review accepted the bounded R3 specification at
 `3184b55e0ee74d82f55203bf3bd744ab9a675f1e`, including a follow-up inspection of
 the completed installed binding. See [the review record](specification-reviews.md).
