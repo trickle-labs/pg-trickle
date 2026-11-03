@@ -163,7 +163,7 @@ def check_contract() -> None:
     lsn_tests = (runner.ROOT / "tests/e2e_lsn_contract_tests.rs").read_text()
     for evidence in [
         "test_lsn_manual_refresh_late_commit_preserves_exact_results",
-        "count(DISTINCT source_xid)::bigint",
+        "count(DISTINCT source_xid::text)::bigint",
         "completed_past_writer",
     ]:
         if evidence not in lsn_tests:
