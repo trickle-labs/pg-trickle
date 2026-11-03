@@ -296,6 +296,18 @@ The generated SQL is compared with an independent endpoint oracle. These
 finite cases broaden the runtime sample but do not establish equivalence for
 arbitrary production histories.
 
+`multi_identity_history_preserves_bag_delta` now composes the per-identity
+complete-image theorem across any finite sequence of distinct logical row
+identities that covers every event in the selected source-incarnation consumer
+window. Each identity may have an independently valid initial/final row state,
+while all histories share the captured batch and can be arbitrarily
+interleaved. The sum of the per-identity complete-image deltas equals the
+batch's final-minus-initial row-image multiplicity. This closes the model's
+two-identity cardinality limit under the explicit unique-row and valid-history
+assumptions. The theorem does not establish those assumptions for every
+production batch, nor PostgreSQL grouping, aggregation, MERGE execution, or
+all protected consumer schedules; those remain acceptance gaps.
+
 ## Controls and candidate binding
 
 The pinned Verus/Z3 runner checks the executable decisions and proof
@@ -315,8 +327,10 @@ the compaction rank and valid-history preservation results:
 `valid_history_endpoint_states` and
 `valid_history_compaction_preserves_image_delta`,
 `different_identity_has_zero_image_weight` and
-`interleaved_row_identity_histories_preserve_endpoints`. Every semantic mutant
-declared by the checker must fail a postcondition, including:
+`interleaved_row_identity_histories_preserve_endpoints`, and
+`multi_identity_history_preserves_bag_delta`. Every semantic mutant declared
+by the checker must be rejected by the intended proof obligation or executable
+postcondition, including:
 `lost-image-change`, `unknown-type-elision`, `lost-positive-image`,
 `reversed-negative-image`, `wrong-insert-event-weight`,
 `wrong-delete-event-weight`, `prefer-deleted-image`, `cross-truncate-barrier`,

@@ -91,7 +91,7 @@ class CandidateBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "omits a required executable mutant"):
                 binding.validate_binding(**arguments)
             self.proof["semantic_mutations"][name] = {**control, "failure_kind": "compile-error"}
-            with self.assertRaisesRegex(ValueError, "intended postcondition"):
+            with self.assertRaisesRegex(ValueError, "intended proof obligation"):
                 binding.validate_binding(**arguments)
             self.proof["semantic_mutations"][name] = control
         self.proof["production_inputs"]["src/dvm/operators/filter.rs"] = "0" * 64
@@ -128,7 +128,7 @@ class CandidateBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"omits a required executable mutant"):
                 binding.validate_binding(**arguments)
             self.proof["semantic_mutations"][name]={**control,"failure_kind":"compile-error"}
-            with self.assertRaisesRegex(ValueError,"intended postcondition"):
+            with self.assertRaisesRegex(ValueError,"intended proof obligation"):
                 binding.validate_binding(**arguments)
             self.proof["semantic_mutations"][name]=control
         with self.assertRaisesRegex(ValueError,"all required RECEIPT E2E cases"):
@@ -164,7 +164,7 @@ class CandidateBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "omits a required executable mutant"):
                 binding.validate_binding(**arguments)
             self.proof["semantic_mutations"][name] = {**control, "failure_kind": "compile-error"}
-            with self.assertRaisesRegex(ValueError, "intended postcondition"):
+            with self.assertRaisesRegex(ValueError, "intended proof obligation"):
                 binding.validate_binding(**arguments)
             self.proof["semantic_mutations"][name] = control
         self.proof["production_inputs"]["src/api/refresh_ops.rs"] = "0" * 64
@@ -191,7 +191,8 @@ class CandidateBindingTests(unittest.TestCase):
             "schema": contract["schema"], "source_sha256": binding.digest(self.source),
             "obligations": sorted(contract["obligations"]),
             "production_inputs": {path: binding.digest(binding.ROOT / path) for path in contract["inputs"]},
-            "semantic_mutations": {name: {"returncode": 1, "failure_kind": "postcondition",
+            "semantic_mutations": {name: {"returncode": 1,
+                                           "failure_kind": "assertion" if name == "lost-identity-bag-delta" else "postcondition",
                                            "summary": "verification results:: 1 verified, 1 errors"}
                                    for name in contract["mutants"]},
         })
@@ -204,7 +205,7 @@ class CandidateBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "omits a required executable mutant"):
                 binding.validate_binding(**arguments)
             self.proof["semantic_mutations"][name] = {**control, "failure_kind": "compile-error"}
-            with self.assertRaisesRegex(ValueError, "intended postcondition"):
+            with self.assertRaisesRegex(ValueError, "intended proof obligation"):
                 binding.validate_binding(**arguments)
             self.proof["semantic_mutations"][name] = control
         self.proof["production_inputs"]["src/cdc/triggers.rs"] = "0" * 64
@@ -250,7 +251,7 @@ class CandidateBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "omits a required executable mutant"):
                 binding.validate_binding(**arguments)
             self.proof["semantic_mutations"][name] = {**control, "failure_kind": "compile-error"}
-            with self.assertRaisesRegex(ValueError, "intended postcondition"):
+            with self.assertRaisesRegex(ValueError, "intended proof obligation"):
                 binding.validate_binding(**arguments)
             self.proof["semantic_mutations"][name] = control
         self.proof["production_inputs"]["src/dvm/row_id_v2.rs"] = "0" * 64

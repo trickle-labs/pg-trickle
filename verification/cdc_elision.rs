@@ -1000,6 +1000,181 @@ pub proof fn valid_history_has_unique_signed_image_endpoints(
     }
 }
 
+/// Sum one complete-image delta for each distinct logical row identity in a
+/// finite batch. The captured history may interleave those identities.
+pub open spec fn multi_identity_bucket_delta(
+    history: Seq<CapturedImageEvent>,
+    event_count: int,
+    identities: Seq<Seq<u8>>,
+    identity_count: int,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> int
+    decreases identity_count,
+{
+    if identity_count <= 0 {
+        0
+    } else {
+        captured_image_bucket_delta(
+            history, event_count, identities[identity_count - 1], row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) + multi_identity_bucket_delta(
+            history, event_count, identities, identity_count - 1, row_image,
+            source_incarnation, previous_cut, new_cut,
+        )
+    }
+}
+
+/// The same finite-row batch's final-minus-initial bag multiplicity.
+pub open spec fn multi_identity_endpoint_bag_delta(
+    final_states: Seq<Option<Seq<u8>>>,
+    history: Seq<CapturedImageEvent>,
+    event_count: int,
+    identities: Seq<Seq<u8>>,
+    identity_count: int,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+) -> int
+    decreases identity_count,
+{
+    if identity_count <= 0 {
+        0
+    } else {
+        let index = identity_count - 1;
+        image_presence(final_states[index], row_image)
+            - image_presence(image_state_before(
+                final_states[index], history, event_count, identities[index],
+                source_incarnation, previous_cut, new_cut,
+            ), row_image)
+            + multi_identity_endpoint_bag_delta(
+                final_states, history, event_count, identities,
+                identity_count - 1, row_image, source_incarnation,
+                previous_cut, new_cut,
+            )
+    }
+}
+
+/// Inductive composition lemma; the public batch theorem below adds coverage.
+proof fn multi_identity_history_preserves_bag_delta_for_prefix(
+    final_states: Seq<Option<Seq<u8>>>,
+    history: Seq<CapturedImageEvent>,
+    event_count: int,
+    identities: Seq<Seq<u8>>,
+    identity_count: int,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        0 <= event_count <= history.len(),
+        identities.len() == final_states.len(),
+        0 <= identity_count <= identities.len(),
+        previous_cut <= new_cut,
+        forall|left: int, right: int| 0 <= left < right < identity_count
+            ==> identities[left] != identities[right],
+        forall|index: int| 0 <= index < identity_count ==> valid_history_from_state(
+            final_states[index], history, event_count, identities[index],
+            source_incarnation, previous_cut, new_cut,
+        ),
+    ensures
+        multi_identity_bucket_delta(
+            history, event_count, identities, identity_count, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) == multi_identity_endpoint_bag_delta(
+            final_states, history, event_count, identities, identity_count,
+            row_image, source_incarnation, previous_cut, new_cut,
+        ),
+    decreases identity_count,
+{
+    if identity_count > 0 {
+        let index = identity_count - 1;
+        valid_single_identity_history_preserves_image_delta(
+            final_states[index], history, event_count, identities[index],
+            source_incarnation, previous_cut, new_cut, row_image,
+        );
+        multi_identity_history_preserves_bag_delta_for_prefix(
+            final_states, history, event_count, identities, identity_count - 1,
+            row_image, source_incarnation, previous_cut, new_cut,
+        );
+        reveal(multi_identity_bucket_delta);
+        reveal(multi_identity_endpoint_bag_delta);
+        assert(multi_identity_bucket_delta(
+            history, event_count, identities, identity_count, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) == captured_image_bucket_delta(
+            history, event_count, identities[index], row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) + multi_identity_bucket_delta(
+            history, event_count, identities, identity_count - 1, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ));
+        assert(multi_identity_endpoint_bag_delta(
+            final_states, history, event_count, identities, identity_count,
+            row_image, source_incarnation, previous_cut, new_cut,
+        ) == image_presence(final_states[index], row_image)
+            - image_presence(image_state_before(
+                final_states[index], history, event_count, identities[index],
+                source_incarnation, previous_cut, new_cut,
+            ), row_image)
+            + multi_identity_endpoint_bag_delta(
+                final_states, history, event_count, identities,
+                identity_count - 1, row_image, source_incarnation,
+                previous_cut, new_cut,
+            ));
+    }
+}
+
+/// For any finite batch of distinct identities with valid unique-row histories,
+/// summing the per-identity SQL partitions equals the batch's complete-row
+/// bag delta. The identity list covers every event in the selected source and
+/// consumer window. PostgreSQL's aggregate execution remains an adapter boundary.
+pub proof fn multi_identity_history_preserves_bag_delta(
+    final_states: Seq<Option<Seq<u8>>>,
+    history: Seq<CapturedImageEvent>,
+    event_count: int,
+    identities: Seq<Seq<u8>>,
+    identity_count: int,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        0 <= event_count <= history.len(),
+        identities.len() == final_states.len(),
+        0 <= identity_count <= identities.len(),
+        previous_cut <= new_cut,
+        forall|left: int, right: int| 0 <= left < right < identity_count
+            ==> identities[left] != identities[right],
+        forall|event_index: int| 0 <= event_index < event_count
+            && captured_event_in_window(
+                history[event_index], source_incarnation, previous_cut, new_cut,
+            ) ==> exists|identity_index: int| 0 <= identity_index < identity_count
+                && history[event_index].row_identity == identities[identity_index],
+        forall|index: int| 0 <= index < identity_count ==> valid_history_from_state(
+            final_states[index], history, event_count, identities[index],
+            source_incarnation, previous_cut, new_cut,
+        ),
+    ensures
+        multi_identity_bucket_delta(
+            history, event_count, identities, identity_count, row_image,
+            source_incarnation, previous_cut, new_cut,
+        ) == multi_identity_endpoint_bag_delta(
+            final_states, history, event_count, identities, identity_count,
+            row_image, source_incarnation, previous_cut, new_cut,
+        ),
+{
+    multi_identity_history_preserves_bag_delta_for_prefix(
+        final_states, history, event_count, identities, identity_count,
+        row_image, source_incarnation, previous_cut, new_cut,
+    );
+}
+
 /// Two independent unique rows may have the same old and new payload images
 /// in one interleaved committed history. Their endpoint deltas must remain
 /// partitioned by row identity, as keyed SQL partitions its image SUMs.
