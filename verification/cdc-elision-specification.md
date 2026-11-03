@@ -396,11 +396,12 @@ claim and inspected ordinary repairs. Full R1/R2/window/compaction correctness
 remains excluded.
 The earlier three-case/62-test report records the initial candidate binding;
 it is superseded by the expanded selection. On 2026-11-03, the local PostgreSQL
-18 E2E runner passed all 24 cases then in `CDC_ELISION_CASES` across four test
-binaries. The gate now contains 26 cases; the immediate-key movement and
-protected-cut cases each passed focused local runs, but the full 26-case
-selection and hosted exact-candidate binding remain to be checked. Hosted
-binding must verify the requested commit and packaged/installed bytes.
+18 E2E runner passed all 26 current `CDC_ELISION_CASES` across four binaries
+(26 passed, 48 filtered, 41.082 seconds). The packaged extension image was
+built from `a84786c3`; the subsequent `c0e0df9d` change only added tests,
+workflow selection and documentation, leaving the extension library
+unchanged. Hosted exact-candidate binding is still queued and must verify the
+requested commit and packaged/installed bytes.
 The generated semantic floor remains red at 16/34 passes; that separate floor
 does not measure the installed CDC case selection.
 
