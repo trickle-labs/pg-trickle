@@ -359,9 +359,10 @@ postcondition, including:
 `lost-identity-bag-delta`;
 compilation/setup failures do not count. The
 candidate-binding helper requires these obligations and controls, hashes the
-production callers and the installed test sources, requires all eight named
-installed cases, and checks identical packaged/installed library bytes. CI
-uses the existing proof and candidate jobs, without introducing a tier.
+production callers and the installed test sources, requires all 24 named
+installed cases in `CDC_ELISION_CASES`, and checks identical
+packaged/installed library bytes. CI uses the existing proof and candidate
+jobs, without introducing a tier.
 
 Binding requires the runtime's declared candidate commit to match the requested
 commit. It trusts the build/test runner for build origin and successful named
@@ -378,11 +379,13 @@ reproduced SQLSTATE 42702; short numbered aliases resolve it. Follow-up review
 accepted `db909f1b0a97f06b999a68a478258aa21e2e7e73` for the bounded classifier
 claim and inspected ordinary repairs. Full R1/R2/window/compaction correctness
 remains excluded.
-The same candidate passes all three required installed CDC cases within a
-62/62 runtime report, with zero skips/retries. Independent follow-up inspection
-confirms its declared commit and package/installed byte equality, subject to
-the trusted-runner boundary above. The generated semantic floor remains red
-at 16/34 passes.
+The earlier three-case/62-test report records the initial candidate binding;
+it is superseded by the expanded 24-case selection. On 2026-11-03, the local
+PostgreSQL 18 E2E runner passed all 24 current `CDC_ELISION_CASES` across four
+test binaries. This local result does not replace the hosted exact-candidate
+binding, which must verify the requested commit and packaged/installed bytes.
+The generated semantic floor remains red at 16/34 passes; that separate floor
+does not measure the installed CDC case selection.
 
 ## Existing installations and limits
 
