@@ -698,6 +698,7 @@ jobs:
             --runtime-case e2e_lsn_contract_tests::test_lsn_wal_transition_rejects_malformed_and_preserves_results \
             --runtime-case e2e_lsn_contract_tests::test_lsn_manual_refresh_late_commit_preserves_exact_results \
             --runtime-case e2e_lsn_contract_tests::test_lsn_manual_refresh_repeated_transaction_preserves_late_commit \
+            --runtime-case e2e_lsn_contract_tests::test_lsn_manual_refresh_rolled_back_writer_unblocks_later_commit \
             --output .p2p/work/issue-1097-verified-production-lsn/evidence/lsn-candidate-binding.json
 
       - name: Run packaged receipt E2E and bind installed library

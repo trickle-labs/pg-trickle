@@ -253,6 +253,159 @@ async fn manual_late_commit_preserves_exact_results(warm_transaction: bool) {
 }
 
 #[tokio::test]
+async fn test_lsn_manual_refresh_rolled_back_writer_unblocks_later_commit() {
+    let db = E2eDb::new().await.with_extension().await;
+    let source = "lsn_rollback_frontier_source";
+    let stream = "lsn_rollback_frontier_stream";
+    let query = format!("SELECT id, value FROM {source}");
+    db.execute(&format!(
+        "CREATE TABLE {source} (id INT PRIMARY KEY, value TEXT NOT NULL)"
+    ))
+    .await;
+    db.execute(&format!("INSERT INTO {source} VALUES (1, 'baseline')"))
+        .await;
+    db.create_st(stream, &query, "1h", "DIFFERENTIAL").await;
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute(&format!(
+        "SELECT pgtrickle.pause_scheduler(ARRAY['{stream}'])"
+    ))
+    .await;
+    db.refresh_st(stream).await;
+    let history_before: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    let source_oid: i64 = db
+        .query_scalar(&format!("SELECT '{source}'::regclass::oid::bigint"))
+        .await;
+    let buffer = db.change_buffer_table(source_oid).await;
+
+    let mut writer_a = db.pool.begin().await.expect("begin rollback writer A");
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {source} VALUES (2, 'rolled back')"
+    )))
+    .execute(&mut *writer_a)
+    .await
+    .expect("capture the earlier open writer");
+    let a_lsn: String = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT MIN(lsn)::text FROM {buffer} WHERE id = 2"
+    )))
+    .fetch_one(&mut *writer_a)
+    .await
+    .expect("read the earlier writer's event LSN");
+
+    let mut writer_b = db.pool.begin().await.expect("begin later writer B");
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {source} VALUES (3, 'committed later')"
+    )))
+    .execute(&mut *writer_b)
+    .await
+    .expect("capture the later writer");
+    let b_lsn: String = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT MAX(lsn)::text FROM {buffer} WHERE id = 3"
+    )))
+    .fetch_one(&mut *writer_b)
+    .await
+    .expect("read the later writer's event LSN");
+    writer_b.commit().await.expect("commit writer B first");
+    let ordered: bool = sqlx::query_scalar("SELECT $1::pg_lsn < $2::pg_lsn")
+        .bind(&a_lsn)
+        .bind(&b_lsn)
+        .fetch_one(&db.pool)
+        .await
+        .expect("compare the two event LSNs");
+    assert!(
+        ordered,
+        "writer B's event must follow the still-open writer A"
+    );
+
+    let mut refresher = db.pool.acquire().await.expect("pin a manual refresher");
+    sqlx::query("SET statement_timeout = '10s'")
+        .execute(&mut *refresher)
+        .await
+        .expect("bound the refresh while writer A remains open");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
+        .bind(stream)
+        .execute(&mut *refresher)
+        .await
+        .expect("refresh must finish while the earlier writer is open");
+    let first_rows: Vec<(i32, String)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT id, value FROM {stream} ORDER BY id"
+    )))
+    .fetch_all(&mut *refresher)
+    .await
+    .expect("read rows before writer A resolves");
+    assert_eq!(first_rows, vec![(1, "baseline".into())]);
+    let frontier_before_rollback: String = sqlx::query_scalar(
+        "SELECT frontier->'sources'->($1::text)->>'lsn' \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $2",
+    )
+    .bind(source_oid.to_string())
+    .bind(stream)
+    .fetch_one(&mut *refresher)
+    .await
+    .expect("read the safe frontier before rollback");
+
+    writer_a.rollback().await.expect("rollback writer A");
+    let rolled_back_images: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT count(*) FROM {buffer} WHERE id = 2"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .expect("check that rollback removed writer A's CDC images");
+    assert_eq!(rolled_back_images, 0);
+
+    sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
+        .bind(stream)
+        .execute(&mut *refresher)
+        .await
+        .expect("refresh after rollback must consume writer B");
+    db.assert_st_matches_query(stream, &query).await;
+    let completed_frontier: String = sqlx::query_scalar(
+        "SELECT frontier->'sources'->($1::text)->>'lsn' \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $2",
+    )
+    .bind(source_oid.to_string())
+    .bind(stream)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the completed frontier");
+    let stayed_before_writer: bool = sqlx::query_scalar("SELECT $1::pg_lsn < $2::pg_lsn")
+        .bind(&frontier_before_rollback)
+        .bind(&a_lsn)
+        .fetch_one(&db.pool)
+        .await
+        .expect("compare the first frontier with the open writer");
+    let completed_past_writer_b: bool = sqlx::query_scalar("SELECT $1::pg_lsn >= $2::pg_lsn")
+        .bind(&completed_frontier)
+        .bind(&b_lsn)
+        .fetch_one(&db.pool)
+        .await
+        .expect("compare the final frontier with writer B");
+    assert!(
+        stayed_before_writer,
+        "the open writer must fence the first refresh"
+    );
+    assert!(
+        completed_past_writer_b,
+        "the final refresh must include writer B"
+    );
+
+    let modes: Vec<(String, String, bool)> = sqlx::query_as(
+        "SELECT action, initiated_by, was_full_fallback FROM pgtrickle.pgt_refresh_history \
+         WHERE refresh_id > $1 ORDER BY refresh_id",
+    )
+    .bind(history_before)
+    .fetch_all(&db.pool)
+    .await
+    .expect("read refresh modes");
+    assert_eq!(
+        modes,
+        vec![("DIFFERENTIAL".into(), "MANUAL".into(), false); 2],
+        "rollback recovery must remain differential without fallback"
+    );
+}
+
+#[tokio::test]
 async fn test_lsn_manual_refresh_own_writes_visible_in_caller_transaction() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE lsn_own_source (id INT PRIMARY KEY, value TEXT NOT NULL)")

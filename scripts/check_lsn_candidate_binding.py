@@ -22,6 +22,7 @@ EXPECTED_CASES = [
     "e2e_lsn_contract_tests::test_lsn_wal_transition_rejects_malformed_and_preserves_results",
     "e2e_lsn_contract_tests::test_lsn_manual_refresh_late_commit_preserves_exact_results",
     "e2e_lsn_contract_tests::test_lsn_manual_refresh_repeated_transaction_preserves_late_commit",
+    "e2e_lsn_contract_tests::test_lsn_manual_refresh_rolled_back_writer_unblocks_later_commit",
 ]
 REQUIRED_OBLIGATIONS = {
     "lsn_parse_value_and_bounds",
