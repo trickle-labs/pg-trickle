@@ -1704,6 +1704,387 @@ pub proof fn identity_projection_preserves_image_bucket_delta(
     }
 }
 
+/// Every event retained by the identity-window projection satisfies its
+/// identity, incarnation, and consumer-cut predicate.
+pub proof fn identity_window_projection_contains_only_selected_events(
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires 0 <= count <= history.len(),
+    ensures forall|index: int|
+        0 <= index < identity_window_projection(
+            history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ).len() ==> identity_event_in_window(
+            identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            )[index], row_identity, source_incarnation, previous_cut, new_cut,
+        ),
+    decreases count,
+{
+    if count > 0 {
+        identity_window_projection_contains_only_selected_events(
+            history, count - 1, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        );
+        reveal(identity_window_projection);
+        let event = history[count - 1];
+        if identity_event_in_window(
+            event, row_identity, source_incarnation, previous_cut, new_cut,
+        ) {
+            assert forall|index: int|
+                0 <= index < identity_window_projection(
+                    history, count, row_identity, source_incarnation,
+                    previous_cut, new_cut,
+                ).len() implies identity_event_in_window(
+                    identity_window_projection(
+                        history, count, row_identity, source_incarnation,
+                        previous_cut, new_cut,
+                    )[index], row_identity, source_incarnation,
+                    previous_cut, new_cut,
+                ) by {
+                if index < identity_window_projection(
+                    history, count - 1, row_identity, source_incarnation,
+                    previous_cut, new_cut,
+                ).len() {
+                    assert(identity_window_projection(
+                        history, count, row_identity, source_incarnation,
+                        previous_cut, new_cut,
+                    )[index] == identity_window_projection(
+                        history, count - 1, row_identity, source_incarnation,
+                        previous_cut, new_cut,
+                    )[index]);
+                } else {
+                    assert(index == identity_window_projection(
+                        history, count - 1, row_identity, source_incarnation,
+                        previous_cut, new_cut,
+                    ).len());
+                    assert(identity_window_projection(
+                        history, count, row_identity, source_incarnation,
+                        previous_cut, new_cut,
+                    )[index] == event);
+                }
+            }
+        } else {
+            assert forall|index: int|
+                0 <= index < identity_window_projection(
+                    history, count, row_identity, source_incarnation,
+                    previous_cut, new_cut,
+                ).len() implies identity_event_in_window(
+                    identity_window_projection(
+                        history, count, row_identity, source_incarnation,
+                        previous_cut, new_cut,
+                    )[index], row_identity, source_incarnation,
+                    previous_cut, new_cut,
+                ) by {
+                identity_window_projection_contains_only_selected_events(
+                    history, count - 1, row_identity, source_incarnation,
+                    previous_cut, new_cut,
+                );
+                assert(identity_window_projection(
+                    history, count, row_identity, source_incarnation,
+                    previous_cut, new_cut,
+                )[index] == identity_window_projection(
+                    history, count - 1, row_identity, source_incarnation,
+                    previous_cut, new_cut,
+                )[index]);
+            }
+        }
+    }
+}
+
+/// Validity of one row's global interleaved history is preserved when the
+/// unrelated identities, incarnations, and consumer windows are projected out.
+pub proof fn identity_window_projection_len_at_most_count(
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires 0 <= count <= history.len(),
+    ensures identity_window_projection(
+        history, count, row_identity, source_incarnation,
+        previous_cut, new_cut,
+    ).len() <= count,
+    decreases count,
+{
+    if count > 0 {
+        identity_window_projection_len_at_most_count(
+            history, count - 1, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        );
+        reveal(identity_window_projection);
+        if identity_event_in_window(
+            history[count - 1], row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ) {
+            assert(identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ).len() == identity_window_projection(
+                history, count - 1, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ).len() + 1);
+        } else {
+            assert(identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ).len() == identity_window_projection(
+                history, count - 1, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ).len());
+        }
+    }
+}
+
+/// Appending an event after a valid history prefix does not change validity
+/// of that prefix.
+pub proof fn appended_suffix_preserves_history_prefix_validity(
+    final_state: Option<Seq<u8>>,
+    history: Seq<CapturedImageEvent>,
+    appended: CapturedImageEvent,
+    count: int,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        0 <= count <= history.len(),
+        previous_cut <= new_cut,
+        valid_history_from_state(
+            final_state, history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ),
+    ensures valid_history_from_state(
+        final_state, history.push(appended), count, row_identity,
+        source_incarnation, previous_cut, new_cut,
+    ),
+    decreases count,
+{
+    if count > 0 {
+        let event = history[count - 1];
+        if identity_event_in_window(
+            event, row_identity, source_incarnation, previous_cut, new_cut,
+        ) {
+            appended_suffix_preserves_history_prefix_validity(
+                previous_image_state(final_state, event), history,
+                appended, count - 1, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            );
+        } else {
+            appended_suffix_preserves_history_prefix_validity(
+                final_state, history, appended, count - 1, row_identity,
+                source_incarnation, previous_cut, new_cut,
+            );
+        }
+        reveal(valid_history_from_state);
+        assert(history.push(appended)[count - 1] == event);
+    }
+}
+
+pub proof fn identity_window_projection_preserves_valid_history(
+    final_state: Option<Seq<u8>>,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        0 <= count <= history.len(),
+        previous_cut <= new_cut,
+        valid_history_from_state(
+            final_state, history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ),
+    ensures valid_history_from_state(
+        final_state,
+        identity_window_projection(
+            history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ),
+        identity_window_projection(
+            history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ).len() as int,
+        row_identity, source_incarnation, previous_cut, new_cut,
+    ),
+    decreases count,
+{
+    if count > 0 {
+        let event = history[count - 1];
+        reveal(valid_history_from_state);
+        reveal(identity_window_projection);
+        if identity_event_in_window(
+            event, row_identity, source_incarnation, previous_cut, new_cut,
+        ) {
+            identity_window_projection_preserves_valid_history(
+                previous_image_state(final_state, event), history, count - 1,
+                row_identity, source_incarnation, previous_cut, new_cut,
+            );
+        } else {
+            identity_window_projection_preserves_valid_history(
+                final_state, history, count - 1, row_identity,
+                source_incarnation, previous_cut, new_cut,
+            );
+        }
+        identity_window_projection_len_at_most_count(
+            history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        );
+        if identity_event_in_window(
+            event, row_identity, source_incarnation, previous_cut, new_cut,
+        ) {
+            let projected_prefix = identity_window_projection(
+                history, count - 1, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            );
+            assert(identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ) == projected_prefix.push(event));
+            assert(valid_history_from_state(
+                previous_image_state(final_state, event), history, count - 1,
+                row_identity, source_incarnation, previous_cut, new_cut,
+            ));
+            assert(match (final_state, event.action) {
+                (Some(after_image), ImageEvent::Insert) => after_image == event.row_image,
+                (None, ImageEvent::Delete) => true,
+                _ => false,
+            });
+            assert(valid_history_from_state(
+                previous_image_state(final_state, event), projected_prefix,
+                projected_prefix.len() as int, row_identity,
+                source_incarnation, previous_cut, new_cut,
+            ));
+            appended_suffix_preserves_history_prefix_validity(
+                previous_image_state(final_state, event), projected_prefix,
+                event, projected_prefix.len() as int, row_identity,
+                source_incarnation, previous_cut, new_cut,
+            );
+            assert(valid_history_from_state(
+                final_state, projected_prefix.push(event),
+                projected_prefix.len() as int + 1, row_identity,
+                source_incarnation, previous_cut, new_cut,
+            )) by {
+                reveal(valid_history_from_state);
+                assert(identity_event_in_window(
+                    event, row_identity, source_incarnation,
+                    previous_cut, new_cut,
+                ));
+                assert(projected_prefix.push(event).len() as int
+                    == projected_prefix.len() as int + 1);
+                assert(projected_prefix.push(event)[projected_prefix.len() as int] == event);
+                assert(match (final_state, event.action) {
+                    (Some(after_image), ImageEvent::Insert) => after_image == event.row_image,
+                    (None, ImageEvent::Delete) => true,
+                    _ => false,
+                });
+                assert(valid_history_from_state(
+                    previous_image_state(final_state, event), projected_prefix,
+                    projected_prefix.len() as int, row_identity,
+                    source_incarnation, previous_cut, new_cut,
+                ));
+            }
+        } else {
+            assert(identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ) == identity_window_projection(
+                history, count - 1, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ));
+        }
+    }
+}
+
+/// Compaction after projecting a valid global capture history preserves the
+/// complete-image delta in that identity's consumer window.
+pub proof fn projected_history_compaction_preserves_image_bucket_delta(
+    final_state: Option<Seq<u8>>,
+    history: Seq<CapturedImageEvent>,
+    count: int,
+    row_identity: Seq<u8>,
+    row_image: Seq<u8>,
+    source_incarnation: u64,
+    previous_cut: u64,
+    new_cut: u64,
+)
+    requires
+        0 <= count <= history.len(),
+        count < u64::MAX as int,
+        previous_cut <= new_cut,
+        valid_history_from_state(
+            final_state, history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        ),
+    ensures
+        compacted_image_bucket_delta(
+            identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ),
+            identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ).len() as int,
+            identity_window_projection(
+                history, count, row_identity, source_incarnation,
+                previous_cut, new_cut,
+            ).len() as int,
+            row_image,
+        ) == captured_image_bucket_delta(
+            history, count, row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        ),
+{
+    let projected = identity_window_projection(
+        history, count, row_identity, source_incarnation,
+        previous_cut, new_cut,
+    );
+    identity_projection_preserves_image_bucket_delta(
+        history, count, row_identity, row_image, source_incarnation,
+        previous_cut, new_cut,
+    );
+    identity_window_projection_contains_only_selected_events(
+        history, count, row_identity, source_incarnation,
+        previous_cut, new_cut,
+    );
+    identity_window_projection_preserves_valid_history(
+        final_state, history, count, row_identity, source_incarnation,
+        previous_cut, new_cut,
+    );
+    if projected.len() > 0 {
+        identity_window_projection_len_at_most_count(
+            history, count, row_identity, source_incarnation,
+            previous_cut, new_cut,
+        );
+        assert((projected.len() as int) <= count);
+        assert((projected.len() as int) < u64::MAX as int);
+        valid_history_compaction_preserves_image_delta(
+            final_state, projected, projected.len() as int,
+            row_identity, source_incarnation, previous_cut, new_cut, row_image,
+        );
+    } else {
+        reveal(compacted_image_bucket_delta);
+        reveal(captured_image_bucket_delta);
+        assert(compacted_image_bucket_delta(projected, 0, 0, row_image) == 0);
+        assert(captured_image_bucket_delta(
+            projected, 0, row_identity, row_image, source_incarnation,
+            previous_cut, new_cut,
+        ) == 0);
+    }
+}
+
 /// Events from one committed source transaction share one abstract visibility
 /// coordinate, so the model's consumer cut cannot admit only part of it.
 /// Mapping this coordinate to per-event capture LSNs relies on the production
