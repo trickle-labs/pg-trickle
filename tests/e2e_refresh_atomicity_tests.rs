@@ -1092,6 +1092,10 @@ async fn advance_scheduler_watermark(db: &E2eDb, stream: &str, query: &str, afte
     ))
     .await;
     assert!(
+        db.query_scalar::<bool>("SELECT pgtrickle.resume_after_drain()")
+            .await
+    );
+    assert!(
         db.wait_for_condition(
             "independent scheduled refresh after source write",
             &format!(
@@ -1196,6 +1200,8 @@ async fn test_pause_scheduler_drains_inline_refresh_until_commit() {
         .fetch_one(&db.pool)
         .await
         .expect("read baseline refresh id");
+        // Keep the scheduler's per-tick change snapshot after the source write.
+        assert!(db.query_scalar::<bool>("SELECT pgtrickle.drain(30)").await);
         let mut setup = db.pool.begin().await.expect("begin due-work setup");
         sqlx::query(
             "UPDATE pgtrickle.pgt_stream_tables
@@ -1316,6 +1322,7 @@ async fn test_pause_scheduler_drains_inline_refresh_until_commit() {
             .fetch_one(&db.pool)
             .await
             .expect("read second control baseline refresh id");
+            assert!(db.query_scalar::<bool>("SELECT pgtrickle.drain(30)").await);
             let mut setup = db.pool.begin().await.expect("begin second due-work setup");
             sqlx::query(
                 "UPDATE pgtrickle.pgt_stream_tables
