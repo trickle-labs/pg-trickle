@@ -1194,12 +1194,13 @@ jobs:
           # full Docker build or long-running soak scenarios.
           UPGRADE_SLICE: "smoke"
         run: |
+          # An empty selection fails: a green slice must have run tests.
           cargo nextest run \
             --profile ci \
             --test e2e_upgrade_tests \
             --run-ignored all \
-            -E "test(smoke) | test(basic) | test(catalog)" \
-          || echo "No matching tests — upgrade slice skipped (no smoke/basic/catalog tests found)"
+            --no-tests fail \
+            -E "test(smoke) | test(basic) | test(catalog)"
 
       - name: Report skipped (no upgrade-sensitive changes)
         if: steps.changes.outputs.run_upgrade_slice == 'false'
