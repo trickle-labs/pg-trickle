@@ -7,6 +7,11 @@ use serde::Serialize;
 use std::time::Instant;
 
 async fn assert_partition_recompute_refresh(db: &E2eDb, pgt_id: i64) {
+    let previous_id: i64 = db
+        .query_scalar(&format!(
+            "SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history WHERE pgt_id = {pgt_id}"
+        ))
+        .await;
     db.refresh_st("wi_st").await;
     db.assert_st_matches_query(
         "public.wi_st",
@@ -14,17 +19,23 @@ async fn assert_partition_recompute_refresh(db: &E2eDb, pgt_id: i64) {
     )
     .await;
 
-    let (action, reason, detail, full_fallback): (String, Option<String>, Option<String>, bool) =
-        sqlx::query_as(
-            "SELECT action, refresh_reason, refresh_reason_detail, was_full_fallback \
+    let (refresh_id, action, reason, detail, full_fallback): (
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT refresh_id, action, refresh_reason, refresh_reason_detail, was_full_fallback \
          FROM pgtrickle.pgt_refresh_history \
          WHERE pgt_id = $1 AND status = 'COMPLETED' \
          ORDER BY refresh_id DESC LIMIT 1",
-        )
-        .bind(pgt_id)
-        .fetch_one(&db.pool)
-        .await
-        .expect("load ROW_NUMBER refresh evidence");
+    )
+    .bind(pgt_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("load ROW_NUMBER refresh evidence");
+    assert!(refresh_id > previous_id);
     assert_eq!(action, "DIFFERENTIAL");
     assert_eq!(reason.as_deref(), Some("WINDOW_RECOMPUTE_CHEAPER"));
     let detail: serde_json::Value =

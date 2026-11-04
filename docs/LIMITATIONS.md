@@ -24,7 +24,6 @@ successfully, but every refresh performs a full table recomputation:
 | `TABLESAMPLE` | Non-deterministic sampling cannot be differentiated | Use `FULL` mode explicitly |
 | `VOLATILE` functions in SELECT | `random()`, `now()`, `clock_timestamp()`, `nextval()` change on every call | Pre-compute volatile values in the source table, or use `FULL` mode |
 | `STABLE` functions in GROUP BY keys | Key values change between refresh cycles | Use stable or immutable functions only |
-| Window functions in output | `ROW_NUMBER()`, `RANK()`, `LEAD()`, `LAG()` require global reordering | Use `FULL` mode, or pre-aggregate and use Top-N views |
 | `FETCH FIRST` without `ORDER BY` | Non-deterministic selection | Add a deterministic `ORDER BY` and use Top-N via `LIMIT` |
 | `GROUPING SETS` beyond branch limit | Explosion prevents O(Δ) maintenance | Reduce dimensions, or raise `pg_trickle.max_grouping_set_branches` |
 
@@ -33,6 +32,7 @@ successfully, but every refresh performs a full table recomputation:
 | Construct | Support | Notes |
 |-----------|---------|-------|
 | `WITH RECURSIVE` | ✅ Supported | DIFFERENTIAL and IMMEDIATE mode use bounded semi-naive evaluation for monotone insert-only changes, DRed for mixed changes, and full recomputation fallback when needed. Guarded by `pg_trickle.ivm_recursive_max_depth`. |
+| Window functions in output | ✅ Differential partition recomputation | Supported window queries recompute affected partitions; an unpartitioned window can require recomputing all rows. Other unsupported query constructs may still require FULL. See the [support matrix](DVM_SUPPORT_MATRIX.md#window-functions). |
 
 ### Not supported at all (any mode)
 
@@ -89,8 +89,8 @@ When a defining query joins multiple source tables:
 | `AVG(x)` | ✅ Yes | Via sum + count decomposition |
 | `STDDEV(x)`, `VARIANCE(x)` | ✅ Yes | Via sum-of-squares decomposition |
 | `COUNT/SUM/AVG(DISTINCT x)` | ✅ Narrow | One simple non-collatable input column over one table; bounded by `pg_trickle.distinct_agg_max_values_per_group`, otherwise FULL/AUTO |
-| `ARRAY_AGG(x)` | ❌ No | Order-dependent; use FULL mode |
-| `STRING_AGG(x, sep)` | ❌ No | Order-dependent; use FULL mode |
+| `ARRAY_AGG(x)` | ✅ Group rescan | Affected groups are recomputed; use `ORDER BY` inside the aggregate with sufficient tie-breakers for deterministic ordering. `DISTINCT` requires FULL or AUTO fallback. |
+| `STRING_AGG(x, sep)` | ✅ Group rescan | Affected groups are recomputed; use `ORDER BY` inside the aggregate with sufficient tie-breakers for deterministic ordering. `DISTINCT` requires FULL or AUTO fallback. |
 | `JSON_AGG(x)` | ❌ No | Order-dependent; use FULL mode |
 | `PERCENTILE_CONT(f) WITHIN GROUP (ORDER BY x)` | ❌ No | Requires global sort |
 | `MODE()` | ❌ No | Requires global frequency computation |
@@ -186,7 +186,8 @@ in-flight refreshes.
 
 ```
 Does your query use window functions in the output?
-  YES → Use FULL mode (refresh_mode => 'FULL')
+  YES → Differential refresh can recompute affected partitions; check their size
+        and the support matrix. Continue checking the rest of the query.
   NO  ↓
 
 Does your query use volatile functions (random(), now(), nextval())?
@@ -306,9 +307,7 @@ when the subquery returns no rows.
 
 | Limitation | Planned in |
 |------------|-----------|
-| Window functions in output | v1.1+ |
 | `WITH RECURSIVE` support | v1.2+ |
-| `STRING_AGG` / `ARRAY_AGG` incremental maintenance | Researching |
 | Cross-database stream tables (without foreign tables) | Not planned |
 | Nested `LATERAL` (LATERAL inside LATERAL) | v1.1+ |
 
