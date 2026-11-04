@@ -1375,9 +1375,9 @@ fn alter_stream_table_partition_key(
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-    // Drop the old storage table (CASCADE drops child partitions too).
+    // RESTRICT protects external dependencies; child partitions are dropped automatically.
     let drop_sql = format!(
-        "DROP TABLE IF EXISTS {}.{} CASCADE",
+        "DROP TABLE IF EXISTS {}.{} RESTRICT",
         quote_identifier(schema),
         quote_identifier(table_name),
     );
