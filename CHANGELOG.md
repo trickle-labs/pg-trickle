@@ -306,6 +306,10 @@ identify the tables that need rebuilding.
   including synchronous IMMEDIATE descendants, and reject dispatch selected
   before a pause but admitted afterward. Dedicated repeatable-read jobs now
   set isolation before their first work snapshot (#1219).
+- Rediscover committed stream-table definitions when another scheduler rebuilt
+  its dependency graph before the creating transaction committed. Refresh the
+  parallel dispatch graph after catalog rebuilds, including rebuilds that keep
+  the same shared version.
 - Retire local WAL slots only after consumer removal or trigger fallback commits.
   Caller rollback preserves the original slot; durable cleanup reservations also
   cover interrupted creation and restart after physical removal. This requires

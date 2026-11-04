@@ -285,6 +285,67 @@ async fn test_autorefresh_diamond_cascade() {
 // Test 4.3 — CALCULATED schedule
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// A catalog rebuild while CREATE is uncommitted must not hide the committed table.
+#[tokio::test]
+async fn test_autorefresh_create_commit_after_catalog_rebuild_converges() {
+    for mode in ["off", "on"] {
+        let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+        configure_fast_scheduler(&db).await;
+        db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", mode, mode)
+            .await;
+        db.execute("CREATE TABLE arc_commit_src(id int PRIMARY KEY, val int)")
+            .await;
+        db.execute("INSERT INTO arc_commit_src VALUES (1, 10)")
+            .await;
+        db.execute("CREATE TABLE arc_commit_heartbeat(id int PRIMARY KEY)")
+            .await;
+        db.create_st(
+            "arc_commit_up",
+            "SELECT * FROM arc_commit_heartbeat",
+            "1s",
+            "DIFFERENTIAL",
+        )
+        .await;
+        wait_for_refresh_cycle(&db, "arc_commit_up", Duration::from_secs(30)).await;
+
+        let mut creating = db.pool.begin().await.expect("begin stream creation");
+        sqlx::query(
+            "SELECT pgtrickle.create_stream_table('arc_commit_leaf', \
+        'SELECT id, val * 2 AS doubled FROM arc_commit_src', '1s', 'DIFFERENTIAL')",
+        )
+        .execute(&mut *creating)
+        .await
+        .expect("create uncommitted stream");
+
+        // Force the overflow/full-rebuild route, which has no list of missing IDs
+        // for the scheduler's old stale-snapshot guard to check.
+        db.execute("SELECT pgtrickle._signal_launcher_rescan()")
+            .await;
+        wait_for_refresh_cycle(&db, "arc_commit_up", Duration::from_secs(30)).await;
+        wait_for_refresh_cycle(&db, "arc_commit_up", Duration::from_secs(30)).await;
+        creating.commit().await.expect("commit stream creation");
+
+        let before: Option<String> = db
+            .query_scalar_opt(
+                "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables \
+         WHERE pgt_name = 'arc_commit_leaf'",
+            )
+            .await;
+        db.execute("INSERT INTO arc_commit_src VALUES (2, 20)")
+            .await;
+        assert!(
+            db.wait_for_auto_refresh_since("arc_commit_leaf", before, Duration::from_secs(30))
+                .await,
+            "stream committed after an earlier catalog rebuild must join scheduled work ({mode})"
+        );
+        db.assert_st_matches_query(
+            "arc_commit_leaf",
+            "SELECT id, val * 2 AS doubled FROM arc_commit_src",
+        )
+        .await;
+    }
+}
+
 /// L1 (schedule 1s) → L2 (schedule 'calculated' = CALCULATED).
 /// L2 should refresh whenever L1 has pending changes.
 #[tokio::test]
