@@ -21,6 +21,13 @@ async fn latest_merge_strategy(db: &E2eDb, stream_table: &str) -> String {
 }
 
 async fn refresh_differential(db: &E2eDb, stream_table: &str) {
+    let previous_id: i64 = db
+        .query_scalar(&format!(
+            "SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = '{stream_table}'"
+        ))
+        .await;
     let refresh = format!("SELECT pgtrickle.refresh_stream_table('{stream_table}')");
     db.try_execute_with_config(
         &[
@@ -34,7 +41,7 @@ async fn refresh_differential(db: &E2eDb, stream_table: &str) {
 
     let differential_completed: bool = db
         .query_scalar(&format!(
-            "SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' \
+            "SELECT h.refresh_id > {previous_id} AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' \
              AND NOT h.was_full_fallback \
              FROM pgtrickle.pgt_refresh_history h \
              JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
@@ -777,11 +784,11 @@ async fn test_agg_array_agg_differential() {
 
     db.execute("INSERT INTO agg_arr (grp, val) VALUES ('a', 'w')")
         .await;
-    db.refresh_st("agg_arr_st").await;
+    refresh_differential(&db, "agg_arr_st").await;
     db.assert_st_matches_query("agg_arr_st", q).await;
 
     db.execute("DELETE FROM agg_arr WHERE val = 'x'").await;
-    db.refresh_st("agg_arr_st").await;
+    refresh_differential(&db, "agg_arr_st").await;
     db.assert_st_matches_query("agg_arr_st", q).await;
 }
 
@@ -799,11 +806,11 @@ async fn test_agg_string_agg_differential() {
 
     db.execute("INSERT INTO agg_str (grp, val) VALUES ('a', 'w')")
         .await;
-    db.refresh_st("agg_str_st").await;
+    refresh_differential(&db, "agg_str_st").await;
     db.assert_st_matches_query("agg_str_st", q).await;
 
     db.execute("DELETE FROM agg_str WHERE val = 'y'").await;
-    db.refresh_st("agg_str_st").await;
+    refresh_differential(&db, "agg_str_st").await;
     db.assert_st_matches_query("agg_str_st", q).await;
 }
 
