@@ -128,7 +128,7 @@ The final validator checks 90 actual four-file package/install observations,
 10 backend-frozen input hashes, four positive records, four predecessor
 counterexample records and 69 complete copied logs. Exact generated install
 SQL bytes are bound in every payload observation. Noncomment SQL-line multisets
-match the unchanged tracked 0.108.4 archive; no schema or migration is added.
+match the unchanged tracked 0.109.0 archive; no schema or migration is added.
 See `.p2p/work/issue-1219-pause-drain/idle/evidence/qualification-manifest.json`.
 
 Earlier prototype and `c68546c6` executions retain their own backend identity.

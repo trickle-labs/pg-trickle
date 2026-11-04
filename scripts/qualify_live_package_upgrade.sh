@@ -6,7 +6,7 @@ set -euo pipefail
 FROM_VERSION="${1:?previous release version required}"
 TO_VERSION="${2:?candidate release version required}"
 IDENTITY_MIGRATION=false
-if [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.3" || "$TO_VERSION" == "0.108.4" ) ]]; then
+if [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.3" || "$TO_VERSION" == "0.109.0" ) ]]; then
     IDENTITY_MIGRATION=true
 fi
 CANDIDATE_DIR="${PGT_EXTENSION_DIR:?candidate package directory is required}"
@@ -69,7 +69,7 @@ OLD_VERSION="$(psql 'SELECT pgtrickle.version()')"
 }
 
 WAL_SLOT=""
-if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.108.4" ]]; then
+if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.109.0" ]]; then
     psql "ALTER SYSTEM SET pg_trickle.scheduler_interval_ms='1000'" >/dev/null
     psql 'SELECT pg_reload_conf()' >/dev/null
     psql "CREATE TABLE public.retirement_upgrade_source(id int PRIMARY KEY,value text);
@@ -188,8 +188,8 @@ if [[ ! -f "$UPGRADE_DIR/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql" ]]; the
     if [[ "$IDENTITY_MIGRATION" == true ]]; then
         test -f "$UPGRADE_DIR/pg_trickle--0.108.1--0.108.3.sql"
     fi
-    if [[ "$TO_VERSION" == "0.108.4" ]]; then
-        test -f "$UPGRADE_DIR/pg_trickle--0.108.3--0.108.4.sql"
+    if [[ "$TO_VERSION" == "0.109.0" ]]; then
+        test -f "$UPGRADE_DIR/pg_trickle--0.108.3--0.109.0.sql"
     fi
 fi
 docker cp "$CANDIDATE_DIR/usr/lib/postgresql/18/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"

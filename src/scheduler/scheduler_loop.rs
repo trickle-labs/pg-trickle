@@ -1272,6 +1272,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
         // Run the scheduler tick inside a transaction
         shmem::clear_inline_refreshes_for_database(database_oid);
+        // Observe commit-time invalidations before taking this tick's snapshot,
+        // so an older snapshot cannot consume the final committed graph version.
+        let current_version = shmem::current_dag_version();
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
             // CSS1 / #536: Capture tick watermark for cross-source snapshot consistency
             // with frontier holdback to prevent silent data loss from long-running
@@ -1283,7 +1286,6 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             prev_tick_watermark.clone_from(&tick_watermark);
 
             // Step A: Check if DAG needs rebuild
-            let current_version = shmem::current_dag_version();
             if current_version != dag_version || dag.is_none() || pending_full_rebuild {
                 let force_full = pending_full_rebuild;
                 pending_full_rebuild = false;
@@ -1343,6 +1345,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         }
                     }
                 }
+
+                // A follow-up rebuild can change edges without changing the
+                // shared version. Rebuild its derived dispatch graph too.
+                parallel_state.eu_dag = None;
 
                 // Race-condition guard: verify all invalidated pgt_ids are visible
                 // in the rebuilt DAG.  `signal_dag_invalidation` is called inside

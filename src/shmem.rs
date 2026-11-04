@@ -1716,6 +1716,14 @@ pub fn signal_dag_rebuild() {
     if !is_shmem_available() {
         return;
     }
+    publish_dag_rebuild();
+    // Another database can drain the shared ring before our catalog writes
+    // commit. Publish again once those writes are visible to new snapshots.
+    pgrx::register_xact_callback(pgrx::PgXactCallbackEvent::Commit, publish_dag_rebuild);
+}
+
+/// Publish without registering another callback during transaction completion.
+fn publish_dag_rebuild() {
     // C2-1: Set overflow flag so the scheduler does a full rebuild.
     PGS_STATE.exclusive().inv_overflow = true;
     DAG_REBUILD_SIGNAL
@@ -1743,6 +1751,7 @@ pub fn signal_dag_invalidation(pgt_id: i64) {
     DAG_REBUILD_SIGNAL
         .get()
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    pgrx::register_xact_callback(pgrx::PgXactCallbackEvent::Commit, publish_dag_rebuild);
 }
 
 /// C2-1: Push a pgt_id into the invalidation ring buffer.

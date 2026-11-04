@@ -2297,12 +2297,12 @@ async fn test_upgrade_v1083_preserves_intersect_private_state_for_differential()
     .expect("read pre-upgrade private counts");
     assert_eq!(initial_counts, (2, 1));
 
-    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.108.4'")
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.109.0'")
         .await;
     let installed_version: String = db
         .query_scalar("SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")
         .await;
-    assert_eq!(installed_version, "0.108.4");
+    assert_eq!(installed_version, "0.109.0");
     let state_oid_after: i64 = db
         .query_scalar(&format!("SELECT '{state_relation}'::regclass::oid::bigint"))
         .await;

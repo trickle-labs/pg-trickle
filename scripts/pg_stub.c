@@ -104,6 +104,12 @@ int      set_config_option(const char *name, const char *value,
 }
 uint32_t GetCurrentTransactionId(void)          { return 0; }
 uint32_t GetCurrentTransactionIdIfAny(void)     { return 0; }
+/* pgrx's commit callback registration is linked by scheduler invalidation.
+ * Pure unit tests do not register real PostgreSQL transaction callbacks. */
+void     RegisterXactCallback(void (*callback)(int, void *), void *arg) {
+    (void)callback;
+    (void)arg;
+}
 int      NewGUCNestLevel(void)                  { return 1; }
 void     AtEOXact_GUC(_Bool is_commit, int nest_level) {
     (void)is_commit;

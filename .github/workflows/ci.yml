@@ -75,7 +75,7 @@ jobs:
   # Keep contracts on every selected PR, including .github/workflows/release.yml and
   # tests/release/** changes; job selection only defers expensive runtime work.
   release-qualification-contract:
-    name: v0.108.4 release evidence contract and checked LSN proof
+    name: v0.109.0 release evidence contract and checked LSN proof
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -123,7 +123,7 @@ jobs:
 
       - name: Validate release evidence and rejection controls
         run: |
-          python3 scripts/v0_108_4_release_gate.py
+          python3 scripts/v0_109_0_release_gate.py
           python3 scripts/check_lsn_verification.py --contract-only
           python3 scripts/check_receipt_verification.py --contract-only
           python3 scripts/check_aggregate_lifecycle_verification.py --contract-only

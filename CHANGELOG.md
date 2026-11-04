@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.109.0 — More dependable live data](#01090--more-dependable-live-data)
 - [0.108.1 — IMMEDIATE cascade consistency and recovery](#01081--immediate-cascade-consistency-and-recovery)
 - [0.108.0 — Incremental graph and consumer recovery qualification](#01080--incremental-graph-and-consumer-recovery-qualification)
 - [0.107.0 — Verified support and operator procedures](#01070--verified-support-and-operator-procedures)
@@ -222,6 +223,79 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+Future changes will be listed here.
+
+## [0.109.0] — More dependable live data
+
+pg_trickle keeps saved query results up to date as the underlying data changes.
+Version 0.109.0 improves how that works in busy databases, with more accurate
+calculations, more reliable change tracking, and safer pause and recovery
+operations.
+
+### What gets better
+
+- **More accurate reports and calculations.** Fixes cover totals, averages,
+  counts, and statistical calculations in several tricky cases, including
+  filtered data, converted values, and special numeric values such as infinity.
+- **More faithful change tracking.**
+  Changing `12.0` to `12.00` can matter to a query even though the numbers are
+  equal. Fixes preserve that distinction, along with updates that set
+  a value to `NULL` (missing), move a row to a different key, or affect duplicate
+  rows.
+- **More reliable results during simultaneous updates.** Fixes prevent
+  affected refreshes from skipping changes when changes are recorded and
+  committed in different orders. Queries that combine tables also
+  avoid certain temporary calculation errors during updates.
+- **Safer maintenance and recovery.** Pausing the scheduler now waits for work
+  already in progress, including dependent tables. Restore and cleanup fixes
+  keep saved results, pending changes, and recorded progress aligned.
+- **Less unnecessary work.** Eligible refreshes skip empty stages, focus on
+  affected rows, and reuse work already done during the refresh. These changes
+  reduce avoidable processing in the workloads they cover.
+
+### Stronger checks behind the scenes
+
+This release expands tests for overlapping transactions, duplicate rows,
+changing keys, rollbacks, and multiple consumers reading changes at different
+speeds. It also adds formal checks for specific change-tracking rules and tests
+that deliberately break selected rules to confirm that the checks detect them.
+The formal checks focus on defined rules, while database tests exercise the
+covered behavior in PostgreSQL.
+
+### Upgrading
+
+After installing the new extension files, update each database that uses
+pg_trickle:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.109.0';
+```
+
+**Some existing results need attention.** Installing the fixes does not
+automatically repair every result produced by an earlier version.
+
+- If you use trigger-based change capture, rebuild the existing capture
+  triggers so they recognize the corrected update rules.
+- Review tables with complex aggregates, counts of composite values containing
+  NULL fields, or filtered averages and statistical calculations. Affected
+  tables may need their saved results and calculation state rebuilt.
+- If you upgrade from an older release, follow that release's migration steps
+  too, including any required row-identity rebuild.
+
+The [upgrade guide](https://github.com/trickle-labs/pg-trickle/blob/main/docs/UPGRADING.md#01083-to-01090)
+provides the commands and explains which tables need action. Use it to
+identify the tables that need rebuilding.
+
+### Detailed changes
+
+<details>
+<summary>Technical fixes, supported cases, and recovery conditions</summary>
+
+- Preserve proven merged keys in chained inner `USING` joins, including
+  differential updates and deletes (#1199).
+- Retain the required first and last change records during eligible buffer
+  compaction. Broaden regression coverage for interleaved row histories,
+  protected consumer positions, key changes, and rollback (#1221, #1326).
 - Rebind output-delta stream and payload relation OIDs after logical restore,
   invalidating existing consumers before rebinding so the contract guard remains
   enabled afterward.
@@ -232,10 +306,14 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
   including synchronous IMMEDIATE descendants, and reject dispatch selected
   before a pause but admitted afterward. Dedicated repeatable-read jobs now
   set isolation before their first work snapshot (#1219).
+- Rediscover committed stream-table definitions when another scheduler rebuilt
+  its dependency graph before the creating transaction committed. Refresh the
+  parallel dispatch graph after catalog rebuilds, including rebuilds that keep
+  the same shared version.
 - Retire local WAL slots only after consumer removal or trigger fallback commits.
   Caller rollback preserves the original slot; durable cleanup reservations also
   cover interrupted creation and restart after physical removal. This requires
-  the `0.108.3` to `0.108.4` catalog upgrade (#1222).
+  the `0.108.3` to `0.109.0` catalog upgrade (#1222).
 - Reject initial population under REPEATABLE READ or SERIALIZABLE rather than
   publish a newer capture frontier over rows from an older snapshot. Retry
   under READ COMMITTED, or defer initial population until the first refresh
@@ -304,7 +382,6 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
   row for differential refresh (#1172).
 - Prevent manual DIFFERENTIAL refreshes from skipping trigger-captured changes
   when source transactions commit out of LSN order (#1158).
-- Add versioned V3 row identities whose `bpchar` canonicalization matches PostgreSQL equality; V2 bytes remain unchanged. V2-backed stream tables require protected FULL reinitialization after upgrade.
 - Require an explicit rebuild of dependent stream tables when WAL capture falls back to triggers, preserving committed changes still pending in WAL or unapplied receipts (#1159).
 - Reduce differential-refresh work by pruning empty graph CDC stages, filtering nested join snapshots to affected keys, and avoiding reconciliation scratch tables when stored results already match the defining query.
 - Avoid JIT compilation during small graph-delta applies when planner hints are enabled; restore the caller's JIT setting before returning.
@@ -317,9 +394,8 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 - Preserve duplicate multiplicity in keyless snapshots and scope delta lookups by source relation when UNION branches reuse aliases.
 - Keep differential SUM and AVG correct when changes include `Infinity`, `-Infinity`, or `NaN`, rescanning only affected groups (#1209).
 - Keep differential STDDEV/VAR correct after non-finite values are removed, rescanning affected groups and rebuilding their sum and sum-of-squares state (#1206).
-- Preserve numeric scale changes in CDC masks so scale-dependent consumers stay current in row and statement trigger modes (#1210).
 
-Future changes will be listed here.
+</details>
 
 ## [0.108.1] — IMMEDIATE cascade consistency and recovery
 

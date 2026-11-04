@@ -79,7 +79,7 @@ resolves their provenance. Disabling the scheduler also defers physical cleanup.
 
 ## Upgrade and qualification
 
-The new catalog requires the `0.108.3` to `0.108.4` migration. Fresh installs and
+The new catalog requires the `0.108.3` to `0.109.0` migration. Fresh installs and
 upgrades revoke PUBLIC access. Physical restart retains intents; logical dumps
 exclude live OID/capture-owner intents with an extension config-dump filter.
 The release contract retains prior required suites and adds retirement runtime
