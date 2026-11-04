@@ -63,12 +63,18 @@ async fn test_v0874_refresh_batching_and_multi_source_history() {
 
     db.execute("UPDATE v0874_left SET value = value + 1 WHERE id = 1")
         .await;
-    db.refresh_st("v0874_split").await;
+    dvm_fuzz::refresh_changed_differential(&db, "v0874_split")
+        .await
+        .expect("first split refresh must be differential");
 
     db.execute("UPDATE v0874_right SET value = value + 1 WHERE id = 1")
         .await;
-    db.refresh_st("v0874_split").await;
-    db.refresh_st("v0874_batch").await;
+    dvm_fuzz::refresh_changed_differential(&db, "v0874_split")
+        .await
+        .expect("second split refresh must be differential");
+    dvm_fuzz::refresh_changed_differential(&db, "v0874_batch")
+        .await
+        .expect("batched refresh must be differential");
 
     e2e::oracle::assert_effective_refresh_mode(&db, "v0874_split", "DIFFERENTIAL")
         .await
@@ -92,6 +98,9 @@ async fn test_v0874_refresh_batching_and_multi_source_history() {
 #[tokio::test]
 async fn test_v08714_live_metamorphic_families() {
     let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
     db.execute_seq(&[
         "CREATE TABLE v08714_update_a (id INT PRIMARY KEY, value INT, unused INT)",
         "CREATE TABLE v08714_update_b (id INT PRIMARY KEY, value INT, unused INT)",
@@ -198,8 +207,12 @@ async fn test_v08714_live_metamorphic_families() {
             ))
             .await;
         }
-        db.refresh_st(&st_a).await;
-        db.refresh_st(&st_b).await;
+        dvm_fuzz::refresh_changed_differential(&db, &st_a)
+            .await
+            .unwrap_or_else(|failure| panic!("{family}: {failure}"));
+        dvm_fuzz::refresh_changed_differential(&db, &st_b)
+            .await
+            .unwrap_or_else(|failure| panic!("{family}: {failure}"));
         e2e::oracle::assert_st_query_exact(&db, &st_a, query_a, family).await;
         e2e::oracle::assert_st_query_exact(&db, &st_b, query_b, family).await;
         e2e::oracle::compare_sts(&db, &st_a, &st_b)
@@ -209,4 +222,35 @@ async fn test_v08714_live_metamorphic_families() {
     }
 
     assert_eq!(executed_families.len(), families.len());
+}
+
+#[tokio::test]
+async fn test_mutation_time_full_refresh_is_rejected() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE full_control_source (id INT PRIMARY KEY, value INT)")
+        .await;
+    db.execute("INSERT INTO full_control_source VALUES (1, 10)")
+        .await;
+    let query = "SELECT id, value FROM full_control_source";
+    db.create_st("full_control", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.refresh_st("full_control").await;
+    let previous: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.execute("UPDATE full_control_source SET value = 15 WHERE id = 1")
+        .await;
+    let failure = dvm_fuzz::refresh_changed_with_strategy(&db, "full_control", "full")
+        .await
+        .expect_err("FULL must be rejected");
+    assert!(
+        failure.contains("no fresh completed differential"),
+        "{failure}"
+    );
+    let full: bool = db.query_scalar(&format!("SELECT h.refresh_id > {previous} AND h.status = 'COMPLETED' AND (h.action = 'FULL' OR h.was_full_fallback) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'full_control' ORDER BY h.refresh_id DESC LIMIT 1")).await;
+    assert!(full, "control must execute a completed FULL refresh");
+    e2e::oracle::assert_st_query_exact(&db, "full_control", query, "FULL control").await;
 }

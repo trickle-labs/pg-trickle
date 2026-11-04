@@ -165,7 +165,9 @@ async fn test_v0873_mandatory_composition_matrix() {
         for mutations in mutation_history(&case) {
             db.execute_seq(&mutations.iter().map(String::as_str).collect::<Vec<_>>())
                 .await;
-            db.refresh_st(&stream_table).await;
+            dvm_fuzz::refresh_changed_differential(&db, &stream_table)
+                .await
+                .unwrap_or_else(|failure| panic!("{}: {failure}", case.id));
             e2e::oracle::assert_st_query_exact(&db, &stream_table, &query, case.id).await;
         }
         let _ = db
