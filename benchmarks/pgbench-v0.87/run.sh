@@ -164,19 +164,12 @@ correctness_check() {
 }
 
 wait_for_correctness() {
-    local history_before="$1"
-    local workload_finished_at="$2"
-    local checked_through="$history_before"
-    local latest_refresh
-    for _ in $(seq 1 360); do
-        latest_refresh="$(db_query "SELECT CASE WHEN count(*) = 3 THEN coalesce(min(max_refresh_id), $history_before) ELSE $history_before END FROM (SELECT st.pgt_id, max(h.refresh_id) AS max_refresh_id FROM pgtrickle.pgt_stream_tables st JOIN pgtrickle.pgt_refresh_history h ON h.pgt_id = st.pgt_id WHERE h.status = 'COMPLETED' AND h.refresh_id > $history_before AND h.start_time >= '$workload_finished_at' GROUP BY st.pgt_id) ready")"
-        if (( latest_refresh > checked_through )); then
-            if [[ "$(correctness_check)" == t ]]; then
-                return 0
-            fi
-            checked_through="$latest_refresh"
+    # Final row equality does not depend on when PostgreSQL assigned a refresh ID.
+    for _ in $(seq 1 36); do
+        if [[ "$(correctness_check)" == t ]]; then
+            return 0
         fi
-        sleep 0.5
+        sleep 5
     done
     return 1
 }
@@ -189,7 +182,7 @@ run_one() {
     local stdout_file="$run_dir/pgbench.stdout"
     local log_dir="$run_dir/logs"
     local warmup_file="$run_dir/warmup.stdout"
-    local history_before refresh_count refresh_duration correct workload_finished_at postgres_version postgres_settings
+    local history_before refresh_count refresh_duration correct postgres_version postgres_settings
     local cpu_before cpu_after cpu_hz sampler_pid
     local postgres_args=(-c wal_level=logical -c track_commit_timestamp=on \
         -c max_replication_slots=10 -c max_worker_processes=128)
@@ -238,10 +231,9 @@ run_one() {
     cpu_after="$(cpu_total_sample)"
     touch "$run_dir/cpu.stop"
     wait "$sampler_pid"
-    workload_finished_at="$(db_query "SELECT clock_timestamp()")"
 
     if [[ "$config" == active ]]; then
-        if wait_for_correctness "$history_before" "$workload_finished_at"; then
+        if wait_for_correctness; then
             correct=true
         else
             correct=false
