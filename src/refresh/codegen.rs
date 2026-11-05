@@ -1915,9 +1915,9 @@ pub(crate) const WIDE_TABLE_HASH_THRESHOLD: usize = 50;
 /// For wider tables (F41), generates a single xxh64 hash comparison using
 /// `pgtrickle.pg_trickle_hash()`:
 /// ```sql
-/// pgtrickle.pg_trickle_hash(concat_ws('\x1E', COALESCE(st."c1"::text,''), ...))
+/// pgtrickle.pg_trickle_hash(concat_ws('\x1E', VARIADIC ARRAY[COALESCE(st."c1"::text,''), ...]))
 /// IS DISTINCT FROM
-/// pgtrickle.pg_trickle_hash(concat_ws('\x1E', COALESCE(d."c1"::text,''), ...))
+/// pgtrickle.pg_trickle_hash(concat_ws('\x1E', VARIADIC ARRAY[COALESCE(d."c1"::text,''), ...]))
 /// ```
 pub(crate) fn build_is_distinct_clause(user_cols: &[String]) -> String {
     if user_cols.len() <= WIDE_TABLE_HASH_THRESHOLD {
@@ -1941,7 +1941,7 @@ pub(crate) fn build_is_distinct_clause(user_cols: &[String]) -> String {
                 })
                 .collect();
             format!(
-                "pgtrickle.pg_trickle_hash(concat_ws({sep}, {cols}))",
+                "pgtrickle.pg_trickle_hash(concat_ws({sep}, VARIADIC ARRAY[{cols}]))",
                 sep = "'\\x1E'",
                 cols = parts.join(", ")
             )

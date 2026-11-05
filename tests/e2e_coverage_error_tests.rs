@@ -331,6 +331,43 @@ async fn test_alter_source_change_column_type() {
 // ── WB-2: Wide-table CDC selectivity ──────────────────────────────────
 
 #[tokio::test]
+async fn test_wide_output_differential_refresh_over_function_argument_limit() {
+    let db = E2eDb::new().await.with_extension().await;
+    let extra_cols: String = (1..=187).map(|i| format!(", col{i} INT")).collect();
+    db.execute(&format!(
+        "CREATE TABLE wide_output_src (id INT PRIMARY KEY{extra_cols})"
+    ))
+    .await;
+    db.execute("INSERT INTO wide_output_src (id, col1, col187) VALUES (1, 10, 20)")
+        .await;
+
+    for width in [99, 100, 188] {
+        let cols = (1..width).map(|i| format!(", col{i}")).collect::<String>();
+        db.create_st(
+            &format!("wide_output_st_{width}"),
+            &format!("SELECT id{cols} FROM wide_output_src"),
+            "1h",
+            "DIFFERENTIAL",
+        )
+        .await;
+    }
+    db.execute("UPDATE wide_output_src SET col1 = 11, col187 = 21 WHERE id = 1")
+        .await;
+    for width in [99, 100, 188] {
+        let name = format!("wide_output_st_{width}");
+        db.refresh_st_with_retry(&name).await;
+        let value: i32 = db
+            .query_scalar(&format!("SELECT col1 FROM {name} WHERE id = 1"))
+            .await;
+        assert_eq!(value, 11);
+    }
+    let value: i32 = db
+        .query_scalar("SELECT col187 FROM wide_output_st_188 WHERE id = 1")
+        .await;
+    assert_eq!(value, 21);
+}
+
+#[tokio::test]
 async fn test_wb2_wide_table_gt63_cols_differential_refresh() {
     // WB-2: Source table with 65 columns (> 63-column BIGINT cap).
     // After WB-1 the trigger stores a VARBIT bitmask of length 65, enabling

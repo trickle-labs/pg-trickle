@@ -2013,6 +2013,15 @@ fn test_build_is_distinct_clause_wide_table_hash_path() {
 }
 
 #[test]
+fn test_build_is_distinct_clause_over_function_argument_limit() {
+    let cols: Vec<String> = (0..188).map(|i| format!("col{i}")).collect();
+    let clause = build_is_distinct_clause(&cols);
+    assert_eq!(clause.matches("VARIADIC ARRAY[").count(), 2);
+    assert!(clause.contains("COALESCE(st.\"col187\"::text, '')"));
+    assert!(clause.contains("COALESCE(d.\"col187\"::text, '')"));
+}
+
+#[test]
 fn test_build_is_distinct_clause_empty_cols() {
     let cols: Vec<String> = vec![];
     let clause = build_is_distinct_clause(&cols);
