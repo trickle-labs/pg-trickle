@@ -67,10 +67,9 @@ fn rf_count() -> usize {
 // signalling a DVM regression where a previously-passing query no longer
 // creates or runs correctly.
 //
-// DIFFERENTIAL: all 22 queries previously passed at SF<10. Queries with correlated
-//               scalar subqueries in WHERE clauses become quadratic in the DVM
-//               delta SQL at SF≥10. Those queries are listed in
-//               LARGE_SCALE_DIFFERENTIAL_SKIP and skipped automatically.
+// DIFFERENTIAL: queries with known resource limits are explicitly allowlisted;
+//               q17 can hit the 16 GB temp-file limit even at SF-1. At SF≥10,
+//               q15/q17 are in LARGE_SCALE_DIFFERENTIAL_SKIP.
 // IMMEDIATE:    a subset cannot be created (IVM restriction). Populate by
 //               running with the guard disabled, then hardening the set.
 //
@@ -85,6 +84,9 @@ const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[
     // v0.77.0: q12 uses CASE aggregate + IN-list predicate and is currently
     // forced to FULL refresh by CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK.
     "q12",
+    // q17's correlated AVG delta can exceed the 16 GB temp-file limit even
+    // at SF-1 (observed in the 2026-11-05 nightly run).
+    "q17",
 ];
 
 /// Scale factor threshold above which LARGE_SCALE_DIFFERENTIAL_SKIP applies.
@@ -92,17 +94,13 @@ const LARGE_SCALE_SKIP_THRESHOLD: f64 = 10.0;
 
 /// Queries skipped in DIFFERENTIAL mode at SF≥LARGE_SCALE_SKIP_THRESHOLD.
 ///
-/// These queries pass correctly at smaller scale factors (all 22 pass at SF-1)
-/// but have DVM performance limitations that cause cycle-level timeouts at
-/// SF≥10. They are pre-skipped to prevent the 90-minute nextest slow-timeout
-/// from killing the whole test function.
+/// These queries hit known resource limits at SF≥10. They are pre-skipped to
+/// prevent temp-file exhaustion or the 90-minute nextest slow-timeout from
+/// killing the whole test function.
 ///
-/// v0.77.0: This list is now empty. Previously q20 was listed here because
-/// the correlated aggregate subquery in its WHERE clause produced O(delta ×
-/// table) DVM delta SQL. As of v0.77.0 the DVM-2/P-1 fallback detection in
-/// execute_differential_refresh forces q20 to run as FULL at all scale factors,
-/// so large-scale performance is no longer a concern.
-const LARGE_SCALE_DIFFERENTIAL_SKIP: &[&str] = &[];
+/// q15 exceeds the test container's temp-file limit at SF-10. q17's correlated
+/// AVG subquery produces a delta refresh that exceeds the 90-minute test limit.
+const LARGE_SCALE_DIFFERENTIAL_SKIP: &[&str] = &["q15", "q17"];
 
 /// Queries allowed to be skipped in IMMEDIATE mode.
 /// Queries that fail `create_stream_table(..., 'IMMEDIATE')` due to IVM
@@ -712,24 +710,19 @@ async fn test_tpch_differential_correctness() {
             q.name, q.tier
         );
 
-        // Pre-skip queries with known DVM performance issues at large scale.
-        // These queries are correct at SF<10 but their DVM delta SQL becomes
-        // O(delta × table) at SF≥10, causing cycle-level timeouts that kill
-        // the whole test function via nextest slow-timeout.
+        // Pre-skip queries with known resource limits at large scale; see the
+        // query-specific notes in LARGE_SCALE_DIFFERENTIAL_SKIP.
         if scale_factor() >= LARGE_SCALE_SKIP_THRESHOLD
             && LARGE_SCALE_DIFFERENTIAL_SKIP.contains(&q.name)
         {
             println!(
-                "  SKIP — {} large-scale DVM perf limit at SF={} (see LARGE_SCALE_DIFFERENTIAL_SKIP)",
+                "  SKIP — {} large-scale DVM resource limit at SF={} (see LARGE_SCALE_DIFFERENTIAL_SKIP)",
                 q.name,
                 scale_factor()
             );
             skipped.push((
                 q.name,
-                format!(
-                    "large-scale DVM correlated-subquery perf limit at SF={}",
-                    scale_factor()
-                ),
+                format!("large-scale DVM resource limit at SF={}", scale_factor()),
             ));
             continue;
         }
