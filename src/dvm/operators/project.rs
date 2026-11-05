@@ -314,17 +314,10 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
             }
             Some(_) => "__pgt_row_id".to_string(),
             None => {
-                let hash_cols: Vec<String> = expressions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, expr)| resolve_project_expr(index, expr))
-                    .collect();
+                // Match the FULL refresh fallback, including output column names.
                 format!(
-                    "{} AS __pgt_row_id",
-                    crate::dvm::operators::scan::build_hash_expr_for_domain(
-                        "SYNTHETIC",
-                        &hash_cols,
-                    )
+                    "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW((SELECT row_to_json(__pgt_project_row)::text FROM (SELECT {}) AS __pgt_project_row))) AS __pgt_row_id",
+                    proj_cols.join(", ")
                 )
             }
         }

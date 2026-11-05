@@ -102,6 +102,32 @@ async fn test_mixed_view_upstream_differential_full_dml() {
     .await;
 }
 
+#[tokio::test]
+async fn test_mixed_view_cast_key_with_extra_column_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE cast_src (k char(4) PRIMARY KEY, v text, extra int)")
+        .await;
+    db.execute("INSERT INTO cast_src SELECT 'K' || g, 'a', g FROM generate_series(1, 10) g")
+        .await;
+    db.execute("CREATE VIEW cast_src_v AS SELECT * FROM cast_src")
+        .await;
+    let query = "SELECT k::varchar(4) AS k, v FROM cast_src_v";
+    db.create_st("cast_st", query, "1h", "DIFFERENTIAL").await;
+
+    db.execute("UPDATE cast_src SET v = 'b' WHERE k = 'K1'")
+        .await;
+    db.execute("DELETE FROM cast_src WHERE k = 'K2'").await;
+    db.refresh_st("cast_st").await;
+    db.assert_st_matches_query("cast_st", query).await;
+
+    db.execute("UPDATE cast_src SET k = 'K11' WHERE k = 'K1'")
+        .await;
+    db.execute("INSERT INTO cast_src VALUES ('K2', 'c', 2)")
+        .await;
+    db.refresh_st("cast_st").await;
+    db.assert_st_matches_query("cast_st", query).await;
+}
+
 // ── Multiple views joining into a stream table ───────────────────────────
 
 /// Two independent views (from different tables) joined in a stream table.
