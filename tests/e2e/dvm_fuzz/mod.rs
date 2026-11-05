@@ -15,6 +15,60 @@ pub mod semantic;
 
 pub const SCENARIO_FORMAT_VERSION: u32 = 1;
 
+/// Refresh a changed fixture and require a new differential history entry covering its captured changes.
+pub async fn refresh_changed_differential(db: &E2eDb, name: &str) -> Result<(), String> {
+    refresh_changed_with_strategy(db, name, "differential").await
+}
+
+pub async fn refresh_changed_with_strategy(
+    db: &E2eDb,
+    name: &str,
+    strategy: &str,
+) -> Result<(), String> {
+    let previous: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    let source_oids: Vec<i64> = sqlx::query_scalar("SELECT DISTINCT d.source_relid::bigint FROM pgtrickle.pgt_dependencies d JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema = 'public' AND s.pgt_name = $1")
+        .bind(name).fetch_all(&db.pool).await.map_err(|e| e.to_string())?;
+    let mut cuts = Vec::new();
+    for oid in source_oids {
+        let buffer = db.change_buffer_table(oid).await;
+        let lsn: Option<String> = db.query_scalar_opt(&format!("SELECT max(lsn)::text FROM {buffer} WHERE action IN ('I','D') AND lsn > (SELECT coalesce(frontier->'sources'->'{oid}'->>'lsn','0/0')::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_schema = 'public' AND pgt_name = '{name}')")).await;
+        if let Some(lsn) = lsn {
+            cuts.push((oid, lsn));
+        }
+    }
+    if cuts.is_empty() {
+        return Err(format!(
+            "{name}: no committed captured changes above frontier"
+        ));
+    }
+    db.try_execute_with_config(
+        &[
+            &format!("SET pg_trickle.refresh_strategy = '{strategy}'"),
+            "SET pg_trickle.differential_max_change_ratio = 0",
+        ],
+        &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let completed: bool = db.query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema = 'public' AND s.pgt_name = '{name}' AND h.refresh_id > {previous} AND h.status = 'COMPLETED' AND h.action = 'DIFFERENTIAL' AND NOT h.was_full_fallback)")).await;
+    if !completed {
+        return Err(format!(
+            "{name}: no fresh completed differential refresh without fallback"
+        ));
+    }
+    for (oid, lsn) in cuts {
+        let covered: bool = db.query_scalar(&format!("SELECT coalesce(frontier->'sources'->'{oid}'->>'lsn','0/0')::pg_lsn >= '{lsn}'::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_schema = 'public' AND pgt_name = '{name}'")).await;
+        if !covered {
+            return Err(format!(
+                "{name}: refresh did not cover source {oid} through {lsn}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scenario {
     pub scenario_id: String,
