@@ -591,22 +591,42 @@ fn parse_and_enforce_distinct_aggregate_bounds(
     defining_query: &str,
     prev_frontier: &Frontier,
     new_frontier: &Frontier,
-    change_schema: &str,
-) -> Result<dvm::ParseResult, PgTrickleError> {
+    dependencies: &[StDependency],
+) -> Result<
+    (
+        dvm::ParseResult,
+        Option<crate::refresh::delta_stage::DeltaStage>,
+    ),
+    PgTrickleError,
+> {
     let max_values = crate::config::pg_trickle_distinct_agg_max_values_per_group() as i64;
-    let result = crate::dvm::parse_defining_query_full(defining_query)?;
+    let result = with_stream_owner(st, || crate::dvm::parse_defining_query_full(defining_query))?;
     let mut checks = Vec::new();
     collect_distinct_agg_bound_checks(&result.tree, &mut checks)?;
     for (_, body) in &result.cte_registry.entries {
         collect_distinct_agg_bound_checks(body, &mut checks)?;
     }
     if checks.is_empty() {
-        return Ok(result);
+        return Ok((result, None));
     }
 
+    let stage = crate::refresh::delta_stage::DeltaStage::prepare(
+        st,
+        dependencies,
+        prev_frontier,
+        new_frontier,
+    )?;
     for check in checks {
-        let observed =
-            distinct_aggregate_max_values(&check, prev_frontier, new_frontier, change_schema)?;
+        let buffer = stage
+            .source_tables()
+            .get(&check.source_oid)
+            .ok_or_else(|| {
+                PgTrickleError::InternalError(format!(
+                    "missing staged source {} for DISTINCT aggregate",
+                    check.source_oid
+                ))
+            })?;
+        let observed = with_stream_owner(st, || distinct_aggregate_max_values(&check, buffer))?;
         if observed > max_values {
             return Err(PgTrickleError::QueryTooComplex(format!(
                 "DISTINCT_AGG_BOUNDED_STATE_FULL_FALLBACK: {}.{} {}(DISTINCT) '{}' has {observed} distinct non-NULL value(s) in an affected group, exceeding pg_trickle.distinct_agg_max_values_per_group={max_values}; falling back to FULL refresh",
@@ -615,14 +635,12 @@ fn parse_and_enforce_distinct_aggregate_bounds(
         }
     }
 
-    Ok(result)
+    Ok((result, Some(stage)))
 }
 
 fn distinct_aggregate_max_values(
     check: &DistinctAggBoundCheck,
-    prev_frontier: &Frontier,
-    new_frontier: &Frontier,
-    change_schema: &str,
+    buffer: &str,
 ) -> Result<i64, PgTrickleError> {
     let q = crate::api::quote_identifier;
     let source = format!(
@@ -631,29 +649,9 @@ fn distinct_aggregate_max_values(
         q(&check.source_table),
         q(&check.source_alias),
     );
-    let (prev_lsn, new_lsn, buffer) = if let Some(pgt_id) =
-        crate::catalog::StreamTableMeta::pgt_id_for_relid(pg_sys::Oid::from(check.source_oid))
-    {
-        (
-            prev_frontier.get_st_lsn(pgt_id),
-            new_frontier.get_st_lsn(pgt_id),
-            format!("changes_pgt_{pgt_id}"),
-        )
-    } else {
-        (
-            prev_frontier.get_lsn(check.source_oid),
-            new_frontier.get_lsn(check.source_oid),
-            crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(check.source_oid)),
-        )
-    };
-
-    let changed_predicate = format!(
-        "c.lsn > '{prev_lsn}'::pg_lsn AND c.lsn <= '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')"
-    );
+    let changed_predicate = "c.action IN ('I', 'D')";
     let affected = if check.group_keys.is_empty() {
-        format!(
-            "SELECT 1 WHERE EXISTS (SELECT 1 FROM \"{change_schema}\".{buffer} c WHERE {changed_predicate})"
-        )
+        format!("SELECT 1 WHERE EXISTS (SELECT 1 FROM {buffer} c WHERE {changed_predicate})")
     } else {
         let select = check
             .group_keys
@@ -662,9 +660,7 @@ fn distinct_aggregate_max_values(
             .map(|(idx, (_, column))| format!("c.{} AS {}", q(column), q(&format!("g{idx}"))))
             .collect::<Vec<_>>()
             .join(", ");
-        format!(
-            "SELECT DISTINCT {select} FROM \"{change_schema}\".{buffer} c WHERE {changed_predicate}"
-        )
+        format!("SELECT DISTINCT {select} FROM {buffer} c WHERE {changed_predicate}")
     };
 
     let affected_filter = if check.group_keys.is_empty() {
@@ -1326,15 +1322,13 @@ pub fn execute_differential_refresh_with_tuning(
         return execute_full_refresh(st);
     }
 
-    let parsed_query = with_stream_owner(st, || {
-        parse_and_enforce_distinct_aggregate_bounds(
-            st,
-            &effective_defining_query,
-            prev_frontier,
-            new_frontier,
-            &change_schema,
-        )
-    })?;
+    let (parsed_query, early_stage) = parse_and_enforce_distinct_aggregate_bounds(
+        st,
+        &effective_defining_query,
+        prev_frontier,
+        new_frontier,
+        &dependencies,
+    )?;
     // Reuse the owner-resolved shape within this refresh; never cache it across DDL.
     let query_has_join = crate::dvm::operators::join_common::tree_contains_join(&parsed_query.tree);
 
@@ -1921,12 +1915,15 @@ pub fn execute_differential_refresh_with_tuning(
     // CDC staging precedes t0, so it was absent from the existing per-node
     // timing report even though it can issue several SQL statements per source.
     let staging_start = Instant::now();
-    let delta_stage = crate::refresh::delta_stage::DeltaStage::prepare(
-        st,
-        &dependencies,
-        prev_frontier,
-        new_frontier,
-    )?;
+    let delta_stage = match early_stage {
+        Some(stage) => stage,
+        None => crate::refresh::delta_stage::DeltaStage::prepare(
+            st,
+            &dependencies,
+            prev_frontier,
+            new_frontier,
+        )?,
+    };
     let t_staging = staging_start.elapsed();
     let t0 = Instant::now();
 

@@ -14,6 +14,56 @@ mod e2e;
 
 use e2e::E2eDb;
 
+#[tokio::test]
+async fn test_distinct_aggregate_refresh_without_private_catalog_grants() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE ROLE r1366_owner LOGIN").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO r1366_owner")
+        .await;
+    db.execute("GRANT CREATE ON SCHEMA public TO r1366_owner")
+        .await;
+    db.execute("GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text, text) TO r1366_owner").await;
+    db.execute("CREATE TABLE r1366_source (id int PRIMARY KEY, grp int, val int)")
+        .await;
+    db.execute("GRANT SELECT ON r1366_source TO r1366_owner")
+        .await;
+    db.try_execute_with_role(
+        "SET ROLE r1366_owner",
+        "SELECT pgtrickle.create_stream_table('r1366_stream', 'SELECT grp, count(DISTINCT val) AS n FROM public.r1366_source GROUP BY grp', '1h', 'DIFFERENTIAL')",
+        "RESET ROLE",
+    ).await.expect("owner creates stream");
+    for catalog in ["pgt_dependencies", "pgt_stream_tables"] {
+        let allowed: bool = db
+            .query_scalar(&format!(
+                "SELECT has_table_privilege('r1366_owner', 'pgtrickle.{catalog}', 'SELECT')"
+            ))
+            .await;
+        assert!(!allowed, "owner must not read {catalog}");
+    }
+    db.execute("INSERT INTO r1366_source VALUES (1, 1, 10), (2, 1, 20)")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('r1366_stream')")
+        .await;
+    let count: i64 = db
+        .query_scalar("SELECT n FROM r1366_stream WHERE grp = 1")
+        .await;
+    assert_eq!(count, 2);
+    db.execute("INSERT INTO r1366_source VALUES (3, 1, 30)")
+        .await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.distinct_agg_max_values_per_group = 2"],
+        "SELECT pgtrickle.refresh_stream_table('r1366_stream')",
+    )
+    .await
+    .expect("the bound check falls back to FULL");
+    let count: i64 = db
+        .query_scalar("SELECT n FROM r1366_stream WHERE grp = 1")
+        .await;
+    assert_eq!(count, 3);
+    let fallback: bool = db.query_scalar("SELECT was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'r1366_stream' ORDER BY refresh_id DESC LIMIT 1").await;
+    assert!(fallback, "the DISTINCT safety limit must still be enforced");
+}
+
 /// #1263: a changed upstream group must update cast and uncast SUM results.
 #[tokio::test]
 async fn test_full_owner_downstream_cast_sum_matches_query() {
@@ -768,6 +818,64 @@ async fn test_full_refresh_non_superuser_owner_with_downstream() {
     .await
     .expect("read downstream aggregate after second FULL refresh");
     assert_eq!(rows, vec![("a".to_string(), 3, 2)]);
+}
+
+#[cfg(not(feature = "light-e2e"))]
+#[tokio::test]
+async fn test_scheduled_union_refresh_without_private_catalog_grants() {
+    use std::time::Duration;
+
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.cdc_trigger_mode = 'row'")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.cleanup_use_truncate = off")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.refresh_strategy = 'differential'")
+        .await;
+    db.reload_config_and_wait().await;
+    assert!(db.wait_for_scheduler(Duration::from_secs(90)).await);
+    db.execute("CREATE ROLE r1366_scheduled_owner LOGIN").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO r1366_scheduled_owner")
+        .await;
+    db.execute("GRANT CREATE ON SCHEMA public TO r1366_scheduled_owner")
+        .await;
+    db.execute("GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text, text) TO r1366_scheduled_owner").await;
+    db.execute("CREATE TABLE r1366_a (id int PRIMARY KEY, val int)")
+        .await;
+    db.execute("CREATE TABLE r1366_b (id int PRIMARY KEY, val int)")
+        .await;
+    db.execute("GRANT SELECT ON r1366_a, r1366_b TO r1366_scheduled_owner")
+        .await;
+    let query = "SELECT id, val FROM public.r1366_a UNION ALL SELECT id, val FROM public.r1366_b";
+    db.try_execute_with_role("SET ROLE r1366_scheduled_owner", &format!("SELECT pgtrickle.create_stream_table('r1366_scheduled', '{query}', '1s', 'DIFFERENTIAL')"), "RESET ROLE").await.expect("owner creates scheduled stream");
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table('r1366_peer', '{query}', '1s', 'DIFFERENTIAL')"
+    ))
+    .await;
+    for catalog in ["pgt_dependencies", "pgt_stream_tables"] {
+        let allowed: bool = db.query_scalar(&format!("SELECT has_table_privilege('r1366_scheduled_owner', 'pgtrickle.{catalog}', 'SELECT')")).await;
+        assert!(!allowed, "owner must not read {catalog}");
+    }
+    for (mutation, expected) in [
+        ("INSERT INTO r1366_a VALUES (1, 10)", 10),
+        ("UPDATE r1366_a SET val = 20 WHERE id = 1", 20),
+    ] {
+        db.execute("SELECT pgtrickle.clear_caches()").await;
+        db.execute(mutation).await;
+        let converged = db.wait_for_condition("scheduled union refresh", &format!("SELECT COALESCE((SELECT val = {expected} FROM r1366_scheduled WHERE id = 1), false) AND COALESCE((SELECT val = {expected} FROM r1366_peer WHERE id = 1), false)"), Duration::from_secs(45), Duration::from_millis(100)).await;
+        assert!(converged, "scheduled stream did not reflect {mutation}");
+    }
+    let (active, completed): (bool, i64) = sqlx::query_as("SELECT st.status = 'ACTIVE', count(*) FILTER (WHERE h.initiated_by = 'SCHEDULER' AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED') FROM pgtrickle.pgt_stream_tables st JOIN pgtrickle.pgt_refresh_history h USING (pgt_id) WHERE st.pgt_name = 'r1366_scheduled' GROUP BY st.status").fetch_one(&db.pool).await.expect("read scheduler history");
+    assert!(
+        active && completed >= 1,
+        "a scheduled differential refresh must succeed"
+    );
 }
 
 #[cfg(not(feature = "light-e2e"))]
