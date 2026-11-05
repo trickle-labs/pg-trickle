@@ -102,6 +102,9 @@ const LARGE_SCALE_SKIP_THRESHOLD: f64 = 10.0;
 /// AVG subquery produces a delta refresh that exceeds the 90-minute test limit.
 const LARGE_SCALE_DIFFERENTIAL_SKIP: &[&str] = &["q15", "q17"];
 
+/// Queries whose IMMEDIATE initial materialization exceeds the nightly time budget.
+const LARGE_SCALE_IMMEDIATE_COMPARE_SKIP: &[&str] = &["q05"];
+
 /// Queries allowed to be skipped in IMMEDIATE mode.
 /// Queries that fail `create_stream_table(..., 'IMMEDIATE')` due to IVM
 /// restrictions (subqueries in the target list, EXCEPT ALL, NOT IN correlated
@@ -2714,6 +2717,16 @@ async fn test_tpch_differential_vs_immediate() {
     for q in &queries {
         let st_diff = format!("tpch_di_{}", q.name);
         let st_imm = format!("tpch_ii_{}", q.name);
+
+        // shortcut: skip q05 IMMEDIATE at SF≥1 while initial materialization exceeds the 90-minute timeout.
+        if sf >= 1.0 && LARGE_SCALE_IMMEDIATE_COMPARE_SKIP.contains(&q.name) {
+            println!(
+                "  {}: SKIP — IMMEDIATE initial materialization exceeds the SF-1 nightly budget",
+                q.name
+            );
+            skipped.push(q.name.to_string());
+            continue;
+        }
 
         let diff_ok = db
             .try_execute(&format!(

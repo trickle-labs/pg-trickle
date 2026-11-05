@@ -275,22 +275,33 @@ fn is_insert_only_table(source_oid: pg_sys::Oid) -> bool {
     .unwrap_or(false)
 }
 
-fn sync_guard_sql(buffer_key: &str) -> String {
-    let key = buffer_key.replace('\'', "''");
-    format!(
-        "IF EXISTS (SELECT 1 FROM pgtrickle.pgt_change_buffers \
-                   WHERE buffer_key = '{key}' AND durability = 'sync') THEN \
-             PERFORM set_config('synchronous_commit', 'on', true); \
-         END IF;"
+pub(crate) fn buffer_uses_sync_commit(buffer_key: &str) -> Result<bool, PgTrickleError> {
+    Spi::get_one_with_args::<bool>(
+        "SELECT durability = 'sync' FROM pgtrickle.pgt_change_buffers WHERE buffer_key = $1",
+        &[buffer_key.into()],
     )
+    .map_err(|e| PgTrickleError::SpiError(format!("change-buffer durability lookup failed: {e}")))
+    .map(|sync| sync.unwrap_or(false))
 }
 
-fn with_sync_guard(sql: &str, buffer_key: &str) -> String {
-    sql.replacen(
-        "BEGIN",
-        &format!("BEGIN\n             {}", sync_guard_sql(buffer_key)),
-        1,
-    )
+fn sync_guard_sql(sync_commit: bool) -> &'static str {
+    if sync_commit {
+        "PERFORM set_config('synchronous_commit', 'on', true);"
+    } else {
+        ""
+    }
+}
+
+pub(crate) fn with_sync_guard(sql: &str, sync_commit: bool) -> String {
+    if sync_commit {
+        sql.replacen(
+            "BEGIN",
+            &format!("BEGIN\n             {}", sync_guard_sql(sync_commit)),
+            1,
+        )
+    } else {
+        sql.to_string()
+    }
 }
 
 /// Apply the registry's synchronous-commit policy to the current transaction.
@@ -821,6 +832,8 @@ pub fn create_change_trigger(
     // UPDATE or DELETE CDC triggers — only an INSERT trigger is registered.
     let insert_only = is_insert_only_table(source_oid);
     let mode = config::pg_trickle_cdc_trigger_mode();
+    let buffer_key = format!("changes_{stable_name}");
+    let sync_commit = buffer_uses_sync_commit(&buffer_key)?;
     match mode {
         config::CdcTriggerMode::Statement => {
             let (ins_fn, upd_fn, del_fn) = build_stmt_trigger_fn_sql(
@@ -830,21 +843,20 @@ pub fn create_change_trigger(
                 columns,
                 has_immediate_primary_key(source_oid)?,
             );
-            let buffer_key = format!("changes_{stable_name}");
-            Spi::run(&with_sync_guard(&ins_fn, &buffer_key)).map_err(|e| {
+            Spi::run(&with_sync_guard(&ins_fn, sync_commit)).map_err(|e| {
                 PgTrickleError::SpiError(format!(
                     "Failed to create CDC INSERT trigger function: {}",
                     e
                 ))
             })?;
             if !insert_only {
-                Spi::run(&with_sync_guard(&upd_fn, &buffer_key)).map_err(|e| {
+                Spi::run(&with_sync_guard(&upd_fn, sync_commit)).map_err(|e| {
                     PgTrickleError::SpiError(format!(
                         "Failed to create CDC UPDATE trigger function: {}",
                         e
                     ))
                 })?;
-                Spi::run(&with_sync_guard(&del_fn, &buffer_key)).map_err(|e| {
+                Spi::run(&with_sync_guard(&del_fn, sync_commit)).map_err(|e| {
                     PgTrickleError::SpiError(format!(
                         "Failed to create CDC DELETE trigger function: {}",
                         e
@@ -901,8 +913,7 @@ pub fn create_change_trigger(
         }
         config::CdcTriggerMode::Row => {
             let fn_sql = build_row_trigger_fn_sql(change_schema, stable_name, pk_columns, columns);
-            let buffer_key = format!("changes_{stable_name}");
-            Spi::run(&with_sync_guard(&fn_sql, &buffer_key)).map_err(|e| {
+            Spi::run(&with_sync_guard(&fn_sql, sync_commit)).map_err(|e| {
                 PgTrickleError::SpiError(format!("Failed to create CDC trigger function: {}", e))
             })?;
             let dml_events = if insert_only {
@@ -930,8 +941,7 @@ pub fn create_change_trigger(
     }
 
     // ── TRUNCATE capture (statement-level trigger) ──────────────────
-    let buffer_key = format!("changes_{stable_name}");
-    let sync_guard = sync_guard_sql(&buffer_key);
+    let sync_guard = sync_guard_sql(sync_commit);
     let truncate_fn_sql = format!(
         "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
@@ -2730,9 +2740,10 @@ fn build_stmt_trigger_fn_sql(
 pub(crate) fn build_inactive_trigger_fn_sql(
     change_schema: &str,
     name: &str,
+    sync_commit: bool,
 ) -> (String, String, String, String, String) {
     let body = |function: &str| {
-        let guard = sync_guard_sql(&format!("changes_{name}"));
+        let guard = sync_guard_sql(sync_commit);
         format!(
             "CREATE OR REPLACE FUNCTION {change_schema}.{function}_{name}()\n             RETURNS trigger LANGUAGE plpgsql\n             SECURITY DEFINER -- nosemgrep: sql.security-definer.present\n             SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$\n             BEGIN\n                 {guard}\n                 RETURN NULL;\n             END;\n             $$",
             function = function,
@@ -2758,8 +2769,9 @@ pub fn refresh_capture_body_for_source(
         return rebuild_cdc_trigger_function(source_oid, &change_schema);
     }
 
+    let sync_commit = buffer_uses_sync_commit(&format!("changes_{name}"))?;
     let (row, insert, update, delete, truncate) =
-        build_inactive_trigger_fn_sql(&change_schema, &name);
+        build_inactive_trigger_fn_sql(&change_schema, &name, sync_commit);
     let functions = if crate::config::pg_trickle_cdc_trigger_mode()
         == crate::config::CdcTriggerMode::Statement
     {
@@ -3792,12 +3804,29 @@ mod tests {
     #[test]
     fn test_inactive_trigger_bodies_are_write_free() {
         let (row, insert, update, delete, truncate) =
-            build_inactive_trigger_fn_sql("pgtrickle_changes", "pg_trickle_cdc_42");
+            build_inactive_trigger_fn_sql("pgtrickle_changes", "pg_trickle_cdc_42", false);
         for body in [row, insert, update, delete, truncate] {
             assert!(body.contains("RETURN NULL;"));
             assert!(!body.contains("INSERT INTO"));
             assert!(!body.contains("NOTIFY"));
+            assert!(!body.contains("pgt_change_buffers"));
         }
+    }
+
+    #[test]
+    fn test_sync_guard_is_baked_into_trigger_function() {
+        let trigger_fn = "BEGIN\n    RETURN NULL;\nEND;";
+        let logged_fn = with_sync_guard(trigger_fn, false);
+        assert_eq!(logged_fn, trigger_fn);
+
+        let sync_guard = sync_guard_sql(true);
+        assert!(sync_guard.contains("set_config('synchronous_commit', 'on', true)"));
+        assert!(!sync_guard.contains("pgt_change_buffers"));
+        assert_eq!(sync_guard_sql(false), "");
+
+        let sync_fn = with_sync_guard(trigger_fn, true);
+        assert!(sync_fn.contains("set_config('synchronous_commit', 'on', true)"));
+        assert!(!sync_fn.contains("pgt_change_buffers"));
     }
 
     #[test]
