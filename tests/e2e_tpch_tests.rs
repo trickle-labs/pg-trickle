@@ -540,18 +540,35 @@ fn log_progress(qname: &str, tier: u8, cycle: usize, total_cycles: usize, elapse
 
 /// Refresh a stream table, returning an error instead of panicking.
 /// Used to gracefully handle known pg_trickle DVM bugs without stopping the test.
-/// A 60-second lock_timeout prevents the test from hanging if the background
-/// scheduler unexpectedly holds a conflicting transaction lock.
+/// A scheduler-busy NOTICE is retried until this transaction completes a refresh.
 async fn try_refresh_st(db: &E2eDb, st_name: &str) -> Result<(), String> {
-    db.try_execute("SET lock_timeout = '60s'").await.ok();
-    let result = db
-        .try_execute(&format!(
-            "SELECT pgtrickle.refresh_stream_table('{st_name}')"
-        ))
+    let deadline = Instant::now() + std::time::Duration::from_secs(600);
+    loop {
+        let mut tx = db.pool.begin().await.map_err(|e| e.to_string())?;
+        sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
+            .bind(st_name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        let completed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history \
+             WHERE xmin = pg_current_xact_id()::xid \
+               AND initiated_by = 'MANUAL' AND status = 'COMPLETED')",
+        )
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| e.to_string());
-    db.try_execute("SET lock_timeout = 0").await.ok();
-    result
+        .map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        if completed {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for concurrent refresh of '{st_name}' to complete"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 // ── TPCH_BENCH mode helpers ────────────────────────────────────────────

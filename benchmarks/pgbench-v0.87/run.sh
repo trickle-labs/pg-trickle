@@ -174,6 +174,14 @@ wait_for_correctness() {
     return 1
 }
 
+report_correctness_state() {
+    db_query "SELECT pgt_name, status FROM pgtrickle.pgt_stream_tables ORDER BY pgt_name"
+    db_query "SELECT
+        NOT EXISTS ((SELECT aid, bid, abalance FROM pgbench_accounts EXCEPT ALL SELECT aid, bid, abalance FROM bench_projection) UNION ALL (SELECT aid, bid, abalance FROM bench_projection EXCEPT ALL SELECT aid, bid, abalance FROM pgbench_accounts)) AS projection_matches,
+        NOT EXISTS ((SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid EXCEPT ALL SELECT bid, total_balance FROM bench_balances) UNION ALL (SELECT bid, total_balance FROM bench_balances EXCEPT ALL SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid)) AS balances_match,
+        NOT EXISTS ((SELECT a.aid, a.bid, a.abalance, b.bbalance FROM pgbench_accounts a JOIN pgbench_branches b ON b.bid = a.bid EXCEPT ALL SELECT aid, bid, abalance, bbalance FROM bench_join) UNION ALL (SELECT aid, bid, abalance, bbalance FROM bench_join EXCEPT ALL SELECT a.aid, a.bid, a.abalance, b.bbalance FROM pgbench_accounts a JOIN pgbench_branches b ON b.bid = a.bid)) AS join_matches"
+}
+
 run_one() {
     local config="$1"
     local repetition="$2"
@@ -237,6 +245,8 @@ run_one() {
             correct=true
         else
             correct=false
+            echo "[pgbench-v0.87] active stream tables did not converge; final state:" >&2
+            report_correctness_state >&2
         fi
         IFS='|' read -r refresh_count refresh_duration <<<"$(db_query "SELECT count(*)::bigint, coalesce(sum(extract(epoch FROM end_time - start_time) * 1000), 0)::double precision FROM pgtrickle.pgt_refresh_history WHERE refresh_id > $history_before AND status = 'COMPLETED'")"
     else
