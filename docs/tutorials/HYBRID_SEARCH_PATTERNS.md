@@ -72,6 +72,39 @@ provide rank order. A document found by both branches contributes both ranks
 but appears once in the final result. Candidate budgets and the fusion
 constant are examples to tune, not calibrated relevance guarantees.
 
+## Half-precision candidates and full-precision reranking
+
+The setup also builds `hybrid_search_half_cosine_idx` on
+`embedding::halfvec(3)` with `halfvec_cosine_ops`. The separate
+[rerank query](../../tests/fixtures/pgvector_halfvec_rerank_query.sql) binds the
+same tenant and vector parameters as the hybrid query. It first retrieves a
+bounded set ordered by that exact half-precision expression, then orders those
+candidates by full-precision cosine distance. The full vector remains in the
+corpus. Reranking cannot recover a neighbor omitted by approximate or
+half-precision candidate selection; measure recall for the model and budget.
+
+For higher dimensions, use the model's actual dimension in both the index and
+candidate expression. The current pgvector HNSW limits are 2,000 dimensions
+for `vector` indexes and 4,000 for `halfvec` indexes, distinct from storage
+limits. Verify the [limits for your pgvector version](https://github.com/pgvector/pgvector#hnsw).
+
+For filtered ANN, `ef_search` can be tuned transaction-locally. On pgvector
+0.8.0 and later, iterative scans can examine additional candidates up to their
+configured scan limits. Check the installed `vector` extension version before
+using the second setting:
+
+```sql
+SELECT extversion FROM pg_extension WHERE extname = 'vector';
+BEGIN;
+SET LOCAL hnsw.ef_search = 100;
+SET LOCAL hnsw.iterative_scan = strict_order; -- pgvector 0.8.0+
+-- Bind tenant context and execute a candidate query in this transaction.
+COMMIT;
+```
+
+These settings are workload choices, not guarantees of a full result set or
+perfect recall. For a selective tenant filter, an exact search may be preferable.
+
 ## Verify the plan and results
 
 The [E2E test](../../tests/e2e_pgvector_hybrid_tests.rs) executes both fixtures,

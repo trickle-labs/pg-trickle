@@ -28,6 +28,8 @@ SELECT pgtrickle.create_stream_table(
 CREATE INDEX hybrid_search_fts_idx ON hybrid_search_corpus USING gin (fts);
 CREATE INDEX hybrid_search_cosine_idx ON hybrid_search_corpus
     USING hnsw ((embedding::vector(3)) vector_cosine_ops);
+CREATE INDEX hybrid_search_half_cosine_idx ON hybrid_search_corpus
+    USING hnsw ((embedding::halfvec(3)) halfvec_cosine_ops);
 
 ALTER TABLE hybrid_search_corpus ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hybrid_search_corpus FORCE ROW LEVEL SECURITY;

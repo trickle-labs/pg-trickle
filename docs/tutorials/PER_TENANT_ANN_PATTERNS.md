@@ -147,7 +147,9 @@ CREATE POLICY tenant_isolation ON tenant_corpus_partitioned
 
 The parent's policy applies when the parent is queried. It does not protect a
 reader granted direct access to a child: deny that access or configure and test
-the child's own policies and privileges.
+the child's own policies and privileges. The
+[partitioned-corpus E2E test](../../tests/e2e_pgvector_hybrid_tests.rs) checks
+parent filtering for a restricted reader and permission denial on a leaf.
 
 **Query pattern — unchanged from Pattern 1:**
 
