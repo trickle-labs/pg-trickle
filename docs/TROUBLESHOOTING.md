@@ -35,6 +35,7 @@ pg_trickle in production.
   - [14. Stream Table Appears Stuck Behind a Long Transaction](#14-stream-table-appears-stuck-behind-a-long-transaction)
   - [15. Stale Data After High-Concurrency Writes (Sequence Cache Inversion)](#15-stale-data-after-high-concurrency-writes-sequence-cache-inversion)
   - [16. Semantic Admission or Identity-Version Failure](#16-semantic-admission-or-identity-version-failure)
+  - [17. Permission Denied on Internal Catalog During Refresh](#17-permission-denied-on-internal-catalog-during-refresh)
 
 ---
 
@@ -755,6 +756,37 @@ the refresh remains blocked until the binary and persisted encoding agree.
 A `21000` cardinality error is not converted to a successful refresh. Correct
 the source data and retry; PostgreSQL transaction rollback preserves the
 stream-table contents and frontier.
+
+---
+
+### 17. Permission Denied on Internal Catalog During Refresh
+
+**Symptoms:** A scheduler refresh owned by a non-superuser fails with
+`permission denied for table pgt_dependencies` or `pgt_stream_tables`, and the
+stream table enters `ERROR` or `SUSPENDED`.
+
+In v0.108.3, a cold differential-refresh template cache can cause internal
+catalog lookups to run as the stream owner. This is one possible cause of these
+errors; check the PostgreSQL log and the installed extension version before
+assuming it applies:
+
+```sql
+SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';
+SELECT * FROM pgtrickle.diagnose_errors('public.my_stream_table');
+```
+
+Upgrade to a release containing the v0.109.0 owner-context fixes using the
+[upgrade guide](UPGRADING.md), then resume an affected stream table:
+
+```sql
+SELECT pgtrickle.resume_stream_table('public.my_stream_table');
+```
+
+The scheduler rebuilds a resumed scheduled stream table. Confirm that subsequent
+refreshes succeed and that its contents match the defining query. The owner
+needs privileges for the defining query, not direct access to internal catalogs
+or `pgtrickle_changes` buffers. Review any workaround grants before removing
+them, including grants inherited through other roles or default privileges.
 
 ---
 

@@ -1450,7 +1450,7 @@ FROM pgtrickle.recommend_target_freshness('public.order_totals');
 
 ### pgtrickle.resume_stream_table
 
-Resume a suspended stream table, clearing its consecutive error count and
+Resume a suspended or errored stream table, clearing its consecutive error count and
 re-enabling automated and manual refreshes.
 
 ```sql
@@ -1471,7 +1471,7 @@ SELECT pgtrickle.resume_stream_table('order_totals');
 ```
 
 **Notes:**
-- Errors if the ST is not in `SUSPENDED` state.
+- Errors if the ST is not in `SUSPENDED` or `ERROR` state.
 - Resets `consecutive_errors` to `0` and sets `status = 'ACTIVE'`.
 - Emits a `resumed` event on the `pg_trickle_alert` NOTIFY channel.
 - After resuming a scheduled ST, the scheduler will rebuild it in its next cycle. IMMEDIATE tables are rebuilt in the resume transaction before IVM resumes.

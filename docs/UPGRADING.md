@@ -14,6 +14,19 @@ The migration adds an internal durable reservation table for local WAL-slot
 retirement. It preserves rollback and restart recovery while a slot is being
 removed; existing stream tables and consumer payloads are retained.
 
+This release also fixes refresh paths that could require a non-superuser stream
+owner to read private pg_trickle catalogs or change buffers. If a stream table
+entered `ERROR` or `SUSPENDED` after such a permission failure, resume it after
+upgrading; the scheduler will rebuild it before continuing refreshes:
+
+```sql
+SELECT pgtrickle.resume_stream_table('public.my_stream_table');
+```
+
+The owner still needs access to the defining query's sources and functions, but
+does not need direct grants on pg_trickle's internal tables or change buffers.
+Review any temporary workaround grants separately before removing them.
+
 This release also corrects several differential-refresh and CDC cases. Review
 existing stream tables that use casted or complex aggregates, count composite
 values containing NULL fields, or use filtered `AVG`, statistical, or
