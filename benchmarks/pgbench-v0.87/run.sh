@@ -190,6 +190,16 @@ report_correctness_state() {
         LEFT JOIN pgtrickle.pgt_refresh_history h
           ON h.pgt_id = s.pgt_id AND h.refresh_id > $history_before
         GROUP BY s.pgt_name ORDER BY s.pgt_name"
+    db_query "SELECT pid, backend_type, application_name, state,
+        wait_event_type, wait_event, xact_start,
+        age(clock_timestamp(), xact_start) AS xact_age,
+        backend_xid, backend_xmin, left(query, 160) AS query
+        FROM pg_stat_activity
+        WHERE datname = current_database() AND pid <> pg_backend_pid()
+          AND (backend_xid IS NOT NULL OR backend_xmin IS NOT NULL)
+        ORDER BY xact_start NULLS LAST LIMIT 20"
+    db_query "SELECT gid, prepared, owner, transaction
+        FROM pg_prepared_xacts WHERE database = current_database()"
     db_query "SELECT
         NOT EXISTS ((SELECT aid, bid, abalance FROM pgbench_accounts EXCEPT ALL SELECT aid, bid, abalance FROM bench_projection) UNION ALL (SELECT aid, bid, abalance FROM bench_projection EXCEPT ALL SELECT aid, bid, abalance FROM pgbench_accounts)) AS projection_matches,
         NOT EXISTS ((SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid EXCEPT ALL SELECT bid, total_balance FROM bench_balances) UNION ALL (SELECT bid, total_balance FROM bench_balances EXCEPT ALL SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid)) AS balances_match,
