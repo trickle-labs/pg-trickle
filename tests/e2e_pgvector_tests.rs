@@ -804,6 +804,103 @@ async fn test_embedding_stream_table_creates_real_st() {
     );
 }
 
+#[tokio::test]
+async fn test_embedding_stream_table_legacy_l2_is_atomic_and_has_no_reindex_policy() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE helper_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO helper_src VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    let preview: Vec<(String,)> = sqlx::query_as(
+        "SELECT action FROM pgtrickle.embedding_stream_table('helper_st', 'helper_src', 'embedding', NULL, '1m', 'hnsw', true)"
+    ).fetch_all(&db.pool).await.expect("preview helper");
+    assert_eq!(preview.len(), 2);
+    assert!(preview[1].0.contains("vector_l2_ops"));
+    assert!(!preview.iter().any(|row| row.0.contains("reindex_if_drift")));
+    let absent: bool = db.query_scalar("SELECT to_regclass('public.helper_st') IS NULL AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'helper_st')").await;
+    assert!(absent, "dry run must not create a stream table");
+
+    db.execute("SELECT * FROM pgtrickle.embedding_stream_table('helper_st', 'helper_src', 'embedding', NULL, '1m', 'hnsw', false)").await;
+    let index_name: String = db
+        .query_scalar(
+            "SELECT c.relname::text FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+         JOIN pg_am am ON am.oid = c.relam JOIN pg_opclass op ON op.oid = i.indclass[0] \
+         WHERE i.indrelid = 'public.helper_st'::regclass AND i.indisvalid AND i.indisready \
+         AND am.amname = 'hnsw' AND op.opcname = 'vector_l2_ops'",
+        )
+        .await;
+    let policy: String = db.query_scalar("SELECT post_refresh_action::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'helper_st'").await;
+    assert_eq!(policy, "none");
+    let mut tx = db.pool.begin().await.expect("begin plan check");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable sequential scan");
+    sqlx::query("SET LOCAL enable_bitmapscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable bitmap scan");
+    sqlx::query("SET LOCAL enable_indexonlyscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable covering scan");
+    let plan: serde_json::Value = sqlx::query_scalar(
+        "EXPLAIN (FORMAT JSON) SELECT id FROM helper_st ORDER BY embedding::vector(3) <-> '[1,0,0]'::vector LIMIT 1"
+    ).fetch_one(&mut *tx).await.expect("explain L2 query");
+    assert!(
+        plan.to_string()
+            .contains(&format!("\"Index Name\":\"{index_name}\"")),
+        "matching L2 index is not eligible: {plan}"
+    );
+    tx.rollback().await.expect("end plan check");
+}
+
+#[tokio::test]
+async fn test_embedding_stream_table_index_conflict_rolls_back_creation() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE helper_conflict_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("CREATE TABLE helper_unrelated (id int)").await;
+    let preview: String = db.query_scalar(
+        "SELECT action FROM pgtrickle.embedding_stream_table('helper_conflict_st', 'helper_conflict_src', 'embedding', NULL, '1m', 'hnsw', true) WHERE action LIKE '-- 2.%'"
+    ).await;
+    let index_name = preview.split('"').nth(1).expect("preview index identifier");
+    assert!(
+        index_name.starts_with("pgt_ann_")
+            && index_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    );
+    db.execute(&format!(
+        "CREATE INDEX {index_name} ON helper_unrelated (id)"
+    ))
+    .await;
+    let result = db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table('helper_conflict_st', 'helper_conflict_src', 'embedding', NULL, '1m', 'hnsw', false)").await;
+    assert!(
+        result.is_err(),
+        "conflicting index must fail instead of claiming success"
+    );
+    let clean: bool = db.query_scalar("SELECT to_regclass('public.helper_conflict_st') IS NULL AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'helper_conflict_st') AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_change_tracking WHERE source_relid = 'helper_conflict_src'::regclass)").await;
+    assert!(clean, "index failure must roll back stream and CDC state");
+}
+
+#[tokio::test]
+async fn test_embedding_stream_table_starter_fixture_executes() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(include_str!("fixtures/pgvector_l2_starter.sql"))
+        .execute(&db.pool)
+        .await
+        .expect("execute L2 starter SQL");
+    let nearest: i64 = db
+        .query_scalar(
+            "SELECT id FROM doc_corpus ORDER BY embedding::vector(3) <-> '[1,0,0]'::vector LIMIT 1",
+        )
+        .await;
+    assert_eq!(nearest, 1);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // VA-4 (v0.48.0): attach_embedding_outbox() catalog registration
 // ═══════════════════════════════════════════════════════════════════════

@@ -2317,10 +2317,10 @@ pub(crate) fn fire_distance_subscriptions(
 
 /// VA-1 (v0.48.0): One-call RAG corpus setup.
 ///
-/// Auto-generates a denormalisation query, creates the stream table, provisions
-/// HNSW indexes on vector/halfvec/sparsevec output columns, configures
-/// `post_refresh_action = 'reindex_if_drift'`, and returns a summary of what
-/// was created.
+/// Auto-generates a denormalisation query, creates the stream table and an
+/// L2 HNSW or IVFFlat index, and returns a summary of what was created. New
+/// tables retain the default post-refresh policy rather than enabling a
+/// blocking rebuild automatically. Index creation failure aborts the call.
 ///
 /// When `dry_run => true` the function returns the generated SQL without
 /// executing it — useful for expert users who want to audit or customise the
@@ -2438,14 +2438,10 @@ fn embedding_stream_table_impl(
 
     // Generate the statements.
     let create_st_sql = format!(
-        "SELECT pgtrickle.create_stream_table({}, $${defining_query}$$, {}, 'DIFFERENTIAL')",
+        "SELECT pgtrickle.create_stream_table({}, {}, {}, 'DIFFERENTIAL')",
         quote_literal(&format!("{}.{}", dst_schema, dst_name)),
+        quote_literal(&defining_query),
         quote_literal(refresh_interval.trim_matches('\'')),
-    );
-
-    let alter_pra_sql = format!(
-        "SELECT pgtrickle.alter_stream_table({}, post_refresh_action => 'reindex_if_drift')",
-        quote_literal(&format!("{}.{}", dst_schema, dst_name)),
     );
 
     // Infer vector column type for index operator class.
@@ -2513,11 +2509,13 @@ fn embedding_stream_table_impl(
         _ => quote_identifier(vector_col).to_string(),
     };
 
+    let index_key = format!("{dst_schema}\0{dst_name}\0{vector_col}");
+    let index_digest = crate::integration_contract::sha256_hex(index_key.as_bytes());
+    let index_name = format!("pgt_ann_{}", &index_digest[..32]);
     let create_idx_sql = format!(
-        "CREATE INDEX IF NOT EXISTS {}_{}_idx ON {}.{} \
+        "CREATE INDEX {} ON {}.{} \
          USING {} ({idx_col_expr} {opclass})",
-        dst_name,
-        vector_col,
+        quote_identifier(&index_name),
         quote_identifier(&dst_schema),
         quote_identifier(&dst_name),
         idx_access_method,
@@ -2527,9 +2525,8 @@ fn embedding_stream_table_impl(
 
     if dry_run {
         actions.push(format!("-- 1. Create stream table\n{create_st_sql}"));
-        actions.push(format!("-- 2. Set post-refresh action\n{alter_pra_sql}"));
         actions.push(format!(
-            "-- 3. Create {idx_access_method} index\n{create_idx_sql}"
+            "-- 2. Create {idx_access_method} index\n{create_idx_sql}"
         ));
         return Ok(actions);
     }
@@ -2543,33 +2540,16 @@ fn embedding_stream_table_impl(
     })?;
     actions.push(format!("created stream table {}.{}", dst_schema, dst_name));
 
-    // Set post-refresh action.
-    if let Err(e) = Spi::run(&alter_pra_sql) {
-        pgrx::warning!(
-            "embedding_stream_table: failed to set post_refresh_action: {}",
-            e
-        );
-    } else {
-        actions.push("post_refresh_action = reindex_if_drift".to_string());
-    }
-
-    // Create vector index (best-effort — the ST may have no rows yet).
-    if let Err(e) = Spi::run(&create_idx_sql) {
-        pgrx::warning!(
-            "embedding_stream_table: {} index creation deferred: {}",
-            idx_access_method,
-            e
-        );
-        actions.push(format!(
-            "note: {} index creation deferred ({})",
-            idx_access_method, e
-        ));
-    } else {
-        actions.push(format!(
-            "created {} index on {}.{} ({})",
-            idx_access_method, dst_schema, dst_name, vector_col
-        ));
-    }
+    // A failed index build aborts the enclosing statement and stream creation.
+    Spi::run(&create_idx_sql).map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "embedding_stream_table: failed to create {idx_access_method} index {index_name}: {e}"
+        ))
+    })?;
+    actions.push(format!(
+        "created {} index {} on {}.{} ({})",
+        idx_access_method, index_name, dst_schema, dst_name, vector_col
+    ));
 
     Ok(actions)
 }
