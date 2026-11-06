@@ -456,6 +456,49 @@ async fn test_pgvector_distance_changing_pivot_differential() {
     db.assert_st_matches_query("distance_pivot_st", query).await;
 }
 
+#[tokio::test]
+async fn test_pgvector_distance_non_public_extension_schema() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE SCHEMA \"Vector.Ext\"").await;
+    db.execute("CREATE EXTENSION vector WITH SCHEMA \"Vector.Ext\"")
+        .await;
+    db.execute(
+        "CREATE TABLE schema_distance_src (id int PRIMARY KEY, embedding \"Vector.Ext\".vector(3), pivot \"Vector.Ext\".vector(3))",
+    )
+    .await;
+    db.execute("INSERT INTO schema_distance_src VALUES (1, '[1,0,0]', '[1,0,0]')")
+        .await;
+    let query = "SELECT id, embedding OPERATOR(\"Vector.Ext\".<=>) pivot AS distance \
+                 FROM schema_distance_src";
+    db.create_st("schema_distance_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    let previous_id: i64 = db
+        .query_scalar(
+            "SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'schema_distance_st'",
+        )
+        .await;
+    db.execute("UPDATE schema_distance_src SET embedding = '[0,1,0]' WHERE id = 1")
+        .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('schema_distance_st')",
+    )
+    .await
+    .expect("refresh schema-qualified vector distance");
+    let differential: bool = db.query_scalar(&format!(
+        "SELECT h.refresh_id > {previous_id} AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback \
+         FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+         WHERE s.pgt_name = 'schema_distance_st' ORDER BY h.refresh_id DESC LIMIT 1"
+    )).await;
+    assert!(differential, "schema-qualified distance fell back to FULL");
+    db.assert_st_matches_query("schema_distance_st", query)
+        .await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // F4-4: HNSW index on centroid stream table
 // ═══════════════════════════════════════════════════════════════════════
