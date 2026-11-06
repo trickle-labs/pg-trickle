@@ -2660,7 +2660,7 @@ fn build_stmt_trigger_fn_sql(
             |bitmask| format!("CASE WHEN {n_present} AND {o_present} THEN ({bitmask}) END"),
         );
         // A materialized pair CTE computes identity and the changed mask once
-        // per matched UPDATE; UNION ALL preserves the required D-before-I order.
+        // per matched UPDATE; ORDER BY 2 preserves the D-before-I invariant.
         format!(
             "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
@@ -2693,7 +2693,8 @@ fn build_stmt_trigger_fn_sql(
              UNION ALL
              SELECT statement_lsn, 'I', p.__pgt_row_id{event_changed_cols}{new_event_cols}, trace_context
              FROM pair_rows p
-             WHERE p.__pgt_new_present;
+             WHERE p.__pgt_new_present
+             ORDER BY 2;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
@@ -3855,6 +3856,10 @@ mod tests {
         assert!(
             d_row < union && union < i_row,
             "D must precede I in {update}"
+        );
+        assert!(
+            update.contains("ORDER BY 2;"),
+            "D events must be inserted before I events: {update}"
         );
         assert!(!update.contains("NOT EXISTS"), "{update}");
     }
