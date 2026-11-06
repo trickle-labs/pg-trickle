@@ -204,11 +204,11 @@ async fn test_pgvector_sum_differential() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// F4-3: Distance operator fallback — queries with <-> fall back to FULL
+// F4-3: Explicit FULL refresh for a distance-ordered Top-K query
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn test_pgvector_distance_operator_fallback_to_full() {
+async fn test_pgvector_distance_topk_explicit_full() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
 
@@ -228,9 +228,7 @@ async fn test_pgvector_distance_operator_fallback_to_full() {
     )
     .await;
 
-    // A stream table using a distance operator in ORDER BY should work
-    // via FULL refresh mode (distance operators are FULL-fallback safe).
-    // Use FULL mode explicitly to avoid relying on differential fallback.
+    // This exercises explicit FULL mode, not automatic fallback.
     let q = "SELECT id, category, embedding FROM emb_dist ORDER BY embedding <-> '[1,0,0]' LIMIT 5";
     db.create_st("dist_st", q, "1m", "FULL").await;
     db.assert_st_matches_query("dist_st", q).await;
@@ -240,6 +238,112 @@ async fn test_pgvector_distance_operator_fallback_to_full() {
         .await;
     db.refresh_st("dist_st").await;
     db.assert_st_matches_query("dist_st", q).await;
+}
+
+#[tokio::test]
+async fn test_pgvector_row_local_distance_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE distance_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO distance_src VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    let query = "SELECT id, embedding <=> '[1,0,0]'::vector AS distance \
+                 FROM distance_src WHERE embedding <-> '[1,0,0]'::vector < 1";
+    db.create_st("distance_local_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st("distance_auto_st", query, "1h", "AUTO").await;
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table('distance_immediate_st', $${query}$$, refresh_mode => 'IMMEDIATE')"
+    )).await;
+
+    for mutation in [
+        "INSERT INTO distance_src VALUES (3, '[0.9,0.1,0]')",
+        "UPDATE distance_src SET embedding = '[0,1,0]' WHERE id = 1",
+        "UPDATE distance_src SET embedding = '[1,0,0]' WHERE id = 2",
+        "DELETE FROM distance_src WHERE id = 3",
+    ] {
+        db.execute(mutation).await;
+        db.assert_st_matches_query("distance_immediate_st", query)
+            .await;
+        for name in ["distance_local_st", "distance_auto_st"] {
+            let previous_id: i64 = db
+                .query_scalar(&format!(
+                    "SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = '{name}'"
+                ))
+                .await;
+            db.try_execute_with_config(
+                &[
+                    "SET pg_trickle.refresh_strategy = 'differential'",
+                    "SET pg_trickle.differential_max_change_ratio = 0",
+                ],
+                &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+            )
+            .await
+            .expect("refresh row-local vector query");
+            let differential: bool = db.query_scalar(&format!(
+                "SELECT h.refresh_id > {previous_id} AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback \
+                 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+                 WHERE s.pgt_name = '{name}' ORDER BY h.refresh_id DESC LIMIT 1"
+            )).await;
+            assert!(differential, "{name}: no completed differential refresh");
+            db.assert_st_matches_query(name, query).await;
+        }
+    }
+    db.execute_seq(&[
+        "BEGIN",
+        "INSERT INTO distance_src VALUES (10, '[1,0,0]')",
+        "ROLLBACK",
+    ])
+    .await;
+    for name in [
+        "distance_local_st",
+        "distance_auto_st",
+        "distance_immediate_st",
+    ] {
+        db.assert_st_matches_query(name, query).await;
+    }
+}
+
+#[tokio::test]
+async fn test_pgvector_distance_topk_recomputes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE distance_rank_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute(
+        "INSERT INTO distance_rank_src VALUES (1, '[1,0,0]'), (2, '[0,1,0]'), (3, '[0,0,1]')",
+    )
+    .await;
+    let query = "SELECT id, embedding FROM distance_rank_src \
+                 ORDER BY embedding <-> '[1,0,0]'::vector, id LIMIT 2";
+    db.create_st("distance_rank_st", query, "1h", "DIFFERENTIAL")
+        .await;
+
+    for mutation in [
+        "INSERT INTO distance_rank_src VALUES (4, '[0.9,0,0]')",
+        "UPDATE distance_rank_src SET embedding = '[0.8,0,0]' WHERE id = 3",
+        "DELETE FROM distance_rank_src WHERE id = 1",
+        "DELETE FROM distance_rank_src WHERE id IN (2, 3, 4)",
+    ] {
+        db.execute(mutation).await;
+        let previous_id: i64 = db.query_scalar(
+            "SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'distance_rank_st'"
+        ).await;
+        db.refresh_st("distance_rank_st").await;
+        let recomputed: bool = db.query_scalar(&format!(
+            "SELECT h.refresh_id > {previous_id} AND h.status = 'COMPLETED' AND h.merge_strategy_used = 'TOP_K' \
+             FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+             WHERE s.pgt_name = 'distance_rank_st' ORDER BY h.refresh_id DESC LIMIT 1"
+        )).await;
+        assert!(
+            recomputed,
+            "Top-K refresh was not recorded as recomputation"
+        );
+        db.assert_st_matches_query("distance_rank_st", query).await;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
