@@ -3289,7 +3289,7 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
     Ok(())
 }
 
-/// Resume a suspended stream table, clearing its consecutive error count and
+/// Resume a suspended or errored stream table, clearing its consecutive error count and
 /// re-enabling automated and manual refreshes.
 #[pg_extern(schema = "pgtrickle", security_definer)]
 #[search_path(pgtrickle, pg_catalog, pg_temp)]

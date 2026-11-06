@@ -134,7 +134,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.resume_after_drain()` | `pgtrickle` | `boolean` | v0.85.0: Explicitly resume dispatch after a persistent drain. |
 | `pgtrickle.resume_all()` | `pgtrickle` | `boolean` | Resume all capture and refresh dispatch after a completed upgrade. |
 | `pgtrickle.resume_scheduler()` | `pgtrickle` | `text` | Example: ```sql SELECT pgtrickle.resume_scheduler(ARRAY['public.my_view']); ```. |
-| `pgtrickle.resume_stream_table()` | `pgtrickle` | `` | Resume a suspended stream table, clearing its consecutive error count and re-enabling automated and manual refreshes. |
+| `pgtrickle.resume_stream_table()` | `pgtrickle` | `` | Resume a suspended or errored stream table, clearing its consecutive error count and re-enabling automated and manual refreshes. |
 | `pgtrickle.row_probe_v1()` | `pgtrickle` | `Vec<u8>` | Return the full identity for short inputs, or a bounded prefix plus XXH3-128 digest. |
 | `pgtrickle.schedule_recommendations()` | `pgtrickle` | `SetOf row` | PLAN-2 (v0.27.0): Return one schedule recommendation row per registered stream table, sortable by `delta_pct DESC`. |
 | `pgtrickle.scheduler_overhead()` | `pgtrickle` | `SetOf row` | Computes busy-time ratio, queue depth, avg dispatch latency, and the fraction of CPU spent on self-monitoring STs vs user STs from refresh history. |
