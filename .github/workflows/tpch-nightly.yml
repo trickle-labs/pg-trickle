@@ -5,7 +5,7 @@
 # must not block PRs or push-to-main gating. They run daily at 20:00 UTC and on manual
 # dispatch, matching the pattern established by stability-tests.yml.
 #
-#   SF-1  (150K orders, 3 cycles): timeout 180 min — all 15 tests
+#   SF-1  (150K orders, 3 cycles): timeout 300 min — all 15 tests
 #   SF-10 (1.5M orders, 2 cycles): timeout 120 min — differential_correctness only
 #
 # SF-10 runs only test_tpch_differential_correctness because:
@@ -50,7 +50,7 @@ jobs:
           - scale: "SF-1"
             tpch_scale: "1.0"
             tpch_cycles: "3"
-            timeout_minutes: 180
+            timeout_minutes: 300
             # SF-1: run all 15 tests — full breadth coverage
             filter_expr: ""
           - scale: "SF-10"

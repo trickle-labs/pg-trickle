@@ -175,7 +175,16 @@ wait_for_correctness() {
 }
 
 report_correctness_state() {
+    local history_before="$1"
     db_query "SELECT pgt_name, status FROM pgtrickle.pgt_stream_tables ORDER BY pgt_name"
+    db_query "SELECT s.pgt_name,
+        count(h.refresh_id) FILTER (WHERE h.status = 'COMPLETED') AS completed,
+        count(h.refresh_id) FILTER (WHERE h.status = 'FAILED') AS failed,
+        max(h.error_message) FILTER (WHERE h.status = 'FAILED') AS last_error
+        FROM pgtrickle.pgt_stream_tables s
+        LEFT JOIN pgtrickle.pgt_refresh_history h
+          ON h.pgt_id = s.pgt_id AND h.refresh_id > $history_before
+        GROUP BY s.pgt_name ORDER BY s.pgt_name"
     db_query "SELECT
         NOT EXISTS ((SELECT aid, bid, abalance FROM pgbench_accounts EXCEPT ALL SELECT aid, bid, abalance FROM bench_projection) UNION ALL (SELECT aid, bid, abalance FROM bench_projection EXCEPT ALL SELECT aid, bid, abalance FROM pgbench_accounts)) AS projection_matches,
         NOT EXISTS ((SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid EXCEPT ALL SELECT bid, total_balance FROM bench_balances) UNION ALL (SELECT bid, total_balance FROM bench_balances EXCEPT ALL SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid)) AS balances_match,
@@ -246,9 +255,10 @@ run_one() {
         else
             correct=false
             echo "[pgbench-v0.87] active stream tables did not converge; final state:" >&2
-            report_correctness_state >&2
+            report_correctness_state "$history_before" >&2
         fi
         IFS='|' read -r refresh_count refresh_duration <<<"$(db_query "SELECT count(*)::bigint, coalesce(sum(extract(epoch FROM end_time - start_time) * 1000), 0)::double precision FROM pgtrickle.pgt_refresh_history WHERE refresh_id > $history_before AND status = 'COMPLETED'")"
+        docker logs "$container" >"$run_dir/postgres.log" 2>&1 || true
     else
         refresh_count=0
         refresh_duration=0
