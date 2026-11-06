@@ -216,8 +216,10 @@ run_one() {
     local warmup_file="$run_dir/warmup.stdout"
     local history_before refresh_count refresh_duration correct workload_finished_at postgres_version postgres_settings
     local cpu_before cpu_after cpu_hz sampler_pid
+    # Avoid the default 1 GB WAL-triggered checkpoints throttling refresh catch-up.
     local postgres_args=(-c wal_level=logical -c track_commit_timestamp=on \
-        -c max_replication_slots=10 -c max_worker_processes=128)
+        -c max_replication_slots=10 -c max_worker_processes=128 \
+        -c max_wal_size=4GB)
 
     mkdir -p "$log_dir"
     chmod 777 "$run_dir" "$log_dir"
