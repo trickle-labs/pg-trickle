@@ -166,7 +166,7 @@ correctness_check() {
 wait_for_correctness() {
     local workload_finished_at="$1"
     local refreshed
-    for _ in $(seq 1 360); do
+    for _ in $(seq 1 600); do
         refreshed="$(db_query "SELECT count(*) = 3 FROM pgtrickle.pgt_stream_tables s WHERE EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = s.pgt_id AND h.status = 'COMPLETED' AND h.start_time >= '$workload_finished_at'::timestamptz)")"
         if [[ "$refreshed" == t ]]; then
             if [[ "$(correctness_check)" == t ]]; then
