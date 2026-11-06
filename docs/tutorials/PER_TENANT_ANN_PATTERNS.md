@@ -7,13 +7,15 @@
 
 **Trust boundaries** for multi-tenant ANN stream tables:
 
-1. **Row-level security enforces tenant isolation** — every SELECT against the
-   stream table must pass through RLS policies.  pg_trickle respects PostgreSQL
-   RLS; the stream table itself is a regular table.
-2. **The refresh runs as a superuser background worker** — the background
-   worker bypasses RLS when writing to the stream table.  This is intentional
-   and correct: the worker writes denormalised data from authorised source
-   tables.  Tenant isolation is enforced on reads, not writes.
+1. **Row-level security can enforce tenant isolation** for restricted readers
+   of the stream table. pg_trickle respects PostgreSQL's normal RLS rules;
+   the stream table itself is a regular table.
+2. **Defining SQL runs as the stream-table owner** with `row_security = on`.
+   PostgreSQL still exempts superusers and roles with `BYPASSRLS`; table owners
+   normally bypass their own policies unless `FORCE ROW LEVEL SECURITY` is set.
+   Use a dedicated corpus owner and check its source-table access and policies.
+   When that owner is subject to source RLS, explicit `DIFFERENTIAL` is rejected
+   and `AUTO` uses `FULL`; see the [RLS contract](../SQL_REFERENCE.md#row-level-security-rls).
 3. **Never grant direct INSERT/UPDATE to application users** — only the
    pg_trickle background worker should write to stream tables.
 4. **Audit the defining query** — if the defining query joins tenant data
@@ -21,15 +23,23 @@
    contain cross-tenant data.  Verify RLS on source tables applies during the
    defining query execution if you rely on source-level isolation.
 
+Source policies are not inherited by the storage table: configure and test its
+own RLS policies and reader grants. A custom GUC is not authentication: any
+client with arbitrary SQL access can set `app.tenant_id`. The examples below
+assume a trusted application authenticates the tenant and runs queries through
+a restricted reader that cannot bypass RLS. Do not grant readers direct access
+to partitions unless those relations have equivalent protection.
+
 ---
 
 ## Pattern 1: Tenant Column + RLS Policy
 
 ```sql
--- Source table with tenant isolation
+-- Source table; add source RLS separately if the owner must be restricted
 CREATE TABLE tenant_embeddings (
     id          BIGSERIAL PRIMARY KEY,
     tenant_id   UUID NOT NULL,
+    tier        TEXT NOT NULL DEFAULT 'standard',
     content     TEXT NOT NULL,
     embedding   vector(1536) NOT NULL
 );
@@ -51,7 +61,7 @@ ALTER TABLE tenant_corpus FORCE ROW LEVEL SECURITY;
 
 -- Policy: each user sees only their tenant's rows
 CREATE POLICY tenant_isolation ON tenant_corpus
-    USING (tenant_id = current_setting('app.tenant_id', true)::uuid);
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
 -- ANN index (spans all tenants — filtered at query time by RLS)
 CREATE INDEX ON tenant_corpus USING hnsw(embedding vector_cosine_ops);
@@ -60,27 +70,35 @@ CREATE INDEX ON tenant_corpus USING hnsw(embedding vector_cosine_ops);
 **Query pattern:**
 
 ```sql
--- Set tenant context before querying
-SET app.tenant_id = 'your-tenant-uuid';
+-- A trusted application binds the authenticated tenant as $1 in a transaction.
+BEGIN;
+SELECT set_config('app.tenant_id', $1::text, true);
 
 -- This query automatically applies the RLS policy
 SELECT id, content, embedding <=> '[...]'::vector AS distance
 FROM tenant_corpus
 ORDER BY embedding <=> '[...]'::vector
 LIMIT 10;
+COMMIT;
 ```
+
+Approximate index scans can return fewer than the requested number of rows when
+tenant filtering discards candidates. pgvector 0.8 and later support iterative
+scans with configurable limits; tune them for the workload and measure recall
+against an exact query with the same tenant filter. Exact filtered search can be
+preferable for highly selective tenants.
 
 ---
 
 ## Pattern 2: Partitioned by Tenant (High-Volume)
 
-For tenants with millions of embeddings each, partition by `tenant_id` and
-create per-partition indexes.  This avoids a single large HNSW index and
-allows index maintenance to proceed per-partition.
+For large corpora, hash partitioning can distribute indexes and maintenance
+across buckets. A bucket can contain multiple tenants; it is not per-tenant
+index isolation. Evaluate its cost and recall for your workload.
 
-### `partition_key` syntax
+### `partition_by` syntax
 
-The `partition_key` parameter accepts a string in one of two forms:
+The `partition_by` parameter accepts a string in one of two forms:
 
 | Form | Example | Description |
 |------|---------|-------------|
@@ -97,7 +115,7 @@ SELECT pgtrickle.create_stream_table(
     $$,
     '1m',
     'DIFFERENTIAL',
-    partition_key => 'HASH:tenant_id:16'
+    partition_by => 'HASH:tenant_id:16'
 );
 ```
 
@@ -119,24 +137,30 @@ BEGIN
     END LOOP;
 END $$;
 
--- Enable RLS on the partitioned parent (propagates to children)
+-- Enable RLS for queries made through the partitioned parent
 ALTER TABLE tenant_corpus_partitioned ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_corpus_partitioned FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY tenant_isolation ON tenant_corpus_partitioned
-    USING (tenant_id = current_setting('app.tenant_id', true)::uuid);
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ```
+
+The parent's policy applies when the parent is queried. It does not protect a
+reader granted direct access to a child: deny that access or configure and test
+the child's own policies and privileges.
 
 **Query pattern — unchanged from Pattern 1:**
 
 ```sql
-SET app.tenant_id = 'your-tenant-uuid';
+BEGIN;
+SELECT set_config('app.tenant_id', $1::text, true);
 
 -- PostgreSQL automatically routes to the correct partition
 SELECT id, content, embedding <=> '[...]'::vector AS distance
 FROM tenant_corpus_partitioned
 ORDER BY embedding <=> '[...]'::vector
 LIMIT 10;
+COMMIT;
 ```
 
 **When to use HASH partitioning:**
@@ -179,7 +203,7 @@ CREATE INDEX ON premium_corpus USING hnsw(embedding vector_cosine_ops)
 ALTER TABLE premium_corpus ENABLE ROW LEVEL SECURITY;
 ALTER TABLE premium_corpus FORCE ROW LEVEL SECURITY;
 CREATE POLICY premium_tenant ON premium_corpus
-    USING (tenant_id = current_setting('app.tenant_id', true)::uuid);
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
 -- Standard tenants: 5-minute refresh, half-precision to save storage
 SELECT pgtrickle.create_stream_table(
@@ -198,19 +222,18 @@ CREATE INDEX ON standard_corpus USING hnsw(embedding halfvec_cosine_ops);
 ALTER TABLE standard_corpus ENABLE ROW LEVEL SECURITY;
 ALTER TABLE standard_corpus FORCE ROW LEVEL SECURITY;
 CREATE POLICY standard_tenant ON standard_corpus
-    USING (tenant_id = current_setting('app.tenant_id', true)::uuid);
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ```
 
 **Application routing:**
 
 ```sql
--- Route to the correct tier based on a session variable
-SET app.tenant_id = 'your-tenant-uuid';
-SET app.tenant_tier = 'premium';  -- or 'standard'
+-- The trusted application chooses a tier and binds its authenticated tenant.
+BEGIN;
+SELECT set_config('app.tenant_id', $1::text, true);
 
--- Your application selects the corpus table dynamically:
--- IF app.tenant_tier = 'premium' THEN query premium_corpus
--- ELSE query standard_corpus
+-- The application queries the corpus for the authenticated tenant's tier.
+COMMIT;
 ```
 
 **When to use tier separation:**
@@ -233,12 +256,13 @@ ORDER BY pgt_name;
 ## Security Checklist
 
 - [ ] RLS enabled (`ALTER TABLE ... ENABLE ROW LEVEL SECURITY`)
-- [ ] RLS forced (`ALTER TABLE ... FORCE ROW LEVEL SECURITY`) to prevent
-      superuser bypass during app queries
+- [ ] RLS forced where table-owner access must be subject to policy; readers
+      are neither superusers nor roles with `BYPASSRLS`
 - [ ] Defining query audited: no unintentional cross-tenant joins
 - [ ] Source tables have RLS if they contain cross-tenant data
-- [ ] Application uses parameterised `SET app.tenant_id = $1` not string
-      interpolation
+- [ ] Trusted application binds the authenticated tenant using transaction-local
+      `set_config`, and pooled transactions reset their context
+- [ ] Readers cannot bypass parent policies through direct partition access
 - [ ] Stream table not directly writable by application users
 
 ---
@@ -246,11 +270,10 @@ ORDER BY pgt_name;
 ## Monitoring
 
 ```sql
--- Per-tenant embedding lag (requires tenant_id in defining query)
+-- Opt-in per-tenant row count; this scans the corpus and does not measure lag.
 SELECT
     tenant_id,
-    COUNT(*) AS embedding_count,
-    MAX(updated_at) AS newest_embedding
+    COUNT(*) AS embedding_count
 FROM tenant_corpus
 GROUP BY tenant_id;
 
