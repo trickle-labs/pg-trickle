@@ -901,6 +901,117 @@ async fn test_embedding_stream_table_starter_fixture_executes() {
     assert_eq!(nearest, 1);
 }
 
+#[tokio::test]
+async fn test_embedding_stream_table_quoted_names_and_vector_schema() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE SCHEMA \"V.X\"").await;
+    db.execute("CREATE EXTENSION vector WITH SCHEMA \"V.X\"")
+        .await;
+    db.execute("CREATE SCHEMA \"A.B\"").await;
+    db.execute("CREATE SCHEMA \"D.S\"").await;
+    db.execute("CREATE TABLE \"A.B\".\"Doc.Source\" (id int PRIMARY KEY, \"Embedding Value\" \"V.X\".vector(3))").await;
+    db.execute("INSERT INTO \"A.B\".\"Doc.Source\" VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("SELECT * FROM pgtrickle.embedding_stream_table('\"D.S\".\"Corpus.A\"', '\"A.B\".\"Doc.Source\"', '\"Embedding Value\"', NULL, '1h', 'hnsw', false)").await;
+    let valid: bool = db.query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+         JOIN pg_opclass op ON op.oid = i.indclass[0] JOIN pg_namespace n ON n.oid = op.opcnamespace \
+         JOIN pg_am am ON am.oid = c.relam WHERE i.indrelid = '\"D.S\".\"Corpus.A\"'::regclass \
+         AND i.indisvalid AND i.indisready AND am.amname = 'hnsw' \
+         AND op.opcname = 'vector_l2_ops' AND n.nspname = 'V.X')"
+    ).await;
+    assert!(
+        valid,
+        "quoted relation and extension names must produce a valid L2 index"
+    );
+    let direct = db
+        .try_execute(
+            "INSERT INTO \"D.S\".\"Corpus.A\" (id, \"Embedding Value\") VALUES (3, '[0,0,1]')",
+        )
+        .await;
+    assert!(
+        direct.is_err(),
+        "quoted stream table must retain its DML guard"
+    );
+    db.execute("INSERT INTO \"A.B\".\"Doc.Source\" VALUES (2, '[0,1,0]')")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('\"D.S\".\"Corpus.A\"')")
+        .await;
+    let rows: i64 = db
+        .query_scalar("SELECT count(*) FROM \"D.S\".\"Corpus.A\"")
+        .await;
+    assert_eq!(rows, 2, "quoted stream must refresh after source changes");
+}
+
+#[tokio::test]
+async fn test_embedding_stream_table_dry_run_rejects_invalid_source_types() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE scalar_source (id int PRIMARY KEY, embedding int)")
+        .await;
+    let no_extension = db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table('bad_st', 'scalar_source', 'embedding', dry_run => true)").await;
+    assert!(
+        no_extension.is_err(),
+        "pgvector must be installed for a validated preview"
+    );
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE undimensioned_source (id int PRIMARY KEY, embedding vector)")
+        .await;
+    db.execute("CREATE SCHEMA fake_vector").await;
+    db.execute("CREATE DOMAIN fake_vector.vector AS text").await;
+    db.execute("CREATE TABLE impostor_source (id int PRIMARY KEY, embedding fake_vector.vector)")
+        .await;
+    for source in [
+        "missing_source",
+        "scalar_source",
+        "undimensioned_source",
+        "impostor_source",
+    ] {
+        let sql = format!(
+            "SELECT * FROM pgtrickle.embedding_stream_table('bad_st', '{source}', 'embedding', dry_run => true)"
+        );
+        assert!(
+            db.try_execute(&sql).await.is_err(),
+            "invalid source {source} must be rejected"
+        );
+    }
+    let absent: bool = db.query_scalar("SELECT to_regclass('public.bad_st') IS NULL AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'bad_st')").await;
+    assert!(absent, "invalid previews must not create objects");
+}
+
+#[tokio::test]
+async fn test_embedding_stream_table_halfvec_and_sparsevec_indexes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE helper_half_src (id int PRIMARY KEY, embedding halfvec(3))")
+        .await;
+    db.execute("CREATE TABLE helper_sparse_src (id int PRIMARY KEY, embedding sparsevec(3))")
+        .await;
+    db.execute("INSERT INTO helper_half_src VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("INSERT INTO helper_sparse_src VALUES (1, '{1:1}/3')")
+        .await;
+    let unsupported = db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table('sparse_bad', 'helper_sparse_src', 'embedding', index_type => 'ivfflat', dry_run => true)").await;
+    assert!(unsupported.is_err(), "IVFFlat does not support sparsevec");
+    for (source, stream, opclass) in [
+        ("helper_half_src", "helper_half_st", "halfvec_l2_ops"),
+        ("helper_sparse_src", "helper_sparse_st", "sparsevec_l2_ops"),
+    ] {
+        db.execute(&format!(
+            "SELECT * FROM pgtrickle.embedding_stream_table('{stream}', '{source}', 'embedding')"
+        ))
+        .await;
+        let valid: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+             JOIN pg_am am ON am.oid = c.relam JOIN pg_opclass op ON op.oid = i.indclass[0] \
+             WHERE i.indrelid = '{stream}'::regclass AND i.indisvalid AND i.indisready \
+             AND am.amname = 'hnsw' AND op.opcname = '{opclass}')"
+            ))
+            .await;
+        assert!(valid, "{stream}: expected a valid {opclass} index");
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // VA-4 (v0.48.0): attach_embedding_outbox() catalog registration
 // ═══════════════════════════════════════════════════════════════════════

@@ -2378,29 +2378,37 @@ fn embedding_stream_table_impl(
         )));
     }
 
-    // Resolve schema / table name for source.
-    let src_parts: Vec<&str> = source_table.splitn(2, '.').collect();
-    let (src_schema, src_tbl) = match src_parts.len() {
-        2 => (src_parts[0].to_string(), src_parts[1].to_string()),
-        _ => {
-            let schema = Spi::get_one::<String>("SELECT current_schema()::text")
-                .unwrap_or(None)
-                .unwrap_or_else(|| "public".to_string());
-            (schema, source_table.to_string())
-        }
-    };
-
-    // Resolve destination schema / name.
-    let dst_parts: Vec<&str> = name.splitn(2, '.').collect();
-    let (dst_schema, dst_name) = match dst_parts.len() {
-        2 => (dst_parts[0].to_string(), dst_parts[1].to_string()),
-        _ => {
-            let schema = Spi::get_one::<String>("SELECT current_schema()::text")
-                .unwrap_or(None)
-                .unwrap_or_else(|| "public".to_string());
-            (schema, name.to_string())
-        }
-    };
+    let source_oid = Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT pg_catalog.to_regclass($1)::oid",
+        &[source_table.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InvalidArgument(format!("source relation not found: {source_table}"))
+    })?;
+    let source_sql = Spi::get_one_with_args::<String>(
+        "SELECT pg_catalog.format('%I.%I', n.nspname, c.relname) \
+         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.oid = $1",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InvalidArgument(format!("source relation not found: {source_table}"))
+    })?;
+    let destination = parse_qualified_identifier_with_current_schema(name)?;
+    let dst_schema = destination.schema();
+    let dst_name = destination.name();
+    let vector_column = TypedIdentifier::parse(vector_col)?;
+    let vector_col = vector_column.as_str();
+    let vector_schema = Spi::get_one::<String>(
+        "SELECT n.nspname::text FROM pg_catalog.pg_extension e \
+         JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector'",
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InvalidArgument("pgvector extension is not installed".to_string())
+    })?;
 
     // Build SELECT list: extra columns + vector column.
     let select_list = match extra_columns {
@@ -2410,28 +2418,20 @@ fn embedding_stream_table_impl(
         _ => {
             // Default: include all non-system columns from source.
             let cols_sql = "SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) \
-                 FROM pg_attribute pa \
-                 JOIN pg_class pc ON pc.oid = pa.attrelid \
-                 JOIN pg_namespace pn ON pn.oid = pc.relnamespace \
-                 WHERE pn.nspname = $1 AND pc.relname = $2 \
-                   AND pa.attnum > 0 AND NOT pa.attisdropped"
-                .to_string();
-            Spi::get_one_with_args::<String>(
-                &cols_sql,
-                &[src_schema.as_str().into(), src_tbl.as_str().into()],
-            )
-            .unwrap_or(None)
-            .unwrap_or_else(|| format!("*, {}", quote_identifier(vector_col)))
+                 FROM pg_catalog.pg_attribute pa WHERE pa.attrelid = $1 \
+                   AND pa.attnum > 0 AND NOT pa.attisdropped";
+            Spi::get_one_with_args::<String>(cols_sql, &[source_oid.into()])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InvalidArgument(format!(
+                        "source relation has no columns: {source_table}"
+                    ))
+                })?
         }
     };
 
     // Build the defining query.
-    let defining_query = format!(
-        "SELECT {} FROM {}.{}",
-        select_list,
-        quote_identifier(&src_schema),
-        quote_identifier(&src_tbl),
-    );
+    let defining_query = format!("SELECT {select_list} FROM {source_sql}");
 
     // Build index access method string.
     let idx_access_method = idx_type_lc.as_str();
@@ -2439,30 +2439,29 @@ fn embedding_stream_table_impl(
     // Generate the statements.
     let create_st_sql = format!(
         "SELECT pgtrickle.create_stream_table({}, {}, {}, 'DIFFERENTIAL')",
-        quote_literal(&format!("{}.{}", dst_schema, dst_name)),
+        quote_literal(&destination.quoted()),
         quote_literal(&defining_query),
         quote_literal(refresh_interval.trim_matches('\'')),
     );
 
     // Infer vector column type for index operator class.
-    let type_sql = "SELECT t.typname::text FROM pg_attribute a \
-         JOIN pg_type t ON t.oid = a.atttypid \
-         JOIN pg_class c ON c.oid = a.attrelid \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3 \
-           AND a.attnum > 0 AND NOT a.attisdropped \
-         LIMIT 1"
-        .to_string();
+    let type_sql = "SELECT t.typname::text FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
+         JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_type'::regclass \
+           AND d.objid = t.oid AND d.refclassid = 'pg_catalog.pg_extension'::regclass AND d.deptype = 'e' \
+         JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid AND e.extname = 'vector' \
+         WHERE a.attrelid = $1 AND a.attname = $2 AND a.attnum > 0 AND NOT a.attisdropped";
     let vec_typename = Spi::get_one_with_args::<String>(
-        &type_sql,
-        &[
-            src_schema.as_str().into(),
-            src_tbl.as_str().into(),
-            vector_col.into(),
-        ],
+        type_sql,
+        &[source_oid.into(), vector_col.into()],
     )
-    .unwrap_or(None)
-    .unwrap_or_else(|| "vector".to_string());
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .filter(|name| matches!(name.as_str(), "vector" | "halfvec" | "sparsevec"))
+    .ok_or_else(|| {
+        PgTrickleError::InvalidArgument(format!(
+            "{source_table}.{vector_col} must be a pgvector vector, halfvec, or sparsevec column"
+        ))
+    })?;
 
     // Select operator class based on index type and vector type.
     let opclass = match (idx_access_method, vec_typename.as_str()) {
@@ -2477,37 +2476,24 @@ fn embedding_stream_table_impl(
         _ => "vector_l2_ops",
     };
 
-    // Look up the source column's format_type (e.g. "vector(2)") so we can
-    // build an explicit cast in the index expression.  pgvector HNSW/IVFFlat
-    // indexes require the column expression to have explicit dimensions; when
-    // pgtrickle creates the stream table it stores only the base type OID
-    // (without type modifier), so the stream table column ends up as `vector`
-    // (no dims).  Using `(col::vector(2))` in the index expression provides
-    // the required dimensions without altering the stream table schema.
-    let src_format_type: Option<String> = Spi::get_one_with_args::<String>(
-        "SELECT format_type(a.atttypid, a.atttypmod) \
-         FROM pg_attribute a \
-         JOIN pg_class c ON c.oid = a.attrelid \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3 \
-           AND a.attnum > 0 AND NOT a.attisdropped \
-         LIMIT 1",
-        &[
-            src_schema.as_str().into(),
-            src_tbl.as_str().into(),
-            vector_col.into(),
-        ],
-    )
-    .unwrap_or(None);
-
-    // Use an explicit cast when the source type carries dimension info
-    // (e.g. "vector(2)" — contains a parenthesised modifier).
-    let idx_col_expr = match &src_format_type {
-        Some(fmt) if fmt.contains('(') => {
-            format!("({}::{})", quote_identifier(vector_col), fmt)
-        }
-        _ => quote_identifier(vector_col).to_string(),
-    };
+    // The storage column may lose its typmod, so index a dimensioned cast.
+    let dimension = Spi::get_one_with_args::<i32>(
+        "SELECT atttypmod FROM pg_catalog.pg_attribute WHERE attrelid = $1 AND attname = $2 AND attnum > 0 AND NOT attisdropped",
+        &[source_oid.into(), vector_col.into()],
+    ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .filter(|dimension| *dimension > 0)
+        .ok_or_else(|| PgTrickleError::InvalidArgument(format!("{source_table}.{vector_col} needs a fixed dimension for ANN indexing")))?;
+    let idx_col_expr = format!(
+        "({}::{}.{}({dimension}))",
+        quote_identifier(vector_col),
+        quote_identifier(&vector_schema),
+        quote_identifier(&vec_typename)
+    );
+    let opclass = format!(
+        "{}.{}",
+        quote_identifier(&vector_schema),
+        quote_identifier(opclass)
+    );
 
     let index_key = format!("{dst_schema}\0{dst_name}\0{vector_col}");
     let index_digest = crate::integration_contract::sha256_hex(index_key.as_bytes());
@@ -2516,8 +2502,8 @@ fn embedding_stream_table_impl(
         "CREATE INDEX {} ON {}.{} \
          USING {} ({idx_col_expr} {opclass})",
         quote_identifier(&index_name),
-        quote_identifier(&dst_schema),
-        quote_identifier(&dst_name),
+        quote_identifier(dst_schema),
+        quote_identifier(dst_name),
         idx_access_method,
     );
 

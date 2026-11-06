@@ -28,10 +28,11 @@ RETURNS TABLE(action text)
 
 `index_type` accepts `hnsw` or `ivfflat`; the helper uses the L2 operator
 class for the source vector type. `extra_columns` is trusted SQL text, not a
-parameterized expression: do not pass untrusted input. The helper's current
-identifier handling is intended for ordinary names; use explicit
-`create_stream_table` and `CREATE INDEX` for quoted or unusual names. An
-expression index can require the query to repeat the dimensional cast.
+parameterized expression: do not pass untrusted input. Source relations are
+resolved through PostgreSQL's search path; quoted schema, relation, and column
+names are supported. A pgvector extension type with known dimensions is
+required. An expression index can require the query to repeat the dimensional
+cast.
 
 Set `dry_run => true` to inspect the generated SQL without creating objects.
 The call succeeds only if the requested index is created; a conflicting index
