@@ -502,18 +502,46 @@ async fn test_pgvector_hnsw_index_on_stream_table() {
     // Verify refresh still works with index in place
     db.execute("INSERT INTO emb_hnsw_src (user_id, embedding) VALUES (1, '[1,0,0]')")
         .await;
-    db.refresh_st("centroid_hnsw_st").await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SELECT pgtrickle.refresh_stream_table('centroid_hnsw_st')",
+    ])
+    .await;
     db.assert_st_matches_query("centroid_hnsw_st", expected_q)
         .await;
 
-    // Verify the HNSW index can be used for ANN search
-    let nn_result = db
-        .query_scalar_opt::<i32>("SELECT user_id FROM public.centroid_hnsw_st ORDER BY centroid <-> '[1,0,0]'::vector LIMIT 1")
+    let index_ready: bool = db
+        .query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_index i \
+         JOIN pg_class c ON c.oid = i.indexrelid \
+         JOIN pg_am am ON am.oid = c.relam \
+         JOIN pg_opclass op ON op.oid = i.indclass[0] \
+         WHERE i.indexrelid = 'public.centroid_hnsw_idx'::regclass \
+         AND i.indrelid = 'public.centroid_hnsw_st'::regclass \
+         AND i.indisvalid AND i.indisready AND am.amname = 'hnsw' \
+         AND op.opcname = 'vector_cosine_ops')",
+        )
         .await;
-    assert!(
-        nn_result.is_some(),
-        "HNSW ANN query should return at least one result"
+    assert!(index_ready, "expected a valid, ready cosine HNSW index");
+
+    // Disabling sequential scans tests eligibility, not the planner's normal cost choice.
+    let mut tx = db.pool.begin().await.expect("begin plan check");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable sequential scans");
+    let plan: serde_json::Value = sqlx::query_scalar(
+        "EXPLAIN (FORMAT JSON) SELECT user_id FROM public.centroid_hnsw_st \
+         ORDER BY centroid <=> '[1,0,0]'::vector LIMIT 1",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("explain cosine ANN query");
+    assert_eq!(
+        plan[0]["Plan"]["Plans"][0]["Index Name"], "centroid_hnsw_idx",
+        "cosine index is not eligible: {plan}"
     );
+    tx.rollback().await.expect("end plan check");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
