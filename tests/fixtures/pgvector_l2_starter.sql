@@ -19,3 +19,10 @@ SELECT id, content, embedding::vector(3) <-> '[1,0,0]'::vector AS distance
 FROM doc_corpus
 ORDER BY embedding::vector(3) <-> '[1,0,0]'::vector
 LIMIT 5;
+
+SELECT * FROM pgtrickle.embedding_stream_table_v2(
+    'corpus_cosine', 'documents', 'embedding', 'cosine',
+    '{"columns": ["id"], "hnsw_m": 16, "hnsw_ef_construction": 64}'::jsonb
+);
+SELECT id FROM corpus_cosine
+ORDER BY embedding::vector(3) <=> '[1,0,0]'::vector LIMIT 5;

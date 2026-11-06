@@ -857,6 +857,84 @@ async fn test_embedding_stream_table_legacy_l2_is_atomic_and_has_no_reindex_poli
 }
 
 #[tokio::test]
+async fn test_embedding_stream_table_v2_metrics_and_options() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE metric_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO metric_source VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    let preview: Vec<(String,)> = sqlx::query_as(
+        r#"SELECT action FROM pgtrickle.embedding_stream_table_v2('metric_cosine', 'metric_source', 'embedding', 'cosine', '{"columns":["id"],"hnsw_m":8,"hnsw_ef_construction":32}', true)"#,
+    ).fetch_all(&db.pool).await.expect("preview cosine helper");
+    assert_eq!(preview.len(), 2);
+    assert!(preview[1].0.contains("vector_cosine_ops"));
+    let absent: bool = db
+        .query_scalar("SELECT to_regclass('public.metric_cosine') IS NULL")
+        .await;
+    assert!(absent);
+    db.execute(r#"SELECT * FROM pgtrickle.embedding_stream_table_v2('metric_cosine', 'metric_source', 'embedding', 'cosine', '{"columns":["id"],"hnsw_m":8,"hnsw_ef_construction":32}')"#).await;
+    db.execute(r#"SELECT * FROM pgtrickle.embedding_stream_table_v2('metric_ip', 'metric_source', 'embedding', 'inner_product', '{"index_type":"ivfflat","ivfflat_lists":1,"post_refresh_action":"analyze"}')"#).await;
+    let cosine: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid='metric_cosine'::regclass AND i.indisvalid AND i.indisready AND op.opcname='vector_cosine_ops' AND c.reloptions @> ARRAY['m=8','ef_construction=32'])").await;
+    assert!(cosine);
+    let inner_product: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid='metric_ip'::regclass AND i.indisvalid AND i.indisready AND op.opcname='vector_ip_ops' AND c.reloptions @> ARRAY['lists=1'])").await;
+    assert!(inner_product);
+    let mut tx = db.pool.begin().await.expect("begin metric plan check");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable sequential scan");
+    for (table, opclass, query) in [
+        (
+            "metric_cosine",
+            "vector_cosine_ops",
+            "EXPLAIN (FORMAT JSON) SELECT id FROM metric_cosine ORDER BY embedding::vector(3) <=> '[1,0,0]'::vector LIMIT 1",
+        ),
+        (
+            "metric_ip",
+            "vector_ip_ops",
+            "EXPLAIN (FORMAT JSON) SELECT id FROM metric_ip ORDER BY embedding::vector(3) <#> '[1,0,0]'::vector LIMIT 1",
+        ),
+    ] {
+        let index: String = sqlx::query_scalar("SELECT c.relname::text FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid=$1::regclass AND op.opcname=$2")
+            .bind(table).bind(opclass).fetch_one(&mut *tx).await.expect("find metric index");
+        let plan: serde_json::Value = sqlx::query_scalar(query)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("explain metric query");
+        assert!(
+            plan.to_string()
+                .contains(&format!("\"Index Name\":\"{index}\"")),
+            "matching index is not eligible: {plan}"
+        );
+    }
+    tx.rollback().await.expect("end metric plan check");
+    let policy: String = db.query_scalar("SELECT post_refresh_action::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name='metric_ip'").await;
+    assert_eq!(policy, "analyze");
+    db.execute(r#"SELECT * FROM pgtrickle.embedding_stream_table_v2('metric_full', 'metric_source', 'embedding', 'l2', '{"refresh_mode":"FULL","refresh_interval":"1h"}')"#).await;
+    db.execute(r#"SELECT * FROM pgtrickle.embedding_stream_table_v2('metric_immediate', 'metric_source', 'embedding', 'l2', '{"refresh_mode":"IMMEDIATE"}')"#).await;
+    let modes: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_stream_tables WHERE (pgt_name='metric_full' AND refresh_mode='FULL') OR (pgt_name='metric_immediate' AND refresh_mode='IMMEDIATE')").await;
+    assert_eq!(modes, 2);
+    for options in [
+        r#"{"unknown":1}"#,
+        r#"{"columns":["missing"]}"#,
+        r#"{"columns":["id","id"]}"#,
+        r#"{"columns":["id); DROP TABLE metric_source; --"]}"#,
+        r#"{"hnsw_m":1}"#,
+        r#"{"hnsw_m":80}"#,
+        r#"{"ivfflat_lists":2}"#,
+        r#"{"index_type":"ivfflat","ivfflat_lists":0}"#,
+        r#"{"refresh_mode":"IMMEDIATE","refresh_interval":"1m"}"#,
+    ] {
+        let sql = format!(
+            "SELECT * FROM pgtrickle.embedding_stream_table_v2('invalid_metric_st', 'metric_source', 'embedding', 'cosine', '{options}', true)"
+        );
+        assert!(db.try_execute(&sql).await.is_err(), "accepted {options}");
+    }
+    assert!(db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table_v2('invalid_metric_st', 'metric_source', 'embedding', 'unknown', NULL, true)").await.is_err());
+}
+
+#[tokio::test]
 async fn test_embedding_stream_table_index_conflict_rolls_back_creation() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
@@ -877,6 +955,7 @@ async fn test_embedding_stream_table_index_conflict_rolls_back_creation() {
         "CREATE INDEX {index_name} ON helper_unrelated (id)"
     ))
     .await;
+    assert!(db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table('helper_conflict_st', 'helper_conflict_src', 'embedding', NULL, '1m', 'hnsw', true)").await.is_err());
     let result = db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table('helper_conflict_st', 'helper_conflict_src', 'embedding', NULL, '1m', 'hnsw', false)").await;
     assert!(
         result.is_err(),
@@ -899,6 +978,8 @@ async fn test_embedding_stream_table_starter_fixture_executes() {
         )
         .await;
     assert_eq!(nearest, 1);
+    let cosine_nearest: i64 = db.query_scalar("SELECT id FROM corpus_cosine ORDER BY embedding::vector(3) <=> '[1,0,0]'::vector LIMIT 1").await;
+    assert_eq!(cosine_nearest, 1);
 }
 
 #[tokio::test]
@@ -913,6 +994,9 @@ async fn test_embedding_stream_table_quoted_names_and_vector_schema() {
     db.execute("INSERT INTO \"A.B\".\"Doc.Source\" VALUES (1, '[1,0,0]')")
         .await;
     db.execute("SELECT * FROM pgtrickle.embedding_stream_table('\"D.S\".\"Corpus.A\"', '\"A.B\".\"Doc.Source\"', '\"Embedding Value\"', NULL, '1h', 'hnsw', false)").await;
+    db.execute(r#"SELECT * FROM pgtrickle.embedding_stream_table_v2('"D.S"."Cosine.Corpus"', '"A.B"."Doc.Source"', '"Embedding Value"', 'cosine', '{"columns":["id"]}')"#).await;
+    let v2_valid: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_opclass op ON op.oid=i.indclass[0] JOIN pg_namespace n ON n.oid=op.opcnamespace WHERE i.indrelid='\"D.S\".\"Cosine.Corpus\"'::regclass AND i.indisvalid AND i.indisready AND op.opcname='vector_cosine_ops' AND n.nspname='V.X')").await;
+    assert!(v2_valid);
     let valid: bool = db.query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
          JOIN pg_opclass op ON op.oid = i.indclass[0] JOIN pg_namespace n ON n.oid = op.opcnamespace \

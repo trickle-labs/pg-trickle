@@ -49,7 +49,20 @@ with blocking locks. Existing tables retain their stored policy on upgrade;
 inspect and change it explicitly if needed. The helper does not attach an
 outbox or generate embeddings.
 
-For a cosine or inner-product index, choose the matching operator class and
-query operator explicitly with `create_stream_table` and `CREATE INDEX` until
-the helper supports a metric argument. See [hybrid search](HYBRID_SEARCH_PATTERNS.md)
-and [tenant isolation](PER_TENANT_ANN_PATTERNS.md) for additional patterns.
+The metric-aware helper takes an explicit metric and structured options:
+
+```sql
+SELECT * FROM pgtrickle.embedding_stream_table_v2(
+    'corpus_cosine', 'documents', 'embedding', 'cosine',
+    '{"columns": ["id"], "hnsw_m": 16, "hnsw_ef_construction": 64}'::jsonb
+);
+-- Match the index expression and cosine operator in the search query.
+SELECT id FROM corpus_cosine
+ORDER BY embedding::vector(3) <=> '[1,0,0]'::vector LIMIT 5;
+```
+
+Use `inner_product` with `<#>` or `l2` with `<->`. The new helper does not
+alter existing indexes: migrate by creating a new stream table and switching
+queries to it. See the [SQL reference](../SQL_REFERENCE.md#pgtrickleembedding_stream_table_v2)
+for options and [hybrid search](HYBRID_SEARCH_PATTERNS.md) and
+[tenant isolation](PER_TENANT_ANN_PATTERNS.md) for additional patterns.
