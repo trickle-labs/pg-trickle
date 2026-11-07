@@ -30,8 +30,10 @@ The blocking profile uses the pinned PostgreSQL base image from
 matches PostgreSQL settings across the stock and extension images, then
 samples pgbench transaction logs at 10%, records p50/p95/p99, checks active
 stream-table correctness and refresh history, and samples worker `/proc`
-jiffies against container cgroup CPU time. The publication profile is a
-five-repetition, 60-second run.
+jiffies against container cgroup CPU time. All three configurations use an
+8 GB `max_wal_size`; the benchmark records it with the other matched settings
+so repeated forced checkpoints do not dominate the short timed samples. The
+publication profile is a five-repetition, 60-second run.
 
 ```bash
 ./tests/build_e2e_image.sh
