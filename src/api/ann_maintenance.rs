@@ -354,7 +354,11 @@ fn claim_ann_maintenance_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickleE
              ON CONFLICT (pgt_id, leaf_relid, index_key) DO UPDATE \
                SET request_id = EXCLUDED.request_id, claim_pid = EXCLUDED.claim_pid, \
                    claim_backend_start = EXCLUDED.claim_backend_start, \
-                   next_eligible_at = pg_catalog.clock_timestamp() + interval '30 seconds' \
+                   next_eligible_at = pg_catalog.clock_timestamp() + \
+                     (30 * (1 << LEAST(pgtrickle.pgt_ann_maintenance_claims.consecutive_failures::integer + \
+                       CASE WHEN pgtrickle.pgt_ann_maintenance_claims.claim_pid IS NULL THEN 0 ELSE 1 END, 5))) * interval '1 second', \
+                   consecutive_failures = LEAST(pgtrickle.pgt_ann_maintenance_claims.consecutive_failures + \
+                     CASE WHEN pgtrickle.pgt_ann_maintenance_claims.claim_pid IS NULL THEN 0 ELSE 1 END, 6) \
              WHERE (pgtrickle.pgt_ann_maintenance_claims.next_eligible_at IS NULL \
                  OR pgtrickle.pgt_ann_maintenance_claims.next_eligible_at <= pg_catalog.clock_timestamp()) \
                AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
