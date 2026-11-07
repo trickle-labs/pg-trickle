@@ -159,6 +159,26 @@ fn claim_ann_maintenance_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickleE
     }
     let caller = super::helpers::outer_user_id();
     let claimed = Spi::connect_mut(|client| {
+        let guard = client.update(
+            "INSERT INTO pgtrickle.pgt_ann_maintenance_claims \
+               (pgt_id, leaf_relid, index_key, request_id, claim_pid, claim_backend_start) \
+             SELECT r.pgt_id, r.leaf_relid, pg_catalog.sha256(pg_catalog.convert_to(r.index_definition, 'UTF8')), \
+               r.request_id, pg_catalog.pg_backend_pid(), \
+               (SELECT backend_start FROM pg_catalog.pg_stat_activity WHERE pid = pg_catalog.pg_backend_pid()) \
+             FROM pgtrickle.pgt_ann_maintenance_requests r WHERE r.request_id = $1 \
+             ON CONFLICT (pgt_id, leaf_relid, index_key) DO UPDATE \
+               SET request_id = EXCLUDED.request_id, claim_pid = EXCLUDED.claim_pid, \
+                   claim_backend_start = EXCLUDED.claim_backend_start \
+             WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+               WHERE a.pid = pgtrickle.pgt_ann_maintenance_claims.claim_pid \
+                 AND a.backend_start = pgtrickle.pgt_ann_maintenance_claims.claim_backend_start) \
+             RETURNING request_id",
+            Some(1),
+            &[request_id.into()],
+        )?;
+        if guard.is_empty() {
+            return Ok::<_, pgrx::spi::Error>(false);
+        }
         let rows = client.update(
             "UPDATE pgtrickle.pgt_ann_maintenance_requests r \
              SET state = 'RUNNING', claim_pid = pg_catalog.pg_backend_pid(), \
@@ -178,7 +198,7 @@ fn claim_ann_maintenance_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickleE
     .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
     if !claimed {
         return Err(PgTrickleError::InvalidArgument(format!(
-            "request {request_id} is already claimed or completed"
+            "request {request_id} or its index is already claimed, or the request is completed"
         )));
     }
     ann_maintenance_request_impl(request_id)
@@ -210,7 +230,7 @@ fn finish_ann_maintenance_impl(
     let caller = super::helpers::outer_user_id();
     let finished = Spi::connect_mut(|client| {
         let rows = client.update(
-            "UPDATE pgtrickle.pgt_ann_maintenance_requests r \
+            "WITH finished AS (UPDATE pgtrickle.pgt_ann_maintenance_requests r \
              SET state = CASE WHEN NOT $2 THEN 'FAILED' \
                WHEN r.pending_during_run THEN 'REQUESTED' ELSE 'SUCCEEDED' END, \
                last_error = CASE WHEN $2 THEN NULL ELSE $3 END, \
@@ -220,7 +240,13 @@ fn finish_ann_maintenance_impl(
                AND r.claim_pid = pg_catalog.pg_backend_pid() \
                AND r.claim_backend_start = (SELECT backend_start FROM pg_catalog.pg_stat_activity \
                  WHERE pid = pg_catalog.pg_backend_pid()) \
-             RETURNING r.request_id",
+             RETURNING r.request_id) \
+             DELETE FROM pgtrickle.pgt_ann_maintenance_claims guard USING finished \
+             WHERE guard.request_id = finished.request_id \
+               AND guard.claim_pid = pg_catalog.pg_backend_pid() \
+               AND guard.claim_backend_start = (SELECT backend_start FROM pg_catalog.pg_stat_activity \
+                 WHERE pid = pg_catalog.pg_backend_pid()) \
+             RETURNING guard.request_id",
             Some(1),
             &[request_id.into(), succeeded.into(), error_message.into(), caller.into()],
         )?;

@@ -30,6 +30,19 @@ CREATE TABLE pgtrickle.pgt_ann_maintenance_requests (
 REVOKE ALL ON TABLE pgtrickle.pgt_ann_maintenance_requests FROM PUBLIC;
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_ann_maintenance_requests', 'WHERE false');
 
+-- Serialize claims for the same leaf and index definition across REINDEX swaps.
+CREATE TABLE pgtrickle.pgt_ann_maintenance_claims (
+    pgt_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
+    leaf_relid OID NOT NULL,
+    index_key BYTEA NOT NULL,
+    request_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_ann_maintenance_requests(request_id) ON DELETE CASCADE,
+    claim_pid INTEGER NOT NULL,
+    claim_backend_start TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (pgt_id, leaf_relid, index_key)
+);
+REVOKE ALL ON TABLE pgtrickle.pgt_ann_maintenance_claims FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_ann_maintenance_claims', 'WHERE false');
+
 CREATE FUNCTION pgtrickle.request_ann_maintenance(stream_table oid, index_oid oid)
 RETURNS bigint STRICT SECURITY DEFINER
 SET search_path TO pgtrickle, pg_catalog, pg_temp

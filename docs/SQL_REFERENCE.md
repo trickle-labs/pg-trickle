@@ -4338,7 +4338,10 @@ pgtrickle.finish_ann_maintenance(request_id bigint, succeeded boolean, error_mes
 Claiming records the current backend, its start time, caller role and observed
 epoch transactionally. The caller must have the same privileges required to
 inspect the request, and its index identity must still match. A live backend's
-claim cannot be taken by another session. If that backend disconnects, status
+claim cannot be taken by another session. Claims for the same leaf and index
+definition also serialize across the identity swap made by concurrent reindex.
+The definition includes the index name; renaming or changing an index requires
+the operator to coordinate DDL with maintenance. If that backend disconnects, status
 becomes `INTERRUPTED` and a new session can claim it. A failed claim can also
 be retried. The claim and completion functions are revoked from `PUBLIC`.
 
