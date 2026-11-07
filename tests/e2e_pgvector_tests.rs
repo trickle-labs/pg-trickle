@@ -3901,6 +3901,198 @@ async fn test_wide_vectors_refresh_without_oversized_covering_index() {
 }
 
 #[tokio::test]
+async fn test_vector_centroid_rescan_preserves_join_multiplicity_and_rollback() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE centroid_join_vectors (id int PRIMARY KEY, grp int NOT NULL, embedding vector(3))").await;
+    db.execute("CREATE TABLE centroid_join_edges (id int PRIMARY KEY, vector_id int NOT NULL REFERENCES centroid_join_vectors(id))").await;
+    db.execute("INSERT INTO centroid_join_vectors VALUES (1, 1, '[1,0,0]'), (2, 1, '[0,1,0]'), (3, 2, NULL)").await;
+    db.execute("INSERT INTO centroid_join_edges VALUES (1, 1), (2, 1), (3, 2), (4, 3)")
+        .await;
+    let definition = "SELECT v.grp, avg(v.embedding) AS centroid FROM centroid_join_vectors v JOIN centroid_join_edges e ON e.vector_id = v.id GROUP BY v.grp";
+    let compare = "SELECT NOT EXISTS ((SELECT grp, centroid FROM centroid_join_st EXCEPT ALL SELECT v.grp, avg(v.embedding) FROM centroid_join_vectors v JOIN centroid_join_edges e ON e.vector_id=v.id GROUP BY v.grp) UNION ALL (SELECT v.grp, avg(v.embedding) FROM centroid_join_vectors v JOIN centroid_join_edges e ON e.vector_id=v.id GROUP BY v.grp EXCEPT ALL SELECT grp, centroid FROM centroid_join_st))";
+    let create = format!(
+        "SELECT pgtrickle.create_stream_table('centroid_join_st', $${definition}$$, '1h', 'DIFFERENTIAL')"
+    );
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create])
+        .await;
+    for statement in [
+        "INSERT INTO centroid_join_edges VALUES (5, 2)",
+        "UPDATE centroid_join_vectors SET grp=2, embedding='[0,0,1]' WHERE id=1",
+        "DELETE FROM centroid_join_edges WHERE id=2",
+        "UPDATE centroid_join_vectors SET embedding='[1,1,0]' WHERE id=3",
+        "DELETE FROM centroid_join_edges WHERE vector_id=2",
+    ] {
+        db.execute(statement).await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.enable_vector_agg = on",
+                "SET pg_trickle.refresh_strategy = 'differential'",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+            ],
+            "SELECT pgtrickle.refresh_stream_table('centroid_join_st')",
+        )
+        .await
+        .expect("refresh joined centroids");
+        let differential: bool = db.query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='centroid_join_st' ORDER BY h.refresh_id DESC LIMIT 1").await;
+        assert!(differential, "joined centroid fell back to full refresh");
+        let matches: bool = db.query_scalar(compare).await;
+        assert!(
+            matches,
+            "joined centroid must preserve duplicate contributions after {statement}"
+        );
+    }
+    let mut tx = db.pool.begin().await.expect("begin rolled-back mutation");
+    sqlx::query("UPDATE centroid_join_vectors SET grp=7, embedding='[9,9,9]' WHERE id=1")
+        .execute(&mut *tx)
+        .await
+        .expect("mutate in transaction");
+    tx.rollback().await.expect("roll back mutation");
+    let matches: bool = db.query_scalar(compare).await;
+    assert!(
+        matches,
+        "rolled-back source mutations must not alter the centroid"
+    );
+    db.try_execute_with_config(
+        &["SET pg_trickle.enable_vector_agg = on"],
+        "SELECT pgtrickle.reinitialize_stream_table('centroid_join_st')",
+    )
+    .await
+    .expect("reinitialize joined centroid");
+    assert!(
+        db.query_scalar::<bool>(compare).await,
+        "reinitialized centroid must match the source"
+    );
+    db.execute("UPDATE centroid_join_vectors SET embedding='[0,1,1]' WHERE id=1")
+        .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.enable_vector_agg = on",
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('centroid_join_st')",
+    )
+    .await
+    .expect("refresh after reinitialization");
+    let differential: bool = db.query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='centroid_join_st' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert!(
+        differential,
+        "post-reinitialization refresh fell back to full"
+    );
+    assert!(
+        db.query_scalar::<bool>(compare).await,
+        "centroid must remain correct after reinitialization"
+    );
+}
+
+#[tokio::test]
+async fn test_vector_centroid_rescan_matches_native_avg_under_sustained_churn() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE centroid_churn_source (id int PRIMARY KEY, grp int NOT NULL, embedding vector(3))").await;
+    db.execute("INSERT INTO centroid_churn_source SELECT i, i % 4, CASE WHEN i % 7 = 0 THEN NULL ELSE ARRAY[((i % 11) - 5)::real, ((i % 13) - 6)::real, ((i % 17) - 8)::real]::vector(3) END FROM generate_series(1, 48) i").await;
+    db.execute("INSERT INTO centroid_churn_source VALUES (101, 9, '[1e8,0,0]'), (102, 9, '[1,0,0]'), (103, 9, '[-1e8,0,0]')").await;
+    let (float32_sum, native_avg): (f32, f32) = sqlx::query_as("SELECT (sum(v ORDER BY ord)::real[])[1], (avg(v ORDER BY ord)::real[])[1] FROM (VALUES (1, '[1e8,0,0]'::vector), (2, '[1,0,0]'::vector), (3, '[-1e8,0,0]'::vector)) AS input(ord, v)")
+        .fetch_one(&db.pool).await.expect("measure cancellation control");
+    assert_eq!(float32_sum, 0.0);
+    assert!(
+        (native_avg - 1.0 / 3.0).abs() < 1e-6,
+        "native AVG must preserve the small contribution"
+    );
+    let (native_first, native_reordered): (f32, f32) = sqlx::query_as("SELECT (avg(v ORDER BY ord)::real[])[1], (avg(v ORDER BY CASE ord WHEN 1 THEN 1 WHEN 3 THEN 2 ELSE 3 END)::real[])[1] FROM (VALUES (1, '[1e20,0,0]'::vector), (2, '[1,0,0]'::vector), (3, '[-1e20,0,0]'::vector)) AS input(ord, v)")
+        .fetch_one(&db.pool).await.expect("measure native order sensitivity");
+    assert_eq!(native_first, 0.0);
+    assert!((native_reordered - 1.0 / 3.0).abs() < 1e-6);
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SELECT pgtrickle.create_stream_table('centroid_churn_st', $$SELECT grp, avg(embedding) AS centroid FROM centroid_churn_source GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+    ]).await;
+    let explanation: String = db
+        .query_scalar("SELECT pgtrickle.explain_stream_table('centroid_churn_st')")
+        .await;
+    assert!(
+        explanation.contains("centroid: GROUP_RESCAN"),
+        "unexpected current strategy: {explanation}"
+    );
+
+    let mut rng = 0x4d59_5df4_d0f3_3173_u64;
+    for cycle in 0..40 {
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let id = ((rng >> 16) % 48 + 1) as i32;
+        let group = ((rng >> 32) % 5) as i32;
+        match cycle % 4 {
+            0 => {
+                sqlx::query("DELETE FROM centroid_churn_source WHERE id=$1")
+                    .bind(id)
+                    .execute(&db.pool)
+                    .await
+                    .expect("delete input");
+            }
+            1 => {
+                sqlx::query("INSERT INTO centroid_churn_source VALUES ($1, $2, NULL) ON CONFLICT (id) DO UPDATE SET grp=EXCLUDED.grp, embedding=NULL")
+                .bind(id).bind(group).execute(&db.pool).await.expect("upsert null input");
+            }
+            _ => {
+                let x = ((rng >> 8) % 2001) as i32 - 1000;
+                let y = ((rng >> 24) % 2001) as i32 - 1000;
+                let z = ((rng >> 40) % 2001) as i32 - 1000;
+                let embedding = format!("[{x},{y},{z}]");
+                sqlx::query("INSERT INTO centroid_churn_source VALUES ($1, $2, $3::text::vector) ON CONFLICT (id) DO UPDATE SET grp=EXCLUDED.grp, embedding=EXCLUDED.embedding")
+                    .bind(id).bind(group).bind(embedding).execute(&db.pool).await.expect("upsert vector input");
+            }
+        }
+        if cycle % 2 == 0 {
+            db.execute("DELETE FROM centroid_churn_source WHERE id = 103")
+                .await;
+        } else {
+            db.execute("INSERT INTO centroid_churn_source VALUES (103, 9, '[-1e8,0,0]')")
+                .await;
+        }
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.enable_vector_agg = on",
+                "SET pg_trickle.refresh_strategy = 'differential'",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+            ],
+            "SELECT pgtrickle.refresh_stream_table('centroid_churn_st')",
+        )
+        .await
+        .expect("refresh centroid after mutation");
+        let differential: bool = db.query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='centroid_churn_st' ORDER BY h.refresh_id DESC LIMIT 1").await;
+        assert!(differential, "cycle {cycle} fell back to full refresh");
+        let actual: Vec<(i32, Option<Vec<f32>>)> =
+            sqlx::query_as("SELECT grp, centroid::real[] FROM centroid_churn_st ORDER BY grp")
+                .fetch_all(&db.pool)
+                .await
+                .expect("read maintained centroids");
+        let expected: Vec<(i32, Option<Vec<f32>>)> = sqlx::query_as("SELECT grp, avg(embedding)::real[] FROM centroid_churn_source GROUP BY grp ORDER BY grp")
+            .fetch_all(&db.pool).await.expect("read native centroids");
+        assert_eq!(actual.len(), expected.len(), "group count on cycle {cycle}");
+        for ((actual_group, actual), (expected_group, expected)) in actual.iter().zip(&expected) {
+            assert_eq!(actual_group, expected_group, "group key on cycle {cycle}");
+            match (actual, expected) {
+                (None, None) => {}
+                (Some(actual), Some(expected)) => {
+                    assert_eq!(actual.len(), expected.len());
+                    for (actual, expected) in actual.iter().zip(expected) {
+                        let error = (f64::from(*actual) - f64::from(*expected)).abs();
+                        let tolerance = 1e-5 + 1e-6 * f64::from(*expected).abs();
+                        assert!(
+                            error <= tolerance,
+                            "cycle {cycle}, group {actual_group}: {actual} vs {expected}, error {error}"
+                        );
+                    }
+                }
+                _ => panic!("NULL centroid mismatch on cycle {cycle}, group {actual_group}"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_vector_aggregate_unknown_dimensions_rejects_mixed_input_without_data_loss() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

@@ -108,19 +108,22 @@ SELECT pgtrickle.create_stream_table(
 
 ## Refresh strategy
 
-The current implementation uses the **group-rescan strategy** for vector aggregates:
-any insert/delete/update affecting a group triggers a full re-aggregation
-of that group using PostgreSQL's native `avg(vector)` or `sum(vector)`
-aggregates from pgvector. Groups that were not affected are not touched.
+The current implementation uses the **group-rescan strategy** for vector
+aggregates: an insert, delete or update re-aggregates affected groups using
+pgvector's native `avg(vector)` or `sum(vector)`. For supported query shapes,
+the group filter is pushed into the source query; other shapes may need to
+recompute more of the defining query. Inspect the actual plan and workload
+before relying on a particular cost.
 
-This is:
-- **Correct**: always produces the same result as a FULL refresh
-- **Efficient for skewed workloads**: if only a few user groups are updated
-  per refresh cycle, only those groups are re-computed
-- **Safe under concurrent updates**: no state accumulation errors possible
-
-A fully algebraic strategy (maintaining running `sum` + `count` auxiliary
-columns without group rescans) is planned.
+The rescan does not accumulate a running vector sum across refreshes. Floating
+point aggregation can still depend on input order, so a fresh FULL refresh and
+a group rescan are not guaranteed to be bit-identical. The packaged regression
+tests include cancellation, NULLs and repeated mutations, and compare each
+component with native AVG using an absolute tolerance of `1e-5` plus a relative
+tolerance of `1e-6`; those tests are evidence for their inputs, not a universal
+error bound. A float32 `sum(vector)` can lose contributions that native AVG's
+double-precision state retains. A fully algebraic strategy with a qualified
+numerical and recovery contract is not yet implemented.
 
 ## Distance operators and ANN queries
 
