@@ -304,6 +304,22 @@ WHERE pgt_relid = 'search_corpus'::regclass;
 
 If the identity or epoch changes, or the epoch is `NULL`, the observation is
 not evidence that the rebuild covered the latest refresh. An unchanged epoch
-also does not rule out a refresh still in flight. This manual recipe does not
-persist requests, retry failures, or account for changes arriving after its
+also does not rule out a refresh still in flight.
+
+An authorized operator can persist an explicit intent for a selected leaf:
+
+```sql
+SELECT pgtrickle.request_ann_maintenance(
+    'search_corpus'::regclass::oid, 'search_corpus_embedding_idx'::regclass::oid
+);
+```
+
+The function records intent only. It does not start a worker, perform the
+rebuild, or mark it complete; an administrator must grant `EXECUTE` explicitly.
+The returned ID can be inspected with `pgtrickle.ann_maintenance_request(id)`
+after an administrator grants `EXECUTE` on that function too. The inspection
+rechecks privileges and reports whether the captured identity still matches;
+it is not a lock and cannot prevent later DDL. Requests are not restored
+across a logical dump/restore because their OIDs are database-local. This
+manual recipe does not retry failures or account for changes arriving after its
 last observation. Continue normal VACUUM and autovacuum care.

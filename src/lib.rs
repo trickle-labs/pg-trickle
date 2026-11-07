@@ -869,6 +869,27 @@ SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_source_gates', '');
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_watermarks', '');
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_watermark_groups', '');
 
+-- Explicit ANN maintenance intents. OIDs are database-local, so requests are
+-- deliberately not restored across a logical dump/restore.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ann_maintenance_requests (
+    request_id BIGSERIAL PRIMARY KEY,
+    pgt_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
+    database_oid OID NOT NULL,
+    system_identifier TEXT NOT NULL,
+    root_relid OID NOT NULL,
+    leaf_relid OID NOT NULL,
+    index_relid OID NOT NULL,
+    index_filenode OID NOT NULL,
+    index_definition TEXT NOT NULL,
+    first_observed_epoch BIGINT,
+    last_observed_epoch BIGINT,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    last_requested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (pgt_id, index_relid, index_filenode)
+);
+REVOKE ALL ON TABLE pgtrickle.pgt_ann_maintenance_requests FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_ann_maintenance_requests', 'WHERE false');
+
 -- CIT-2: Cross-node advisory lock table for distributed stream table refresh.
 -- Uses INSERT … ON CONFLICT DO NOTHING for atomic acquisition; timestamp-based
 -- lease expiry handles crashed holders without requiring heartbeats.
@@ -2206,6 +2227,8 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_apply_delta_enr(bigint, integer, bo
 REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_handle_truncate(bigint) FROM PUBLIC;
 
 -- owner_lifecycle
+REVOKE EXECUTE ON FUNCTION pgtrickle.ann_maintenance_request(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.request_ann_maintenance(oid, oid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.alter_stream_table(text, text, text, text, text, text, text, text, boolean, boolean, text, text, bigint, integer, text, integer, double precision, text, double precision, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.attach_embedding_outbox(text, text, integer, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.attach_outbox(text, integer, integer) FROM PUBLIC;
