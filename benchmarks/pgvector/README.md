@@ -45,11 +45,13 @@ can use randomness despite deterministic input; do not infer production
 latency or recall from one run or treat forced eligibility as the default plan.
 
 The refresh section measures a one-row vector update, a 10% vector update,
-and a 10% delete with an HNSW index present. Each refresh must be differential
-and match its complete defining query. WAL is measured between cluster-wide
-LSN reads, excludes the source mutation and can include unrelated activity;
-refresh latencies include client overhead. A plan is recorded for retrieval,
-not for the refresh internals. This initial workload does not compare full
-refresh, centroid strategies or group sizes, measure source-write overhead,
-or characterize concurrent load. Use a dedicated host and more repetitions
-before drawing performance conclusions.
+and a 10% delete on separate differential and full-refresh stream tables with
+equivalent HNSW indexes. Both must match their complete defining query and the
+recorded history must confirm the intended strategy. The differential refresh
+always runs first, so shared cache and other ordering effects can bias the
+comparison. WAL is measured between cluster-wide LSN reads, excludes the source
+mutation and can include unrelated activity; refresh latencies include client
+overhead. A plan is recorded for retrieval, not for the refresh internals. This
+initial workload does not compare centroid strategies or group sizes, measure
+source-write overhead, or characterize concurrent load. Use a dedicated host
+and more repetitions before drawing performance conclusions.

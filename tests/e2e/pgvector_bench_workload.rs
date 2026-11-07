@@ -58,6 +58,11 @@ async fn test_pgvector_filtered_ann_workload() {
     )
     .await;
     db.execute("ANALYZE vector_bench_corpus").await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('vector_bench_full', \
+        'SELECT id, tenant, embedding FROM vector_bench_source', '1h', 'FULL')",
+    )
+    .await;
     let versions: (String, String, String) = sqlx::query_as(
         "SELECT version(), \
         (SELECT extversion FROM pg_extension WHERE extname = 'vector'), \
@@ -181,8 +186,15 @@ async fn test_pgvector_filtered_ann_workload() {
         ((embedding::vector({dim})) vector_cosine_ops)"
     ))
     .await;
+    db.execute(&format!(
+        "CREATE INDEX vector_bench_full_ann ON vector_bench_full USING hnsw \
+        ((embedding::vector({dim})) vector_cosine_ops)"
+    ))
+    .await;
     let mut refresh_ms = Vec::new();
     let mut wal_bytes = Vec::new();
+    let mut full_refresh_ms = Vec::new();
+    let mut full_wal_bytes = Vec::new();
     for cycle in 0..3 {
         let changed = if cycle == 0 { 1 } else { rows / 10 };
         if cycle == 2 {
@@ -229,6 +241,33 @@ async fn test_pgvector_filtered_ann_workload() {
             "SELECT id, tenant, embedding FROM vector_bench_source",
         )
         .await;
+        let before_full: String = db
+            .query_scalar("SELECT pg_current_wal_insert_lsn()::text")
+            .await;
+        let start_full = Instant::now();
+        db.refresh_st("vector_bench_full").await;
+        full_refresh_ms.push(start_full.elapsed().as_secs_f64() * 1000.0);
+        let full_written: f64 = sqlx::query_scalar(
+            "SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(), $1::text::pg_lsn)::float8",
+        )
+        .bind(before_full)
+        .fetch_one(&db.pool)
+        .await
+        .expect("full refresh WAL delta");
+        full_wal_bytes.push(full_written);
+        let full: bool = db
+            .query_scalar(
+                "SELECT h.action = 'FULL' AND h.status = 'COMPLETED' \
+            FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+            WHERE s.pgt_name = 'vector_bench_full' ORDER BY refresh_id DESC LIMIT 1",
+            )
+            .await;
+        assert!(full, "expected completed full refresh");
+        db.assert_st_matches_query(
+            "vector_bench_full",
+            "SELECT id, tenant, embedding FROM vector_bench_source",
+        )
+        .await;
     }
     println!(
         "PGVECTOR_BENCHMARK_JSON={}",
@@ -237,6 +276,8 @@ async fn test_pgvector_filtered_ann_workload() {
         "data": "md5(id:dimension), seedless deterministic", "rows": rows, "dimensions": dim,
         "ann": results, "refresh": {"operations": ["update embedding", "update embedding", "delete"],
         "changed_rows": [1, rows / 10, rows / 10], "elapsed_ms": refresh_ms,
-        "wal_bytes_cluster_wide": wal_bytes, "notes": "HNSW index maintained; WAL is cluster-wide between LSN reads and excludes source mutations"}})
+        "wal_bytes_cluster_wide": wal_bytes,
+        "full_elapsed_ms": full_refresh_ms, "full_wal_bytes_cluster_wide": full_wal_bytes,
+        "notes": "Separate equivalent HNSW indexes; differential always runs first; WAL is cluster-wide between LSN reads and excludes source mutations"}})
     );
 }
