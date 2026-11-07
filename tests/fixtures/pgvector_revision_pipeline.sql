@@ -207,7 +207,12 @@ BEGIN
         JOIN pg_catalog.pg_am am ON am.oid = idx.relam
         JOIN pg_catalog.pg_opclass op ON op.oid = i.indclass[0]
         WHERE i.indexrelid = ann AND i.indrelid = corpus AND i.indisvalid AND i.indisready
-          AND i.indislive AND am.amname = 'hnsw' AND op.opcname = 'vector_cosine_ops'
+          AND i.indislive AND i.indpred IS NULL AND i.indnkeyatts = 1
+          AND i.indexprs IS NULL AND i.indkey[0] = (
+              SELECT a.attnum FROM pg_catalog.pg_attribute a
+              WHERE a.attrelid = corpus AND a.attname = 'embedding' AND NOT a.attisdropped
+          )
+          AND am.amname = 'hnsw' AND op.opcname = 'vector_cosine_ops'
     ) THEN RAISE EXCEPTION 'model % ANN index is unavailable', p_model; END IF;
     PERFORM pgtrickle.refresh_stream_table(corpus::text);
     EXECUTE pg_catalog.format(

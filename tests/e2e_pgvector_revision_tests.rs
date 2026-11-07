@@ -206,6 +206,20 @@ async fn test_revision_safe_generation_and_model_rollover() {
         .await
         .expect_err("missing ANN index must block cutover");
     assert!(blocked.to_string().contains("ANN index is unavailable"));
+    db.execute("CREATE INDEX corpus_v2_ann ON embedding_demo.corpus_v2 USING hnsw ((embedding::vector(3)) vector_cosine_ops) WHERE id < 0").await;
+    let blocked = db
+        .try_execute("SELECT embedding_demo.switch_model('model-v2')")
+        .await
+        .expect_err("partial ANN index must block cutover");
+    assert!(blocked.to_string().contains("ANN index is unavailable"));
+    db.execute("DROP INDEX embedding_demo.corpus_v2_ann").await;
+    db.execute("CREATE INDEX corpus_v2_ann ON embedding_demo.corpus_v2 USING hnsw (((embedding::vector(3) + '[1,0,0]'::vector)::vector(3)) vector_cosine_ops)").await;
+    let blocked = db
+        .try_execute("SELECT embedding_demo.switch_model('model-v2')")
+        .await
+        .expect_err("ANN index on a different expression must block cutover");
+    assert!(blocked.to_string().contains("ANN index is unavailable"));
+    db.execute("DROP INDEX embedding_demo.corpus_v2_ann").await;
     db.execute("CREATE INDEX corpus_v2_ann ON embedding_demo.corpus_v2 USING hnsw ((embedding::vector(3)) vector_cosine_ops)").await;
     db.execute("SELECT embedding_demo.switch_model('model-v2')")
         .await;
