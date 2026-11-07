@@ -1,6 +1,7 @@
 # pgvector RAG Cookbook: Always-Fresh Embedding Pipelines with pg_trickle
 
-> **Status: Stable** — pgvector RAG pipelines using stream tables are production-ready.
+> **Status:** Vector aggregates are experimental and disabled by default. See
+> the [support summary](../SUPPORT_SUMMARY.md) for capability-specific maturity.
 
 **Prerequisites:** PostgreSQL 18, `pg_trickle`, `pgvector` extension.
 
@@ -8,16 +9,20 @@
 
 ## Overview
 
-This cookbook shows you how to build a production-ready Retrieval-Augmented
-Generation (RAG) pipeline using `pg_trickle` and `pgvector`. The key insight:
-embeddings are **derived state** — they must be recomputed whenever source
-documents change. `pg_trickle` incremental view maintenance keeps that derived
-state fresh automatically, without batch jobs or cron scripts.
+This cookbook describes Retrieval-Augmented Generation (RAG) patterns using
+`pg_trickle` and `pgvector`. Applications must recompute embeddings when model
+inputs change. pg_trickle maintains the stored query result from committed
+inputs; scheduled refresh adds propagation lag and does not generate vectors.
 
 Embeddings are **generated at the application layer** (via OpenAI, Cohere,
 Ollama, or any embedding API) and stored in a source table. `pg_trickle` then
 incrementally maintains the denormalised corpus, the vector index, and any
 aggregate centroids.
+
+The first pattern below does not track whether an embedding matches the latest
+document content. For asynchronous generation, retries and model changes, use
+the [revision-safe embedding workflow](REVISION_SAFE_EMBEDDINGS.md): a stream
+refresh alone cannot make a stale provider result current.
 
 ---
 
