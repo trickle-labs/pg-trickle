@@ -22,6 +22,318 @@ async fn setup_pgvector(db: &E2eDb) {
 }
 
 #[tokio::test]
+async fn test_ann_maintenance_intent_is_transactional_deduplicated_and_identity_bound() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_intent_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_intent_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "ann_intent_stream",
+        "SELECT id, embedding FROM ann_intent_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_intent_hnsw ON ann_intent_stream USING hnsw (embedding vector_cosine_ops)").await;
+    db.execute("CREATE INDEX ann_intent_btree ON ann_intent_stream (id)")
+        .await;
+    let request_sql = "SELECT pgtrickle.request_ann_maintenance('ann_intent_stream'::regclass::oid, 'ann_intent_hnsw'::regclass::oid)";
+    let mut tx = db.pool.begin().await.expect("begin intent transaction");
+    let _: i64 = sqlx::query_scalar(request_sql)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("request intent");
+    let outside: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.pgt_ann_maintenance_requests")
+        .await;
+    assert_eq!(outside, 0, "uncommitted intent must not be visible");
+    tx.rollback().await.expect("roll back intent");
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.pgt_ann_maintenance_requests")
+            .await,
+        0
+    );
+
+    let (a, b) = tokio::join!(
+        sqlx::query_scalar::<_, i64>(request_sql).fetch_one(&db.pool),
+        sqlx::query_scalar::<_, i64>(request_sql).fetch_one(&db.pool)
+    );
+    let first = a.expect("first request");
+    assert_eq!(first, b.expect("concurrent duplicate request"));
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(first)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect request");
+    assert_eq!(status["state"], "REQUESTED");
+    assert_eq!(status["identity_current"], true);
+    let (first_epoch, last_epoch): (Option<i64>, Option<i64>) = sqlx::query_as("SELECT first_observed_epoch, last_observed_epoch FROM pgtrickle.pgt_ann_maintenance_requests WHERE request_id = $1").bind(first).fetch_one(&db.pool).await.expect("request epochs");
+    assert!(first_epoch.is_some());
+    assert_eq!(first_epoch, last_epoch);
+    db.execute("INSERT INTO ann_intent_source VALUES (2, '[0,1,0]')")
+        .await;
+    db.refresh_st("ann_intent_stream").await;
+    let changed: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(first)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect intervening refresh");
+    assert_eq!(changed["identity_current"], true);
+    assert!(changed["current_epoch"].as_i64() > changed["last_observed_epoch"].as_i64());
+    let repeated: i64 = db.query_scalar(request_sql).await;
+    assert_eq!(first, repeated);
+    let dump_condition: String = db.query_scalar("SELECT extcondition[array_position(extconfig, 'pgtrickle.pgt_ann_maintenance_requests'::regclass::oid)] FROM pg_extension WHERE extname='pg_trickle'").await;
+    assert_eq!(
+        dump_condition, "WHERE false",
+        "database-local requests must not be restored as valid work"
+    );
+    let (original, latest): (Option<i64>, Option<i64>) = sqlx::query_as("SELECT first_observed_epoch, last_observed_epoch FROM pgtrickle.pgt_ann_maintenance_requests WHERE request_id = $1").bind(first).fetch_one(&db.pool).await.expect("updated request epochs");
+    assert_eq!(original, first_epoch);
+    assert!(latest > original);
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET ann_refresh_epoch = NULL WHERE pgt_name = 'ann_intent_stream'").await;
+    assert_eq!(db.query_scalar::<i64>(request_sql).await, first);
+    let unknown: (Option<i64>, Option<i64>) = sqlx::query_as("SELECT first_observed_epoch, last_observed_epoch FROM pgtrickle.pgt_ann_maintenance_requests WHERE request_id = $1").bind(first).fetch_one(&db.pool).await.expect("unknown epochs");
+    assert_eq!(unknown, (None, None));
+    let invalid = db.try_execute("SELECT pgtrickle.request_ann_maintenance('ann_intent_stream'::regclass::oid, 'ann_intent_btree'::regclass::oid)").await;
+    assert!(invalid.is_err(), "non-ANN indexes must be rejected");
+    db.execute("DROP INDEX ann_intent_hnsw").await;
+    let stale: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(first)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect stale request");
+    assert_eq!(stale["identity_current"], false);
+    db.execute("CREATE INDEX ann_intent_hnsw ON ann_intent_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let replacement: i64 = db.query_scalar(request_sql).await;
+    assert_ne!(
+        first, replacement,
+        "a replacement index must not reuse the old request"
+    );
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.pgt_ann_maintenance_requests")
+            .await,
+        2
+    );
+    db.execute("SELECT pgtrickle.drop_stream_table('ann_intent_stream')")
+        .await;
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.pgt_ann_maintenance_requests")
+            .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn test_ann_maintenance_intent_requires_execute_select_and_maintain() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_intent_auth_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_intent_auth_stream",
+        "SELECT id, embedding FROM ann_intent_auth_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_intent_auth_idx ON ann_intent_auth_stream USING hnsw (embedding vector_cosine_ops)").await;
+    db.execute("CREATE ROLE ann_intent_operator NOLOGIN").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO ann_intent_operator")
+        .await;
+    db.execute("GRANT SELECT, MAINTAIN ON ann_intent_auth_stream TO ann_intent_operator")
+        .await;
+    let private: bool = db.query_scalar("SELECT NOT has_table_privilege('ann_intent_operator', 'pgtrickle.pgt_ann_maintenance_requests', 'SELECT')").await;
+    assert!(private, "request catalog must not be publicly readable");
+    let mut tx = db.pool.begin().await.expect("begin unauthorized call");
+    sqlx::query("SET LOCAL ROLE ann_intent_operator")
+        .execute(&mut *tx)
+        .await
+        .expect("set role");
+    let request = "SELECT pgtrickle.request_ann_maintenance('ann_intent_auth_stream'::regclass::oid, 'ann_intent_auth_idx'::regclass::oid)";
+    assert!(
+        sqlx::query_scalar::<_, i64>(request)
+            .fetch_one(&mut *tx)
+            .await
+            .is_err(),
+        "PUBLIC must not execute the function"
+    );
+    tx.rollback().await.expect("end unauthorized call");
+    db.execute("GRANT EXECUTE ON FUNCTION pgtrickle.request_ann_maintenance(oid, oid) TO ann_intent_operator").await;
+    db.execute("GRANT EXECUTE ON FUNCTION pgtrickle.ann_maintenance_request(bigint) TO ann_intent_operator").await;
+    db.execute("REVOKE MAINTAIN ON ann_intent_auth_stream FROM ann_intent_operator")
+        .await;
+    let mut tx = db.pool.begin().await.expect("begin denied privilege call");
+    sqlx::query("SET LOCAL ROLE ann_intent_operator")
+        .execute(&mut *tx)
+        .await
+        .expect("set role");
+    assert!(
+        sqlx::query_scalar::<_, i64>(request)
+            .fetch_one(&mut *tx)
+            .await
+            .is_err(),
+        "MAINTAIN must be rechecked"
+    );
+    tx.rollback().await.expect("end denied call");
+    db.execute("GRANT MAINTAIN ON ann_intent_auth_stream TO ann_intent_operator")
+        .await;
+    let mut tx = db.pool.begin().await.expect("begin authorized call");
+    sqlx::query("SET LOCAL ROLE ann_intent_operator")
+        .execute(&mut *tx)
+        .await
+        .expect("set role");
+    let id: i64 = sqlx::query_scalar(request)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("authorized request");
+    assert!(id > 0);
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("authorized inspection");
+    assert_eq!(status["identity_current"], true);
+    tx.commit().await.expect("commit authorized request");
+    db.execute("REVOKE MAINTAIN ON ann_intent_auth_stream FROM ann_intent_operator")
+        .await;
+    let mut tx = db.pool.begin().await.expect("begin revoked inspection");
+    sqlx::query("SET LOCAL ROLE ann_intent_operator")
+        .execute(&mut *tx)
+        .await
+        .expect("set role");
+    assert!(
+        sqlx::query_scalar::<_, serde_json::Value>("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .is_err()
+    );
+    tx.rollback().await.expect("end revoked inspection");
+}
+
+#[tokio::test]
+async fn test_ann_maintenance_intent_delayed_request_cannot_regress_epoch() {
+    use std::time::Duration;
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_intent_race_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_intent_race_stream",
+        "SELECT id, embedding FROM ann_intent_race_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_intent_race_idx ON ann_intent_race_stream USING hnsw (embedding vector_cosine_ops)").await;
+    db.execute("CREATE FUNCTION public.hold_old_ann_request() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+        IF current_setting('application_name') = 'ann-old-request' THEN \
+          PERFORM pg_advisory_xact_lock(7341, 82); END IF; RETURN NEW; END $$").await;
+    db.execute("CREATE TRIGGER hold_old_ann_request BEFORE INSERT ON pgtrickle.pgt_ann_maintenance_requests \
+        FOR EACH ROW EXECUTE FUNCTION public.hold_old_ann_request()").await;
+    let mut blocker = db.pool.begin().await.expect("begin barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("barrier pid");
+    sqlx::query("SELECT pg_advisory_xact_lock(7341, 82)")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold request barrier");
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let pool = db.pool.clone();
+    let old = tokio::spawn(async move {
+        let mut tx = pool.begin().await.expect("begin old request");
+        sqlx::query("SET LOCAL application_name = 'ann-old-request'")
+            .execute(&mut *tx)
+            .await
+            .expect("mark old request");
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("old request pid");
+        sender.send(pid).expect("send pid");
+        let id: i64 = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_intent_race_stream'::regclass::oid, 'ann_intent_race_idx'::regclass::oid)")
+            .fetch_one(&mut *tx).await.expect("submit old request");
+        tx.commit().await.expect("commit old request");
+        id
+    });
+    let old_pid = receiver.await.expect("receive old request pid");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                .bind(blocker_pid)
+                .bind(old_pid)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect barrier");
+            if waiting {
+                break;
+            }
+            assert!(
+                !old.is_finished(),
+                "old request ended before reaching the barrier"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("old request did not reach the barrier");
+    db.execute("INSERT INTO ann_intent_race_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.refresh_st("ann_intent_race_stream").await;
+    let newer: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_intent_race_stream'::regclass::oid, 'ann_intent_race_idx'::regclass::oid)").await;
+    let observed: i64 = sqlx::query_scalar("SELECT last_observed_epoch FROM pgtrickle.pgt_ann_maintenance_requests WHERE request_id = $1")
+        .bind(newer).fetch_one(&db.pool).await.expect("read newer epoch");
+    blocker.commit().await.expect("release barrier");
+    assert_eq!(old.await.expect("join old request"), newer);
+    let (first, last): (i64, i64) = sqlx::query_as("SELECT first_observed_epoch, last_observed_epoch FROM pgtrickle.pgt_ann_maintenance_requests WHERE request_id = $1")
+        .bind(newer).fetch_one(&db.pool).await.expect("read merged epochs");
+    assert!(first < last, "the older observation should remain visible");
+    assert_eq!(
+        last, observed,
+        "a delayed request must not lower the latest epoch"
+    );
+}
+
+#[tokio::test]
+async fn test_ann_maintenance_intent_survives_restart() {
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_intent_restart_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_intent_restart_stream",
+        "SELECT id, embedding FROM ann_intent_restart_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_intent_restart_idx ON ann_intent_restart_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let sql = "SELECT pgtrickle.request_ann_maintenance('ann_intent_restart_stream'::regclass::oid, 'ann_intent_restart_idx'::regclass::oid)";
+    let before: i64 = db.query_scalar(sql).await;
+    db.pool.close().await;
+    let restarted = tokio::process::Command::new("docker")
+        .args(["restart", db.container_id()])
+        .output()
+        .await
+        .expect("restart PostgreSQL");
+    assert!(restarted.status.success());
+    db.pool = db.reconnect_after_restart().await;
+    let after: i64 = db.query_scalar(sql).await;
+    assert_eq!(
+        before, after,
+        "restart must preserve and deduplicate the request"
+    );
+}
+
+#[tokio::test]
 async fn test_ann_refresh_epoch_is_transactional_and_independent_of_legacy_counter() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
@@ -263,6 +575,23 @@ async fn test_manual_ann_candidates_select_only_authorized_leaf_indexes() {
     let methods: std::collections::HashSet<&str> =
         indexes.iter().map(|row| row.2.as_str()).collect();
     assert_eq!(methods, ["hnsw", "ivfflat"].into_iter().collect());
+    let root: i64 = db
+        .query_scalar("SELECT 'ann_manual_stream'::regclass::oid::bigint")
+        .await;
+    let request: i64 = sqlx::query_scalar(
+        "SELECT pgtrickle.request_ann_maintenance($1::bigint::oid, $2::bigint::oid)",
+    )
+    .bind(root)
+    .bind(indexes[0].0)
+    .fetch_one(&db.pool)
+    .await
+    .expect("request a partition leaf");
+    assert!(request > 0);
+    let parent = db.try_execute("SELECT pgtrickle.request_ann_maintenance('ann_manual_stream'::regclass::oid, 'ann_manual_hnsw'::regclass::oid)").await;
+    assert!(
+        parent.is_err(),
+        "partitioned parent indexes must not be enqueued as leaves"
+    );
     for (oid, _, _) in indexes {
         let leaf: bool = sqlx::query_scalar("SELECT c.relkind = 'i' AND NOT EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent = c.oid) FROM pg_class c WHERE c.oid = $1::bigint::oid")
             .bind(oid).fetch_one(&db.pool).await.expect("inspect leaf index");

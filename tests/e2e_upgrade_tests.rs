@@ -558,6 +558,18 @@ async fn test_upgrade_embedding_helpers_from_0109() {
     db.execute("SELECT * FROM pgtrickle.embedding_stream_table_v2('upgrade_cosine', 'upgrade_vectors', 'embedding', 'cosine')").await;
     let valid: i64 = db.query_scalar("SELECT count(*) FROM pg_index i JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid IN ('upgrade_l2'::regclass, 'upgrade_cosine'::regclass) AND i.indisready AND i.indisvalid AND op.opcname IN ('vector_l2_ops','vector_cosine_ops')").await;
     assert_eq!(valid, 2);
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('upgrade_cosine'::regclass::oid, \
+        (SELECT i.indexrelid FROM pg_index i JOIN pg_opclass op ON op.oid = i.indclass[0] \
+         WHERE i.indrelid = 'upgrade_cosine'::regclass AND op.opcname = 'vector_cosine_ops' LIMIT 1))").await;
+    assert!(request > 0);
+    db.execute("CREATE ROLE upgrade_ann_unprivileged NOLOGIN")
+        .await;
+    let private: bool = db.query_scalar("SELECT NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.request_ann_maintenance(oid,oid)', 'EXECUTE') \
+        AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.ann_maintenance_request(bigint)', 'EXECUTE')").await;
+    assert!(
+        private,
+        "upgrade must revoke PUBLIC access to the intent APIs"
+    );
 }
 
 #[tokio::test]

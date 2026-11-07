@@ -21,6 +21,7 @@ use crate::template_cache;
 use crate::version;
 use crate::wal_decoder;
 
+pub(crate) mod ann_maintenance;
 pub(crate) mod integration;
 pub(crate) mod outbox;
 pub(crate) mod output_delta;

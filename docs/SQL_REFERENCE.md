@@ -4292,6 +4292,41 @@ See also: [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [FAQ.md](FAQ.md).
 
 ## Catalog Tables
 
+### pgtrickle.request_ann_maintenance
+
+```sql
+pgtrickle.request_ann_maintenance(stream_table oid, index_oid oid) → bigint
+```
+
+Records an explicit maintenance intent for a valid HNSW or IVFFlat leaf index
+on the specified stream table. The caller must have `SELECT` on the stream
+table, `MAINTAIN` on the leaf, and schema usage on both. Execution is revoked
+from `PUBLIC`; an administrator must grant it explicitly. The operation does
+not rebuild an index or start a worker. Repeated requests for the same captured
+index identity return the same ID and update the last observed epoch.
+
+Requests commit or roll back with the caller's transaction and are stored in
+the private `pgtrickle.pgt_ann_maintenance_requests` catalog. Index and table
+OIDs and filenodes are database-local: a future worker must revalidate them,
+the index definition, database identity, and current privileges before acting.
+Requests are deliberately excluded from logical dump/restore; operators must
+recreate them after a restore. This API does not yet provide claims, execution,
+completion, retries, cooldowns, or automatic threshold-based requests.
+
+### pgtrickle.ann_maintenance_request
+
+```sql
+pgtrickle.ann_maintenance_request(request_id bigint) → jsonb
+```
+
+Returns the request's recorded and current epochs, timestamps, object OIDs,
+and `identity_current`, after rechecking the caller's privileges. `REQUESTED`
+means only that intent was recorded. A false `identity_current` means the
+captured database, stream, leaf, or index identity is no longer valid; `true`
+is a point-in-time observation and does not prevent later DDL. An unchanged
+epoch does not rule out an in-flight refresh. Execution is revoked from
+`PUBLIC`; an administrator must grant it explicitly.
+
 ### pgtrickle.pgt_stream_tables
 
 Core metadata for each stream table.
