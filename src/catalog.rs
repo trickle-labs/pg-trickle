@@ -319,6 +319,21 @@ pub struct RefreshRuntimeTuning {
 }
 
 impl StreamTableMeta {
+    /// Record an IMMEDIATE storage rewrite without changing refresh timestamps.
+    pub fn advance_ann_refresh_epoch(pgt_id: i64) -> Result<(), PgTrickleError> {
+        let epoch = ann_epoch_assignment()?;
+        if epoch.is_empty() {
+            return Ok(());
+        }
+        Spi::run_with_args(
+            &format!(
+                "UPDATE pgtrickle.pgt_stream_tables SET {} WHERE pgt_id = $1",
+                epoch.trim_end_matches(", ")
+            ),
+            &[pgt_id.into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
     pub fn runtime_tuning(&self) -> RefreshRuntimeTuning {
         let percent = i32::from(self.self_heal_work_mem_percent.clamp(25, 100));
         let scale = |value: i32| {

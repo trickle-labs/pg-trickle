@@ -1887,6 +1887,62 @@ async fn test_ann_refresh_epoch_is_transactional_and_independent_of_legacy_count
 }
 
 #[tokio::test]
+async fn test_ann_refresh_epoch_tracks_immediate_truncate_transactionally() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_truncate_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_truncate_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table('ann_truncate_stream', 'SELECT id, embedding FROM ann_truncate_source', NULL, 'IMMEDIATE')").await;
+    db.execute(
+        "CREATE INDEX ann_truncate_idx ON ann_truncate_stream USING hnsw (embedding vector_l2_ops)",
+    )
+    .await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_truncate_stream'::regclass::oid, 'ann_truncate_idx'::regclass::oid)").await;
+    let mut worker = db.pool.acquire().await.expect("worker session");
+    let claim: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .fetch_one(&mut *worker)
+        .await
+        .expect("claim request");
+    let claim_epoch = claim["claim_epoch"].as_i64().expect("claim epoch");
+    let mut tx = db.pool.begin().await.expect("begin truncate transaction");
+    sqlx::query("TRUNCATE ann_truncate_source")
+        .execute(&mut *tx)
+        .await
+        .expect("truncate source");
+    let uncommitted: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_truncate_stream'")
+        .fetch_one(&mut *tx).await.expect("read uncommitted epoch");
+    assert!(uncommitted > claim_epoch);
+    tx.rollback().await.expect("roll back truncate");
+    let after_rollback: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_truncate_stream'").await;
+    assert_eq!(after_rollback, claim_epoch);
+    db.execute("TRUNCATE ann_truncate_source").await;
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("finish request");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect request");
+    assert_eq!(status["reported_covered_epoch"].as_i64(), Some(claim_epoch));
+    assert!(
+        status["epoch_advances_since_reported_coverage"]
+            .as_i64()
+            .is_some_and(|n| n > 0)
+    );
+    let remaining: i64 = db
+        .query_scalar("SELECT count(*) FROM ann_truncate_stream")
+        .await;
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
 async fn test_ann_refresh_epoch_covers_immediate_and_full_rebuilds() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

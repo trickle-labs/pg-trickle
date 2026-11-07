@@ -1464,6 +1464,7 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
         })?;
     }
 
+    StreamTableMeta::advance_ann_refresh_epoch(pgt_id)?;
     pgrx::log!("[pg_trickle] IVM TRUNCATE handled for pgt_id={}", pgt_id,);
 
     Ok(())
