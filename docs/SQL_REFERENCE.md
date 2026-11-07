@@ -1240,8 +1240,17 @@ pgtrickle.alter_stream_table(
 | `partition_by` | `text` | `NULL` | Partition key column for the storage table. Pass `NULL` to leave unchanged. Changing the key rebuilds storage and is rejected if external objects depend on it. |
 | `max_differential_joins` | `integer` | `NULL` | Per-stream-table cap on join combinations during differential refresh. Pass `NULL` to leave unchanged. |
 | `max_delta_fraction` | `float8` | `NULL` | Per-stream-table AUTO cost model threshold (0.0–1.0). Pass `NULL` to leave unchanged. |
-| `post_refresh_action` | `text` | `NULL` | Action to take after each successful refresh: `'reindex'` (rebuild indexes when drift exceeds threshold) or `NULL` (no action). |
-| `reindex_drift_threshold` | `float8` | `NULL` | Index drift ratio threshold (0.0–1.0) for `post_refresh_action = 'reindex'`. Pass `NULL` to leave unchanged. |
+| `post_refresh_action` | `text` | `NULL` | Set to `'none'`, `'analyze'`, `'reindex'` after each changed refresh, or `'reindex_if_drift'` when the changed-row ratio reaches its threshold. `NULL` leaves the existing setting unchanged. |
+| `reindex_drift_threshold` | `float8` | `NULL` | Changed-row ratio threshold for `post_refresh_action = 'reindex_if_drift'`. Pass `NULL` to leave unchanged. This is a churn estimate, not measured recall or semantic drift. |
+
+The current `reindex` actions run non-concurrent `REINDEX TABLE` in the refresh
+transaction after applying the data changes. They rebuild all indexes on the
+table and may block writes and queries until the transaction ends. Errors are
+isolated and logged so they do not abort the refresh; the changed-row counter
+remains available after a failed rebuild. For separately scheduled concurrent
+maintenance, set the action to `none` and execute the appropriate PostgreSQL
+`REINDEX ... CONCURRENTLY` command outside a transaction block. There is no
+durable maintenance request queue in this release.
 
 If you switch a stream table to `refresh_mode => 'IMMEDIATE'` while the
 cluster-wide `pg_trickle.cdc_mode` GUC is set to `'wal'`, pg_trickle rejects the

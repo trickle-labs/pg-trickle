@@ -969,6 +969,100 @@ async fn test_pgvector_hnsw_index_on_stream_table() {
 // T-VP1 (v0.47.0): Drift-based reindex on HNSW stream table
 // ═══════════════════════════════════════════════════════════════════════
 
+#[tokio::test]
+async fn test_post_refresh_reindex_failure_does_not_rollback_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE maintenance_fail_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "maintenance_fail_st",
+        "SELECT id, embedding FROM maintenance_fail_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX maintenance_fail_hnsw ON maintenance_fail_st USING hnsw (embedding vector_l2_ops)").await;
+    db.execute("SELECT pgtrickle.alter_stream_table('maintenance_fail_st', post_refresh_action => 'reindex')").await;
+    db.execute("CREATE FUNCTION fail_reindex() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected reindex failure'; END $$").await;
+    db.execute("CREATE EVENT TRIGGER fail_reindex ON ddl_command_start WHEN TAG IN ('REINDEX') EXECUTE FUNCTION fail_reindex()").await;
+    db.execute("INSERT INTO maintenance_fail_src VALUES (1,'[1,0,0]')")
+        .await;
+    let notices = db
+        .try_execute_with_notices("SELECT pgtrickle.refresh_stream_table('maintenance_fail_st')")
+        .await
+        .expect("maintenance failure must not roll back refresh");
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("injected reindex failure")),
+        "maintenance failure must be observable: {notices:?}"
+    );
+    db.assert_st_matches_query(
+        "maintenance_fail_st",
+        "SELECT id, embedding FROM maintenance_fail_src",
+    )
+    .await;
+    let changed: i64 = db
+        .query_scalar("SELECT rows_changed_since_last_reindex FROM pgtrickle.pgt_stream_tables WHERE pgt_name='maintenance_fail_st'")
+        .await;
+    assert_eq!(
+        changed, 1,
+        "failed maintenance must retain the changed-row count"
+    );
+}
+
+#[tokio::test]
+async fn test_post_refresh_reindex_success_and_transaction_rollback() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE maintenance_success_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "maintenance_success_st",
+        "SELECT id, embedding FROM maintenance_success_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX maintenance_success_hnsw ON maintenance_success_st USING hnsw (embedding vector_l2_ops)").await;
+    db.execute("SELECT pgtrickle.alter_stream_table('maintenance_success_st', post_refresh_action => 'reindex')").await;
+    let original: i64 = db
+        .query_scalar("SELECT pg_relation_filenode('maintenance_success_hnsw'::regclass)::bigint")
+        .await;
+    db.execute("INSERT INTO maintenance_success_src VALUES (1,'[1,0,0]')")
+        .await;
+    let mut tx = db.pool.begin().await.expect("begin refresh transaction");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('maintenance_success_st')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh and reindex");
+    let rebuilt: i64 = sqlx::query_scalar(
+        "SELECT pg_relation_filenode('maintenance_success_hnsw'::regclass)::bigint",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read rebuilt index identity");
+    assert_ne!(
+        rebuilt, original,
+        "successful maintenance must rebuild the index"
+    );
+    tx.rollback().await.expect("rollback refresh and reindex");
+    let after_rollback: i64 = db
+        .query_scalar("SELECT pg_relation_filenode('maintenance_success_hnsw'::regclass)::bigint")
+        .await;
+    assert_eq!(after_rollback, original);
+    assert_eq!(db.count("public.maintenance_success_st").await, 0);
+    db.refresh_st("maintenance_success_st").await;
+    db.assert_st_matches_query(
+        "maintenance_success_st",
+        "SELECT id, embedding FROM maintenance_success_src",
+    )
+    .await;
+    let state: (i64, bool) = sqlx::query_as("SELECT rows_changed_since_last_reindex,last_reindex_at IS NOT NULL FROM pgtrickle.pgt_stream_tables WHERE pgt_name='maintenance_success_st'").fetch_one(&db.pool).await.expect("inspect successful maintenance");
+    assert_eq!(state, (0, true));
+}
+
 /// T-VP1: Create a vector stream table with post_refresh_action='reindex_if_drift',
 /// change rows beyond the threshold, verify that the drift counter increments
 /// and that last_reindex_at is updated after a refresh.
