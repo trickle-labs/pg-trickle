@@ -4369,7 +4369,9 @@ failure leaves the previous value intact. `epoch_advances_since_reported_coverag
 is the difference from the current stream epoch when both are known. A refresh
 committed after the claim remains in that difference even if it completed
 while the rebuild ran. These are epoch advances, not counts of refreshes or
-changed rows; a single manual refresh can advance the epoch more than once.
+changed rows; a single manual refresh can advance the epoch more than once,
+and an immediate Top-K recomputation can advance it even when its result is
+unchanged.
 They do not measure recall, and success is the caller's report. A `NULL` epoch or
 missing coverage yields an unknown difference. A manual rebuild outside this
 interface does not advance reported coverage. No refresh counter is reset.

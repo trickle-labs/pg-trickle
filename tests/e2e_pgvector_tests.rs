@@ -1887,6 +1887,79 @@ async fn test_ann_refresh_epoch_is_transactional_and_independent_of_legacy_count
 }
 
 #[tokio::test]
+async fn test_ann_refresh_epoch_tracks_snapshot_restore_transactionally() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_snapshot_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_snapshot_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "ann_snapshot_stream",
+        "SELECT id, embedding FROM ann_snapshot_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.snapshot_stream_table('ann_snapshot_stream', 'public.ann_snapshot_archive')").await;
+    db.execute("INSERT INTO ann_snapshot_source VALUES (2, '[0,1,0]')")
+        .await;
+    db.refresh_st("ann_snapshot_stream").await;
+    let epoch_sql = "SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_snapshot_stream'";
+    let before: i64 = db.query_scalar(epoch_sql).await;
+    let mut tx = db.pool.begin().await.expect("begin restore transaction");
+    sqlx::query("SELECT pgtrickle.restore_from_snapshot('ann_snapshot_stream', 'public.ann_snapshot_archive')")
+        .execute(&mut *tx).await.expect("restore snapshot");
+    let uncommitted: i64 = sqlx::query_scalar(epoch_sql)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read epoch");
+    assert!(uncommitted > before);
+    tx.rollback().await.expect("roll back restore");
+    let rolled_back: i64 = db.query_scalar(epoch_sql).await;
+    assert_eq!(rolled_back, before);
+    db.execute("SELECT pgtrickle.restore_from_snapshot('ann_snapshot_stream', 'public.ann_snapshot_archive')").await;
+    let committed: i64 = db.query_scalar(epoch_sql).await;
+    assert!(committed > before);
+    let rows: i64 = db
+        .query_scalar("SELECT count(*) FROM ann_snapshot_stream")
+        .await;
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+async fn test_ann_refresh_epoch_tracks_immediate_topk_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_topk_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_topk_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table('ann_topk_stream', 'SELECT id, embedding FROM ann_topk_source ORDER BY id DESC LIMIT 1', NULL, 'IMMEDIATE')").await;
+    let epoch_sql = "SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_topk_stream'";
+    let before: i64 = db.query_scalar(epoch_sql).await;
+    let mut tx = db.pool.begin().await.expect("begin Top-K transaction");
+    sqlx::query("INSERT INTO ann_topk_source VALUES (2, '[0,1,0]')")
+        .execute(&mut *tx)
+        .await
+        .expect("insert in Top-K transaction");
+    let uncommitted: i64 = sqlx::query_scalar(epoch_sql)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read uncommitted Top-K epoch");
+    assert!(uncommitted > before);
+    tx.rollback().await.expect("roll back Top-K change");
+    let rolled_back: i64 = db.query_scalar(epoch_sql).await;
+    assert_eq!(rolled_back, before);
+    db.execute("INSERT INTO ann_topk_source VALUES (2, '[0,1,0]')")
+        .await;
+    let id: i32 = db.query_scalar("SELECT id FROM ann_topk_stream").await;
+    assert_eq!(id, 2);
+    let after: i64 = db.query_scalar(epoch_sql).await;
+    assert!(after > before);
+}
+
+#[tokio::test]
 async fn test_ann_refresh_epoch_tracks_immediate_truncate_transactionally() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

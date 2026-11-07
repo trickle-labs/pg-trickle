@@ -319,7 +319,7 @@ pub struct RefreshRuntimeTuning {
 }
 
 impl StreamTableMeta {
-    /// Record an IMMEDIATE storage rewrite without changing refresh timestamps.
+    /// Record a storage rewrite without changing refresh timestamps.
     pub fn advance_ann_refresh_epoch(pgt_id: i64) -> Result<(), PgTrickleError> {
         let epoch = ann_epoch_assignment()?;
         if epoch.is_empty() {
