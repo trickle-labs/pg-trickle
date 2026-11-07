@@ -2343,10 +2343,17 @@ fn build_pk_hash_trigger_exprs(
 
     if hash_cols.len() == 1 {
         let col = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
-        (
-            format!("pgtrickle.encode_row_id_v3('{domain}', ROW(NEW.{col}))"),
-            format!("pgtrickle.encode_row_id_v3('{domain}', ROW(OLD.{col}))"),
-        )
+        let sql_type = all_columns
+            .iter()
+            .find(|(name, _)| name == &hash_cols[0])
+            .map(|(_, sql_type)| sql_type.as_str())
+            .unwrap_or("");
+        let expr = |prefix: &str| {
+            let value = format!("{prefix}.{col}");
+            scalar_pk_row_id_expr(domain, &value, sql_type)
+                .unwrap_or_else(|| format!("pgtrickle.encode_row_id_v3('{domain}', ROW({value}))"))
+        };
+        (expr("NEW"), expr("OLD"))
     } else {
         let new_items: Vec<String> = hash_cols
             .iter()
@@ -2361,6 +2368,21 @@ fn build_pk_hash_trigger_exprs(
             crate::hash::build_row_identity_expr(domain, &old_items),
         )
     }
+}
+
+fn scalar_pk_row_id_expr(domain: &str, value: &str, sql_type: &str) -> Option<String> {
+    if domain != "SCAN_KEY" {
+        return None;
+    }
+    let (type_tag, send, sign_bit) = match sql_type {
+        "smallint" => (0x02, "int2send", "(-32768)::smallint"),
+        "integer" => (0x03, "int4send", "(-2147483648)::integer"),
+        "bigint" => (0x04, "int8send", "(-9223372036854775808)::bigint"),
+        _ => return None,
+    };
+    Some(format!(
+        "pg_catalog.decode('030100000001{type_tag:02x}01','hex') || pg_catalog.{send}(({value}) # {sign_bit}) || pg_catalog.decode('ff','hex')"
+    ))
 }
 
 // ── Trigger SQL builders ──────────────────────────────────────────────────
@@ -2829,7 +2851,14 @@ fn build_pk_hash_stmt_expr(
 
     if hash_cols.len() == 1 {
         let col = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
-        format!("pgtrickle.encode_row_id_v3('{domain}', ROW({prefix}.{col}))")
+        let value = format!("{prefix}.{col}");
+        let sql_type = all_columns
+            .iter()
+            .find(|(name, _)| name == &hash_cols[0])
+            .map(|(_, sql_type)| sql_type.as_str())
+            .unwrap_or("");
+        scalar_pk_row_id_expr(domain, &value, sql_type)
+            .unwrap_or_else(|| format!("pgtrickle.encode_row_id_v3('{domain}', ROW({value}))"))
     } else {
         let items: Vec<String> = hash_cols
             .iter()
@@ -3852,7 +3881,7 @@ mod tests {
         assert!(!update.contains("FULL JOIN"), "{update}");
         assert!(update.contains("FROM __pgt_old o"));
         assert!(update.contains("FROM __pgt_new n"));
-        assert!(update.contains("'SCAN_KEY'"));
+        assert!(update.contains("0301000000010301"), "{update}");
     }
 
     // ── build_pk_hash_trigger_exprs tests ────────────────────────────
@@ -3864,11 +3893,42 @@ mod tests {
         let (new_expr, old_expr) = build_pk_hash_trigger_exprs(&pk, &all);
         assert_eq!(
             new_expr,
-            r#"pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(NEW."id"))"#
+            "pg_catalog.decode('0301000000010301','hex') || pg_catalog.int4send((NEW.\"id\") # (-2147483648)::integer) || pg_catalog.decode('ff','hex')"
         );
         assert_eq!(
             old_expr,
-            r#"pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(OLD."id"))"#
+            "pg_catalog.decode('0301000000010301','hex') || pg_catalog.int4send((OLD.\"id\") # (-2147483648)::integer) || pg_catalog.decode('ff','hex')"
+        );
+        assert_eq!(
+            build_pk_hash_stmt_expr("n", &pk, &all),
+            "pg_catalog.decode('0301000000010301','hex') || pg_catalog.int4send((n.\"id\") # (-2147483648)::integer) || pg_catalog.decode('ff','hex')"
+        );
+    }
+
+    #[test]
+    fn test_build_pk_hash_integer_widths_and_fallback() {
+        for (sql_type, tag, send, sign_bit) in [
+            ("smallint", "02", "int2send", "(-32768)::smallint"),
+            ("integer", "03", "int4send", "(-2147483648)::integer"),
+            ("bigint", "04", "int8send", "(-9223372036854775808)::bigint"),
+        ] {
+            let pk = vec!["id".to_string()];
+            let columns = vec![("id".to_string(), sql_type.to_string())];
+            let expr = build_pk_hash_stmt_expr("n", &pk, &columns);
+            assert_eq!(
+                expr,
+                format!(
+                    "pg_catalog.decode('030100000001{tag}01','hex') || pg_catalog.{send}((n.\"id\") # {sign_bit}) || pg_catalog.decode('ff','hex')"
+                ),
+                "{sql_type}"
+            );
+        }
+
+        let pk = vec!["id".to_string()];
+        let columns = vec![("id".to_string(), "text".to_string())];
+        assert_eq!(
+            build_pk_hash_stmt_expr("n", &pk, &columns),
+            r#"pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(n."id"))"#
         );
     }
 
