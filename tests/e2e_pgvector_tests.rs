@@ -192,6 +192,104 @@ async fn test_ann_worker_rejects_a_replaced_index() {
 }
 
 #[tokio::test]
+async fn test_ann_worker_revalidates_index_after_claim() {
+    use std::process::Stdio;
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_worker_race_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_worker_race_stream",
+        "SELECT id, embedding FROM ann_worker_race_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_worker_race_idx ON ann_worker_race_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_worker_race_stream'::regclass::oid, 'ann_worker_race_idx'::regclass::oid)").await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let mut command = ann_worker_command(&db, &database, "postgres", request, "5s");
+    command.stdin(Stdio::piped());
+    let mut child = command.spawn().expect("start ANN worker");
+    let mut input = child.stdin.take().expect("worker stdin");
+    let script = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/ann_maintenance_worker.sql"
+    ));
+    let claim_line =
+        "SELECT pgtrickle.claim_ann_maintenance(:'request_id'::bigint) AS ann_claim \\gset\n";
+    let (before, after) = script
+        .split_once(claim_line)
+        .expect("worker claim boundary");
+    input
+        .write_all(before.as_bytes())
+        .await
+        .expect("send worker setup");
+    input
+        .write_all(claim_line.as_bytes())
+        .await
+        .expect("send worker claim");
+    input.flush().await.expect("flush worker input");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(request)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect claim");
+            if status["state"] == "RUNNING" {
+                break;
+            }
+            assert!(
+                child.try_wait().expect("inspect worker process").is_none(),
+                "worker exited before claiming"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("worker did not claim request");
+    db.execute("DROP INDEX ann_worker_race_idx").await;
+    db.execute("CREATE INDEX ann_worker_race_idx ON ann_worker_race_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let replacement: i64 = db
+        .query_scalar("SELECT 'ann_worker_race_idx'::regclass::oid::bigint")
+        .await;
+    input
+        .write_all(after.as_bytes())
+        .await
+        .expect("send remainder of worker");
+    input.shutdown().await.expect("close worker input");
+    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .expect("worker did not finish")
+        .expect("wait for worker");
+    assert!(
+        !output.status.success(),
+        "worker must not execute a stale claim"
+    );
+    let after: i64 = db
+        .query_scalar("SELECT 'ann_worker_race_idx'::regclass::oid::bigint")
+        .await;
+    assert_eq!(replacement, after, "replacement must not be rebuilt");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect stale claim");
+    assert_eq!(
+        status["state"],
+        "FAILED",
+        "worker stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
 async fn test_ann_worker_records_lock_timeout_and_can_retry() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
