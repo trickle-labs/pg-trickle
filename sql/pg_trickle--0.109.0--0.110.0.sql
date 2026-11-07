@@ -15,12 +15,13 @@ CREATE TABLE pgtrickle.pgt_ann_maintenance_requests (
     index_definition TEXT NOT NULL,
     first_observed_epoch BIGINT,
     last_observed_epoch BIGINT,
-    state TEXT NOT NULL DEFAULT 'REQUESTED' CHECK (state IN ('REQUESTED', 'RUNNING', 'SUCCEEDED', 'FAILED')),
+    state TEXT NOT NULL DEFAULT 'REQUESTED' CHECK (state IN ('REQUESTED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
     claim_pid INTEGER,
     claim_backend_start TIMESTAMPTZ,
     claim_role OID,
     claim_epoch BIGINT,
     pending_during_run BOOLEAN NOT NULL DEFAULT FALSE,
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
     last_error TEXT,
     completed_at TIMESTAMPTZ,
     requested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
@@ -55,6 +56,11 @@ RETURNS jsonb STRICT SECURITY DEFINER
 SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c AS 'MODULE_PATHNAME', 'ann_maintenance_request_wrapper';
 REVOKE EXECUTE ON FUNCTION pgtrickle.ann_maintenance_request(bigint) FROM PUBLIC;
+CREATE FUNCTION pgtrickle.cancel_ann_maintenance(request_id bigint)
+RETURNS jsonb STRICT SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', 'cancel_ann_maintenance_wrapper';
+REVOKE EXECUTE ON FUNCTION pgtrickle.cancel_ann_maintenance(bigint) FROM PUBLIC;
 CREATE FUNCTION pgtrickle.claim_ann_maintenance(request_id bigint)
 RETURNS jsonb STRICT SECURITY DEFINER
 SET search_path TO pgtrickle, pg_catalog, pg_temp

@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**175 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**176 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -27,6 +27,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.bulk_create()` | `pgtrickle` | `jsonb` | On any error, the entire transaction is rolled back (standard PostgreSQL transactional semantics). |
 | `pgtrickle.bulk_drop_stream_tables()` | `pgtrickle` | `integer` | # Example ```sql SELECT pgtrickle.bulk_drop_stream_tables(     ARRAY['public.orders_summary', 'public.stale_view'] ); ```. |
 | `pgtrickle.cache_stats()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.cache_stats()`. |
+| `pgtrickle.cancel_ann_maintenance()` | `pgtrickle` | `jsonb` | Cancel queued work or request cancellation of an active claim. |
 | `pgtrickle.capture_instance_status()` | `pgtrickle` | `text` | Return the current capture-instance identity and quarantine state. |
 | `pgtrickle.cdc_pause_status()` | `pgtrickle` | `SetOf row` | Returns a table with one row containing: - `paused` — `true` when `cdc_paused = on` - `capture_mode` — `'discard'` or `'hold'` - `note` — human-readable explanation of the current state. |
 | `pgtrickle.change_buffer_sizes()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.change_buffer_sizes()`. |
