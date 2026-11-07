@@ -1137,6 +1137,78 @@ async fn test_distance_subscription_waits_for_refresh_catalog_lock() {
 }
 
 #[tokio::test]
+async fn test_distance_subscription_fused_chain_scheduler_emits_crossing() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    setup_pgvector(&db).await;
+    for setting in [
+        "ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100",
+        "ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1",
+        "ALTER SYSTEM SET pg_trickle.auto_backoff = off",
+        "ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = 'on'",
+        "ALTER SYSTEM SET pg_trickle.enable_fused_refresh = on",
+    ] {
+        db.execute(setting).await;
+    }
+    db.reload_config_and_wait().await;
+    assert!(
+        db.wait_for_scheduler(Duration::from_secs(90)).await,
+        "scheduler did not start"
+    );
+    db.execute("CREATE TABLE fused_alert_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "fused_alert_first",
+        "SELECT id, embedding FROM fused_alert_src",
+        "1s",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "fused_alert_second",
+        "SELECT id FROM fused_alert_first",
+        "1s",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("INSERT INTO fused_alert_src VALUES (1,'[0,1,0]')")
+        .await;
+    assert!(
+        db.wait_for_condition(
+            "fused chain control converged",
+            "SELECT count(*)=1 FROM fused_alert_second",
+            Duration::from_secs(30),
+            Duration::from_millis(100)
+        )
+        .await
+    );
+    // shortcut: workers start with cold template caches, so this checks chain scheduling, not fused SQL; add that control when fusion can be witnessed.
+    assert!(db.wait_for_condition("fused chain control job", "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_scheduler_jobs WHERE unit_kind='fused_chain' AND status='SUCCEEDED')", Duration::from_secs(30), Duration::from_millis(100)).await);
+    let previous_job: i64 = db
+        .query_scalar(
+            "SELECT max(job_id) FROM pgtrickle.pgt_scheduler_jobs WHERE unit_kind='fused_chain'",
+        )
+        .await;
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    listener.listen("fused_alert").await.expect("listen");
+    db.execute("SELECT pgtrickle.subscribe_distance('fused_alert_first','fused_alert','embedding','[1,0,0]','<->',0.5)").await;
+    db.execute("INSERT INTO fused_alert_src VALUES (100,'[1,0,0]')")
+        .await;
+    let event = tokio::time::timeout(Duration::from_secs(30), listener.recv())
+        .await
+        .expect("scheduler crossing")
+        .expect("receive scheduler crossing");
+    let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+    assert_eq!(payload["entered"], 1);
+    assert!(db.wait_for_condition("subscribed fused chain job", &format!("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_scheduler_jobs WHERE unit_kind='fused_chain' AND status='SUCCEEDED' AND job_id > {previous_job})"), Duration::from_secs(30), Duration::from_millis(100)).await);
+    let initiated_by: String = db.query_scalar("SELECT h.initiated_by FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='fused_alert_first' AND h.refresh_id=(SELECT max(h2.refresh_id) FROM pgtrickle.pgt_refresh_history h2 WHERE h2.pgt_id=s.pgt_id AND h2.status='COMPLETED')").await;
+    assert_ne!(initiated_by, "SCHEDULER_FUSED");
+}
+
+#[tokio::test]
 async fn test_distance_subscription_invalid_stored_value_does_not_abort_refresh() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

@@ -755,6 +755,11 @@ fn try_fused_chain_refresh(
         if is_external_orchestration(&st) {
             continue;
         }
+        // Fused execution has no per-node before images for distance alerts.
+        // Check after taking the row lock so registration cannot race this choice.
+        if crate::api::has_distance_subscriptions(&st) {
+            return Ok(vec![]);
+        }
         let prev_frontier = match &st.frontier {
             Some(f) if !f.is_empty() => f.clone(),
             _ => continue,
