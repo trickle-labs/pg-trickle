@@ -4624,6 +4624,147 @@ async fn test_vector_diagnostics_catalog_visibility_and_index_metadata() {
 }
 
 #[tokio::test]
+async fn test_vector_index_expectation_reports_configuration_and_visibility() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE expect_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO expect_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "expect_stream",
+        "SELECT id, embedding FROM expect_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX expect_ann ON expect_stream USING hnsw (embedding vector_l2_ops)")
+        .await;
+    db.execute("CREATE INDEX expect_partial ON expect_stream USING hnsw (embedding vector_l2_ops) WHERE id > 0").await;
+    db.execute("CREATE TABLE expect_other (embedding vector(3))")
+        .await;
+    db.execute(
+        "CREATE INDEX expect_other_ann ON expect_other USING hnsw (embedding vector_l2_ops)",
+    )
+    .await;
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire expectation session");
+    sqlx::raw_sql(include_str!("fixtures/pgvector_index_expectation.sql"))
+        .execute(&mut *conn)
+        .await
+        .expect("install session-local expectation query");
+    for (index, opclass, expression, expected) in [
+        (None, None, None, "exact_search"),
+        (
+            Some("public.expect_ann"),
+            None,
+            Some("embedding"),
+            "incomplete_expectation",
+        ),
+        (
+            Some("public.missing_ann"),
+            Some("vector_l2_ops"),
+            Some("embedding"),
+            "missing_index",
+        ),
+        (
+            Some("public.expect_other_ann"),
+            Some("vector_l2_ops"),
+            Some("embedding"),
+            "unavailable_or_wrong_stream",
+        ),
+        (
+            Some("public.expect_ann"),
+            Some("vector_cosine_ops"),
+            Some("embedding"),
+            "metric_mismatch",
+        ),
+        (
+            Some("public.expect_ann"),
+            Some("vector_l2_ops"),
+            Some("other_expression"),
+            "expression_mismatch",
+        ),
+        (
+            Some("public.expect_ann"),
+            Some("vector_l2_ops"),
+            Some("embedding"),
+            "ready",
+        ),
+    ] {
+        let actual: String = sqlx::query_scalar(
+            "SELECT pg_temp.ann_expectation('expect_stream'::regclass, $1, $2, $3, NULL)",
+        )
+        .bind(index)
+        .bind(opclass)
+        .bind(expression)
+        .fetch_one(&mut *conn)
+        .await
+        .expect("check expected index");
+        assert_eq!(actual, expected);
+    }
+    let partial_mismatch: String = sqlx::query_scalar("SELECT pg_temp.ann_expectation('expect_stream'::regclass, 'public.expect_partial', 'vector_l2_ops', 'embedding', NULL)")
+        .fetch_one(&mut *conn).await.expect("check unexpected partial index");
+    assert_eq!(partial_mismatch, "predicate_mismatch");
+    let partial_ready: String = sqlx::query_scalar("SELECT pg_temp.ann_expectation('expect_stream'::regclass, 'public.expect_partial', 'vector_l2_ops', 'embedding', '(id > 0)')")
+        .fetch_one(&mut *conn).await.expect("check intended partial index");
+    assert_eq!(partial_ready, "ready");
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin invalid-index test");
+    sqlx::query("UPDATE pg_catalog.pg_index SET indisvalid = false WHERE indexrelid = 'expect_ann'::regclass")
+        .execute(&mut *conn).await.expect("mark test index invalid");
+    let invalid: String = sqlx::query_scalar("SELECT pg_temp.ann_expectation('expect_stream'::regclass, 'public.expect_ann', 'vector_l2_ops', 'embedding', NULL)")
+        .fetch_one(&mut *conn).await.expect("check invalid index");
+    assert_eq!(invalid, "invalid_index");
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("restore index state");
+    sqlx::query("CREATE ROLE expect_observer")
+        .execute(&mut *conn)
+        .await
+        .expect("create observer");
+    sqlx::query("GRANT USAGE ON SCHEMA pgtrickle TO expect_observer")
+        .execute(&mut *conn)
+        .await
+        .expect("grant schema");
+    sqlx::query("SET ROLE expect_observer")
+        .execute(&mut *conn)
+        .await
+        .expect("set observer");
+    let hidden: Option<String> = sqlx::query_scalar("SELECT pg_temp.ann_expectation('expect_stream'::regclass, 'public.expect_ann', 'vector_l2_ops', 'embedding', NULL)")
+        .fetch_one(&mut *conn).await.expect("check hidden stream");
+    assert!(
+        hidden.is_none(),
+        "expectation must not reveal an inaccessible stream"
+    );
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("reset observer");
+    sqlx::query("GRANT SELECT ON expect_stream TO expect_observer")
+        .execute(&mut *conn)
+        .await
+        .expect("grant stream visibility");
+    sqlx::query("SET ROLE expect_observer")
+        .execute(&mut *conn)
+        .await
+        .expect("set authorized observer");
+    let visible: String = sqlx::query_scalar("SELECT pg_temp.ann_expectation('expect_stream'::regclass, 'public.expect_ann', 'vector_l2_ops', 'embedding', NULL)")
+        .fetch_one(&mut *conn).await.expect("check visible stream");
+    assert_eq!(visible, "ready");
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("reset authorized observer");
+}
+
+#[tokio::test]
 async fn test_vector_diagnostics_reports_partition_leaf_indexes() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

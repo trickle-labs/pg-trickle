@@ -5530,6 +5530,33 @@ FROM pgtrickle.ann_index_status_v2() AS i;
 -- Compare the opclass and expression with the query, then inspect EXPLAIN.
 ```
 
+To distinguish intentional exact search from a missing requested index, supply
+the application's own expectation to the tested
+[session-local query](../tests/fixtures/pgvector_index_expectation.sql). For
+example, in `psql` from the repository root:
+
+```sql
+\i tests/fixtures/pgvector_index_expectation.sql
+SELECT pg_temp.ann_expectation(
+  'public.search_corpus'::regclass, 'public.search_corpus_ann',
+  'vector_cosine_ops', 'embedding', NULL
+);
+-- Pass NULL for the index name when exact search is intentional.
+SELECT pg_temp.ann_expectation('public.search_corpus'::regclass, NULL, NULL, NULL, NULL);
+```
+
+The expected expression and partial predicate must match the `expression` and
+`predicate` text returned by `ann_index_status_v2()`; pass NULL when no partial
+predicate is intended. `missing_index` calls for creating the requested index;
+`invalid_index` calls for a supported rebuild; `metric_mismatch` or
+`expression_mismatch` or `predicate_mismatch` calls for aligning the index and
+query. An index on a different stream or an inaccessible leaf can return
+`unavailable_or_wrong_stream`; resolving a name may require schema access.
+The query returns NULL for a stream not visible through the vector diagnostic.
+`ready` describes catalog state only; use `EXPLAIN` to check query eligibility
+and the planner's choice. The expectation belongs to the application and is
+not stored by pg_trickle.
+
 See also:
 - [Delta SQL Profiling](#delta-sql-profiling-v0130) — `explain_delta`, `dedup_stats`, `shared_buffer_stats`
 - [Stream Table Lifecycle](#stream-table-lifecycle) — status values and transitions
