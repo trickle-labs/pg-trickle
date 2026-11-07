@@ -1048,19 +1048,14 @@ async fn test_cdc_image_policy_preserves_native_scalar_observations() {
             admitted,
             "{data_type}: actual catalog OID"
         );
-        let observations: Vec<(String, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT ({rendered})::text, a.v::text IS DISTINCT FROM b.v::text FROM (VALUES {values}) a(v) CROSS JOIN (VALUES {values}) b(v)"
+        let typed_rendered = cdc_elision::changed_column_sql_for_type("a.v", "b.v", data_type);
+        let observations: Vec<(String, String, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT ({rendered})::text, ({typed_rendered})::text, a.v::text IS DISTINCT FROM b.v::text FROM (VALUES {values}) a(v) CROSS JOIN (VALUES {values}) b(v)"
         ))).fetch_all(&db.pool).await.unwrap();
-        for (bit, different_observation) in observations {
-            assert_eq!(
-                bit,
-                if !admitted || different_observation {
-                    "1"
-                } else {
-                    "0"
-                },
-                "{data_type}: native text/NULL observation"
-            );
+        for (generic_bit, typed_bit, different_observation) in observations {
+            let expected = if !admitted || different_observation { "1" } else { "0" };
+            assert_eq!(generic_bit, expected, "{data_type}: generic native observation");
+            assert_eq!(typed_bit, expected, "{data_type}: typed native observation");
             observed += 1;
         }
     }
