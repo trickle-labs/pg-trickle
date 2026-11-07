@@ -345,14 +345,16 @@ fn claim_ann_maintenance_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickleE
     let claimed = Spi::connect_mut(|client| {
         let guard = client.update(
             "INSERT INTO pgtrickle.pgt_ann_maintenance_claims \
-               (pgt_id, leaf_relid, index_key, request_id, claim_pid, claim_backend_start) \
+               (pgt_id, leaf_relid, index_key, request_id, claim_pid, claim_backend_start, next_eligible_at) \
              SELECT r.pgt_id, r.leaf_relid, pg_catalog.sha256(pg_catalog.convert_to(r.index_definition, 'UTF8')), \
                r.request_id, pg_catalog.pg_backend_pid(), \
-               (SELECT backend_start FROM pg_catalog.pg_stat_activity WHERE pid = pg_catalog.pg_backend_pid()) \
+               (SELECT backend_start FROM pg_catalog.pg_stat_activity WHERE pid = pg_catalog.pg_backend_pid()), \
+               pg_catalog.clock_timestamp() + interval '30 seconds' \
              FROM pgtrickle.pgt_ann_maintenance_requests r WHERE r.request_id = $1 \
              ON CONFLICT (pgt_id, leaf_relid, index_key) DO UPDATE \
                SET request_id = EXCLUDED.request_id, claim_pid = EXCLUDED.claim_pid, \
-                   claim_backend_start = EXCLUDED.claim_backend_start, next_eligible_at = NULL \
+                   claim_backend_start = EXCLUDED.claim_backend_start, \
+                   next_eligible_at = pg_catalog.clock_timestamp() + interval '30 seconds' \
              WHERE (pgtrickle.pgt_ann_maintenance_claims.next_eligible_at IS NULL \
                  OR pgtrickle.pgt_ann_maintenance_claims.next_eligible_at <= pg_catalog.clock_timestamp()) \
                AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \

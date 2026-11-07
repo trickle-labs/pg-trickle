@@ -2342,6 +2342,7 @@ async fn test_ann_maintenance_cancel_is_transactional_and_reopens_only_on_reques
         "a canceled interrupted claim must not restart itself"
     );
     assert_eq!(db.query_scalar::<i64>(request).await, id);
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     let mut worker = db.pool.acquire().await.expect("replacement worker");
     sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
         .bind(id)
@@ -2366,6 +2367,7 @@ async fn test_ann_maintenance_cancel_is_transactional_and_reopens_only_on_reques
             .await
             .expect("inspect interrupted later request");
     assert_eq!(status["state"], "INTERRUPTED");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     let mut worker = db.pool.acquire().await.expect("final worker");
     sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
         .bind(id)
@@ -2713,11 +2715,78 @@ async fn test_ann_maintenance_claim_serializes_concurrent_reindex_replacement() 
         .close()
         .await
         .expect("disconnect second worker");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
         .bind(next)
         .execute(&mut *worker)
         .await
         .expect("reclaim replacement after worker disconnects");
+}
+
+#[tokio::test]
+async fn test_ann_claim_interval_starts_after_guard_lock_wait() {
+    use sqlx::Connection;
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_interval_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_interval_stream",
+        "SELECT id, embedding FROM ann_interval_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "CREATE INDEX ann_interval_idx ON ann_interval_stream USING hnsw (embedding vector_l2_ops)",
+    )
+    .await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_interval_stream'::regclass::oid, 'ann_interval_idx'::regclass::oid)").await;
+    let mut first = db.pool.acquire().await.expect("first worker");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .execute(&mut *first)
+        .await
+        .expect("initial claim");
+    first.detach().close().await.expect("disconnect worker");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    let mut blocker = db.pool.begin().await.expect("begin guard lock");
+    sqlx::query("SELECT 1 FROM pgtrickle.pgt_ann_maintenance_claims FOR UPDATE")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("lock guard row");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("guard backend");
+    let pool = db.pool.clone();
+    let claimant = tokio::spawn(async move {
+        let mut conn = pool.acquire().await.expect("claimant session");
+        sqlx::query("SET application_name = 'ann_interval_claimant'")
+            .execute(&mut *conn)
+            .await
+            .expect("name claimant");
+        sqlx::query_scalar::<_, f64>("WITH claim AS MATERIALIZED (SELECT pgtrickle.claim_ann_maintenance($1) AS status) SELECT extract(epoch FROM (status->>'next_eligible_at')::timestamptz - clock_timestamp())::float8 FROM claim")
+            .bind(request).fetch_one(&mut *conn).await.expect("read remaining interval")
+    });
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name='ann_interval_claimant' AND $1 = ANY(pg_blocking_pids(pid)))")
+                .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect blocked claim");
+            if waiting { break; }
+            assert!(!claimant.is_finished(), "claim exited before the guard wait");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }).await.expect("claim did not wait on guard");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    blocker.commit().await.expect("release guard");
+    let remaining = claimant.await.expect("join claimant");
+    assert!(
+        remaining > 28.0,
+        "interval began before the guard was acquired: {remaining}"
+    );
 }
 
 #[tokio::test]
@@ -2807,6 +2876,16 @@ async fn test_ann_maintenance_claim_is_session_bound_and_retryable() {
             .await
             .expect("interrupted status");
     assert_eq!(status["state"], "INTERRUPTED");
+    assert!(status["next_eligible_at"].is_string());
+    assert!(
+        sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .is_err(),
+        "interrupted claims must respect the minimum interval"
+    );
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     let mut worker = db.pool.acquire().await.expect("replacement worker");
     sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
         .bind(id)
@@ -2910,6 +2989,7 @@ async fn test_ann_worker_retries_after_restart_during_concurrent_reindex() {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }).await.expect("reindex did not reach snapshot wait");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() + interval '5 minutes'").await;
     let restarted = tokio::process::Command::new("docker")
         .args(["restart", db.container_id()])
         .output()
@@ -2939,6 +3019,16 @@ async fn test_ann_worker_retries_after_restart_during_concurrent_reindex() {
             .expect("inspect interrupted request");
     assert_eq!(status["state"], "INTERRUPTED");
     assert_eq!(status["identity_current"], true);
+    assert!(status["next_eligible_at"].is_string());
+    assert!(
+        sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+            .bind(request)
+            .execute(&db.pool)
+            .await
+            .is_err(),
+        "restart must not erase the attempt interval"
+    );
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     let invalid_before: i64 = db.query_scalar("SELECT count(*) FROM pg_index WHERE indrelid='ann_restart_live_stream'::regclass AND NOT indisvalid").await;
     assert!(
         invalid_before > 0,
