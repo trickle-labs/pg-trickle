@@ -3045,6 +3045,11 @@ async fn test_ann_maintenance_claim_is_session_bound_and_retryable() {
         .execute(&mut *worker)
         .await
         .expect("concurrent rebuild");
+    let stale: bool = db.query_scalar("SELECT (v->>'maintenance_stale')::boolean FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'ann_claim_stream'").await;
+    assert!(
+        !stale,
+        "a live rebuild must not be marked stale before completion"
+    );
     sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
         .bind(id)
         .execute(&mut *worker)
@@ -3063,6 +3068,11 @@ async fn test_ann_maintenance_claim_is_session_bound_and_retryable() {
     assert_eq!(
         status["identity_current"], false,
         "concurrent rebuild replaces the index identity"
+    );
+    let stale: bool = db.query_scalar("SELECT (v->>'maintenance_stale')::boolean FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'ann_claim_stream'").await;
+    assert!(
+        stale,
+        "the stale pending request must be visible in stream diagnostics"
     );
     let next: i64 = db.query_scalar(request).await;
     assert_ne!(id, next);
@@ -3088,6 +3098,13 @@ async fn test_ann_maintenance_claim_is_session_bound_and_retryable() {
             .await
             .expect("completed status");
     assert_eq!(status["state"], "SUCCEEDED");
+    sqlx::query("SELECT pgtrickle.cancel_ann_maintenance($1)")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .expect("cancel stale request after requesting the replacement");
+    let stale: bool = db.query_scalar("SELECT (v->>'maintenance_stale')::boolean FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'ann_claim_stream'").await;
+    assert!(!stale, "canceled stale requests must not appear actionable");
 }
 
 #[tokio::test]
@@ -5433,7 +5450,7 @@ async fn test_vector_diagnostics_catalog_visibility_and_index_metadata() {
     db.execute("CREATE INDEX diagnostic_expression ON diagnostic_st USING hnsw ((c::vector(3)) vector_l2_ops)").await;
     db.execute("CREATE INDEX diagnostic_ivf ON diagnostic_st USING ivfflat ((c::vector(3)) vector_l2_ops) WITH (lists = 1)").await;
 
-    let columns = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'post_refresh_action' = 'none' AND v->>'dimensions' = '3' AND v->'embedding_freshness' = 'null'::jsonb AND v->>'maintenance_pending' = 'false' AND v->>'maintenance_failed' = 'false'").await;
+    let columns = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'post_refresh_action' = 'none' AND v->>'dimensions' = '3' AND v->'embedding_freshness' = 'null'::jsonb AND v->>'maintenance_pending' = 'false' AND v->>'maintenance_failed' = 'false' AND v->>'maintenance_stale' = 'false'").await;
     assert_eq!(columns, 2);
     let unknown = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'column' = 'c' AND v->'dimensions' = 'null'::jsonb AND v->'requested_index_state' = 'null'::jsonb AND v->>'requested_index_reason' IS NOT NULL").await;
     assert_eq!(unknown, 1);
@@ -5487,7 +5504,7 @@ async fn test_vector_diagnostics_catalog_visibility_and_index_metadata() {
         .await
         .expect("inspect as observer");
     assert_eq!(visible, 3);
-    let redacted: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->'maintenance_pending' = 'null'::jsonb AND v->'maintenance_failed' = 'null'::jsonb AND v->'maintenance_error' = 'null'::jsonb AND v->>'maintenance_reason' IS NOT NULL")
+    let redacted: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->'maintenance_pending' = 'null'::jsonb AND v->'maintenance_failed' = 'null'::jsonb AND v->'maintenance_stale' = 'null'::jsonb AND v->'maintenance_error' = 'null'::jsonb AND v->>'maintenance_reason' IS NOT NULL")
         .fetch_one(&mut *conn).await.expect("inspect redacted maintenance");
     assert_eq!(redacted, 3);
     sqlx::query("RESET ROLE")

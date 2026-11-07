@@ -5555,7 +5555,11 @@ reason because these catalog checks do not measure or record them. The
 stream-wide `maintenance_pending` and `maintenance_failed` fields summarize
 durable requests, and `maintenance_error` is the most recent failed request's
 error. `maintenance_pending` includes requested and running work, including
-interrupted claims that have not yet been recovered. These fields are NULL
+interrupted claims that have not yet been recovered. `maintenance_stale` is
+true when requested, failed, or interrupted work no longer identifies its
+original index. Inspect the request, explicitly request the replacement index
+if needed, and cancel the stale request. Running work with a live claim is not
+marked stale while a concurrent rebuild is replacing the index. These fields are NULL
 with a reason unless the caller can inspect all storage leaves and stale
 requests; SELECT alone does not expose maintenance details. An old timestamp
 alone does not mean an idle corpus is stale, and

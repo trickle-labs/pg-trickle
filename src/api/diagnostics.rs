@@ -2302,6 +2302,7 @@ pub(super) fn vector_stream_status_v2()
                 'backlog', NULL, 'backlog_reason', 'not measured by this catalog inspection',
                 'maintenance_pending', CASE WHEN q.can_view THEN q.pending END,
                 'maintenance_failed', CASE WHEN q.can_view THEN q.failed END,
+                'maintenance_stale', CASE WHEN q.can_view THEN q.stale END,
                 'maintenance_error', CASE WHEN q.can_view THEN q.last_error END,
                 'maintenance_reason', CASE WHEN NOT q.can_view THEN 'MAINTAIN on storage leaves and access to stale requests required' END,
                 'requested_index_state', NULL, 'requested_index_reason', 'requested ANN index intent is not recorded')
@@ -2331,6 +2332,23 @@ pub(super) fn vector_stream_status_v2()
                   ) AS can_view,
                   COALESCE(bool_or(r.state IN ('REQUESTED', 'RUNNING')), false) AS pending,
                   COALESCE(bool_or(r.state = 'FAILED'), false) AS failed,
+                  COALESCE(bool_or((r.state IN ('REQUESTED', 'FAILED') OR
+                    (r.state = 'RUNNING' AND NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.pg_stat_activity a
+                      WHERE a.pid = r.claim_pid AND a.backend_start = r.claim_backend_start)))
+                    AND (r.root_relid <> s.pgt_relid
+                      OR r.database_oid <> (SELECT oid FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database())
+                      OR r.system_identifier <> (SELECT system_identifier::text FROM pg_catalog.pg_control_system())
+                      OR NOT EXISTS (SELECT 1 FROM storage WHERE relid = r.leaf_relid)
+                      OR NOT EXISTS (
+                        SELECT 1 FROM pg_catalog.pg_index i
+                        JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid
+                        JOIN pg_catalog.pg_am am ON am.oid = idx.relam
+                        WHERE idx.oid = r.index_relid AND i.indrelid = r.leaf_relid
+                          AND idx.relkind = 'i' AND am.amname IN ('hnsw', 'ivfflat')
+                          AND i.indisvalid AND i.indisready AND i.indislive
+                          AND pg_catalog.pg_relation_filenode(idx.oid) = r.index_filenode
+                          AND pg_catalog.pg_get_indexdef(idx.oid) = r.index_definition))), false) AS stale,
                   (array_agg(r.last_error ORDER BY r.completed_at DESC NULLS LAST)
                     FILTER (WHERE r.state = 'FAILED'))[1] AS last_error
                 FROM access LEFT JOIN pgtrickle.pgt_ann_maintenance_requests r ON r.pgt_id = s.pgt_id
