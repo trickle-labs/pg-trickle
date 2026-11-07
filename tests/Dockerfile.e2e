@@ -59,13 +59,14 @@ COPY verification/ verification/
 COPY pg_trickle.control ./
 
 # Compile the extension.
-# The target/ cache mount keeps incremental artefacts between builds on the
-# same host, so only crates touched by the source change are recompiled.
+# Keep dependencies cached, but rebuild this crate when the source layer changes:
+# different checkouts can have source timestamps older than the shared cache.
 # Artefacts are copied to /artefacts/ so that Stage 2 can COPY them
 # (cache-mounted paths aren't directly visible to downstream COPY --from=).
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/build/target \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo clean --release -p pg_trickle && \
     cargo pgrx package --pg-config /usr/bin/pg_config && \
     mkdir -p /artefacts && \
     cp -r target/release/pg_trickle-pg18 /artefacts/
