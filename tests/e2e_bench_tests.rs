@@ -12,6 +12,8 @@
 //! Prerequisites: `./tests/build_e2e_image.sh`
 
 mod e2e;
+#[path = "e2e/pgvector_bench_workload.rs"]
+mod pgvector_workload;
 
 use e2e::E2eDb;
 use std::{

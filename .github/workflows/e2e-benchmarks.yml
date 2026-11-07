@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       job:
-        description: 'Run a specific job only (refresh | latency | cdc | tpch | overhead | all)'
+        description: 'Run a specific job only (refresh | latency | cdc | tpch | overhead | pgvector | all)'
         required: false
         default: 'all'
 
@@ -348,6 +348,54 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
           path: target/bench_results/tpch-stdout.txt
+
+  # ── Filtered vector retrieval and indexed differential refresh ─────────
+  bench-pgvector:
+    name: Bench — pgvector (${{ matrix.dimensions }} dimensions)
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'schedule' ||
+      inputs.job == 'all' ||
+      inputs.job == 'pgvector'
+    strategy:
+      fail-fast: false
+      matrix:
+        dimensions: [384, 768, 1536]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+      - name: Pull builder image when available
+        run: |
+          if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
+            docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+          fi
+      - name: Build E2E Docker image
+        run: ./tests/build_e2e_image.sh
+      - name: Measure workload
+        env:
+          PGVECTOR_BENCH_DIM: ${{ matrix.dimensions }}
+        run: |
+          mkdir -p target/pgvector-bench
+          uname -a > target/pgvector-bench/host.txt
+          lscpu >> target/pgvector-bench/host.txt
+          docker version >> target/pgvector-bench/host.txt
+          git rev-parse HEAD >> target/pgvector-bench/host.txt
+          ./scripts/run_e2e_tests.sh --retries 0 --test e2e_bench_tests \
+            --run-ignored ignored-only --no-capture \
+            -E 'test(test_pgvector_filtered_ann_workload)' \
+            2>&1 | tee target/pgvector-bench/stdout.txt
+          sed -n 's/^PGVECTOR_BENCHMARK_JSON=//p' target/pgvector-bench/stdout.txt > target/pgvector-bench/results.json
+          test -s target/pgvector-bench/results.json
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgvector-workload-${{ matrix.dimensions }}
+          retention-days: 90
+          if-no-files-found: error
+          path: target/pgvector-bench/
 
   # ── v0.87 paired pgbench overhead gate ─────────────────────────────────
   # Unlike the historical refresh/CDC jobs, this LOW-6 decision is blocking
