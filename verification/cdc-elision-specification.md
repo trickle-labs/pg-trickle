@@ -131,12 +131,13 @@ production scan source; it does not prove PostgreSQL's `FIRST_VALUE`,
 histories. The installed committed-history regression continues to check the
 actual differential result with FULL fallback disabled.
 
-Both trigger builders call the same `changed_column_sql` adapter. It lowers
-the checked decisions into a CASE with a type-OID guard, followed by equality
-of `pg_catalog.record_send(ROW(value))` bytea images. NULL fields have explicit
-record framing. Variable-length and unknown types retain a bit without invoking an equality,
-output or send function for that type. PostgreSQL resolves the generic record
-function at SQL type checking; only the admitted branch evaluates its body.
+Both trigger builders call the typed `changed_column_sql_for_type` adapter.
+Fixed-width built-in booleans, integers and UUIDs use null-safe equality,
+which matches their canonical binary image. Other types retain the generic
+type-OID guard and `record_send` comparison; variable-length and unknown types
+retain a bit without invoking an equality, output or send function for that
+type. PostgreSQL resolves the generic record function at SQL type checking;
+only the admitted branch evaluates its body.
 
 ## SQL and PostgreSQL boundaries
 
