@@ -2867,6 +2867,127 @@ async fn test_ann_maintenance_claim_is_session_bound_and_retryable() {
 }
 
 #[tokio::test]
+async fn test_ann_worker_retries_after_restart_during_concurrent_reindex() {
+    use std::time::Duration;
+
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_restart_live_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_restart_live_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "ann_restart_live_stream",
+        "SELECT id, embedding FROM ann_restart_live_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_restart_live_idx ON ann_restart_live_stream USING hnsw (embedding vector_l2_ops)").await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_restart_live_stream'::regclass::oid, 'ann_restart_live_idx'::regclass::oid)").await;
+    let original_index: i64 = db
+        .query_scalar("SELECT 'ann_restart_live_idx'::regclass::oid::bigint")
+        .await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let mut snapshot = db.pool.begin().await.expect("begin old snapshot");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *snapshot)
+        .await
+        .expect("set snapshot isolation");
+    sqlx::query("SELECT count(*) FROM ann_restart_live_stream")
+        .fetch_one(&mut *snapshot)
+        .await
+        .expect("hold old snapshot");
+    let mut command = ann_worker_command(&db, &database, "postgres", request, "30s");
+    command.kill_on_drop(true);
+    let mut worker = command.spawn().expect("start concurrent worker");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_progress_create_index p JOIN pg_stat_activity a USING (pid) WHERE a.application_name = 'pgtrickle_ann_worker' AND p.command = 'REINDEX CONCURRENTLY' AND p.phase LIKE 'waiting for old snapshots%')")
+                .fetch_one(&db.pool).await.expect("inspect reindex progress");
+            if waiting { break; }
+            assert!(worker.try_wait().expect("inspect worker").is_none(), "worker exited before restart barrier");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }).await.expect("reindex did not reach snapshot wait");
+    let restarted = tokio::process::Command::new("docker")
+        .args(["restart", db.container_id()])
+        .output()
+        .await
+        .expect("restart PostgreSQL during reindex");
+    assert!(
+        restarted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    drop(snapshot);
+    let interrupted = tokio::time::timeout(Duration::from_secs(30), worker.wait_with_output())
+        .await
+        .expect("worker remained alive")
+        .expect("wait for interrupted worker");
+    assert!(
+        !interrupted.status.success(),
+        "interrupted worker must not report success"
+    );
+    db.pool.close().await;
+    db.pool = db.reconnect_after_restart().await;
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect interrupted request");
+    assert_eq!(status["state"], "INTERRUPTED");
+    assert_eq!(status["identity_current"], true);
+    let invalid_before: i64 = db.query_scalar("SELECT count(*) FROM pg_index WHERE indrelid='ann_restart_live_stream'::regclass AND NOT indisvalid").await;
+    assert!(
+        invalid_before > 0,
+        "interrupted concurrent reindex should leave an invalid index for operator inspection"
+    );
+    db.execute("INSERT INTO ann_restart_live_source VALUES (2, '[0,1,0]')")
+        .await;
+    db.refresh_st("ann_restart_live_stream").await;
+    let retried = ann_worker_command(&db, &database, "postgres", request, "30s")
+        .output()
+        .await
+        .expect("retry interrupted worker");
+    assert!(
+        retried.status.success(),
+        "retry failed: {}",
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect retry");
+    assert_eq!(status["state"], "SUCCEEDED");
+    let (new_index, valid): (i64, bool) = sqlx::query_as("SELECT i.indexrelid::bigint, i.indisvalid AND i.indisready AND i.indislive FROM pg_index i WHERE i.indexrelid = 'ann_restart_live_idx'::regclass")
+        .fetch_one(&db.pool).await.expect("inspect rebuilt index");
+    assert_ne!(original_index, new_index);
+    assert!(valid);
+    let invalid_after: i64 = db.query_scalar("SELECT count(*) FROM pg_index WHERE indrelid='ann_restart_live_stream'::regclass AND NOT indisvalid").await;
+    assert_eq!(
+        invalid_after, invalid_before,
+        "retry must not silently drop an interrupted index"
+    );
+    assert_eq!(invalid_after, 1, "the test created one interrupted index");
+    let cleanup: String = db.query_scalar("SELECT format('DROP INDEX CONCURRENTLY %I.%I', n.nspname, c.relname) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE i.indrelid='ann_restart_live_stream'::regclass AND NOT i.indisvalid").await;
+    sqlx::query(sqlx::AssertSqlSafe(cleanup))
+        .execute(&db.pool)
+        .await
+        .expect("remove the verified abandoned test index");
+    let remaining: i64 = db.query_scalar("SELECT count(*) FROM pg_index WHERE indrelid='ann_restart_live_stream'::regclass AND NOT indisvalid").await;
+    assert_eq!(remaining, 0);
+    db.assert_st_matches_query(
+        "ann_restart_live_stream",
+        "SELECT id, embedding FROM ann_restart_live_source",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_ann_maintenance_intent_survives_restart() {
     let mut db = E2eDb::new_dedicated().await.with_extension().await;
     setup_pgvector(&db).await;
