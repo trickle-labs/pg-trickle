@@ -2363,6 +2363,7 @@ fn isolate_distance_notification<T>(
 
 thread_local! {
     static DISTANCE_SNAPSHOT: std::cell::Cell<Option<(i64, bool)>> = const { std::cell::Cell::new(None) };
+    static LIFECYCLE_DISTANCE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(crate) fn clear_distance_snapshot() {
@@ -2395,6 +2396,112 @@ pub(crate) fn has_distance_subscriptions(st: &StreamTableMeta) -> bool {
 
 pub(crate) fn prepare_distance_snapshot(st: &StreamTableMeta) {
     prepare_distance_snapshot_inner(st, None);
+}
+
+/// Keep a pre-rebuild snapshot until the replacement storage has been swapped in.
+pub(crate) struct LifecycleDistanceSnapshot {
+    pgt_id: i64,
+    previous: Option<(i64, bool)>,
+    captured: bool,
+}
+
+impl LifecycleDistanceSnapshot {
+    pub(crate) fn begin(st: &StreamTableMeta) -> Self {
+        let nested = LIFECYCLE_DISTANCE_DEPTH.with(|depth| {
+            let nested = depth.get() > 0;
+            depth.set(depth.get() + 1);
+            nested
+        });
+        let previous = DISTANCE_SNAPSHOT.with(|state| state.replace(None));
+        let previous = if nested { previous } else { None };
+        if previous.is_some_and(|(id, _)| id == st.pgt_id) {
+            // shortcut: recursive rebuilds of the same stream skip the nested alert until snapshots are per invocation.
+            pgrx::warning!(
+                "pg_trickle: skipping recursive distance snapshot for {}.{}",
+                st.pgt_schema,
+                st.pgt_name
+            );
+            return Self {
+                pgt_id: st.pgt_id,
+                previous,
+                captured: false,
+            };
+        }
+        prepare_distance_snapshot(st);
+        let captured =
+            DISTANCE_SNAPSHOT.with(|state| state.get().is_some_and(|(id, _)| id == st.pgt_id));
+        Self {
+            pgt_id: st.pgt_id,
+            previous,
+            captured,
+        }
+    }
+
+    pub(crate) fn finish(&self, st: &StreamTableMeta, rows_inserted: i64) {
+        if !self.captured {
+            return;
+        }
+        let result = isolate_distance_notification(|| {
+            let snapshot = format!(
+                "pg_temp.{}",
+                quote_identifier(&format!("__pgt_distance_pre_{}", self.pgt_id))
+            );
+            let rows_deleted = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {snapshot}"))
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("distance snapshot count is NULL".into())
+                })?;
+            let now = Spi::get_one::<TimestampWithTimeZone>("SELECT now()")
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("now() returned NULL".into()))?;
+            let refresh_id = RefreshRecord::insert(
+                self.pgt_id,
+                now,
+                "FULL",
+                "RUNNING",
+                0,
+                0,
+                None,
+                Some("MANUAL"),
+                None,
+                0,
+                None,
+                false,
+                None,
+            )?;
+            RefreshRecord::complete_with_rows_updated(
+                refresh_id,
+                "COMPLETED",
+                rows_inserted,
+                0,
+                rows_deleted,
+                None,
+                0,
+                None,
+                false,
+            )?;
+            Ok(refresh_id)
+        });
+        match result {
+            Ok(refresh_id) => {
+                DISTANCE_SNAPSHOT.with(|state| state.set(Some((self.pgt_id, false))));
+                fire_distance_subscriptions(st, refresh_id);
+            }
+            Err(error) => pgrx::warning!(
+                "pg_trickle: could not record rebuild distance notifications for {}.{}: {}",
+                st.pgt_schema,
+                st.pgt_name,
+                error
+            ),
+        }
+    }
+}
+
+impl Drop for LifecycleDistanceSnapshot {
+    fn drop(&mut self) {
+        DISTANCE_SNAPSHOT.with(|state| state.set(self.previous));
+        LIFECYCLE_DISTANCE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
 }
 
 pub(crate) fn prepare_distance_delta_snapshot(st: &StreamTableMeta, delta: &str) {
@@ -2469,8 +2576,9 @@ pub(crate) fn fire_distance_subscriptions(st: &StreamTableMeta, refresh_id: i64)
     }
     let full_name = format!("{}.{}", st.pgt_schema, st.pgt_name);
     let loaded = isolate_distance_notification(|| {
-        Spi::connect(|client| {
-        let rows = client.select(
+        // A fresh SPI snapshot sees subscriptions committed while the refresh waited for the catalog lock.
+        Spi::connect_mut(|client| {
+        let rows = client.update(
             "SELECT channel, vector_column, query_vector, op, threshold FROM pgtrickle.pgt_distance_subscriptions WHERE pgt_id=$1",
             None, &[st.pgt_id.into()],
         )?;

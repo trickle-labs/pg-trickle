@@ -34,12 +34,19 @@ Subscribers needing durable changes should use the separately documented
 logged and do not abort the refresh.
 
 Ordinary row-wise differential refreshes compare affected row identities.
-Other query shapes and FULL refreshes use a logged full snapshot. Explicit
-definition changes and direct repair operations do not currently emit crossing
-notifications; inspect the stream contents after such operations. IMMEDIATE
+Other query shapes and FULL refreshes use a logged full snapshot. A protected
+ALTER QUERY, partition, or refresh-mode rebuild compares the original and
+replacement storage and records its FULL refresh in history when a distance
+snapshot is available.
+Direct repair operations do not currently emit crossing notifications; inspect
+the stream contents after such operations. IMMEDIATE
 mode and pooler compatibility mode do not support these notifications, and new
 registrations in those modes are rejected. If pooler mode is enabled later,
 refreshes log a warning instead of emitting alerts.
+
+If a rebuild recursively re-enters the same stream before its snapshot is
+consumed, the nested alert is skipped with a warning; the outer snapshot is
+preserved.
 
 The subscription tracks the stream table's catalog ID and is removed when the
 stream table is dropped. Directly renaming the underlying storage table is not
