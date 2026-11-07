@@ -661,6 +661,15 @@ async fn test_distance_subscription_catalog_insert() {
         )
         .await;
     assert_eq!(count, 1, "subscription should be registered in catalog");
+    let threshold: f64 = db
+        .query_scalar("SELECT threshold FROM pgtrickle.pgt_distance_subscriptions WHERE stream_table = 'public.ds_st' AND channel = 'near_centroid'")
+        .await;
+    assert_eq!(threshold, 0.5);
+    db.execute("SELECT pgtrickle.subscribe_distance('public.ds_st', 'near_centroid', 'centroid', '[1,0,0]', '<->', 0.3)").await;
+    let threshold: f64 = db
+        .query_scalar("SELECT threshold FROM pgtrickle.list_distance_subscriptions('public.ds_st') WHERE channel = 'near_centroid'")
+        .await;
+    assert_eq!(threshold, 0.3);
 }
 
 /// VH-2b: unsubscribe_distance() removes the catalog entry.

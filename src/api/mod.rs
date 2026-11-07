@@ -2149,7 +2149,7 @@ fn subscribe_distance(
             vector_column.into(),
             query_vector.into(),
             op.into(),
-            threshold.into_datum().into(),
+            threshold.into(),
         ],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))
@@ -2286,7 +2286,7 @@ pub(crate) fn fire_distance_subscriptions(
         );
         let matched: i64 = Spi::get_one_with_args::<i64>(
             &count_sql,
-            &[query_vector.as_str().into(), threshold.into_datum().into()],
+            &[query_vector.as_str().into(), threshold.into()],
         )
         .unwrap_or(None)
         .unwrap_or(0);

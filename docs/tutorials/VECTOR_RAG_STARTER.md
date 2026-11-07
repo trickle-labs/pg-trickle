@@ -48,8 +48,15 @@ LIMIT 5;
 
 - **Hybrid search**: Add a `tsvector` column — see [HYBRID_SEARCH_PATTERNS.md](../tutorials/HYBRID_SEARCH_PATTERNS.md)
 - **Multi-tenant isolation**: See [PER_TENANT_ANN_PATTERNS.md](../tutorials/PER_TENANT_ANN_PATTERNS.md)
-- **Distance alerts**: Use `subscribe_distance()` for real-time anomaly detection
+- **Distance alerts**: `subscribe_distance()` currently reports matching rows
+  after refresh; it can notify on unrelated changes and miss the final exit.
+  Do not rely on it for threshold-crossing detection.
 - **Embedding outbox**: Use `attach_embedding_outbox()` to publish embedding changes downstream
+
+Subscriptions registered by a build affected by the distance-threshold binding
+bug can have an incorrect stored threshold. Re-register each affected
+subscription with its intended threshold after upgrading; the intended value
+cannot be recovered reliably from the stored value.
 
 ## `pgtrickle.embedding_stream_table()` Parameter Reference
 
