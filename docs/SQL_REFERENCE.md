@@ -5259,12 +5259,11 @@ pgtrickle.resume_after_drain() → bool
 | `pgtrickle.ann_index_status_v2()` | `SETOF jsonb` | One record per key of each visible HNSW or IVFFlat index, including partition leaves. |
 | `pgtrickle.st_auto_threshold(st_name text)` | `float8` | Returns the effective `differential_max_change_ratio` for a specific stream table — the per-ST override if set, otherwise the global `pg_trickle.differential_max_change_ratio` GUC. |
 
+### pgtrickle.vector_stream_status_v2
+
 The v2 diagnostics inspect catalogs without scanning vector data. They require
 `SELECT` on the stream table and `USAGE` on its schema. Column dimensions are
-NULL when the type has no known typmod; index dimensions are also NULL for
-expressions whose dimension cannot be inferred from a simple column. Index size
-is in bytes, and index options are PostgreSQL reloptions. Opclass names identify
-the indexed metric; use `EXPLAIN` to check whether a query can use the index.
+NULL when the type has no known typmod.
 
 The column records include refresh timestamps and frontier, not embedding
 generation freshness. Backlog, maintenance queue state, and requested ANN index
@@ -5275,6 +5274,13 @@ missing requested index. Compare application revision and model metadata to
 assess embedding freshness. If dimensions are unknown, declare a dimensioned
 vector type; for invalid indexes use a supported rebuild, and investigate
 refresh progress separately when backlog is suspected.
+
+### pgtrickle.ann_index_status_v2
+
+Index dimensions are NULL for expressions whose dimension cannot be inferred
+from a simple column. Index size is in bytes, and index options are PostgreSQL
+reloptions. Opclass names identify the indexed metric; use `EXPLAIN` to check
+whether a query can use the index.
 
 ```sql
 SELECT i->>'index', i->>'opclass', i->>'expression', i->>'predicate',
