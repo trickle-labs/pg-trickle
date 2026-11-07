@@ -546,6 +546,8 @@ async fn test_upgrade_embedding_helpers_from_0109() {
     db.execute("SELECT * FROM pgtrickle.embedding_stream_table_v2('upgrade_cosine', 'upgrade_vectors', 'embedding', 'cosine')").await;
     let valid: i64 = db.query_scalar("SELECT count(*) FROM pg_index i JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid IN ('upgrade_l2'::regclass, 'upgrade_cosine'::regclass) AND i.indisready AND i.indisvalid AND op.opcname IN ('vector_l2_ops','vector_cosine_ops')").await;
     assert_eq!(valid, 2);
+    let diagnostics: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE v->>'table' IN ('upgrade_l2', 'upgrade_cosine') AND v->>'valid' = 'true'").await;
+    assert_eq!(diagnostics, 2);
 }
 
 #[tokio::test]

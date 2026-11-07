@@ -2249,6 +2249,8 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.unsubscribe_distance(text, text) FROM PUBLI
 REVOKE EXECUTE ON FUNCTION pgtrickle.stat_reset(bigint) FROM PUBLIC;
 
 -- public_read
+GRANT EXECUTE ON FUNCTION pgtrickle.ann_index_status_v2() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.vector_stream_status_v2() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.bootstrap_gate_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.cache_stats() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.cdc_pause_status() TO PUBLIC;

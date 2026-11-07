@@ -470,6 +470,83 @@ async fn test_vector_status_view_accuracy_and_reset() {
     );
 }
 
+#[tokio::test]
+async fn test_vector_diagnostics_catalog_visibility_and_index_metadata() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute(
+        "CREATE TABLE diagnostic_src (id int PRIMARY KEY, a vector(3), b vector(3), c vector)",
+    )
+    .await;
+    db.execute("INSERT INTO diagnostic_src VALUES (1, '[1,0,0]', '[0,1,0]', '[1,1,0]')")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table('diagnostic_st', $$SELECT id, a, b, c FROM diagnostic_src$$, '1m', 'DIFFERENTIAL')").await;
+    db.execute("CREATE INDEX diagnostic_cosine ON diagnostic_st USING hnsw (a vector_cosine_ops) WHERE id > 0").await;
+    db.execute("CREATE INDEX diagnostic_expression ON diagnostic_st USING hnsw ((b::vector(3)) vector_l2_ops)").await;
+
+    let columns = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'post_refresh_action' = 'none' AND v->>'dimensions' = '3' AND v->'embedding_freshness' = 'null'::jsonb AND v->'maintenance_pending' = 'null'::jsonb").await;
+    assert_eq!(columns, 2);
+    let unknown = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'column' = 'c' AND v->'dimensions' = 'null'::jsonb AND v->'requested_index_state' = 'null'::jsonb AND v->>'requested_index_reason' IS NOT NULL").await;
+    assert_eq!(unknown, 1);
+    let indexes = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'access_method' = 'hnsw' AND v->>'valid' = 'true' AND v->>'ready' = 'true' AND ((v->>'index' = 'diagnostic_cosine' AND v->>'opclass' = 'vector_cosine_ops' AND v->>'predicate' IS NOT NULL) OR (v->>'index' = 'diagnostic_expression' AND v->>'opclass' = 'vector_l2_ops'))").await;
+    assert_eq!(indexes, 2);
+
+    db.execute("CREATE ROLE diagnostic_observer").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO diagnostic_observer")
+        .await;
+    let mut conn = db.pool.acquire().await.expect("acquire connection");
+    sqlx::query("SET ROLE diagnostic_observer")
+        .execute(&mut *conn)
+        .await
+        .expect("set role");
+    let hidden: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pgtrickle.vector_stream_status_v2()")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("inspect as observer");
+    assert_eq!(hidden, 0);
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("reset role");
+    sqlx::query("GRANT SELECT ON diagnostic_st TO diagnostic_observer")
+        .execute(&mut *conn)
+        .await
+        .expect("grant select");
+    sqlx::query("SET ROLE diagnostic_observer")
+        .execute(&mut *conn)
+        .await
+        .expect("set role");
+    let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtrickle.ann_index_status_v2()")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("inspect as observer");
+    assert_eq!(visible, 2);
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("reset role");
+}
+
+#[tokio::test]
+async fn test_vector_diagnostics_reports_partition_leaf_indexes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE diagnostic_partition_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st_partitioned(
+        "diagnostic_partition_st",
+        "SELECT id, embedding FROM diagnostic_partition_src",
+        "1m",
+        "DIFFERENTIAL",
+        "id",
+    )
+    .await;
+    db.execute("CREATE INDEX diagnostic_partition_ann ON diagnostic_partition_st USING hnsw (embedding vector_l2_ops)").await;
+    let leaves = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE v->>'stream_table_oid' = 'diagnostic_partition_st'::regclass::oid::text AND v->>'table_oid' <> v->>'stream_table_oid' AND v->>'opclass' = 'vector_l2_ops'").await;
+    assert!(leaves > 0);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // T-VP3 / VP-5 (v0.47.0): Vector-aggregate cases — shard-additive verification
 // ═══════════════════════════════════════════════════════════════════════

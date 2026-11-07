@@ -36,3 +36,12 @@ ALTER FUNCTION pgtrickle.unsubscribe_distance(text, text)
     SECURITY DEFINER SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.list_distance_subscriptions(text)
     SECURITY DEFINER SET search_path = pgtrickle, pg_catalog, pg_temp;
+
+CREATE FUNCTION pgtrickle.vector_stream_status_v2() RETURNS SETOF jsonb
+LANGUAGE c STRICT SECURITY DEFINER SET search_path = pgtrickle, pg_catalog, pg_temp
+AS 'MODULE_PATHNAME', 'vector_stream_status_v2_wrapper';
+CREATE FUNCTION pgtrickle.ann_index_status_v2() RETURNS SETOF jsonb
+LANGUAGE c STRICT SECURITY DEFINER SET search_path = pgtrickle, pg_catalog, pg_temp
+AS 'MODULE_PATHNAME', 'ann_index_status_v2_wrapper';
+GRANT EXECUTE ON FUNCTION pgtrickle.vector_stream_status_v2() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.ann_index_status_v2() TO PUBLIC;
