@@ -1,0 +1,40 @@
+name: pgvector compatibility
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installed-extension:
+    name: PostgreSQL 18 / pgvector ${{ matrix.pgvector }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pgvector: ["0.8.1", "0.8.7"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-pgrx
+      - name: Pull builder image when available
+        run: |
+          if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
+            docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+          fi
+      - name: Build packaged extension and pgvector image
+        env:
+          PGVECTOR_VERSION: ${{ matrix.pgvector }}
+        run: |
+          ./tests/build_e2e_image.sh
+          ./tests/build_e2e_pgvector_image.sh "$PGVECTOR_VERSION"
+      - name: Run bounded installed-extension conformance
+        env:
+          PGVECTOR_EXPECTED_VERSION: ${{ matrix.pgvector }}
+          PGS_E2E_IMAGE: pg_trickle_e2e_pgvector:${{ matrix.pgvector }}
+        run: |
+          ./scripts/run_e2e_tests.sh --retries 0 --test-threads 2 \
+            --test e2e_pgvector_tests --test e2e_pgvector_hybrid_tests --test e2e_pgvector_revision_tests \
+            -E 'test(test_pgvector_compat_installed_version) | test(test_pgvector_helper_missing_extension_is_actionable_and_atomic) | test(test_pgvector_helper_invalid_column_is_actionable_and_atomic) | test(test_vector_aggregate_disabled_reports_actionable_error) | test(test_vector_aggregate_nonpublic_extension_schema) | test(test_pgvector_hnsw_index_on_stream_table) | test(test_pgvector_halfvec_avg_output_type) | test(test_embedding_stream_table_halfvec_and_sparsevec_indexes) | test(test_wide_vectors_refresh_without_oversized_covering_index) | test(test_manual_concurrent_ann_rebuild_allows_reads_and_refresh_writes) | test(test_tenant_tutorial_sql_runs_with_isolated_reader) | test(test_revision_safe_generation_and_model_rollover) | test(test_revision_safe_rechunk_rejects_inflight_results)'

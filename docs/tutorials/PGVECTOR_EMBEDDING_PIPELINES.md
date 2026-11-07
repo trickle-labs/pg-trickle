@@ -20,6 +20,13 @@ maintained correctly under differential refresh.
 
 ## Prerequisites
 
+pg_trickle targets PostgreSQL 18. The
+[pgvector changelog](https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md)
+first lists PostgreSQL 18 support in pgvector 0.8.1. The bounded compatibility
+suite tests 0.8.1 and 0.8.7; this is not a blanket support claim or a
+recommendation to deploy the older release. Later pgvector releases fix index
+and aggregate defects, so use a maintained release and review its release notes.
+
 ```sql
 -- Install pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;

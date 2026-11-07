@@ -1,0 +1,10 @@
+# Replace pgvector in an already-built pg_trickle test image with a pinned
+# upstream PostgreSQL 18 build. The test suite verifies the installed version.
+ARG PGVECTOR_IMAGE=pgvector/pgvector:0.8.7-pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47
+FROM ${PGVECTOR_IMAGE} AS pgvector
+FROM pg_trickle_e2e:latest
+USER root
+RUN rm -f /usr/share/postgresql/18/extension/vector* /usr/lib/postgresql/18/lib/vector.so
+COPY --from=pgvector /usr/share/postgresql/18/extension/vector* /usr/share/postgresql/18/extension/
+COPY --from=pgvector /usr/lib/postgresql/18/lib/vector.so /usr/lib/postgresql/18/lib/vector.so
+USER postgres

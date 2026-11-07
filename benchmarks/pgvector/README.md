@@ -1,5 +1,23 @@
 # Filtered pgvector workload
 
+## Version conformance
+
+The PR compatibility workflow packages pg_trickle for PostgreSQL 18.6 and
+tests pgvector 0.8.1 and 0.8.7 from digest-pinned upstream images. The first
+is a historical PostgreSQL 18 compatibility target, not a deployment
+recommendation; see the [pgvector changelog](https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md)
+for fixes in later releases. The selected tests assert the installed versions
+and exercise a bounded set of helper, index, aggregate, security, and example
+paths. They do not prove every pgvector capability.
+
+To build a matching image locally, run `just build-e2e-image` followed by
+`./tests/build_e2e_pgvector_image.sh 0.8.7`. Set
+`PGS_E2E_IMAGE=pg_trickle_e2e_pgvector:0.8.7` and
+`PGVECTOR_EXPECTED_VERSION=0.8.7` when running the cases in
+`.github/workflows/pgvector-conformance.yml`.
+
+## Workload measurements
+
 This opt-in database benchmark runs against the packaged extension in a
 Testcontainers PostgreSQL instance. It emits one `PGVECTOR_BENCHMARK_JSON=`
 line containing raw observations; it does not impose universal latency or
