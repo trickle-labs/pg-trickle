@@ -22,6 +22,193 @@ async fn setup_pgvector(db: &E2eDb) {
 }
 
 #[tokio::test]
+async fn test_manual_ann_candidates_select_only_authorized_leaf_indexes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute(
+        "CREATE TABLE ann_manual_source (id int PRIMARY KEY, embedding vector(3), label text)",
+    )
+    .await;
+    db.execute("INSERT INTO ann_manual_source VALUES (1, '[1,0,0]', 'alpha')")
+        .await;
+    db.create_st_partitioned(
+        "ann_manual_stream",
+        "SELECT id, embedding, label FROM ann_manual_source",
+        "1h",
+        "DIFFERENTIAL",
+        "id",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_manual_hnsw ON ann_manual_stream USING hnsw (embedding vector_cosine_ops)").await;
+    db.execute("CREATE INDEX ann_manual_ivf ON ann_manual_stream USING ivfflat (embedding vector_cosine_ops) WITH (lists = 1)").await;
+    db.execute("CREATE INDEX ann_manual_label ON ann_manual_stream (label)")
+        .await;
+    let indexes: Vec<(i64, String, String)> = sqlx::query_as(include_str!(
+        "fixtures/pgvector_ann_maintenance_candidates.sql"
+    ))
+    .bind("ann_manual_stream")
+    .fetch_all(&db.pool)
+    .await
+    .expect("discover ANN leaf indexes");
+    assert_eq!(indexes.len(), 2);
+    let methods: std::collections::HashSet<&str> =
+        indexes.iter().map(|row| row.2.as_str()).collect();
+    assert_eq!(methods, ["hnsw", "ivfflat"].into_iter().collect());
+    for (oid, _, _) in indexes {
+        let leaf: bool = sqlx::query_scalar("SELECT c.relkind = 'i' AND NOT EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent = c.oid) FROM pg_class c WHERE c.oid = $1::bigint::oid")
+            .bind(oid).fetch_one(&db.pool).await.expect("inspect leaf index");
+        assert!(leaf);
+    }
+    let ordinary: Vec<(i64, String, String)> = sqlx::query_as(include_str!(
+        "fixtures/pgvector_ann_maintenance_candidates.sql"
+    ))
+    .bind("ann_manual_source")
+    .fetch_all(&db.pool)
+    .await
+    .expect("check non-stream table");
+    assert!(ordinary.is_empty());
+    db.execute("CREATE ROLE ann_manual_operator NOLOGIN").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO ann_manual_operator")
+        .await;
+    db.execute(
+        "GRANT SELECT ON pgtrickle.pgt_stream_tables, ann_manual_stream TO ann_manual_operator",
+    )
+    .await;
+    let leaf: String = db.query_scalar("SELECT inhrelid::regclass::text FROM pg_inherits WHERE inhparent = 'ann_manual_stream'::regclass").await;
+    let mut tx = db.pool.begin().await.expect("begin restricted check");
+    sqlx::query("SET LOCAL ROLE ann_manual_operator")
+        .execute(&mut *tx)
+        .await
+        .expect("set maintenance role");
+    let denied: Vec<(i64, String, String)> = sqlx::query_as(include_str!(
+        "fixtures/pgvector_ann_maintenance_candidates.sql"
+    ))
+    .bind("ann_manual_stream")
+    .fetch_all(&mut *tx)
+    .await
+    .expect("check missing MAINTAIN");
+    assert!(denied.is_empty());
+    tx.rollback().await.expect("end restricted check");
+    db.execute(&format!(
+        "GRANT MAINTAIN ON TABLE {leaf} TO ann_manual_operator"
+    ))
+    .await;
+    let mut tx = db.pool.begin().await.expect("begin authorized check");
+    sqlx::query("SET LOCAL ROLE ann_manual_operator")
+        .execute(&mut *tx)
+        .await
+        .expect("set maintenance role");
+    let allowed: Vec<(i64, String, String)> = sqlx::query_as(include_str!(
+        "fixtures/pgvector_ann_maintenance_candidates.sql"
+    ))
+    .bind("ann_manual_stream")
+    .fetch_all(&mut *tx)
+    .await
+    .expect("check MAINTAIN grant");
+    assert_eq!(allowed.len(), 2);
+    tx.rollback().await.expect("end authorized check");
+}
+
+#[tokio::test]
+async fn test_manual_concurrent_ann_rebuild_allows_reads_and_refresh_writes() {
+    use std::time::Duration;
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_online_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_online_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "ann_online_stream",
+        "SELECT id, embedding FROM ann_online_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_online_hnsw ON ann_online_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let before: i64 = db
+        .query_scalar("SELECT 'ann_online_hnsw'::regclass::oid::bigint")
+        .await;
+    let mut blocker = db.pool.begin().await.expect("begin writer barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("barrier pid");
+    sqlx::query("LOCK TABLE ann_online_stream IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold writer barrier");
+    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+    let pool = db.pool.clone();
+    let rebuild = tokio::spawn(async move {
+        let mut conn = pool
+            .acquire()
+            .await
+            .expect("acquire maintenance connection");
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("maintenance pid");
+        pid_tx.send(pid).expect("send maintenance pid");
+        sqlx::query("SET statement_timeout = '30s'")
+            .execute(&mut *conn)
+            .await
+            .expect("set timeout");
+        sqlx::query("REINDEX INDEX CONCURRENTLY ann_online_hnsw")
+            .execute(&mut *conn)
+            .await
+    });
+    let pid = pid_rx.await.expect("receive maintenance pid");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                .bind(blocker_pid)
+                .bind(pid)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect rebuild blocker");
+            if waiting {
+                break;
+            }
+            assert!(
+                !rebuild.is_finished(),
+                "rebuild ended before reaching the writer barrier"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("rebuild did not wait for the writer barrier");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        assert_eq!(db.count("ann_online_stream").await, 1);
+        db.execute("INSERT INTO ann_online_source VALUES (2, '[0,1,0]')")
+            .await;
+        db.refresh_st("ann_online_stream").await;
+        assert_eq!(db.count("ann_online_stream").await, 2);
+    })
+    .await
+    .expect("reads and refresh must progress while rebuild waits");
+    assert!(
+        !rebuild.is_finished(),
+        "barrier must still hold the rebuild"
+    );
+    blocker.commit().await.expect("release writer barrier");
+    rebuild
+        .await
+        .expect("join maintenance task")
+        .expect("concurrent rebuild");
+    let after: i64 = db
+        .query_scalar("SELECT 'ann_online_hnsw'::regclass::oid::bigint")
+        .await;
+    assert_ne!(before, after, "concurrent rebuild must replace the index");
+    db.assert_st_matches_query(
+        "ann_online_stream",
+        "SELECT id, embedding FROM ann_online_source",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_wide_vectors_refresh_without_oversized_covering_index() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

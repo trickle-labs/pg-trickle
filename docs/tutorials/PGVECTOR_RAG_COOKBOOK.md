@@ -271,7 +271,27 @@ before a drift-triggered REINDEX fires. The default is 0.20 (20%). You can
 set a per-table override via `ALTER STREAM TABLE ... reindex_drift_threshold`.
 
 **Q: Does REINDEX block reads?**
-pg_trickle uses the standard, non-concurrent `REINDEX TABLE` form, which can
-block writes while indexes are rebuilt. If that is unsuitable, set
-`post_refresh_action = 'none'` and manage index maintenance separately using
-the PostgreSQL operation appropriate for your workload.
+The legacy `reindex` and `reindex_if_drift` actions run a non-concurrent,
+table-wide `REINDEX` inside the refresh transaction. It blocks writes and can
+also block reads while the indexes are locked. A failure is isolated, but the
+rebuild still extends the refresh transaction. The threshold is not evidence
+of index quality. Leave `post_refresh_action = 'none'` to manage maintenance
+independently.
+
+For manual concurrent maintenance, the tested
+[candidate query](../../tests/fixtures/pgvector_ann_maintenance_candidates.sql)
+accepts a stream-table name as its `$1` parameter and returns valid HNSW and
+IVFFlat leaf indexes for which the caller has `MAINTAIN` privilege. Run it as a
+trusted maintenance role with access to the pg_trickle stream-table catalog and
+the stream table. The role must also have schema usage and `MAINTAIN` on each
+leaf table; PostgreSQL checks privileges again at execution. The returned index
+names are quoted identifiers, not SQL supplied by another user. For each chosen
+index, recheck its identity and access method immediately before executing
+`REINDEX INDEX CONCURRENTLY` on an ordinary connection in autocommit mode, with
+appropriate lock and statement timeouts. Do not run concurrent DDL inside a
+function or transaction block, or assume the original index OID survives a
+successful concurrent rebuild. Coordinate operators to prevent duplicate work,
+and inspect invalid `_ccnew`/`_ccold` indexes after a failed operation as
+described in the [PostgreSQL REINDEX documentation](https://www.postgresql.org/docs/18/sql-reindex.html).
+This manual recipe does not persist requests, retry failures, or account for
+changes arriving during a rebuild. Continue normal VACUUM and autovacuum care.
