@@ -521,7 +521,8 @@ pub static PGS_FUSE_DEFAULT_CEILING: GucSetting<i32> = GucSetting::<i32>::new(0)
 ///
 /// When enabled, `create_stream_table()` automatically creates indexes on
 /// GROUP BY keys, DISTINCT columns, and adds INCLUDE clauses to the
-/// `__pgt_row_id` index for stream tables with ≤ 8 output columns.
+/// `__pgt_row_id` index for stream tables with ≤ 8 output columns when the
+/// identity and output values have a bounded combined size.
 pub static PGS_AUTO_INDEX: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// SCAL-1 (v0.30.0): When true, classify SPI error retryability by SQLSTATE code

@@ -2894,25 +2894,29 @@ pub(crate) fn normalize_full_set_operation_storage(
 
     if rebuild_index {
         let user_columns = crate::cdc::resolve_st_output_columns(pgt_relid)?;
-        let identity_bounded = user_columns.iter().all(|(column, type_name)| {
-            Spi::get_one_with_args::<pg_sys::Oid>(
-                "SELECT $1::regtype::oid",
-                &[type_name.as_str().into()],
-            )
-            .ok()
-            .flatten()
-            .is_some_and(|type_oid| {
-                row_identity_is_bounded(&[ColumnDef {
+        let column_defs: Option<Vec<ColumnDef>> = user_columns
+            .iter()
+            .map(|(column, type_name)| {
+                let type_oid = Spi::get_one_with_args::<pg_sys::Oid>(
+                    "SELECT $1::regtype::oid",
+                    &[type_name.as_str().into()],
+                )
+                .ok()
+                .flatten()?;
+                Some(ColumnDef {
                     name: column.clone(),
                     type_oid: type_oid.into(),
                     typmod: -1,
-                }])
+                })
             })
-        });
+            .collect();
+        let identity_bounded = column_defs.as_deref().is_some_and(row_identity_is_bounded);
         let include_clause = if crate::config::pg_trickle_auto_index()
             && !user_columns.is_empty()
             && user_columns.len() <= 8
-        {
+            && column_defs.as_ref().is_some_and(|columns| {
+                row_identity_is_bounded(&[columns.as_slice(), columns.as_slice()].concat())
+            }) {
             let columns = user_columns
                 .iter()
                 .map(|(column, _)| quote_identifier(column))

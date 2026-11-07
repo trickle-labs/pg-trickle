@@ -22,6 +22,73 @@ async fn setup_pgvector(db: &E2eDb) {
 }
 
 #[tokio::test]
+async fn test_wide_vectors_refresh_without_oversized_covering_index() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE bounded_index_source (id int PRIMARY KEY, value int)")
+        .await;
+    db.create_st(
+        "bounded_index_stream",
+        "SELECT id, value FROM bounded_index_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let covered: bool = db.query_scalar("SELECT indnatts > indnkeyatts FROM pg_index WHERE indexrelid = 'bounded_index_stream_row_id_idx'::regclass").await;
+    assert!(covered, "small fixed-width outputs should remain covered");
+    for dimensions in [768, 1536] {
+        let source = format!("wide_vectors_{dimensions}");
+        let stream = format!("wide_vector_st_{dimensions}");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id int PRIMARY KEY, embedding vector({dimensions}))"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} SELECT 1, ARRAY(SELECT sin(n::float8)::real \
+            FROM generate_series(1, {dimensions}) n)::vector({dimensions})"
+        ))
+        .await;
+        db.create_st(
+            &stream,
+            &format!("SELECT id, embedding FROM {source}"),
+            "1h",
+            "DIFFERENTIAL",
+        )
+        .await;
+        let no_includes: bool = db
+            .query_scalar(&format!(
+                "SELECT indnatts = indnkeyatts FROM pg_index \
+            WHERE indexrelid = '{stream}_row_id_idx'::regclass"
+            ))
+            .await;
+        assert!(
+            no_includes,
+            "unbounded vectors must not enter the B-tree index"
+        );
+        db.execute(&format!(
+            "CREATE INDEX {stream}_ann ON {stream} USING hnsw (embedding vector_cosine_ops)"
+        ))
+        .await;
+        db.execute(&format!(
+            "UPDATE {source} SET embedding = ARRAY(SELECT cos(n::float8)::real \
+            FROM generate_series(1, {dimensions}) n)::vector({dimensions})"
+        ))
+        .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy = 'differential'",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
+        )
+        .await
+        .expect("refresh wide vector");
+        db.assert_st_matches_query(&stream, &format!("SELECT id, embedding FROM {source}"))
+            .await;
+    }
+}
+
+#[tokio::test]
 async fn test_vector_aggregate_unknown_dimensions_rejects_mixed_input_without_data_loss() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
