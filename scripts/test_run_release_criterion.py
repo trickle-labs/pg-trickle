@@ -1,13 +1,18 @@
 import unittest
 
-from scripts.run_release_criterion import BASELINE_TAG, BASELINE_VERSION, QUALIFICATION
+from scripts import run_release_criterion as criterion
 
 
 class ReleaseCriterionTests(unittest.TestCase):
     def test_baseline_matches_previous_release_in_current_contract(self) -> None:
-        self.assertEqual(BASELINE_TAG, "v0.108.3")
-        self.assertEqual(BASELINE_VERSION, "0.108.3")
-        self.assertEqual(QUALIFICATION.name, "v0.109.0-qualification.json")
+        criterion.configure_release("0.109.0")
+        self.assertEqual(criterion.BASELINE_TAG, "v0.108.3")
+        self.assertEqual(criterion.BASELINE_VERSION, "0.108.3")
+        self.assertEqual(criterion.QUALIFICATION.name, "v0.109.0-qualification.json")
+
+    def test_missing_contract_does_not_fall_back_to_an_older_release(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            criterion.configure_release("999.0.0")
 
 
 if __name__ == "__main__":

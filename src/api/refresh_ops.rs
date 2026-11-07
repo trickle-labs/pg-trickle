@@ -649,6 +649,9 @@ fn execute_manual_full_refresh_target(
         crate::cdc::lock_source_relations(source_oids)?;
         crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
     }
+    if schema == st.pgt_schema && table_name == st.pgt_name {
+        crate::api::prepare_distance_snapshot(st);
+    }
     // Persist polling deltas before this FULL reads the foreign source. The
     // baseline frontier can then skip those rows while other ST frontiers keep them.
     refresh::poll_foreign_table_sources_for_st(st)?;

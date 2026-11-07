@@ -3,6 +3,7 @@
 use super::*;
 
 pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
+    crate::api::prepare_distance_snapshot(st);
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("TOP_K");
     crate::refresh::set_last_rows_updated(0);

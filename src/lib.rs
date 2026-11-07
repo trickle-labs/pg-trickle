@@ -2110,27 +2110,29 @@ COMMENT ON TABLE pgtrickle.pgt_outbox_config IS
 extension_sql!(
     r#"
 -- VH-2 (v0.48.0): Distance-predicate subscription catalog.
--- Stores per-(stream_table, channel) vector distance subscriptions.
--- After each non-empty refresh the background worker evaluates the predicate
--- and emits pg_notify(channel, payload) when matched_rows > 0.
+-- Stores per-(stream table, channel) distance subscriptions. The optional
+-- legacy name is retained so unresolved upgraded subscriptions are not lost.
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_distance_subscriptions (
     stream_table    TEXT NOT NULL,
+    pgt_id          BIGINT REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
     channel         TEXT NOT NULL,
     vector_column   TEXT NOT NULL,
     query_vector    TEXT NOT NULL,
     op              TEXT NOT NULL
-        CHECK (op IN ('<->', '<=>', '<#>', '<+>', '<<->>', '<<%>>')),
-    threshold       DOUBLE PRECISION NOT NULL CHECK (threshold > 0),
+        CHECK (op IN ('<->', '<=>', '<#>', '<+>', '<~>', '<%>')),
+    threshold       DOUBLE PRECISION NOT NULL CHECK (threshold NOT IN ('NaN'::float8, 'Infinity'::float8, '-Infinity'::float8)),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (stream_table, channel)
+    UNIQUE (pgt_id, channel)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS pgt_distance_subscriptions_legacy_name_channel_idx
+    ON pgtrickle.pgt_distance_subscriptions (stream_table, channel) WHERE pgt_id IS NULL;
 
 COMMENT ON TABLE pgtrickle.pgt_distance_subscriptions IS
     'VH-2 (v0.48.0): Distance-predicate NOTIFY subscriptions per stream table. '
     'Populated via pgtrickle.subscribe_distance() / pgtrickle.unsubscribe_distance().';
 "#,
     name = "pg_trickle_distance_subscriptions_catalog",
-    requires = [],
+    requires = ["pg_trickle_catalog"],
 );
 
 // ── v0.87.13: pg_tide outbox boundary security attributes ──────────────
@@ -2222,6 +2224,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.drop_snapshot(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.drop_stream_table(text, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.drop_stream_table_publication(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.embedding_stream_table(text, text, text, text, text, text, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.embedding_stream_table_v2(text, text, text, text, jsonb, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.exec_stream_ddl(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.pause_stream_table(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.refresh_efficiency() FROM PUBLIC;
@@ -2246,6 +2249,8 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.unsubscribe_distance(text, text) FROM PUBLI
 REVOKE EXECUTE ON FUNCTION pgtrickle.stat_reset(bigint) FROM PUBLIC;
 
 -- public_read
+GRANT EXECUTE ON FUNCTION pgtrickle.ann_index_status_v2() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.vector_stream_status_v2() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.bootstrap_gate_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.cache_stats() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.cdc_pause_status() TO PUBLIC;

@@ -1124,13 +1124,14 @@ pub fn finalize_success(
         }
     }
 
+    if matches!(
+        history_action,
+        RefreshAction::Full | RefreshAction::Reinitialize
+    ) || (rows_changed > 0 && history_action != RefreshAction::NoData)
+    {
+        crate::api::fire_distance_subscriptions(st, refresh_id);
+    }
     if rows_changed > 0 && history_action != RefreshAction::NoData {
-        crate::api::fire_distance_subscriptions(
-            schema,
-            table_name,
-            table_name,
-            st.pooler_compatibility_mode,
-        );
         crate::scheduler::execute_post_refresh_action(st, rows_changed);
     }
 

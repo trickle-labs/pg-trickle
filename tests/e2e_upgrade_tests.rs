@@ -524,6 +524,75 @@ fn upgrade_image_available() -> bool {
     matches!(std::env::var("PGS_UPGRADE_FROM"), Ok(v) if !v.is_empty())
 }
 
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_embedding_helpers_from_0109() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        return;
+    }
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+        .await;
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+        .await;
+    db.execute("CREATE TABLE upgrade_vectors (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO upgrade_vectors VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("SELECT * FROM pgtrickle.embedding_stream_table('upgrade_l2', 'upgrade_vectors', 'embedding', NULL, '1m', 'hnsw', false)").await;
+    db.execute("SELECT * FROM pgtrickle.embedding_stream_table_v2('upgrade_cosine', 'upgrade_vectors', 'embedding', 'cosine')").await;
+    let valid: i64 = db.query_scalar("SELECT count(*) FROM pg_index i JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid IN ('upgrade_l2'::regclass, 'upgrade_cosine'::regclass) AND i.indisready AND i.indisvalid AND op.opcname IN ('vector_l2_ops','vector_cosine_ops')").await;
+    assert_eq!(valid, 2);
+    let diagnostics: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE v->>'table' IN ('upgrade_l2', 'upgrade_cosine') AND v->>'valid' = 'true'").await;
+    assert_eq!(diagnostics, 2);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_distance_subscriptions_preserves_legacy_rows() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        return;
+    }
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+        .await;
+    db.execute(
+        "CREATE TABLE upgrade_alert_src (id int PRIMARY KEY, embedding vector(3), bits bit(3))",
+    )
+    .await;
+    db.create_st(
+        "upgrade_alert_st",
+        "SELECT id, embedding, bits FROM upgrade_alert_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("INSERT INTO pgtrickle.pgt_distance_subscriptions(stream_table,channel,vector_column,query_vector,op,threshold) VALUES ('public.upgrade_alert_st','known','embedding','[1,0,0]','<->',0.5), ('missing.legacy','unresolved','embedding','[1,0,0]','<->',0.5), ('public.upgrade_alert_st','legacy_bits','bits','101','<<->>',1)").await;
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+        .await;
+    let bound: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_distance_subscriptions WHERE pgt_id=(SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_alert_st')").await;
+    let unresolved: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_distance_subscriptions WHERE stream_table='missing.legacy' AND pgt_id IS NULL").await;
+    assert_eq!(bound, 0);
+    assert_eq!(unresolved, 1);
+    db.execute("SELECT pgtrickle.subscribe_distance('upgrade_alert_st','known','embedding','[1,0,0]','<->',0.5)").await;
+    db.execute("SELECT pgtrickle.subscribe_distance('upgrade_alert_st','legacy_bits','bits','101','<~>',1)").await;
+    let op: String = db
+        .query_scalar(
+            "SELECT op FROM pgtrickle.pgt_distance_subscriptions WHERE channel='legacy_bits'",
+        )
+        .await;
+    assert_eq!(op, "<~>");
+    db.drop_st("upgrade_alert_st").await;
+    let remaining: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_distance_subscriptions WHERE channel IN ('known','legacy_bits')").await;
+    assert_eq!(remaining, 0);
+}
+
 /// A tracked source for an IMMEDIATE stream table has no CDC buffer, while a
 /// DIFFERENTIAL source with a buffer must still have its CDC trigger rebuilt.
 #[tokio::test]

@@ -8,6 +8,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 
 - [Functions](#functions)
   - [Core Lifecycle](#core-lifecycle)
+    - [pgtrickle.embedding\_stream\_table\_v2](#pgtrickleembedding_stream_table_v2)
     - [pgtrickle.create\_stream\_table](#pgtricklecreate_stream_table)
     - [pgtrickle.create\_stream\_table\_fast\_append\_only](#pgtricklecreate_stream_table_fast_append_only)
     - [pgtrickle.create\_stream\_table\_realtime](#pgtricklecreate_stream_table_realtime)
@@ -229,6 +230,36 @@ extension schema or schema-version audit.
 ### Core Lifecycle
 
 Create, modify, and manage the lifecycle of stream tables.
+
+---
+
+### pgtrickle.embedding_stream_table_v2
+
+```sql
+pgtrickle.embedding_stream_table_v2(
+    name text, source_table text, vector_column text, metric text,
+    options jsonb DEFAULT NULL, dry_run boolean DEFAULT false
+) RETURNS TABLE(action text)
+```
+
+Creates a stream table and pgvector ANN index atomically. `metric` is `l2`,
+`cosine`, or `inner_product`; queries must use the corresponding `<->`, `<=>`,
+or `<#>` operator and repeat the index's dimensioned cast. The source column
+must be a fixed-dimension pgvector type. Names may be schema-qualified and
+quoted. `dry_run` returns generated SQL without creating objects.
+
+The optional JSON object accepts `columns` (an array of source column names;
+the default is all columns), `refresh_interval` (default `1m`), `refresh_mode`
+(default `DIFFERENTIAL`; also `AUTO`, `FULL`, `IMMEDIATE`), `index_type`
+(`hnsw` by default, or `ivfflat`), `hnsw_m`, `hnsw_ef_construction`,
+`ivfflat_lists`, and `post_refresh_action` (`none` by default, `analyze`,
+`reindex`, or `reindex_if_drift`). `IMMEDIATE` must omit `refresh_interval`.
+HNSW requires `m` 2–100 and `ef_construction` 4–1000, at least twice `m`;
+IVFFlat accepts `lists` 1–32768 and does not support `sparsevec`. Reindex
+actions can take blocking locks. Unknown options and invalid values fail.
+
+The seven-argument `embedding_stream_table` remains available and always uses
+L2. Existing stream tables and index definitions are not changed on upgrade.
 
 ---
 
@@ -5224,8 +5255,40 @@ pgtrickle.resume_after_drain() → bool
 | `pgtrickle.reliability_counters()` | `SetOf row` | Returns shared-memory reliability counters (scheduler errors, worker crashes, CDC pause events). Useful for alert dashboards. |
 | `pgtrickle.wal_source_status()` | `SetOf row` | Per-source WAL CDC slot status: LSN lag, slot name, active/inactive state. Only populated when WAL-based CDC is active. |
 | `pgtrickle.worker_allocation_status()` | `SetOf row` | Per-database dynamic background worker allocation: quota, active count, and DB name. |
-| `pgtrickle.vector_status()` | `SetOf row` | One row per stream table that has a `post_refresh_action` configured or any ANN-relevant index. Shows index type, dimensions, and last rebuild time. |
+| `pgtrickle.vector_status()` | `SetOf row` | One row per stream table whose `post_refresh_action` is not `none`. `embedding_lag` is time since `data_timestamp`, not embedding-generation freshness; `drift_pct` is the changed-row counter as a percentage of estimated rows, or NULL when the estimate is not positive. It does not report index type, dimensions, validity, or recall. |
+| `pgtrickle.vector_stream_status_v2()` | `SETOF jsonb` | One record per visible pgvector column, including streams with maintenance disabled. |
+| `pgtrickle.ann_index_status_v2()` | `SETOF jsonb` | One record per key of each visible HNSW or IVFFlat index, including partition leaves. |
 | `pgtrickle.st_auto_threshold(st_name text)` | `float8` | Returns the effective `differential_max_change_ratio` for a specific stream table — the per-ST override if set, otherwise the global `pg_trickle.differential_max_change_ratio` GUC. |
+
+### pgtrickle.vector_stream_status_v2
+
+The v2 diagnostics inspect catalogs without scanning vector data. They require
+`SELECT` on the stream table and `USAGE` on its schema. Column dimensions are
+NULL when the type has no known typmod.
+
+The column records include refresh timestamps and frontier, not embedding
+generation freshness. Backlog, maintenance queue state, and requested ANN index
+intent are NULL with a reason because these catalog checks do not measure or
+record them. An old timestamp alone does not mean an idle corpus is stale, and
+the absence of an index cannot distinguish intentional exact search from a
+missing requested index. Compare application revision and model metadata to
+assess embedding freshness. If dimensions are unknown, declare a dimensioned
+vector type; for invalid indexes use a supported rebuild, and investigate
+refresh progress separately when backlog is suspected.
+
+### pgtrickle.ann_index_status_v2
+
+Index dimensions are NULL for expressions whose dimension cannot be inferred
+from a simple column. Index size is in bytes, and index options are PostgreSQL
+reloptions. Opclass names identify the indexed metric; use `EXPLAIN` to check
+whether a query can use the index.
+
+```sql
+SELECT i->>'index', i->>'opclass', i->>'expression', i->>'predicate',
+       i->>'valid', i->>'ready'
+FROM pgtrickle.ann_index_status_v2() AS i;
+-- Compare the opclass and expression with the query, then inspect EXPLAIN.
+```
 
 See also:
 - [Delta SQL Profiling](#delta-sql-profiling-v0130) — `explain_delta`, `dedup_stats`, `shared_buffer_stats`

@@ -124,7 +124,7 @@ pub use tier::RefreshTier;
 ///
 /// Automatically rolls back on drop if neither [`commit()`](SubTransaction::commit)
 /// nor [`rollback()`](SubTransaction::rollback) was called (panic safety).
-struct SubTransaction {
+pub(crate) struct SubTransaction {
     old_cxt: pg_sys::MemoryContext,
     old_owner: pg_sys::ResourceOwner,
     finished: bool,
@@ -132,7 +132,7 @@ struct SubTransaction {
 
 impl SubTransaction {
     /// Begin a new sub-transaction within the current worker transaction.
-    fn begin() -> Self {
+    pub(crate) fn begin() -> Self {
         // SAFETY: Called within a PostgreSQL worker transaction. The current
         // memory context and resource owner are valid.
         let old_cxt = unsafe { pg_sys::CurrentMemoryContext };
@@ -148,7 +148,7 @@ impl SubTransaction {
     }
 
     /// Commit the sub-transaction and restore the outer context.
-    fn commit(mut self) {
+    pub(crate) fn commit(mut self) {
         // SAFETY: Commits the sub-transaction, restores context.
         unsafe {
             pg_sys::ReleaseCurrentSubTransaction();
@@ -159,7 +159,7 @@ impl SubTransaction {
     }
 
     /// Roll back the sub-transaction and restore the outer context.
-    fn rollback(mut self) {
+    pub(crate) fn rollback(mut self) {
         // SAFETY: Rolls back the sub-transaction, restores context.
         unsafe {
             pg_sys::RollbackAndReleaseCurrentSubTransaction();
@@ -754,6 +754,11 @@ fn try_fused_chain_refresh(
         };
         if is_external_orchestration(&st) {
             continue;
+        }
+        // Fused execution has no per-node before images for distance alerts.
+        // Check after taking the row lock so registration cannot race this choice.
+        if crate::api::has_distance_subscriptions(&st) {
+            return Ok(vec![]);
         }
         let prev_frontier = match &st.frontier {
             Some(f) if !f.is_empty() => f.clone(),
