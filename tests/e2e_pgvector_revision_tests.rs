@@ -208,3 +208,73 @@ async fn test_revision_safe_generation_and_model_rollover() {
         .await;
     assert_eq!(rolled_back, v1);
 }
+
+#[tokio::test]
+async fn test_revision_safe_rechunk_rejects_inflight_results() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(include_str!("fixtures/pgvector_revision_pipeline.sql"))
+        .execute(&db.pool)
+        .await
+        .expect("install revision fixture");
+    db.execute("INSERT INTO embedding_demo.document_sets VALUES (7)")
+        .await;
+    db.execute("SELECT embedding_demo.replace_chunks(7, ARRAY['A', 'B'], 1, 'model-v1')")
+        .await;
+    let first = claim(&db, "model-v1").await;
+    let inflight = claim(&db, "model-v1").await;
+    assert!(complete(&db, &first, "model-v1").await);
+    refresh_differential(&db, "corpus_v1").await;
+    assert_eq!(db.count("embedding_demo.corpus_v1").await, 1);
+
+    db.execute_seq(&[
+        "BEGIN",
+        "SELECT embedding_demo.replace_chunks(7, ARRAY['rolled back'], 2, 'model-v1')",
+        "ROLLBACK",
+    ])
+    .await;
+    assert_eq!(db.count("embedding_demo.documents").await, 2);
+    db.execute("SELECT embedding_demo.replace_chunks(7, ARRAY['B', 'A', 'C'], 2, 'model-v1')")
+        .await;
+    assert!(!complete(&db, &inflight, "model-v1").await);
+    refresh_differential(&db, "corpus_v1").await;
+    assert_eq!(db.count("embedding_demo.corpus_v1").await, 0);
+    for _ in 0..3 {
+        let chunk = claim(&db, "model-v1").await;
+        assert!(complete(&db, &chunk, "model-v1").await);
+    }
+    refresh_differential(&db, "corpus_v1").await;
+    let rows: Vec<(i32, String, String)> = sqlx::query_as(
+        "SELECT d.chunk_index, c.body, c.embedding::text FROM embedding_demo.corpus_v1 c \
+         JOIN embedding_demo.documents d ON d.id = c.id WHERE d.document_set_id = 7 ORDER BY d.chunk_index",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("current chunks");
+    assert_eq!(
+        rows,
+        vec![
+            (1, "B".into(), "[0,1,0]".into()),
+            (2, "A".into(), "[1,0,0]".into()),
+            (3, "C".into(), "[1,0,0]".into()),
+        ]
+    );
+    db.execute("SELECT embedding_demo.replace_chunks(7, ARRAY['A'], 3, 'model-v1')")
+        .await;
+    let deleted = claim(&db, "model-v1").await;
+    db.execute("DELETE FROM embedding_demo.document_sets WHERE id = 7")
+        .await;
+    db.execute("INSERT INTO embedding_demo.document_sets VALUES (7)")
+        .await;
+    db.execute("SELECT embedding_demo.replace_chunks(7, ARRAY['B'], 3, 'model-v1')")
+        .await;
+    assert!(!complete(&db, &deleted, "model-v1").await);
+    refresh_differential(&db, "corpus_v1").await;
+    assert_eq!(db.count("embedding_demo.corpus_v1").await, 0);
+    let recreated = claim(&db, "model-v1").await;
+    assert!(complete(&db, &recreated, "model-v1").await);
+    refresh_differential(&db, "corpus_v1").await;
+    let body: String = db
+        .query_scalar("SELECT body FROM embedding_demo.corpus_v1")
+        .await;
+    assert_eq!(body, "B");
+}

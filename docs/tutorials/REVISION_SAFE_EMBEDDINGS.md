@@ -15,9 +15,22 @@ changes the revision when `body` or `chunk_version` changes. Metadata-only
 updates leave it unchanged. A real application must include **every** input
 to the model and chunker in its revision rule, including any title, prompt,
 normalization, and chunk identity. Assign a distinct incarnation to a
-delete/recreate even if the external document ID is reused. The example's
-single chunk is represented by one `chunk_version`; a multi-chunk system must
-also key and reconcile individual chunks.
+delete/recreate even if the external document ID is reused. Each row in
+`documents` represents one chunk. Standalone documents have one row; the
+optional `document_sets` parent groups multiple rows using a unique chunk index.
+Each replacement chunk receives a new row ID, incarnation and revision, even
+when its position is reused.
+
+For example, insert a `document_sets` row and call
+`embedding_demo.replace_chunks(id, ARRAY['first', 'second'], 1, 'model-v1')`
+in the same transaction as the application change. The function locks the
+parent, deletes its old chunks and their jobs/results, inserts the replacement
+chunks and enqueues their generation atomically. An empty array removes all
+chunks. Enqueue additional active models in that transaction. A completion from
+an old chunk cannot publish after replacement, and a rollback restores the old
+chunks and jobs. The refreshed corpus may contain only the new chunks that have
+finished; applications requiring whole-document completeness must gate serving
+on all current chunks having results. Deleting the parent cascades to its chunks.
 
 The job and result keys include incarnation, revision, chunk version and model
 version. The corpus joins on all of them and filters by model version. After a
