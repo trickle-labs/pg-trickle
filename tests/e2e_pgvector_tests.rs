@@ -63,6 +63,103 @@ fn ann_worker_command(
 }
 
 #[tokio::test]
+async fn test_ann_worker_limits_concurrent_requests_per_database() {
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let mut requests = Vec::new();
+    for i in 0..5 {
+        db.execute(&format!(
+            "CREATE TABLE ann_slot_source_{i} (id int PRIMARY KEY, embedding vector(3))"
+        ))
+        .await;
+        db.create_st(
+            &format!("ann_slot_stream_{i}"),
+            &format!("SELECT id, embedding FROM ann_slot_source_{i}"),
+            "1h",
+            "DIFFERENTIAL",
+        )
+        .await;
+        db.execute(&format!("CREATE INDEX ann_slot_idx_{i} ON ann_slot_stream_{i} USING hnsw (embedding vector_l2_ops)")).await;
+        let request: i64 = db.query_scalar(&format!("SELECT pgtrickle.request_ann_maintenance('ann_slot_stream_{i}'::regclass::oid, 'ann_slot_idx_{i}'::regclass::oid)")).await;
+        requests.push(request);
+    }
+    let mut blocker = db.pool.begin().await.expect("begin barrier");
+    sqlx::query("LOCK TABLE ann_slot_stream_0, ann_slot_stream_1, ann_slot_stream_2, ann_slot_stream_3, ann_slot_stream_4 IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold barrier");
+    let mut workers = Vec::new();
+    for request in &requests[..4] {
+        let mut command = ann_worker_command(&db, &database, "postgres", *request, "30s");
+        command.kill_on_drop(true);
+        workers.push(command.spawn().expect("start worker"));
+    }
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let mut running = 0;
+            for request in &requests[..4] {
+                let state: String =
+                    sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)->>'state'")
+                        .bind(request)
+                        .fetch_one(&db.pool)
+                        .await
+                        .expect("inspect request");
+                running += usize::from(state == "RUNNING");
+            }
+            if running == 4 {
+                break;
+            }
+            for worker in &mut workers {
+                assert!(
+                    worker.try_wait().expect("inspect worker").is_none(),
+                    "worker exited before the barrier"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("workers did not reach barrier");
+    let rejected = ann_worker_command(&db, &database, "postgres", requests[4], "30s")
+        .output()
+        .await
+        .expect("run fifth worker");
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("worker capacity exhausted"));
+    let state: String =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)->>'state'")
+            .bind(requests[4])
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect rejected request");
+    assert_eq!(state, "REQUESTED");
+    blocker.commit().await.expect("release barrier");
+    for worker in workers {
+        let output = tokio::time::timeout(Duration::from_secs(30), worker.wait_with_output())
+            .await
+            .expect("worker did not finish")
+            .expect("wait for worker");
+        assert!(
+            output.status.success(),
+            "worker failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let retried = ann_worker_command(&db, &database, "postgres", requests[4], "30s")
+        .output()
+        .await
+        .expect("retry fifth worker");
+    assert!(
+        retried.status.success(),
+        "retry failed: {}",
+        String::from_utf8_lossy(&retried.stderr)
+    );
+}
+
+#[tokio::test]
 async fn test_ann_maintenance_coverage_preserves_refreshes_after_claim() {
     use std::time::Duration;
 

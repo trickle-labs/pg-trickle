@@ -4391,7 +4391,12 @@ move commands between backends and is incompatible with session-bound claims.
 Do not use psql's `--single-transaction` option or wrap the script in a
 transaction; concurrent reindex must run at the top level.
 The worker handles one request and exits; a supervisor must choose requests
-and limit the number of concurrent workers. It commits the claim, rechecks
+and retries. Reference workers admit at most four concurrent executions per
+database using session advisory locks; a worker that cannot obtain a slot
+exits without claiming its request. Custom clients are not subject to this
+limit. Run the script as a one-shot psql process so unexpected errors release
+its session lock on disconnect; session pools must reset session locks when a
+connection is returned. It commits the claim, rechecks
 identity and privileges, then runs only that index's top-level concurrent
 reindex. Coordinate index renames, drops and definition changes with the
 worker: the recheck and the DDL are separate commands, so the check is not a
