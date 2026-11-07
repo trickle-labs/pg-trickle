@@ -575,7 +575,7 @@ fn is_scan_chain_tree(tree: &parser::OpTree) -> bool {
 }
 
 /// Whether one scan feeds only row-wise operators, with no grouping or joins.
-fn is_rowwise_scan_tree(tree: &parser::OpTree) -> bool {
+pub(crate) fn is_rowwise_scan_tree(tree: &parser::OpTree) -> bool {
     match tree {
         parser::OpTree::Scan { .. } => true,
         parser::OpTree::Filter { child, .. }

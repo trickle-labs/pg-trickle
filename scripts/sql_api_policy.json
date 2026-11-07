@@ -1092,7 +1092,7 @@
       "name": "subscribe_distance",
       "identity_arguments": "text, text, text, text, text, double precision",
       "class": "owner_lifecycle",
-      "execution_policy": "invoker_delegating"
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.teardown_self_monitoring()": {
       "schema": "pgtrickle",
@@ -1134,7 +1134,7 @@
       "name": "unsubscribe_distance",
       "identity_arguments": "text, text",
       "class": "owner_lifecycle",
-      "execution_policy": "invoker_delegating"
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.validate_query(text)": {
       "schema": "pgtrickle",

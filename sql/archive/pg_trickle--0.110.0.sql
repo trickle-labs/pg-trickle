@@ -1417,20 +1417,22 @@ COMMENT ON TABLE pgtrickle.pgt_outbox_config IS
 -- src/lib.rs:2110
 
 -- VH-2 (v0.48.0): Distance-predicate subscription catalog.
--- Stores per-(stream_table, channel) vector distance subscriptions.
--- After each non-empty refresh the background worker evaluates the predicate
--- and emits pg_notify(channel, payload) when matched_rows > 0.
+-- Stores per-(stream table, channel) distance subscriptions. The optional
+-- legacy name is retained so unresolved upgraded subscriptions are not lost.
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_distance_subscriptions (
     stream_table    TEXT NOT NULL,
+    pgt_id          BIGINT REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
     channel         TEXT NOT NULL,
     vector_column   TEXT NOT NULL,
     query_vector    TEXT NOT NULL,
     op              TEXT NOT NULL
-        CHECK (op IN ('<->', '<=>', '<#>', '<+>', '<<->>', '<<%>>')),
-    threshold       DOUBLE PRECISION NOT NULL CHECK (threshold > 0),
+        CHECK (op IN ('<->', '<=>', '<#>', '<+>', '<~>', '<%>')),
+    threshold       DOUBLE PRECISION NOT NULL CHECK (threshold NOT IN ('NaN'::float8, 'Infinity'::float8, '-Infinity'::float8)),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (stream_table, channel)
+    UNIQUE (pgt_id, channel)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS pgt_distance_subscriptions_legacy_name_channel_idx
+    ON pgtrickle.pgt_distance_subscriptions (stream_table, channel) WHERE pgt_id IS NULL;
 
 COMMENT ON TABLE pgtrickle.pgt_distance_subscriptions IS
     'VH-2 (v0.48.0): Distance-predicate NOTIFY subscriptions per stream table. '
@@ -3201,7 +3203,8 @@ CREATE  FUNCTION pgtrickle."subscribe_distance"(
 	"op" TEXT, /* & str */
 	"threshold" double precision /* f64 */
 ) RETURNS VOID /* Result < (), PgTrickleError > */
-STRICT 
+STRICT SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'subscribe_distance_wrapper';
 /* </end connected objects> */
@@ -3885,7 +3888,8 @@ CREATE  FUNCTION pgtrickle."unsubscribe_distance"(
 	"stream_table" TEXT, /* & str */
 	"channel" TEXT /* & str */
 ) RETURNS VOID /* Result < (), PgTrickleError > */
-STRICT 
+STRICT SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'unsubscribe_distance_wrapper';
 /* </end connected objects> */
@@ -4192,7 +4196,8 @@ CREATE  FUNCTION pgtrickle."list_distance_subscriptions"(
 	"threshold" double precision,  /* Option < f64 > */
 	"created_at" timestamp with time zone  /* Option < pgrx :: datum :: TimestampWithTimeZone > */
 )
-
+SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'list_distance_subscriptions_wrapper';
 /* </end connected objects> */

@@ -121,9 +121,7 @@ _INVOKER_DELEGATE_NAMES = {
     "exec_stream_ddl",
     "refresh_if_stale",
     "subscribe",
-    "subscribe_distance",
     "unsubscribe",
-    "unsubscribe_distance",
 }
 
 _TYPE_ALIASES = {

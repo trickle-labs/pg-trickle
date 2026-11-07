@@ -66,3 +66,4 @@ alter existing indexes: migrate by creating a new stream table and switching
 queries to it. See the [SQL reference](../SQL_REFERENCE.md#pgtrickleembedding_stream_table_v2)
 for options and [hybrid search](HYBRID_SEARCH_PATTERNS.md) and
 [tenant isolation](PER_TENANT_ANN_PATTERNS.md) for additional patterns.
+For refresh-based threshold notifications, see [distance alerts](DISTANCE_ALERTS.md).

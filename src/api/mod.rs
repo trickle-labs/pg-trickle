@@ -2097,21 +2097,82 @@ fn list_subscriptions() -> TableIterator<
 
 // ── v0.48.0 reactive distance-subscription API (VH-2) ────────────────────────
 
+fn distance_predicate_type(
+    st: &StreamTableMeta,
+    column: &str,
+    op: &str,
+) -> Result<(String, String), PgTrickleError> {
+    let metadata = Spi::connect(|client| {
+        let mut rows = client.select(
+            "SELECT n.nspname::text, t.typname::text, a.atttypmod, en.nspname::text \
+             FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid=a.atttypid \
+             JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+             JOIN pg_catalog.pg_extension e ON e.extname='vector' \
+             JOIN pg_catalog.pg_namespace en ON en.oid=e.extnamespace \
+             WHERE a.attrelid=$1 AND a.attname=$2 AND a.attnum>0 AND NOT a.attisdropped \
+               AND (t.oid='pg_catalog.bit'::regtype OR EXISTS \
+                 (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::regclass \
+                  AND d.objid=t.oid AND d.refobjid=e.oid AND d.deptype='e' \
+                  AND t.typname IN ('vector','halfvec','sparsevec'))) \
+               AND EXISTS (SELECT 1 FROM pg_catalog.pg_operator o \
+                 JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_operator'::regclass \
+                   AND d.objid=o.oid AND d.refobjid=e.oid AND d.deptype='e' \
+                 WHERE o.oprname=$3 AND o.oprleft=t.oid AND o.oprright=t.oid)",
+            None,
+            &[st.pgt_relid.into(), column.into(), op.into()],
+        )?;
+        if let Some(row) = rows.next() {
+            Ok::<_, pgrx::spi::Error>(Some((row.get::<String>(1)?.unwrap_or_default(), row.get::<String>(2)?.unwrap_or_default(), row.get::<i32>(3)?.unwrap_or(-1), row.get::<String>(4)?.unwrap_or_default())))
+        } else {
+            Ok(None)
+        }
+    })
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::InvalidArgument(format!("unsupported distance operator {op} for column {column}")))?;
+    let (type_schema, type_name, dimension, operator_schema) = metadata;
+    let type_sql = format!(
+        "{}.{}{}",
+        quote_identifier(&type_schema),
+        quote_identifier(&type_name),
+        if dimension > 0 {
+            format!("({dimension})")
+        } else {
+            String::new()
+        }
+    );
+    Ok((type_sql, operator_schema))
+}
+
+fn lock_distance_stream(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+    Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id=$1 FOR UPDATE",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::NotFound(format!("stream table {}.{}", st.pgt_schema, st.pgt_name))
+    })?;
+    Ok(())
+}
+
 /// VH-2 (v0.48.0): Subscribe a NOTIFY channel to distance-predicate changes on
 /// a stream table.
 ///
-/// After each non-empty refresh the background worker evaluates
-/// `<distance_col> <op> <threshold>` against the rows that changed and emits
-/// `pg_notify(channel, payload)` when at least one row newly satisfies or
-/// newly ceases to satisfy the predicate.  The payload is a JSON object with
-/// `stream_table`, `schema`, `op`, `threshold`, and `matched_rows` fields.
+/// After a successful refresh, emit a best-effort NOTIFY when rows enter or
+/// leave the region. The JSON payload includes entered/exited counts and the
+/// refresh ID, but not vectors or document contents. Registration and edits
+/// establish a baseline without emitting an event; a changed row identity is
+/// an exit and an entry. Channels do not provide tenant access control.
 ///
 /// `op` must be one of `<->` (L2), `<=>` (cosine), `<#>` (inner product),
-/// `<+>` (L1), `<<->>` (Hamming), or `<<%>>` (Jaccard).
+/// `<+>` (L1), `<~>` (Hamming), or `<%>` (Jaccard), when the installed
+/// pgvector type supports that operator. Thresholds must be finite; `<#>`
+/// returns negative inner product.
 ///
 /// The subscription is stored in `pgtrickle.pgt_distance_subscriptions` and
 /// survives restarts.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn subscribe_distance(
     stream_table: &str,
     channel: &str,
@@ -2120,7 +2181,7 @@ fn subscribe_distance(
     op: &str,
     threshold: f64,
 ) -> Result<(), PgTrickleError> {
-    const VALID_OPS: &[&str] = &["<->", "<=>", "<#>", "<+>", "<<->>", "<<%>>"];
+    const VALID_OPS: &[&str] = &["<->", "<=>", "<#>", "<+>", "<~>", "<%>"];
     if !VALID_OPS.contains(&op) {
         return Err(PgTrickleError::InvalidArgument(format!(
             "subscribe_distance: invalid distance operator '{}'. \
@@ -2129,81 +2190,136 @@ fn subscribe_distance(
             VALID_OPS.join(", ")
         )));
     }
-    if threshold <= 0.0 {
+    if !threshold.is_finite() {
         return Err(PgTrickleError::InvalidArgument(
-            "subscribe_distance: threshold must be positive".to_string(),
+            "subscribe_distance: threshold must be finite".to_string(),
         ));
     }
+    if channel.is_empty() || channel.len() >= pg_sys::NAMEDATALEN as usize || channel.contains('\0')
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "subscribe_distance: invalid notification channel".into(),
+        ));
+    }
+    let (schema, table, st) = resolve_owned_stream_table(
+        stream_table,
+        security_context::EntryContext::SecurityDefiner,
+    )?;
+    lock_distance_stream(&st)?;
+    if st.refresh_mode == RefreshMode::Immediate {
+        return Err(PgTrickleError::InvalidArgument(
+            "subscribe_distance: IMMEDIATE stream tables do not support distance notifications"
+                .into(),
+        ));
+    }
+    if crate::config::effective_pooler_compat(st.pooler_compatibility_mode) {
+        return Err(PgTrickleError::InvalidArgument(
+            "subscribe_distance: notifications are disabled in pooler compatibility mode".into(),
+        ));
+    }
+    let column = TypedIdentifier::parse(vector_column)?;
+    let vector_column = column.as_str();
+    let (type_sql, _) = distance_predicate_type(&st, vector_column, op)?;
+    let validate_sql = format!("SELECT ($1::{type_sql})::pg_catalog.text");
+    crate::refresh::with_stream_owner(&st, || {
+        Spi::get_one_with_args::<String>(&validate_sql, &[query_vector.into()]) // nosemgrep: rust.spi.query.dynamic-format — type is resolved from the pgvector catalog and quoted.
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Ok(())
+    })?;
+    let canonical = Spi::get_one_with_args::<String>(
+        "SELECT pg_catalog.format('%I.%I', $1, $2)",
+        &[schema.as_str().into(), table.as_str().into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::InternalError("cannot format stream table name".into()))?;
+    Spi::run_with_args(
+        "DELETE FROM pgtrickle.pgt_distance_subscriptions WHERE pgt_id IS NULL AND stream_table=$1 AND channel=$2",
+        &[canonical.as_str().into(), channel.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     Spi::run_with_args(
         "INSERT INTO pgtrickle.pgt_distance_subscriptions \
-         (stream_table, channel, vector_column, query_vector, op, threshold) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
-         ON CONFLICT (stream_table, channel) DO UPDATE \
-           SET vector_column = EXCLUDED.vector_column, \
+         (stream_table, channel, vector_column, query_vector, op, threshold, pgt_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (pgt_id, channel) DO UPDATE \
+           SET stream_table = EXCLUDED.stream_table, vector_column = EXCLUDED.vector_column, \
                query_vector  = EXCLUDED.query_vector, \
                op            = EXCLUDED.op, \
                threshold     = EXCLUDED.threshold",
         &[
-            stream_table.into(),
+            canonical.as_str().into(),
             channel.into(),
             vector_column.into(),
             query_vector.into(),
             op.into(),
-            threshold.into_datum().into(),
+            threshold.into(),
+            st.pgt_id.into(),
         ],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))
 }
 
 /// VH-2 (v0.48.0): Remove a distance-predicate subscription.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn unsubscribe_distance(stream_table: &str, channel: &str) -> Result<(), PgTrickleError> {
+    let (_, _, st) = resolve_owned_stream_table(
+        stream_table,
+        security_context::EntryContext::SecurityDefiner,
+    )?;
+    lock_distance_stream(&st)?;
     Spi::run_with_args(
         "DELETE FROM pgtrickle.pgt_distance_subscriptions \
-         WHERE stream_table = $1 AND channel = $2",
-        &[stream_table.into(), channel.into()],
+         WHERE pgt_id = $1 AND channel = $2",
+        &[st.pgt_id.into(), channel.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))
 }
 
 /// VH-2 (v0.48.0): List all active distance-predicate subscriptions.
 ///
-/// When `p_stream_table` is provided (e.g. `'public.ds3_st'`), only
-/// subscriptions for that stream table are returned.  Pass NULL to list all.
+/// Lists only subscriptions for stream tables owned by the caller (or all
+/// subscriptions for a superuser). Pass NULL to list all visible streams.
 #[allow(clippy::type_complexity)]
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn list_distance_subscriptions(
     p_stream_table: pgrx::default!(Option<&str>, "NULL"),
-) -> TableIterator<
-    'static,
-    (
-        name!(stream_table, Option<String>),
-        name!(channel, Option<String>),
-        name!(vector_column, Option<String>),
-        name!(op, Option<String>),
-        name!(threshold, Option<f64>),
-        name!(created_at, Option<pgrx::datum::TimestampWithTimeZone>),
-    ),
+) -> Result<
+    TableIterator<
+        'static,
+        (
+            name!(stream_table, Option<String>),
+            name!(channel, Option<String>),
+            name!(vector_column, Option<String>),
+            name!(op, Option<String>),
+            name!(threshold, Option<f64>),
+            name!(created_at, Option<pgrx::datum::TimestampWithTimeZone>),
+        ),
+    >,
+    PgTrickleError,
 > {
+    let caller =
+        security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?;
+    let filter_id = p_stream_table
+        .map(|name| {
+            resolve_owned_stream_table_with_caller(name, &caller).map(|(_, _, st)| st.pgt_id)
+        })
+        .transpose()?;
     let rows = Spi::connect(|client| {
-        let tup_table = if let Some(st) = p_stream_table {
-            client.select(
-                "SELECT stream_table, channel, vector_column, op, threshold, created_at \
-                 FROM pgtrickle.pgt_distance_subscriptions \
-                 WHERE stream_table = $1 \
-                 ORDER BY stream_table, channel",
-                None,
-                &[st.into()],
-            )?
-        } else {
-            client.select(
-                "SELECT stream_table, channel, vector_column, op, threshold, created_at \
-                 FROM pgtrickle.pgt_distance_subscriptions \
-                 ORDER BY stream_table, channel",
-                None,
-                &[],
-            )?
-        };
+        let tup_table = client.select(
+            "SELECT pg_catalog.format('%I.%I',s.pgt_schema,s.pgt_name) AS stream_table, \
+                    d.channel,d.vector_column,d.op,d.threshold,d.created_at \
+             FROM pgtrickle.pgt_distance_subscriptions d \
+             JOIN pgtrickle.pgt_stream_tables s ON s.pgt_id=d.pgt_id \
+             JOIN pg_catalog.pg_class c ON c.oid=s.pgt_relid \
+             WHERE ($2::bigint IS NULL OR s.pgt_id=$2) AND \
+                   (pg_catalog.pg_has_role($1,c.relowner,'USAGE') OR \
+                    EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.oid=$1 AND r.rolsuper)) \
+             ORDER BY s.pgt_schema,s.pgt_name,d.channel",
+            None,
+            &[caller.role_oid.into(), filter_id.into()],
+        )?;
         let mut result: Vec<(
             Option<String>,
             Option<String>,
@@ -2224,91 +2340,247 @@ fn list_distance_subscriptions(
         }
         Ok::<_, pgrx::spi::Error>(result)
     })
-    .unwrap_or_default();
-    TableIterator::new(rows)
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Ok(TableIterator::new(rows))
 }
 
 /// VH-2 (v0.48.0): Fire distance-predicate NOTIFY for a stream table after a
 /// successful refresh.
 ///
-/// Evaluates each distance subscription for the given stream table:
-/// counts matching rows and emits `pg_notify(channel, payload)` when at
-/// least one row satisfies the predicate.  Errors are logged but never
-/// propagated \u2014 subscription notifications must not abort a refresh.
-pub(crate) fn fire_distance_subscriptions(
-    schema: &str,
-    st_name: &str,
-    storage_table: &str,
-    skip_notify: bool,
-) {
-    if skip_notify {
+/// Isolate alert work from refresh durability using a PostgreSQL subtransaction.
+fn isolate_distance_notification<T>(
+    f: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, String> {
+    let subtxn = crate::scheduler::SubTransaction::begin();
+    let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        f().map_err(|e| e.to_string())
+    }))
+    .catch_others(|error| Err(format!("{error:?}")))
+    .execute();
+    match result {
+        Ok(value) => {
+            subtxn.commit();
+            Ok(value)
+        }
+        Err(error) => {
+            subtxn.rollback();
+            Err(error)
+        }
+    }
+}
+
+thread_local! {
+    static DISTANCE_SNAPSHOT: std::cell::Cell<Option<(i64, bool)>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn clear_distance_snapshot() {
+    DISTANCE_SNAPSHOT.with(|state| state.set(None));
+}
+
+pub(crate) fn has_distance_subscriptions(st: &StreamTableMeta) -> bool {
+    match isolate_distance_notification(|| {
+        Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_distance_subscriptions WHERE pgt_id=$1)",
+            &[st.pgt_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .ok_or_else(|| {
+            PgTrickleError::InternalError("distance subscription lookup returned no row".into())
+        })
+    }) {
+        Ok(present) => present,
+        Err(error) => {
+            pgrx::warning!(
+                "pg_trickle: distance subscription lookup failed for {}.{}: {}",
+                st.pgt_schema,
+                st.pgt_name,
+                error
+            );
+            false
+        }
+    }
+}
+
+pub(crate) fn prepare_distance_snapshot(st: &StreamTableMeta) {
+    prepare_distance_snapshot_inner(st, None);
+}
+
+pub(crate) fn prepare_distance_delta_snapshot(st: &StreamTableMeta, delta: &str) {
+    prepare_distance_snapshot_inner(st, Some(delta));
+}
+
+fn prepare_distance_snapshot_inner(st: &StreamTableMeta, delta: Option<&str>) {
+    clear_distance_snapshot();
+    if !has_distance_subscriptions(st) {
         return;
     }
-    // Load all distance subscriptions for this stream table.
-    let full_name = format!("{schema}.{st_name}");
-    let subs: Vec<(String, String, String, String, f64)> = Spi::connect(|client| {
-        let tup = client.select(
-            "SELECT channel, vector_column, query_vector, op, threshold \
-             FROM pgtrickle.pgt_distance_subscriptions \
-             WHERE stream_table = $1",
-            None,
-            &[full_name.as_str().into()],
-        )?;
-        let mut out: Vec<(String, String, String, String, f64)> = Vec::new();
-        for row in tup {
-            if let (Some(ch), Some(vc), Some(qv), Some(op), Some(thr)) = (
-                row.get::<String>(1).ok().flatten(),
-                row.get::<String>(2).ok().flatten(),
-                row.get::<String>(3).ok().flatten(),
-                row.get::<String>(4).ok().flatten(),
-                row.get::<f64>(5).ok().flatten(),
-            ) {
-                out.push((ch, vc, qv, op, thr));
-            }
-        }
-        Ok::<_, pgrx::spi::Error>(out)
-    })
-    .unwrap_or_default();
-
-    for (channel, vector_col, query_vector, op, threshold) in subs {
-        // Count rows that satisfy the distance predicate.
-        // The query_vector is a user-supplied literal; cast to ::vector for pgvector.
-        let quoted_storage = format!(
+    if crate::config::effective_pooler_compat(st.pooler_compatibility_mode) {
+        pgrx::warning!(
+            "pg_trickle: distance notifications are disabled in pooler compatibility mode for {}.{}",
+            st.pgt_schema,
+            st.pgt_name
+        );
+        return;
+    }
+    if delta.is_none() {
+        pgrx::log!(
+            "pg_trickle: distance subscriptions use a full snapshot for {}.{}",
+            st.pgt_schema,
+            st.pgt_name
+        );
+    }
+    let result = isolate_distance_notification(|| {
+        let table = format!(
             "{}.{}",
-            quote_identifier(schema),
-            quote_identifier(storage_table),
+            quote_identifier(&st.pgt_schema),
+            quote_identifier(&st.pgt_name)
         );
-        let count_sql = format!(
-            "SELECT COUNT(*)::bigint FROM {quoted_storage} \
-             WHERE {} {} $1::vector < $2",
-            quote_identifier(&vector_col),
-            op,
-        );
-        let matched: i64 = Spi::get_one_with_args::<i64>(
-            &count_sql,
-            &[query_vector.as_str().into(), threshold.into_datum().into()],
-        )
-        .unwrap_or(None)
-        .unwrap_or(0);
+        let basename = format!("__pgt_distance_pre_{}", st.pgt_id);
+        crate::refresh::with_stream_owner(st, || {
+            let select = if let Some(delta) = delta {
+                let ids_basename = format!("__pgt_distance_ids_{}", st.pgt_id);
+                let ids_select = format!("SELECT DISTINCT __pgt_row_id FROM {delta}");
+                let ids = crate::refresh::prepare_owner_temp_table(st, &ids_basename, &ids_select)?;
+                Spi::run(&format!("INSERT INTO {ids} {ids_select}")) // nosemgrep: rust.spi.run.dynamic-format — temporary relation names are generated internally.
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                format!(
+                    "SELECT st.* FROM {ids} d CROSS JOIN LATERAL (SELECT st.* FROM {table} st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id OFFSET 0) st"
+                )
+            } else {
+                format!("SELECT * FROM {table}")
+            };
+            let snapshot = crate::refresh::prepare_owner_temp_table(st, &basename, &select)?;
+            Spi::run(&format!("INSERT INTO {snapshot} {select}")) // nosemgrep: rust.spi.run.dynamic-format — relation identifiers are quoted.
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })
+    });
+    match result {
+        Ok(()) => DISTANCE_SNAPSHOT.with(|state| state.set(Some((st.pgt_id, delta.is_some())))),
+        Err(error) => pgrx::warning!(
+            "pg_trickle: distance snapshot failed for {}.{}: {}",
+            st.pgt_schema,
+            st.pgt_name,
+            error
+        ),
+    }
+}
 
-        if matched > 0 {
-            let escaped_ch = channel.replace('\'', "''");
-            let escaped_name = st_name.replace('\'', "''");
-            let escaped_schema = schema.replace('\'', "''");
-            let payload = format!(
-                "{{\"stream_table\":\"{escaped_name}\",\"schema\":\"{escaped_schema}\",\
-                 \"op\":\"{op}\",\"threshold\":{threshold},\"matched_rows\":{matched}}}"
+pub(crate) fn fire_distance_subscriptions(st: &StreamTableMeta, refresh_id: i64) {
+    if crate::config::effective_pooler_compat(st.pooler_compatibility_mode) {
+        return;
+    }
+    let Some((snapshot_id, bounded)) = DISTANCE_SNAPSHOT.with(|state| state.replace(None)) else {
+        return;
+    };
+    if snapshot_id != st.pgt_id {
+        return;
+    }
+    let full_name = format!("{}.{}", st.pgt_schema, st.pgt_name);
+    let loaded = isolate_distance_notification(|| {
+        Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT channel, vector_column, query_vector, op, threshold FROM pgtrickle.pgt_distance_subscriptions WHERE pgt_id=$1",
+            None, &[st.pgt_id.into()],
+        )?;
+        let mut subscriptions = Vec::new();
+        for row in rows {
+            if let (Some(channel), Some(column), Some(query), Some(op), Some(threshold)) = (
+                row.get::<String>(1)?, row.get::<String>(2)?, row.get::<String>(3)?, row.get::<String>(4)?, row.get::<f64>(5)?,
+            ) { subscriptions.push((channel, column, query, op, threshold)); }
+        }
+        Ok::<_, pgrx::spi::Error>(subscriptions)
+    }).map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    });
+    let subscriptions = match loaded {
+        Ok(subscriptions) => subscriptions,
+        Err(error) => {
+            pgrx::warning!(
+                "pg_trickle: failed to load distance subscriptions for {}: {}",
+                full_name,
+                error
             );
-            let escaped_payload = payload.replace('\'', "''");
-            let notify_sql = format!("NOTIFY {escaped_ch}, '{escaped_payload}'");
-            if let Err(e) = Spi::run(&notify_sql) {
-                pgrx::warning!(
-                    "pg_trickle: distance subscription NOTIFY failed for {}.{}: {}",
-                    schema,
-                    st_name,
-                    e
-                );
+            return;
+        }
+    };
+    for (channel, column, query, op, threshold) in subscriptions {
+        let result = isolate_distance_notification(|| {
+            if !matches!(op.as_str(), "<->" | "<=>" | "<#>" | "<+>" | "<~>" | "<%>")
+                || !threshold.is_finite()
+            {
+                return Err(PgTrickleError::InvalidArgument(
+                    "invalid stored distance predicate".into(),
+                ));
             }
+            let snapshot = format!(
+                "pg_temp.{}",
+                quote_identifier(&format!("__pgt_distance_pre_{}", st.pgt_id))
+            );
+            let exists = Spi::get_one_with_args::<pg_sys::Oid>(
+                "SELECT pg_catalog.to_regclass($1)::oid",
+                &[snapshot.as_str().into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .is_some();
+            if !exists {
+                return Err(PgTrickleError::InvalidArgument(
+                    "distance snapshot is unavailable for this refresh".into(),
+                ));
+            }
+            let (type_sql, operator_schema) = distance_predicate_type(st, &column, &op)?;
+            let predicate = format!(
+                "{} OPERATOR({}.{}) $1::{type_sql} < $2",
+                quote_identifier(&column),
+                quote_identifier(&operator_schema),
+                op
+            );
+            let table = format!(
+                "{}.{}",
+                quote_identifier(&st.pgt_schema),
+                quote_identifier(&st.pgt_name)
+            );
+            let after_source = if bounded {
+                let ids = format!(
+                    "pg_temp.{}",
+                    quote_identifier(&format!("__pgt_distance_ids_{}", st.pgt_id))
+                );
+                format!(
+                    "{ids} d CROSS JOIN LATERAL (SELECT st.* FROM {table} st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id OFFSET 0) st"
+                )
+            } else {
+                format!("{table} st")
+            };
+            let sql = format!(
+                "WITH before_rows AS (SELECT __pgt_row_id, count(*)::bigint AS n FROM {snapshot} WHERE {predicate} GROUP BY __pgt_row_id), after_rows AS (SELECT st.__pgt_row_id, count(*)::bigint AS n FROM {after_source} WHERE {predicate} GROUP BY st.__pgt_row_id) SELECT COALESCE(sum(greatest(COALESCE(a.n,0)-COALESCE(b.n,0),0)),0)::bigint, COALESCE(sum(greatest(COALESCE(b.n,0)-COALESCE(a.n,0),0)),0)::bigint FROM before_rows b FULL JOIN after_rows a USING (__pgt_row_id)"
+            );
+            crate::refresh::with_stream_owner(st, || {
+                let (entered, exited) = Spi::connect_mut(|client| {
+                    let rows =
+                        client.update(&sql, None, &[query.as_str().into(), threshold.into()])?;
+                    let row = rows.first();
+                    Ok::<_, pgrx::spi::Error>((
+                        row.get::<i64>(1)?.unwrap_or(0),
+                        row.get::<i64>(2)?.unwrap_or(0),
+                    ))
+                })
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                if entered > 0 || exited > 0 {
+                    let payload = serde_json::json!({"schema": st.pgt_schema, "stream_table": st.pgt_name, "op": op, "threshold": threshold, "entered": entered, "exited": exited, "refresh_id": refresh_id}).to_string();
+                    Spi::run_with_args(
+                        "SELECT pg_catalog.pg_notify($1,$2)",
+                        &[channel.as_str().into(), payload.as_str().into()],
+                    )
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                }
+                Ok(())
+            })
+        });
+        if let Err(error) = result {
+            pgrx::warning!(
+                "pg_trickle: distance subscription failed for {} on {}: {}",
+                channel,
+                full_name,
+                error
+            );
         }
     }
 }

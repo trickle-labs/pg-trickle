@@ -629,6 +629,544 @@ async fn test_pgvector_halfvec_avg_values_correct() {
 // VH-2 (v0.48.0): Distance subscription catalog operations
 // ═══════════════════════════════════════════════════════════════════════
 
+#[tokio::test]
+async fn test_distance_subscription_notifies_only_membership_crossings() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_source (id int PRIMARY KEY, note text, embedding vector(3))")
+        .await;
+    db.create_st(
+        "alert_st",
+        "SELECT id, note, embedding FROM alert_source",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    listener
+        .listen("distance_crossing")
+        .await
+        .expect("listen for crossings");
+    db.execute("SELECT pgtrickle.subscribe_distance('public.alert_st', 'distance_crossing', 'embedding', '[1,0,0]', '<->', 0.5)").await;
+    db.execute("INSERT INTO alert_source VALUES (1, 'first', '[1,0,0]')")
+        .await;
+    db.refresh_st("alert_st").await;
+    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("enter notification")
+        .expect("receive enter");
+    let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+    assert_eq!(payload["entered"], 1);
+    assert_eq!(payload["exited"], 0);
+    db.execute("UPDATE alert_source SET note='changed' WHERE id=1")
+        .await;
+    db.refresh_st("alert_st").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.recv())
+            .await
+            .is_err(),
+        "unchanged membership must not notify"
+    );
+    drop(listener);
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("reconnect listener");
+    listener
+        .listen("distance_crossing")
+        .await
+        .expect("listen for exit");
+    db.execute("UPDATE alert_source SET embedding='[0,1,0]' WHERE id=1")
+        .await;
+    db.refresh_st("alert_st").await;
+    let value: String = db
+        .query_scalar("SELECT embedding::text FROM alert_st WHERE id=1")
+        .await;
+    assert_eq!(value, "[0,1,0]");
+    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("exit notification")
+        .expect("receive exit");
+    let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+    assert_eq!(payload["entered"], 0);
+    assert_eq!(payload["exited"], 1);
+    db.refresh_st("alert_st").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.recv())
+            .await
+            .is_err(),
+        "unchanged refresh must not notify"
+    );
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin rolled-back source change");
+    sqlx::query("INSERT INTO alert_source VALUES (2, 'rolled back', '[1,0,0]')")
+        .execute(&mut *tx)
+        .await
+        .expect("insert in transaction");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('alert_st')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh in transaction");
+    tx.rollback().await.expect("rollback");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.recv())
+            .await
+            .is_err(),
+        "rolled-back change must not notify"
+    );
+}
+
+#[tokio::test]
+async fn test_distance_subscription_small_delta_snapshots_only_affected_rows() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_batch_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute(
+        "INSERT INTO alert_batch_src SELECT i, '[1,0,0]'::vector FROM generate_series(1,1000) i",
+    )
+    .await;
+    db.create_st(
+        "alert_batch_st",
+        "SELECT id, embedding FROM alert_batch_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.subscribe_distance('public.alert_batch_st', 'batch_alerts', 'embedding', '[1,0,0]', '<->', 0.5)")
+        .await;
+    db.execute("UPDATE alert_batch_src SET embedding='[0,1,0]' WHERE id=1")
+        .await;
+    let pgt_id: i64 = db
+        .query_scalar("SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_schema='public' AND pgt_name='alert_batch_st'")
+        .await;
+    let mut tx = db.pool.begin().await.expect("begin refresh transaction");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('alert_batch_st')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh one changed row");
+    let snapshot_sql = format!("SELECT count(*) FROM pg_temp.__pgt_distance_pre_{pgt_id}");
+    let before_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(snapshot_sql))
+        .fetch_one(&mut *tx)
+        .await
+        .expect("inspect affected pre-refresh rows");
+    let ids_sql = format!("SELECT count(*) FROM pg_temp.__pgt_distance_ids_{pgt_id}");
+    let id_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(ids_sql))
+        .fetch_one(&mut *tx)
+        .await
+        .expect("inspect affected identities");
+    assert_eq!(before_count, 1);
+    assert_eq!(id_count, 1);
+    let plan_sql = format!(
+        "EXPLAIN (ANALYZE, BUFFERS) SELECT st.* FROM pg_temp.__pgt_distance_ids_{pgt_id} d \
+         CROSS JOIN LATERAL (SELECT st.* FROM public.alert_batch_st st \
+         WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
+           AND st.__pgt_row_id = d.__pgt_row_id OFFSET 0) st"
+    );
+    let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(plan_sql))
+        .fetch_all(&mut *tx)
+        .await
+        .expect("inspect affected-row lookup plan");
+    assert!(
+        plan.iter().any(|line| line.contains("Index")
+            && line.contains("Scan")
+            && line.contains("row_id_idx")),
+        "affected-row lookup should use the row-identity index: {plan:?}"
+    );
+    tx.commit().await.expect("commit refresh");
+}
+
+#[tokio::test]
+async fn test_distance_subscription_typed_predicates_and_authorization() {
+    use sqlx::postgres::PgListener;
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_typed_src (id int PRIMARY KEY, dense vector(3), half halfvec(3), bits bit(3), sparse sparsevec(3))").await;
+    db.create_st(
+        "alert_typed_st",
+        "SELECT id, dense, half, bits, sparse FROM alert_typed_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    for channel in [
+        "typed_dense",
+        "typed_cosine",
+        "typed_half",
+        "typed_bits",
+        "typed_jaccard",
+        "typed_sparse",
+    ] {
+        listener.listen(channel).await.expect("listen");
+    }
+    for sql in [
+        "SELECT pgtrickle.subscribe_distance('alert_typed_st','typed_dense','dense','[1,0,0]','<#>',-0.5)",
+        "SELECT pgtrickle.subscribe_distance('alert_typed_st','typed_cosine','dense','[1,0,0]','<=>',0.1)",
+        "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','typed_half','half','[1,0,0]','<->',0.5)",
+        "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','typed_bits','bits','101','<~>',1)",
+        "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','typed_jaccard','bits','101','<%>',0.5)",
+        "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','typed_sparse','sparse','{1:1}/3','<->',0.5)",
+    ] {
+        db.execute(sql).await;
+    }
+    for sql in [
+        "SELECT pgtrickle.subscribe_distance('alert_typed_st','bad_dim','dense','[1,0]','<->',0.5)",
+        "SELECT pgtrickle.subscribe_distance('alert_typed_st','bad_op','bits','101','<->',0.5)",
+        "SELECT pgtrickle.subscribe_distance('alert_typed_st','bad_nan','dense','[1,0,0]','<->','NaN'::float8)",
+        "SELECT pgtrickle.subscribe_distance('alert_typed_st','bad_inf','dense','[1,0,0]','<->','Infinity'::float8)",
+    ] {
+        assert!(
+            db.try_execute(sql).await.is_err(),
+            "invalid subscription accepted: {sql}"
+        );
+    }
+    db.execute("INSERT INTO alert_typed_src VALUES (1,'[1,0,0]','[1,0,0]','101','{1:1}/3')")
+        .await;
+    db.refresh_st("alert_typed_st").await;
+    let mut channels = HashSet::new();
+    for _ in 0..6 {
+        let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+            .await
+            .expect("typed alert")
+            .expect("receive typed alert");
+        let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+        assert_eq!(payload["entered"], 1);
+        channels.insert(event.channel().to_owned());
+    }
+    assert_eq!(channels.len(), 6);
+
+    db.execute("CREATE ROLE alert_intruder NOLOGIN").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle, public TO alert_intruder")
+        .await;
+    db.execute("GRANT EXECUTE ON FUNCTION pgtrickle.subscribe_distance(text,text,text,text,text,double precision), pgtrickle.unsubscribe_distance(text,text) TO alert_intruder").await;
+    let error = db.try_execute_with_role("SET ROLE alert_intruder", "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','stolen','dense','[1,0,0]','<->',0.5)", "RESET ROLE").await.expect_err("non-owner subscription must fail");
+    assert!(
+        error.to_string().contains("must be owner"),
+        "unexpected denial: {error}"
+    );
+    let mut tx = db.pool.begin().await.expect("begin observer transaction");
+    sqlx::query("SET LOCAL ROLE alert_intruder")
+        .execute(&mut *tx)
+        .await
+        .expect("set role");
+    let visible: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pgtrickle.list_distance_subscriptions(NULL)")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("list visible subscriptions");
+    assert_eq!(visible, 0);
+    tx.rollback().await.expect("end observer transaction");
+
+    db.execute("CREATE ROLE alert_owner NOLOGIN").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle, public TO alert_owner")
+        .await;
+    db.execute("GRANT EXECUTE ON FUNCTION pgtrickle.subscribe_distance(text,text,text,text,text,double precision), pgtrickle.unsubscribe_distance(text,text) TO alert_owner").await;
+    db.execute("ALTER TABLE public.alert_typed_st OWNER TO alert_owner")
+        .await;
+    let result = db.try_execute_with_role("SET ROLE alert_owner", "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','owner_alert','dense','[1,0,0]','<->',0.5)", "RESET ROLE").await;
+    assert!(
+        result.is_ok(),
+        "stream owner should be able to subscribe: {result:?}"
+    );
+    let mut tx = db.pool.begin().await.expect("begin owner transaction");
+    sqlx::query("SET LOCAL ROLE alert_owner")
+        .execute(&mut *tx)
+        .await
+        .expect("set owner role");
+    let visible: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pgtrickle.list_distance_subscriptions('public.alert_typed_st')",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("list owner subscriptions");
+    assert_eq!(visible, 7);
+    tx.rollback().await.expect("end owner transaction");
+}
+
+#[tokio::test]
+async fn test_distance_subscription_key_delete_and_null_transitions() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_key_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO alert_key_src VALUES (1,'[1,0,0]')")
+        .await;
+    db.create_st(
+        "alert_key_st",
+        "SELECT id, embedding FROM alert_key_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    listener.listen("key_alert").await.expect("listen");
+    db.execute("SELECT pgtrickle.subscribe_distance('alert_key_st','key_alert','embedding','[1,0,0]','<->',0.5)").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), listener.recv())
+            .await
+            .is_err(),
+        "registration establishes a baseline"
+    );
+    for (mutation, entered, exited) in [
+        ("UPDATE alert_key_src SET id=2 WHERE id=1", 1, 1),
+        ("DELETE FROM alert_key_src WHERE id=2", 0, 1),
+        ("INSERT INTO alert_key_src VALUES (3,'[1,0,0]')", 1, 0),
+        ("UPDATE alert_key_src SET embedding=NULL WHERE id=3", 0, 1),
+    ] {
+        db.execute(mutation).await;
+        db.refresh_st("alert_key_st").await;
+        let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+            .await
+            .expect("crossing notification")
+            .expect("receive crossing");
+        let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+        assert_eq!(payload["entered"], entered, "{mutation}");
+        assert_eq!(payload["exited"], exited, "{mutation}");
+    }
+}
+
+#[tokio::test]
+async fn test_distance_subscription_full_refresh_and_edit_baseline() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_full_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO alert_full_src VALUES (1,'[1,0,0]')")
+        .await;
+    db.create_st(
+        "alert_full_st",
+        "SELECT id, embedding FROM alert_full_src",
+        "1m",
+        "FULL",
+    )
+    .await;
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    listener.listen("full_alert").await.expect("listen");
+    db.execute("SELECT pgtrickle.subscribe_distance('alert_full_st','full_alert','embedding','[1,0,0]','<->',0.5)").await;
+    db.execute("UPDATE alert_full_src SET embedding='[0,1,0]' WHERE id=1")
+        .await;
+    db.refresh_st("alert_full_st").await;
+    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("full exit")
+        .expect("receive full exit");
+    let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+    assert_eq!(payload["exited"], 1);
+    db.execute("SELECT pgtrickle.subscribe_distance('alert_full_st','full_alert','embedding','[0,1,0]','<->',0.5)").await;
+    db.refresh_st("alert_full_st").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.recv())
+            .await
+            .is_err(),
+        "subscription edits establish a baseline"
+    );
+    db.execute("DELETE FROM alert_full_src WHERE id=1").await;
+    db.refresh_st("alert_full_st").await;
+    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("full delete exit")
+        .expect("receive full delete exit");
+    let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+    assert_eq!(payload["exited"], 1);
+    db.execute("INSERT INTO alert_full_src VALUES (2,'[0,1,0]')")
+        .await;
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables SET needs_reinit=true WHERE pgt_name='alert_full_st'",
+    )
+    .await;
+    db.refresh_st("alert_full_st").await;
+    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("reinitialization entry")
+        .expect("receive reinitialization entry");
+    let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+    assert_eq!(payload["entered"], 1);
+}
+
+#[tokio::test]
+async fn test_distance_subscription_quoted_names_and_extension_schema() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE SCHEMA \"Vector Ext\"").await;
+    db.execute("CREATE EXTENSION vector WITH SCHEMA \"Vector Ext\"")
+        .await;
+    db.execute("CREATE SCHEMA \"Odd.Schema\"").await;
+    db.execute("CREATE TABLE \"Odd.Schema\".source (id int PRIMARY KEY, \"vec weird\" \"Vector Ext\".vector(3))").await;
+    db.execute("SELECT pgtrickle.create_stream_table('\"Odd.Schema\".\"Alert Table\"', $$SELECT id, \"vec weird\" FROM \"Odd.Schema\".source$$, '1m', 'DIFFERENTIAL')").await;
+    let channel = "alerts \"odd'";
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    listener
+        .listen(channel)
+        .await
+        .expect("listen to quoted channel");
+    db.execute_seq(&[
+        "SET search_path TO \"Odd.Schema\", public",
+        "SELECT pgtrickle.subscribe_distance('\"Alert Table\"', 'alerts \"odd''', '\"vec weird\"', '[1,0,0]', '<->', 0.5)",
+        "RESET search_path",
+    ]).await;
+    db.execute("INSERT INTO \"Odd.Schema\".source VALUES (1,'[1,0,0]')")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('\"Odd.Schema\".\"Alert Table\"')")
+        .await;
+    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("quoted alert")
+        .expect("receive alert");
+    let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+    assert_eq!(event.channel(), channel);
+    assert_eq!(payload["schema"], "Odd.Schema");
+    assert_eq!(payload["stream_table"], "Alert Table");
+    assert_eq!(payload["entered"], 1);
+    db.execute("SELECT pgtrickle.drop_stream_table('\"Odd.Schema\".\"Alert Table\"')")
+        .await;
+    let count: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_distance_subscriptions WHERE channel='alerts \"odd''' ").await;
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn test_distance_subscription_rejects_unsupported_notification_modes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_modes_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "alert_modes_st",
+        "SELECT id, embedding FROM alert_modes_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.subscribe_distance('alert_modes_st','mode_alert','embedding','[1,0,0]','<->',0.5)").await;
+    db.execute(
+        "SELECT pgtrickle.alter_stream_table('alert_modes_st', pooler_compatibility_mode => true)",
+    )
+    .await;
+    let error = db.try_execute("SELECT pgtrickle.subscribe_distance('alert_modes_st','new_alert','embedding','[1,0,0]','<->',0.5)").await.expect_err("pooler mode must reject subscriptions");
+    assert!(
+        error.to_string().contains("pooler compatibility"),
+        "unexpected error: {error}"
+    );
+    db.execute("INSERT INTO alert_modes_src VALUES (1,'[1,0,0]')")
+        .await;
+    let notices = db
+        .try_execute_with_notices("SELECT pgtrickle.refresh_stream_table('alert_modes_st')")
+        .await
+        .expect("refresh remains successful");
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("distance notifications are disabled")),
+        "missing pooler warning: {notices:?}"
+    );
+    db.create_st(
+        "alert_immediate_st",
+        "SELECT id, embedding FROM alert_modes_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    let error = db.try_execute("SELECT pgtrickle.subscribe_distance('alert_immediate_st','immediate_alert','embedding','[1,0,0]','<->',0.5)").await.expect_err("IMMEDIATE mode must reject subscriptions");
+    assert!(
+        error.to_string().contains("IMMEDIATE"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_distance_subscription_waits_for_refresh_catalog_lock() {
+    use std::time::Duration;
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_lock_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "alert_lock_st",
+        "SELECT id, embedding FROM alert_lock_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let mut tx = db.pool.begin().await.expect("begin lock transaction");
+    sqlx::query(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name='alert_lock_st' FOR UPDATE",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("hold refresh catalog lock");
+    let pool = db.pool.clone();
+    let mut registration = tokio::spawn(async move {
+        sqlx::query("SELECT pgtrickle.subscribe_distance('alert_lock_st','lock_alert','embedding','[1,0,0]','<->',0.5)")
+            .execute(&pool).await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut registration)
+            .await
+            .is_err(),
+        "registration must wait for the refresh lock"
+    );
+    tx.commit().await.expect("release refresh catalog lock");
+    tokio::time::timeout(Duration::from_secs(5), registration)
+        .await
+        .expect("registration completes")
+        .expect("registration task")
+        .expect("registration succeeds");
+}
+
+#[tokio::test]
+async fn test_distance_subscription_invalid_stored_value_does_not_abort_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_error_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "alert_error_st",
+        "SELECT id, embedding FROM alert_error_source",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.subscribe_distance('public.alert_error_st', 'distance_error', 'embedding', '[1,0,0]', '<->', 0.5)").await;
+    db.execute("UPDATE pgtrickle.pgt_distance_subscriptions SET query_vector='invalid' WHERE stream_table='public.alert_error_st'").await;
+    db.execute("INSERT INTO alert_error_source VALUES (1, '[1,0,0]')")
+        .await;
+    let notices = db
+        .try_execute_with_notices("SELECT pgtrickle.refresh_stream_table('alert_error_st')")
+        .await
+        .expect("alert failure must not abort refresh");
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("distance subscription failed")),
+        "missing failure warning: {notices:?}"
+    );
+    let count: i64 = db.query_scalar("SELECT count(*) FROM alert_error_st").await;
+    assert_eq!(count, 1);
+}
+
 /// VH-2a: subscribe_distance() inserts into pgt_distance_subscriptions.
 #[tokio::test]
 async fn test_distance_subscription_catalog_insert() {
@@ -661,6 +1199,15 @@ async fn test_distance_subscription_catalog_insert() {
         )
         .await;
     assert_eq!(count, 1, "subscription should be registered in catalog");
+    let threshold: f64 = db
+        .query_scalar("SELECT threshold FROM pgtrickle.pgt_distance_subscriptions WHERE stream_table = 'public.ds_st' AND channel = 'near_centroid'")
+        .await;
+    assert_eq!(threshold, 0.5);
+    db.execute("SELECT pgtrickle.subscribe_distance('public.ds_st', 'near_centroid', 'centroid', '[1,0,0]', '<->', 0.3)").await;
+    let threshold: f64 = db
+        .query_scalar("SELECT threshold FROM pgtrickle.list_distance_subscriptions('public.ds_st') WHERE channel = 'near_centroid'")
+        .await;
+    assert_eq!(threshold, 0.3);
 }
 
 /// VH-2b: unsubscribe_distance() removes the catalog entry.
