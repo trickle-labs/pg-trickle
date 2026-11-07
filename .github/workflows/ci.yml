@@ -447,6 +447,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check pgbench result validation
+        run: |
+          python3 benchmarks/pgbench-v0.87/test_parse_pgbench.py
+          python3 benchmarks/pgbench-v0.87/test_compare.py
+
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 

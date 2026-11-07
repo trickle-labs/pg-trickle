@@ -37,6 +37,11 @@ def main() -> int:
     records = [json.loads(line) for line in args.raw.read_text(encoding="utf-8").splitlines() if line.strip()]
     budgets = json.loads(args.budgets.read_text(encoding="utf-8"))
     repetitions = args.expected_repetitions
+    minimum = budgets.get("ci_noise_tolerance", {}).get("paired_repetitions_min")
+    if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 1:
+        fail("paired_repetitions_min must be a positive integer")
+    if repetitions < minimum:
+        fail(f"at least {minimum} paired repetitions are required, got {repetitions}")
     if len(records) != repetitions * 3:
         fail(f"expected {repetitions * 3} raw records, found {len(records)}")
 
