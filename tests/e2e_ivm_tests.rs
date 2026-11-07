@@ -303,6 +303,50 @@ async fn test_ivm_delete_propagates_immediately() {
 // ── TRUNCATE Handling ──────────────────────────────────────────────────
 
 #[tokio::test]
+async fn test_ivm_churn_counts_keyless_duplicate_mutations() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE ivm_churn_keyless_source (id int, value text)")
+        .await;
+    db.execute("INSERT INTO ivm_churn_keyless_source VALUES (1, 'a'), (1, 'a')")
+        .await;
+    let query = "SELECT id, value FROM ivm_churn_keyless_source";
+    create_immediate_st(&db, "ivm_churn_keyless_stream", query).await;
+    let keyless: bool = db.query_scalar("SELECT has_keyless_source FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ivm_churn_keyless_stream'").await;
+    assert!(keyless);
+    let counter_sql = "SELECT ann_churn_generation, ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ivm_churn_keyless_stream'";
+    let before: (i64, i64) = sqlx::query_as(counter_sql)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read baseline");
+    db.execute("INSERT INTO ivm_churn_keyless_source VALUES (1, 'a')")
+        .await;
+    let inserted: (i64, i64) = sqlx::query_as(counter_sql)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read inserted work");
+    assert_eq!(inserted, (before.0, before.1 + 1));
+    db.execute("DELETE FROM ivm_churn_keyless_source WHERE ctid IN (SELECT ctid FROM ivm_churn_keyless_source LIMIT 1)").await;
+    let deleted: (i64, i64) = sqlx::query_as(counter_sql)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read deleted work");
+    assert_eq!(deleted, (before.0, before.1 + 2));
+    let mut tx = db.pool.begin().await.expect("begin keyless rollback");
+    sqlx::query("INSERT INTO ivm_churn_keyless_source VALUES (2, 'b')")
+        .execute(&mut *tx)
+        .await
+        .expect("insert rolled-back row");
+    tx.rollback().await.expect("roll back keyless change");
+    let rolled_back: (i64, i64) = sqlx::query_as(counter_sql)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read rolled-back work");
+    assert_eq!(rolled_back, deleted);
+    db.assert_st_matches_query("ivm_churn_keyless_stream", query)
+        .await;
+}
+
+#[tokio::test]
 async fn test_ivm_truncate_clears_and_repopulates() {
     let db = E2eDb::new().await.with_extension().await;
 

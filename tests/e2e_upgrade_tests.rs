@@ -679,6 +679,10 @@ async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
         .execute(&mut *conn)
         .await
         .expect("roll back upgrade");
+    sqlx::query("INSERT INTO upgrade_epoch_immediate_source VALUES (2)")
+        .execute(&mut *conn)
+        .await
+        .expect("immediate mutation works with the old catalog after rollback");
     sqlx::query("TRUNCATE upgrade_epoch_immediate_source")
         .execute(&mut *conn)
         .await
@@ -712,6 +716,9 @@ async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
         .execute(&mut *conn)
         .await
         .expect("insert after upgrade");
+    let immediate_churn: (i64, i64) = sqlx::query_as("SELECT ann_churn_generation, ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_immediate'")
+        .fetch_one(&mut *conn).await.expect("read immediate churn after upgrade");
+    assert!(immediate_churn.1 > 0);
     let before: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_immediate'")
         .fetch_one(&mut *conn).await.expect("read immediate epoch");
     sqlx::query("TRUNCATE upgrade_epoch_immediate_source")
@@ -721,6 +728,9 @@ async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
     let after: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_immediate'")
         .fetch_one(&mut *conn).await.expect("read epoch after truncate");
     assert!(after > before);
+    let after_truncate: (i64, i64) = sqlx::query_as("SELECT ann_churn_generation, ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_immediate'")
+        .fetch_one(&mut *conn).await.expect("read churn after truncate");
+    assert!(after_truncate.0 > immediate_churn.0);
 }
 
 /// A tracked source for an IMMEDIATE stream table has no CDC buffer, while a

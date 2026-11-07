@@ -4433,13 +4433,13 @@ This interface does not create threshold-based requests.
 `known_operations_since_reported_coverage` is a separate, per-index-baseline
 estimate of stream-table storage operations committed after the claim reported
 as successful. It counts measured INSERT, UPDATE and DELETE operations from
-differential, append-only, fused and Top-K refresh execution, including
+differential, append-only, fused, immediate delta and scheduled Top-K refresh execution, including
 reconciliation writes; an update implemented as DELETE plus INSERT counts
 twice. It is a work estimate, not a count of distinct rows, vector changes,
 or measured recall. A successful report captures the claim's counter, so work
 committed while the rebuild runs remains outstanding. Failure leaves the
 previous baseline unchanged. Until a successful report, or after an unmeasured
-rewrite, immediate-mode change, partitioned refresh, refresh with active application triggers,
+rewrite, immediate Top-K recomputation or TRUNCATE, partitioned refresh, refresh with active application triggers,
 counter overflow, or missing metadata, the
 value is `NULL` (unknown). A later successful report can establish a new
 baseline. The value is stream-wide even for a partition leaf; it cannot tell

@@ -682,7 +682,7 @@ fn apply_ivm_owner_delta(
     user_columns: &[String],
     delta_table: &str,
     is_deduplicated: bool,
-) -> Result<i64, PgTrickleError> {
+) -> Result<(i64, Option<i64>), PgTrickleError> {
     let st_qualified = format!(
         "\"{}\".\"{}\"",
         st.pgt_schema.replace('"', "\"\""),
@@ -724,6 +724,7 @@ fn apply_ivm_owner_delta(
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap_or(0);
 
+        let mut operations = Some(0_i64);
         if delta_count > 0 {
             if let Some(basename) = &pre_table {
                 let pre_table = format!("pg_temp.{}", quote_identifier(basename));
@@ -739,43 +740,49 @@ fn apply_ivm_owner_delta(
                 })?;
             }
 
-            Spi::run(&build_ivm_delete_sql(
-                &st_qualified,
-                delta_table,
-                st.has_keyless_source,
-            ))
-            .map_err(|e| PgTrickleError::SpiError(format!("IVM delta DELETE failed: {e}")))?;
+            let mut apply = |sql: String, action: &str| -> Result<(), PgTrickleError> {
+                let affected = Spi::connect_mut(|client| {
+                    client.update(&sql, None, &[]).map(|rows| rows.len())
+                })
+                .map_err(|e| PgTrickleError::SpiError(format!("IVM delta {action} failed: {e}")))?;
+                operations = operations
+                    .zip(i64::try_from(affected).ok())
+                    .and_then(|(total, count)| total.checked_add(count));
+                Ok(())
+            };
+            apply(
+                build_ivm_delete_sql(&st_qualified, delta_table, st.has_keyless_source),
+                "DELETE",
+            )?;
             if st.has_keyless_source && is_deduplicated {
-                Spi::run(&build_ivm_update_sql(
-                    &st_qualified,
-                    delta_table,
-                    user_columns,
-                ))
-                .map_err(|e| PgTrickleError::SpiError(format!("IVM delta UPDATE failed: {e}")))?;
-                Spi::run(&build_ivm_insert_sql_no_conflict(
-                    &st_qualified,
-                    delta_table,
-                    user_columns,
-                ))
-                .map_err(|e| PgTrickleError::SpiError(format!("IVM delta INSERT failed: {e}")))?;
+                apply(
+                    build_ivm_update_sql(&st_qualified, delta_table, user_columns),
+                    "UPDATE",
+                )?;
+                apply(
+                    build_ivm_insert_sql_no_conflict(&st_qualified, delta_table, user_columns),
+                    "INSERT",
+                )?;
             } else {
-                Spi::run(&build_ivm_insert_sql(
-                    &st_qualified,
-                    delta_table,
-                    user_columns,
-                    st.has_keyless_source,
-                ))
-                .map_err(|e| PgTrickleError::SpiError(format!("IVM delta INSERT failed: {e}")))?;
+                apply(
+                    build_ivm_insert_sql(
+                        &st_qualified,
+                        delta_table,
+                        user_columns,
+                        st.has_keyless_source,
+                    ),
+                    "INSERT",
+                )?;
             }
         }
 
-        Ok(delta_count)
+        Ok((delta_count, operations))
     });
-    let result = result.and_then(|delta_count| {
+    let result = result.and_then(|(delta_count, operations)| {
         if delta_count > 0 && !capture_columns.is_empty() {
             crate::refresh::capture_incremental_diff_to_st_buffer(st, &capture_columns)?;
         }
-        Ok(delta_count)
+        Ok((delta_count, operations))
     });
     if let Some(basename) = pre_table {
         crate::refresh::drop_owner_temp_table(st, &basename);
@@ -918,7 +925,7 @@ fn pgt_ivm_apply_delta(
     );
 
     let delta_table = format!("__pgt_delta_{pgt_id}");
-    let delta_count = apply_ivm_owner_delta(
+    let (delta_count, operations) = apply_ivm_owner_delta(
         &st,
         &delta_sql,
         &user_columns,
@@ -939,8 +946,14 @@ fn pgt_ivm_apply_delta(
         let now = Spi::get_one::<pgrx::datum::TimestampWithTimeZone>("SELECT now()")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .ok_or_else(|| PgTrickleError::InternalError("now() returned NULL".into()))?;
-        // shortcut: delta rows are not storage operations, count them when IVM reports affected rows.
-        StreamTableMeta::update_after_refresh(pgt_id, now, None)?;
+        let operations = if st.st_partition_key.is_some()
+            || !matches!(crate::cdc::has_user_triggers(st.pgt_relid), Ok(false))
+        {
+            None
+        } else {
+            operations.and_then(|count| count.checked_add(phantom_cleanup_count))
+        };
+        StreamTableMeta::update_after_refresh(pgt_id, now, operations)?;
     }
 
     pgrx::debug1!(
