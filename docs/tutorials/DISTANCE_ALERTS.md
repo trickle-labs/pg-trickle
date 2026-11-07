@@ -12,8 +12,10 @@ SELECT pgtrickle.subscribe_distance(
 LISTEN near_documents;
 ```
 
-Use a query vector with the subscribed column's type and dimensions. The
-operator must be provided by the installed pgvector extension for that type:
+Use a query vector with the subscribed column's type and dimensions. For a
+fixed-width `bit(n)` column, registration rejects a bit string of any other
+length instead of padding or truncating it. The operator must be provided by
+the installed pgvector extension for that type:
 `<->` is L2 distance, `<=>` is cosine distance, `<#>` is **negative** inner
 product, `<+>` is L1 distance, `<~>` is Hamming distance, and `<%>` is Jaccard
 distance. Not every operator supports every type. Thresholds must be finite;

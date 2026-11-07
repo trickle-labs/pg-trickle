@@ -6466,6 +6466,26 @@ async fn test_distance_subscription_typed_predicates_and_authorization() {
             "invalid subscription accepted: {sql}"
         );
     }
+    for (query, actual) in [("10", 2), ("1011", 4)] {
+        let sql = format!(
+            "SELECT pgtrickle.subscribe_distance('alert_typed_st','typed_bits','bits','{query}','<~>',1)"
+        );
+        let error = db
+            .try_execute(&sql)
+            .await
+            .expect_err("reject wrong bit length");
+        assert!(
+            error.to_string().contains(&format!(
+                "bit query has {actual} dimensions; column bits requires 3"
+            )),
+            "unexpected error: {error}"
+        );
+    }
+    let retained: String = db.query_scalar("SELECT query_vector FROM pgtrickle.pgt_distance_subscriptions WHERE channel = 'typed_bits'").await;
+    assert_eq!(
+        retained, "101",
+        "invalid edits must preserve the subscription"
+    );
     db.execute("INSERT INTO alert_typed_src VALUES (1,'[1,0,0]','[1,0,0]','101','{1:1}/3')")
         .await;
     db.refresh_st("alert_typed_st").await;

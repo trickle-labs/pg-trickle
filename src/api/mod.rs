@@ -2095,7 +2095,7 @@ fn distance_predicate_type(
     st: &StreamTableMeta,
     column: &str,
     op: &str,
-) -> Result<(String, String), PgTrickleError> {
+) -> Result<(String, String, Option<i32>), PgTrickleError> {
     let metadata = Spi::connect(|client| {
         let mut rows = client.select(
             "SELECT n.nspname::text, t.typname::text, a.atttypmod, en.nspname::text \
@@ -2134,7 +2134,9 @@ fn distance_predicate_type(
             String::new()
         }
     );
-    Ok((type_sql, operator_schema))
+    let bit_dimension =
+        (type_schema == "pg_catalog" && type_name == "bit" && dimension > 0).then_some(dimension);
+    Ok((type_sql, operator_schema, bit_dimension))
 }
 
 fn lock_distance_stream(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
@@ -2213,9 +2215,22 @@ fn subscribe_distance(
     }
     let column = TypedIdentifier::parse(vector_column)?;
     let vector_column = column.as_str();
-    let (type_sql, _) = distance_predicate_type(&st, vector_column, op)?;
+    let (type_sql, _, bit_dimension) = distance_predicate_type(&st, vector_column, op)?;
     let validate_sql = format!("SELECT ($1::{type_sql})::pg_catalog.text");
     crate::refresh::with_stream_owner(&st, || {
+        if let Some(expected) = bit_dimension {
+            let actual = Spi::get_one_with_args::<i32>(
+                "SELECT pg_catalog.bit_length($1::pg_catalog.varbit)",
+                &[query_vector.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::InvalidArgument("bit query is NULL".into()))?;
+            if actual != expected {
+                return Err(PgTrickleError::InvalidArgument(format!(
+                    "bit query has {actual} dimensions; column {vector_column} requires {expected}"
+                )));
+            }
+        }
         Spi::get_one_with_args::<String>(&validate_sql, &[query_vector.into()]) // nosemgrep: rust.spi.query.dynamic-format — type is resolved from the pgvector catalog and quoted.
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Ok(())
@@ -2628,7 +2643,7 @@ pub(crate) fn fire_distance_subscriptions(st: &StreamTableMeta, refresh_id: i64)
                     "distance snapshot is unavailable for this refresh".into(),
                 ));
             }
-            let (type_sql, operator_schema) = distance_predicate_type(st, &column, &op)?;
+            let (type_sql, operator_schema, _) = distance_predicate_type(st, &column, &op)?;
             let predicate = format!(
                 "{} OPERATOR({}.{}) $1::{type_sql} < $2",
                 quote_identifier(&column),
