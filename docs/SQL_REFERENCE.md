@@ -5223,7 +5223,7 @@ pgtrickle.resume_after_drain() → bool
 | `pgtrickle.reliability_counters()` | `SetOf row` | Returns shared-memory reliability counters (scheduler errors, worker crashes, CDC pause events). Useful for alert dashboards. |
 | `pgtrickle.wal_source_status()` | `SetOf row` | Per-source WAL CDC slot status: LSN lag, slot name, active/inactive state. Only populated when WAL-based CDC is active. |
 | `pgtrickle.worker_allocation_status()` | `SetOf row` | Per-database dynamic background worker allocation: quota, active count, and DB name. |
-| `pgtrickle.vector_status()` | `SetOf row` | One row per stream table that has a `post_refresh_action` configured or any ANN-relevant index. Shows index type, dimensions, and last rebuild time. |
+| `pgtrickle.vector_status()` | `SetOf row` | One row per stream table whose `post_refresh_action` is not `none`. `embedding_lag` is time since `data_timestamp`, not embedding-generation freshness; `drift_pct` is the changed-row counter as a percentage of estimated rows, or NULL when the estimate is not positive. It does not report index type, dimensions, validity, or recall. |
 | `pgtrickle.st_auto_threshold(st_name text)` | `float8` | Returns the effective `differential_max_change_ratio` for a specific stream table — the per-ST override if set, otherwise the global `pg_trickle.differential_max_change_ratio` GUC. |
 
 See also:

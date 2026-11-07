@@ -110,11 +110,13 @@ SELECT pgtrickle.create_stream_table(
 
 ---
 
-## Pattern 3: Drift-Aware HNSW Reindexing (VP-1/VP-2)
+## Pattern 3: Changed-Row-Triggered Reindexing (VP-1/VP-2)
 
-HNSW indexes degrade as rows are deleted and tombstones accumulate. Use
-`post_refresh_action = 'reindex_if_drift'` to automatically rebuild the index
-when enough rows have changed.
+`post_refresh_action = 'reindex_if_drift'` requests a table-wide, non-concurrent
+`REINDEX` after the changed-row counter reaches a fraction of the estimated
+table size. This ratio is a churn estimate, not a measurement of index quality,
+semantic drift, or recall. Rebuilding every index on the table can block writes;
+measure the effect on your workload before enabling it.
 
 ```sql
 -- Create a vector stream table
@@ -141,20 +143,27 @@ SELECT pgtrickle.alter_stream_table(
 );
 ```
 
-### Monitor Drift
+### Inspect the Changed-Row Estimate
 
 ```sql
--- Check vector status for all vector stream tables
+-- This function lists only stream tables with a non-'none' post-refresh action.
 SELECT
     name,
     post_refresh_action,
     rows_changed_since_last_reindex,
     estimated_rows,
-    drift_pct || '%' AS drift,
+    drift_pct AS changed_rows_pct,
     last_reindex_at,
-    embedding_lag
+    embedding_lag AS time_since_data_timestamp
 FROM pgtrickle.vector_status();
 ```
+
+`drift_pct` is the changed-row counter divided by PostgreSQL's estimated row
+count, expressed as a percentage; it is NULL when the estimate is not positive.
+`embedding_lag` is the time since the stream's data timestamp. An idle corpus
+can have an old timestamp even when it is current, and neither field reports
+whether an embedding matches the latest document revision or model. Track that
+freshness with application-provided revision and model metadata.
 
 ---
 
@@ -209,33 +218,31 @@ SELECT pgtrickle.alter_stream_table(
 
 ## Operational Sizing Guidance
 
-| Table size | Recommended `post_refresh_action` | Notes |
-|------------|-----------------------------------|-------|
-| < 100k rows | `analyze` | Statistics are cheap; skip REINDEX unless deletes are heavy |
-| 100k – 2M | `reindex_if_drift` with threshold 0.20–0.30 | Balance freshness vs. rebuild cost |
-| > 2M rows | `reindex_if_drift` with threshold 0.10–0.15 | ANN quality degrades faster at scale |
-| Append-only | `none` | HNSW handles inserts well; only deletions cause tombstones |
+Choose maintenance from measurements of your own query and update workload.
+`analyze` updates planner statistics; `reindex_if_drift` can rebuild all indexes
+on the table synchronously. With `none`, manage any index maintenance yourself.
+Use `EXPLAIN` to check a query plan and an application-specific benchmark to
+measure recall and latency.
 
 ---
 
 ## Monitoring
 
 ```sql
--- Comprehensive embedding pipeline health check
+-- Inspect refresh timestamp age and changed-row estimates.
 SELECT
     name,
     post_refresh_action,
-    embedding_lag,
-    drift_pct || '%' AS drift,
-    last_reindex_at,
-    CASE
-        WHEN embedding_lag > INTERVAL '5 minutes' THEN 'STALE'
-        WHEN drift_pct > 30 THEN 'REINDEX_NEEDED'
-        ELSE 'OK'
-    END AS health
+    data_timestamp,
+    embedding_lag AS time_since_data_timestamp,
+    drift_pct AS changed_rows_pct,
+    last_reindex_at
 FROM pgtrickle.vector_status()
 ORDER BY drift_pct DESC NULLS LAST;
 ```
+
+This query does not establish refresh backlog, embedding freshness, index
+validity, or recall. Tables with `post_refresh_action = 'none'` are omitted.
 
 ---
 
@@ -247,10 +254,10 @@ API, Ollama, or pgai). pg_trickle maintains the derived state once embeddings
 are stored in the source table.
 
 **Q: Should I use IVFFlat or HNSW with pg_trickle?**
-HNSW is strongly preferred. HNSW handles incremental writes and deletes via
-tombstones. IVFFlat requires periodic full rebuilds because it uses fixed
-k-means centroids built at index creation time. Use `reindex_if_drift` to
-manage HNSW tombstone accumulation.
+Both support approximate search with different build, memory, and query
+tradeoffs. Benchmark recall and latency for your data and workload. Rebuilding
+may be useful as data changes, but the changed-row threshold does not measure
+recall or establish when a rebuild is needed.
 
 **Q: What is the `reindex_drift_threshold`?**
 It is the fraction of estimated rows that must change since the last REINDEX
@@ -258,9 +265,7 @@ before a drift-triggered REINDEX fires. The default is 0.20 (20%). You can
 set a per-table override via `ALTER STREAM TABLE ... reindex_drift_threshold`.
 
 **Q: Does REINDEX block reads?**
-In PostgreSQL, `REINDEX TABLE` acquires a `SHARE UPDATE EXCLUSIVE` lock, which
-allows concurrent reads but blocks writes and other REINDEX operations. For
-zero-downtime reindexing on large tables, use `REINDEX TABLE CONCURRENTLY`
-(PostgreSQL 12+). pg_trickle uses the standard `REINDEX TABLE` form; if
-concurrency is critical, set `post_refresh_action = 'none'` and schedule
-`REINDEX TABLE CONCURRENTLY` yourself.
+pg_trickle uses the standard, non-concurrent `REINDEX TABLE` form, which can
+block writes while indexes are rebuilt. If that is unsuitable, set
+`post_refresh_action = 'none'` and manage index maintenance separately using
+the PostgreSQL operation appropriate for your workload.
