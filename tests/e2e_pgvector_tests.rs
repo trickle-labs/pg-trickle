@@ -1115,6 +1115,92 @@ async fn test_ann_maintenance_coverage_rolls_back_and_keeps_unknown_unknown() {
 }
 
 #[tokio::test]
+async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_live_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_live_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "ann_live_stream",
+        "SELECT id, embedding FROM ann_live_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_live_idx ON ann_live_stream USING hnsw (embedding vector_l2_ops)")
+        .await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_live_stream'::regclass::oid, 'ann_live_idx'::regclass::oid)").await;
+
+    let mut old_snapshot = db.pool.begin().await.expect("begin old snapshot");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *old_snapshot)
+        .await
+        .expect("set isolation");
+    sqlx::query("SELECT count(*) FROM ann_live_stream")
+        .fetch_one(&mut *old_snapshot)
+        .await
+        .expect("establish old snapshot");
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let mut command = ann_worker_command(&db, &database, "postgres", request, "30s");
+    command.kill_on_drop(true);
+    let mut worker = command.spawn().expect("start worker");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_progress_create_index p JOIN pg_stat_activity a USING (pid) WHERE a.application_name = 'pgtrickle_ann_worker' AND p.command = 'REINDEX CONCURRENTLY' AND p.phase LIKE 'waiting for old snapshots%')")
+                .fetch_one(&db.pool).await.expect("inspect reindex progress");
+            if waiting {
+                break;
+            }
+            assert!(worker.try_wait().expect("inspect worker").is_none(), "worker exited before reaching old snapshot wait");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }).await.expect("worker did not reach concurrent reindex snapshot wait");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        db.execute("INSERT INTO ann_live_source VALUES (2, '[0,1,0]')")
+            .await;
+        db.refresh_st("ann_live_stream").await;
+        assert_eq!(db.count("ann_live_stream").await, 2);
+        let mut reader = db.pool.begin().await.expect("begin reader");
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *reader)
+            .await
+            .expect("enable index plan");
+        let plan: Vec<String> = sqlx::query_scalar("EXPLAIN (COSTS OFF) SELECT id FROM ann_live_stream ORDER BY embedding <-> '[0,1,0]'::vector LIMIT 1")
+            .fetch_all(&mut *reader).await.expect("explain nearest-neighbor read");
+        assert!(plan.iter().any(|line| line.contains("ann_live_idx")), "expected ANN index in {plan:?}");
+        let nearest: i32 = sqlx::query_scalar("SELECT id FROM ann_live_stream ORDER BY embedding <-> '[0,1,0]'::vector LIMIT 1")
+            .fetch_one(&mut *reader).await.expect("read nearest neighbor");
+        assert_eq!(nearest, 2);
+        reader.commit().await.expect("finish reader");
+    })
+    .await
+    .expect("reads or refresh writes blocked during concurrent reindex");
+    old_snapshot.commit().await.expect("release old snapshot");
+    let output = tokio::time::timeout(Duration::from_secs(30), worker.wait_with_output())
+        .await
+        .expect("worker did not finish")
+        .expect("wait for worker");
+    assert!(
+        output.status.success(),
+        "worker failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect result");
+    assert_eq!(status["state"], "SUCCEEDED");
+    assert_eq!(db.count("ann_live_stream").await, 2);
+}
+
+#[tokio::test]
 async fn test_ann_worker_rebuilds_only_the_requested_index() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
