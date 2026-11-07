@@ -152,6 +152,7 @@ fn bench_diff_aggregate(c: &mut Criterion) {
             column_name: "region".to_string(),
         }],
         aggregates: vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::CountStar,
             argument: None,
             alias: "cnt".to_string(),
@@ -178,6 +179,7 @@ fn bench_diff_aggregate(c: &mut Criterion) {
         ],
         aggregates: vec![
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(Expr::ColumnRef {
                     table_alias: None,
@@ -191,6 +193,7 @@ fn bench_diff_aggregate(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::CountStar,
                 argument: None,
                 alias: "cnt".to_string(),
@@ -201,6 +204,7 @@ fn bench_diff_aggregate(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Avg,
                 argument: Some(Expr::ColumnRef {
                     table_alias: None,
@@ -412,6 +416,7 @@ fn bench_diff_composite(c: &mut Criterion) {
             column_name: "region".to_string(),
         }],
         aggregates: vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(Expr::ColumnRef {
                 table_alias: Some("o".to_string()),
@@ -533,6 +538,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
         ],
         aggregates: vec![
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(Expr::ColumnRef {
                     table_alias: Some("l".to_string()),
@@ -546,6 +552,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(Expr::ColumnRef {
                     table_alias: Some("l".to_string()),
@@ -559,6 +566,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(Expr::BinaryOp {
                     op: "*".to_string(),
@@ -583,6 +591,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Avg,
                 argument: Some(Expr::ColumnRef {
                     table_alias: Some("l".to_string()),
@@ -596,6 +605,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Avg,
                 argument: Some(Expr::ColumnRef {
                     table_alias: Some("l".to_string()),
@@ -609,6 +619,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::CountStar,
                 argument: None,
                 alias: "count_order".to_string(),
@@ -729,6 +740,7 @@ fn bench_diff_tpch_q05(c: &mut Criterion) {
             column_name: "n_name".to_string(),
         }],
         aggregates: vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(Expr::BinaryOp {
                 op: "*".to_string(),
@@ -902,6 +914,7 @@ fn bench_diff_tpch_q08(c: &mut Criterion) {
         }],
         aggregates: vec![
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(Expr::ColumnRef {
                     table_alias: Some("l".to_string()),
@@ -915,6 +928,7 @@ fn bench_diff_tpch_q08(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(Expr::ColumnRef {
                     table_alias: Some("l".to_string()),
@@ -964,6 +978,7 @@ fn bench_diff_tpch_q18(c: &mut Criterion) {
             column_name: "l_orderkey".to_string(),
         }],
         aggregates: vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(Expr::ColumnRef {
                 table_alias: Some("li".to_string()),
@@ -1054,6 +1069,7 @@ fn bench_diff_tpch_q18(c: &mut Criterion) {
             },
         ],
         aggregates: vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(Expr::ColumnRef {
                 table_alias: Some("l".to_string()),
@@ -1193,6 +1209,7 @@ fn bench_diff_tpch_q21(c: &mut Criterion) {
             column_name: "s_name".to_string(),
         }],
         aggregates: vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::CountStar,
             argument: None,
             alias: "numwait".to_string(),
@@ -1314,6 +1331,7 @@ fn bench_diff_topk(c: &mut Criterion) {
             group_by,
             aggregates: vec![
                 AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::Sum,
                     argument: Some(Expr::ColumnRef {
                         table_alias: None,
@@ -1327,6 +1345,7 @@ fn bench_diff_topk(c: &mut Criterion) {
                     statistical_support: None,
                 },
                 AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::CountStar,
                     argument: None,
                     alias: "cnt".to_string(),
@@ -1381,6 +1400,7 @@ fn bench_diff_aggregate_scaled(c: &mut Criterion) {
             group_by,
             aggregates: vec![
                 AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::Sum,
                     argument: Some(Expr::ColumnRef {
                         table_alias: None,
@@ -1394,6 +1414,7 @@ fn bench_diff_aggregate_scaled(c: &mut Criterion) {
                     statistical_support: None,
                 },
                 AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::Avg,
                     argument: Some(Expr::ColumnRef {
                         table_alias: None,
@@ -1492,6 +1513,7 @@ fn bench_diff_vector_avg(c: &mut Criterion) {
             column_name: "user_id".to_string(),
         }],
         aggregates: vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::VectorAvg,
             argument: Some(Expr::ColumnRef {
                 table_alias: None,
@@ -1518,6 +1540,7 @@ fn bench_diff_vector_avg(c: &mut Criterion) {
             column_name: "cluster_id".to_string(),
         }],
         aggregates: vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::VectorSum,
             argument: Some(Expr::ColumnRef {
                 table_alias: None,
@@ -1545,6 +1568,7 @@ fn bench_diff_vector_avg(c: &mut Criterion) {
         }],
         aggregates: vec![
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::VectorAvg,
                 argument: Some(Expr::ColumnRef {
                     table_alias: None,
@@ -1558,6 +1582,7 @@ fn bench_diff_vector_avg(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::CountStar,
                 argument: None,
                 alias: "doc_count".to_string(),
@@ -1568,6 +1593,7 @@ fn bench_diff_vector_avg(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::VectorSum,
                 argument: Some(Expr::ColumnRef {
                     table_alias: None,
@@ -1674,6 +1700,7 @@ fn bench_a44_7_scan_agg_delta_sql(c: &mut Criterion) {
         let tree = OpTree::Aggregate {
             group_by: group_exprs,
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(Expr::ColumnRef {
                     table_alias: None,

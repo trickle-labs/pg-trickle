@@ -1849,6 +1849,7 @@ mod distinct_aggregate_admission_tests {
 
     fn distinct_agg(function: AggFunc, arg: Expr) -> AggExpr {
         AggExpr {
+            analyzed_argument: None,
             function,
             argument: Some(arg),
             alias: "d".to_string(),
@@ -2076,6 +2077,7 @@ mod monotonicity_tests {
     #[test]
     fn test_statistical_aggregate_missing_operand_is_full_only() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Corr,
             argument: Some(Expr::ColumnRef {
                 table_alias: None,
@@ -2102,6 +2104,7 @@ mod monotonicity_tests {
     #[test]
     fn test_statistical_aggregate_unresolved_signature_is_full_only() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::StddevPop,
             argument: Some(Expr::ColumnRef {
                 table_alias: None,

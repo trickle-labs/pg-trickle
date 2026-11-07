@@ -960,6 +960,7 @@ mod tests {
         let tree = OpTree::Aggregate {
             group_by: vec![col("region")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(col("amount")),
                 alias: "total".to_string(),
@@ -1134,6 +1135,7 @@ mod tests {
             group_by: vec![col("region")],
             aggregates: vec![
                 AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::Sum,
                     argument: Some(col("amount")),
                     alias: "total".to_string(),
@@ -1144,6 +1146,7 @@ mod tests {
                     statistical_support: None,
                 },
                 AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::CountStar,
                     argument: None,
                     alias: "cnt".to_string(),
@@ -1336,6 +1339,7 @@ mod tests {
             group_by: vec![col("id")],
             aggregates: vec![
                 AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::Sum,
                     argument: Some(col("val")),
                     alias: "sum_val".to_string(),
@@ -1346,6 +1350,7 @@ mod tests {
                     statistical_support: None,
                 },
                 AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::Count,
                     argument: Some(col("val")),
                     alias: "cnt".to_string(),
@@ -1356,6 +1361,7 @@ mod tests {
                     statistical_support: None,
                 },
                 AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::Avg,
                     argument: Some(col("val")),
                     alias: "avg_val".to_string(),
@@ -1412,6 +1418,7 @@ mod tests {
         let agg = OpTree::Aggregate {
             group_by: vec![col("id")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Min,
                 argument: Some(col("val")),
                 alias: "min_val".to_string(),
@@ -1431,6 +1438,7 @@ mod tests {
         let agg = OpTree::Aggregate {
             group_by: vec![col("id")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Max,
                 argument: Some(col("val")),
                 alias: "max_val".to_string(),
@@ -1595,6 +1603,7 @@ mod tests {
             child: Box::new(OpTree::Aggregate {
                 group_by: vec![col("user_id")],
                 aggregates: vec![AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::Sum,
                     argument: Some(col("amount")),
                     alias: "total".to_string(),
@@ -2473,6 +2482,7 @@ mod tests {
 
     fn make_agg(func: AggFunc, arg_name: Option<&str>, alias: &str) -> AggExpr {
         AggExpr {
+            analyzed_argument: None,
             function: func,
             argument: arg_name.map(col),
             alias: alias.to_string(),
@@ -2655,6 +2665,7 @@ mod tests {
         let tree = OpTree::Aggregate {
             group_by: vec![],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::CountStar,
                 argument: None,
                 alias: "cnt".to_string(),
@@ -2720,6 +2731,7 @@ mod tests {
             child: Box::new(OpTree::Aggregate {
                 group_by: vec![col("id"), col("name")],
                 aggregates: vec![AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::CountStar,
                     argument: None,
                     alias: "cnt".to_string(),
@@ -2761,6 +2773,7 @@ mod tests {
             child: Box::new(OpTree::Aggregate {
                 group_by: vec![Expr::Literal("1".to_string())],
                 aggregates: vec![AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::Sum,
                     argument: Some(col("headcount")),
                     alias: "total_headcount".to_string(),
@@ -3094,6 +3107,7 @@ mod tests {
         let tree = OpTree::Aggregate {
             group_by: vec![col("region")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(col("val")),
                 alias: "total".to_string(),
@@ -3113,6 +3127,7 @@ mod tests {
         let tree = OpTree::Aggregate {
             group_by: vec![],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::CountStar,
                 argument: None,
                 alias: "cnt".to_string(),
@@ -3667,6 +3682,7 @@ mod tests {
         let agg = OpTree::Aggregate {
             group_by: vec![col("id")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Count,
                 argument: Some(col("val")),
                 alias: "cnt".to_string(),
@@ -3687,6 +3703,7 @@ mod tests {
         let min_child = OpTree::Aggregate {
             group_by: vec![col("id")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Min,
                 argument: Some(col("val")),
                 alias: "min_val".to_string(),
@@ -3722,6 +3739,7 @@ mod tests {
             OpTree::Aggregate {
                 group_by: vec![col("id")],
                 aggregates: vec![AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::Min,
                     argument: Some(col("val")),
                     alias: "min_val".to_string(),
@@ -4553,6 +4571,7 @@ mod tests {
         let agg = OpTree::Aggregate {
             group_by: vec![col("cust_id")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(col("amount")),
                 alias: "total".to_string(),
@@ -5324,6 +5343,7 @@ mod tests {
         let mut tree = OpTree::Aggregate {
             group_by: vec![qualified_col("t", "dept")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(qualified_col("t", "salary")),
                 alias: "total".into(),
@@ -5355,6 +5375,7 @@ mod tests {
             let mut tree = OpTree::Aggregate {
                 group_by: vec![qualified_col("t", "dept")],
                 aggregates: vec![AggExpr {
+                    analyzed_argument: None,
                     function,
                     argument: None,
                     alias: "result".into(),
@@ -5564,6 +5585,7 @@ mod tests {
         let tree = OpTree::Aggregate {
             group_by: vec![col("dept")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Count,
                 argument: None,
                 alias: "cnt".to_string(),
@@ -6166,6 +6188,7 @@ mod tests {
         let tree = OpTree::Aggregate {
             group_by: vec![col("region")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(col("amount")),
                 alias: "total".to_string(),
@@ -6254,6 +6277,7 @@ mod tests {
         let tree = OpTree::Aggregate {
             group_by: vec![col("region")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(col("amount")),
                 alias: "total".to_string(),

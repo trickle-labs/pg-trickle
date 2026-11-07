@@ -930,6 +930,16 @@ fn alter_stream_table_query(
         }
         return Ok(());
     }
+    let expression_index = Spi::get_one_with_args::<String>(
+        "SELECT (SELECT c.relname::text FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid JOIN pg_catalog.pg_am am ON am.oid = c.relam WHERE i.indrelid = $1 AND (i.indexprs IS NOT NULL OR am.amname IN ('hnsw', 'ivfflat')) AND c.relname <> $2::name ORDER BY c.oid LIMIT 1)",
+        &[st.pgt_relid.into(), format!("{table_name}_row_id_idx").as_str().into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    if let Some(index) = expression_index {
+        return Err(PgTrickleError::UnsupportedOperator(format!(
+            "ALTER QUERY requires rebuilding {schema}.{table_name}, which has expression or ANN index {index}; drop and recreate the index explicitly"
+        )));
+    }
     let rebuild_reason = classification
         .reason()
         .unwrap_or("state reuse was not proven")
@@ -1038,6 +1048,11 @@ fn alter_stream_table_query(
         st.st_partition_key.as_deref(),
         st.storage_fillfactor,
     )?;
+    if let Some(ref parsed) = vq.parsed_tree {
+        with_invoker_search_path(caller_search_path, || {
+            fix_vector_aggregate_column_types(schema, &shadow_name, &parsed.tree)
+        })?;
+    }
     set_relation_owner(schema, &shadow_name, original_owner)?;
 
     // ── Phase 4: Update catalog & set up new infrastructure ──
@@ -1365,6 +1380,9 @@ fn alter_stream_table_partition_key(
     // LSEC-8 (v0.87.9): capture the exact pre-rebuild storage owner so it
     // can be restored on the recreated table below.
     let original_owner = relation_owner(st.pgt_relid)?;
+    let (avg_aux, nonnull_aux) = crate::refresh::with_stream_owner(st, || {
+        crate::dvm::query_aggregate_aux_columns(&st.defining_query)
+    })?;
 
     // Detach pgt_relid so the sql_drop event trigger does not delete the
     // catalog row when we drop the old table.
@@ -1387,10 +1405,8 @@ fn alter_stream_table_partition_key(
     // Recompute auxiliary column needs from the defining query.
     let needs_pgt_count = crate::dvm::query_needs_pgt_count(&st.defining_query);
     let needs_dual_count = crate::dvm::query_needs_dual_count(&st.defining_query);
-    let avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
     let sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
     let covar_aux = crate::dvm::query_covar_aux_columns(&st.defining_query);
-    let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
     let statistical_aux_types = crate::dvm::query_statistical_aux_types(&st.defining_query);
 
     // Recreate the storage table with the new partition scheme.
@@ -2421,6 +2437,7 @@ pub(crate) fn alter_stream_table_impl(
                 &st.defining_query,
                 target_refresh_mode,
                 relation_owner(st.pgt_relid)?,
+                true,
             )?;
         }
 

@@ -150,7 +150,7 @@ pub(crate) fn execute_full_refresh_target(
             let mut eq = crate::api::inject_pgt_count(query);
             // Also inject AVG auxiliary columns (SUM/COUNT of arg) for algebraic
             // AVG maintenance.
-            let avg_aux = crate::dvm::query_avg_aux_columns(query);
+            let (avg_aux, nonnull_aux) = crate::dvm::query_aggregate_aux_columns(query)?;
             if !avg_aux.is_empty() {
                 eq = crate::api::inject_avg_aux(&eq, &avg_aux);
             }
@@ -162,7 +162,6 @@ pub(crate) fn execute_full_refresh_target(
                 eq = crate::api::inject_sum2_aux_typed(&eq, &typed);
             }
             // Also inject nonnull-count columns for SUM NULL-transition correction (P2-2).
-            let nonnull_aux = crate::dvm::query_nonnull_aux_columns(query);
             if !nonnull_aux.is_empty() {
                 eq = crate::api::inject_nonnull_aux(&eq, &nonnull_aux);
             }

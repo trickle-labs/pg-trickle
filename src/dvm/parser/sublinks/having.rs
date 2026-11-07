@@ -81,6 +81,7 @@ mod tests {
 
     fn make_count_star_agg(alias: &str) -> AggExpr {
         AggExpr {
+            analyzed_argument: None,
             function: AggFunc::CountStar,
             argument: None,
             alias: alias.to_string(),
@@ -94,6 +95,7 @@ mod tests {
 
     fn make_sum_agg(col: &str, alias: &str) -> AggExpr {
         AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(Expr::ColumnRef {
                 table_alias: None,

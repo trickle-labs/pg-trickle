@@ -1011,6 +1011,7 @@ mod tests {
         let child = aggregate(
             vec![],
             vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Max,
                 argument: Some(Expr::ColumnRef {
                     table_alias: Some("q".into()),

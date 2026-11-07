@@ -152,6 +152,7 @@ fn bench_output_columns(c: &mut Criterion) {
         }],
         aggregates: vec![
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(Expr::ColumnRef {
                     table_alias: None,
@@ -165,6 +166,7 @@ fn bench_output_columns(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::CountStar,
                 argument: None,
                 alias: "cnt".to_string(),
@@ -596,6 +598,7 @@ fn bench_a44_11_di_delta_scan(c: &mut Criterion) {
                 column_name: "col_1".to_string(),
             }],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(Expr::ColumnRef {
                     table_alias: None,

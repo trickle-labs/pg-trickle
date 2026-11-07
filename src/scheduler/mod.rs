@@ -3256,6 +3256,7 @@ fn refresh_single_st(
                 &st.defining_query,
                 st.refresh_mode,
                 crate::api::security_context::stream_execution_context(&st)?.owner_oid,
+                false,
             )
         })
     {

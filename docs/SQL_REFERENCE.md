@@ -1271,6 +1271,7 @@ SELECT pgtrickle.alter_stream_table('order_totals', status => 'ACTIVE');
 **Notes:**
 - When `query` is provided, the function runs the full query rewrite pipeline (view inlining, DISTINCT ON, GROUPING SETS, etc.) and validates the new query before applying changes.
 - The entire ALTER QUERY operation runs within a single transaction. If any step fails, the stream table is left unchanged.
+- If a query change requires a shadow-table rebuild and the stream table has an expression or ANN index, the change is rejected to prevent silently losing that index. Drop the index explicitly, perform the change, and recreate it.
 - For same-schema and compatible-schema changes, the storage table OID is preserved — views, policies, and publications referencing the stream table remain valid.
 - For incompatible schema changes (e.g., changing a column from `integer` to `text`), the storage table is rebuilt and the OID changes. A `WARNING` is emitted.
 - The stream table is temporarily suspended during query migration to prevent concurrent scheduler refreshes.

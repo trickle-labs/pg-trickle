@@ -423,6 +423,7 @@ mod tests {
 
     fn aggregate(function: AggFunc, argument: Option<&str>, alias: &str) -> AggExpr {
         AggExpr {
+            analyzed_argument: None,
             function,
             argument: argument.map(|column_name| Expr::ColumnRef {
                 table_alias: Some("e".into()),

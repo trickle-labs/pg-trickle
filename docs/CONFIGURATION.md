@@ -2713,9 +2713,12 @@ SELECT pg_reload_conf();
 
 ### pg_trickle.enable_vector_agg
 
-When `true`, `avg(vector_col)` and `sum(vector_col)` in stream table defining
-queries are handled by the DVM engine using incremental aggregate operators for
-`vector`, `halfvec`, and `sparsevec` types. Requires the `pgvector` extension.
+When `true`, supported pgvector `avg` and `sum` aggregates use group rescans
+for affected groups during differential refresh. The installed pgvector
+version must provide the aggregate for the argument type; sparse vector
+storage does not imply a sparse aggregate. Known argument dimensions are
+preserved for direct aggregate outputs, while expressions whose dimensions
+cannot be established remain unconstrained. Requires the `pgvector` extension.
 
 | Property | Value |
 |---|---|
