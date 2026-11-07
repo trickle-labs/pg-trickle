@@ -4365,11 +4365,12 @@ requests on logical restore. An interrupted backend can be reclaimed without
 delay because no outcome was reported. Index renames or definition changes
 create a different schedule and require operator coordination. On reported
 success, the per-index `reported_covered_epoch` advances to the claim epoch;
-failure leaves the previous value intact. `refreshes_since_reported_coverage`
+failure leaves the previous value intact. `epoch_advances_since_reported_coverage`
 is the difference from the current stream epoch when both are known. A refresh
 committed after the claim remains in that difference even if it completed
-while the rebuild ran. These are refresh generations, not changed-row counts
-or recall measurements, and success is the caller's report. A `NULL` epoch or
+while the rebuild ran. These are epoch advances, not counts of refreshes or
+changed rows; a single manual refresh can advance the epoch more than once.
+They do not measure recall, and success is the caller's report. A `NULL` epoch or
 missing coverage yields an unknown difference. A manual rebuild outside this
 interface does not advance reported coverage. No refresh counter is reset.
 This interface does not create threshold-based requests.

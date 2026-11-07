@@ -84,6 +84,7 @@ async fn test_ann_maintenance_coverage_preserves_refreshes_after_claim() {
     let request_sql = "SELECT pgtrickle.request_ann_maintenance('ann_coverage_stream'::regclass::oid, 'ann_coverage_idx'::regclass::oid)";
     let request: i64 = db.query_scalar(request_sql).await;
     let other: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_coverage_stream'::regclass::oid, 'ann_coverage_other_idx'::regclass::oid)").await;
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET rows_changed_since_last_reindex=42 WHERE pgt_name='ann_coverage_stream'").await;
     db.execute("INSERT INTO ann_coverage_source VALUES (2, '[0,1,0]')")
         .await;
     db.refresh_st("ann_coverage_stream").await;
@@ -138,6 +139,11 @@ async fn test_ann_maintenance_coverage_preserves_refreshes_after_claim() {
         "worker failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let legacy_counter: i64 = db.query_scalar("SELECT rows_changed_since_last_reindex FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_coverage_stream'").await;
+    assert_eq!(
+        legacy_counter, 42,
+        "completion must not reset the table-wide churn counter"
+    );
     let replacement: i64 = db.query_scalar(request_sql).await;
     assert_ne!(request, replacement);
     let status: serde_json::Value =
@@ -151,7 +157,7 @@ async fn test_ann_maintenance_coverage_preserves_refreshes_after_claim() {
         Some(epoch_at_claim)
     );
     assert_eq!(
-        status["refreshes_since_reported_coverage"].as_i64(),
+        status["epoch_advances_since_reported_coverage"].as_i64(),
         Some(later_epoch - epoch_at_claim)
     );
     assert!(status["reported_covered_at"].is_string());
@@ -282,7 +288,7 @@ async fn test_ann_maintenance_coverage_rolls_back_and_keeps_unknown_unknown() {
             .expect("inspect unknown coverage");
     assert!(unknown["claim_epoch"].is_null());
     assert!(unknown["reported_covered_epoch"].is_null());
-    assert!(unknown["refreshes_since_reported_coverage"].is_null());
+    assert!(unknown["epoch_advances_since_reported_coverage"].is_null());
     assert!(unknown["reported_covered_at"].is_string());
 }
 

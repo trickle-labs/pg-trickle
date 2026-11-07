@@ -114,7 +114,7 @@ fn ann_maintenance_request_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickl
            'consecutive_failures', COALESCE(g.consecutive_failures, 0), \
            'reported_covered_epoch', g.reported_covered_epoch, \
            'reported_covered_at', g.reported_covered_at, \
-           'refreshes_since_reported_coverage', CASE \
+           'epoch_advances_since_reported_coverage', CASE \
              WHEN g.reported_covered_epoch IS NOT NULL AND s.ann_refresh_epoch >= g.reported_covered_epoch \
              THEN s.ann_refresh_epoch - g.reported_covered_epoch ELSE NULL END, \
            'stream_table_oid', r.root_relid, 'leaf_table_oid', r.leaf_relid, \
