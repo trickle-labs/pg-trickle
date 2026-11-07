@@ -4534,12 +4534,28 @@ async fn test_vector_diagnostics_catalog_visibility_and_index_metadata() {
     db.execute("CREATE INDEX diagnostic_cosine ON diagnostic_st USING hnsw (a vector_cosine_ops) WHERE id > 0").await;
     db.execute("CREATE INDEX diagnostic_expression ON diagnostic_st USING hnsw ((b::vector(3)) vector_l2_ops)").await;
 
-    let columns = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'post_refresh_action' = 'none' AND v->>'dimensions' = '3' AND v->'embedding_freshness' = 'null'::jsonb AND v->'maintenance_pending' = 'null'::jsonb").await;
+    let columns = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'post_refresh_action' = 'none' AND v->>'dimensions' = '3' AND v->'embedding_freshness' = 'null'::jsonb AND v->>'maintenance_pending' = 'false' AND v->>'maintenance_failed' = 'false'").await;
     assert_eq!(columns, 2);
     let unknown = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'column' = 'c' AND v->'dimensions' = 'null'::jsonb AND v->'requested_index_state' = 'null'::jsonb AND v->>'requested_index_reason' IS NOT NULL").await;
     assert_eq!(unknown, 1);
     let indexes = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'access_method' = 'hnsw' AND v->>'valid' = 'true' AND v->>'ready' = 'true' AND ((v->>'index' = 'diagnostic_cosine' AND v->>'opclass' = 'vector_cosine_ops' AND v->>'predicate' IS NOT NULL) OR (v->>'index' = 'diagnostic_expression' AND v->>'opclass' = 'vector_l2_ops'))").await;
     assert_eq!(indexes, 2);
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('diagnostic_st'::regclass::oid, 'diagnostic_cosine'::regclass::oid)").await;
+    let pending: bool = db.query_scalar("SELECT (v->>'maintenance_pending')::boolean FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' LIMIT 1").await;
+    assert!(pending);
+    let mut worker = db.pool.acquire().await.expect("acquire worker");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("claim request");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, false, 'test failure')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("fail request");
+    let failed: bool = db.query_scalar("SELECT (v->>'maintenance_failed')::boolean AND v->>'maintenance_error' = 'test failure' AND v->>'maintenance_pending' = 'false' FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' LIMIT 1").await;
+    assert!(failed);
 
     db.execute("CREATE ROLE diagnostic_observer").await;
     db.execute("GRANT USAGE ON SCHEMA pgtrickle TO diagnostic_observer")
@@ -4572,6 +4588,24 @@ async fn test_vector_diagnostics_catalog_visibility_and_index_metadata() {
         .await
         .expect("inspect as observer");
     assert_eq!(visible, 2);
+    let redacted: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->'maintenance_pending' = 'null'::jsonb AND v->'maintenance_failed' = 'null'::jsonb AND v->'maintenance_error' = 'null'::jsonb AND v->>'maintenance_reason' IS NOT NULL")
+        .fetch_one(&mut *conn).await.expect("inspect redacted maintenance");
+    assert_eq!(redacted, 3);
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("reset role");
+    sqlx::query("GRANT MAINTAIN ON diagnostic_st TO diagnostic_observer")
+        .execute(&mut *conn)
+        .await
+        .expect("grant maintenance visibility");
+    sqlx::query("SET ROLE diagnostic_observer")
+        .execute(&mut *conn)
+        .await
+        .expect("set maintenance observer");
+    let authorized: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'maintenance_failed' = 'true' AND v->>'maintenance_error' = 'test failure'")
+        .fetch_one(&mut *conn).await.expect("inspect authorized maintenance");
+    assert_eq!(authorized, 3);
     sqlx::query("RESET ROLE")
         .execute(&mut *conn)
         .await
@@ -4595,6 +4629,31 @@ async fn test_vector_diagnostics_reports_partition_leaf_indexes() {
     db.execute("CREATE INDEX diagnostic_partition_ann ON diagnostic_partition_st USING hnsw (embedding vector_l2_ops)").await;
     let leaves = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE v->>'stream_table_oid' = 'diagnostic_partition_st'::regclass::oid::text AND v->>'table_oid' <> v->>'stream_table_oid' AND v->>'opclass' = 'vector_l2_ops'").await;
     assert!(leaves > 0);
+    let leaf_index: i64 = db.query_scalar("SELECT (v->>'index_oid')::bigint FROM pgtrickle.ann_index_status_v2() v WHERE v->>'stream_table_oid' = 'diagnostic_partition_st'::regclass::oid::text LIMIT 1").await;
+    let _: i64 = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance('diagnostic_partition_st'::regclass::oid, $1::bigint::oid)")
+        .bind(leaf_index).fetch_one(&db.pool).await.expect("request leaf maintenance");
+    let pending: bool = db.query_scalar("SELECT (v->>'maintenance_pending')::boolean FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_partition_st' LIMIT 1").await;
+    assert!(pending);
+    db.execute("CREATE ROLE diagnostic_partition_observer")
+        .await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO diagnostic_partition_observer")
+        .await;
+    db.execute(
+        "GRANT SELECT, MAINTAIN ON diagnostic_partition_st TO diagnostic_partition_observer",
+    )
+    .await;
+    let mut observer = db.pool.begin().await.expect("begin observer");
+    sqlx::query("SET LOCAL ROLE diagnostic_partition_observer")
+        .execute(&mut *observer)
+        .await
+        .expect("set observer");
+    let redacted: bool = sqlx::query_scalar("SELECT v->'maintenance_pending' = 'null'::jsonb FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_partition_st' LIMIT 1")
+        .fetch_one(&mut *observer).await.expect("inspect partition visibility");
+    assert!(
+        redacted,
+        "root privileges alone must not expose leaf maintenance"
+    );
+    observer.rollback().await.expect("finish observer");
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -2279,8 +2279,7 @@ pub(super) fn vector_status() -> TableIterator<
     TableIterator::new(rows)
 }
 
-/// Catalog-only vector column status. Generation freshness and maintenance
-/// queue state are unknown unless supplied by the application or a future queue.
+/// Catalog-only vector column status. Generation freshness requires application metadata.
 #[pg_extern(schema = "pgtrickle", security_definer)]
 #[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub(super) fn vector_stream_status_v2()
@@ -2301,8 +2300,10 @@ pub(super) fn vector_stream_status_v2()
                 'post_refresh_action', s.post_refresh_action,
                 'embedding_freshness', NULL, 'embedding_freshness_reason', 'application revision and model metadata unavailable',
                 'backlog', NULL, 'backlog_reason', 'not measured by this catalog inspection',
-                'maintenance_pending', NULL, 'maintenance_error', NULL,
-                'maintenance_reason', 'no durable maintenance queue is available',
+                'maintenance_pending', CASE WHEN q.can_view THEN q.pending END,
+                'maintenance_failed', CASE WHEN q.can_view THEN q.failed END,
+                'maintenance_error', CASE WHEN q.can_view THEN q.last_error END,
+                'maintenance_reason', CASE WHEN NOT q.can_view THEN 'MAINTAIN on storage leaves and access to stale requests required' END,
                 'requested_index_state', NULL, 'requested_index_reason', 'requested ANN index intent is not recorded')
               FROM pgtrickle.pgt_stream_tables s
               JOIN pg_catalog.pg_class sc ON sc.oid = s.pgt_relid
@@ -2310,6 +2311,31 @@ pub(super) fn vector_stream_status_v2()
               JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
               JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e'
               JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid AND e.extname = 'vector'
+              CROSS JOIN LATERAL (
+                WITH RECURSIVE storage(relid) AS (
+                  SELECT s.pgt_relid UNION ALL
+                  SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN storage p ON h.inhparent = p.relid
+                ), access AS (
+                  SELECT COALESCE(bool_and(pg_catalog.has_schema_privilege($1, c.relnamespace, 'USAGE')
+                    AND pg_catalog.has_table_privilege($1, c.oid, 'MAINTAIN')), false) AS allowed
+                  FROM storage JOIN pg_catalog.pg_class c ON c.oid = storage.relid
+                )
+                SELECT access.allowed AND NOT EXISTS (
+                    SELECT 1 FROM pgtrickle.pgt_ann_maintenance_requests r
+                    LEFT JOIN pg_catalog.pg_class leaf ON leaf.oid = r.leaf_relid
+                    WHERE r.pgt_id = s.pgt_id AND
+                      CASE WHEN leaf.oid IS NULL THEN NOT pg_catalog.pg_has_role($1, sc.relowner, 'USAGE')
+                        ELSE NOT EXISTS (SELECT 1 FROM storage WHERE relid = leaf.oid)
+                          OR NOT pg_catalog.has_schema_privilege($1, leaf.relnamespace, 'USAGE')
+                          OR NOT pg_catalog.has_table_privilege($1, leaf.oid, 'MAINTAIN') END
+                  ) AS can_view,
+                  COALESCE(bool_or(r.state IN ('REQUESTED', 'RUNNING')), false) AS pending,
+                  COALESCE(bool_or(r.state = 'FAILED'), false) AS failed,
+                  (array_agg(r.last_error ORDER BY r.completed_at DESC NULLS LAST)
+                    FILTER (WHERE r.state = 'FAILED'))[1] AS last_error
+                FROM access LEFT JOIN pgtrickle.pgt_ann_maintenance_requests r ON r.pgt_id = s.pgt_id
+                GROUP BY access.allowed
+              ) q
               WHERE t.typname IN ('vector', 'halfvec', 'sparsevec')
                 AND pg_catalog.has_table_privilege($1, s.pgt_relid, 'SELECT')
                 AND pg_catalog.has_schema_privilege($1, sc.relnamespace, 'USAGE')

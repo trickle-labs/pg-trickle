@@ -5499,9 +5499,15 @@ The v2 diagnostics inspect catalogs without scanning vector data. They require
 NULL when the type has no known typmod.
 
 The column records include refresh timestamps and frontier, not embedding
-generation freshness. Backlog, maintenance queue state, and requested ANN index
-intent are NULL with a reason because these catalog checks do not measure or
-record them. An old timestamp alone does not mean an idle corpus is stale, and
+generation freshness. Backlog and requested ANN index intent are NULL with a
+reason because these catalog checks do not measure or record them. The
+stream-wide `maintenance_pending` and `maintenance_failed` fields summarize
+durable requests, and `maintenance_error` is the most recent failed request's
+error. `maintenance_pending` includes requested and running work, including
+interrupted claims that have not yet been recovered. These fields are NULL
+with a reason unless the caller can inspect all storage leaves and stale
+requests; SELECT alone does not expose maintenance details. An old timestamp
+alone does not mean an idle corpus is stale, and
 the absence of an index cannot distinguish intentional exact search from a
 missing requested index. Compare application revision and model metadata to
 assess embedding freshness. If dimensions are unknown, declare a dimensioned

@@ -573,6 +573,8 @@ async fn test_upgrade_embedding_helpers_from_0109() {
         .execute(&mut *worker)
         .await
         .expect("release upgraded claim");
+    let failed: bool = db.query_scalar("SELECT (v->>'maintenance_failed')::boolean AND v->>'maintenance_error' = 'test failure' FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'upgrade_cosine' LIMIT 1").await;
+    assert!(failed, "upgraded diagnostics report failed maintenance");
     let status: serde_json::Value =
         sqlx::query_scalar("SELECT pgtrickle.cancel_ann_maintenance($1)")
             .bind(request)
