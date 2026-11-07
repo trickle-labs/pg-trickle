@@ -1380,6 +1380,9 @@ fn alter_stream_table_partition_key(
     // LSEC-8 (v0.87.9): capture the exact pre-rebuild storage owner so it
     // can be restored on the recreated table below.
     let original_owner = relation_owner(st.pgt_relid)?;
+    let (avg_aux, nonnull_aux) = crate::refresh::with_stream_owner(st, || {
+        crate::dvm::query_aggregate_aux_columns(&st.defining_query)
+    })?;
 
     // Detach pgt_relid so the sql_drop event trigger does not delete the
     // catalog row when we drop the old table.
@@ -1402,9 +1405,6 @@ fn alter_stream_table_partition_key(
     // Recompute auxiliary column needs from the defining query.
     let needs_pgt_count = crate::dvm::query_needs_pgt_count(&st.defining_query);
     let needs_dual_count = crate::dvm::query_needs_dual_count(&st.defining_query);
-    let (avg_aux, nonnull_aux) = crate::refresh::with_stream_owner(st, || {
-        crate::dvm::query_aggregate_aux_columns(&st.defining_query)
-    })?;
     let sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
     let covar_aux = crate::dvm::query_covar_aux_columns(&st.defining_query);
     let statistical_aux_types = crate::dvm::query_statistical_aux_types(&st.defining_query);
