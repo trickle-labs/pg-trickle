@@ -21,6 +21,51 @@ async fn setup_pgvector(db: &E2eDb) {
     db.execute("CREATE EXTENSION IF NOT EXISTS vector").await;
 }
 
+#[tokio::test]
+async fn test_pgvector_helper_missing_extension_is_actionable_and_atomic() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE no_vector_source (id int PRIMARY KEY, embedding text)")
+        .await;
+    let error = db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table_v2('no_vector_stream', 'no_vector_source', 'embedding', 'cosine')")
+        .await.expect_err("helper requires pgvector");
+    assert!(
+        error
+            .to_string()
+            .contains("pgvector extension is not installed"),
+        "unexpected error: {error}"
+    );
+    let clean: bool = db
+        .query_scalar(
+            "SELECT to_regclass('no_vector_stream') IS NULL AND NOT EXISTS \
+        (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'no_vector_stream')",
+        )
+        .await;
+    assert!(clean, "failed helper must not leave a stream table");
+}
+
+#[tokio::test]
+async fn test_pgvector_helper_invalid_column_is_actionable_and_atomic() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE invalid_vector_source (id int PRIMARY KEY, embedding text)")
+        .await;
+    for column in ["missing", "embedding"] {
+        let error = db.try_execute(&format!("SELECT * FROM pgtrickle.embedding_stream_table_v2('invalid_vector_stream', 'invalid_vector_source', '{column}', 'cosine', '{{\"columns\":[\"id\"]}}')"))
+            .await.expect_err("helper requires a pgvector column");
+        assert!(
+            error.to_string().contains("must be a pgvector"),
+            "unexpected error: {error}"
+        );
+        let clean: bool = db
+            .query_scalar(
+                "SELECT to_regclass('invalid_vector_stream') IS NULL AND NOT EXISTS \
+            (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'invalid_vector_stream')",
+            )
+            .await;
+        assert!(clean, "failed helper must not leave a stream table");
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // F4-1: User-taste centroid — avg(embedding) per user
 // ═══════════════════════════════════════════════════════════════════════

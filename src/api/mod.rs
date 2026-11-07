@@ -2560,8 +2560,8 @@ fn embedding_stream_table_impl(
     let vector_column = TypedIdentifier::parse(vector_col)?;
     let vector_col = vector_column.as_str();
     let vector_schema = Spi::get_one::<String>(
-        "SELECT n.nspname::text FROM pg_catalog.pg_extension e \
-         JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector'",
+        "SELECT (SELECT n.nspname::text FROM pg_catalog.pg_extension e \
+         JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector')",
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
     .ok_or_else(|| {
@@ -2628,12 +2628,12 @@ fn embedding_stream_table_impl(
     );
 
     // Infer vector column type for index operator class.
-    let type_sql = "SELECT t.typname::text FROM pg_catalog.pg_attribute a \
+    let type_sql = "SELECT (SELECT t.typname::text FROM pg_catalog.pg_attribute a \
          JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
          JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_type'::regclass \
            AND d.objid = t.oid AND d.refclassid = 'pg_catalog.pg_extension'::regclass AND d.deptype = 'e' \
          JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid AND e.extname = 'vector' \
-         WHERE a.attrelid = $1 AND a.attname = $2 AND a.attnum > 0 AND NOT a.attisdropped";
+         WHERE a.attrelid = $1 AND a.attname = $2 AND a.attnum > 0 AND NOT a.attisdropped)";
     let vec_typename = Spi::get_one_with_args::<String>(
         type_sql,
         &[source_oid.into(), vector_col.into()],
