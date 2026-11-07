@@ -6,6 +6,17 @@ import v0_109_0_release_gate as gate
 
 
 class RetirementContractTests(unittest.TestCase):
+    def test_metadata_tracks_package_and_never_precedes_gate(self):
+        check = gate.prior.shared.check_metadata_version
+        check("0.110.0", "0.110.0", "0.109.0")
+        check("0.109.0", "0.109.0", "0.109.0")
+        for meta, package, version in [
+            ("0.109.0", "0.110.0", "0.109.0"),
+            ("0.108.3", "0.108.3", "0.109.0"),
+        ]:
+            with self.assertRaises(SystemExit):
+                check(meta, package, version)
+
     def test_requires_pause_cases_in_recovery_suite_and_shard(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
         self.assertTrue(gate.PAUSE_CASES <= set(contract["required_cases"]))
