@@ -22,6 +22,71 @@ async fn setup_pgvector(db: &E2eDb) {
 }
 
 #[tokio::test]
+async fn test_pgvector_compat_installed_version() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let (server, installed, pg_trickle): (i32, String, String) = sqlx::query_as(
+        "SELECT current_setting('server_version_num')::int, \
+         (SELECT extversion FROM pg_extension WHERE extname = 'vector'), \
+         (SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle')",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("inspect installed versions");
+    assert_eq!(server / 10_000, 18, "wrong PostgreSQL major version");
+    assert_eq!(pg_trickle, env!("CARGO_PKG_VERSION"));
+    if let Ok(expected) = std::env::var("PGVECTOR_EXPECTED_VERSION") {
+        assert_eq!(server, 180_006, "wrong PostgreSQL compatibility image");
+        assert_eq!(installed, expected, "wrong pgvector test image");
+    }
+}
+
+#[tokio::test]
+async fn test_pgvector_helper_missing_extension_is_actionable_and_atomic() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE no_vector_source (id int PRIMARY KEY, embedding text)")
+        .await;
+    let error = db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table_v2('no_vector_stream', 'no_vector_source', 'embedding', 'cosine')")
+        .await.expect_err("helper requires pgvector");
+    assert!(
+        error
+            .to_string()
+            .contains("pgvector extension is not installed"),
+        "unexpected error: {error}"
+    );
+    let clean: bool = db
+        .query_scalar(
+            "SELECT to_regclass('no_vector_stream') IS NULL AND NOT EXISTS \
+        (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'no_vector_stream')",
+        )
+        .await;
+    assert!(clean, "failed helper must not leave a stream table");
+}
+
+#[tokio::test]
+async fn test_pgvector_helper_invalid_column_is_actionable_and_atomic() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE invalid_vector_source (id int PRIMARY KEY, embedding text)")
+        .await;
+    for column in ["missing", "embedding"] {
+        let error = db.try_execute(&format!("SELECT * FROM pgtrickle.embedding_stream_table_v2('invalid_vector_stream', 'invalid_vector_source', '{column}', 'cosine', '{{\"columns\":[\"id\"]}}')"))
+            .await.expect_err("helper requires a pgvector column");
+        assert!(
+            error.to_string().contains("must be a pgvector"),
+            "unexpected error: {error}"
+        );
+        let clean: bool = db
+            .query_scalar(
+                "SELECT to_regclass('invalid_vector_stream') IS NULL AND NOT EXISTS \
+            (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'invalid_vector_stream')",
+            )
+            .await;
+        assert!(clean, "failed helper must not leave a stream table");
+    }
+}
+
+#[tokio::test]
 async fn test_manual_ann_candidates_select_only_authorized_leaf_indexes() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
