@@ -22,6 +22,48 @@ async fn setup_pgvector(db: &E2eDb) {
 }
 
 #[tokio::test]
+async fn test_vector_aggregate_unknown_dimensions_rejects_mixed_input_without_data_loss() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE unknown_vector_dims (id int PRIMARY KEY, embedding vector)")
+        .await;
+    db.execute("INSERT INTO unknown_vector_dims VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SELECT pgtrickle.create_stream_table('unknown_vector_st', $$SELECT avg(embedding) AS centroid FROM unknown_vector_dims$$, '1m', 'DIFFERENTIAL')",
+    ]).await;
+    let typ: String = db.query_scalar("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='unknown_vector_st'::regclass AND attname='centroid'").await;
+    assert_eq!(typ, "vector");
+    let error = db.try_execute("CREATE INDEX unknown_vector_ann ON unknown_vector_st USING hnsw (centroid vector_l2_ops)").await.expect_err("an undimensioned vector cannot be indexed directly");
+    assert!(
+        error.to_string().contains("dimensions"),
+        "unexpected error: {error}"
+    );
+
+    db.execute("INSERT INTO unknown_vector_dims VALUES (2, '[1,0]')")
+        .await;
+    let error = db
+        .try_execute_with_config(
+            &[
+                "SET pg_trickle.enable_vector_agg = on",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+            ],
+            "SELECT pgtrickle.refresh_stream_table('unknown_vector_st')",
+        )
+        .await
+        .expect_err("mixed dimensions must not be silently narrowed");
+    assert!(
+        error.to_string().contains("dimensions"),
+        "unexpected error: {error}"
+    );
+    let centroid: String = db
+        .query_scalar("SELECT centroid::text FROM unknown_vector_st")
+        .await;
+    assert_eq!(centroid, "[1,0,0]");
+}
+
+#[tokio::test]
 async fn test_vector_aggregate_qualified_join_uses_argument_type() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
