@@ -132,8 +132,10 @@ histories. The installed committed-history regression continues to check the
 actual differential result with FULL fallback disabled.
 
 Both trigger builders call the typed `changed_column_sql_for_type` adapter.
-Fixed-width built-in booleans, integers and UUIDs use null-safe equality,
-which matches their canonical binary image. Other types retain the generic
+Booleans, integers and UUIDs use null-safe equality, which matches their
+canonical binary image. Fixed-width `character(n)` uses null-safe equality
+under the `C` collation, preserving byte-sensitive distinctions while
+ignoring only canonical trailing-space padding. Other types retain the generic
 type-OID guard and `record_send` comparison; variable-length and unknown types
 retain a bit without invoking an equality, output or send function for that
 type. PostgreSQL resolves the generic record function at SQL type checking;
