@@ -181,6 +181,11 @@ async fn test_revision_safe_generation_and_model_rollover() {
         AND e.revision = d.revision AND e.chunk_version = d.chunk_version AND e.model_version = 'model-v2')";
     let missing: i64 = db.query_scalar(missing_sql).await;
     assert_eq!(missing, 1, "rollover must wait for the new model backfill");
+    let blocked = db
+        .try_execute("SELECT embedding_demo.switch_model('model-v2')")
+        .await
+        .expect_err("incomplete backfill must not switch the view");
+    assert!(blocked.to_string().contains("backfill is incomplete"));
     enqueue(&db, "model-v2").await;
     let v2 = claim(&db, "model-v2").await;
     assert!(complete(&db, &v2, "model-v2").await);
@@ -195,18 +200,83 @@ async fn test_revision_safe_generation_and_model_rollover() {
         .query_scalar("SELECT embedding::text FROM embedding_demo.search_corpus WHERE id = 1")
         .await;
     assert_eq!(v1, "[1,0,0]");
-    db.execute("CREATE OR REPLACE VIEW embedding_demo.search_corpus AS SELECT id, body, embedding FROM embedding_demo.corpus_v2").await;
+    db.execute("DROP INDEX embedding_demo.corpus_v2_ann").await;
+    let blocked = db
+        .try_execute("SELECT embedding_demo.switch_model('model-v2')")
+        .await
+        .expect_err("missing ANN index must block cutover");
+    assert!(blocked.to_string().contains("ANN index is unavailable"));
+    db.execute("CREATE INDEX corpus_v2_ann ON embedding_demo.corpus_v2 USING hnsw ((embedding::vector(3)) vector_cosine_ops)").await;
+    db.execute("SELECT embedding_demo.switch_model('model-v2')")
+        .await;
     let switched: String = db
         .query_scalar("SELECT embedding::text FROM embedding_demo.search_corpus WHERE id = 1")
         .await;
     assert_eq!(switched, "[0,0,1]");
     let nearest: i64 = db.query_scalar("SELECT id FROM embedding_demo.search_corpus ORDER BY embedding::vector(3) <=> '[0,0,1]'::vector LIMIT 1").await;
     assert_eq!(nearest, 1);
-    db.execute("CREATE OR REPLACE VIEW embedding_demo.search_corpus AS SELECT id, body, embedding FROM embedding_demo.corpus_v1").await;
+    db.execute("SELECT embedding_demo.switch_model('model-v1')")
+        .await;
     let rolled_back: String = db
         .query_scalar("SELECT embedding::text FROM embedding_demo.search_corpus WHERE id = 1")
         .await;
     assert_eq!(rolled_back, v1);
+}
+
+#[tokio::test]
+async fn test_model_cutover_holds_source_lock_and_rolls_back() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(include_str!("fixtures/pgvector_revision_pipeline.sql"))
+        .execute(&db.pool)
+        .await
+        .expect("install revision fixture");
+    db.execute("INSERT INTO embedding_demo.documents (id, body) VALUES (1, 'A')")
+        .await;
+    for model in ["model-v1", "model-v2"] {
+        enqueue(&db, model).await;
+        let job = claim(&db, model).await;
+        assert!(complete(&db, &job, model).await);
+    }
+    refresh_differential(&db, "corpus_v1").await;
+    let mut cutover = db.pool.begin().await.expect("begin cutover");
+    sqlx::query("SELECT embedding_demo.switch_model('model-v2')")
+        .execute(&mut *cutover)
+        .await
+        .expect("prepare cutover");
+    for statement in [
+        "UPDATE embedding_demo.documents SET body = 'B' WHERE id = 1",
+        "DELETE FROM embedding_demo.results WHERE document_id = 1",
+    ] {
+        let mut writer = db.pool.begin().await.expect("begin concurrent writer");
+        sqlx::query("SET LOCAL statement_timeout = '300ms'")
+            .execute(&mut *writer)
+            .await
+            .expect("set timeout");
+        let error = sqlx::query(statement)
+            .execute(&mut *writer)
+            .await
+            .expect_err("cutover must block concurrent source changes");
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("57014")
+        );
+        writer.rollback().await.expect("release writer");
+    }
+    cutover.rollback().await.expect("roll back cutover");
+    let unchanged: String = db
+        .query_scalar("SELECT embedding::text FROM embedding_demo.search_corpus WHERE id = 1")
+        .await;
+    assert_eq!(unchanged, "[1,0,0]");
+    db.execute("UPDATE embedding_demo.documents SET metadata = 'after rollback' WHERE id = 1")
+        .await;
+    db.execute("UPDATE embedding_demo.results SET embedding = embedding WHERE document_id = 1")
+        .await;
+    db.execute("SELECT embedding_demo.switch_model('model-v2')")
+        .await;
+    let switched: String = db
+        .query_scalar("SELECT embedding::text FROM embedding_demo.search_corpus WHERE id = 1")
+        .await;
+    assert_eq!(switched, "[0,0,1]");
 }
 
 #[tokio::test]

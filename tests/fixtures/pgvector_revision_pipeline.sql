@@ -173,3 +173,57 @@ SELECT pgtrickle.create_stream_table(
 CREATE INDEX corpus_v1_ann ON embedding_demo.corpus_v1 USING hnsw ((embedding::vector(3)) vector_cosine_ops);
 CREATE INDEX corpus_v2_ann ON embedding_demo.corpus_v2 USING hnsw ((embedding::vector(3)) vector_cosine_ops);
 CREATE VIEW embedding_demo.search_corpus AS SELECT id, body, embedding FROM embedding_demo.corpus_v1;
+
+-- Hold the source stable through refresh, readiness checks and the view switch.
+CREATE FUNCTION embedding_demo.switch_model(p_model text) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    corpus regclass;
+    ann regclass;
+    incomplete boolean;
+BEGIN
+    CASE p_model
+        WHEN 'model-v1' THEN
+            corpus := 'embedding_demo.corpus_v1'::regclass;
+            ann := pg_catalog.to_regclass('embedding_demo.corpus_v1_ann');
+        WHEN 'model-v2' THEN
+            corpus := 'embedding_demo.corpus_v2'::regclass;
+            ann := pg_catalog.to_regclass('embedding_demo.corpus_v2_ann');
+        ELSE RAISE EXCEPTION 'unsupported model %', p_model;
+    END CASE;
+    LOCK TABLE embedding_demo.documents, embedding_demo.results IN SHARE MODE;
+    EXECUTE pg_catalog.format('LOCK TABLE %s IN SHARE UPDATE EXCLUSIVE MODE', corpus);
+    IF EXISTS (
+        SELECT 1 FROM embedding_demo.documents d
+        WHERE d.published AND NOT EXISTS (
+            SELECT 1 FROM embedding_demo.results e
+            WHERE e.document_id = d.id AND e.incarnation = d.incarnation
+              AND e.revision = d.revision AND e.chunk_version = d.chunk_version
+              AND e.model_version = p_model
+        )
+    ) THEN RAISE EXCEPTION 'model % backfill is incomplete', p_model; END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_index i
+        JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid
+        JOIN pg_catalog.pg_am am ON am.oid = idx.relam
+        JOIN pg_catalog.pg_opclass op ON op.oid = i.indclass[0]
+        WHERE i.indexrelid = ann AND i.indrelid = corpus AND i.indisvalid AND i.indisready
+          AND i.indislive AND am.amname = 'hnsw' AND op.opcname = 'vector_cosine_ops'
+    ) THEN RAISE EXCEPTION 'model % ANN index is unavailable', p_model; END IF;
+    PERFORM pgtrickle.refresh_stream_table(corpus::text);
+    EXECUTE pg_catalog.format(
+        'SELECT EXISTS ((SELECT id, body, incarnation, revision, chunk_version, model_version, embedding FROM %s
+         EXCEPT ALL SELECT d.id, d.body, e.incarnation, e.revision, e.chunk_version, e.model_version, e.embedding
+         FROM embedding_demo.documents d JOIN embedding_demo.results e
+         ON e.document_id = d.id AND e.incarnation = d.incarnation AND e.revision = d.revision
+         AND e.chunk_version = d.chunk_version WHERE d.published AND e.model_version = $1)
+         UNION ALL
+         (SELECT d.id, d.body, e.incarnation, e.revision, e.chunk_version, e.model_version, e.embedding
+         FROM embedding_demo.documents d JOIN embedding_demo.results e
+         ON e.document_id = d.id AND e.incarnation = d.incarnation AND e.revision = d.revision
+         AND e.chunk_version = d.chunk_version WHERE d.published AND e.model_version = $1
+         EXCEPT ALL SELECT id, body, incarnation, revision, chunk_version, model_version, embedding FROM %s))',
+        corpus, corpus
+    ) INTO incomplete USING p_model;
+    IF incomplete THEN RAISE EXCEPTION 'model % corpus is not current', p_model; END IF;
+    EXECUTE pg_catalog.format('CREATE OR REPLACE VIEW embedding_demo.search_corpus AS SELECT id, body, embedding FROM %s', corpus);
+END $$;

@@ -121,7 +121,19 @@ WHERE d.published AND NOT EXISTS (
 
 Inspect `pg_index.indisvalid` and `indisready` for `corpus_v2_ann` and compare
 the refreshed corpus with the current source/result join before switching the
-application's view or configuration. The test switches the stable view from
-v1 to v2, verifies the distinct model result, then switches it back. Keep the
-old corpus and model available through the rollback window; changing the view
-does not itself make an incomplete backfill ready.
+application's view or configuration. Separate checks followed by a later
+switch have a race: a document can change after the checks. The fixture's
+`embedding_demo.switch_model('model-v2')` performs the check, refresh, exact
+comparison and view switch in one transaction. It holds SHARE locks on the
+document and result tables and a maintenance lock on the target corpus until
+commit, so source writes and competing index maintenance wait during cutover.
+The comparison scans the corpus and is an operator-controlled cutover, not a
+routine monitoring query. Call it in a short transaction with appropriate
+timeouts; an error or rollback leaves the view unchanged. After commit, ordinary
+source updates can again occur and remain subject to scheduled refresh lag.
+
+The test switches the stable view from v1 to v2, verifies the distinct model
+result, then calls `embedding_demo.switch_model('model-v1')` to roll back with
+the same readiness checks. Keep the old corpus and model available and current
+through the rollback window. A missing result or invalid target index blocks
+either switch.
