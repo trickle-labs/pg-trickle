@@ -5385,14 +5385,15 @@ async fn test_vector_diagnostics_catalog_visibility_and_index_metadata() {
         .await;
     db.execute("SELECT pgtrickle.create_stream_table('diagnostic_st', $$SELECT id, a, b, c FROM diagnostic_src$$, '1m', 'DIFFERENTIAL')").await;
     db.execute("CREATE INDEX diagnostic_cosine ON diagnostic_st USING hnsw (a vector_cosine_ops) WHERE id > 0").await;
-    db.execute("CREATE INDEX diagnostic_expression ON diagnostic_st USING hnsw ((b::vector(3)) vector_l2_ops)").await;
+    db.execute("CREATE INDEX diagnostic_expression ON diagnostic_st USING hnsw ((c::vector(3)) vector_l2_ops)").await;
+    db.execute("CREATE INDEX diagnostic_ivf ON diagnostic_st USING ivfflat ((c::vector(3)) vector_l2_ops) WITH (lists = 1)").await;
 
     let columns = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'post_refresh_action' = 'none' AND v->>'dimensions' = '3' AND v->'embedding_freshness' = 'null'::jsonb AND v->>'maintenance_pending' = 'false' AND v->>'maintenance_failed' = 'false'").await;
     assert_eq!(columns, 2);
     let unknown = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'column' = 'c' AND v->'dimensions' = 'null'::jsonb AND v->'requested_index_state' = 'null'::jsonb AND v->>'requested_index_reason' IS NOT NULL").await;
     assert_eq!(unknown, 1);
-    let indexes = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'access_method' = 'hnsw' AND v->>'valid' = 'true' AND v->>'ready' = 'true' AND ((v->>'index' = 'diagnostic_cosine' AND v->>'opclass' = 'vector_cosine_ops' AND v->>'predicate' IS NOT NULL) OR (v->>'index' = 'diagnostic_expression' AND v->>'opclass' = 'vector_l2_ops'))").await;
-    assert_eq!(indexes, 2);
+    let indexes = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->>'valid' = 'true' AND v->>'ready' = 'true' AND v->>'dimensions' = '3' AND ((v->>'index' = 'diagnostic_cosine' AND v->>'access_method' = 'hnsw' AND v->>'opclass' = 'vector_cosine_ops' AND v->>'predicate' IS NOT NULL) OR (v->>'index' = 'diagnostic_expression' AND v->>'access_method' = 'hnsw' AND v->>'opclass' = 'vector_l2_ops') OR (v->>'index' = 'diagnostic_ivf' AND v->>'access_method' = 'ivfflat' AND v->>'opclass' = 'vector_l2_ops'))").await;
+    assert_eq!(indexes, 3);
     let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('diagnostic_st'::regclass::oid, 'diagnostic_cosine'::regclass::oid)").await;
     let pending: bool = db.query_scalar("SELECT (v->>'maintenance_pending')::boolean FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' LIMIT 1").await;
     assert!(pending);
@@ -5440,7 +5441,7 @@ async fn test_vector_diagnostics_catalog_visibility_and_index_metadata() {
         .fetch_one(&mut *conn)
         .await
         .expect("inspect as observer");
-    assert_eq!(visible, 2);
+    assert_eq!(visible, 3);
     let redacted: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_st' AND v->'maintenance_pending' = 'null'::jsonb AND v->'maintenance_failed' = 'null'::jsonb AND v->'maintenance_error' = 'null'::jsonb AND v->>'maintenance_reason' IS NOT NULL")
         .fetch_one(&mut *conn).await.expect("inspect redacted maintenance");
     assert_eq!(redacted, 3);

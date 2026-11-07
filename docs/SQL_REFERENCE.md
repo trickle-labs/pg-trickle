@@ -5569,8 +5569,9 @@ refresh progress separately when backlog is suspected.
 
 Partition leaf indexes appear only when the caller also has `SELECT` on the
 leaf and `USAGE` on its schema; access to the parent alone is insufficient.
-Index dimensions are NULL for expressions whose dimension cannot be inferred
-from a simple column. Index size is in bytes, and index options are PostgreSQL
+Index dimensions come from the index key's type modifier, including explicit
+casts, and are NULL when that modifier does not specify a dimension. Index size
+is in bytes, and index options are PostgreSQL
 reloptions. Opclass names identify the indexed metric; use `EXPLAIN` to check
 whether a query can use the index.
 

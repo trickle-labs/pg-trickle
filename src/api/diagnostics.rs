@@ -2385,7 +2385,7 @@ pub(super) fn ann_index_status_v2() -> Result<SetOfIterator<'static, pgrx::JsonB
               CROSS JOIN LATERAL pg_catalog.generate_series(1, ix.indnkeyatts) k(n)
               JOIN pg_catalog.pg_opclass op ON op.oid = ix.indclass[k.n - 1]
               JOIN pg_catalog.pg_namespace opns ON opns.oid = op.opcnamespace
-              LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = r.relid AND a.attnum = ix.indkey[k.n - 1]
+              LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = idx.oid AND a.attnum = k.n
               WHERE pg_catalog.has_table_privilege($1, tbl.oid, 'SELECT')
                 AND pg_catalog.has_schema_privilege($1, tbl.relnamespace, 'USAGE')
               ORDER BY r.pgt_id, idx.oid, k.n"#,
