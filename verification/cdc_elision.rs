@@ -2498,17 +2498,22 @@ pub fn changed_column_sql(old: &str, new: &str) -> String {
     )
 }
 
-/// Lower fixed-width built-in types with null-safe equality; retain the
+/// Lower canonical built-in types with null-safe equality; retain the
 /// binary-image guard for types with non-canonical or unknown representations.
 pub fn changed_column_sql_for_type(old: &str, new: &str, formatted_type: &str) -> String {
-    if matches!(
+    let comparison = if matches!(
         formatted_type,
         "boolean" | "smallint" | "integer" | "bigint" | "uuid"
     ) {
-        format!("(CASE WHEN {old} IS DISTINCT FROM {new} THEN B'1' ELSE B'0' END)::varbit")
+        format!("{old} IS DISTINCT FROM {new}")
+    } else if formatted_type.starts_with("character(") {
+        // C collation preserves byte-sensitive case while bpchar equality
+        // still ignores only the type's canonical trailing-space padding.
+        format!("({old} COLLATE \"C\") IS DISTINCT FROM ({new} COLLATE \"C\")")
     } else {
-        changed_column_sql(old, new)
-    }
+        return changed_column_sql(old, new);
+    };
+    format!("(CASE WHEN {comparison} THEN B'1' ELSE B'0' END)::varbit")
 }
 
 /// Group by PostgreSQL's complete binary record images, including NULL framing.
@@ -2665,6 +2670,9 @@ mod tests {
             assert!(sql.contains("IS DISTINCT FROM"), "{ty}: {sql}");
             assert!(!sql.contains("record_send"), "{ty}: {sql}");
         }
+        let bpchar = changed_column_sql_for_type("o.v", "n.v", "character(84)");
+        assert!(bpchar.contains("COLLATE \"C\""), "{bpchar}");
+        assert!(!bpchar.contains("record_send"), "{bpchar}");
         assert!(changed_column_sql_for_type("o.v", "n.v", "numeric").contains("record_send"));
     }
 }
