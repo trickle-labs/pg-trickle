@@ -215,6 +215,50 @@ async fn test_ann_maintenance_intent_requires_execute_select_and_maintain() {
             .is_err()
     );
     tx.rollback().await.expect("end revoked inspection");
+    db.execute(
+        "GRANT EXECUTE ON FUNCTION pgtrickle.claim_ann_maintenance(bigint) TO ann_intent_operator",
+    )
+    .await;
+    db.execute("GRANT EXECUTE ON FUNCTION pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO ann_intent_operator").await;
+    let mut operator = db.pool.acquire().await.expect("operator session");
+    sqlx::query("SET ROLE ann_intent_operator")
+        .execute(&mut *operator)
+        .await
+        .expect("set operator role");
+    assert!(
+        sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+            .bind(id)
+            .execute(&mut *operator)
+            .await
+            .is_err(),
+        "claim must recheck MAINTAIN"
+    );
+    db.execute("GRANT MAINTAIN ON ann_intent_auth_stream TO ann_intent_operator")
+        .await;
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(id)
+        .execute(&mut *operator)
+        .await
+        .expect("authorized claim");
+    db.execute("REVOKE MAINTAIN ON ann_intent_auth_stream FROM ann_intent_operator")
+        .await;
+    assert!(
+        sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+            .bind(id)
+            .execute(&mut *operator)
+            .await
+            .is_err(),
+        "success must recheck MAINTAIN"
+    );
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, false, 'privilege revoked')")
+        .bind(id)
+        .execute(&mut *operator)
+        .await
+        .expect("record failure after revocation");
+    sqlx::query("RESET ROLE")
+        .execute(&mut *operator)
+        .await
+        .expect("reset operator role");
 }
 
 #[tokio::test]
@@ -300,6 +344,150 @@ async fn test_ann_maintenance_intent_delayed_request_cannot_regress_epoch() {
         last, observed,
         "a delayed request must not lower the latest epoch"
     );
+}
+
+#[tokio::test]
+async fn test_ann_maintenance_claim_is_session_bound_and_retryable() {
+    use sqlx::Connection;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_claim_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_claim_stream",
+        "SELECT id, embedding FROM ann_claim_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "CREATE INDEX ann_claim_idx ON ann_claim_stream USING hnsw (embedding vector_cosine_ops)",
+    )
+    .await;
+    let request = "SELECT pgtrickle.request_ann_maintenance('ann_claim_stream'::regclass::oid, 'ann_claim_idx'::regclass::oid)";
+    let id: i64 = db.query_scalar(request).await;
+    let mut tx = db.pool.begin().await.expect("begin claim transaction");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .expect("claim inside transaction");
+    tx.rollback().await.expect("roll back claim");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("rolled-back status");
+    assert_eq!(status["state"], "REQUESTED");
+    let mut worker = db.pool.acquire().await.expect("worker connection");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.claim_ann_maintenance($1)")
+            .bind(id)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("claim request");
+    assert_eq!(status["state"], "RUNNING");
+    assert!(
+        sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .is_err(),
+        "another session cannot claim live work"
+    );
+    assert!(
+        sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .is_err(),
+        "another session cannot finish a claim"
+    );
+    assert_eq!(db.query_scalar::<i64>(request).await, id);
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, false, 'test failure')")
+        .bind(id)
+        .execute(&mut *worker)
+        .await
+        .expect("record failure");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("failed status");
+    assert_eq!(status["state"], "FAILED");
+    assert_eq!(status["last_error"], "test failure");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(id)
+        .execute(&mut *worker)
+        .await
+        .expect("retry failed request");
+    worker.detach().close().await.expect("disconnect worker");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("interrupted status");
+    assert_eq!(status["state"], "INTERRUPTED");
+    let mut worker = db.pool.acquire().await.expect("replacement worker");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(id)
+        .execute(&mut *worker)
+        .await
+        .expect("reclaim interrupted request");
+    db.execute("INSERT INTO ann_claim_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.refresh_st("ann_claim_stream").await;
+    assert_eq!(db.query_scalar::<i64>(request).await, id);
+    sqlx::query("REINDEX INDEX CONCURRENTLY ann_claim_idx")
+        .execute(&mut *worker)
+        .await
+        .expect("concurrent rebuild");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(id)
+        .execute(&mut *worker)
+        .await
+        .expect("record success");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("completed status");
+    assert_eq!(
+        status["state"], "REQUESTED",
+        "work requested during the run stays pending"
+    );
+    assert_eq!(
+        status["identity_current"], false,
+        "concurrent rebuild replaces the index identity"
+    );
+    let next: i64 = db.query_scalar(request).await;
+    assert_ne!(id, next);
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(next)
+        .execute(&mut *worker)
+        .await
+        .expect("claim replacement index");
+    sqlx::query("REINDEX INDEX CONCURRENTLY ann_claim_idx")
+        .execute(&mut *worker)
+        .await
+        .expect("rebuild replacement index");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(next)
+        .execute(&mut *worker)
+        .await
+        .expect("record success");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(next)
+            .fetch_one(&db.pool)
+            .await
+            .expect("completed status");
+    assert_eq!(status["state"], "SUCCEEDED");
 }
 
 #[tokio::test]

@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**175 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**177 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -32,6 +32,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.cdc_pause_status()` | `pgtrickle` | `SetOf row` | Returns a table with one row containing: - `paused` — `true` when `cdc_paused = on` - `capture_mode` — `'discard'` or `'hold'` - `note` — human-readable explanation of the current state. |
 | `pgtrickle.change_buffer_sizes()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.change_buffer_sizes()`. |
 | `pgtrickle.check_cdc_health()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.check_cdc_health()`. |
+| `pgtrickle.claim_ann_maintenance()` | `pgtrickle` | `jsonb` | Claim an intent for execution by this PostgreSQL session. |
 | `pgtrickle.clear_caches()` | `pgtrickle` | `bigint` | Use during debugging, emergency migration rollback, or after a query definition change that was not captured by the normal DDL invalidation path. |
 | `pgtrickle.cluster_worker_summary()` | `pgtrickle` | `SetOf row` | Reads from `pg_stat_activity` (shared catalog) so the calling role needs `pg_monitor` or superuser privilege. |
 | `pgtrickle.commit_latency_stats()` | `pgtrickle` | `SetOf row` | Returns rows only for stream tables that have at least one completed refresh in the history table. |
@@ -75,6 +76,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.explain_st()` | `pgtrickle` | `` | PERF-3: When `with_analyze` is true, the defining query is EXPLAINed with ANALYZE to show actual row counts, timings, and buffer usage. |
 | `pgtrickle.explain_stream_table()` | `pgtrickle` | `text` | v0.39.0 extends the output to include: - Explicit DIFF/FULL fallback reason from the stream table catalog - Whether `force_full_refresh` GUC is overriding the mode - The effective refresh mode from the last completed refresh cycle - Whether the backpressure or CDC-pause state is active. |
 | `pgtrickle.export_definition()` | `pgtrickle` | `text` | Returns a `DROP STREAM TABLE IF EXISTS` + `CREATE STREAM TABLE . |
+| `pgtrickle.finish_ann_maintenance()` | `pgtrickle` | `` | Record the outcome reported by the session that claimed an intent. |
 | `pgtrickle.freshness()` | `pgtrickle` | `SetOf row` | v0.90.0: Return bounded exact freshness summaries for interval-targeted stream tables. |
 | `pgtrickle.fuse_status()` | `pgtrickle` | `SetOf row` | Returns one row per stream table with fuse configuration and state. |
 | `pgtrickle.gate_source()` | `pgtrickle` | `void` | `source` is the source table name, optionally schema-qualified. |

@@ -50,6 +50,10 @@ fn request_ann_maintenance_impl(
                AND pg_catalog.has_table_privilege($3, leaf.oid, 'MAINTAIN') \
              ON CONFLICT (pgt_id, index_relid, index_filenode) DO UPDATE \
                SET last_requested_at = pg_catalog.clock_timestamp(), \
+                   pending_during_run = pgtrickle.pgt_ann_maintenance_requests.pending_during_run \
+                     OR pgtrickle.pgt_ann_maintenance_requests.state = 'RUNNING', \
+                   state = CASE WHEN pgtrickle.pgt_ann_maintenance_requests.state = 'RUNNING' \
+                     THEN 'RUNNING' ELSE 'REQUESTED' END, \
                    first_observed_epoch = CASE \
                      WHEN pgtrickle.pgt_ann_maintenance_requests.first_observed_epoch IS NULL \
                        OR EXCLUDED.first_observed_epoch IS NULL THEN NULL \
@@ -94,7 +98,11 @@ fn ann_maintenance_request_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickl
     Spi::connect_mut(|client| {
         let rows = client.update(
         "SELECT (SELECT pg_catalog.jsonb_build_object(\
-           'request_id', r.request_id, 'state', 'REQUESTED', \
+           'request_id', r.request_id, 'state', CASE WHEN r.state = 'RUNNING' AND NOT EXISTS (\
+             SELECT 1 FROM pg_catalog.pg_stat_activity a WHERE a.pid = r.claim_pid \
+               AND a.backend_start = r.claim_backend_start) THEN 'INTERRUPTED' ELSE r.state END, \
+           'claim_epoch', r.claim_epoch, 'pending_during_run', r.pending_during_run, \
+           'last_error', r.last_error, 'completed_at', r.completed_at, \
            'stream_table_oid', r.root_relid, 'leaf_table_oid', r.leaf_relid, \
            'index_oid', r.index_relid, 'first_observed_epoch', r.first_observed_epoch, \
            'last_observed_epoch', r.last_observed_epoch, 'current_epoch', s.ann_refresh_epoch, \
@@ -132,4 +140,97 @@ fn ann_maintenance_request_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickl
     })
     .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
     .ok_or_else(|| PgTrickleError::NotFound(format!("request {request_id} is unavailable or not authorized")))
+}
+
+/// Claim an intent for execution by this PostgreSQL session.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+pub fn claim_ann_maintenance(request_id: i64) -> pgrx::JsonB {
+    claim_ann_maintenance_impl(request_id)
+        .unwrap_or_else(|error| pgrx::error!("claim_ann_maintenance: {error}"))
+}
+
+fn claim_ann_maintenance_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickleError> {
+    let status = ann_maintenance_request_impl(request_id)?;
+    if status.0["identity_current"] != true {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "request {request_id} no longer identifies the requested index"
+        )));
+    }
+    let caller = super::helpers::outer_user_id();
+    let claimed = Spi::connect_mut(|client| {
+        let rows = client.update(
+            "UPDATE pgtrickle.pgt_ann_maintenance_requests r \
+             SET state = 'RUNNING', claim_pid = pg_catalog.pg_backend_pid(), \
+                 claim_backend_start = (SELECT backend_start FROM pg_catalog.pg_stat_activity \
+                   WHERE pid = pg_catalog.pg_backend_pid()), \
+                 claim_role = $2, claim_epoch = r.last_observed_epoch, \
+                 pending_during_run = false, last_error = NULL \
+             WHERE r.request_id = $1 AND (r.state IN ('REQUESTED', 'FAILED') \
+               OR (r.state = 'RUNNING' AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                 WHERE a.pid = r.claim_pid AND a.backend_start = r.claim_backend_start))) \
+             RETURNING r.request_id",
+            Some(1),
+            &[request_id.into(), caller.into()],
+        )?;
+        Ok::<_, pgrx::spi::Error>(!rows.is_empty())
+    })
+    .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
+    if !claimed {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "request {request_id} is already claimed or completed"
+        )));
+    }
+    ann_maintenance_request_impl(request_id)
+}
+
+/// Record the outcome reported by the session that claimed an intent.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+pub fn finish_ann_maintenance(request_id: i64, succeeded: bool, error_message: &str) {
+    finish_ann_maintenance_impl(request_id, succeeded, error_message)
+        .unwrap_or_else(|error| pgrx::error!("finish_ann_maintenance: {error}"));
+}
+
+fn finish_ann_maintenance_impl(
+    request_id: i64,
+    succeeded: bool,
+    error_message: &str,
+) -> Result<(), PgTrickleError> {
+    if error_message.len() > 2048
+        || (succeeded && !error_message.is_empty())
+        || (!succeeded && error_message.is_empty())
+    {
+        return Err(PgTrickleError::InvalidArgument("provide an empty error for success or a nonempty error of at most 2048 bytes for failure".into()));
+    }
+    if succeeded {
+        // A revoked caller may report failure, but cannot claim successful coverage.
+        ann_maintenance_request_impl(request_id)?;
+    }
+    let caller = super::helpers::outer_user_id();
+    let finished = Spi::connect_mut(|client| {
+        let rows = client.update(
+            "UPDATE pgtrickle.pgt_ann_maintenance_requests r \
+             SET state = CASE WHEN NOT $2 THEN 'FAILED' \
+               WHEN r.pending_during_run THEN 'REQUESTED' ELSE 'SUCCEEDED' END, \
+               last_error = CASE WHEN $2 THEN NULL ELSE $3 END, \
+               completed_at = CASE WHEN $2 THEN pg_catalog.clock_timestamp() ELSE r.completed_at END, \
+               claim_pid = NULL, claim_backend_start = NULL, claim_role = NULL \
+             WHERE r.request_id = $1 AND r.state = 'RUNNING' AND r.claim_role = $4 \
+               AND r.claim_pid = pg_catalog.pg_backend_pid() \
+               AND r.claim_backend_start = (SELECT backend_start FROM pg_catalog.pg_stat_activity \
+                 WHERE pid = pg_catalog.pg_backend_pid()) \
+             RETURNING r.request_id",
+            Some(1),
+            &[request_id.into(), succeeded.into(), error_message.into(), caller.into()],
+        )?;
+        Ok::<_, pgrx::spi::Error>(!rows.is_empty())
+    })
+    .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
+    if !finished {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "request {request_id} is not claimed by this session and role"
+        )));
+    }
+    Ok(())
 }
