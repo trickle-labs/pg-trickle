@@ -22,7 +22,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.allow_circular` | `bool` | `false` | When `false` (default), cycle detection rejects any stream table creation that would introduce a cycle in the dependency graph. |
 | `pg_trickle.analyze_before_delta` | `bool` | `true` | Graph refreshes analyze their bounded CDC stages and materialized deltas; other refreshes analyze persistent source change buffers. |
 | `pg_trickle.auto_backoff` | `bool` | `true` | This prevents CPU runaway when a stream table's refresh cost exceeds its schedule budget and an operator is not available to respond manually. |
-| `pg_trickle.auto_index` | `bool` | `true` | When enabled, `create_stream_table()` automatically creates indexes on GROUP BY keys, DISTINCT columns, and adds INCLUDE clauses to the `__pgt_row_id` index for stream tables with ≤ 8 output columns. |
+| `pg_trickle.auto_index` | `bool` | `true` | When enabled, `create_stream_table()` automatically creates indexes on GROUP BY keys, DISTINCT columns, and adds INCLUDE clauses to the `__pgt_row_id` index for stream tables with ≤ 8 output columns when the identity and output values have a bounded combined size. |
 | `pg_trickle.backpressure_consecutive_limit` | `int4` | `3` | Default: 3 cycles. |
 | `pg_trickle.block_source_ddl` | `bool` | `true` | Default is `true` (enabled) as of v0.11.0 — set to `false` to restore the previous permissive behavior (DDL triggers reinitialization instead of blocking). |
 | `pg_trickle.buffer_alert_threshold` | `int4` | `1000000` | When any source table's change buffer exceeds this number of rows, a `BufferGrowthWarning` alert is emitted. |

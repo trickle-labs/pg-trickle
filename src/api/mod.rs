@@ -1720,29 +1720,30 @@ fn setup_storage_table(
 
     // Create index on __pgt_row_id (EC-06: non-unique for keyless sources)
     //
-    // A-4 / AUTO-IDX-2: When auto_index is enabled and the output schema has
-    // <= 8 user columns, create a covering index with INCLUDE clause to enable
-    // index-only scans during MERGE. This eliminates the heap fetch for matched
-    // rows, giving 20-50% MERGE time reduction for small-delta / large-target
-    // scenarios.
+    // A-4 / AUTO-IDX-2: Cover small, bounded output schemas when the combined
+    // identity and included values fit conservatively within a B-tree tuple.
     //
     // A1-1: PostgreSQL does not support global UNIQUE indexes on partitioned
     // tables. Force a non-unique index when the storage table is partitioned.
     let auto_index = crate::config::pg_trickle_auto_index();
     const COVERING_INDEX_MAX_COLUMNS: usize = 8;
-    let include_clause =
-        if auto_index && columns.len() <= COVERING_INDEX_MAX_COLUMNS && !columns.is_empty() {
-            let include_cols: Vec<String> = columns
-                .iter()
-                .map(|c| quote_identifier(&c.name).to_string())
-                .collect();
-            format!(" INCLUDE ({})", include_cols.join(", "))
-        } else {
-            String::new()
-        };
-    let is_partitioned = partition_key.is_some();
     let identity_columns = crate::api::helpers::row_identity_columns(columns, parsed_tree);
     let identity_bounded = crate::api::helpers::row_identity_is_bounded(&identity_columns);
+    let covering_columns = [identity_columns.as_slice(), columns].concat();
+    let include_clause = if auto_index
+        && columns.len() <= COVERING_INDEX_MAX_COLUMNS
+        && !columns.is_empty()
+        && crate::api::helpers::row_identity_is_bounded(&covering_columns)
+    {
+        let include_cols: Vec<String> = columns
+            .iter()
+            .map(|c| quote_identifier(&c.name).to_string())
+            .collect();
+        format!(" INCLUDE ({})", include_cols.join(", "))
+    } else {
+        String::new()
+    };
+    let is_partitioned = partition_key.is_some();
     let index_key = if identity_bounded {
         "__pgt_row_id".to_string()
     } else {

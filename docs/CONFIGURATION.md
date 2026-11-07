@@ -1275,9 +1275,12 @@ When enabled, the following indexes are created automatically:
    a composite index on all output columns is created.
 
 3. **Covering `__pgt_row_id` index** — for stream tables with ≤ 8 output
-   columns, the `__pgt_row_id` index includes all user columns via `INCLUDE`,
-   enabling index-only scans during MERGE (20–50% faster for small deltas
-   against large targets).
+   columns, the index includes all user columns when their combined size with
+   the identity is conservatively bounded. Variable-width or otherwise
+   unbounded values, including pgvector embeddings, omit the `INCLUDE` clause
+   to avoid exceeding PostgreSQL's B-tree tuple limit. The row-identity index
+   remains available for refreshes. Existing indexes are not rewritten on
+   upgrade; this rule applies when the index is created or rebuilt.
 
 The `__pgt_row_id` index itself is always created regardless of this setting
 (it is required for correctness).
