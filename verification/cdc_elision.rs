@@ -2498,6 +2498,19 @@ pub fn changed_column_sql(old: &str, new: &str) -> String {
     )
 }
 
+/// Lower fixed-width built-in types with null-safe equality; retain the
+/// binary-image guard for types with non-canonical or unknown representations.
+pub fn changed_column_sql_for_type(old: &str, new: &str, formatted_type: &str) -> String {
+    if matches!(
+        formatted_type,
+        "boolean" | "smallint" | "integer" | "bigint" | "uuid"
+    ) {
+        format!("(CASE WHEN {old} IS DISTINCT FROM {new} THEN B'1' ELSE B'0' END)::varbit")
+    } else {
+        changed_column_sql(old, new)
+    }
+}
+
 /// Group by PostgreSQL's complete binary record images, including NULL framing.
 pub fn keyed_weight_sql(delta_sql: &str, columns: &str) -> String {
     let vacant = |prefix: &str| {
@@ -2643,5 +2656,15 @@ mod tests {
         assert_eq!(image_action_priority(ImageAction::Insert), 0);
         assert_eq!(image_action_priority(ImageAction::Delete), 1);
         assert_eq!(image_action_priority(ImageAction::Skip), 2);
+    }
+
+    #[test]
+    fn fixed_width_cdc_types_skip_binary_serialization() {
+        for ty in ["boolean", "smallint", "integer", "bigint", "uuid"] {
+            let sql = changed_column_sql_for_type("o.v", "n.v", ty);
+            assert!(sql.contains("IS DISTINCT FROM"), "{ty}: {sql}");
+            assert!(!sql.contains("record_send"), "{ty}: {sql}");
+        }
+        assert!(changed_column_sql_for_type("o.v", "n.v", "numeric").contains("record_send"));
     }
 }
