@@ -970,7 +970,7 @@ fn execute_manual_full_refresh_target(
     } else {
         // No upstream changes — store frontier but preserve data_timestamp.
         StreamTableMeta::store_frontier(st.pgt_id, &frontier)?;
-        StreamTableMeta::update_after_no_data_refresh(st.pgt_id)?;
+        StreamTableMeta::update_after_no_data_refresh(st.pgt_id, true)?;
         crate::refresh::set_effective_mode("NO_DATA");
         pgrx::info!(
             "Stream table {}.{} refreshed (FULL, no-op — data_timestamp preserved)",
@@ -1179,7 +1179,7 @@ fn execute_manual_differential_refresh(
         // No rows changed — store frontier to advance past processed WAL range,
         // but preserve data_timestamp to avoid spurious downstream wakeups.
         StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)?;
-        StreamTableMeta::update_after_no_data_refresh(st.pgt_id)?;
+        StreamTableMeta::update_after_no_data_refresh(st.pgt_id, false)?;
     }
 
     pgrx::info!(

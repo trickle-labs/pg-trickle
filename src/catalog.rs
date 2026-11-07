@@ -713,6 +713,8 @@ impl StreamTableMeta {
             "UPDATE pgtrickle.pgt_stream_tables \
              SET data_timestamp = $1, is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
+             ann_refresh_epoch = CASE WHEN ann_refresh_epoch < 9223372036854775807 \
+                 THEN ann_refresh_epoch + 1 ELSE NULL END, \
              status = 'ACTIVE', needs_reinit = false, \
              last_error_message = NULL, last_error_at = NULL, \
              updated_at = now() \
@@ -728,7 +730,10 @@ impl StreamTableMeta {
     /// downstream stream tables (which compare `upstream.data_timestamp > us.data_timestamp`
     /// to detect when a full refresh is needed) do not see a spurious "upstream
     /// changed" signal after a pure no-data verification pass.
-    pub fn update_after_no_data_refresh(pgt_id: i64) -> Result<(), PgTrickleError> {
+    pub fn update_after_no_data_refresh(
+        pgt_id: i64,
+        storage_rewritten: bool,
+    ) -> Result<(), PgTrickleError> {
         // NOTE: intentionally does NOT clear needs_reinit.  A no-data refresh
         // means no rows were written — it must not overwrite a needs_reinit=true
         // flag set by EC-16 function-body-change detection or DDL hooks.  The
@@ -738,11 +743,14 @@ impl StreamTableMeta {
             "UPDATE pgtrickle.pgt_stream_tables \
              SET is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
+             ann_refresh_epoch = CASE WHEN NOT $2 THEN ann_refresh_epoch \
+                 WHEN ann_refresh_epoch < 9223372036854775807 \
+                 THEN ann_refresh_epoch + 1 ELSE NULL END, \
              status = 'ACTIVE', \
              last_error_message = NULL, last_error_at = NULL, \
              updated_at = now() \
              WHERE pgt_id = $1",
-            &[pgt_id.into()],
+            &[pgt_id.into(), storage_rewritten.into()],
         )
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
     }
@@ -762,6 +770,8 @@ impl StreamTableMeta {
             "UPDATE pgtrickle.pgt_stream_tables \
              SET data_timestamp = $1, is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
+             ann_refresh_epoch = CASE WHEN ann_refresh_epoch < 9223372036854775807 \
+                 THEN ann_refresh_epoch + 1 ELSE NULL END, \
              status = 'ACTIVE', needs_reinit = false, \
              frontier = $3, updated_at = now() \
              WHERE pgt_id = $2",
@@ -791,6 +801,8 @@ impl StreamTableMeta {
             "UPDATE pgtrickle.pgt_stream_tables \
              SET data_timestamp = now(), is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
+             ann_refresh_epoch = CASE WHEN ann_refresh_epoch < 9223372036854775807 \
+                 THEN ann_refresh_epoch + 1 ELSE NULL END, \
              status = 'ACTIVE', needs_reinit = false, \
              last_error_message = NULL, last_error_at = NULL, \
              frontier = $3, updated_at = now() \

@@ -4311,6 +4311,7 @@ Core metadata for each stream table.
 | `data_timestamp` | `timestamptz` | Timestamp of the data in the ST |
 | `frontier` | `jsonb` | Per-source LSN positions (version tracking) |
 | `last_refresh_at` | `timestamptz` | When last refreshed |
+| `ann_refresh_epoch` | `bigint` | Conservative committed refresh-completion epoch for maintenance coordination; `NULL` means unknown. It is not a changed-row count or a durable maintenance request. |
 | `consecutive_errors` | `int` | Current error streak count |
 | `needs_reinit` | `bool` | Whether upstream DDL requires reinitialization |
 | `row_identity_version` | `smallint` | Composite row-identity framing version; legacy or `NULL` values block incremental maintenance |
@@ -4329,6 +4330,17 @@ Core metadata for each stream table.
 | `last_fixpoint_iterations` | `int` | Number of iterations in the last SCC fixpoint convergence (`NULL` if never iterated) |
 | `created_at` | `timestamptz` | Creation timestamp |
 | `updated_at` | `timestamptz` | Last modification timestamp |
+
+`ann_refresh_epoch` advances transactionally when a refresh changes storage,
+when a full refresh rewrites storage, and for IMMEDIATE changes. A no-data
+differential check does not advance it; a rolled-back refresh does not advance
+it. It is independent of `rows_changed_since_last_reindex`,
+which legacy blocking maintenance can reset. `NULL` means the epoch cannot be
+used to establish coverage; it remains `NULL` on subsequent refreshes. Treat a
+changed or missing stream-table identity, a database restore, and index
+replacement as separate invalidation conditions. An unchanged epoch alone does
+not prove that a rebuild ran, that no refresh is in flight, or that an index is
+healthy. This catalog value does not itself enqueue or complete maintenance.
 
 ### pgtrickle.pgt_window_states
 
