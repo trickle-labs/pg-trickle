@@ -1,7 +1,8 @@
 # Maintaining Centroids with pgVectorMV
 
-> **Status: Experimental** — vector aggregates are disabled by default. See
-> [the runtime support summary](../SUPPORT_SUMMARY.md) for capability status.
+> **Status:** Vector aggregates are experimental and disabled by default. The
+> `attach_embedding_outbox` integration is **Beta**. See the
+> [support summary](../SUPPORT_SUMMARY.md) for capability-specific maturity.
 
 **pg_trickle** — F4: pgVectorMV incremental vector aggregate operators
 
@@ -116,14 +117,16 @@ columns without group rescans) is planned.
 
 ## Distance operators and ANN queries
 
-pgvector distance operators (`<->`, `<=>`, `<#>`, `<+>`) in `WHERE`
-predicates or `ORDER BY` clauses are **FULL-fallback safe**: pg_trickle
-detects these operators and falls back to FULL refresh automatically. This
-is expected and safe — distance operators are non-monotone and cannot be
-differentiated.
+Row-local distance projections and predicates are distinct from maintaining a
+global nearest-neighbor ranking. A fixed-pivot distance can be evaluated on
+changed rows; support still depends on the complete query and its expressions.
+Inspect the effective refresh mode rather than assuming an operator forces FULL.
+For `ORDER BY ... LIMIT`, the Top-K path re-evaluates the complete ordered
+query on refresh; it is not an incremental ANN graph. See the
+[Top-K contract](../SQL_REFERENCE.md).
 
 ```sql
--- This defining query uses a distance operator → FULL refresh mode only
+-- Explicit FULL refresh for a bounded nearest-neighbor result
 SELECT pgtrickle.create_stream_table(
     'nearest_docs',
     $$
@@ -132,7 +135,7 @@ SELECT pgtrickle.create_stream_table(
         ORDER BY embedding <-> '[0.1, 0.2, ...]'
         LIMIT 20
     $$,
-    refresh_mode => 'FULL'  -- always use FULL for ANN/KNN queries
+    refresh_mode => 'FULL'
 );
 ```
 

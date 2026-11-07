@@ -4703,12 +4703,12 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         match aexpr.kind {
             pg_sys::A_Expr_Kind::AEXPR_OP => {
                 // SAFETY: Parse-tree node pointer from raw_parser; valid within current memory context.
-                let op_name = unsafe { extract_operator_name(aexpr.name)? };
+                let op_name = unsafe { extract_operator_sql(aexpr.name)? };
                 // Handle unary prefix operators (e.g., -x) where lexpr is NULL
                 if aexpr.lexpr.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                     let right = safe_node_to_expr(aexpr.rexpr)?;
-                    return Ok(Expr::Raw(format!("{op_name}{}", right.to_sql())));
+                    return Ok(Expr::Raw(format!("{op_name} {}", right.to_sql())));
                 }
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                 let left = safe_node_to_expr(aexpr.lexpr)?;
@@ -4904,7 +4904,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                 let right = safe_node_to_expr(aexpr.rexpr)?;
                 // SAFETY: Parse-tree node pointer from raw_parser; valid within current memory context.
-                let op_name = unsafe { extract_operator_name(aexpr.name)? };
+                let op_name = unsafe { extract_operator_sql(aexpr.name)? };
                 Ok(Expr::Raw(format!(
                     "{} {op_name} ANY({})",
                     left.to_sql(),
@@ -4918,7 +4918,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                 let right = safe_node_to_expr(aexpr.rexpr)?;
                 // SAFETY: Parse-tree node pointer from raw_parser; valid within current memory context.
-                let op_name = unsafe { extract_operator_name(aexpr.name)? };
+                let op_name = unsafe { extract_operator_sql(aexpr.name)? };
                 Ok(Expr::Raw(format!(
                     "{} {op_name} ALL({})",
                     left.to_sql(),
@@ -5829,6 +5829,43 @@ pub(crate) unsafe fn extract_operator_name(
         safe_node_to_string(node)
     } else {
         Ok("=".to_string())
+    }
+}
+
+/// Extract the unqualified operator symbol for conservative volatility lookup.
+pub(crate) unsafe fn extract_operator_symbol(
+    name_list: *mut pg_sys::List,
+) -> Result<String, PgTrickleError> {
+    let list = pg_list::<pg_sys::Node>(name_list);
+    match list.iter_ptr().last() {
+        Some(node) => safe_node_to_string(node),
+        None => Ok("=".to_string()),
+    }
+}
+
+/// Render an operator name with PostgreSQL's schema-qualified operator syntax.
+unsafe fn extract_operator_sql(name_list: *mut pg_sys::List) -> Result<String, PgTrickleError> {
+    let list = pg_list::<pg_sys::Node>(name_list);
+    if list.len() == 2 {
+        let mut names = list.iter_ptr();
+        let schema = safe_node_to_string(
+            names
+                .next()
+                .ok_or_else(|| PgTrickleError::InternalError("missing operator schema".into()))?,
+        )?;
+        let operator = safe_node_to_string(
+            names
+                .next()
+                .ok_or_else(|| PgTrickleError::InternalError("missing operator name".into()))?,
+        )?;
+        Ok(format!(
+            "OPERATOR({}.{})",
+            crate::dvm::diff::quote_ident(&schema),
+            operator
+        ))
+    } else {
+        // SAFETY: The list is the same raw parser allocation described above.
+        unsafe { extract_operator_name(name_list) }
     }
 }
 

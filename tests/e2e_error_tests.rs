@@ -1266,6 +1266,33 @@ async fn test_volatile_operator_rejected_in_differential() {
     );
 }
 
+#[tokio::test]
+async fn test_qualified_volatile_operator_rejected_in_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE SCHEMA volatile_ops").await;
+    db.execute(
+        "CREATE FUNCTION volatile_ops.add_random(int, int) RETURNS int AS $$ \
+         SELECT ($1 + $2 + (random() * 0)::int) $$ LANGUAGE SQL VOLATILE",
+    )
+    .await;
+    db.execute("CREATE OPERATOR volatile_ops.|+| (LEFTARG = int, RIGHTARG = int, FUNCTION = volatile_ops.add_random)")
+        .await;
+    db.execute("CREATE TABLE qualified_volop_src (id int PRIMARY KEY, a int, b int)")
+        .await;
+    let error = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('qualified_volop_st', \
+         $$ SELECT id, a OPERATOR(volatile_ops.|+|) b AS result FROM qualified_volop_src $$, \
+         '1m', 'DIFFERENTIAL')",
+        )
+        .await
+        .expect_err("qualified volatile operator must be rejected");
+    assert!(
+        error.to_string().contains("volatile"),
+        "unexpected error: {error}"
+    );
+}
+
 /// Verify that a custom volatile operator works in FULL mode.
 #[tokio::test]
 async fn test_volatile_operator_allowed_in_full_mode() {

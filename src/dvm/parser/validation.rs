@@ -1019,7 +1019,7 @@ fn walk_node_for_volatility(
         // G7.2: Check the operator's implementing function volatility.
         if !aexpr.name.is_null()
             // SAFETY: Parse-tree node pointer from raw_parser; valid within current memory context.
-            && let Ok(op_name) = unsafe { extract_operator_name(aexpr.name) }
+            && let Ok(op_name) = unsafe { extract_operator_symbol(aexpr.name) }
         {
             let vol = lookup_operator_volatility(&op_name)?;
             *worst = max_volatility(*worst, vol);

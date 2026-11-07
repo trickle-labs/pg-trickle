@@ -204,11 +204,11 @@ async fn test_pgvector_sum_differential() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// F4-3: Distance operator fallback — queries with <-> fall back to FULL
+// F4-3: Explicit FULL refresh for a distance-ordered Top-K query
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn test_pgvector_distance_operator_fallback_to_full() {
+async fn test_pgvector_distance_topk_explicit_full() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
 
@@ -228,9 +228,7 @@ async fn test_pgvector_distance_operator_fallback_to_full() {
     )
     .await;
 
-    // A stream table using a distance operator in ORDER BY should work
-    // via FULL refresh mode (distance operators are FULL-fallback safe).
-    // Use FULL mode explicitly to avoid relying on differential fallback.
+    // This exercises explicit FULL mode, not automatic fallback.
     let q = "SELECT id, category, embedding FROM emb_dist ORDER BY embedding <-> '[1,0,0]' LIMIT 5";
     db.create_st("dist_st", q, "1m", "FULL").await;
     db.assert_st_matches_query("dist_st", q).await;
@@ -240,6 +238,265 @@ async fn test_pgvector_distance_operator_fallback_to_full() {
         .await;
     db.refresh_st("dist_st").await;
     db.assert_st_matches_query("dist_st", q).await;
+}
+
+#[tokio::test]
+async fn test_pgvector_row_local_distance_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE distance_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO distance_src VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    let query = "SELECT id, embedding <=> '[1,0,0]'::vector AS distance \
+                 FROM distance_src WHERE embedding <-> '[1,0,0]'::vector < 1";
+    db.create_st("distance_local_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st("distance_auto_st", query, "1h", "AUTO").await;
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table('distance_immediate_st', $${query}$$, refresh_mode => 'IMMEDIATE')"
+    )).await;
+
+    for mutation in [
+        "INSERT INTO distance_src VALUES (3, '[0.9,0.1,0]')",
+        "UPDATE distance_src SET embedding = '[0,1,0]' WHERE id = 1",
+        "UPDATE distance_src SET embedding = '[1,0,0]' WHERE id = 2",
+        "DELETE FROM distance_src WHERE id = 3",
+    ] {
+        db.execute(mutation).await;
+        db.assert_st_matches_query("distance_immediate_st", query)
+            .await;
+        for name in ["distance_local_st", "distance_auto_st"] {
+            let previous_id: i64 = db
+                .query_scalar(&format!(
+                    "SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = '{name}'"
+                ))
+                .await;
+            db.try_execute_with_config(
+                &[
+                    "SET pg_trickle.refresh_strategy = 'differential'",
+                    "SET pg_trickle.differential_max_change_ratio = 0",
+                ],
+                &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+            )
+            .await
+            .expect("refresh row-local vector query");
+            let differential: bool = db.query_scalar(&format!(
+                "SELECT h.refresh_id > {previous_id} AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback \
+                 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+                 WHERE s.pgt_name = '{name}' ORDER BY h.refresh_id DESC LIMIT 1"
+            )).await;
+            assert!(differential, "{name}: no completed differential refresh");
+            db.assert_st_matches_query(name, query).await;
+        }
+    }
+    db.execute_seq(&[
+        "BEGIN",
+        "INSERT INTO distance_src VALUES (10, '[1,0,0]')",
+        "ROLLBACK",
+    ])
+    .await;
+    for name in [
+        "distance_local_st",
+        "distance_auto_st",
+        "distance_immediate_st",
+    ] {
+        db.assert_st_matches_query(name, query).await;
+    }
+}
+
+#[tokio::test]
+async fn test_pgvector_distance_topk_recomputes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE distance_rank_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute(
+        "INSERT INTO distance_rank_src VALUES (1, '[1,0,0]'), (2, '[0,1,0]'), (3, '[0,0,1]')",
+    )
+    .await;
+    let query = "SELECT id, embedding FROM distance_rank_src \
+                 ORDER BY embedding <-> '[1,0,0]'::vector, id LIMIT 2";
+    db.create_st("distance_rank_st", query, "1h", "DIFFERENTIAL")
+        .await;
+
+    for mutation in [
+        "INSERT INTO distance_rank_src VALUES (4, '[0.9,0,0]')",
+        "UPDATE distance_rank_src SET embedding = '[0.8,0,0]' WHERE id = 3",
+        "DELETE FROM distance_rank_src WHERE id = 1",
+        "DELETE FROM distance_rank_src WHERE id IN (2, 3, 4)",
+    ] {
+        db.execute(mutation).await;
+        let previous_id: i64 = db.query_scalar(
+            "SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'distance_rank_st'"
+        ).await;
+        db.refresh_st("distance_rank_st").await;
+        let recomputed: bool = db.query_scalar(&format!(
+            "SELECT h.refresh_id > {previous_id} AND h.status = 'COMPLETED' AND h.merge_strategy_used = 'TOP_K' \
+             FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+             WHERE s.pgt_name = 'distance_rank_st' ORDER BY h.refresh_id DESC LIMIT 1"
+        )).await;
+        assert!(
+            recomputed,
+            "Top-K refresh was not recorded as recomputation"
+        );
+        db.assert_st_matches_query("distance_rank_st", query).await;
+    }
+}
+
+#[tokio::test]
+async fn test_pgvector_distance_types_and_functions_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+
+    for (kind, first, second, zero) in [
+        ("vector", "[1,0,0]", "[0,1,0]", "[0,0,0]"),
+        ("halfvec", "[1,0,0]", "[0,1,0]", "[0,0,0]"),
+        ("sparsevec", "{1:1}/3", "{2:1}/3", "{}/3"),
+    ] {
+        let source = format!("distance_{kind}_src");
+        let stream = format!("distance_{kind}_st");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id int PRIMARY KEY, embedding {kind}(3))"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (1, '{first}'), (2, '{zero}'), (3, NULL)"
+        ))
+        .await;
+        let pivot = format!("'{first}'::{kind}");
+        let query = format!(
+            "SELECT id, embedding <-> {pivot} AS l2, embedding <=> {pivot} AS cosine, \
+             embedding <#> {pivot} AS neg_ip, embedding <+> {pivot} AS l1, \
+             l2_distance(embedding, {pivot}) AS l2_fn, \
+             cosine_distance(embedding, {pivot}) AS cosine_fn, \
+             inner_product(embedding, {pivot}) AS ip_fn, \
+             l1_distance(embedding, {pivot}) AS l1_fn FROM {source}"
+        );
+        db.create_st(&stream, &query, "1h", "DIFFERENTIAL").await;
+        db.assert_st_matches_query(&stream, &query).await;
+
+        for mutation in [
+            format!("INSERT INTO {source} VALUES (4, '{second}')"),
+            format!("UPDATE {source} SET embedding = '{second}' WHERE id IN (1, 3)"),
+            format!("DELETE FROM {source} WHERE id = 2"),
+        ] {
+            db.execute(&mutation).await;
+            let previous_id: i64 = db
+                .query_scalar(&format!(
+                    "SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = '{stream}'"
+                ))
+                .await;
+            db.try_execute_with_config(
+                &[
+                    "SET pg_trickle.refresh_strategy = 'differential'",
+                    "SET pg_trickle.differential_max_change_ratio = 0",
+                ],
+                &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
+            )
+            .await
+            .expect("refresh vector distance expressions");
+            let differential: bool = db.query_scalar(&format!(
+                "SELECT h.refresh_id > {previous_id} AND h.action = 'DIFFERENTIAL' \
+                 AND h.status = 'COMPLETED' AND NOT h.was_full_fallback \
+                 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+                 WHERE s.pgt_name = '{stream}' ORDER BY h.refresh_id DESC LIMIT 1"
+            )).await;
+            assert!(differential, "{kind}: no completed differential refresh");
+            db.assert_st_matches_query(&stream, &query).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_pgvector_distance_changing_pivot_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE distance_docs (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("CREATE TABLE distance_pivot (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO distance_docs VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    db.execute("INSERT INTO distance_pivot VALUES (1, '[1,0,0]')")
+        .await;
+    let query = "SELECT d.id, d.embedding <-> p.embedding AS distance \
+                 FROM distance_docs d CROSS JOIN distance_pivot p WHERE p.id = 1";
+    db.create_st("distance_pivot_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("UPDATE distance_pivot SET embedding = '[0,1,0]' WHERE id = 1")
+        .await;
+    let previous_id: i64 = db
+        .query_scalar(
+            "SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'distance_pivot_st'",
+        )
+        .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('distance_pivot_st')",
+    )
+    .await
+    .expect("refresh after changing the pivot");
+    let differential: bool = db
+        .query_scalar(&format!(
+            "SELECT h.refresh_id > {previous_id} AND h.action = 'DIFFERENTIAL' \
+         AND h.status = 'COMPLETED' AND NOT h.was_full_fallback \
+         FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+         WHERE s.pgt_name = 'distance_pivot_st' ORDER BY h.refresh_id DESC LIMIT 1"
+        ))
+        .await;
+    assert!(differential, "pivot change did not refresh differentially");
+    db.assert_st_matches_query("distance_pivot_st", query).await;
+}
+
+#[tokio::test]
+async fn test_pgvector_distance_non_public_extension_schema() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE SCHEMA \"Vector.Ext\"").await;
+    db.execute("CREATE EXTENSION vector WITH SCHEMA \"Vector.Ext\"")
+        .await;
+    db.execute(
+        "CREATE TABLE schema_distance_src (id int PRIMARY KEY, embedding \"Vector.Ext\".vector(3), pivot \"Vector.Ext\".vector(3))",
+    )
+    .await;
+    db.execute("INSERT INTO schema_distance_src VALUES (1, '[1,0,0]', '[1,0,0]')")
+        .await;
+    let query = "SELECT id, embedding OPERATOR(\"Vector.Ext\".<=>) pivot AS distance \
+                 FROM schema_distance_src";
+    db.create_st("schema_distance_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    let previous_id: i64 = db
+        .query_scalar(
+            "SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'schema_distance_st'",
+        )
+        .await;
+    db.execute("UPDATE schema_distance_src SET embedding = '[0,1,0]' WHERE id = 1")
+        .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('schema_distance_st')",
+    )
+    .await
+    .expect("refresh schema-qualified vector distance");
+    let differential: bool = db.query_scalar(&format!(
+        "SELECT h.refresh_id > {previous_id} AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback \
+         FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+         WHERE s.pgt_name = 'schema_distance_st' ORDER BY h.refresh_id DESC LIMIT 1"
+    )).await;
+    assert!(differential, "schema-qualified distance fell back to FULL");
+    db.assert_st_matches_query("schema_distance_st", query)
+        .await;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -288,16 +545,24 @@ async fn test_pgvector_hnsw_index_on_stream_table() {
     // Verify refresh still works with index in place
     db.execute("INSERT INTO emb_hnsw_src (user_id, embedding) VALUES (1, '[1,0,0]')")
         .await;
-    db.refresh_st("centroid_hnsw_st").await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SELECT pgtrickle.refresh_stream_table('centroid_hnsw_st')",
+    ])
+    .await;
     db.assert_st_matches_query("centroid_hnsw_st", expected_q)
         .await;
 
     let index_ready: bool = db
         .query_scalar(
-            "SELECT i.indisvalid AND i.indisready AND am.amname = 'hnsw' AND opc.opcname = 'vector_cosine_ops' \
-             FROM pg_index i JOIN pg_class idx ON idx.oid = i.indexrelid \
-             JOIN pg_am am ON am.oid = idx.relam JOIN pg_opclass opc ON opc.oid = i.indclass[0] \
-             WHERE idx.oid = 'public.centroid_hnsw_idx'::regclass",
+            "SELECT EXISTS (SELECT 1 FROM pg_index i \
+         JOIN pg_class c ON c.oid = i.indexrelid \
+         JOIN pg_am am ON am.oid = c.relam \
+         JOIN pg_opclass op ON op.oid = i.indclass[0] \
+         WHERE i.indexrelid = 'public.centroid_hnsw_idx'::regclass \
+         AND i.indrelid = 'public.centroid_hnsw_st'::regclass \
+         AND i.indisvalid AND i.indisready AND am.amname = 'hnsw' \
+         AND op.opcname = 'vector_cosine_ops')",
         )
         .await;
     assert!(index_ready, "expected a valid, ready cosine HNSW index");
