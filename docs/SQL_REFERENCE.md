@@ -4439,8 +4439,12 @@ reported success, including across the reindex swap. A reported failure delays
 the next claim by 30 seconds, doubling on each consecutive failure up to 16
 minutes; success resets the failure count. `next_eligible_at` shows the
 deadline. These schedules survive a physical restart and are discarded with
-requests on logical restore. An interrupted backend can be reclaimed without
-delay because no outcome was reported. Index renames or definition changes
+requests on logical restore. Every claim reserves a minimum 30-second
+interval from its start, including when the backend disconnects without
+reporting an outcome. An interrupted request can be reclaimed when that
+interval has elapsed; a long-running interrupted attempt may therefore be
+retried immediately. Repeated unreported interruptions do not use exponential
+backoff, so a supervisor should apply its own retry policy. Index renames or definition changes
 create a different schedule and require operator coordination. On reported
 success, the per-index `reported_covered_epoch` advances to the claim epoch;
 failure leaves the previous value intact. `epoch_advances_since_reported_coverage`
