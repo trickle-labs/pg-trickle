@@ -1222,30 +1222,17 @@ fn validate_and_parse_query(
         || *refresh_mode == RefreshMode::Immediate)
         && topk_info.is_none()
     {
-        match crate::dvm::parse_defining_query_full(q) {
-            Ok(mut tree) => {
+        let parsed = crate::dvm::parse_defining_query_full(q).and_then(|mut tree| {
+            crate::dvm::parser::enrich_vector_aggregates(q, &mut tree, true)?;
+            Ok(tree)
+        });
+        match parsed {
+            Ok(tree) => {
                 // Emit advisory warnings (e.g. NATURAL JOIN column drift) exactly
                 // once here — downstream parse calls (cache pre-warm, row-id
                 // derivation) silently discard them via ParseResult.warnings.
                 for msg in &tree.warnings {
                     pgrx::warning!("{}", msg);
-                }
-                // F4 (v0.37.0): Reclassify avg/sum on vector-typed columns to
-                // VectorAvg/VectorSum (group-rescan strategy) so that
-                // avg_aux_columns() does not create algebraic aux columns for
-                // vector types (COALESCE(vec_col, 0) is not valid for vectors).
-                if crate::config::pg_trickle_enable_vector_agg() {
-                    let source_oids = {
-                        let mut oids = tree.tree.source_oids();
-                        oids.extend(tree.cte_registry.source_oids());
-                        oids.sort_unstable();
-                        oids.dedup();
-                        oids
-                    };
-                    let vector_cols = crate::dvm::resolve_vector_columns_for_sources(&source_oids);
-                    if !vector_cols.is_empty() {
-                        crate::dvm::reclassify_vector_aggregates(&mut tree.tree, &vector_cols);
-                    }
                 }
                 Some(tree)
             }
@@ -1563,12 +1550,18 @@ pub(crate) fn validate_incremental_mode_for_query(
     defining_query: &str,
     mode: RefreshMode,
     stream_owner_oid: pg_sys::Oid,
+    enforce_vector_setting: bool,
 ) -> Result<(), PgTrickleError> {
     if mode == RefreshMode::Full {
         return Ok(());
     }
     let query_volatility = helpers::defining_query_volatility(defining_query)?;
-    let result = crate::dvm::parse_defining_query_full(defining_query)?;
+    let mut result = crate::dvm::parse_defining_query_full(defining_query)?;
+    crate::dvm::parser::enrich_vector_aggregates(
+        defining_query,
+        &mut result,
+        enforce_vector_setting,
+    )?;
     crate::dvm::check_ivm_support_with_registry(&result)?;
     let mut source_oids = result.tree.source_oids();
     source_oids.extend(result.cte_registry.source_oids());
@@ -1603,9 +1596,9 @@ pub(crate) fn validate_incremental_mode_for_query(
 /// `avg(embedding)` where `embedding` is `vector(3)` returns type `vector`
 /// (undimensioned) at the PostgreSQL query-analysis level. HNSW / IVFFlat
 /// indexes require the column to have an explicit dimension. This function
-/// looks up each VectorAvg/VectorSum output column's source column typmod and
-/// runs `ALTER TABLE … ALTER COLUMN … TYPE <type>(N)` when the dimension is
-/// known.
+/// uses the analyzed argument's typmod and runs
+/// `ALTER TABLE … ALTER COLUMN … TYPE <type>(N)` when the output is a direct
+/// aggregate and its dimension is known.
 ///
 /// VH-1 (v0.48.0): uses the actual pgvector type (`vector`, `halfvec`, or
 /// `sparsevec`) so that `halfvec_avg` and `sparsevec_avg` output columns are
@@ -1620,14 +1613,13 @@ fn fix_vector_aggregate_column_types(
         if typmod <= 0 {
             continue;
         }
-        // Use the actual pgvector base type name to build the correct type expression.
-        // typename is one of: "vector", "halfvec", "sparsevec".
+        // The analyzed pgvector type is already schema-qualified and quoted.
         let alter_sql = format!(
             "ALTER TABLE {}.{} ALTER COLUMN {} TYPE {}({})",
             quote_identifier(schema),
             quote_identifier(table_name),
             quote_identifier(&col_alias),
-            typename, // VH-1: use actual type, not always "vector"
+            typename,
             typmod,
         );
         Spi::run(&alter_sql).map_err(|e| {

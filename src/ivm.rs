@@ -1241,7 +1241,12 @@ fn get_or_compute_ivm_delta(
     }
 
     // Cache miss — parse, differentiate, and cache.
-    let result = parse_defining_query_full(defining_query).map_err(|e| {
+    let result = crate::refresh::with_stream_owner(st, || {
+        let mut result = parse_defining_query_full(defining_query)?;
+        crate::dvm::parser::enrich_vector_aggregates(defining_query, &mut result, false)?;
+        Ok(result)
+    })
+    .map_err(|e| {
         PgTrickleError::InternalError(format!("Failed to parse defining query for IVM: {e}"))
     })?;
     let op_tree = result.tree;
@@ -1382,7 +1387,9 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
     } else {
         st.defining_query.clone()
     };
-    let avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
+    let (avg_aux, nonnull_aux) = crate::refresh::with_stream_owner(&st, || {
+        crate::dvm::query_aggregate_aux_columns(&st.defining_query)
+    })?;
     if !avg_aux.is_empty() {
         effective_query = crate::api::inject_avg_aux(&effective_query, &avg_aux);
     }
@@ -1398,7 +1405,6 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
         let typed = crate::api::typed_statistical_aux_columns(&covar_aux, &types);
         effective_query = crate::api::inject_covar_aux_typed(&effective_query, &typed);
     }
-    let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
     if !nonnull_aux.is_empty() {
         effective_query = crate::api::inject_nonnull_aux(&effective_query, &nonnull_aux);
     }

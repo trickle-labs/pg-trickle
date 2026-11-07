@@ -350,6 +350,7 @@ pub(crate) fn execute_manual_refresh(
                 &st.defining_query,
                 st.refresh_mode,
                 crate::api::security_context::stream_execution_context(st)?.owner_oid,
+                false,
             )
         })?;
     }
@@ -801,7 +802,8 @@ fn execute_manual_full_refresh_target(
         {
             let mut eq = inject_pgt_count(&st.defining_query);
             // Also inject AVG auxiliary columns for algebraic AVG maintenance.
-            let avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
+            let (avg_aux, nonnull_aux) =
+                crate::dvm::query_aggregate_aux_columns(&st.defining_query)?;
             if !avg_aux.is_empty() {
                 eq = inject_avg_aux(&eq, &avg_aux);
             }
@@ -820,7 +822,6 @@ fn execute_manual_full_refresh_target(
                 eq = inject_covar_aux_typed(&eq, &typed);
             }
             // Also inject nonnull-count columns for SUM NULL-transition correction (P2-2).
-            let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
             if !nonnull_aux.is_empty() {
                 eq = inject_nonnull_aux(&eq, &nonnull_aux);
             }

@@ -3801,6 +3801,7 @@ mod tests {
         let child = scan(1, "t", "public", "t", &["id", "region"]);
         let group_by = vec![colref("region")];
         let aggs = vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Count,
             argument: Some(colref("id")),
             alias: "cnt".to_string(),
@@ -4090,6 +4091,7 @@ mod tests {
     #[test]
     fn test_agg_delta_exprs_count_distinct_uses_change_sentinel() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Count,
             argument: Some(colref("name")),
             alias: "uniq".to_string(),
@@ -4153,6 +4155,7 @@ mod tests {
     #[test]
     fn test_sum_case_when_not_algebraically_invertible() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(Expr::Raw(
                 "CASE WHEN o_orderpriority IN ('1-URGENT','2-HIGH') THEN 1 ELSE 0 END".into(),
@@ -4182,6 +4185,7 @@ mod tests {
     #[test]
     fn test_sum_case_when_with_leading_whitespace() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(Expr::Raw(
                 "  CASE WHEN status = 'A' THEN qty ELSE 0 END".into(),
@@ -4220,6 +4224,7 @@ mod tests {
     #[test]
     fn test_is_algebraic_via_aux_not_for_distinct_avg() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Avg,
             argument: Some(colref("score")),
             alias: "avg_score".to_string(),
@@ -4390,6 +4395,7 @@ mod tests {
     #[test]
     fn test_agg_merge_expr_min() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Min,
             argument: Some(colref("val")),
             alias: "min_val".to_string(),
@@ -4424,6 +4430,7 @@ mod tests {
     #[test]
     fn test_agg_merge_expr_max() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Max,
             argument: Some(colref("val")),
             alias: "max_val".to_string(),
@@ -4454,6 +4461,7 @@ mod tests {
     #[test]
     fn test_agg_delta_exprs_min() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Min,
             argument: Some(colref("val")),
             alias: "min_val".to_string(),
@@ -4480,6 +4488,7 @@ mod tests {
     #[test]
     fn test_agg_delta_exprs_max() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Max,
             argument: Some(colref("val")),
             alias: "max_val".to_string(),
@@ -4511,6 +4520,7 @@ mod tests {
         let agg = OpTree::Aggregate {
             group_by: vec![colref("dept")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Min,
                 argument: Some(colref("salary")),
                 alias: "min_salary".to_string(),
@@ -4541,6 +4551,7 @@ mod tests {
         let agg = OpTree::Aggregate {
             group_by: vec![colref("dept")],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Max,
                 argument: Some(colref("salary")),
                 alias: "max_salary".to_string(),
@@ -4798,6 +4809,7 @@ mod tests {
     #[test]
     fn test_agg_to_rescan_sql_json_objectagg_std() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::JsonObjectAggStd(
                 "JSON_OBJECTAGG(name : value ABSENT ON NULL)".into(),
             ),
@@ -4818,6 +4830,7 @@ mod tests {
     #[test]
     fn test_agg_to_rescan_sql_json_arrayagg_std() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::JsonArrayAggStd("JSON_ARRAYAGG(x ORDER BY x)".into()),
             argument: None,
             alias: "arr".to_string(),
@@ -4833,6 +4846,7 @@ mod tests {
     #[test]
     fn test_agg_to_rescan_sql_json_arrayagg_std_with_filter() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::JsonArrayAggStd("JSON_ARRAYAGG(x)".into()),
             argument: None,
             alias: "arr".to_string(),
@@ -4858,6 +4872,7 @@ mod tests {
     #[test]
     fn test_uda_rescan_sql_rendering() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::UserDefined("my_custom_agg(x)".into()),
             argument: None,
             alias: "custom".to_string(),
@@ -4873,6 +4888,7 @@ mod tests {
     #[test]
     fn test_uda_rescan_sql_schema_qualified() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::UserDefined("myschema.my_agg(x, y)".into()),
             argument: None,
             alias: "result".to_string(),
@@ -4890,6 +4906,7 @@ mod tests {
         // UDA with FILTER: the raw SQL is stored directly, FILTER handled
         // by the UserDefined variant returning the raw SQL as-is.
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::UserDefined("my_agg(x) FILTER (WHERE x > 0)".into()),
             argument: None,
             alias: "filtered".to_string(),
@@ -4905,6 +4922,7 @@ mod tests {
     #[test]
     fn test_uda_rescan_sql_with_order_by() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::UserDefined("my_agg(x ORDER BY y)".into()),
             argument: None,
             alias: "ordered".to_string(),
@@ -5552,6 +5570,7 @@ mod tests {
     #[test]
     fn test_statistical_delta_products_cast_operands_to_resolved_type() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Corr,
             argument: Some(colref("y")),
             alias: "corr".into(),
@@ -5576,6 +5595,7 @@ mod tests {
     #[test]
     fn test_statistical_sum2_casts_operands_to_resolved_type() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::StddevPop,
             argument: Some(colref("amount")),
             alias: "sd".into(),
@@ -6204,6 +6224,7 @@ mod tests {
         let mut ctx = test_ctx_with_st("public", "st");
         let child = scan(1, "t", "public", "t", &["region", "amount", "active"]);
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(colref("amount")),
             alias: "total".into(),
@@ -6314,6 +6335,7 @@ mod tests {
         );
 
         let complex_sd = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::ComplexExpression(
                 "round(round(stddev_pop(amount), 4), 4)".to_string(),
             ),
@@ -7071,6 +7093,7 @@ mod tests {
     #[test]
     fn test_direct_agg_delta_exprs_count_col_ignores_value_only() {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Count,
             argument: Some(colref("id")),
             alias: "cnt".to_string(),
@@ -7230,6 +7253,7 @@ mod tests {
         let child = scan(1, "t", "public", "t", &["id", "status", "amount", "region"]);
         let group_by = vec![colref("region")];
         let aggs = vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(Expr::Raw(
                 "CASE WHEN status = 'active' THEN amount ELSE 0 END".to_string(),
@@ -7266,6 +7290,7 @@ mod tests {
         let child = scan(1, "t", "public", "t", &["id", "status", "amount"]);
         let group_by = vec![colref("region")];
         let aggs = vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(Expr::Raw(
                 "CASE WHEN status = 'active' THEN amount ELSE 0 END".to_string(),
@@ -7293,6 +7318,7 @@ mod tests {
         let child = scan(1, "t", "public", "t", &["id", "status", "amount", "region"]);
         let group_by = vec![colref("region")];
         let aggs = vec![AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(Expr::Raw(
                 "CASE WHEN status = 'active' THEN amount ELSE 0 END".to_string(),
