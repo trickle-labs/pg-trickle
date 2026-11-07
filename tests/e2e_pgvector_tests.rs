@@ -3374,6 +3374,17 @@ async fn test_vector_aggregate_qualified_join_uses_argument_type() {
     );
     db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create])
         .await;
+    let explanation: String = db
+        .query_scalar("SELECT pgtrickle.explain_stream_table('typed_join_st')")
+        .await;
+    assert!(
+        explanation.contains("centroid: GROUP_RESCAN"),
+        "vector AVG must report its actual strategy: {explanation}"
+    );
+    assert!(
+        explanation.contains("scalar_mean: ALGEBRAIC_VIA_AUX"),
+        "scalar AVG must retain its own strategy: {explanation}"
+    );
     db.execute("UPDATE typed_scalars SET embedding = 20 WHERE id = 2")
         .await;
     db.execute("UPDATE typed_vectors SET embedding = '[0,0,1]' WHERE id = 2")

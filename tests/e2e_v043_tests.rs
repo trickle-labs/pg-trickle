@@ -166,6 +166,19 @@ async fn test_t_a44_3_explain_stream_table_includes_plan_info() {
         lower.contains("differential") || lower.contains("diff"),
         "explain output should mention differential mode; got: {result}"
     );
+    db.create_st(
+        "a44_case_st",
+        "SELECT grp, SUM(CASE WHEN val > 10 THEN val ELSE 0 END) AS total FROM a44_plan_src GROUP BY grp",
+        "1m",
+        "DIFFERENTIAL",
+    ).await;
+    let case_plan: String = db
+        .query_scalar("SELECT pgtrickle.explain_stream_table('a44_case_st')")
+        .await;
+    assert!(
+        case_plan.contains("GROUP_RESCAN"),
+        "SUM(CASE) must retain its rescan classification: {case_plan}"
+    );
 }
 
 // ── T-A44-4: WAL per-source status ────────────────────────────────────────

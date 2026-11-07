@@ -3307,16 +3307,24 @@ fn explain_stream_table(name: &str) -> Result<String, PgTrickleError> {
         format!("L0 per-leaf snapshot (join depth {join_count} <= threshold {deep_threshold})")
     };
 
-    let aggregate_strategy_note = if !has_aggregate {
-        "no_aggregate".to_string()
-    } else if has_case_in_agg {
+    let aggregate_strategy_note = if has_case_in_agg {
         "GROUP_RESCAN — SUM(CASE) is not algebraically invertible (DI-8)".to_string()
-    } else if has_window {
-        "GROUP_RESCAN — window functions require full rescan".to_string()
-    } else if has_distinct_agg {
-        "GROUP_RESCAN — DISTINCT aggregates require full rescan".to_string()
     } else {
-        "algebraic — COUNT/SUM algebraically invertible".to_string()
+        let strategies = crate::refresh::with_stream_owner(&st, || {
+            let mut parsed = crate::dvm::parser::parse_defining_query_full(&st.defining_query)?;
+            crate::dvm::parser::enrich_vector_aggregates(&st.defining_query, &mut parsed, false)?;
+            Ok(parsed.tree.aggregate_strategies())
+        });
+        match strategies {
+            Ok(strategies) if !strategies.is_empty() => strategies
+                .iter()
+                .map(|(alias, strategy)| format!("{alias}: {strategy}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            Ok(_) if !has_aggregate => "no_aggregate".to_string(),
+            Ok(_) => "unknown — no output aggregate strategy identified".to_string(),
+            Err(_) => "unknown — aggregate strategy analysis failed".to_string(),
+        }
     };
 
     let mut fallback_reasons: Vec<String> = Vec::new();
