@@ -247,10 +247,9 @@ API, Ollama, or pgai). pg_trickle maintains the derived state once embeddings
 are stored in the source table.
 
 **Q: Should I use IVFFlat or HNSW with pg_trickle?**
-HNSW is strongly preferred. HNSW handles incremental writes and deletes via
-tombstones. IVFFlat requires periodic full rebuilds because it uses fixed
-k-means centroids built at index creation time. Use `reindex_if_drift` to
-manage HNSW tombstone accumulation.
+Both have different build, memory, query, and recall tradeoffs. Benchmark them
+against your data. A changed-row threshold is a churn heuristic; it does not
+measure recall or determine when either index must be rebuilt.
 
 **Q: What is the `reindex_drift_threshold`?**
 It is the fraction of estimated rows that must change since the last REINDEX
@@ -258,9 +257,27 @@ before a drift-triggered REINDEX fires. The default is 0.20 (20%). You can
 set a per-table override via `ALTER STREAM TABLE ... reindex_drift_threshold`.
 
 **Q: Does REINDEX block reads?**
-In PostgreSQL, `REINDEX TABLE` acquires a `SHARE UPDATE EXCLUSIVE` lock, which
-allows concurrent reads but blocks writes and other REINDEX operations. For
-zero-downtime reindexing on large tables, use `REINDEX TABLE CONCURRENTLY`
-(PostgreSQL 12+). pg_trickle uses the standard `REINDEX TABLE` form; if
-concurrency is critical, set `post_refresh_action = 'none'` and schedule
-`REINDEX TABLE CONCURRENTLY` yourself.
+The legacy `reindex` and `reindex_if_drift` actions run a non-concurrent,
+table-wide `REINDEX` inside the refresh transaction. It blocks writes and can
+also block reads while the indexes are locked. A failure is isolated, but the
+rebuild still extends the refresh transaction. The threshold is not evidence
+of index quality. Leave `post_refresh_action = 'none'` to manage maintenance
+independently.
+
+For manual concurrent maintenance, the tested
+[candidate query](../../tests/fixtures/pgvector_ann_maintenance_candidates.sql)
+accepts a stream-table name as its `$1` parameter and returns valid HNSW and
+IVFFlat leaf indexes for which the caller has `MAINTAIN` privilege. Run it as a
+trusted maintenance role with access to the pg_trickle stream-table catalog and
+the stream table. The role must also have schema usage and `MAINTAIN` on each
+leaf table; PostgreSQL checks privileges again at execution. The returned index
+names are quoted identifiers, not SQL supplied by another user. For each chosen
+index, recheck its identity and access method immediately before executing
+`REINDEX INDEX CONCURRENTLY` on an ordinary connection in autocommit mode, with
+appropriate lock and statement timeouts. Do not run concurrent DDL inside a
+function or transaction block, or assume the original index OID survives a
+successful concurrent rebuild. Coordinate operators to prevent duplicate work,
+and inspect invalid `_ccnew`/`_ccold` indexes after a failed operation as
+described in the [PostgreSQL REINDEX documentation](https://www.postgresql.org/docs/18/sql-reindex.html).
+This manual recipe does not persist requests, retry failures, or account for
+changes arriving during a rebuild. Continue normal VACUUM and autovacuum care.
