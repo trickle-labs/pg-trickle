@@ -47,7 +47,9 @@ missing latency samples, unavailable Linux CPU samples, failed correctness,
 or a budget regression. The initial v0.87 product floor preserves the
 roadmap requirement of at least 99% installed/no-stream TPS; active p99 and
 refresh CPU share are separately budgeted so CI noise cannot silently change
-the product contract.
+the product contract. GitHub Actions may tolerate p99 up to the separately
+versioned CI-noise ceiling; the result still marks whether the product budget
+passed or noise tolerance was used. Local publication runs remain strict.
 
 ## v0.88 vector aggregate gate
 
