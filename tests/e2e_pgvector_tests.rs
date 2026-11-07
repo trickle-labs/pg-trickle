@@ -4640,11 +4640,21 @@ async fn test_vector_diagnostics_reports_partition_leaf_indexes() {
     db.execute("CREATE INDEX diagnostic_partition_ann ON diagnostic_partition_st USING hnsw (embedding vector_l2_ops)").await;
     let leaves = db.query_scalar::<i64>("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE v->>'stream_table_oid' = 'diagnostic_partition_st'::regclass::oid::text AND v->>'table_oid' <> v->>'stream_table_oid' AND v->>'opclass' = 'vector_l2_ops'").await;
     assert!(leaves > 0);
-    let leaf_index: i64 = db.query_scalar("SELECT (v->>'index_oid')::bigint FROM pgtrickle.ann_index_status_v2() v WHERE v->>'stream_table_oid' = 'diagnostic_partition_st'::regclass::oid::text LIMIT 1").await;
+    let (leaf_index, leaf_table): (i64, i64) = sqlx::query_as("SELECT (v->>'index_oid')::bigint, (v->>'table_oid')::bigint FROM pgtrickle.ann_index_status_v2() v WHERE v->>'stream_table_oid' = 'diagnostic_partition_st'::regclass::oid::text LIMIT 1")
+        .fetch_one(&db.pool).await.expect("find partition leaf");
     let _: i64 = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance('diagnostic_partition_st'::regclass::oid, $1::bigint::oid)")
         .bind(leaf_index).fetch_one(&db.pool).await.expect("request leaf maintenance");
     let pending: bool = db.query_scalar("SELECT (v->>'maintenance_pending')::boolean FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'diagnostic_partition_st' LIMIT 1").await;
     assert!(pending);
+    db.execute("CREATE SCHEMA diagnostic_private").await;
+    let move_leaf: String = sqlx::query_scalar(
+        "SELECT format('ALTER TABLE %s SET SCHEMA diagnostic_private', $1::bigint::oid::regclass)",
+    )
+    .bind(leaf_table)
+    .fetch_one(&db.pool)
+    .await
+    .expect("quote leaf relation");
+    db.execute(&move_leaf).await;
     db.execute("CREATE ROLE diagnostic_partition_observer")
         .await;
     db.execute("GRANT USAGE ON SCHEMA pgtrickle TO diagnostic_partition_observer")
@@ -4664,7 +4674,59 @@ async fn test_vector_diagnostics_reports_partition_leaf_indexes() {
         redacted,
         "root privileges alone must not expose leaf maintenance"
     );
+    let hidden: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE (v->>'table_oid')::bigint = $1")
+        .bind(leaf_table).fetch_one(&mut *observer).await.expect("inspect leaf index visibility");
+    assert_eq!(
+        hidden, 0,
+        "root access must not expose an inaccessible leaf index"
+    );
     observer.rollback().await.expect("finish observer");
+    let grant_leaf: String = sqlx::query_scalar("SELECT format('GRANT SELECT ON TABLE %s TO diagnostic_partition_observer', $1::bigint::oid::regclass)")
+        .bind(leaf_table).fetch_one(&db.pool).await.expect("quote leaf grant");
+    db.execute(&grant_leaf).await;
+    let mut observer = db.pool.begin().await.expect("begin leaf observer");
+    sqlx::query("SET LOCAL ROLE diagnostic_partition_observer")
+        .execute(&mut *observer)
+        .await
+        .expect("set leaf observer");
+    let hidden: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE (v->>'table_oid')::bigint = $1")
+        .bind(leaf_table).fetch_one(&mut *observer).await.expect("inspect leaf without schema usage");
+    assert_eq!(
+        hidden, 0,
+        "leaf SELECT without schema USAGE must not expose the index"
+    );
+    observer.rollback().await.expect("finish leaf observer");
+    db.execute("GRANT USAGE ON SCHEMA diagnostic_private TO diagnostic_partition_observer")
+        .await;
+    let mut observer = db.pool.begin().await.expect("begin authorized observer");
+    sqlx::query("SET LOCAL ROLE diagnostic_partition_observer")
+        .execute(&mut *observer)
+        .await
+        .expect("set authorized observer");
+    let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE (v->>'table_oid')::bigint = $1")
+        .bind(leaf_table).fetch_one(&mut *observer).await.expect("inspect authorized leaf");
+    assert_eq!(visible, 1);
+    observer
+        .rollback()
+        .await
+        .expect("finish authorized observer");
+    db.execute("REVOKE SELECT ON diagnostic_partition_st FROM diagnostic_partition_observer")
+        .await;
+    let mut observer = db.pool.begin().await.expect("begin leaf-only observer");
+    sqlx::query("SET LOCAL ROLE diagnostic_partition_observer")
+        .execute(&mut *observer)
+        .await
+        .expect("set leaf-only observer");
+    let hidden: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE (v->>'table_oid')::bigint = $1")
+        .bind(leaf_table).fetch_one(&mut *observer).await.expect("inspect leaf without root access");
+    assert_eq!(
+        hidden, 0,
+        "leaf access must not bypass the root visibility check"
+    );
+    observer
+        .rollback()
+        .await
+        .expect("finish leaf-only observer");
 }
 
 // ═══════════════════════════════════════════════════════════════════════

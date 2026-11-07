@@ -5516,6 +5516,8 @@ refresh progress separately when backlog is suspected.
 
 ### pgtrickle.ann_index_status_v2
 
+Partition leaf indexes appear only when the caller also has `SELECT` on the
+leaf and `USAGE` on its schema; access to the parent alone is insufficient.
 Index dimensions are NULL for expressions whose dimension cannot be inferred
 from a simple column. Index size is in bytes, and index options are PostgreSQL
 reloptions. Opclass names identify the indexed metric; use `EXPLAIN` to check
