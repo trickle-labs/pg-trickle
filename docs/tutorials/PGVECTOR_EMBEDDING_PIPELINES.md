@@ -1,6 +1,7 @@
 # Maintaining Centroids with pgVectorMV
 
-> **Status: Stable** — pgvector stream tables are production-ready. The `attach_embedding_outbox` integration is **Beta**.
+> **Status: Experimental** — vector aggregates are disabled by default. See
+> [the runtime support summary](../SUPPORT_SUMMARY.md) for capability status.
 
 **pg_trickle** — F4: pgVectorMV incremental vector aggregate operators
 

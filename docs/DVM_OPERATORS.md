@@ -29,7 +29,7 @@ This document describes the Differential View Maintenance (DVM) operators implem
 | `HAVING` | ✅ | ✅ | ✅ | [Having](#having) |
 | `GROUP BY ROLLUP / CUBE` | ✅ | ✅ | ✅ | [Grouping Sets](#grouping-sets) |
 | Recursive CTEs | ✅ | ⚠️ | ⚠️ | [CTEs](#ctes) |
-| `vector_avg` / `halfvec_avg` | ✅ | ✅ | ✅ | [Vector Aggregates](#vector-aggregates) |
+| pgvector `avg(vector)` / `avg(halfvec)` | ⚠️ | ⚠️ | ⚠️ | [Vector aggregates](tutorials/PGVECTOR_EMBEDDING_PIPELINES.md) (experimental; disabled by default) |
 
 Legend: ✅ Supported · ⚠️ Partial (see section) · ❌ Not supported
 

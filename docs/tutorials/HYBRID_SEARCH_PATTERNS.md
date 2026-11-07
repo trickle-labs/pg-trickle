@@ -177,7 +177,7 @@ LIMIT 20;
 
 | GUC | Default | Effect |
 |-----|---------|--------|
-| `pg_trickle.enable_vector_agg` | `off` | Enable `vector_avg` / `halfvec_avg` / `sparsevec_avg` aggregates in defining queries.  Must be `on` for centroid-style stream tables. |
+| `pg_trickle.enable_vector_agg` | `off` | Enable experimental support for admitted pgvector aggregates in defining queries. Must be `on` for centroid-style stream tables. |
 
 Enable before creating centroid aggregates:
 
@@ -187,11 +187,11 @@ SET pg_trickle.enable_vector_agg = on;
 
 ---
 
-## Pattern 3: Tiered Storage (halfvec + sparsevec)
+## Pattern 3: Tiered Storage (vector + halfvec)
 
-Pattern 3 uses pg_trickle's `halfvec_avg` and `sparsevec_avg` support
-(enabled via `pg_trickle.enable_vector_agg`) to maintain storage-efficient
-index tiers alongside full-precision data.
+Pattern 3 maintains a half-precision index tier alongside full-precision data
+and uses pgvector's `avg(vector)` for centroids. Vector aggregates are
+experimental. This example does not establish sparse-vector aggregate support.
 
 ```sql
 SET pg_trickle.enable_vector_agg = on;
@@ -218,7 +218,7 @@ SELECT pgtrickle.create_stream_table(
 CREATE INDEX ON embeddings_full USING gin(fts_vector);
 CREATE INDEX ON embeddings_full USING hnsw(embedding vector_cosine_ops);
 
--- Tier 3: Half-precision stream table (50% storage savings, same recall for most models)
+-- Tier 3: Half-precision stream table (measure storage and recall for your data)
 SELECT pgtrickle.create_stream_table(
     'embeddings_half',
     $$
@@ -229,15 +229,16 @@ SELECT pgtrickle.create_stream_table(
 );
 CREATE INDEX ON embeddings_half USING hnsw(embedding halfvec_cosine_ops);
 
--- Tier 4: Per-category centroids using vector_avg aggregate
+-- Tier 4: Per-category centroids using pgvector's avg aggregates.
+-- Vector aggregates are experimental and require pg_trickle.enable_vector_agg
+-- in the creation and refresh sessions, including scheduler workers.
 SELECT pgtrickle.create_stream_table(
     'category_centroids',
     $$
         SELECT
             category,
-            vector_avg(embedding)                  AS centroid,
-            halfvec_avg(embedding::halfvec(1536))  AS centroid_half,
-            COUNT(*)                               AS doc_count
+            avg(embedding) AS centroid,
+            COUNT(*)       AS doc_count
         FROM raw_embeddings
         GROUP BY category
     $$,
@@ -245,16 +246,17 @@ SELECT pgtrickle.create_stream_table(
 );
 ```
 
-**Query pattern — route by tier based on use case:**
+**Query pattern — route by tier based on use case:** Replace `'[...]'` with a
+valid query vector of the required dimension before running these examples.
 
 ```sql
--- High-recall retrieval: full precision (best accuracy)
+-- Full-precision retrieval
 SELECT id, content, embedding <=> '[...]'::vector AS distance
 FROM embeddings_full
 ORDER BY embedding <=> '[...]'::vector
 LIMIT 10;
 
--- Low-latency retrieval: half precision (smaller index, faster scan)
+-- Half-precision retrieval
 SELECT id, embedding <=> '[...]'::halfvec AS distance
 FROM embeddings_half
 ORDER BY embedding <=> '[...]'::halfvec
@@ -268,13 +270,9 @@ LIMIT 3;
 -- Then query embeddings_full filtered by category
 ```
 
-**Performance comparison (1536-dim, 1M rows):**
-
-| Tier | Storage | Index size | p99 ANN latency |
-|------|---------|------------|-----------------|
-| `vector` (full) | ~6 GB | ~2.5 GB | ~8 ms |
-| `halfvec` (half) | ~3 GB | ~1.3 GB | ~4 ms |
-| Centroids only | < 1 MB | < 1 MB | < 1 ms |
+Measure storage, latency and recall for your dimensions, data, filters and index
+settings. Compare recall against an exact search with the same metric and
+filters; none of the examples above establishes a performance baseline.
 
 ---
 
@@ -284,7 +282,7 @@ LIMIT 3;
 |-----|---------------|
 | HNSW `m` parameter | Default 16; increase to 32–64 for high-recall |
 | HNSW `ef_construction` | Default 64; increase for better recall at index build cost |
-| Index maintenance | Use `post_refresh_action = 'reindex_if_drift'` for automatic drift-based REINDEX |
+| Index maintenance | Measure rebuild cost before enabling `reindex_if_drift`; its non-concurrent table-wide REINDEX can block writes |
 | halfvec storage | ~50% storage savings vs `vector`; use for index columns when precision allows |
 | Refresh interval | Match to your ingestion rate; 30s–5m is typical for RAG |
 
@@ -292,12 +290,15 @@ LIMIT 3;
 
 ## Latency Assertions
 
-Measure your actual p99 latencies before adding hard latency gates —
-pg_trickle publishes measured baselines via `pgtrickle.vector_status()`,
-not aspirational numbers.
+Measure actual query and refresh latency before adding latency gates.
+`pgtrickle.vector_status()` does not measure latency or recall: its
+`embedding_lag` is the age of the data timestamp, and `drift_pct` is a
+changed-row ratio based on an estimated row count. An idle but current corpus
+can have an old data timestamp. Tables with `post_refresh_action = 'none'`
+are omitted.
 
 ```sql
--- Check embedding lag and drift
+-- Inspect timestamp age and the changed-row estimate
 SELECT name, embedding_lag, drift_pct, last_reindex_at
 FROM pgtrickle.vector_status();
 ```

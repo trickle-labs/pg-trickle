@@ -160,7 +160,7 @@ FROM pgtrickle.vector_status();
 
 ## Pattern 4: Centroid Maintenance for Cluster-Aware Search
 
-`pg_trickle` supports `vector_avg()` for per-cluster centroid maintenance.
+`pg_trickle` supports pgvector's `avg(vector)` for per-cluster centroid maintenance.
 This enables fast cluster-first ANN search on large corpora.
 
 ```sql
@@ -177,7 +177,7 @@ SELECT pgtrickle.create_stream_table(
     $$
         SELECT
             cluster_id,
-            vector_avg(embedding) AS centroid,
+            avg(embedding) AS centroid,
             count(*) AS member_count
         FROM cluster_assignments
         GROUP BY cluster_id
@@ -187,8 +187,9 @@ SELECT pgtrickle.create_stream_table(
 );
 ```
 
-> **Note:** `vector_avg()` requires `pg_trickle.enable_vector_agg = on` in
-> `postgresql.conf` and the `pgvector` extension to be installed.
+> **Note:** Vector aggregates are experimental and disabled by default. Install
+> pgvector and enable `pg_trickle.enable_vector_agg` in the sessions that create
+> and refresh the stream table, including scheduler workers.
 
 ---
 

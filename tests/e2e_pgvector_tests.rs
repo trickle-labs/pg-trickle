@@ -292,14 +292,51 @@ async fn test_pgvector_hnsw_index_on_stream_table() {
     db.assert_st_matches_query("centroid_hnsw_st", expected_q)
         .await;
 
-    // Verify the HNSW index can be used for ANN search
-    let nn_result = db
-        .query_scalar_opt::<i32>("SELECT user_id FROM public.centroid_hnsw_st ORDER BY centroid <-> '[1,0,0]'::vector LIMIT 1")
+    let index_ready: bool = db
+        .query_scalar(
+            "SELECT i.indisvalid AND i.indisready AND am.amname = 'hnsw' AND opc.opcname = 'vector_cosine_ops' \
+             FROM pg_index i JOIN pg_class idx ON idx.oid = i.indexrelid \
+             JOIN pg_am am ON am.oid = idx.relam JOIN pg_opclass opc ON opc.oid = i.indclass[0] \
+             WHERE idx.oid = 'public.centroid_hnsw_idx'::regclass",
+        )
         .await;
+    assert!(index_ready, "expected a valid, ready cosine HNSW index");
+
+    // Test index eligibility separately from the planner's cost-based choice.
+    let mut tx = db.pool.begin().await.expect("begin plan transaction");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("discourage sequential scan");
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT user_id FROM public.centroid_hnsw_st ORDER BY centroid <=> '[1,0,0]'::vector LIMIT 1",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .expect("explain cosine ANN query");
     assert!(
-        nn_result.is_some(),
-        "HNSW ANN query should return at least one result"
+        plan.iter().any(|line| line.contains("centroid_hnsw_idx")),
+        "cosine query must be eligible for the HNSW index: {plan:?}"
     );
+    let wrong_metric_plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT user_id FROM public.centroid_hnsw_st ORDER BY centroid <-> '[1,0,0]'::vector LIMIT 1",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .expect("explain L2 query");
+    assert!(
+        wrong_metric_plan
+            .iter()
+            .all(|line| !line.contains("centroid_hnsw_idx")),
+        "L2 ordering must not use the cosine HNSW index: {wrong_metric_plan:?}"
+    );
+    tx.rollback().await.expect("end plan transaction");
+
+    // Verify the matching search returns the nearest centroid.
+    let nn_result = db
+        .query_scalar_opt::<i32>("SELECT user_id FROM public.centroid_hnsw_st ORDER BY centroid <=> '[1,0,0]'::vector LIMIT 1")
+        .await;
+    assert_eq!(nn_result, Some(1));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
