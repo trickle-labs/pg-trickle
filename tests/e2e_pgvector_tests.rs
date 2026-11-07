@@ -3671,6 +3671,51 @@ async fn test_pgvector_helper_missing_extension_is_actionable_and_atomic() {
 }
 
 #[tokio::test]
+async fn test_pgvector_helper_dry_run_rejects_invalid_legacy_columns() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE preview_source (id int PRIMARY KEY, \"Tag,Name\" text, __pgt_row_id text, embedding vector(3))")
+        .await;
+    for columns in ["missing", "id, id", "embedding", "__pgt_row_id"] {
+        let error = sqlx::query(
+            "SELECT * FROM pgtrickle.embedding_stream_table('preview_stream', 'preview_source', 'embedding', $1, '1h', 'hnsw', true)",
+        )
+        .bind(columns)
+        .execute(&db.pool)
+        .await;
+        assert!(error.is_err(), "invalid columns accepted: {columns}");
+    }
+    let clean: bool = db.query_scalar("SELECT to_regclass('preview_stream') IS NULL AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'preview_stream')").await;
+    assert!(clean, "dry-run validation must not create a stream table");
+    let actions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pgtrickle.embedding_stream_table('preview_stream', 'preview_source', 'embedding', $1, '1h', 'hnsw', true)",
+    )
+    .bind("id, \"Tag,Name\"")
+    .fetch_one(&db.pool)
+    .await
+    .expect("validate quoted column preview");
+    assert!(actions > 0);
+    db.execute("CREATE SEQUENCE preview_seq").await;
+    db.execute("CREATE FUNCTION preview_side_effect() RETURNS bigint LANGUAGE sql IMMUTABLE AS $$SELECT nextval('preview_seq')$$").await;
+    let _: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pgtrickle.embedding_stream_table('preview_stream', 'preview_source', 'embedding', $1, '1h', 'hnsw', true)",
+    )
+    .bind("id, preview_side_effect() AS marker")
+    .fetch_one(&db.pool)
+    .await
+    .expect("preview must not evaluate expressions");
+    let called: bool = db.query_scalar("SELECT is_called FROM preview_seq").await;
+    assert!(!called, "dry run must not execute the defining query");
+    let created: bool = db
+        .query_scalar("SELECT to_regclass('preview_stream') IS NOT NULL")
+        .await;
+    assert!(
+        !created,
+        "successful previews must not create a stream table"
+    );
+}
+
+#[tokio::test]
 async fn test_pgvector_helper_invalid_column_is_actionable_and_atomic() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

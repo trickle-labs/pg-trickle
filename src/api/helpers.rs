@@ -1543,6 +1543,34 @@ fn analyze_query_tree(query: &str) -> Result<*mut pg_sys::Query, PgTrickleError>
     }
 }
 
+/// Validate helper output names without executing the defining query.
+pub(super) fn validate_helper_projection(query: &str) -> Result<(), PgTrickleError> {
+    use pgrx::PgList;
+    use std::collections::HashSet;
+    use std::ffi::CStr;
+
+    let query_node = analyze_query_tree(query)?;
+    let mut names = HashSet::new();
+    // SAFETY: analyze_query_tree returns a PostgreSQL Query in the current memory context.
+    unsafe {
+        let target_list = PgList::<pg_sys::TargetEntry>::from_pg((*query_node).targetList);
+        for target in target_list.iter_ptr() {
+            if target.is_null() || (*target).resjunk || (*target).resname.is_null() {
+                continue;
+            }
+            let name = CStr::from_ptr((*target).resname)
+                .to_string_lossy()
+                .into_owned();
+            if name == "__pgt_row_id" || !names.insert(name.clone()) {
+                return Err(PgTrickleError::InvalidArgument(format!(
+                    "duplicate or reserved output column: {name}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Inspect resolved expression volatility without executing the defining query.
 pub(crate) fn defining_query_volatility(query: &str) -> Result<char, PgTrickleError> {
     analyzed_query_volatility(analyze_query_tree(query)?, false)

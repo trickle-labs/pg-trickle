@@ -3068,6 +3068,7 @@ fn embedding_stream_table_impl(
             "{vec_typename} dimension {dimension} exceeds the supported ANN index limit"
         )));
     }
+    helpers::validate_helper_projection(&defining_query)?;
     let idx_col_expr = format!(
         "({}::{}.{}({dimension}))",
         quote_identifier(vector_col),

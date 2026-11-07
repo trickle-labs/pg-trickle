@@ -34,7 +34,10 @@ names are supported. A pgvector extension type with known dimensions is
 required. An expression index can require the query to repeat the dimensional
 cast.
 
-Set `dry_run => true` to inspect the generated SQL without creating objects.
+Set `dry_run => true` to inspect the generated SQL without creating objects or
+executing the defining query. The helper analyzes the projection and rejects
+unknown, duplicate, and reserved output columns; a preview does not guarantee
+that a later index build will succeed.
 The call succeeds only if the requested index is created; a conflicting index
 name or a failed build aborts the statement and stream-table creation. New
 index names are deterministic hashes; existing indexes are not renamed on
