@@ -49,6 +49,9 @@ roadmap requirement of at least 99% installed/no-stream TPS; active p99 and
 refresh CPU share are separately budgeted so CI noise cannot silently change
 the product contract.
 
+A [native ARM investigation](../benchmarks/pgbench-v0.87/results/2026-11-07-native-arm/README.md)
+records a candidate and main run, including the limitations of the comparison.
+
 ## v0.88 vector aggregate gate
 
 `benchmarks/vector-aggregate-v0.88/contract.json` freezes the primary v0.88
