@@ -110,13 +110,13 @@ fn ann_maintenance_request_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickl
            'claim_pid', CASE WHEN r.state = 'RUNNING' AND r.cancel_requested THEN r.claim_pid END, \
            'claim_backend_start', CASE WHEN r.state = 'RUNNING' AND r.cancel_requested THEN r.claim_backend_start END, \
            'last_error', r.last_error, 'completed_at', r.completed_at, \
-           'next_eligible_at', (SELECT g.next_eligible_at FROM pgtrickle.pgt_ann_maintenance_claims g \
-             WHERE g.pgt_id = r.pgt_id AND g.leaf_relid = r.leaf_relid \
-               AND g.index_key = pg_catalog.sha256(pg_catalog.convert_to(r.index_definition, 'UTF8'))), \
-           'consecutive_failures', COALESCE((SELECT g.consecutive_failures \
-             FROM pgtrickle.pgt_ann_maintenance_claims g WHERE g.pgt_id = r.pgt_id \
-               AND g.leaf_relid = r.leaf_relid \
-               AND g.index_key = pg_catalog.sha256(pg_catalog.convert_to(r.index_definition, 'UTF8'))), 0), \
+           'next_eligible_at', g.next_eligible_at, \
+           'consecutive_failures', COALESCE(g.consecutive_failures, 0), \
+           'reported_covered_epoch', g.reported_covered_epoch, \
+           'reported_covered_at', g.reported_covered_at, \
+           'refreshes_since_reported_coverage', CASE \
+             WHEN g.reported_covered_epoch IS NOT NULL AND s.ann_refresh_epoch >= g.reported_covered_epoch \
+             THEN s.ann_refresh_epoch - g.reported_covered_epoch ELSE NULL END, \
            'stream_table_oid', r.root_relid, 'leaf_table_oid', r.leaf_relid, \
            'index_oid', r.index_relid, 'first_observed_epoch', r.first_observed_epoch, \
            'last_observed_epoch', r.last_observed_epoch, 'current_epoch', s.ann_refresh_epoch, \
@@ -141,6 +141,9 @@ fn ann_maintenance_request_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickl
          JOIN pgtrickle.pgt_stream_tables s ON s.pgt_id = r.pgt_id \
          JOIN pg_catalog.pg_class root ON root.oid = s.pgt_relid \
          LEFT JOIN pg_catalog.pg_class leaf ON leaf.oid = r.leaf_relid \
+         LEFT JOIN pgtrickle.pgt_ann_maintenance_claims g ON g.pgt_id = r.pgt_id \
+           AND g.leaf_relid = r.leaf_relid \
+           AND g.index_key = pg_catalog.sha256(pg_catalog.convert_to(r.index_definition, 'UTF8')) \
          WHERE r.request_id = $1 \
            AND pg_catalog.has_schema_privilege($2, root.relnamespace, 'USAGE') \
            AND pg_catalog.has_table_privilege($2, root.oid, 'SELECT') \
@@ -236,7 +239,8 @@ fn claim_ann_maintenance_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickleE
              SET state = 'RUNNING', claim_pid = pg_catalog.pg_backend_pid(), \
                  claim_backend_start = (SELECT backend_start FROM pg_catalog.pg_stat_activity \
                    WHERE pid = pg_catalog.pg_backend_pid()), \
-                 claim_role = $2, claim_epoch = r.last_observed_epoch, \
+                 claim_role = $2, claim_epoch = (SELECT s.ann_refresh_epoch \
+                   FROM pgtrickle.pgt_stream_tables s WHERE s.pgt_id = r.pgt_id), \
                  pending_during_run = false, cancel_requested = false, last_error = NULL \
              WHERE r.request_id = $1 AND (r.state IN ('REQUESTED', 'FAILED') \
                OR (r.state = 'RUNNING' AND (NOT r.cancel_requested OR r.pending_during_run) \
@@ -295,14 +299,18 @@ fn finish_ann_maintenance_impl(
                AND r.claim_pid = pg_catalog.pg_backend_pid() \
                AND r.claim_backend_start = (SELECT backend_start FROM pg_catalog.pg_stat_activity \
                  WHERE pid = pg_catalog.pg_backend_pid()) \
-             RETURNING r.request_id) \
+             RETURNING r.request_id, r.claim_epoch) \
              UPDATE pgtrickle.pgt_ann_maintenance_claims guard \
              SET request_id = NULL, claim_pid = NULL, claim_backend_start = NULL, \
                  next_eligible_at = pg_catalog.clock_timestamp() + CASE WHEN $2 \
                    THEN interval '5 minutes' \
                    ELSE (30 * (1 << LEAST(guard.consecutive_failures::integer, 5))) * interval '1 second' END, \
                  consecutive_failures = CASE WHEN $2 THEN 0 \
-                   ELSE LEAST(guard.consecutive_failures + 1, 6) END \
+                   ELSE LEAST(guard.consecutive_failures + 1, 6) END, \
+                 reported_covered_epoch = CASE WHEN $2 THEN finished.claim_epoch \
+                   ELSE guard.reported_covered_epoch END, \
+                 reported_covered_at = CASE WHEN $2 THEN pg_catalog.clock_timestamp() \
+                   ELSE guard.reported_covered_at END \
              FROM finished \
              WHERE guard.request_id = finished.request_id \
                AND guard.claim_pid = pg_catalog.pg_backend_pid() \

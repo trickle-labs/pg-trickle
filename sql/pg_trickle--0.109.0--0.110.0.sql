@@ -40,6 +40,8 @@ CREATE TABLE pgtrickle.pgt_ann_maintenance_claims (
     claim_pid INTEGER,
     claim_backend_start TIMESTAMPTZ,
     next_eligible_at TIMESTAMPTZ,
+    reported_covered_epoch BIGINT CHECK (reported_covered_epoch IS NULL OR reported_covered_epoch >= 0),
+    reported_covered_at TIMESTAMPTZ,
     consecutive_failures SMALLINT NOT NULL DEFAULT 0 CHECK (consecutive_failures BETWEEN 0 AND 6),
     PRIMARY KEY (pgt_id, leaf_relid, index_key)
 );

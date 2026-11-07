@@ -63,6 +63,230 @@ fn ann_worker_command(
 }
 
 #[tokio::test]
+async fn test_ann_maintenance_coverage_preserves_refreshes_after_claim() {
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_coverage_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_coverage_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "ann_coverage_stream",
+        "SELECT id, embedding FROM ann_coverage_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_coverage_idx ON ann_coverage_stream USING hnsw (embedding vector_cosine_ops)").await;
+    db.execute("CREATE INDEX ann_coverage_other_idx ON ann_coverage_stream USING hnsw (embedding vector_l2_ops)").await;
+    let request_sql = "SELECT pgtrickle.request_ann_maintenance('ann_coverage_stream'::regclass::oid, 'ann_coverage_idx'::regclass::oid)";
+    let request: i64 = db.query_scalar(request_sql).await;
+    let other: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_coverage_stream'::regclass::oid, 'ann_coverage_other_idx'::regclass::oid)").await;
+    db.execute("INSERT INTO ann_coverage_source VALUES (2, '[0,1,0]')")
+        .await;
+    db.refresh_st("ann_coverage_stream").await;
+    let epoch_at_claim: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_coverage_stream'").await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let mut blocker = db.pool.begin().await.expect("begin barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("barrier pid");
+    sqlx::query("LOCK TABLE ann_coverage_stream IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold barrier");
+    let mut child = ann_worker_command(&db, &database, "postgres", request, "30s")
+        .spawn()
+        .expect("start worker");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND application_name='pgtrickle_ann_worker' AND $1 = ANY(pg_blocking_pids(pid)))")
+                .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect worker");
+            if waiting { break; }
+            assert!(child.try_wait().expect("inspect worker process").is_none(), "worker ended before reaching barrier");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }).await.expect("worker did not reach barrier");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect claim");
+    assert!(status["last_observed_epoch"].as_i64() < Some(epoch_at_claim));
+    assert_eq!(
+        status["claim_epoch"].as_i64(),
+        Some(epoch_at_claim),
+        "claim must capture the latest committed epoch"
+    );
+    assert!(status["reported_covered_epoch"].is_null());
+    db.execute("INSERT INTO ann_coverage_source VALUES (3, '[0,0,1]')")
+        .await;
+    db.refresh_st("ann_coverage_stream").await;
+    let later_epoch: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_coverage_stream'").await;
+    assert!(later_epoch > epoch_at_claim);
+    blocker.commit().await.expect("release barrier");
+    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+        .await
+        .expect("worker did not finish")
+        .expect("wait for worker");
+    assert!(
+        output.status.success(),
+        "worker failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let replacement: i64 = db.query_scalar(request_sql).await;
+    assert_ne!(request, replacement);
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(replacement)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect replacement coverage");
+    assert_eq!(
+        status["reported_covered_epoch"].as_i64(),
+        Some(epoch_at_claim)
+    );
+    assert_eq!(
+        status["refreshes_since_reported_coverage"].as_i64(),
+        Some(later_epoch - epoch_at_claim)
+    );
+    assert!(status["reported_covered_at"].is_string());
+    let independent: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(other)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect independent index");
+    assert!(
+        independent["reported_covered_epoch"].is_null(),
+        "other indexes must not inherit coverage"
+    );
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    let mut blocker = db.pool.begin().await.expect("begin retry barrier");
+    sqlx::query("LOCK TABLE ann_coverage_stream IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold retry barrier");
+    let output = ann_worker_command(&db, &database, "postgres", replacement, "250ms")
+        .output()
+        .await
+        .expect("run failed retry");
+    assert!(!output.status.success());
+    blocker.rollback().await.expect("release retry barrier");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(replacement)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect failed retry");
+    assert_eq!(status["state"], "FAILED");
+    assert_eq!(
+        status["reported_covered_epoch"].as_i64(),
+        Some(epoch_at_claim),
+        "a failed rebuild must not advance coverage"
+    );
+}
+
+#[tokio::test]
+async fn test_ann_maintenance_coverage_rolls_back_and_keeps_unknown_unknown() {
+    use sqlx::Acquire;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_coverage_tx_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_coverage_tx_stream",
+        "SELECT id, embedding FROM ann_coverage_tx_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_coverage_tx_idx ON ann_coverage_tx_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let request_sql = "SELECT pgtrickle.request_ann_maintenance('ann_coverage_tx_stream'::regclass::oid, 'ann_coverage_tx_idx'::regclass::oid)";
+    let first: i64 = db.query_scalar(request_sql).await;
+    let mut worker = db.pool.acquire().await.expect("worker session");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(first)
+        .execute(&mut *worker)
+        .await
+        .expect("claim request");
+    sqlx::query("REINDEX INDEX CONCURRENTLY ann_coverage_tx_idx")
+        .execute(&mut *worker)
+        .await
+        .expect("rebuild index");
+    let mut tx = (&mut *worker).begin().await.expect("begin completion");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(first)
+        .execute(&mut *tx)
+        .await
+        .expect("report in transaction");
+    let outside: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(first)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect uncommitted report");
+    assert_eq!(outside["state"], "RUNNING");
+    assert!(
+        outside["reported_covered_epoch"].is_null(),
+        "uncommitted coverage must not be visible"
+    );
+    tx.rollback().await.expect("roll back completion");
+    let rolled_back: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(first)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect rolled-back report");
+    assert_eq!(rolled_back["state"], "RUNNING");
+    assert!(rolled_back["reported_covered_epoch"].is_null());
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(first)
+        .execute(&mut *worker)
+        .await
+        .expect("commit completion");
+    let committed: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(first)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect committed report");
+    assert!(committed["reported_covered_epoch"].is_number());
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET ann_refresh_epoch=NULL WHERE pgt_name='ann_coverage_tx_stream'").await;
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at=clock_timestamp() - interval '1 second'").await;
+    let next: i64 = db.query_scalar(request_sql).await;
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(next)
+        .execute(&mut *worker)
+        .await
+        .expect("claim unknown epoch");
+    sqlx::query("REINDEX INDEX CONCURRENTLY ann_coverage_tx_idx")
+        .execute(&mut *worker)
+        .await
+        .expect("rebuild with unknown epoch");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(next)
+        .execute(&mut *worker)
+        .await
+        .expect("finish unknown epoch");
+    let unknown: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(next)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect unknown coverage");
+    assert!(unknown["claim_epoch"].is_null());
+    assert!(unknown["reported_covered_epoch"].is_null());
+    assert!(unknown["refreshes_since_reported_coverage"].is_null());
+    assert!(unknown["reported_covered_at"].is_string());
+}
+
+#[tokio::test]
 async fn test_ann_worker_rebuilds_only_the_requested_index() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
