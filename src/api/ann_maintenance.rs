@@ -114,6 +114,14 @@ fn ann_maintenance_request_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickl
            'consecutive_failures', COALESCE(g.consecutive_failures, 0), \
            'reported_covered_epoch', g.reported_covered_epoch, \
            'reported_covered_at', g.reported_covered_at, \
+           'claim_churn_generation', r.claim_churn_generation, \
+           'claim_churn_operations', r.claim_churn_operations, \
+           'reported_churn_generation', g.reported_churn_generation, \
+           'reported_churn_operations', g.reported_churn_operations, \
+           'known_operations_since_reported_coverage', CASE \
+             WHEN s.ann_churn_generation = g.reported_churn_generation \
+               AND s.ann_churn_operations >= g.reported_churn_operations \
+             THEN s.ann_churn_operations - g.reported_churn_operations ELSE NULL END, \
            'epoch_advances_since_reported_coverage', CASE \
              WHEN g.reported_covered_epoch IS NOT NULL AND s.ann_refresh_epoch >= g.reported_covered_epoch \
              THEN s.ann_refresh_epoch - g.reported_covered_epoch ELSE NULL END, \
@@ -241,6 +249,10 @@ fn claim_ann_maintenance_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickleE
                    WHERE pid = pg_catalog.pg_backend_pid()), \
                  claim_role = $2, claim_epoch = (SELECT s.ann_refresh_epoch \
                    FROM pgtrickle.pgt_stream_tables s WHERE s.pgt_id = r.pgt_id), \
+                 claim_churn_generation = (SELECT s.ann_churn_generation \
+                   FROM pgtrickle.pgt_stream_tables s WHERE s.pgt_id = r.pgt_id), \
+                 claim_churn_operations = (SELECT s.ann_churn_operations \
+                   FROM pgtrickle.pgt_stream_tables s WHERE s.pgt_id = r.pgt_id), \
                  pending_during_run = false, cancel_requested = false, last_error = NULL \
              WHERE r.request_id = $1 AND (r.state IN ('REQUESTED', 'FAILED') \
                OR (r.state = 'RUNNING' AND (NOT r.cancel_requested OR r.pending_during_run) \
@@ -299,7 +311,7 @@ fn finish_ann_maintenance_impl(
                AND r.claim_pid = pg_catalog.pg_backend_pid() \
                AND r.claim_backend_start = (SELECT backend_start FROM pg_catalog.pg_stat_activity \
                  WHERE pid = pg_catalog.pg_backend_pid()) \
-             RETURNING r.request_id, r.claim_epoch) \
+             RETURNING r.request_id, r.claim_epoch, r.claim_churn_generation, r.claim_churn_operations) \
              UPDATE pgtrickle.pgt_ann_maintenance_claims guard \
              SET request_id = NULL, claim_pid = NULL, claim_backend_start = NULL, \
                  next_eligible_at = pg_catalog.clock_timestamp() + CASE WHEN $2 \
@@ -309,6 +321,10 @@ fn finish_ann_maintenance_impl(
                    ELSE LEAST(guard.consecutive_failures + 1, 6) END, \
                  reported_covered_epoch = CASE WHEN $2 THEN finished.claim_epoch \
                    ELSE guard.reported_covered_epoch END, \
+                 reported_churn_generation = CASE WHEN $2 THEN finished.claim_churn_generation \
+                   ELSE guard.reported_churn_generation END, \
+                 reported_churn_operations = CASE WHEN $2 THEN finished.claim_churn_operations \
+                   ELSE guard.reported_churn_operations END, \
                  reported_covered_at = CASE WHEN $2 THEN pg_catalog.clock_timestamp() \
                    ELSE guard.reported_covered_at END \
              FROM finished \

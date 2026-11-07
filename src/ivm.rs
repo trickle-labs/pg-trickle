@@ -939,7 +939,8 @@ fn pgt_ivm_apply_delta(
         let now = Spi::get_one::<pgrx::datum::TimestampWithTimeZone>("SELECT now()")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .ok_or_else(|| PgTrickleError::InternalError("now() returned NULL".into()))?;
-        StreamTableMeta::update_after_refresh(pgt_id, now, delta_count)?;
+        // shortcut: delta rows are not storage operations, count them when IVM reports affected rows.
+        StreamTableMeta::update_after_refresh(pgt_id, now, None)?;
     }
 
     pgrx::debug1!(

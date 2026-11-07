@@ -3148,7 +3148,7 @@ pub(super) fn initialize_st(
     for (upstream_pgt_id, lsn) in st_source_lsn_snapshot {
         frontier.set_st_source(upstream_pgt_id, lsn, data_ts.clone());
     }
-    StreamTableMeta::store_frontier_and_complete_refresh(pgt_id, &frontier, 0)?;
+    StreamTableMeta::store_frontier_and_complete_refresh(pgt_id, &frontier, 0, false)?;
 
     // Record the initial population in pgt_refresh_history so that monitoring
     // tools and tests can observe the initial fill event.  Errors here are

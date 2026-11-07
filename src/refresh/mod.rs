@@ -815,6 +815,8 @@ pub struct RefreshExecution {
     pub rows_inserted: i64,
     pub rows_updated: i64,
     pub rows_deleted: i64,
+    /// Observed storage operations, or unknown when the executor cannot count them.
+    pub ann_churn_operations: Option<i64>,
     pub data_changed: bool,
     pub full_reason: Option<FullRefreshReason>,
     pub downstream_capture_complete: bool,
@@ -957,7 +959,12 @@ pub fn finalize_success(
         StreamTableMeta::update_after_refresh(
             st.pgt_id,
             data_timestamp,
-            execution.rows_inserted + execution.rows_updated,
+            // shortcut: partition work lacks leaf attribution, count it when per-leaf accounting exists.
+            if st.st_partition_key.is_some() {
+                None
+            } else {
+                execution.ann_churn_operations
+            },
         )?;
     } else {
         let storage_rewritten = execution.effective_mode == "FULL"
@@ -1350,6 +1357,15 @@ thread_local! {
     static LAST_EFFECTIVE_MODE: Cell<&'static str> = const { Cell::new("") };
     static LAST_MERGE_STRATEGY: Cell<&'static str> = const { Cell::new("") };
     static LAST_COST_EVIDENCE: RefCell<Option<String>> = const { RefCell::new(None) };
+    static LAST_ANN_CHURN_OPERATIONS: Cell<Option<i64>> = const { Cell::new(None) };
+}
+
+pub(crate) fn set_last_ann_churn_operations(value: Option<i64>) {
+    LAST_ANN_CHURN_OPERATIONS.with(|last| last.set(value));
+}
+
+pub(crate) fn take_last_ann_churn_operations() -> Option<i64> {
+    LAST_ANN_CHURN_OPERATIONS.with(|last| last.replace(None))
 }
 
 pub(crate) fn clear_last_cost_evidence() {
@@ -1396,6 +1412,7 @@ pub(crate) fn reset_execution_state() {
     let _ = take_merge_strategy();
     clear_last_cost_evidence();
     let _ = take_last_rows_updated();
+    let _ = take_last_ann_churn_operations();
     let _ = take_last_temp_blks_written();
 }
 

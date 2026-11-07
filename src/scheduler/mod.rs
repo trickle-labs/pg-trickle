@@ -1093,6 +1093,16 @@ fn try_fused_chain_refresh(
             rows_inserted,
             rows_updated,
             rows_deleted,
+            ann_churn_operations: matches!(
+                crate::cdc::has_user_triggers(nd.st.pgt_relid),
+                Ok(false)
+            )
+            .then(|| {
+                rows_inserted
+                    .checked_add(rows_updated)
+                    .and_then(|count| count.checked_add(rows_deleted))
+            })
+            .flatten(),
             data_changed: rows_inserted > 0 || rows_updated > 0 || rows_deleted > 0,
             full_reason: None,
             downstream_capture_complete: true,
@@ -4394,6 +4404,7 @@ fn execute_scheduled_refresh(
                 rows_inserted,
                 rows_updated,
                 rows_deleted,
+                ann_churn_operations: refresh::take_last_ann_churn_operations(),
                 data_changed: effective_action != RefreshAction::NoData
                     && (rows_inserted > 0 || rows_updated > 0 || rows_deleted > 0),
                 full_reason,

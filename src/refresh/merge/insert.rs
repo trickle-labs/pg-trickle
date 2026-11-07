@@ -213,6 +213,15 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         })
     })?;
     crate::refresh::set_last_rows_updated(rows_updated);
+    crate::refresh::set_last_ann_churn_operations(
+        matches!(crate::cdc::has_user_triggers(st.pgt_relid), Ok(false))
+            .then(|| {
+                rows_inserted
+                    .checked_add(rows_updated)
+                    .and_then(|count| count.checked_add(rows_deleted))
+            })
+            .flatten(),
+    );
 
     if let Some(cols) = downstream_cols {
         crate::refresh::capture_full_refresh_diff_to_st_buffer(st, &cols).map_err(|e| {
