@@ -605,6 +605,73 @@ async fn test_upgrade_distance_subscriptions_preserves_legacy_rows() {
     assert_eq!(remaining, 0);
 }
 
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        return;
+    }
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+        .await;
+    db.execute("CREATE TABLE upgrade_epoch_source (id int PRIMARY KEY)")
+        .await;
+    db.create_st(
+        "upgrade_epoch_stream",
+        "SELECT id FROM upgrade_epoch_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let mut conn = db.pool.acquire().await.expect("acquire upgrade connection");
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin upgrade");
+    sqlx::query("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+        .execute(&mut *conn)
+        .await
+        .expect("upgrade in transaction");
+    sqlx::query("INSERT INTO upgrade_epoch_source VALUES (1)")
+        .execute(&mut *conn)
+        .await
+        .expect("insert during upgrade");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('upgrade_epoch_stream')")
+        .execute(&mut *conn)
+        .await
+        .expect("refresh during upgrade");
+    let epoch: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_stream'").fetch_one(&mut *conn).await.expect("read upgraded epoch");
+    assert!(epoch > 0);
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("roll back upgrade");
+    sqlx::query("INSERT INTO upgrade_epoch_source VALUES (2)")
+        .execute(&mut *conn)
+        .await
+        .expect("insert after rollback");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('upgrade_epoch_stream')")
+        .execute(&mut *conn)
+        .await
+        .expect("old catalog still refreshes in same backend");
+    sqlx::query("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+        .execute(&mut *conn)
+        .await
+        .expect("commit upgrade");
+    sqlx::query("INSERT INTO upgrade_epoch_source VALUES (3)")
+        .execute(&mut *conn)
+        .await
+        .expect("insert after upgrade");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('upgrade_epoch_stream')")
+        .execute(&mut *conn)
+        .await
+        .expect("refresh after upgrade");
+    let epoch: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_stream'").fetch_one(&mut *conn).await.expect("read final epoch");
+    assert!(epoch > 0);
+}
+
 /// A tracked source for an IMMEDIATE stream table has no CDC buffer, while a
 /// DIFFERENTIAL source with a buffer must still have its CDC trigger rebuilt.
 #[tokio::test]

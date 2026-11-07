@@ -13,6 +13,28 @@ use crate::dvm::parser::WindowStrategyPlan;
 use crate::error::PgTrickleError;
 use crate::version::Frontier;
 
+/// Keep the new library usable with an old catalog until ALTER EXTENSION commits.
+fn ann_epoch_assignment() -> Result<&'static str, PgTrickleError> {
+    let exists = Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute \
+             WHERE attrelid = 'pgtrickle.pgt_stream_tables'::regclass \
+               AND attname = 'ann_refresh_epoch' AND attnum > 0 AND NOT attisdropped)",
+            None,
+            &[],
+        )?;
+        rows.first().get::<bool>(1)
+    })
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::InternalError("epoch column lookup returned NULL".into()))?;
+    Ok(if exists {
+        "ann_refresh_epoch = CASE WHEN ann_refresh_epoch < 9223372036854775807 \
+         THEN ann_refresh_epoch + 1 ELSE NULL END, "
+    } else {
+        ""
+    })
+}
+
 // ---------------------------------------------------------------------------
 // CODE-003 (v0.75.0): Typed domain wrappers for stream-table identifiers.
 //
@@ -709,16 +731,18 @@ impl StreamTableMeta {
         data_ts: TimestampWithTimeZone,
         _rows_affected: i64,
     ) -> Result<(), PgTrickleError> {
+        let epoch = ann_epoch_assignment()?;
         Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_stream_tables \
+            &format!(
+                "UPDATE pgtrickle.pgt_stream_tables \
              SET data_timestamp = $1, is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
-             ann_refresh_epoch = CASE WHEN ann_refresh_epoch < 9223372036854775807 \
-                 THEN ann_refresh_epoch + 1 ELSE NULL END, \
+             {epoch} \
              status = 'ACTIVE', needs_reinit = false, \
              last_error_message = NULL, last_error_at = NULL, \
              updated_at = now() \
-             WHERE pgt_id = $2",
+             WHERE pgt_id = $2"
+            ),
             &[data_ts.into(), pgt_id.into()],
         )
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
@@ -739,18 +763,23 @@ impl StreamTableMeta {
         // flag set by EC-16 function-body-change detection or DDL hooks.  The
         // flag is cleared only by update_after_refresh / store_frontier_and_complete_refresh
         // after an actual full reinitialization succeeds.
+        let epoch = if storage_rewritten {
+            ann_epoch_assignment()?
+        } else {
+            ""
+        };
         Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_stream_tables \
+            &format!(
+                "UPDATE pgtrickle.pgt_stream_tables \
              SET is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
-             ann_refresh_epoch = CASE WHEN NOT $2 THEN ann_refresh_epoch \
-                 WHEN ann_refresh_epoch < 9223372036854775807 \
-                 THEN ann_refresh_epoch + 1 ELSE NULL END, \
+             {epoch} \
              status = 'ACTIVE', \
              last_error_message = NULL, last_error_at = NULL, \
              updated_at = now() \
-             WHERE pgt_id = $1",
-            &[pgt_id.into(), storage_rewritten.into()],
+             WHERE pgt_id = $1"
+            ),
+            &[pgt_id.into()],
         )
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
     }
@@ -766,15 +795,17 @@ impl StreamTableMeta {
             PgTrickleError::InternalError(format!("Failed to serialize frontier: {}", e))
         })?;
 
+        let epoch = ann_epoch_assignment()?;
         Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_stream_tables \
+            &format!(
+                "UPDATE pgtrickle.pgt_stream_tables \
              SET data_timestamp = $1, is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
-             ann_refresh_epoch = CASE WHEN ann_refresh_epoch < 9223372036854775807 \
-                 THEN ann_refresh_epoch + 1 ELSE NULL END, \
+             {epoch} \
              status = 'ACTIVE', needs_reinit = false, \
              frontier = $3, updated_at = now() \
-             WHERE pgt_id = $2",
+             WHERE pgt_id = $2"
+            ),
             &[
                 data_ts.into(),
                 pgt_id.into(),
@@ -797,17 +828,19 @@ impl StreamTableMeta {
             PgTrickleError::InternalError(format!("Failed to serialize frontier: {}", e))
         })?;
 
+        let epoch = ann_epoch_assignment()?;
         Spi::get_one_with_args::<TimestampWithTimeZone>(
-            "UPDATE pgtrickle.pgt_stream_tables \
+            &format!(
+                "UPDATE pgtrickle.pgt_stream_tables \
              SET data_timestamp = now(), is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
-             ann_refresh_epoch = CASE WHEN ann_refresh_epoch < 9223372036854775807 \
-                 THEN ann_refresh_epoch + 1 ELSE NULL END, \
+             {epoch} \
              status = 'ACTIVE', needs_reinit = false, \
              last_error_message = NULL, last_error_at = NULL, \
              frontier = $3, updated_at = now() \
              WHERE pgt_id = $1 \
-             RETURNING data_timestamp",
+             RETURNING data_timestamp"
+            ),
             &[
                 pgt_id.into(),
                 rows_affected.into(),
