@@ -306,6 +306,8 @@ The returned ID can be inspected with `pgtrickle.ann_maintenance_request(id)`
 after an administrator grants `EXECUTE` on that function too. The inspection
 rechecks privileges and reports whether the captured identity still matches;
 it is not a lock and cannot prevent later DDL. Requests are not restored
-across a logical dump/restore because their OIDs are database-local. This
-manual recipe does not retry failures or account for changes arriving after its
-last observation. Continue normal VACUUM and autovacuum care.
+across a logical dump/restore because their OIDs are database-local. The
+session-bound claim and completion APIs can record a manually executed rebuild
+and its failure; see the SQL reference for their transaction and identity
+requirements. They do not provide an executor or automatic retry. Continue
+normal VACUUM and autovacuum care.

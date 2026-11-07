@@ -4310,8 +4310,8 @@ the private `pgtrickle.pgt_ann_maintenance_requests` catalog. Index and table
 OIDs and filenodes are database-local: a future worker must revalidate them,
 the index definition, database identity, and current privileges before acting.
 Requests are deliberately excluded from logical dump/restore; operators must
-recreate them after a restore. This API does not yet provide claims, execution,
-completion, retries, cooldowns, or automatic threshold-based requests.
+recreate them after a restore. This API does not execute maintenance or create
+automatic threshold-based requests.
 
 ### pgtrickle.ann_maintenance_request
 
@@ -4326,6 +4326,32 @@ captured database, stream, leaf, or index identity is no longer valid; `true`
 is a point-in-time observation and does not prevent later DDL. An unchanged
 epoch does not rule out an in-flight refresh. Execution is revoked from
 `PUBLIC`; an administrator must grant it explicitly.
+
+### pgtrickle.claim_ann_maintenance and pgtrickle.finish_ann_maintenance
+
+```sql
+pgtrickle.claim_ann_maintenance(request_id bigint) → jsonb
+pgtrickle.finish_ann_maintenance(request_id bigint, succeeded boolean, error_message text) → void
+```
+
+Claiming records the current backend, its start time, caller role and observed
+epoch transactionally. The caller must have the same privileges required to
+inspect the request, and its index identity must still match. A live backend's
+claim cannot be taken by another session. If that backend disconnects, status
+becomes `INTERRUPTED` and a new session can claim it. A failed claim can also
+be retried. The claim and completion functions are revoked from `PUBLIC`.
+
+Commit the claim before running any top-level `REINDEX INDEX CONCURRENTLY` on
+the **same connection and role**. Recheck identity and privileges immediately
+before execution; a claim does not prevent concurrent DDL or authorize SQL.
+Report the outcome on that connection with an empty error on success, or a
+nonempty error of at most 2048 bytes on failure. A success is the caller's
+report, not independent proof that a rebuild ran. Failure remains observable.
+If another request arrives during the run, success leaves it `REQUESTED`.
+Concurrent reindex replaces index identity, so an old pending request can
+become stale; inspect it and explicitly request the replacement index. No
+refresh counter is reset. This interface does not yet provide an executor,
+automatic cooldown, backoff, cancellation, or threshold-based requests.
 
 ### pgtrickle.pgt_stream_tables
 
