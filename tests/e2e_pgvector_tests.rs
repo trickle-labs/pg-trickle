@@ -206,6 +206,24 @@ async fn test_ann_threshold_requests_deduplicate_and_reject_stale_estimates() {
         .execute(&mut *worker)
         .await
         .expect("report baseline");
+    let mut estimate_tx = db.pool.begin().await.expect("begin estimate");
+    sqlx::query("LOCK TABLE ann_threshold_stream IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *estimate_tx)
+        .await
+        .expect("lock estimate target");
+    sqlx::query("ANALYZE ann_threshold_stream")
+        .execute(&mut *estimate_tx)
+        .await
+        .expect("analyze estimate target");
+    let (estimated, actual_generation, actual_operations): (i64, i64, i64) = sqlx::query_as(
+        "SELECT c.reltuples::bigint, s.ann_churn_generation, s.ann_churn_operations FROM pgtrickle.pgt_stream_tables s JOIN pg_catalog.pg_class c ON c.oid=s.pgt_relid WHERE s.pgt_name='ann_threshold_stream'",
+    ).fetch_one(&mut *estimate_tx).await.expect("capture estimate and watermark");
+    assert!(estimated > 0);
+    assert_eq!(
+        (actual_generation, actual_operations),
+        (generation, operations)
+    );
+    estimate_tx.commit().await.expect("commit estimate");
     db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     let below: serde_json::Value = sqlx::query_scalar(policy_sql)
         .bind(generation)
@@ -413,6 +431,41 @@ async fn test_ann_threshold_requests_deduplicate_and_reject_stale_estimates() {
         .await
         .expect("check cooldown");
     assert_eq!(cooldown["decision"], "cooldown");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    let before_index: i64 = db
+        .query_scalar("SELECT 'ann_threshold_idx'::regclass::oid::bigint")
+        .await;
+    let next: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance_if_needed('ann_threshold_stream'::regclass::oid, 'ann_threshold_idx'::regclass::oid, 5, $1, $2)")
+        .bind(generation).bind(operations).fetch_one(&db.pool).await.expect("request later threshold");
+    assert_eq!(next["decision"], "requested");
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let output = ann_worker_command(
+        &db,
+        &database,
+        "postgres",
+        next["request_id"].as_i64().expect("request id"),
+        "30s",
+    )
+    .output()
+    .await
+    .expect("run threshold worker");
+    assert!(
+        output.status.success(),
+        "threshold worker failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after_index: i64 = db
+        .query_scalar("SELECT 'ann_threshold_idx'::regclass::oid::bigint")
+        .await;
+    assert_ne!(
+        before_index, after_index,
+        "worker must complete concurrent reindex"
+    );
+    db.assert_st_matches_query(
+        "ann_threshold_stream",
+        "SELECT id, embedding FROM ann_threshold_source",
+    )
+    .await;
 }
 
 #[tokio::test]
