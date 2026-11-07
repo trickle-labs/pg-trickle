@@ -52,6 +52,8 @@ fn request_ann_maintenance_impl(
                SET last_requested_at = pg_catalog.clock_timestamp(), \
                    pending_during_run = pgtrickle.pgt_ann_maintenance_requests.pending_during_run \
                      OR pgtrickle.pgt_ann_maintenance_requests.state = 'RUNNING', \
+                   cancel_requested = CASE WHEN pgtrickle.pgt_ann_maintenance_requests.state = 'RUNNING' \
+                     THEN pgtrickle.pgt_ann_maintenance_requests.cancel_requested ELSE false END, \
                    state = CASE WHEN pgtrickle.pgt_ann_maintenance_requests.state = 'RUNNING' \
                      THEN 'RUNNING' ELSE 'REQUESTED' END, \
                    first_observed_epoch = CASE \
@@ -100,8 +102,13 @@ fn ann_maintenance_request_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickl
         "SELECT (SELECT pg_catalog.jsonb_build_object(\
            'request_id', r.request_id, 'state', CASE WHEN r.state = 'RUNNING' AND NOT EXISTS (\
              SELECT 1 FROM pg_catalog.pg_stat_activity a WHERE a.pid = r.claim_pid \
-               AND a.backend_start = r.claim_backend_start) THEN 'INTERRUPTED' ELSE r.state END, \
+               AND a.backend_start = r.claim_backend_start) THEN \
+                 CASE WHEN r.cancel_requested AND NOT r.pending_during_run THEN 'CANCELLED' \
+                   ELSE 'INTERRUPTED' END ELSE r.state END, \
            'claim_epoch', r.claim_epoch, 'pending_during_run', r.pending_during_run, \
+           'cancel_requested', r.cancel_requested, \
+           'claim_pid', CASE WHEN r.state = 'RUNNING' AND r.cancel_requested THEN r.claim_pid END, \
+           'claim_backend_start', CASE WHEN r.state = 'RUNNING' AND r.cancel_requested THEN r.claim_backend_start END, \
            'last_error', r.last_error, 'completed_at', r.completed_at, \
            'next_eligible_at', (SELECT g.next_eligible_at FROM pgtrickle.pgt_ann_maintenance_claims g \
              WHERE g.pgt_id = r.pgt_id AND g.leaf_relid = r.leaf_relid \
@@ -149,6 +156,42 @@ fn ann_maintenance_request_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickl
     .ok_or_else(|| PgTrickleError::NotFound(format!("request {request_id} is unavailable or not authorized")))
 }
 
+/// Cancel queued work or request cancellation of an active claim.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+pub fn cancel_ann_maintenance(request_id: i64) -> pgrx::JsonB {
+    cancel_ann_maintenance_impl(request_id)
+        .unwrap_or_else(|error| pgrx::error!("cancel_ann_maintenance: {error}"))
+}
+
+fn cancel_ann_maintenance_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickleError> {
+    ann_maintenance_request_impl(request_id)?;
+    let updated = Spi::connect_mut(|client| {
+        let rows = client.update(
+            "UPDATE pgtrickle.pgt_ann_maintenance_requests r \
+             SET cancel_requested = r.state = 'RUNNING' AND EXISTS (\
+                   SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                   WHERE a.pid = r.claim_pid AND a.backend_start = r.claim_backend_start), \
+                 state = CASE WHEN r.state = 'SUCCEEDED' THEN 'SUCCEEDED' \
+                   WHEN r.state = 'RUNNING' AND EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                     WHERE a.pid = r.claim_pid AND a.backend_start = r.claim_backend_start) \
+                     THEN 'RUNNING' ELSE 'CANCELLED' END, \
+                 pending_during_run = false \
+             WHERE r.request_id = $1 RETURNING r.request_id",
+            Some(1),
+            &[request_id.into()],
+        )?;
+        Ok::<_, pgrx::spi::Error>(!rows.is_empty())
+    })
+    .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
+    if !updated {
+        return Err(PgTrickleError::NotFound(format!(
+            "request {request_id} is unavailable"
+        )));
+    }
+    ann_maintenance_request_impl(request_id)
+}
+
 /// Claim an intent for execution by this PostgreSQL session.
 #[pg_extern(schema = "pgtrickle", security_definer)]
 #[search_path(pgtrickle, pg_catalog, pg_temp)]
@@ -194,9 +237,10 @@ fn claim_ann_maintenance_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickleE
                  claim_backend_start = (SELECT backend_start FROM pg_catalog.pg_stat_activity \
                    WHERE pid = pg_catalog.pg_backend_pid()), \
                  claim_role = $2, claim_epoch = r.last_observed_epoch, \
-                 pending_during_run = false, last_error = NULL \
+                 pending_during_run = false, cancel_requested = false, last_error = NULL \
              WHERE r.request_id = $1 AND (r.state IN ('REQUESTED', 'FAILED') \
-               OR (r.state = 'RUNNING' AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+               OR (r.state = 'RUNNING' AND (NOT r.cancel_requested OR r.pending_during_run) \
+                 AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
                  WHERE a.pid = r.claim_pid AND a.backend_start = r.claim_backend_start))) \
              RETURNING r.request_id",
             Some(1),
@@ -240,11 +284,13 @@ fn finish_ann_maintenance_impl(
     let finished = Spi::connect_mut(|client| {
         let rows = client.update(
             "WITH finished AS (UPDATE pgtrickle.pgt_ann_maintenance_requests r \
-             SET state = CASE WHEN NOT $2 THEN 'FAILED' \
+             SET state = CASE WHEN NOT $2 AND r.cancel_requested \
+                 THEN CASE WHEN r.pending_during_run THEN 'REQUESTED' ELSE 'CANCELLED' END \
+               WHEN NOT $2 THEN 'FAILED' \
                WHEN r.pending_during_run THEN 'REQUESTED' ELSE 'SUCCEEDED' END, \
                last_error = CASE WHEN $2 THEN NULL ELSE $3 END, \
                completed_at = CASE WHEN $2 THEN pg_catalog.clock_timestamp() ELSE r.completed_at END, \
-               claim_pid = NULL, claim_backend_start = NULL, claim_role = NULL \
+               claim_pid = NULL, claim_backend_start = NULL, claim_role = NULL, cancel_requested = false \
              WHERE r.request_id = $1 AND r.state = 'RUNNING' AND r.claim_role = $4 \
                AND r.claim_pid = pg_catalog.pg_backend_pid() \
                AND r.claim_backend_start = (SELECT backend_start FROM pg_catalog.pg_stat_activity \

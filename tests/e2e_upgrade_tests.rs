@@ -573,10 +573,18 @@ async fn test_upgrade_embedding_helpers_from_0109() {
         .execute(&mut *worker)
         .await
         .expect("release upgraded claim");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.cancel_ann_maintenance($1)")
+            .bind(request)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("cancel on upgraded catalog");
+    assert_eq!(status["state"], "CANCELLED");
     db.execute("CREATE ROLE upgrade_ann_unprivileged NOLOGIN")
         .await;
     let private: bool = db.query_scalar("SELECT NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.request_ann_maintenance(oid,oid)', 'EXECUTE') \
         AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.ann_maintenance_request(bigint)', 'EXECUTE') \
+        AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.cancel_ann_maintenance(bigint)', 'EXECUTE') \
         AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.claim_ann_maintenance(bigint)', 'EXECUTE') \
         AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.finish_ann_maintenance(bigint,boolean,text)', 'EXECUTE')").await;
     assert!(

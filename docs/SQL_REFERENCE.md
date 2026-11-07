@@ -4321,7 +4321,7 @@ pgtrickle.ann_maintenance_request(request_id bigint) → jsonb
 ```
 
 Returns the request's recorded and current epochs, timestamps, object OIDs,
-`next_eligible_at`, consecutive failures, and `identity_current`, after
+`next_eligible_at`, consecutive failures, cancellation status, and `identity_current`, after
 rechecking the caller's privileges. `REQUESTED`
 means only that intent was recorded. A false `identity_current` means the
 captured database, stream, leaf, or index identity is no longer valid; `true`
@@ -4363,8 +4363,32 @@ deadline. These schedules survive a physical restart and are discarded with
 requests on logical restore. An interrupted backend can be reclaimed without
 delay because no outcome was reported. Index renames or definition changes
 create a different schedule and require operator coordination. No refresh
-counter is reset. This interface does not yet provide an executor,
-cancellation, or threshold-based requests.
+counter is reset. This interface does not yet provide an executor or
+threshold-based requests.
+
+### pgtrickle.cancel_ann_maintenance
+
+```sql
+pgtrickle.cancel_ann_maintenance(request_id bigint) → jsonb
+```
+
+Cancels queued or failed work transactionally. For a live claim it records
+`cancel_requested` and returns `RUNNING` with the claimant's PID and backend
+start time; it does not signal the backend. The caller must have the same
+privileges required to inspect the request, plus an explicit `EXECUTE` grant.
+An external coordinator may use PostgreSQL's `pg_cancel_backend` under its own
+native privileges after verifying the PID and backend start. Use a dedicated
+worker connection and coordinate its lifetime: a PID or connection can be
+reused, and a delayed signal could cancel unrelated work. Committing the
+request alone does not stop an active `REINDEX`.
+
+If the worker reports failure after cancellation was requested, the request
+becomes `CANCELLED`; the stored error is the worker's report and does not prove
+the signal caused the failure. A successful rebuild still reports success if
+the cancellation arrived too late. A new request made after cancellation
+remains pending, including if the worker disconnects. A canceled request does
+not restart on its own, but an explicit new request can reopen it. Failure
+backoff still applies to a worker-reported failure.
 
 ### pgtrickle.pgt_stream_tables
 

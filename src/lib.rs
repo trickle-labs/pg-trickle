@@ -883,12 +883,13 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ann_maintenance_requests (
     index_definition TEXT NOT NULL,
     first_observed_epoch BIGINT,
     last_observed_epoch BIGINT,
-    state TEXT NOT NULL DEFAULT 'REQUESTED' CHECK (state IN ('REQUESTED', 'RUNNING', 'SUCCEEDED', 'FAILED')),
+    state TEXT NOT NULL DEFAULT 'REQUESTED' CHECK (state IN ('REQUESTED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
     claim_pid INTEGER,
     claim_backend_start TIMESTAMPTZ,
     claim_role OID,
     claim_epoch BIGINT,
     pending_during_run BOOLEAN NOT NULL DEFAULT FALSE,
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
     last_error TEXT,
     completed_at TIMESTAMPTZ,
     requested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
@@ -2251,6 +2252,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_handle_truncate(bigint) FROM PUBLIC
 
 -- owner_lifecycle
 REVOKE EXECUTE ON FUNCTION pgtrickle.ann_maintenance_request(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.cancel_ann_maintenance(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.claim_ann_maintenance(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.finish_ann_maintenance(bigint, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.request_ann_maintenance(oid, oid) FROM PUBLIC;
