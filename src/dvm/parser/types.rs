@@ -593,7 +593,17 @@ impl AggFunc {
 
 /// An aggregate expression in a GROUP BY query.
 #[derive(Debug, Clone)]
+pub struct AnalyzedAggregateArgument {
+    pub location: i32,
+    pub type_oid: u32,
+    pub typmod: i32,
+    pub type_schema: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct AggExpr {
+    pub analyzed_argument: Option<AnalyzedAggregateArgument>,
     pub function: AggFunc,
     pub argument: Option<Expr>,
     pub alias: String,
@@ -738,6 +748,7 @@ mod classify_agg_strategy_tests {
 
     fn make_agg(func: AggFunc, distinct: bool) -> AggExpr {
         AggExpr {
+            analyzed_argument: None,
             function: func,
             argument: None,
             alias: "test_agg".to_string(),
@@ -887,6 +898,7 @@ mod is_all_algebraic_agg_tests {
 
     fn make_agg(func: AggFunc) -> AggExpr {
         AggExpr {
+            analyzed_argument: None,
             function: func,
             argument: None,
             alias: "a".to_string(),

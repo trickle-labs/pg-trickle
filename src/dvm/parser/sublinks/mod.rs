@@ -1262,6 +1262,7 @@ fn extract_aggregates_from_expr_inner(expr: &Expr, start_idx: usize, out: &mut V
                 };
                 let alias = format!("__pgt_having_{}", start_idx + out.len());
                 out.push(AggExpr {
+                    analyzed_argument: None,
                     function: func,
                     argument,
                     alias,
@@ -1453,6 +1454,19 @@ pub fn parse_defining_query(query: &str) -> Result<OpTree, PgTrickleError> {
 pub fn parse_defining_query_full(query: &str) -> Result<ParseResult, PgTrickleError> {
     // SAFETY: same invariants as parse_defining_query.
     unsafe { parse_defining_query_inner(query) }
+}
+
+pub(crate) fn enrich_vector_aggregates(
+    query: &str,
+    result: &mut ParseResult,
+    enforce_enabled: bool,
+) -> Result<(), PgTrickleError> {
+    annotate_vector_aggregates(
+        query,
+        &mut result.tree,
+        &mut result.cte_registry,
+        enforce_enabled,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -1908,6 +1922,154 @@ fn collect_analyzed_window_metadata(
 #[cfg(any(not(test), feature = "pg_test"))]
 struct AnalyzedAggCollectorCtx {
     by_location: *mut HashMap<i32, pg_sys::Oid>,
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+struct VectorAggCollectorCtx {
+    by_location: *mut HashMap<i32, (pg_sys::Oid, pg_sys::Oid, i32, pg_sys::Oid)>,
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+unsafe extern "C-unwind" fn vector_agg_walker(
+    node: *mut pg_sys::Node,
+    context: *mut std::ffi::c_void,
+) -> bool {
+    if node.is_null() {
+        return false;
+    }
+    // SAFETY: node tags are checked before casting; context points to the live collector.
+    unsafe {
+        if pgrx::is_a(node, pg_sys::NodeTag::T_Aggref) {
+            let agg = &*(node as *const pg_sys::Aggref);
+            let args = pgrx::PgList::<pg_sys::TargetEntry>::from_pg(agg.args);
+            if agg.location >= 0
+                && let Some(arg) = args.get_ptr(0)
+                && !(*arg).expr.is_null()
+            {
+                let expr = (*arg).expr as *const pg_sys::Node;
+                let values = &mut *((*(context as *mut VectorAggCollectorCtx)).by_location);
+                values.insert(
+                    agg.location,
+                    (
+                        agg.aggfnoid,
+                        pg_sys::exprType(expr),
+                        pg_sys::exprTypmod(expr),
+                        agg.aggtype,
+                    ),
+                );
+            }
+            return false;
+        }
+        if pgrx::is_a(node, pg_sys::NodeTag::T_Query) {
+            return pg_sys::query_tree_walker_impl(
+                node as *mut pg_sys::Query,
+                Some(vector_agg_walker),
+                context,
+                0,
+            );
+        }
+        pg_sys::expression_tree_walker_impl(node, Some(vector_agg_walker), context)
+    }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn collect_vector_aggregate_metadata(
+    query: &str,
+) -> Result<HashMap<i32, AnalyzedAggregateArgument>, PgTrickleError> {
+    let c_sql = std::ffi::CString::new(query)
+        .map_err(|e| PgTrickleError::QueryParseError(format!("Query contains null byte: {e}")))?;
+    // SAFETY: PostgreSQL owns all parse nodes in the active backend memory context.
+    let aggregates = unsafe {
+        pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            let raw = pg_sys::raw_parser(c_sql.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT);
+            let statements = pgrx::PgList::<pg_sys::RawStmt>::from_pg(raw);
+            let stmt = statements.get_ptr(0).ok_or_else(|| {
+                PgTrickleError::QueryParseError("Query produced no parse tree nodes".into())
+            })?;
+            let analyzed = pg_sys::parse_analyze_fixedparams(
+                stmt,
+                c_sql.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+            );
+            if analyzed.is_null() {
+                return Err(PgTrickleError::QueryParseError(
+                    "Query analysis returned null".into(),
+                ));
+            }
+            let mut values = HashMap::new();
+            let mut context = VectorAggCollectorCtx {
+                by_location: &mut values,
+            };
+            pg_sys::query_tree_walker_impl(
+                analyzed,
+                Some(vector_agg_walker),
+                &mut context as *mut _ as *mut _,
+                0,
+            );
+            Ok(values)
+        }))
+        .execute()?
+    };
+    let mut result = HashMap::new();
+    for (location, (function_oid, type_oid, typmod, result_oid)) in aggregates {
+        let type_info = Spi::connect(|client| {
+            let rows = client.select("SELECT n.nspname::text, t.typname::text FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace JOIN pg_catalog.pg_depend td ON td.classid='pg_catalog.pg_type'::regclass AND td.objid=t.oid AND td.deptype='e' JOIN pg_catalog.pg_extension e ON e.oid=td.refobjid AND e.extname='vector' JOIN pg_catalog.pg_depend fd ON fd.classid='pg_catalog.pg_proc'::regclass AND fd.objid=$1 AND fd.refobjid=e.oid AND fd.deptype='e' WHERE t.oid=$2 AND t.typname IN ('vector','halfvec','sparsevec')", None, &[function_oid.into(), type_oid.into()])?;
+            if rows.is_empty() { return Ok::<_, pgrx::spi::Error>(None); }
+            let row = rows.first();
+            Ok(Some((row.get::<String>(1)?.unwrap_or_default(), row.get::<String>(2)?.unwrap_or_default())))
+        }).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if let Some((type_schema, type_name)) = type_info {
+            result.insert(
+                location,
+                AnalyzedAggregateArgument {
+                    location,
+                    type_oid: type_oid.to_u32(),
+                    typmod: if result_oid == type_oid { typmod } else { -1 },
+                    type_schema,
+                    type_name,
+                },
+            );
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn annotate_vector_aggregates(
+    query: &str,
+    tree: &mut OpTree,
+    registry: &mut CteRegistry,
+    enforce_enabled: bool,
+) -> Result<(), PgTrickleError> {
+    let lower = query.to_ascii_lowercase();
+    if !lower.contains("avg") && !lower.contains("sum") {
+        return Ok(());
+    }
+    let metadata = collect_vector_aggregate_metadata(query)?;
+    if metadata.is_empty() {
+        return Ok(());
+    }
+    let mut found = false;
+    crate::dvm::reclassify_vector_aggregates(tree, &metadata, &mut found);
+    for (_, cte) in &mut registry.entries {
+        crate::dvm::reclassify_vector_aggregates(cte, &metadata, &mut found);
+    }
+    if found && enforce_enabled && !crate::config::pg_trickle_enable_vector_agg() {
+        return Err(PgTrickleError::UnsupportedOperator("pgvector aggregates require pg_trickle.enable_vector_agg = on for incremental refresh; use FULL refresh otherwise".into()));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+fn annotate_vector_aggregates(
+    _query: &str,
+    _tree: &mut OpTree,
+    _registry: &mut CteRegistry,
+    _enforce_enabled: bool,
+) -> Result<(), PgTrickleError> {
+    Ok(())
 }
 
 #[cfg(any(not(test), feature = "pg_test"))]
@@ -7966,6 +8128,7 @@ unsafe fn extract_aggregates(
                         None
                     };
                     aggs.push(AggExpr {
+                        analyzed_argument: None,
                         function: AggFunc::Sum,
                         argument,
                         alias,
@@ -8107,6 +8270,15 @@ unsafe fn extract_aggregates(
                     };
 
                 aggs.push(AggExpr {
+                    analyzed_argument: matches!(agg_func, AggFunc::Avg | AggFunc::Sum).then(|| {
+                        AnalyzedAggregateArgument {
+                            location: fcall.location,
+                            type_oid: 0,
+                            typmod: -1,
+                            type_schema: String::new(),
+                            type_name: String::new(),
+                        }
+                    }),
                     function: agg_func,
                     argument,
                     alias,
@@ -8205,6 +8377,7 @@ unsafe fn extract_aggregates(
                 };
 
                 aggs.push(AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::UserDefined(raw_sql),
                     argument,
                     alias,
@@ -8230,6 +8403,7 @@ unsafe fn extract_aggregates(
                 };
 
                 aggs.push(AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::ComplexExpression(raw_sql),
                     argument: None,
                     alias,
@@ -8279,6 +8453,7 @@ unsafe fn extract_aggregates(
             };
 
             aggs.push(AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::JsonObjectAggStd(raw_sql),
                 argument: None,
                 alias,
@@ -8319,6 +8494,7 @@ unsafe fn extract_aggregates(
             };
 
             aggs.push(AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::JsonArrayAggStd(raw_sql),
                 argument: None,
                 alias,
@@ -8346,6 +8522,7 @@ unsafe fn extract_aggregates(
                 };
 
                 aggs.push(AggExpr {
+                    analyzed_argument: None,
                     function: AggFunc::ComplexExpression(raw_sql),
                     argument: None,
                     alias,
@@ -8502,6 +8679,7 @@ mod unit_tests {
     // Helper: build a minimal AggExpr for testing rewrite_having_expr.
     fn make_count_star_agg(alias: &str) -> AggExpr {
         AggExpr {
+            analyzed_argument: None,
             function: AggFunc::CountStar,
             argument: None,
             alias: alias.to_string(),
@@ -8515,6 +8693,7 @@ mod unit_tests {
 
     fn make_sum_agg(col: &str, alias: &str) -> AggExpr {
         AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Sum,
             argument: Some(Expr::ColumnRef {
                 table_alias: None,

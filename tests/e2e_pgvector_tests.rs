@@ -21,6 +21,367 @@ async fn setup_pgvector(db: &E2eDb) {
     db.execute("CREATE EXTENSION IF NOT EXISTS vector").await;
 }
 
+#[tokio::test]
+async fn test_vector_aggregate_unknown_dimensions_rejects_mixed_input_without_data_loss() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE unknown_vector_dims (id int PRIMARY KEY, embedding vector)")
+        .await;
+    db.execute("INSERT INTO unknown_vector_dims VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SELECT pgtrickle.create_stream_table('unknown_vector_st', $$SELECT avg(embedding) AS centroid FROM unknown_vector_dims$$, '1m', 'DIFFERENTIAL')",
+    ]).await;
+    let typ: String = db.query_scalar("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='unknown_vector_st'::regclass AND attname='centroid'").await;
+    assert_eq!(typ, "vector");
+    let error = db.try_execute("CREATE INDEX unknown_vector_ann ON unknown_vector_st USING hnsw (centroid vector_l2_ops)").await.expect_err("an undimensioned vector cannot be indexed directly");
+    assert!(
+        error.to_string().contains("dimensions"),
+        "unexpected error: {error}"
+    );
+
+    db.execute("INSERT INTO unknown_vector_dims VALUES (2, '[1,0]')")
+        .await;
+    let error = db
+        .try_execute_with_config(
+            &[
+                "SET pg_trickle.enable_vector_agg = on",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+            ],
+            "SELECT pgtrickle.refresh_stream_table('unknown_vector_st')",
+        )
+        .await
+        .expect_err("mixed dimensions must not be silently narrowed");
+    assert!(
+        error.to_string().contains("dimensions"),
+        "unexpected error: {error}"
+    );
+    let centroid: String = db
+        .query_scalar("SELECT centroid::text FROM unknown_vector_st")
+        .await;
+    assert_eq!(centroid, "[1,0,0]");
+}
+
+#[tokio::test]
+async fn test_vector_aggregate_qualified_join_uses_argument_type() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE typed_vectors (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("CREATE TABLE typed_scalars (id int PRIMARY KEY, embedding double precision)")
+        .await;
+    db.execute("INSERT INTO typed_vectors VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    db.execute("INSERT INTO typed_scalars VALUES (1, 42), (2, 10)")
+        .await;
+    let query = "SELECT avg(s.embedding) AS scalar_mean, avg(v.embedding) AS centroid FROM typed_scalars s JOIN typed_vectors v USING (id)";
+    let create = format!(
+        "SELECT pgtrickle.create_stream_table('typed_join_st', $${query}$$, '1m', 'DIFFERENTIAL')"
+    );
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create])
+        .await;
+    db.execute("UPDATE typed_scalars SET embedding = 20 WHERE id = 2")
+        .await;
+    db.execute("UPDATE typed_vectors SET embedding = '[0,0,1]' WHERE id = 2")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('typed_join_st')",
+    ])
+    .await;
+    let differential: bool = db.query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name='typed_join_st' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert!(differential);
+    db.assert_st_matches_query("typed_join_st", "SELECT avg(s.embedding) AS scalar_mean, avg(v.embedding)::vector(3) AS centroid FROM typed_scalars s JOIN typed_vectors v USING (id)").await;
+    let scalar_type: String = db.query_scalar("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='typed_join_st'::regclass AND attname='scalar_mean'").await;
+    assert_eq!(scalar_type, "double precision");
+    db.execute("UPDATE typed_vectors SET embedding=NULL WHERE id=1")
+        .await;
+    db.execute("UPDATE typed_scalars SET embedding=NULL WHERE id=1")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('typed_join_st')",
+    ])
+    .await;
+    db.assert_st_matches_query("typed_join_st", "SELECT avg(s.embedding) AS scalar_mean, avg(v.embedding)::vector(3) AS centroid FROM typed_scalars s JOIN typed_vectors v USING (id)").await;
+    db.execute("DELETE FROM typed_vectors WHERE id=2").await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('typed_join_st')",
+    ])
+    .await;
+    db.assert_st_matches_query("typed_join_st", "SELECT avg(s.embedding) AS scalar_mean, avg(v.embedding)::vector(3) AS centroid FROM typed_scalars s JOIN typed_vectors v USING (id)").await;
+    db.execute("INSERT INTO typed_vectors VALUES (3, '[1,1,0]')")
+        .await;
+    db.execute("INSERT INTO typed_scalars VALUES (3, 7)").await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('typed_join_st')",
+    ])
+    .await;
+    db.assert_st_matches_query("typed_join_st", "SELECT avg(s.embedding) AS scalar_mean, avg(v.embedding)::vector(3) AS centroid FROM typed_scalars s JOIN typed_vectors v USING (id)").await;
+}
+
+#[tokio::test]
+async fn test_vector_aggregate_cast_uses_cast_type() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE typed_casts (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO typed_casts VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    let query = "SELECT avg(embedding::halfvec(3)) AS centroid FROM typed_casts";
+    let create = format!(
+        "SELECT pgtrickle.create_stream_table('typed_cast_st', $${query}$$, '1m', 'DIFFERENTIAL')"
+    );
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create])
+        .await;
+    db.execute("UPDATE typed_casts SET embedding = '[0,0,1]' WHERE id = 2")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('typed_cast_st')",
+    ])
+    .await;
+    let differential: bool = db.query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name='typed_cast_st' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert!(differential);
+    db.assert_st_matches_query(
+        "typed_cast_st",
+        "SELECT avg(embedding::halfvec(3))::halfvec(3) AS centroid FROM typed_casts",
+    )
+    .await;
+    let typ: String = db.query_scalar("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='typed_cast_st'::regclass AND attname='centroid'").await;
+    assert_eq!(typ, "halfvec(3)");
+}
+
+#[tokio::test]
+async fn test_vector_aggregate_join_uses_each_bound_dimension() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE dims_three (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("CREATE TABLE dims_two (id int PRIMARY KEY, embedding vector(2))")
+        .await;
+    db.execute("INSERT INTO dims_three VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("INSERT INTO dims_two VALUES (1, '[1,0]')").await;
+    let create = "SELECT pgtrickle.create_stream_table('dims_st', $$SELECT avg(a.embedding) AS three, avg(b.embedding) AS two FROM dims_three a JOIN dims_two b USING(id)$$, '1m', 'DIFFERENTIAL')";
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", create])
+        .await;
+    let types: Vec<(String, String)> = sqlx::query_as("SELECT attname::text, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='dims_st'::regclass AND attname IN ('three','two') ORDER BY attname").fetch_all(&db.pool).await.expect("read dimensioned output types");
+    assert_eq!(
+        types,
+        vec![
+            ("three".into(), "vector(3)".into()),
+            ("two".into(), "vector(2)".into())
+        ]
+    );
+    db.execute("UPDATE dims_two SET embedding='[0,1]' WHERE id=1")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('dims_st')",
+    ])
+    .await;
+    db.assert_st_matches_query("dims_st", "SELECT avg(a.embedding)::vector(3) AS three, avg(b.embedding)::vector(2) AS two FROM dims_three a JOIN dims_two b USING(id)").await;
+}
+
+#[tokio::test]
+async fn test_vector_aggregate_normalized_expression_keeps_unknown_dimension() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE normalized_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO normalized_source VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    let create = "SELECT pgtrickle.create_stream_table('normalized_st', $$SELECT avg(l2_normalize(embedding)) AS centroid FROM normalized_source$$, '1m', 'DIFFERENTIAL')";
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", create])
+        .await;
+    let typ: String = db.query_scalar("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='normalized_st'::regclass AND attname='centroid'").await;
+    assert_eq!(typ, "vector");
+    db.execute("UPDATE normalized_source SET embedding='[0,0,1]' WHERE id=2")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('normalized_st')",
+    ])
+    .await;
+    db.assert_st_matches_query(
+        "normalized_st",
+        "SELECT avg(l2_normalize(embedding)) AS centroid FROM normalized_source",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_vector_aggregate_immediate_uses_analyzed_type() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE immediate_vectors (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO immediate_vectors VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", "SELECT pgtrickle.create_stream_table('immediate_vectors_st', $$SELECT avg(embedding::halfvec(3)) AS centroid FROM immediate_vectors$$, NULL, 'IMMEDIATE')", "UPDATE immediate_vectors SET embedding='[0,1,0]' WHERE id=1"]).await;
+    db.assert_st_matches_query(
+        "immediate_vectors_st",
+        "SELECT avg(embedding::halfvec(3))::halfvec(3) AS centroid FROM immediate_vectors",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_vector_aggregate_nonpublic_extension_schema() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE SCHEMA \"Vec.X\"").await;
+    db.execute("CREATE EXTENSION vector WITH SCHEMA \"Vec.X\"")
+        .await;
+    db.execute("CREATE TABLE private_vectors (id int PRIMARY KEY, embedding \"Vec.X\".vector(3))")
+        .await;
+    db.execute("INSERT INTO private_vectors VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute_seq(&["SET search_path = public, \"Vec.X\"", "SET pg_trickle.enable_vector_agg = on", "SELECT pgtrickle.create_stream_table('private_vector_st', $$SELECT avg(embedding) AS centroid FROM private_vectors$$, '1m', 'DIFFERENTIAL')"]).await;
+    let type_matches: bool = db.query_scalar("SELECT atttypid='\"Vec.X\".vector'::regtype AND atttypmod=3 FROM pg_attribute WHERE attrelid='private_vector_st'::regclass AND attname='centroid'").await;
+    assert!(type_matches);
+    db.execute("UPDATE private_vectors SET embedding='[0,1,0]' WHERE id=1")
+        .await;
+    db.execute_seq(&[
+        "SET search_path = public, \"Vec.X\"",
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('private_vector_st')",
+    ])
+    .await;
+    let same: bool = db
+        .query_scalar("SELECT centroid::text = '[0,1,0]' FROM private_vector_st")
+        .await;
+    assert!(same);
+}
+
+#[tokio::test]
+async fn test_vector_projection_retains_typmod_for_direct_ann_index() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE projected_vectors (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO projected_vectors VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table('projected_vector_st', $$SELECT id, embedding FROM projected_vectors$$, '1m', 'DIFFERENTIAL')").await;
+    let typ: String = db.query_scalar("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='projected_vector_st'::regclass AND attname='embedding'").await;
+    assert_eq!(typ, "vector(3)");
+    db.execute("CREATE INDEX projected_vector_ann ON projected_vector_st USING hnsw (embedding vector_l2_ops)").await;
+    let mut tx = db.pool.begin().await.expect("begin plan check");
+    sqlx::query("SET LOCAL enable_seqscan=off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable sequential scan");
+    let plan: serde_json::Value = sqlx::query_scalar("EXPLAIN (FORMAT JSON) SELECT id FROM projected_vector_st ORDER BY embedding <-> '[1,0,0]'::vector LIMIT 1").fetch_one(&mut *tx).await.expect("explain vector search");
+    assert!(
+        plan.to_string().contains("projected_vector_ann"),
+        "direct index is not eligible: {plan}"
+    );
+    tx.rollback().await.expect("end plan check");
+}
+
+#[tokio::test]
+async fn test_vector_aggregate_cte_alias_and_group_key_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE cte_vectors (id int PRIMARY KEY, grp int, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO cte_vectors VALUES (1, 1, '[1,0,0]'), (2, 2, '[0,1,0]')")
+        .await;
+    let query = "WITH c AS (SELECT id, grp, embedding AS vec FROM cte_vectors) SELECT grp, avg(vec) AS centroid FROM c GROUP BY grp";
+    let create = format!(
+        "SELECT pgtrickle.create_stream_table('cte_vectors_st', $${query}$$, '1m', 'DIFFERENTIAL')"
+    );
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create])
+        .await;
+    let typ: String = db.query_scalar("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='cte_vectors_st'::regclass AND attname='centroid'").await;
+    assert_eq!(typ, "vector(3)");
+    db.execute("UPDATE cte_vectors SET grp=2, embedding='[0,0,1]' WHERE id=1")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('cte_vectors_st')",
+    ])
+    .await;
+    db.assert_st_matches_query("cte_vectors_st", "WITH c AS (SELECT id, grp, embedding AS vec FROM cte_vectors) SELECT grp, avg(vec)::vector(3) AS centroid FROM c GROUP BY grp").await;
+}
+
+#[tokio::test]
+async fn test_vector_aggregate_disabled_reports_actionable_error() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE disabled_vectors (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    let error = db.try_execute_with_config(&["SET pg_trickle.enable_vector_agg = off"], "SELECT pgtrickle.create_stream_table('disabled_vector_st', $$SELECT avg(embedding) AS centroid FROM disabled_vectors$$, '1m', 'DIFFERENTIAL')").await.expect_err("vector aggregate should require opt-in");
+    assert!(
+        error.to_string().contains("enable_vector_agg"),
+        "unexpected error: {error}"
+    );
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = off", "SELECT pgtrickle.create_stream_table('disabled_auto_st', $$SELECT avg(embedding) AS centroid FROM disabled_vectors$$, '1m', 'AUTO')"]).await;
+    let mode: String = db.query_scalar("SELECT refresh_mode::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name='disabled_auto_st'").await;
+    assert_eq!(mode, "FULL");
+}
+
+#[tokio::test]
+async fn test_vector_aggregate_alter_query_keeps_expression_index_usable() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alter_vectors (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO alter_vectors VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", "SELECT pgtrickle.create_stream_table('alter_vectors_st', $$SELECT avg(embedding) AS centroid FROM alter_vectors$$, '1m', 'DIFFERENTIAL')"]).await;
+    db.execute("CREATE INDEX alter_vectors_ann ON alter_vectors_st USING hnsw ((l2_normalize(centroid)::vector(3)) vector_l2_ops)").await;
+    let alter = "SELECT pgtrickle.alter_stream_table('alter_vectors_st', query => $$SELECT avg(embedding) AS centroid FROM alter_vectors WHERE id > 0$$)";
+    let error = db
+        .try_execute_with_config(&["SET pg_trickle.enable_vector_agg = on"], alter)
+        .await
+        .expect_err("ALTER must not silently drop the expression index");
+    assert!(
+        error
+            .to_string()
+            .contains("expression or ANN index alter_vectors_ann"),
+        "unexpected error: {error}"
+    );
+    let usable: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('alter_vectors_ann') AND indisvalid AND indisready)").await;
+    assert!(usable, "ALTER QUERY must retain a usable expression index");
+    db.assert_st_matches_query(
+        "alter_vectors_st",
+        "SELECT avg(embedding)::vector(3) AS centroid FROM alter_vectors",
+    )
+    .await;
+    db.execute("DROP INDEX alter_vectors_ann").await;
+    db.execute("CREATE INDEX alter_vectors_ann_plain ON alter_vectors_st USING hnsw (centroid vector_l2_ops)").await;
+    let error = db
+        .try_execute_with_config(&["SET pg_trickle.enable_vector_agg = on"], alter)
+        .await
+        .expect_err("ALTER must not silently drop a plain ANN index");
+    assert!(
+        error.to_string().contains("alter_vectors_ann_plain"),
+        "unexpected error: {error}"
+    );
+    db.execute("DROP INDEX alter_vectors_ann_plain").await;
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", alter])
+        .await;
+    db.execute("CREATE INDEX alter_vectors_ann ON alter_vectors_st USING hnsw ((l2_normalize(centroid)::vector(3)) vector_l2_ops)").await;
+    db.assert_st_matches_query(
+        "alter_vectors_st",
+        "SELECT avg(embedding)::vector(3) AS centroid FROM alter_vectors WHERE id > 0",
+    )
+    .await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // F4-1: User-taste centroid — avg(embedding) per user
 // ═══════════════════════════════════════════════════════════════════════

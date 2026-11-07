@@ -3626,6 +3626,7 @@ mod tests {
                 column_name: "category".to_string(),
             }],
             aggregates: vec![AggExpr {
+                analyzed_argument: None,
                 function: AggFunc::Sum,
                 argument: Some(Expr::ColumnRef {
                     table_alias: Some("t".to_string()),
