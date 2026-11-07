@@ -253,6 +253,9 @@ def _normalize_return_type(raw: str) -> str:
     if not s:
         return s
 
+    if s.startswith("Result<SetOfIterator<") and "pgrx::JsonB" in s:
+        return "SetOf jsonb"
+
     # Result<TableIterator<...>, ...> → "SetOf row (failable)"
     if s.startswith("Result<") and "TableIterator<" in s:
         return "SetOf row (failable)"
@@ -459,7 +462,13 @@ def extract_sql_functions(src_dir: Path) -> list[dict]:
                             if len(candidate_ret) > len(best_ret):
                                 best_ret = candidate_ret
                         # Stop extending when angle brackets are balanced
-                        if _angle_bracket_depth(candidate_ret) == 0:
+                        next_line = scan + window
+                        return_on_next_line = (
+                            not candidate_ret
+                            and next_line < len(lines)
+                            and lines[next_line].lstrip().startswith("->")
+                        )
+                        if _angle_bracket_depth(candidate_ret) == 0 and not return_on_next_line:
                             best_fn = fm.group(1)
                             best_args = fm.group(2).strip()
                             best_ret = candidate_ret

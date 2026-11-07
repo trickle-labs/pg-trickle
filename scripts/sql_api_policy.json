@@ -1150,6 +1150,20 @@
       "class": "public_read",
       "execution_policy": "capability_specific"
     },
+    "pgtrickle.ann_index_status_v2()": {
+      "schema": "pgtrickle",
+      "name": "ann_index_status_v2",
+      "identity_arguments": "",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.vector_stream_status_v2()": {
+      "schema": "pgtrickle",
+      "name": "vector_stream_status_v2",
+      "identity_arguments": "",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
     "pgtrickle.vector_status()": {
       "schema": "pgtrickle",
       "name": "vector_status",
