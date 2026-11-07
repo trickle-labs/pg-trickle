@@ -160,6 +160,343 @@ async fn test_ann_worker_limits_concurrent_requests_per_database() {
 }
 
 #[tokio::test]
+async fn test_ann_churn_reports_unknown_for_partitioned_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_churn_partition_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_churn_partition_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st_partitioned(
+        "ann_churn_partition_stream",
+        "SELECT id, embedding FROM ann_churn_partition_source",
+        "1h",
+        "DIFFERENTIAL",
+        "id",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_churn_partition_idx ON ann_churn_partition_stream USING hnsw (embedding vector_l2_ops)").await;
+    let leaf: i64 = db.query_scalar("SELECT i.indexrelid::bigint FROM pg_index i JOIN pg_inherits h ON h.inhrelid=i.indrelid WHERE h.inhparent='ann_churn_partition_stream'::regclass AND i.indisvalid AND EXISTS (SELECT 1 FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.oid=i.indexrelid AND a.amname='hnsw') LIMIT 1").await;
+    let request: i64 = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_churn_partition_stream'::regclass::oid, $1::bigint::oid)")
+        .bind(leaf).fetch_one(&db.pool).await.expect("request leaf");
+    let mut worker = db.pool.acquire().await.expect("worker session");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("claim request");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("report baseline");
+    db.execute("INSERT INTO ann_churn_partition_source VALUES (2, '[0,1,0]')")
+        .await;
+    db.refresh_st("ann_churn_partition_stream").await;
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect partition change");
+    assert!(status["known_operations_since_reported_coverage"].is_null());
+    db.assert_st_matches_query(
+        "ann_churn_partition_stream",
+        "SELECT id, embedding FROM ann_churn_partition_source",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_ann_churn_reports_unknown_with_user_triggers() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_churn_trigger_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_churn_trigger_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "ann_churn_trigger_stream",
+        "SELECT id, embedding FROM ann_churn_trigger_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_churn_trigger_idx ON ann_churn_trigger_stream USING hnsw (embedding vector_l2_ops)").await;
+    db.execute("CREATE FUNCTION ann_churn_trigger_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$").await;
+    db.execute("CREATE TRIGGER ann_churn_trigger AFTER INSERT ON ann_churn_trigger_stream FOR EACH ROW EXECUTE FUNCTION ann_churn_trigger_fn()").await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_churn_trigger_stream'::regclass::oid, 'ann_churn_trigger_idx'::regclass::oid)").await;
+    let mut worker = db.pool.acquire().await.expect("worker session");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("claim request");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("report baseline");
+    db.execute("INSERT INTO ann_churn_trigger_source VALUES (2, '[0,1,0]')")
+        .await;
+    db.refresh_st("ann_churn_trigger_stream").await;
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect trigger change");
+    assert!(status["known_operations_since_reported_coverage"].is_null());
+    db.assert_st_matches_query(
+        "ann_churn_trigger_stream",
+        "SELECT id, embedding FROM ann_churn_trigger_source",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_ann_churn_reports_unknown_after_immediate_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_churn_immediate_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_churn_immediate_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table('ann_churn_immediate_stream', 'SELECT id, embedding FROM ann_churn_immediate_source', NULL, 'IMMEDIATE')").await;
+    db.execute("CREATE INDEX ann_churn_immediate_idx ON ann_churn_immediate_stream USING hnsw (embedding vector_l2_ops)").await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_churn_immediate_stream'::regclass::oid, 'ann_churn_immediate_idx'::regclass::oid)").await;
+    let mut worker = db.pool.acquire().await.expect("worker session");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("claim request");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("report baseline");
+    let baseline: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect baseline");
+    assert_eq!(
+        baseline["known_operations_since_reported_coverage"].as_i64(),
+        Some(0)
+    );
+    db.execute("INSERT INTO ann_churn_immediate_source VALUES (2, '[0,1,0]')")
+        .await;
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect immediate change");
+    assert!(status["known_operations_since_reported_coverage"].is_null());
+    db.assert_st_matches_query(
+        "ann_churn_immediate_stream",
+        "SELECT id, embedding FROM ann_churn_immediate_source",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_ann_churn_preserves_concurrent_work_and_unknown_rewrites() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_churn_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_churn_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "ann_churn_stream",
+        "SELECT id, embedding FROM ann_churn_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "CREATE INDEX ann_churn_idx ON ann_churn_stream USING hnsw (embedding vector_l2_ops)",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_churn_other_idx ON ann_churn_stream USING hnsw (embedding vector_cosine_ops)").await;
+    db.execute(
+        "SELECT pgtrickle.snapshot_stream_table('ann_churn_stream', 'public.ann_churn_archive')",
+    )
+    .await;
+    let request_sql = "SELECT pgtrickle.request_ann_maintenance('ann_churn_stream'::regclass::oid, 'ann_churn_idx'::regclass::oid)";
+    let request: i64 = db.query_scalar(request_sql).await;
+    let other: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_churn_stream'::regclass::oid, 'ann_churn_other_idx'::regclass::oid)").await;
+    let mut worker = db.pool.acquire().await.expect("worker session");
+    let claim: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .fetch_one(&mut *worker)
+        .await
+        .expect("claim request");
+    assert!(claim["known_operations_since_reported_coverage"].is_null());
+    db.execute("INSERT INTO ann_churn_source VALUES (2, '[0,1,0]'), (3, '[0,0,1]')")
+        .await;
+    db.refresh_st("ann_churn_stream").await;
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("report coverage");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect coverage");
+    assert_eq!(
+        status["reported_churn_operations"],
+        claim["claim_churn_operations"]
+    );
+    assert_eq!(
+        status["known_operations_since_reported_coverage"].as_i64(),
+        Some(2)
+    );
+    let independent: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(other)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect other index");
+    assert!(independent["known_operations_since_reported_coverage"].is_null());
+    let mut tx = db.pool.begin().await.expect("begin rollback test");
+    sqlx::query("INSERT INTO ann_churn_source VALUES (4, '[1,1,0]')")
+        .execute(&mut *tx)
+        .await
+        .expect("insert rolled-back row");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('ann_churn_stream')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh in transaction");
+    tx.rollback().await.expect("roll back refresh");
+    let after_rollback: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect rollback");
+    assert_eq!(
+        after_rollback["known_operations_since_reported_coverage"].as_i64(),
+        Some(2)
+    );
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    let retry: i64 = db.query_scalar(request_sql).await;
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(retry)
+        .execute(&mut *worker)
+        .await
+        .expect("claim retry");
+    db.execute("INSERT INTO ann_churn_source VALUES (4, '[1,1,0]')")
+        .await;
+    db.refresh_st("ann_churn_stream").await;
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, false, 'test failure')")
+        .bind(retry)
+        .execute(&mut *worker)
+        .await
+        .expect("report failed retry");
+    let failed_retry: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(retry)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect failed retry");
+    assert_eq!(
+        failed_retry["known_operations_since_reported_coverage"].as_i64(),
+        Some(3)
+    );
+    db.execute("UPDATE ann_churn_source SET embedding = '[1,0,1]' WHERE id = 2")
+        .await;
+    db.execute("DELETE FROM ann_churn_source WHERE id = 3")
+        .await;
+    db.refresh_st("ann_churn_stream").await;
+    let after_update_delete: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(retry)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect update and delete");
+    assert!(
+        after_update_delete["known_operations_since_reported_coverage"]
+            .as_i64()
+            .is_some_and(|count| count >= 5)
+    );
+    db.execute(
+        "SELECT pgtrickle.restore_from_snapshot('ann_churn_stream', 'public.ann_churn_archive')",
+    )
+    .await;
+    let after_restore: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect restore");
+    assert!(after_restore["known_operations_since_reported_coverage"].is_null());
+    db.refresh_st("ann_churn_stream").await;
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    let renewed: i64 = db.query_scalar(request_sql).await;
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(renewed)
+        .execute(&mut *worker)
+        .await
+        .expect("claim after rewrite");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, false, 'test failure')")
+        .bind(renewed)
+        .execute(&mut *worker)
+        .await
+        .expect("report failure");
+    let after_failure: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(renewed)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect failure");
+    assert!(after_failure["known_operations_since_reported_coverage"].is_null());
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(renewed)
+        .execute(&mut *worker)
+        .await
+        .expect("retry claim");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(renewed)
+        .execute(&mut *worker)
+        .await
+        .expect("establish new baseline");
+    let recovered: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(renewed)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect new baseline");
+    assert_eq!(
+        recovered["known_operations_since_reported_coverage"].as_i64(),
+        Some(0)
+    );
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET ann_churn_operations = 9223372036854775807 WHERE pgt_name='ann_churn_stream'").await;
+    db.execute("INSERT INTO ann_churn_source VALUES (5, '[1,1,1]')")
+        .await;
+    db.refresh_st("ann_churn_stream").await;
+    let overflow: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(renewed)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("inspect overflow");
+    assert!(overflow["known_operations_since_reported_coverage"].is_null());
+    db.assert_st_matches_query(
+        "ann_churn_stream",
+        "SELECT id, embedding FROM ann_churn_source",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_ann_maintenance_coverage_preserves_refreshes_after_claim() {
     use std::time::Duration;
 

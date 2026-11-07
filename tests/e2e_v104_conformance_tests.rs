@@ -259,6 +259,8 @@ async fn test_graph_no_data_reconciliation_repairs_stale_missing_and_surplus_row
             .await
             .expect("read initial graph rows");
     assert_eq!(initial, vec![(1, "expected".into()), (2, "second".into())]);
+    let churn_before: (i64, i64) = sqlx::query_as("SELECT ann_churn_generation, ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'recon_graph_st'")
+        .fetch_one(&db.pool).await.expect("read churn before reconciliation");
 
     // Simulate stale content, a missing row, and a surplus row left by an
     // earlier broken delta. Mutations to storage are test-only and isolated
@@ -296,6 +298,10 @@ async fn test_graph_no_data_reconciliation_repairs_stale_missing_and_surplus_row
             .fetch_all(&db.pool)
             .await
             .expect("read repaired graph rows");
+    let churn_after: (i64, i64) = sqlx::query_as("SELECT ann_churn_generation, ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'recon_graph_st'")
+        .fetch_one(&db.pool).await.expect("read churn after reconciliation");
+    assert_eq!(churn_after.0, churn_before.0);
+    assert!(churn_after.1 > churn_before.1);
     assert_eq!(
         repaired, initial,
         "reconciliation must correct every kind of residue"

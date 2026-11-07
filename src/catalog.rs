@@ -35,6 +35,15 @@ fn ann_epoch_assignment() -> Result<&'static str, PgTrickleError> {
     })
 }
 
+// Unknown work starts a new generation; a successful rebuild can establish a
+// new baseline without attributing that work to a later claim.
+const ANN_CHURN_UNKNOWN: &str = "ann_churn_generation = CASE \
+    WHEN ann_churn_generation < 9223372036854775807 THEN ann_churn_generation + 1 ELSE NULL END, \
+    ann_churn_operations = 0, ";
+const ANN_CHURN_ADD: &str = "ann_churn_operations = CASE WHEN $3::bigint < 0 THEN NULL \
+    WHEN ann_churn_operations <= 9223372036854775807 - $3::bigint \
+    THEN ann_churn_operations + $3::bigint ELSE NULL END, ";
+
 // ---------------------------------------------------------------------------
 // CODE-003 (v0.75.0): Typed domain wrappers for stream-table identifiers.
 //
@@ -327,8 +336,8 @@ impl StreamTableMeta {
         }
         Spi::run_with_args(
             &format!(
-                "UPDATE pgtrickle.pgt_stream_tables SET {} WHERE pgt_id = $1",
-                epoch.trim_end_matches(", ")
+                "UPDATE pgtrickle.pgt_stream_tables SET {epoch} {} WHERE pgt_id = $1",
+                ANN_CHURN_UNKNOWN.trim_end_matches(", ")
             ),
             &[pgt_id.into()],
         )
@@ -744,21 +753,28 @@ impl StreamTableMeta {
     pub fn update_after_refresh(
         pgt_id: i64,
         data_ts: TimestampWithTimeZone,
-        _rows_affected: i64,
+        rows_affected: Option<i64>,
     ) -> Result<(), PgTrickleError> {
         let epoch = ann_epoch_assignment()?;
+        let churn = if epoch.is_empty() {
+            ""
+        } else if rows_affected.is_some() {
+            ANN_CHURN_ADD
+        } else {
+            ANN_CHURN_UNKNOWN
+        };
         Spi::run_with_args(
             &format!(
                 "UPDATE pgtrickle.pgt_stream_tables \
              SET data_timestamp = $1, is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
-             {epoch} \
+             {epoch} {churn} \
              status = 'ACTIVE', needs_reinit = false, \
              last_error_message = NULL, last_error_at = NULL, \
              updated_at = now() \
              WHERE pgt_id = $2"
             ),
-            &[data_ts.into(), pgt_id.into()],
+            &[data_ts.into(), pgt_id.into(), rows_affected.into()],
         )
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
     }
@@ -783,12 +799,17 @@ impl StreamTableMeta {
         } else {
             ""
         };
+        let churn = if epoch.is_empty() {
+            ""
+        } else {
+            ANN_CHURN_UNKNOWN
+        };
         Spi::run_with_args(
             &format!(
                 "UPDATE pgtrickle.pgt_stream_tables \
              SET is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
-             {epoch} \
+             {epoch} {churn} \
              status = 'ACTIVE', \
              last_error_message = NULL, last_error_at = NULL, \
              updated_at = now() \
@@ -811,12 +832,17 @@ impl StreamTableMeta {
         })?;
 
         let epoch = ann_epoch_assignment()?;
+        let churn = if epoch.is_empty() {
+            ""
+        } else {
+            ANN_CHURN_UNKNOWN
+        };
         Spi::run_with_args(
             &format!(
                 "UPDATE pgtrickle.pgt_stream_tables \
              SET data_timestamp = $1, is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
-             {epoch} \
+             {epoch} {churn} \
              status = 'ACTIVE', needs_reinit = false, \
              frontier = $3, updated_at = now() \
              WHERE pgt_id = $2"
@@ -838,18 +864,24 @@ impl StreamTableMeta {
         pgt_id: i64,
         frontier: &Frontier,
         rows_affected: i64,
+        finalized_later: bool,
     ) -> Result<TimestampWithTimeZone, PgTrickleError> {
         let frontier_json = serde_json::to_value(frontier).map_err(|e| {
             PgTrickleError::InternalError(format!("Failed to serialize frontier: {}", e))
         })?;
 
         let epoch = ann_epoch_assignment()?;
+        let churn = if epoch.is_empty() || finalized_later {
+            ""
+        } else {
+            ANN_CHURN_UNKNOWN
+        };
         Spi::get_one_with_args::<TimestampWithTimeZone>(
             &format!(
                 "UPDATE pgtrickle.pgt_stream_tables \
              SET data_timestamp = now(), is_populated = true, \
              last_refresh_at = now(), consecutive_errors = 0, \
-             {epoch} \
+             {epoch} {churn} \
              status = 'ACTIVE', needs_reinit = false, \
              last_error_message = NULL, last_error_at = NULL, \
              frontier = $3, updated_at = now() \
@@ -4555,6 +4587,7 @@ mod tests {
                 i64,
                 &crate::version::Frontier,
                 i64,
+                bool,
             ) -> Result<pgrx::datum::TimestampWithTimeZone, PgTrickleError>;
     }
 }

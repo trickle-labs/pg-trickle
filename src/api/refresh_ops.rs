@@ -501,6 +501,7 @@ pub(crate) fn execute_manual_refresh(
                 rows_inserted: *rows_inserted,
                 rows_updated,
                 rows_deleted: *rows_deleted,
+                ann_churn_operations: refresh::take_last_ann_churn_operations(),
                 data_changed: effective_action != RefreshAction::NoData
                     && (*rows_inserted > 0 || rows_updated > 0 || *rows_deleted > 0),
                 full_reason: if refresh::is_full_fallback(requested_action, effective_action) {
@@ -989,7 +990,7 @@ fn execute_manual_full_refresh_target(
         .any(|(oid, lsn)| prev_frontier.get_lsn(*oid) != *lsn);
 
     if has_upstream_st_change || has_wal_change || prev_frontier.is_empty() {
-        StreamTableMeta::store_frontier_and_complete_refresh(st.pgt_id, &frontier, 0)?;
+        StreamTableMeta::store_frontier_and_complete_refresh(st.pgt_id, &frontier, 0, false)?;
         pgrx::info!("Stream table {}.{} refreshed (FULL)", schema, table_name);
     } else {
         // No upstream changes — store frontier but preserve data_timestamp.
@@ -1198,6 +1199,7 @@ fn execute_manual_differential_refresh(
             st.pgt_id,
             &new_frontier,
             rows_inserted,
+            true,
         )?;
     } else {
         // No rows changed — store frontier to advance past processed WAL range,

@@ -722,6 +722,7 @@ pub fn execute_differential_refresh_with_tuning(
     tuning: &crate::catalog::RefreshRuntimeTuning,
 ) -> Result<(i64, i64), PgTrickleError> {
     crate::refresh::clear_last_cost_evidence();
+    crate::refresh::set_last_ann_churn_operations(None);
     set_effective_mode("DIFFERENTIAL");
     validate_differential_refresh_inputs(st, prev_frontier)?;
     crate::api::clear_distance_snapshot();
@@ -1285,6 +1286,7 @@ pub fn execute_differential_refresh_with_tuning(
             })?;
             crate::refresh::drop_owner_temp_table(st, &format!("__pgt_recon_{}", st.pgt_id));
             if reconciled > 0 {
+                crate::refresh::set_last_ann_churn_operations(Some(reconciled));
                 pgrx::debug1!(
                     "[pg_trickle] graph no-data reconciliation for {}.{}: {} rows",
                     schema,
@@ -2565,7 +2567,12 @@ pub fn execute_differential_refresh_with_tuning(
     // path returns early before capture_delta_to_st_buffer() runs,
     // so downstream STs would never see change buffer rows and their
     // data_timestamp would never advance — breaking ST-on-ST cascades.
-    if is_append_only && !has_downstream_st_consumers(st.pgt_id) && !bounded_distance_snapshot {
+    // Partitioned storage may lack a parent-level unique row-id constraint.
+    if is_append_only
+        && st.st_partition_key.is_none()
+        && !has_downstream_st_consumers(st.pgt_id)
+        && !bounded_distance_snapshot
+    {
         let non_monotonic = has_non_monotonic_cte(&resolved.merge_sql);
         let keep_append_only_hint =
             crate::refresh::classify_case_in_list_aggregate_drift(&st.defining_query);
@@ -2661,6 +2668,9 @@ pub fn execute_differential_refresh_with_tuning(
 
             // G12-ERM-1: Record the effective mode for this execution path.
             set_effective_mode("APPEND_ONLY");
+            crate::refresh::set_last_ann_churn_operations(
+                (!user_triggers_active).then_some(rows_inserted),
+            );
 
             // G14-MDED: Count this as a differential refresh. The normal
             // record_diff_refresh() call is below the append-only early return,
@@ -4016,6 +4026,13 @@ pub fn execute_differential_refresh_with_tuning(
     }
     // Preserve the legacy work counter independently of proven empty output capture.
     let effective_count = (merge_count as i64).max(1);
+    crate::refresh::set_last_ann_churn_operations(if user_triggers_active {
+        None
+    } else {
+        i64::try_from(merge_count)
+            .ok()
+            .and_then(|count| count.checked_add(phantom_cleanup_count))
+    });
 
     let mut cost_evidence =
         crate::refresh::build_differential_cost_evidence(total_change_count, effective_count);

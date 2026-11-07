@@ -743,6 +743,9 @@ async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
         .expect("refresh after upgrade");
     let epoch: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_stream'").fetch_one(&mut *conn).await.expect("read final epoch");
     assert!(epoch > 0);
+    let operations: i64 = sqlx::query_scalar("SELECT ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_stream'")
+        .fetch_one(&mut *conn).await.expect("read upgraded churn");
+    assert!(operations > 0);
     sqlx::query("INSERT INTO upgrade_epoch_immediate_source VALUES (2)")
         .execute(&mut *conn)
         .await

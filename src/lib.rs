@@ -262,6 +262,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     -- A conservative completion watermark, independent of the resettable churn counter.
     -- NULL means the counter overflowed and must not be used for coverage claims.
     ann_refresh_epoch BIGINT DEFAULT 0 CHECK (ann_refresh_epoch IS NULL OR ann_refresh_epoch >= 0),
+    ann_churn_generation BIGINT DEFAULT 0 CHECK (ann_churn_generation IS NULL OR ann_churn_generation >= 0),
+    ann_churn_operations BIGINT DEFAULT 0 CHECK (ann_churn_operations IS NULL OR ann_churn_operations >= 0),
     -- v0.36.0: column lineage metadata (F12)
     column_lineage  JSONB,
     -- v0.59.0 PERF-2: hash of defining_query to skip recomputation on every refresh
@@ -888,6 +890,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ann_maintenance_requests (
     claim_backend_start TIMESTAMPTZ,
     claim_role OID,
     claim_epoch BIGINT,
+    claim_churn_generation BIGINT,
+    claim_churn_operations BIGINT,
     pending_during_run BOOLEAN NOT NULL DEFAULT FALSE,
     cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
     last_error TEXT,
@@ -909,6 +913,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ann_maintenance_claims (
     claim_backend_start TIMESTAMPTZ,
     next_eligible_at TIMESTAMPTZ,
     reported_covered_epoch BIGINT CHECK (reported_covered_epoch IS NULL OR reported_covered_epoch >= 0),
+    reported_churn_generation BIGINT,
+    reported_churn_operations BIGINT,
     reported_covered_at TIMESTAMPTZ,
     consecutive_failures SMALLINT NOT NULL DEFAULT 0 CHECK (consecutive_failures BETWEEN 0 AND 6),
     PRIMARY KEY (pgt_id, leaf_relid, index_key)

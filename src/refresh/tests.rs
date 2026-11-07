@@ -178,6 +178,7 @@ fn test_reset_execution_state_discards_failed_refresh_output() {
     set_merge_strategy("merge");
     set_last_cost_evidence("stale".to_string());
     set_last_rows_updated(7);
+    set_last_ann_churn_operations(Some(9));
     set_last_temp_blks_written(11);
 
     reset_execution_state();
@@ -186,6 +187,7 @@ fn test_reset_execution_state_discards_failed_refresh_output() {
     assert_eq!(take_merge_strategy(), "");
     assert_eq!(take_last_cost_evidence(), None);
     assert_eq!(take_last_rows_updated(), 0);
+    assert_eq!(take_last_ann_churn_operations(), None);
     assert_eq!(take_last_temp_blks_written(), -1);
 }
 
