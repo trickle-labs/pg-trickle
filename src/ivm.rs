@@ -1183,6 +1183,7 @@ fn apply_topk_micro_refresh(st: &crate::catalog::StreamTableMeta) -> Result<(), 
     }
     result?;
 
+    crate::catalog::StreamTableMeta::advance_ann_refresh_epoch(st.pgt_id)?;
     pgrx::debug1!(
         "[pg_trickle] TopK micro-refresh applied for pgt_id={}",
         st.pgt_id,
@@ -1470,6 +1471,7 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
         })?;
     }
 
+    StreamTableMeta::advance_ann_refresh_epoch(pgt_id)?;
     pgrx::log!("[pg_trickle] IVM TRUNCATE handled for pgt_id={}", pgt_id,);
 
     Ok(())

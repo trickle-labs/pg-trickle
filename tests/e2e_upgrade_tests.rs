@@ -689,6 +689,11 @@ async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
         "DIFFERENTIAL",
     )
     .await;
+    db.execute("CREATE TABLE upgrade_epoch_immediate_source (id int PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO upgrade_epoch_immediate_source VALUES (1)")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table('upgrade_epoch_immediate', 'SELECT id FROM upgrade_epoch_immediate_source', NULL, 'IMMEDIATE')").await;
     let mut conn = db.pool.acquire().await.expect("acquire upgrade connection");
     sqlx::query("BEGIN")
         .execute(&mut *conn)
@@ -712,6 +717,10 @@ async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
         .execute(&mut *conn)
         .await
         .expect("roll back upgrade");
+    sqlx::query("TRUNCATE upgrade_epoch_immediate_source")
+        .execute(&mut *conn)
+        .await
+        .expect("immediate truncate works with the old catalog after rollback");
     sqlx::query("INSERT INTO upgrade_epoch_source VALUES (2)")
         .execute(&mut *conn)
         .await
@@ -734,6 +743,19 @@ async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
         .expect("refresh after upgrade");
     let epoch: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_stream'").fetch_one(&mut *conn).await.expect("read final epoch");
     assert!(epoch > 0);
+    sqlx::query("INSERT INTO upgrade_epoch_immediate_source VALUES (2)")
+        .execute(&mut *conn)
+        .await
+        .expect("insert after upgrade");
+    let before: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_immediate'")
+        .fetch_one(&mut *conn).await.expect("read immediate epoch");
+    sqlx::query("TRUNCATE upgrade_epoch_immediate_source")
+        .execute(&mut *conn)
+        .await
+        .expect("truncate after upgrade");
+    let after: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_immediate'")
+        .fetch_one(&mut *conn).await.expect("read epoch after truncate");
+    assert!(after > before);
 }
 
 /// A tracked source for an IMMEDIATE stream table has no CDC buffer, while a
