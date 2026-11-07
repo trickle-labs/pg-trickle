@@ -2193,11 +2193,12 @@ pub(super) fn clear_caches() -> i64 {
     l2_count
 }
 
-/// VP-3 (v0.47.0): Vector status view — embedding lag, ANN age, drift percentage.
+/// VP-3 (v0.47.0): Refresh timestamp age and changed-row estimates.
 ///
 /// Returns one row per stream table that has a `post_refresh_action` other than
-/// 'none', or that has any ANN-relevant index on its storage table. Operators
-/// can use this to monitor the health of vector/embedding stream tables.
+/// 'none'. `embedding_lag` is the age of `data_timestamp`, not embedding
+/// generation freshness; `drift_pct` is changed rows divided by the estimated
+/// row count, not measured ANN quality or recall.
 #[pg_extern(schema = "pgtrickle", name = "vector_status")]
 #[allow(clippy::type_complexity)]
 pub(super) fn vector_status() -> TableIterator<
