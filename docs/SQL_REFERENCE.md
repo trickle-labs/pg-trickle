@@ -4293,6 +4293,59 @@ See also: [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [FAQ.md](FAQ.md).
 
 ## Catalog Tables
 
+### pgtrickle.request_ann_maintenance_if_needed
+
+```sql
+pgtrickle.request_ann_maintenance_if_needed(
+    stream_table oid, index_oid oid, estimated_rows bigint,
+    estimate_generation bigint, estimate_operations bigint
+) → jsonb
+```
+
+Checks one authorized ANN index against the stream table's configured
+`reindex_drift_threshold` (or the global default) and records a durable
+request only when measured operations since reported coverage reach the
+threshold. The caller supplies a positive row estimate and the exact churn
+generation and operation count captured with that estimate. The function
+locks the stream metadata while it compares the watermark and records intent;
+it does not scan the corpus, run ANALYZE, or rebuild an index.
+The metadata row lock is held until the caller's transaction ends; use a short
+transaction and configure the caller's lock and statement timeouts.
+Its return `decision` is `requested`, `already_requested`, `already_running`,
+`below_threshold`, `cooldown`, `missing_baseline`, `unknown_work`,
+`stale_estimate`, `partitioned_unknown`, or `raced`. A `raced` decision means
+another session changed the request during the check; recheck it later.
+Requests made inside a transaction roll back with it. The function is revoked
+from `PUBLIC` and checks the same SELECT, schema USAGE and MAINTAIN privileges
+as `request_ann_maintenance`.
+
+The estimate and watermark must describe the same committed contents. For
+example, a table owner with `SELECT` on `pgtrickle.pgt_stream_tables` can block concurrent writes,
+run ANALYZE and capture the planner estimate and watermark together:
+
+```sql
+BEGIN;
+LOCK TABLE public.search_corpus IN SHARE ROW EXCLUSIVE MODE;
+ANALYZE public.search_corpus;
+SELECT c.reltuples::bigint AS estimated_rows,
+       s.ann_churn_generation, s.ann_churn_operations
+FROM pgtrickle.pgt_stream_tables s
+JOIN pg_catalog.pg_class c ON c.oid = s.pgt_relid
+WHERE s.pgt_relid = 'public.search_corpus'::regclass;
+COMMIT;
+```
+
+Pass those three returned values to the function. A different current
+watermark makes the estimate stale and prevents a request. An estimate of zero
+or less is rejected; missing or unmeasured coverage remains unknown. The
+caller is responsible for obtaining a trustworthy estimate and watermark;
+pairing an old estimate with a newer watermark defeats this check. ANALYZE and
+the explicit lock have a cost and are operator choices, not monitoring work
+performed by this API. The ratio is a whole-stream operation heuristic, not
+the number of distinct changed rows, the size of a partial index, or recall.
+Partitioned streams remain unknown until per-leaf accounting is available.
+A successful maintenance report is needed to establish the first baseline.
+
 ### pgtrickle.request_ann_maintenance
 
 ```sql

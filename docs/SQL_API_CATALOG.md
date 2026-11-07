@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**178 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**179 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -134,6 +134,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.reliability_counters()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.reliability_counters()`. |
 | `pgtrickle.repair_stream_table()` | `pgtrickle` | `text` | Steps performed (actions taken are summarized in the return text): 1. |
 | `pgtrickle.request_ann_maintenance()` | `pgtrickle` | `bigint` | Record one explicit ANN maintenance intent without executing a rebuild. |
+| `pgtrickle.request_ann_maintenance_if_needed()` | `pgtrickle` | `jsonb` | Request a rebuild only when a watermark-bound estimate crosses the threshold. |
 | `pgtrickle.request_output_delta_resnapshot()` | `pgtrickle` | `SetOf row` | Require a fresh baseline without deleting the durable log or cursor. |
 | `pgtrickle.reset_fuse()` | `pgtrickle` | `` | Returns nothing on success; raises an ERROR if the stream table does not exist or the fuse is not blown. |
 | `pgtrickle.restore_from_snapshot()` | `pgtrickle` | `` | The stream table must already be registered. |

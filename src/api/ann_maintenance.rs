@@ -8,14 +8,22 @@ use crate::error::PgTrickleError;
 #[pg_extern(schema = "pgtrickle", security_definer)]
 #[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub fn request_ann_maintenance(stream_table: pg_sys::Oid, index_oid: pg_sys::Oid) -> i64 {
-    request_ann_maintenance_impl(stream_table, index_oid)
+    request_ann_maintenance_impl(stream_table, index_oid, true)
+        .and_then(|request| request.ok_or_else(|| invalid_index(stream_table, index_oid)))
         .unwrap_or_else(|error| pgrx::error!("request_ann_maintenance: {error}"))
+}
+
+fn invalid_index(stream_table: pg_sys::Oid, index: pg_sys::Oid) -> PgTrickleError {
+    PgTrickleError::InvalidArgument(format!(
+        "index {index} is not a valid, authorized ANN leaf of stream table {stream_table}, or its recorded identity changed"
+    ))
 }
 
 fn request_ann_maintenance_impl(
     stream_table: pg_sys::Oid,
     index: pg_sys::Oid,
-) -> Result<i64, PgTrickleError> {
+    allow_pending: bool,
+) -> Result<Option<i64>, PgTrickleError> {
     let caller = super::helpers::outer_user_id();
     let request = Spi::connect_mut(|client| {
         let rows = client.update(
@@ -69,9 +77,10 @@ fn request_ann_maintenance_impl(
                AND pgtrickle.pgt_ann_maintenance_requests.root_relid = EXCLUDED.root_relid \
                AND pgtrickle.pgt_ann_maintenance_requests.leaf_relid = EXCLUDED.leaf_relid \
                AND pgtrickle.pgt_ann_maintenance_requests.index_definition = EXCLUDED.index_definition \
+               AND ($4 OR pgtrickle.pgt_ann_maintenance_requests.state NOT IN ('REQUESTED', 'RUNNING')) \
              RETURNING request_id",
             Some(1),
-            &[stream_table.into(), index.into(), caller.into()],
+            &[stream_table.into(), index.into(), caller.into(), allow_pending.into()],
         )?;
         if rows.is_empty() {
             Ok(None)
@@ -80,11 +89,123 @@ fn request_ann_maintenance_impl(
         }
     })
     .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
-    request.ok_or_else(|| {
-        PgTrickleError::InvalidArgument(format!(
-            "index {index} is not a valid, authorized ANN leaf of stream table {stream_table}, or its recorded identity changed"
-        ))
+    Ok(request)
+}
+
+/// Request a rebuild only when a watermark-bound estimate crosses the threshold.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+pub fn request_ann_maintenance_if_needed(
+    stream_table: pg_sys::Oid,
+    index_oid: pg_sys::Oid,
+    estimated_rows: i64,
+    estimate_generation: i64,
+    estimate_operations: i64,
+) -> pgrx::JsonB {
+    request_ann_maintenance_if_needed_impl(
+        stream_table,
+        index_oid,
+        estimated_rows,
+        estimate_generation,
+        estimate_operations,
+    )
+    .unwrap_or_else(|error| pgrx::error!("request_ann_maintenance_if_needed: {error}"))
+}
+
+fn request_ann_maintenance_if_needed_impl(
+    stream_table: pg_sys::Oid,
+    index: pg_sys::Oid,
+    estimated_rows: i64,
+    estimate_generation: i64,
+    estimate_operations: i64,
+) -> Result<pgrx::JsonB, PgTrickleError> {
+    if estimated_rows <= 0 || estimate_generation < 0 || estimate_operations < 0 {
+        return Err(PgTrickleError::InvalidArgument(
+            "provide a positive row estimate and nonnegative estimate watermark".into(),
+        ));
+    }
+    let caller = super::helpers::outer_user_id();
+    let threshold = crate::config::pg_trickle_reindex_drift_threshold();
+    let decision = Spi::connect_mut(|client| {
+        let rows = client.update(
+            "WITH RECURSIVE root AS MATERIALIZED (\
+               SELECT s.pgt_id, s.pgt_relid, s.st_partition_key, s.ann_churn_generation, \
+                 s.ann_churn_operations, COALESCE(s.reindex_drift_threshold, $7::float8) AS threshold, \
+                 c.relnamespace, c.relkind AS root_relkind \
+               FROM pgtrickle.pgt_stream_tables s \
+               JOIN pg_catalog.pg_class c ON c.oid = s.pgt_relid \
+               WHERE s.pgt_relid = $1 FOR UPDATE OF s\
+             ), storage(relid) AS (\
+               SELECT pgt_relid FROM root \
+               UNION ALL SELECT i.inhrelid FROM pg_catalog.pg_inherits i \
+                 JOIN storage parent ON parent.relid = i.inhparent\
+             ), candidate AS (\
+               SELECT root.*, leaf.oid AS leaf_oid, idx.oid AS index_oid, \
+                 pg_catalog.pg_relation_filenode(idx.oid) AS filenode, \
+                 pg_catalog.pg_get_indexdef(idx.oid) AS definition \
+               FROM root CROSS JOIN storage s \
+               JOIN pg_catalog.pg_class leaf ON leaf.oid = s.relid \
+               JOIN pg_catalog.pg_index i ON i.indrelid = leaf.oid \
+               JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid \
+               JOIN pg_catalog.pg_am am ON am.oid = idx.relam \
+               WHERE idx.oid = $2 AND idx.relkind = 'i' AND am.amname IN ('hnsw', 'ivfflat') \
+                 AND i.indisvalid AND i.indisready AND i.indislive \
+                 AND pg_catalog.pg_relation_filenode(idx.oid) IS NOT NULL \
+                 AND pg_catalog.has_schema_privilege($3, root.relnamespace, 'USAGE') \
+                 AND pg_catalog.has_table_privilege($3, root.pgt_relid, 'SELECT') \
+                 AND pg_catalog.has_schema_privilege($3, leaf.relnamespace, 'USAGE') \
+                 AND pg_catalog.has_table_privilege($3, leaf.oid, 'MAINTAIN')\
+             ) \
+             SELECT pg_catalog.jsonb_build_object(\
+               'decision', CASE \
+                 WHEN c.st_partition_key IS NOT NULL OR c.root_relkind = 'p' THEN 'partitioned_unknown' \
+                 WHEN g.reported_churn_generation IS NULL OR g.reported_churn_operations IS NULL \
+                   THEN 'missing_baseline' \
+                 WHEN c.ann_churn_generation IS NULL OR c.ann_churn_operations IS NULL \
+                   OR c.ann_churn_generation <> g.reported_churn_generation \
+                   OR c.ann_churn_operations < g.reported_churn_operations THEN 'unknown_work' \
+                 WHEN c.ann_churn_generation <> $4 OR c.ann_churn_operations <> $5 \
+                   THEN 'stale_estimate' \
+                 WHEN r.state IN ('REQUESTED', 'RUNNING') THEN 'already_requested' \
+                 WHEN g.claim_pid IS NOT NULL AND EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                   WHERE a.pid = g.claim_pid AND a.backend_start = g.claim_backend_start) \
+                   THEN 'already_running' \
+                 WHEN g.next_eligible_at > pg_catalog.clock_timestamp() THEN 'cooldown' \
+                 WHEN (c.ann_churn_operations - g.reported_churn_operations)::numeric \
+                   >= $6::numeric * c.threshold::numeric THEN 'threshold_met' \
+                 ELSE 'below_threshold' END, \
+               'request_id', r.request_id, 'threshold', c.threshold, \
+               'estimated_rows', $6::bigint, \
+               'known_operations', CASE WHEN c.st_partition_key IS NULL AND c.root_relkind <> 'p' \
+                 AND c.ann_churn_generation = g.reported_churn_generation \
+                 AND c.ann_churn_operations >= g.reported_churn_operations \
+                 THEN c.ann_churn_operations - g.reported_churn_operations END) \
+             FROM candidate c \
+             LEFT JOIN pgtrickle.pgt_ann_maintenance_claims g ON g.pgt_id = c.pgt_id \
+               AND g.leaf_relid = c.leaf_oid \
+               AND g.index_key = pg_catalog.sha256(pg_catalog.convert_to(c.definition, 'UTF8')) \
+             LEFT JOIN pgtrickle.pgt_ann_maintenance_requests r ON r.pgt_id = c.pgt_id \
+               AND r.index_relid = c.index_oid AND r.index_filenode = c.filenode \
+               AND r.index_definition = c.definition",
+            Some(1),
+            &[stream_table.into(), index.into(), caller.into(), estimate_generation.into(),
+              estimate_operations.into(), estimated_rows.into(), threshold.into()],
+        )?;
+        if rows.is_empty() { Ok(None) } else { rows.first().get::<pgrx::JsonB>(1) }
     })
+    .map_err(|error: pgrx::spi::SpiError| PgTrickleError::SpiError(error.to_string()))?
+    .ok_or_else(|| invalid_index(stream_table, index))?;
+    if decision.0["decision"] != "threshold_met" {
+        return Ok(decision);
+    }
+    let mut result = decision.0;
+    if let Some(request_id) = request_ann_maintenance_impl(stream_table, index, false)? {
+        result["decision"] = "requested".into();
+        result["request_id"] = request_id.into();
+    } else {
+        result["decision"] = "raced".into();
+    }
+    Ok(pgrx::JsonB(result))
 }
 
 /// Inspect a request while rechecking the caller's current privileges.
@@ -118,6 +239,8 @@ fn ann_maintenance_request_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickl
            'claim_churn_operations', r.claim_churn_operations, \
            'reported_churn_generation', g.reported_churn_generation, \
            'reported_churn_operations', g.reported_churn_operations, \
+           'current_churn_generation', s.ann_churn_generation, \
+           'current_churn_operations', s.ann_churn_operations, \
            'known_operations_since_reported_coverage', CASE \
              WHEN s.ann_churn_generation = g.reported_churn_generation \
                AND s.ann_churn_operations >= g.reported_churn_operations \

@@ -611,9 +611,16 @@ async fn test_upgrade_embedding_helpers_from_0109() {
             .expect("inspect upgraded coverage");
     assert_eq!(covered["reported_covered_epoch"], claim["claim_epoch"]);
     assert!(covered["reported_covered_epoch"].is_number());
+    let replacement: i64 = db.query_scalar("SELECT i.indexrelid::bigint FROM pg_index i JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid='upgrade_cosine'::regclass AND op.opcname='vector_cosine_ops' LIMIT 1").await;
+    let (generation, operations): (i64, i64) = sqlx::query_as("SELECT ann_churn_generation, ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_cosine'")
+        .fetch_one(&db.pool).await.expect("read upgraded estimate watermark");
+    let decision: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance_if_needed('upgrade_cosine'::regclass::oid, $1::bigint::oid, 10, $2, $3)")
+        .bind(replacement).bind(generation).bind(operations).fetch_one(&db.pool).await.expect("check upgraded threshold");
+    assert_eq!(decision["decision"], "cooldown");
     db.execute("CREATE ROLE upgrade_ann_unprivileged NOLOGIN")
         .await;
     let private: bool = db.query_scalar("SELECT NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.request_ann_maintenance(oid,oid)', 'EXECUTE') \
+        AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.request_ann_maintenance_if_needed(oid,oid,bigint,bigint,bigint)', 'EXECUTE') \
         AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.ann_maintenance_request(bigint)', 'EXECUTE') \
         AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.cancel_ann_maintenance(bigint)', 'EXECUTE') \
         AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.claim_ann_maintenance(bigint)', 'EXECUTE') \

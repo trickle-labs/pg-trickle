@@ -160,6 +160,315 @@ async fn test_ann_worker_limits_concurrent_requests_per_database() {
 }
 
 #[tokio::test]
+async fn test_ann_threshold_requests_deduplicate_and_reject_stale_estimates() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_threshold_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_threshold_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "ann_threshold_stream",
+        "SELECT id, embedding FROM ann_threshold_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_threshold_idx ON ann_threshold_stream USING hnsw (embedding vector_l2_ops)").await;
+    db.execute("SELECT pgtrickle.alter_stream_table('ann_threshold_stream', reindex_drift_threshold => 0.20)").await;
+    let watermark_sql = "SELECT ann_churn_generation, ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_threshold_stream'";
+    let policy_sql = "SELECT pgtrickle.request_ann_maintenance_if_needed('ann_threshold_stream'::regclass::oid, 'ann_threshold_idx'::regclass::oid, 10, $1, $2)";
+    let (generation, operations): (i64, i64) = sqlx::query_as(watermark_sql)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read estimate watermark");
+    let initial: serde_json::Value = sqlx::query_scalar(policy_sql)
+        .bind(generation)
+        .bind(operations)
+        .fetch_one(&db.pool)
+        .await
+        .expect("inspect missing baseline");
+    assert_eq!(initial["decision"], "missing_baseline");
+    let invalid = db.try_execute("SELECT pgtrickle.request_ann_maintenance_if_needed('ann_threshold_stream'::regclass::oid, 'ann_threshold_idx'::regclass::oid, 0, 0, 0)").await;
+    assert!(
+        invalid.is_err(),
+        "an empty or missing estimate is not healthy"
+    );
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_threshold_stream'::regclass::oid, 'ann_threshold_idx'::regclass::oid)").await;
+    let mut worker = db.pool.acquire().await.expect("worker session");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("claim baseline");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("report baseline");
+    let mut estimate_tx = db.pool.begin().await.expect("begin estimate");
+    sqlx::query("LOCK TABLE ann_threshold_stream IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *estimate_tx)
+        .await
+        .expect("lock estimate target");
+    sqlx::query("ANALYZE ann_threshold_stream")
+        .execute(&mut *estimate_tx)
+        .await
+        .expect("analyze estimate target");
+    let (estimated, actual_generation, actual_operations): (i64, i64, i64) = sqlx::query_as(
+        "SELECT c.reltuples::bigint, s.ann_churn_generation, s.ann_churn_operations FROM pgtrickle.pgt_stream_tables s JOIN pg_catalog.pg_class c ON c.oid=s.pgt_relid WHERE s.pgt_name='ann_threshold_stream'",
+    ).fetch_one(&mut *estimate_tx).await.expect("capture estimate and watermark");
+    assert!(estimated > 0);
+    assert_eq!(
+        (actual_generation, actual_operations),
+        (generation, operations)
+    );
+    estimate_tx.commit().await.expect("commit estimate");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    let below: serde_json::Value = sqlx::query_scalar(policy_sql)
+        .bind(generation)
+        .bind(operations)
+        .fetch_one(&db.pool)
+        .await
+        .expect("check below threshold");
+    assert_eq!(below["decision"], "below_threshold");
+    db.execute("CREATE ROLE ann_threshold_operator NOLOGIN")
+        .await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO ann_threshold_operator")
+        .await;
+    db.execute("GRANT EXECUTE ON FUNCTION pgtrickle.request_ann_maintenance_if_needed(oid,oid,bigint,bigint,bigint) TO ann_threshold_operator").await;
+    db.execute("GRANT SELECT ON ann_threshold_stream TO ann_threshold_operator")
+        .await;
+    let mut restricted = db.pool.begin().await.expect("begin restricted request");
+    sqlx::query("SET LOCAL ROLE ann_threshold_operator")
+        .execute(&mut *restricted)
+        .await
+        .expect("set restricted role");
+    let denied = sqlx::query_scalar::<_, serde_json::Value>(policy_sql)
+        .bind(generation)
+        .bind(operations)
+        .fetch_one(&mut *restricted)
+        .await;
+    assert!(
+        denied.is_err(),
+        "SELECT alone must not authorize threshold maintenance"
+    );
+    restricted.rollback().await.expect("end restricted request");
+    db.execute("GRANT MAINTAIN ON ann_threshold_stream TO ann_threshold_operator")
+        .await;
+    let mut permitted = db.pool.begin().await.expect("begin authorized request");
+    sqlx::query("SET LOCAL ROLE ann_threshold_operator")
+        .execute(&mut *permitted)
+        .await
+        .expect("set authorized role");
+    let allowed: serde_json::Value = sqlx::query_scalar(policy_sql)
+        .bind(generation)
+        .bind(operations)
+        .fetch_one(&mut *permitted)
+        .await
+        .expect("check authorized threshold");
+    assert_eq!(allowed["decision"], "below_threshold");
+    permitted.rollback().await.expect("end authorized request");
+    let mut blocker = db.pool.begin().await.expect("begin watermark race");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("read blocker pid");
+    sqlx::query("UPDATE pgtrickle.pgt_stream_tables SET ann_churn_operations = ann_churn_operations + 1 WHERE pgt_name='ann_threshold_stream'")
+        .execute(&mut *blocker).await.expect("hold uncommitted watermark");
+    let pool = db.pool.clone();
+    let check = tokio::spawn(async move {
+        let mut conn = pool.acquire().await.expect("acquire threshold session");
+        sqlx::query("SET application_name = 'ann_threshold_race'")
+            .execute(&mut *conn)
+            .await
+            .expect("name threshold session");
+        sqlx::query_scalar::<_, serde_json::Value>(policy_sql)
+            .bind(generation)
+            .bind(operations)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("check concurrent watermark")
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE application_name='ann_threshold_race' AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)))")
+                .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect threshold wait");
+            if waiting { break; }
+            assert!(!check.is_finished(), "threshold check exited before waiting");
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("threshold check did not wait for watermark");
+    blocker.commit().await.expect("commit watermark");
+    let raced = check.await.expect("join threshold check");
+    assert_eq!(raced["decision"], "stale_estimate");
+    db.execute("INSERT INTO ann_threshold_source VALUES (2, '[0,1,0]'), (3, '[0,0,1]')")
+        .await;
+    db.refresh_st("ann_threshold_stream").await;
+    let stale: serde_json::Value = sqlx::query_scalar(policy_sql)
+        .bind(generation)
+        .bind(operations)
+        .fetch_one(&db.pool)
+        .await
+        .expect("check stale estimate");
+    assert_eq!(stale["decision"], "stale_estimate");
+    let (generation, operations): (i64, i64) = sqlx::query_as(watermark_sql)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read new estimate watermark");
+    let mut tx = db.pool.begin().await.expect("begin request rollback");
+    let rolled_back: serde_json::Value = sqlx::query_scalar(policy_sql)
+        .bind(generation)
+        .bind(operations)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("request inside transaction");
+    assert_eq!(rolled_back["decision"], "requested");
+    tx.rollback().await.expect("roll back request");
+    let previous: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect rolled-back request");
+    assert_eq!(previous["state"], "SUCCEEDED");
+    let mut callers = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let pool = db.pool.clone();
+        callers.spawn(async move {
+            sqlx::query_scalar::<_, serde_json::Value>(policy_sql)
+                .bind(generation)
+                .bind(operations)
+                .fetch_one(&pool)
+                .await
+                .expect("request threshold maintenance")
+        });
+    }
+    let mut newly_requested = 0;
+    while let Some(result) = callers.join_next().await {
+        let decision = result.expect("join threshold caller");
+        assert_eq!(decision["request_id"].as_i64(), Some(request));
+        match decision["decision"].as_str() {
+            Some("requested") => newly_requested += 1,
+            Some("already_requested" | "raced") => {}
+            other => panic!("unexpected threshold decision: {other:?}"),
+        }
+    }
+    assert_eq!(
+        newly_requested, 1,
+        "concurrent checks must create one request"
+    );
+    let duplicate: serde_json::Value = sqlx::query_scalar(policy_sql)
+        .bind(generation)
+        .bind(operations)
+        .fetch_one(&db.pool)
+        .await
+        .expect("deduplicate request");
+    assert_eq!(duplicate["decision"], "already_requested");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("claim threshold request");
+    let running: serde_json::Value = sqlx::query_scalar(policy_sql)
+        .bind(generation)
+        .bind(operations)
+        .fetch_one(&db.pool)
+        .await
+        .expect("deduplicate running request");
+    assert_eq!(running["decision"], "already_requested");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect running request");
+    assert_eq!(status["pending_during_run"], false);
+    db.execute("INSERT INTO ann_threshold_source VALUES (4, '[1,1,0]')")
+        .await;
+    db.refresh_st("ann_threshold_stream").await;
+    let (during_generation, during_operations): (i64, i64) = sqlx::query_as(watermark_sql)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read watermark during run");
+    let during: serde_json::Value = sqlx::query_scalar(policy_sql)
+        .bind(during_generation)
+        .bind(during_operations)
+        .fetch_one(&db.pool)
+        .await
+        .expect("check while running");
+    assert_eq!(during["decision"], "already_requested");
+    let running_status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect running deduplication");
+    assert_eq!(running_status["pending_during_run"], false);
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("finish threshold request");
+    let covered: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect covered work");
+    assert_eq!(
+        covered["known_operations_since_reported_coverage"].as_i64(),
+        Some(1)
+    );
+    let (generation, operations): (i64, i64) = sqlx::query_as(watermark_sql)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read later watermark");
+    let cooldown: serde_json::Value = sqlx::query_scalar(policy_sql)
+        .bind(generation)
+        .bind(operations)
+        .fetch_one(&db.pool)
+        .await
+        .expect("check cooldown");
+    assert_eq!(cooldown["decision"], "cooldown");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    let before_index: i64 = db
+        .query_scalar("SELECT 'ann_threshold_idx'::regclass::oid::bigint")
+        .await;
+    let next: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance_if_needed('ann_threshold_stream'::regclass::oid, 'ann_threshold_idx'::regclass::oid, 5, $1, $2)")
+        .bind(generation).bind(operations).fetch_one(&db.pool).await.expect("request later threshold");
+    assert_eq!(next["decision"], "requested");
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let output = ann_worker_command(
+        &db,
+        &database,
+        "postgres",
+        next["request_id"].as_i64().expect("request id"),
+        "30s",
+    )
+    .output()
+    .await
+    .expect("run threshold worker");
+    assert!(
+        output.status.success(),
+        "threshold worker failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after_index: i64 = db
+        .query_scalar("SELECT 'ann_threshold_idx'::regclass::oid::bigint")
+        .await;
+    assert_ne!(
+        before_index, after_index,
+        "worker must complete concurrent reindex"
+    );
+    db.assert_st_matches_query(
+        "ann_threshold_stream",
+        "SELECT id, embedding FROM ann_threshold_source",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_ann_churn_reports_unknown_for_partitioned_refresh() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
@@ -190,6 +499,10 @@ async fn test_ann_churn_reports_unknown_for_partitioned_refresh() {
         .execute(&mut *worker)
         .await
         .expect("report baseline");
+    let partition_decision: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance_if_needed('ann_churn_partition_stream'::regclass::oid, $1::bigint::oid, 10, 0, 0)")
+        .bind(leaf).fetch_one(&db.pool).await.expect("check partition policy");
+    assert_eq!(partition_decision["decision"], "partitioned_unknown");
+    assert!(partition_decision["known_operations"].is_null());
     db.execute("INSERT INTO ann_churn_partition_source VALUES (2, '[0,1,0]')")
         .await;
     db.refresh_st("ann_churn_partition_stream").await;
@@ -295,6 +608,11 @@ async fn test_ann_churn_reports_unknown_after_immediate_changes() {
             .await
             .expect("inspect immediate change");
     assert!(status["known_operations_since_reported_coverage"].is_null());
+    let unknown: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance_if_needed('ann_churn_immediate_stream'::regclass::oid, 'ann_churn_immediate_idx'::regclass::oid, 10, $1, $2)")
+        .bind(status["current_churn_generation"].as_i64().expect("current generation"))
+        .bind(status["current_churn_operations"].as_i64().expect("current operations"))
+        .fetch_one(&db.pool).await.expect("check unknown immediate work");
+    assert_eq!(unknown["decision"], "unknown_work");
     db.assert_st_matches_query(
         "ann_churn_immediate_stream",
         "SELECT id, embedding FROM ann_churn_immediate_source",

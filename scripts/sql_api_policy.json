@@ -1283,6 +1283,13 @@
       "class": "owner_lifecycle",
       "execution_policy": "capability_specific"
     },
+    "pgtrickle.request_ann_maintenance_if_needed(oid, oid, bigint, bigint, bigint)": {
+      "schema": "pgtrickle",
+      "name": "request_ann_maintenance_if_needed",
+      "identity_arguments": "oid, oid, bigint, bigint, bigint",
+      "class": "owner_lifecycle",
+      "execution_policy": "capability_specific"
+    },
     "pgtrickle.register_output_delta_consumer(oid, text, bytea, text)": {
       "schema": "pgtrickle",
       "name": "register_output_delta_consumer",
