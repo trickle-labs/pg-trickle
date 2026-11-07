@@ -1162,6 +1162,396 @@ async fn test_distance_subscription_notifies_only_membership_crossings() {
 }
 
 #[tokio::test]
+async fn test_distance_subscription_alter_query_reports_committed_crossings() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_alter_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO alert_alter_src VALUES (1, '[1,0,0]'), (2, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "alert_alter_st",
+        "SELECT id, embedding FROM alert_alter_src WHERE id = 1",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.subscribe_distance('alert_alter_st', 'alter_crossings', 'embedding', '[1,0,0]', '<->', 0.5)").await;
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    listener.listen("alter_crossings").await.expect("listen");
+
+    db.execute("SELECT pgtrickle.alter_stream_table('alert_alter_st', query => $$SELECT id, embedding FROM alert_alter_src WHERE id = 2$$)").await;
+    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("receive ALTER event")
+        .expect("listener event");
+    let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+    assert_eq!(payload["entered"], 1);
+    assert_eq!(payload["exited"], 1);
+    let refresh_id = payload["refresh_id"].as_i64().expect("refresh id");
+    let recorded: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE h.refresh_id = $1 AND s.pgt_name = 'alert_alter_st' AND h.action = 'FULL' AND h.status = 'COMPLETED')")
+        .bind(refresh_id).fetch_one(&db.pool).await.expect("refresh history");
+    assert!(recorded);
+
+    db.execute("SELECT pgtrickle.alter_stream_table('alert_alter_st', query => $$SELECT id, embedding FROM alert_alter_src WHERE id = 2$$)").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.recv())
+            .await
+            .is_err()
+    );
+
+    let mut tx = db.pool.begin().await.expect("begin rollback test");
+    sqlx::query("SELECT pgtrickle.alter_stream_table('alert_alter_st', query => $$SELECT id, embedding FROM alert_alter_src WHERE id = 1$$)")
+        .execute(&mut *tx).await.expect("alter before rollback");
+    tx.rollback().await.expect("rollback ALTER");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.recv())
+            .await
+            .is_err()
+    );
+    let id: i32 = db.query_scalar("SELECT id FROM alert_alter_st").await;
+    assert_eq!(id, 2);
+    let latest: i64 = db.query_scalar("SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'alert_alter_st')").await;
+    assert_eq!(
+        latest, refresh_id,
+        "rolled-back ALTER must not leave history"
+    );
+
+    db.execute("UPDATE pgtrickle.pgt_distance_subscriptions SET query_vector = 'invalid' WHERE channel = 'alter_crossings'").await;
+    db.execute("SELECT pgtrickle.alter_stream_table('alert_alter_st', query => $$SELECT id, embedding FROM alert_alter_src WHERE id = 1$$)").await;
+    let id: i32 = db.query_scalar("SELECT id FROM alert_alter_st").await;
+    assert_eq!(id, 1, "notification failure must not roll back ALTER");
+}
+
+#[tokio::test]
+async fn test_distance_subscription_partition_rebuild_reports_crossings() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_partition_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO alert_partition_src VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    db.create_st(
+        "alert_partition_st",
+        "SELECT id, embedding FROM alert_partition_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.subscribe_distance('alert_partition_st', 'partition_crossings', 'embedding', '[1,0,0]', '<->', 0.5)").await;
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    listener
+        .listen("partition_crossings")
+        .await
+        .expect("listen");
+    db.execute("UPDATE alert_partition_src SET embedding = CASE id WHEN 1 THEN '[0,1,0]'::vector ELSE '[1,0,0]'::vector END").await;
+    db.execute(
+        "SELECT pgtrickle.alter_stream_table('alert_partition_st', partition_by => 'HASH:id:2')",
+    )
+    .await;
+    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("receive partition rebuild event")
+        .expect("listener event");
+    let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+    assert_eq!(payload["entered"], 1);
+    assert_eq!(payload["exited"], 1);
+    let refresh_id = payload["refresh_id"].as_i64().expect("refresh id");
+    let recorded: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE h.refresh_id = $1 AND s.pgt_name = 'alert_partition_st' AND h.action = 'FULL' AND h.status = 'COMPLETED')").bind(refresh_id).fetch_one(&db.pool).await.expect("refresh history");
+    assert!(recorded);
+
+    let mut tx = db.pool.begin().await.expect("begin rollback test");
+    sqlx::query("UPDATE alert_partition_src SET embedding = '[1,0,0]' WHERE id = 1")
+        .execute(&mut *tx)
+        .await
+        .expect("update before rollback");
+    sqlx::query("SELECT pgtrickle.alter_stream_table('alert_partition_st', partition_by => '')")
+        .execute(&mut *tx)
+        .await
+        .expect("rebuild before rollback");
+    tx.rollback().await.expect("rollback partition rebuild");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.recv())
+            .await
+            .is_err()
+    );
+    let latest: i64 = db.query_scalar("SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'alert_partition_st')").await;
+    assert_eq!(
+        latest, refresh_id,
+        "rolled-back rebuild must not leave history"
+    );
+}
+
+#[tokio::test]
+async fn test_distance_subscription_mode_change_reports_crossings() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_mode_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO alert_mode_src VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "alert_mode_st",
+        "SELECT id, embedding FROM alert_mode_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.subscribe_distance('alert_mode_st', 'mode_crossings', 'embedding', '[1,0,0]', '<->', 0.5)").await;
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    listener.listen("mode_crossings").await.expect("listen");
+    db.execute("UPDATE alert_mode_src SET embedding = '[0,1,0]' WHERE id = 1")
+        .await;
+    db.execute("SELECT pgtrickle.alter_stream_table('alert_mode_st', refresh_mode => 'FULL')")
+        .await;
+    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("receive mode-change event")
+        .expect("listener event");
+    let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+    assert_eq!(payload["entered"], 0);
+    assert_eq!(payload["exited"], 1);
+    let refresh_id = payload["refresh_id"].as_i64().expect("refresh id");
+    let recorded: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE h.refresh_id = $1 AND s.pgt_name = 'alert_mode_st' AND h.action = 'FULL' AND h.status = 'COMPLETED')").bind(refresh_id).fetch_one(&db.pool).await.expect("refresh history");
+    assert!(recorded);
+
+    let mut tx = db.pool.begin().await.expect("begin rollback test");
+    sqlx::query("UPDATE alert_mode_src SET embedding = '[1,0,0]' WHERE id = 1")
+        .execute(&mut *tx)
+        .await
+        .expect("update before rollback");
+    sqlx::query(
+        "SELECT pgtrickle.alter_stream_table('alert_mode_st', refresh_mode => 'DIFFERENTIAL')",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("change mode before rollback");
+    tx.rollback().await.expect("rollback mode change");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.recv())
+            .await
+            .is_err()
+    );
+    let latest: i64 = db.query_scalar("SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'alert_mode_st')").await;
+    assert_eq!(
+        latest, refresh_id,
+        "rolled-back mode change must not leave history"
+    );
+}
+
+#[tokio::test]
+async fn test_distance_subscription_alter_query_notifies_parent_and_downstream() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_chain_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO alert_chain_src VALUES (1, '[1,0,0]'), (2, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "alert_chain_parent",
+        "SELECT id, embedding FROM alert_chain_src WHERE id = 1",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SELECT pgtrickle.create_stream_table('alert_chain_child', $$SELECT id, avg(embedding)::vector(3) AS embedding FROM alert_chain_parent GROUP BY id$$, '1h', 'DIFFERENTIAL')",
+        "RESET pg_trickle.enable_vector_agg",
+    ]).await;
+    db.execute("SELECT pgtrickle.subscribe_distance('alert_chain_parent', 'parent_crossings', 'embedding', '[1,0,0]', '<->', 0.5)").await;
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    listener
+        .listen("parent_crossings")
+        .await
+        .expect("listen to parent");
+    listener
+        .listen("child_crossings")
+        .await
+        .expect("listen to child");
+    let mut registration_tx = db.pool.begin().await.expect("begin registration");
+    sqlx::query("SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'alert_chain_child' FOR UPDATE")
+        .execute(&mut *registration_tx).await.expect("lock child catalog row");
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *registration_tx)
+        .await
+        .expect("registration PID");
+    let pool = db.pool.clone();
+    let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+    let alter = tokio::spawn(async move {
+        let mut conn = pool.acquire().await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *conn)
+            .await?;
+        let _ = pid_sender.send(pid);
+        sqlx::query("SELECT pgtrickle.alter_stream_table('alert_chain_parent', query => $$SELECT id, embedding FROM alert_chain_src WHERE id = 2$$)").execute(&mut *conn).await
+    });
+    let alter_pid = tokio::time::timeout(Duration::from_secs(10), pid_receiver)
+        .await
+        .expect("ALTER PID timeout")
+        .expect("ALTER PID");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let blocked: bool =
+                sqlx::query_scalar("SELECT $1 = ANY(pg_catalog.pg_blocking_pids($2))")
+                    .bind(blocker)
+                    .bind(alter_pid)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect ALTER lock");
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("ALTER must wait for downstream registration");
+    sqlx::query("SELECT pgtrickle.subscribe_distance('alert_chain_child', 'child_crossings', 'embedding', '[1,0,0]', '<->', 0.5)")
+        .execute(&mut *registration_tx).await.expect("register child subscription");
+    registration_tx
+        .commit()
+        .await
+        .expect("commit child subscription");
+    tokio::time::timeout(Duration::from_secs(30), alter)
+        .await
+        .expect("ALTER completes")
+        .expect("ALTER task")
+        .expect("ALTER succeeds");
+    let child_records: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'alert_chain_child' AND h.action = 'FULL' AND h.initiated_by = 'MANUAL' AND h.status = 'COMPLETED'").await;
+    assert_eq!(
+        child_records, 1,
+        "downstream rebuild must have notification history"
+    );
+    let child_ids: Vec<i32> = sqlx::query_scalar("SELECT id FROM alert_chain_child ORDER BY id")
+        .fetch_all(&db.pool)
+        .await
+        .expect("read downstream");
+    assert_eq!(
+        child_ids,
+        vec![2],
+        "downstream rebuild must contain replacement rows"
+    );
+    let mut channels = std::collections::BTreeSet::new();
+    for _ in 0..2 {
+        let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+            .await
+            .unwrap_or_else(|_| panic!("missing chain event; received {channels:?}"))
+            .expect("listener event");
+        let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+        assert_eq!(payload["entered"], 1);
+        assert_eq!(payload["exited"], 1);
+        let name = match event.channel() {
+            "parent_crossings" => "alert_chain_parent",
+            "child_crossings" => "alert_chain_child",
+            other => panic!("unexpected channel {other}"),
+        };
+        let recorded: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE h.refresh_id = $1 AND s.pgt_name = $2 AND h.status = 'COMPLETED')")
+            .bind(payload["refresh_id"].as_i64().expect("refresh id")).bind(name).fetch_one(&db.pool).await.expect("refresh history");
+        assert!(recorded);
+        channels.insert(event.channel().to_string());
+    }
+    assert_eq!(
+        channels,
+        [
+            "child_crossings".to_string(),
+            "parent_crossings".to_string()
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+
+#[tokio::test]
+async fn test_distance_subscription_failed_alter_retry_restores_snapshot_context() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE alert_retry_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO alert_retry_src VALUES (1, '[1,0,0]'), (2, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "alert_retry_st",
+        "SELECT id, embedding FROM alert_retry_src WHERE id = 1",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.subscribe_distance('alert_retry_st', 'retry_crossings', 'embedding', '[1,0,0]', '<->', 0.5)").await;
+    db.execute("CREATE FUNCTION public.fail_alert_alter() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.pgt_name = 'alert_retry_st' AND NEW.status = 'SUSPENDED' AND current_setting('test.fail_alert_alter', true) = 'on' THEN RAISE EXCEPTION 'injected ALTER failure'; END IF; RETURN NEW; END $$").await;
+    db.execute("CREATE TRIGGER fail_alert_alter BEFORE UPDATE ON pgtrickle.pgt_stream_tables FOR EACH ROW EXECUTE FUNCTION public.fail_alert_alter()").await;
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    listener.listen("retry_crossings").await.expect("listen");
+    let mut conn = db.pool.acquire().await.expect("acquire connection");
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin");
+    sqlx::query("SAVEPOINT before_failed_alter")
+        .execute(&mut *conn)
+        .await
+        .expect("savepoint");
+    sqlx::query("SET LOCAL test.fail_alert_alter = 'on'")
+        .execute(&mut *conn)
+        .await
+        .expect("enable failure");
+    let alter = "SELECT pgtrickle.alter_stream_table('alert_retry_st', query => $$SELECT id, embedding FROM alert_retry_src WHERE id = 2$$)";
+    let error = sqlx::query(alter)
+        .execute(&mut *conn)
+        .await
+        .expect_err("injected ALTER must fail");
+    assert!(error.to_string().contains("injected ALTER failure"));
+    sqlx::query("ROLLBACK TO SAVEPOINT before_failed_alter")
+        .execute(&mut *conn)
+        .await
+        .expect("rollback failed ALTER");
+    sqlx::query("SET LOCAL test.fail_alert_alter = 'off'")
+        .execute(&mut *conn)
+        .await
+        .expect("disable failure");
+    sqlx::query(alter)
+        .execute(&mut *conn)
+        .await
+        .expect("retry ALTER");
+    sqlx::query("COMMIT")
+        .execute(&mut *conn)
+        .await
+        .expect("commit retry");
+    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("receive retry event")
+        .expect("listener event");
+    let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+    assert_eq!(payload["entered"], 1);
+    assert_eq!(payload["exited"], 1);
+}
+
+#[tokio::test]
 async fn test_distance_subscription_small_delta_snapshots_only_affected_rows() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

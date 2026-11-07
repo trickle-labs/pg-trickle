@@ -3,7 +3,9 @@
 // All shared helpers, types, and utilities are in api/mod.rs (use super::*).
 
 use super::publication;
-use super::refresh_ops::execute_manual_full_refresh;
+use super::refresh_ops::{
+    execute_manual_full_refresh, execute_manual_full_refresh_with_distance_snapshot,
+};
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -624,7 +626,12 @@ fn atomic_swap_shadow_table(
             "shadow swap identity changed for {schema}.{table_name}"
         )));
     }
-    let downstreams = StDependency::get_downstream_pgt_ids(old_relid)?
+    let mut downstream_ids = StDependency::get_downstream_pgt_ids(old_relid)?;
+    downstream_ids.sort_unstable();
+    for downstream_id in &downstream_ids {
+        lock_alter_target(*downstream_id)?;
+    }
+    let downstreams = downstream_ids
         .into_iter()
         .map(|downstream_id| {
             StreamTableMeta::get_by_id(downstream_id)?.ok_or_else(|| {
@@ -742,12 +749,14 @@ fn atomic_swap_shadow_table(
             })
             .map(|dep| dep.source_relid)
             .collect::<Vec<_>>();
-        execute_manual_full_refresh(
+        let distance_snapshot = LifecycleDistanceSnapshot::begin(&downstream);
+        let (rows_inserted, _) = execute_manual_full_refresh_with_distance_snapshot(
             &downstream,
             &downstream.pgt_schema,
             &downstream.pgt_name,
             &source_oids,
         )?;
+        distance_snapshot.finish(&downstream, rows_inserted);
     }
     Ok(())
 }
@@ -965,6 +974,8 @@ fn alter_stream_table_query(
     source_oids.sort_unstable_by_key(|oid| oid.to_u32());
     source_oids.dedup();
     cdc::lock_source_relations(&source_oids)?;
+
+    let distance_snapshot = LifecycleDistanceSnapshot::begin(&st);
 
     // ── Phase 1: Suspend ──
     StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended)?;
@@ -1283,7 +1294,8 @@ fn alter_stream_table_query(
     // Re-load ST with updated metadata for the refresh. The catalog points to
     // the shadow OID, so the target name must also be the private shadow.
     let updated_st = StreamTableMeta::get_by_name(schema, table_name)?;
-    execute_manual_full_refresh(&updated_st, schema, &shadow_name, &source_oids)?;
+    let (rows_inserted, _) =
+        execute_manual_full_refresh(&updated_st, schema, &shadow_name, &source_oids)?;
 
     atomic_swap_shadow_table(
         schema,
@@ -1302,6 +1314,9 @@ fn alter_stream_table_query(
         &[st.pgt_id.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    let updated_st = StreamTableMeta::get_by_name(schema, table_name)?;
+    distance_snapshot.finish(&updated_st, rows_inserted);
 
     // ERR-1f: Clear any previous error state now that the query has been fixed
     // and the refresh succeeded. This ensures alter_stream_table with a fixed
@@ -1362,6 +1377,11 @@ fn alter_stream_table_partition_key(
     table_name: &str,
     new_partition_key: Option<&str>,
 ) -> Result<(), PgTrickleError> {
+    lock_alter_target(st.pgt_id)?;
+    let locked_st = StreamTableMeta::get_by_id(st.pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={}", st.pgt_id)))?;
+    let st = &locked_st;
+    check_stream_table_ownership(st.pgt_relid, schema, table_name)?;
     publication::ensure_storage_replacement_allowed(st)?;
 
     // Get current storage columns for validation.
@@ -1383,6 +1403,7 @@ fn alter_stream_table_partition_key(
     let (avg_aux, nonnull_aux) = crate::refresh::with_stream_owner(st, || {
         crate::dvm::query_aggregate_aux_columns(&st.defining_query)
     })?;
+    let distance_snapshot = LifecycleDistanceSnapshot::begin(st);
 
     // Detach pgt_relid so the sql_drop event trigger does not delete the
     // catalog row when we drop the old table.
@@ -1458,7 +1479,13 @@ fn alter_stream_table_partition_key(
         .filter(|d| d.source_type == "TABLE")
         .map(|d| d.source_relid)
         .collect();
-    execute_manual_full_refresh(&updated_st, schema, table_name, &source_oids)?;
+    let (rows_inserted, _) = execute_manual_full_refresh_with_distance_snapshot(
+        &updated_st,
+        schema,
+        table_name,
+        &source_oids,
+    )?;
+    distance_snapshot.finish(&updated_st, rows_inserted);
 
     pgrx::info!(
         "pg_trickle: partition key for {schema}.{table_name} changed to {}; full refresh applied.",
@@ -2613,7 +2640,14 @@ pub(crate) fn alter_stream_table_impl(
                     .collect();
                 // Re-load ST with updated mode for the refresh dispatch.
                 let updated_st = StreamTableMeta::get_by_name(&schema, &table_name)?;
-                execute_manual_full_refresh(&updated_st, &schema, &table_name, &source_oids)?;
+                let distance_snapshot = LifecycleDistanceSnapshot::begin(&updated_st);
+                let (rows_inserted, _) = execute_manual_full_refresh_with_distance_snapshot(
+                    &updated_st,
+                    &schema,
+                    &table_name,
+                    &source_oids,
+                )?;
+                distance_snapshot.finish(&updated_st, rows_inserted);
 
                 // ERG-F: warn so the client sees the implicit full refresh regardless of log_min_messages.
                 pgrx::warning!(

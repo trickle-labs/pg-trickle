@@ -434,8 +434,14 @@ pub(crate) fn execute_manual_refresh(
         } else {
             st.clone()
         };
-        let full_result =
-            execute_manual_full_refresh_target(&refresh_st, schema, table_name, source_oids, true)?;
+        let full_result = execute_manual_full_refresh_target(
+            &refresh_st,
+            schema,
+            table_name,
+            source_oids,
+            true,
+            false,
+        )?;
 
         // Replace the inlined query and all query-derived state only after the
         // target was rebuilt from the current source definitions.
@@ -602,7 +608,19 @@ pub(crate) fn execute_manual_full_refresh(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<(i64, i64), PgTrickleError> {
-    let result = execute_manual_full_refresh_target(st, schema, table_name, source_oids, true)?;
+    let result =
+        execute_manual_full_refresh_target(st, schema, table_name, source_oids, true, false)?;
+    finalize_manual_full_refresh(st, result)
+}
+
+pub(crate) fn execute_manual_full_refresh_with_distance_snapshot(
+    st: &StreamTableMeta,
+    schema: &str,
+    table_name: &str,
+    source_oids: &[pg_sys::Oid],
+) -> Result<(i64, i64), PgTrickleError> {
+    let result =
+        execute_manual_full_refresh_target(st, schema, table_name, source_oids, true, true)?;
     finalize_manual_full_refresh(st, result)
 }
 
@@ -612,7 +630,8 @@ pub(crate) fn execute_manual_full_refresh_without_source_locks(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<(i64, i64), PgTrickleError> {
-    let result = execute_manual_full_refresh_target(st, schema, table_name, source_oids, false)?;
+    let result =
+        execute_manual_full_refresh_target(st, schema, table_name, source_oids, false, false)?;
     finalize_manual_full_refresh(st, result)
 }
 
@@ -637,6 +656,7 @@ fn execute_manual_full_refresh_target(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
     lock_sources: bool,
+    distance_snapshot_prepared: bool,
 ) -> Result<(i64, i64), PgTrickleError> {
     refresh::ensure_full_policy(st, "manual refresh")?;
     refresh::set_effective_mode("FULL");
@@ -649,7 +669,7 @@ fn execute_manual_full_refresh_target(
         crate::cdc::lock_source_relations(source_oids)?;
         crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
     }
-    if schema == st.pgt_schema && table_name == st.pgt_name {
+    if !distance_snapshot_prepared && schema == st.pgt_schema && table_name == st.pgt_name {
         crate::api::prepare_distance_snapshot(st);
     }
     // Persist polling deltas before this FULL reads the foreign source. The
