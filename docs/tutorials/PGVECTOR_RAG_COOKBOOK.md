@@ -322,6 +322,8 @@ rechecks privileges and reports whether the captured identity still matches;
 it is not a lock and cannot prevent later DDL. Requests are not restored
 across a logical dump/restore because their OIDs are database-local. The
 session-bound claim and completion APIs can record a manually executed rebuild
-and its failure; see the SQL reference for their transaction and identity
-requirements. They do not provide an executor or automatic retry. Continue
-normal VACUUM and autovacuum care.
+and its failure. The repository's one-request psql worker is documented in
+[the SQL reference](../SQL_REFERENCE.md#pgtrickleclaim_ann_maintenance-and-pgtricklefinish_ann_maintenance),
+including its connection, identity and timeout requirements. A supervisor is
+responsible for selecting requests and retries. Continue normal VACUUM and
+autovacuum care.

@@ -21,6 +21,343 @@ async fn setup_pgvector(db: &E2eDb) {
     db.execute("CREATE EXTENSION IF NOT EXISTS vector").await;
 }
 
+fn ann_worker_command(
+    db: &E2eDb,
+    database: &str,
+    user: &str,
+    request_id: i64,
+    lock_timeout: &str,
+) -> tokio::process::Command {
+    use std::process::Stdio;
+
+    let script = std::fs::File::open(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/ann_maintenance_worker.sql"
+    ))
+    .expect("open ANN worker script");
+    let mut command = tokio::process::Command::new("docker");
+    command
+        .args([
+            "exec",
+            "-i",
+            "-e",
+            "PGAPPNAME=pgtrickle_ann_worker",
+            db.container_id(),
+            "psql",
+            "-X",
+            "-w",
+            "-U",
+            user,
+            "-d",
+            database,
+            "-v",
+        ])
+        .arg(format!("request_id={request_id}"))
+        .arg("-v")
+        .arg(format!("ann_lock_timeout={lock_timeout}"))
+        .args(["-f", "-"])
+        .stdin(Stdio::from(script))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+#[tokio::test]
+async fn test_ann_worker_rebuilds_only_the_requested_index() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_worker_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_worker_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "ann_worker_stream",
+        "SELECT id, embedding FROM ann_worker_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX \"ann worker\"\"; DROP TABLE ann_worker_source; --\" ON ann_worker_stream USING hnsw (embedding vector_cosine_ops)").await;
+    db.execute("CREATE INDEX ann_worker_btree ON ann_worker_stream (id)")
+        .await;
+    let (index_oid, old_node, btree_node): (i64, i64, i64) = sqlx::query_as("SELECT i.indexrelid::bigint, pg_relation_filenode(i.indexrelid)::bigint, pg_relation_filenode('ann_worker_btree'::regclass)::bigint FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='ann_worker_stream'::regclass AND c.relname='ann worker\"; DROP TABLE ann_worker_source; --'")
+        .fetch_one(&db.pool).await.expect("index identities");
+    let request: i64 = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_worker_stream'::regclass::oid, $1::bigint::oid)")
+        .bind(index_oid).fetch_one(&db.pool).await.expect("request work");
+    db.execute("CREATE ROLE ann_worker_operator LOGIN").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle, public TO ann_worker_operator")
+        .await;
+    db.execute("GRANT SELECT, MAINTAIN ON ann_worker_stream TO ann_worker_operator")
+        .await;
+    db.execute("GRANT EXECUTE ON FUNCTION pgtrickle.claim_ann_maintenance(bigint), pgtrickle.ann_maintenance_request(bigint), pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO ann_worker_operator").await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let output = ann_worker_command(&db, &database, "ann_worker_operator", request, "5s")
+        .output()
+        .await
+        .expect("run ANN worker");
+    assert!(
+        output.status.success(),
+        "worker failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect result");
+    assert_eq!(status["state"], "SUCCEEDED");
+    let (new_oid, new_node, other_node): (i64, i64, i64) = sqlx::query_as("SELECT i.indexrelid::bigint, pg_relation_filenode(i.indexrelid)::bigint, pg_relation_filenode('ann_worker_btree'::regclass)::bigint FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='ann_worker_stream'::regclass AND c.relname='ann worker\"; DROP TABLE ann_worker_source; --'")
+        .fetch_one(&db.pool).await.expect("rebuilt index identities");
+    assert_ne!(index_oid, new_oid);
+    assert_ne!(old_node, new_node);
+    assert_eq!(
+        btree_node, other_node,
+        "unrelated indexes must not be rebuilt"
+    );
+    assert_eq!(
+        db.count("ann_worker_source").await,
+        1,
+        "index names must not become SQL"
+    );
+    let replacement: i64 = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_worker_stream'::regclass::oid, $1::bigint::oid)")
+        .bind(new_oid).fetch_one(&db.pool).await.expect("request replacement index");
+    db.execute("REVOKE MAINTAIN ON ann_worker_stream FROM ann_worker_operator")
+        .await;
+    let output = ann_worker_command(&db, &database, "ann_worker_operator", replacement, "5s")
+        .output()
+        .await
+        .expect("run without MAINTAIN");
+    assert!(
+        !output.status.success(),
+        "worker must respect revoked MAINTAIN"
+    );
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(replacement)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect denied request");
+    assert_eq!(status["state"], "REQUESTED");
+    db.execute("GRANT MAINTAIN ON ann_worker_stream TO ann_worker_operator")
+        .await;
+    let output = ann_worker_command(&db, &database, "ann_worker_operator", replacement, "5s")
+        .output()
+        .await
+        .expect("run during cooldown");
+    assert!(!output.status.success(), "worker must respect cooldown");
+}
+
+#[tokio::test]
+async fn test_ann_worker_rejects_a_replaced_index() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_worker_stale_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_worker_stale_stream",
+        "SELECT id, embedding FROM ann_worker_stale_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_worker_stale_idx ON ann_worker_stale_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_worker_stale_stream'::regclass::oid, 'ann_worker_stale_idx'::regclass::oid)").await;
+    db.execute("DROP INDEX ann_worker_stale_idx").await;
+    db.execute("CREATE INDEX ann_worker_stale_idx ON ann_worker_stale_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let before: i64 = db
+        .query_scalar("SELECT 'ann_worker_stale_idx'::regclass::oid::bigint")
+        .await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let output = ann_worker_command(&db, &database, "postgres", request, "5s")
+        .output()
+        .await
+        .expect("run stale request");
+    assert!(
+        !output.status.success(),
+        "worker must reject the stale identity"
+    );
+    let after: i64 = db
+        .query_scalar("SELECT 'ann_worker_stale_idx'::regclass::oid::bigint")
+        .await;
+    assert_eq!(before, after, "replacement must not be rebuilt");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect stale request");
+    assert_eq!(status["state"], "REQUESTED");
+    assert_eq!(status["identity_current"], false);
+}
+
+#[tokio::test]
+async fn test_ann_worker_records_lock_timeout_and_can_retry() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_worker_timeout_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_worker_timeout_stream",
+        "SELECT id, embedding FROM ann_worker_timeout_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_worker_timeout_idx ON ann_worker_timeout_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_worker_timeout_stream'::regclass::oid, 'ann_worker_timeout_idx'::regclass::oid)").await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let mut blocker = db.pool.begin().await.expect("begin barrier");
+    sqlx::query("LOCK TABLE ann_worker_timeout_stream IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold barrier");
+    let output = ann_worker_command(&db, &database, "postgres", request, "250ms")
+        .output()
+        .await
+        .expect("run timed worker");
+    assert!(
+        !output.status.success(),
+        "timed-out rebuild must return an error"
+    );
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect failure");
+    assert_eq!(
+        status["state"],
+        "FAILED",
+        "worker output: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        status["last_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Concurrent reindex failed"),
+        "status: {status}; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("lock timeout"));
+    assert!(status["next_eligible_at"].is_string());
+    blocker.rollback().await.expect("release barrier");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    let output = ann_worker_command(&db, &database, "postgres", request, "5s")
+        .output()
+        .await
+        .expect("retry worker");
+    assert!(
+        output.status.success(),
+        "retry failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect retry");
+    assert_eq!(status["state"], "SUCCEEDED");
+}
+
+#[tokio::test]
+async fn test_ann_worker_records_backend_cancellation() {
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_worker_cancel_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_worker_cancel_stream",
+        "SELECT id, embedding FROM ann_worker_cancel_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_worker_cancel_idx ON ann_worker_cancel_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_worker_cancel_stream'::regclass::oid, 'ann_worker_cancel_idx'::regclass::oid)").await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let mut blocker = db.pool.begin().await.expect("begin barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("barrier pid");
+    sqlx::query("LOCK TABLE ann_worker_cancel_stream IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold barrier");
+    let mut child = ann_worker_command(&db, &database, "postgres", request, "30s")
+        .spawn()
+        .expect("start ANN worker");
+    let worker_pid = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let pid: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_catalog.pg_stat_activity WHERE datname = current_database() AND application_name = 'pgtrickle_ann_worker' AND $1 = ANY(pg_blocking_pids(pid)) LIMIT 1")
+                .bind(blocker_pid).fetch_optional(&db.pool).await.expect("inspect worker");
+            if let Some(pid) = pid { break pid; }
+            assert!(child.try_wait().expect("inspect worker process").is_none(), "worker ended before reaching the barrier");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }).await.expect("worker did not reach barrier");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        assert_eq!(db.count("ann_worker_cancel_stream").await, 0);
+        db.execute("INSERT INTO ann_worker_cancel_source VALUES (1, '[1,0,0]')")
+            .await;
+        db.refresh_st("ann_worker_cancel_stream").await;
+        assert_eq!(db.count("ann_worker_cancel_stream").await, 1);
+    })
+    .await
+    .expect("reads and refresh must progress while the worker waits");
+    assert!(
+        child.try_wait().expect("inspect worker").is_none(),
+        "worker must still be blocked"
+    );
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.cancel_ann_maintenance($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("request cancellation");
+    assert_eq!(status["claim_pid"], worker_pid);
+    let signaled: bool = sqlx::query_scalar("SELECT pg_catalog.pg_cancel_backend(pid) FROM pg_catalog.pg_stat_activity WHERE pid = $1 AND backend_start = $2::text::timestamptz")
+        .bind(worker_pid).bind(status["claim_backend_start"].as_str().expect("backend start"))
+        .fetch_one(&db.pool).await.expect("signal worker");
+    assert!(signaled);
+    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .expect("worker did not exit")
+        .expect("wait for worker");
+    assert!(
+        !output.status.success(),
+        "canceled worker must return failure"
+    );
+    blocker.rollback().await.expect("release barrier");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect cancellation");
+    assert_eq!(
+        status["state"],
+        "CANCELLED",
+        "worker stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        status["current_epoch"].as_i64() > status["claim_epoch"].as_i64(),
+        "refresh after the claim must remain visible"
+    );
+    assert!(
+        status["last_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Concurrent reindex failed")
+    );
+}
+
 #[tokio::test]
 async fn test_ann_maintenance_intent_is_transactional_deduplicated_and_identity_bound() {
     let db = E2eDb::new().await.with_extension().await;
