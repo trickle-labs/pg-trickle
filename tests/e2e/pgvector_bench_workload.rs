@@ -269,12 +269,102 @@ async fn test_pgvector_filtered_ann_workload() {
         )
         .await;
     }
+    db.execute(&format!("CREATE TABLE vector_centroid_source (id bigint PRIMARY KEY, small_group int NOT NULL, large_group int NOT NULL, embedding vector({dim}) NOT NULL)")).await;
+    db.execute("INSERT INTO vector_centroid_source SELECT id, (id % 100)::int, (id % 2)::int, embedding FROM vector_bench_source").await;
+    db.execute("CREATE INDEX vector_centroid_small_group ON vector_centroid_source (small_group)")
+        .await;
+    db.execute("CREATE INDEX vector_centroid_large_group ON vector_centroid_source (large_group)")
+        .await;
+    db.execute("ANALYZE vector_centroid_source").await;
+    for group in ["small", "large"] {
+        let query = format!(
+            "SELECT {group}_group AS grp, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group}_group"
+        );
+        for mode in ["DIFFERENTIAL", "FULL"] {
+            let stream = format!("vector_centroid_{group}_{}", mode.to_lowercase());
+            let create = format!(
+                "SELECT pgtrickle.create_stream_table('{stream}', $${query}$$, '1h', '{mode}')"
+            );
+            db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create])
+                .await;
+        }
+    }
+    let target = rows - 1;
+    db.execute(&format!("UPDATE vector_centroid_source SET embedding = (SELECT embedding FROM vector_centroid_source WHERE id = {rows}) WHERE id = {target}")).await;
+    let mut centroid = Vec::new();
+    for group in ["small", "large"] {
+        let group_value = if group == "small" {
+            target % 100
+        } else {
+            target % 2
+        };
+        let explanation: String = db
+            .query_scalar(&format!(
+                "SELECT pgtrickle.explain_stream_table('vector_centroid_{group}_differential')"
+            ))
+            .await;
+        assert!(
+            explanation.contains("centroid: GROUP_RESCAN"),
+            "centroid strategy is not group rescan: {explanation}"
+        );
+        let group_rows: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM vector_centroid_source WHERE {group}_group = {group_value}"
+            ))
+            .await;
+        let explain = format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT avg(embedding) FROM vector_centroid_source WHERE {group}_group = {group_value}"
+        );
+        let group_plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain))
+            .fetch_one(&db.pool)
+            .await
+            .expect("explain representative group rescan");
+        let mut measurements = Vec::new();
+        for mode in ["DIFFERENTIAL", "FULL"] {
+            let stream = format!("vector_centroid_{group}_{}", mode.to_lowercase());
+            let before: String = db
+                .query_scalar("SELECT pg_current_wal_insert_lsn()::text")
+                .await;
+            let start = Instant::now();
+            let refresh = format!("SELECT pgtrickle.refresh_stream_table('{stream}')");
+            db.try_execute_with_config(
+                &[
+                    "SET pg_trickle.enable_vector_agg = on",
+                    "SET pg_trickle.differential_max_change_ratio = 0",
+                ],
+                &refresh,
+            )
+            .await
+            .expect("refresh centroid");
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let wal_bytes: f64 = sqlx::query_scalar(
+                "SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(), $1::text::pg_lsn)::float8",
+            )
+            .bind(before)
+            .fetch_one(&db.pool)
+            .await
+            .expect("centroid WAL delta");
+            let history: (String, bool) = sqlx::query_as("SELECT h.action::text, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name=$1 AND h.status='COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+                .bind(&stream).fetch_one(&db.pool).await.expect("centroid refresh history");
+            assert_eq!(history.0, mode);
+            assert!(!history.1, "centroid refresh fell back to full");
+            db.assert_st_matches_query(&stream, &format!("SELECT {group}_group AS grp, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group}_group")).await;
+            let storage_bytes: i64 =
+                sqlx::query_scalar("SELECT pg_total_relation_size($1::regclass)::bigint")
+                    .bind(&stream)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("centroid storage size");
+            measurements.push(serde_json::json!({"mode": mode, "elapsed_ms": elapsed_ms, "wal_bytes_cluster_wide": wal_bytes, "storage_bytes_including_indexes": storage_bytes}));
+        }
+        centroid.push(serde_json::json!({"group_shape": group, "changed_rows": 1, "affected_group_rows": group_rows, "representative_group_query_plan": group_plan, "refresh": measurements}));
+    }
     println!(
         "PGVECTOR_BENCHMARK_JSON={}",
         serde_json::json!({"schema": 1, "postgres": versions.0,
         "pgvector": versions.1, "pg_trickle": versions.2, "host_arch": std::env::consts::ARCH,
         "data": "md5(id:dimension), seedless deterministic", "rows": rows, "dimensions": dim,
-        "ann": results, "refresh": {"operations": ["update embedding", "update embedding", "delete"],
+        "ann": results, "centroid_baseline": centroid, "centroid_notes": "Group rescan and full refresh only; no algebraic vector state is implemented. Representative group query plan is not the actual refresh plan. Differential runs first; WAL excludes the source mutation.", "refresh": {"operations": ["update embedding", "update embedding", "delete"],
         "changed_rows": [1, rows / 10, rows / 10], "elapsed_ms": refresh_ms,
         "wal_bytes_cluster_wide": wal_bytes,
         "full_elapsed_ms": full_refresh_ms, "full_wal_bytes_cluster_wide": full_wal_bytes,

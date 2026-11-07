@@ -52,6 +52,12 @@ always runs first, so shared cache and other ordering effects can bias the
 comparison. WAL is measured between cluster-wide LSN reads, excludes the source
 mutation and can include unrelated activity; refresh latencies include client
 overhead. A plan is recorded for retrieval, not for the refresh internals. This
-initial workload does not compare centroid strategies or group sizes, measure
-source-write overhead, or characterize concurrent load. Use a dedicated host
-and more repetitions before drawing performance conclusions.
+The centroid baseline additionally compares one changed vector in roughly 100
+small groups and two large groups. It verifies the differential group-rescan
+strategy and both results, and records affected group size, refresh latency,
+WAL and stream storage size. A separate `EXPLAIN (ANALYZE, BUFFERS)` of the
+affected group query illustrates a possible rescan; it is not the actual
+refresh plan. This is one observation per strategy, with differential first.
+An algebraic vector strategy is not yet implemented and is not measured. The
+workload does not measure source-write overhead or concurrent load. Use a
+dedicated host and more repetitions before drawing performance conclusions.
