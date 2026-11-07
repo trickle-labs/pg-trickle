@@ -62,6 +62,300 @@ fn ann_worker_command(
     command
 }
 
+fn ann_threshold_command(
+    db: &E2eDb,
+    database: &str,
+    user: &str,
+    stream: &str,
+    index: &str,
+    lock_timeout: &str,
+) -> tokio::process::Command {
+    use std::process::Stdio;
+    let script = std::fs::File::open(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/ann_threshold_request.sql"
+    ))
+    .expect("open threshold request script");
+    let mut command = tokio::process::Command::new("docker");
+    command
+        .args([
+            "exec",
+            "-i",
+            db.container_id(),
+            "psql",
+            "-X",
+            "-w",
+            "-qAt",
+            "-U",
+            user,
+            "-d",
+            database,
+            "-v",
+        ])
+        .arg(format!("ann_stream={stream}"))
+        .arg("-v")
+        .arg(format!("ann_index={index}"))
+        .arg("-v")
+        .arg(format!("ann_lock_timeout={lock_timeout}"))
+        .args(["-f", "-"])
+        .stdin(Stdio::from(script))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+#[tokio::test]
+async fn test_ann_threshold_request_script_records_only_eligible_work() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_policy_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute(
+        "INSERT INTO ann_policy_source SELECT i, '[1,0,0]'::vector FROM generate_series(1,10) i",
+    )
+    .await;
+    db.create_st(
+        "ann_policy_stream",
+        "SELECT id, embedding FROM ann_policy_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "CREATE INDEX ann_policy_idx ON ann_policy_stream USING hnsw (embedding vector_l2_ops)",
+    )
+    .await;
+    db.execute(
+        "SELECT pgtrickle.alter_stream_table('ann_policy_stream', reindex_drift_threshold => 0.2)",
+    )
+    .await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let run = || {
+        ann_threshold_command(
+            &db,
+            &database,
+            "postgres",
+            "public.ann_policy_stream",
+            "public.ann_policy_idx",
+            "5s",
+        )
+    };
+    let initial = run().output().await.expect("inspect missing baseline");
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    assert!(String::from_utf8_lossy(&initial.stdout).contains("missing_baseline"));
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_policy_stream'::regclass::oid, 'ann_policy_idx'::regclass::oid)").await;
+    let baseline = ann_worker_command(&db, &database, "postgres", request, "5s")
+        .output()
+        .await
+        .expect("establish baseline");
+    assert!(
+        baseline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    let below = run().output().await.expect("check unchanged corpus");
+    assert!(
+        below.status.success(),
+        "{}",
+        String::from_utf8_lossy(&below.stderr)
+    );
+    assert!(String::from_utf8_lossy(&below.stdout).contains("below_threshold"));
+    db.execute("UPDATE ann_policy_source SET embedding = '[0,1,0]' WHERE id <= 3")
+        .await;
+    db.refresh_st("ann_policy_stream").await;
+    let old_index: i64 = db
+        .query_scalar("SELECT 'ann_policy_idx'::regclass::oid::bigint")
+        .await;
+    let scheduled = run().output().await.expect("request eligible work");
+    assert!(
+        scheduled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scheduled.stderr)
+    );
+    let decision: serde_json::Value =
+        serde_json::from_slice(&scheduled.stdout).expect("parse threshold decision");
+    assert_eq!(decision["decision"], "requested");
+    let scheduled_request = decision["request_id"]
+        .as_i64()
+        .expect("scheduled request id");
+    let new_index: i64 = db
+        .query_scalar("SELECT 'ann_policy_idx'::regclass::oid::bigint")
+        .await;
+    assert_eq!(old_index, new_index, "request script must not run DDL");
+    let state: String =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)->>'state'")
+            .bind(scheduled_request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect requested work");
+    assert_eq!(state, "REQUESTED");
+    let duplicate = run().output().await.expect("deduplicate work");
+    assert!(
+        duplicate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&duplicate.stderr)
+    );
+    assert!(String::from_utf8_lossy(&duplicate.stdout).contains("already_requested"));
+    let completed = ann_worker_command(&db, &database, "postgres", scheduled_request, "5s")
+        .output()
+        .await
+        .expect("execute requested work");
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    let rebuilt: i64 = db
+        .query_scalar("SELECT 'ann_policy_idx'::regclass::oid::bigint")
+        .await;
+    assert_ne!(old_index, rebuilt);
+    db.execute("CREATE INDEX ann_policy_btree ON ann_policy_stream (id)")
+        .await;
+    let unrelated = ann_threshold_command(
+        &db,
+        &database,
+        "postgres",
+        "public.ann_policy_stream",
+        "public.ann_policy_btree",
+        "5s",
+    )
+    .output()
+    .await
+    .expect("check non-ANN index");
+    assert!(
+        !unrelated.status.success(),
+        "non-ANN indexes must not be queued"
+    );
+    db.assert_st_matches_query(
+        "ann_policy_stream",
+        "SELECT id, embedding FROM ann_policy_source",
+    )
+    .await;
+    let mut blocker = db.pool.begin().await.expect("begin refresh barrier");
+    sqlx::query("LOCK TABLE ann_policy_stream IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold refresh barrier");
+    let locked = ann_threshold_command(
+        &db,
+        &database,
+        "postgres",
+        "public.ann_policy_stream",
+        "public.ann_policy_idx",
+        "200ms",
+    )
+    .output()
+    .await
+    .expect("check lock timeout");
+    assert!(!locked.status.success());
+    assert!(String::from_utf8_lossy(&locked.stderr).contains("lock timeout"));
+    blocker.rollback().await.expect("release refresh barrier");
+    db.execute("CREATE ROLE ann_policy_operator LOGIN").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO ann_policy_operator")
+        .await;
+    db.execute(
+        "GRANT SELECT ON pgtrickle.pgt_stream_tables, ann_policy_stream TO ann_policy_operator",
+    )
+    .await;
+    db.execute("GRANT EXECUTE ON FUNCTION pgtrickle.request_ann_maintenance_if_needed(oid,oid,bigint,bigint,bigint) TO ann_policy_operator").await;
+    let denied = ann_threshold_command(
+        &db,
+        &database,
+        "ann_policy_operator",
+        "public.ann_policy_stream",
+        "public.ann_policy_idx",
+        "5s",
+    )
+    .output()
+    .await
+    .expect("run without MAINTAIN");
+    assert!(
+        !denied.status.success(),
+        "SELECT alone must not request maintenance"
+    );
+    db.execute("GRANT MAINTAIN ON ann_policy_stream TO ann_policy_operator")
+        .await;
+    let permitted = ann_threshold_command(
+        &db,
+        &database,
+        "ann_policy_operator",
+        "public.ann_policy_stream",
+        "public.ann_policy_idx",
+        "5s",
+    )
+    .output()
+    .await
+    .expect("run with MAINTAIN");
+    assert!(
+        permitted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&permitted.stderr)
+    );
+    assert!(String::from_utf8_lossy(&permitted.stdout).contains("cooldown"));
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET ann_churn_operations = NULL WHERE pgt_name = 'ann_policy_stream'").await;
+    let unknown = run().output().await.expect("check unknown churn");
+    assert!(
+        unknown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unknown.stderr)
+    );
+    assert!(String::from_utf8_lossy(&unknown.stdout).contains("unknown_work"));
+    db.execute("CREATE TABLE ann_policy_empty_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_policy_empty",
+        "SELECT id, embedding FROM ann_policy_empty_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_policy_empty_idx ON ann_policy_empty USING hnsw (embedding vector_l2_ops)").await;
+    let empty = ann_threshold_command(
+        &db,
+        &database,
+        "postgres",
+        "public.ann_policy_empty",
+        "public.ann_policy_empty_idx",
+        "5s",
+    )
+    .output()
+    .await
+    .expect("check empty estimate");
+    assert!(
+        empty.status.success(),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    assert!(String::from_utf8_lossy(&empty.stdout).contains("unknown_estimate"));
+    db.execute(
+        "ALTER INDEX ann_policy_empty_idx RENAME TO \"empty; DROP TABLE ann_policy_source; --\"",
+    )
+    .await;
+    let quoted = ann_threshold_command(
+        &db,
+        &database,
+        "postgres",
+        "public.ann_policy_empty",
+        "public.\"empty; DROP TABLE ann_policy_source; --\"",
+        "5s",
+    )
+    .output()
+    .await
+    .expect("check quoted index name");
+    assert!(
+        quoted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&quoted.stderr)
+    );
+    assert!(String::from_utf8_lossy(&quoted.stdout).contains("unknown_estimate"));
+    assert_eq!(db.count("ann_policy_source").await, 10);
+}
+
 #[tokio::test]
 async fn test_ann_worker_limits_concurrent_requests_per_database() {
     use std::time::Duration;

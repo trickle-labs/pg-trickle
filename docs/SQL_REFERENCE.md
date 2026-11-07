@@ -4345,6 +4345,30 @@ the number of distinct changed rows, the size of a partial index, or recall.
 Partitioned streams remain unknown until per-leaf accounting is available.
 A successful maintenance report is needed to establish the first baseline.
 
+The optional [threshold request script](../scripts/ann_threshold_request.sql)
+captures the estimate and watermark under a table lock and records eligible
+intent in the same transaction. For example:
+
+```sh
+psql "$DATABASE_URL" -X -w \
+  -v ann_stream='public.search_corpus' -v ann_index='public.search_corpus_ann' \
+  -f scripts/ann_threshold_request.sql
+```
+
+Run it as a trusted operator with schema USAGE, stream SELECT and MAINTAIN,
+SELECT on `pgtrickle.pgt_stream_tables`, and EXECUTE on the threshold API.
+The script uses `ANALYZE` and a `SHARE ROW EXCLUSIVE` lock, so it can delay
+refresh writes. `ann_lock_timeout` and `ann_statement_timeout` default to 5
+seconds and 5 minutes and can be overridden with `-v`. A timeout or SQL error
+rolls back the request transaction. The final JSON reports `unknown_estimate`
+for an empty or unavailable estimate and `unknown_work` for a missing
+watermark; neither creates a request. Other decisions come from the API. A
+job scheduler can run this script for operator-selected indexes, inspect the
+decision, and invoke the separate concurrent worker for a `requested` ID.
+The script does not discover indexes, perform the rebuild, or establish an
+initial baseline. Avoid granting catalog SELECT to untrusted roles merely to
+run this example.
+
 ### pgtrickle.request_ann_maintenance
 
 ```sql
