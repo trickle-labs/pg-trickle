@@ -804,6 +804,298 @@ async fn test_embedding_stream_table_creates_real_st() {
     );
 }
 
+#[tokio::test]
+async fn test_embedding_stream_table_legacy_l2_is_atomic_and_has_no_reindex_policy() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE helper_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO helper_src VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    let preview: Vec<(String,)> = sqlx::query_as(
+        "SELECT action FROM pgtrickle.embedding_stream_table('helper_st', 'helper_src', 'embedding', NULL, '1m', 'hnsw', true)"
+    ).fetch_all(&db.pool).await.expect("preview helper");
+    assert_eq!(preview.len(), 2);
+    assert!(preview[1].0.contains("vector_l2_ops"));
+    assert!(!preview.iter().any(|row| row.0.contains("reindex_if_drift")));
+    let absent: bool = db.query_scalar("SELECT to_regclass('public.helper_st') IS NULL AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'helper_st')").await;
+    assert!(absent, "dry run must not create a stream table");
+
+    db.execute("SELECT * FROM pgtrickle.embedding_stream_table('helper_st', 'helper_src', 'embedding', NULL, '1m', 'hnsw', false)").await;
+    let index_name: String = db
+        .query_scalar(
+            "SELECT c.relname::text FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+         JOIN pg_am am ON am.oid = c.relam JOIN pg_opclass op ON op.oid = i.indclass[0] \
+         WHERE i.indrelid = 'public.helper_st'::regclass AND i.indisvalid AND i.indisready \
+         AND am.amname = 'hnsw' AND op.opcname = 'vector_l2_ops'",
+        )
+        .await;
+    let policy: String = db.query_scalar("SELECT post_refresh_action::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'helper_st'").await;
+    assert_eq!(policy, "none");
+    let mut tx = db.pool.begin().await.expect("begin plan check");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable sequential scan");
+    sqlx::query("SET LOCAL enable_bitmapscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable bitmap scan");
+    sqlx::query("SET LOCAL enable_indexonlyscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable covering scan");
+    let plan: serde_json::Value = sqlx::query_scalar(
+        "EXPLAIN (FORMAT JSON) SELECT id FROM helper_st ORDER BY embedding::vector(3) <-> '[1,0,0]'::vector LIMIT 1"
+    ).fetch_one(&mut *tx).await.expect("explain L2 query");
+    assert!(
+        plan.to_string()
+            .contains(&format!("\"Index Name\":\"{index_name}\"")),
+        "matching L2 index is not eligible: {plan}"
+    );
+    tx.rollback().await.expect("end plan check");
+}
+
+#[tokio::test]
+async fn test_embedding_stream_table_v2_metrics_and_options() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE metric_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO metric_source VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    let preview: Vec<(String,)> = sqlx::query_as(
+        r#"SELECT action FROM pgtrickle.embedding_stream_table_v2('metric_cosine', 'metric_source', 'embedding', 'cosine', '{"columns":["id"],"hnsw_m":8,"hnsw_ef_construction":32}', true)"#,
+    ).fetch_all(&db.pool).await.expect("preview cosine helper");
+    assert_eq!(preview.len(), 2);
+    assert!(preview[1].0.contains("vector_cosine_ops"));
+    let absent: bool = db
+        .query_scalar("SELECT to_regclass('public.metric_cosine') IS NULL")
+        .await;
+    assert!(absent);
+    db.execute(r#"SELECT * FROM pgtrickle.embedding_stream_table_v2('metric_cosine', 'metric_source', 'embedding', 'cosine', '{"columns":["id"],"hnsw_m":8,"hnsw_ef_construction":32}')"#).await;
+    db.execute(r#"SELECT * FROM pgtrickle.embedding_stream_table_v2('metric_ip', 'metric_source', 'embedding', 'inner_product', '{"index_type":"ivfflat","ivfflat_lists":1,"post_refresh_action":"analyze"}')"#).await;
+    let cosine: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid='metric_cosine'::regclass AND i.indisvalid AND i.indisready AND op.opcname='vector_cosine_ops' AND c.reloptions @> ARRAY['m=8','ef_construction=32'])").await;
+    assert!(cosine);
+    let inner_product: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid='metric_ip'::regclass AND i.indisvalid AND i.indisready AND op.opcname='vector_ip_ops' AND c.reloptions @> ARRAY['lists=1'])").await;
+    assert!(inner_product);
+    let mut tx = db.pool.begin().await.expect("begin metric plan check");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable sequential scan");
+    for (table, opclass, query) in [
+        (
+            "metric_cosine",
+            "vector_cosine_ops",
+            "EXPLAIN (FORMAT JSON) SELECT id FROM metric_cosine ORDER BY embedding::vector(3) <=> '[1,0,0]'::vector LIMIT 1",
+        ),
+        (
+            "metric_ip",
+            "vector_ip_ops",
+            "EXPLAIN (FORMAT JSON) SELECT id FROM metric_ip ORDER BY embedding::vector(3) <#> '[1,0,0]'::vector LIMIT 1",
+        ),
+    ] {
+        let index: String = sqlx::query_scalar("SELECT c.relname::text FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid=$1::regclass AND op.opcname=$2")
+            .bind(table).bind(opclass).fetch_one(&mut *tx).await.expect("find metric index");
+        let plan: serde_json::Value = sqlx::query_scalar(query)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("explain metric query");
+        assert!(
+            plan.to_string()
+                .contains(&format!("\"Index Name\":\"{index}\"")),
+            "matching index is not eligible: {plan}"
+        );
+    }
+    tx.rollback().await.expect("end metric plan check");
+    let policy: String = db.query_scalar("SELECT post_refresh_action::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name='metric_ip'").await;
+    assert_eq!(policy, "analyze");
+    db.execute(r#"SELECT * FROM pgtrickle.embedding_stream_table_v2('metric_full', 'metric_source', 'embedding', 'l2', '{"refresh_mode":"FULL","refresh_interval":"1h"}')"#).await;
+    db.execute(r#"SELECT * FROM pgtrickle.embedding_stream_table_v2('metric_immediate', 'metric_source', 'embedding', 'l2', '{"refresh_mode":"IMMEDIATE"}')"#).await;
+    let modes: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_stream_tables WHERE (pgt_name='metric_full' AND refresh_mode='FULL') OR (pgt_name='metric_immediate' AND refresh_mode='IMMEDIATE')").await;
+    assert_eq!(modes, 2);
+    for options in [
+        r#"{"unknown":1}"#,
+        r#"{"columns":["missing"]}"#,
+        r#"{"columns":["id","id"]}"#,
+        r#"{"columns":["id); DROP TABLE metric_source; --"]}"#,
+        r#"{"hnsw_m":1}"#,
+        r#"{"hnsw_m":80}"#,
+        r#"{"ivfflat_lists":2}"#,
+        r#"{"index_type":"ivfflat","ivfflat_lists":0}"#,
+        r#"{"refresh_mode":"IMMEDIATE","refresh_interval":"1m"}"#,
+    ] {
+        let sql = format!(
+            "SELECT * FROM pgtrickle.embedding_stream_table_v2('invalid_metric_st', 'metric_source', 'embedding', 'cosine', '{options}', true)"
+        );
+        assert!(db.try_execute(&sql).await.is_err(), "accepted {options}");
+    }
+    assert!(db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table_v2('invalid_metric_st', 'metric_source', 'embedding', 'unknown', NULL, true)").await.is_err());
+}
+
+#[tokio::test]
+async fn test_embedding_stream_table_index_conflict_rolls_back_creation() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE helper_conflict_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("CREATE TABLE helper_unrelated (id int)").await;
+    let preview: String = db.query_scalar(
+        "SELECT action FROM pgtrickle.embedding_stream_table('helper_conflict_st', 'helper_conflict_src', 'embedding', NULL, '1m', 'hnsw', true) WHERE action LIKE '-- 2.%'"
+    ).await;
+    let index_name = preview.split('"').nth(1).expect("preview index identifier");
+    assert!(
+        index_name.starts_with("pgt_ann_")
+            && index_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    );
+    db.execute(&format!(
+        "CREATE INDEX {index_name} ON helper_unrelated (id)"
+    ))
+    .await;
+    assert!(db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table('helper_conflict_st', 'helper_conflict_src', 'embedding', NULL, '1m', 'hnsw', true)").await.is_err());
+    let result = db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table('helper_conflict_st', 'helper_conflict_src', 'embedding', NULL, '1m', 'hnsw', false)").await;
+    assert!(
+        result.is_err(),
+        "conflicting index must fail instead of claiming success"
+    );
+    let clean: bool = db.query_scalar("SELECT to_regclass('public.helper_conflict_st') IS NULL AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'helper_conflict_st') AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_change_tracking WHERE source_relid = 'helper_conflict_src'::regclass)").await;
+    assert!(clean, "index failure must roll back stream and CDC state");
+}
+
+#[tokio::test]
+async fn test_embedding_stream_table_starter_fixture_executes() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(include_str!("fixtures/pgvector_l2_starter.sql"))
+        .execute(&db.pool)
+        .await
+        .expect("execute L2 starter SQL");
+    let nearest: i64 = db
+        .query_scalar(
+            "SELECT id FROM doc_corpus ORDER BY embedding::vector(3) <-> '[1,0,0]'::vector LIMIT 1",
+        )
+        .await;
+    assert_eq!(nearest, 1);
+    let cosine_nearest: i64 = db.query_scalar("SELECT id FROM corpus_cosine ORDER BY embedding::vector(3) <=> '[1,0,0]'::vector LIMIT 1").await;
+    assert_eq!(cosine_nearest, 1);
+}
+
+#[tokio::test]
+async fn test_embedding_stream_table_quoted_names_and_vector_schema() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE SCHEMA \"V.X\"").await;
+    db.execute("CREATE EXTENSION vector WITH SCHEMA \"V.X\"")
+        .await;
+    db.execute("CREATE SCHEMA \"A.B\"").await;
+    db.execute("CREATE SCHEMA \"D.S\"").await;
+    db.execute("CREATE TABLE \"A.B\".\"Doc.Source\" (id int PRIMARY KEY, \"Embedding Value\" \"V.X\".vector(3))").await;
+    db.execute("INSERT INTO \"A.B\".\"Doc.Source\" VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("SELECT * FROM pgtrickle.embedding_stream_table('\"D.S\".\"Corpus.A\"', '\"A.B\".\"Doc.Source\"', '\"Embedding Value\"', NULL, '1h', 'hnsw', false)").await;
+    db.execute(r#"SELECT * FROM pgtrickle.embedding_stream_table_v2('"D.S"."Cosine.Corpus"', '"A.B"."Doc.Source"', '"Embedding Value"', 'cosine', '{"columns":["id"]}')"#).await;
+    let v2_valid: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_opclass op ON op.oid=i.indclass[0] JOIN pg_namespace n ON n.oid=op.opcnamespace WHERE i.indrelid='\"D.S\".\"Cosine.Corpus\"'::regclass AND i.indisvalid AND i.indisready AND op.opcname='vector_cosine_ops' AND n.nspname='V.X')").await;
+    assert!(v2_valid);
+    let valid: bool = db.query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+         JOIN pg_opclass op ON op.oid = i.indclass[0] JOIN pg_namespace n ON n.oid = op.opcnamespace \
+         JOIN pg_am am ON am.oid = c.relam WHERE i.indrelid = '\"D.S\".\"Corpus.A\"'::regclass \
+         AND i.indisvalid AND i.indisready AND am.amname = 'hnsw' \
+         AND op.opcname = 'vector_l2_ops' AND n.nspname = 'V.X')"
+    ).await;
+    assert!(
+        valid,
+        "quoted relation and extension names must produce a valid L2 index"
+    );
+    let direct = db
+        .try_execute(
+            "INSERT INTO \"D.S\".\"Corpus.A\" (id, \"Embedding Value\") VALUES (3, '[0,0,1]')",
+        )
+        .await;
+    assert!(
+        direct.is_err(),
+        "quoted stream table must retain its DML guard"
+    );
+    db.execute("INSERT INTO \"A.B\".\"Doc.Source\" VALUES (2, '[0,1,0]')")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('\"D.S\".\"Corpus.A\"')")
+        .await;
+    let rows: i64 = db
+        .query_scalar("SELECT count(*) FROM \"D.S\".\"Corpus.A\"")
+        .await;
+    assert_eq!(rows, 2, "quoted stream must refresh after source changes");
+}
+
+#[tokio::test]
+async fn test_embedding_stream_table_dry_run_rejects_invalid_source_types() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE scalar_source (id int PRIMARY KEY, embedding int)")
+        .await;
+    let no_extension = db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table('bad_st', 'scalar_source', 'embedding', dry_run => true)").await;
+    assert!(
+        no_extension.is_err(),
+        "pgvector must be installed for a validated preview"
+    );
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE undimensioned_source (id int PRIMARY KEY, embedding vector)")
+        .await;
+    db.execute("CREATE SCHEMA fake_vector").await;
+    db.execute("CREATE DOMAIN fake_vector.vector AS text").await;
+    db.execute("CREATE TABLE impostor_source (id int PRIMARY KEY, embedding fake_vector.vector)")
+        .await;
+    for source in [
+        "missing_source",
+        "scalar_source",
+        "undimensioned_source",
+        "impostor_source",
+    ] {
+        let sql = format!(
+            "SELECT * FROM pgtrickle.embedding_stream_table('bad_st', '{source}', 'embedding', dry_run => true)"
+        );
+        assert!(
+            db.try_execute(&sql).await.is_err(),
+            "invalid source {source} must be rejected"
+        );
+    }
+    let absent: bool = db.query_scalar("SELECT to_regclass('public.bad_st') IS NULL AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'bad_st')").await;
+    assert!(absent, "invalid previews must not create objects");
+}
+
+#[tokio::test]
+async fn test_embedding_stream_table_halfvec_and_sparsevec_indexes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE helper_half_src (id int PRIMARY KEY, embedding halfvec(3))")
+        .await;
+    db.execute("CREATE TABLE helper_sparse_src (id int PRIMARY KEY, embedding sparsevec(3))")
+        .await;
+    db.execute("INSERT INTO helper_half_src VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("INSERT INTO helper_sparse_src VALUES (1, '{1:1}/3')")
+        .await;
+    let unsupported = db.try_execute("SELECT * FROM pgtrickle.embedding_stream_table('sparse_bad', 'helper_sparse_src', 'embedding', index_type => 'ivfflat', dry_run => true)").await;
+    assert!(unsupported.is_err(), "IVFFlat does not support sparsevec");
+    for (source, stream, opclass) in [
+        ("helper_half_src", "helper_half_st", "halfvec_l2_ops"),
+        ("helper_sparse_src", "helper_sparse_st", "sparsevec_l2_ops"),
+    ] {
+        db.execute(&format!(
+            "SELECT * FROM pgtrickle.embedding_stream_table('{stream}', '{source}', 'embedding')"
+        ))
+        .await;
+        let valid: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+             JOIN pg_am am ON am.oid = c.relam JOIN pg_opclass op ON op.oid = i.indclass[0] \
+             WHERE i.indrelid = '{stream}'::regclass AND i.indisvalid AND i.indisready \
+             AND am.amname = 'hnsw' AND op.opcname = '{opclass}')"
+            ))
+            .await;
+        assert!(valid, "{stream}: expected a valid {opclass} index");
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // VA-4 (v0.48.0): attach_embedding_outbox() catalog registration
 // ═══════════════════════════════════════════════════════════════════════

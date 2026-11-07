@@ -17,10 +17,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_VERSION = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
 QUALIFICATION = ROOT / f"tests/release/v{PACKAGE_VERSION}-qualification.json"
-SOURCE_VERSIONS = json.loads(QUALIFICATION.read_text(encoding="utf-8"))["source_versions"]
-BASELINE_VERSION = max(SOURCE_VERSIONS, key=lambda version: tuple(map(int, version.split("."))))
-BASELINE_TAG = f"v{BASELINE_VERSION}"
+BASELINE_VERSION: str | None = None
+BASELINE_TAG: str | None = None
 MAX_COMPARISON_ATTEMPTS = 2
+
+
+def configure_release(version: str) -> None:
+    """Select the explicit release contract, failing if it does not exist."""
+    global QUALIFICATION, BASELINE_VERSION, BASELINE_TAG
+    qualification = ROOT / f"tests/release/v{version}-qualification.json"
+    source_versions = json.loads(qualification.read_text(encoding="utf-8"))["source_versions"]
+    baseline_version = max(source_versions, key=lambda item: tuple(map(int, item.split("."))))
+    QUALIFICATION = qualification
+    BASELINE_VERSION = baseline_version
+    BASELINE_TAG = f"v{baseline_version}"
 
 
 def run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
@@ -29,6 +39,7 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> 
 
 
 def main() -> int:
+    configure_release(PACKAGE_VERSION)
     measurement = Path(os.environ["PGS_RELEASE_MEASUREMENT_JSON"])
     raw_dir = measurement.parent / "criterion-raw"
     baseline_snapshot = raw_dir / "baseline"

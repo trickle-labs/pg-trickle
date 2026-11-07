@@ -171,10 +171,12 @@ pub(super) fn install_dml_guard_trigger(
         quote_identifier(schema),
         quote_identifier(table_name),
     );
+    let digest = crate::integration_contract::sha256_hex(table_name.as_bytes());
+    let guard_name = format!("_pgt_guard_{}", &digest[..32]);
     let trigger_func_name = format!(
-        "{}._pgt_guard_{}",
+        "{}.{}",
         quote_identifier(schema),
-        table_name.replace('"', ""),
+        quote_identifier(&guard_name),
     );
 
     // Create the guard trigger function
@@ -2810,7 +2812,7 @@ pub(super) fn build_create_table_sql(
 /// Get the OID of a table by schema and name.
 pub(super) fn get_table_oid(schema: &str, name: &str) -> Result<pg_sys::Oid, PgTrickleError> {
     let oid = Spi::get_one_with_args::<pg_sys::Oid>(
-        "SELECT ($1 || '.' || $2)::regclass::oid",
+        "SELECT pg_catalog.format('%I.%I', $1::text, $2::text)::regclass::oid",
         &[schema.into(), name.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?

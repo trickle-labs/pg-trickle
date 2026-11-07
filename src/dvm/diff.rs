@@ -587,7 +587,20 @@ impl OptimizationContext {
 
     fn next_cte_name(&mut self, prefix: &str) -> String {
         self.cte_counter += 1;
-        format!("__pgt_cte_{}_{}", prefix, self.cte_counter)
+        let suffix = format!("_{}", self.cte_counter);
+        let max_prefix = 63usize.saturating_sub("__pgt_cte_".len() + suffix.len());
+        let safe_prefix: String = prefix
+            .chars()
+            .take(max_prefix)
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("__pgt_cte_{safe_prefix}{suffix}")
     }
 
     fn add_cte(&mut self, name: String, sql: String, is_recursive: bool, is_materialized: bool) {
@@ -1461,6 +1474,19 @@ mod tests {
         for _ in 0..100 {
             let name = ctx.next_cte_name("x");
             assert!(names.insert(name), "Duplicate CTE name generated");
+        }
+    }
+
+    #[test]
+    fn test_next_cte_name_handles_unusual_and_long_aliases() {
+        let mut ctx = test_ctx();
+        let alias = format!("Doc.Source \"λ\"{}", "x".repeat(100));
+        let first = ctx.next_cte_name(&alias);
+        let second = ctx.next_cte_name(&alias);
+        assert_ne!(first, second);
+        for name in [first, second] {
+            assert!(name.len() <= 63);
+            assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
         }
     }
 

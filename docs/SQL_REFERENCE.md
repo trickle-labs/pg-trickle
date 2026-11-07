@@ -8,6 +8,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 
 - [Functions](#functions)
   - [Core Lifecycle](#core-lifecycle)
+    - [pgtrickle.embedding\_stream\_table\_v2](#pgtrickleembedding_stream_table_v2)
     - [pgtrickle.create\_stream\_table](#pgtricklecreate_stream_table)
     - [pgtrickle.create\_stream\_table\_fast\_append\_only](#pgtricklecreate_stream_table_fast_append_only)
     - [pgtrickle.create\_stream\_table\_realtime](#pgtricklecreate_stream_table_realtime)
@@ -229,6 +230,36 @@ extension schema or schema-version audit.
 ### Core Lifecycle
 
 Create, modify, and manage the lifecycle of stream tables.
+
+---
+
+### pgtrickle.embedding_stream_table_v2
+
+```sql
+pgtrickle.embedding_stream_table_v2(
+    name text, source_table text, vector_column text, metric text,
+    options jsonb DEFAULT NULL, dry_run boolean DEFAULT false
+) RETURNS TABLE(action text)
+```
+
+Creates a stream table and pgvector ANN index atomically. `metric` is `l2`,
+`cosine`, or `inner_product`; queries must use the corresponding `<->`, `<=>`,
+or `<#>` operator and repeat the index's dimensioned cast. The source column
+must be a fixed-dimension pgvector type. Names may be schema-qualified and
+quoted. `dry_run` returns generated SQL without creating objects.
+
+The optional JSON object accepts `columns` (an array of source column names;
+the default is all columns), `refresh_interval` (default `1m`), `refresh_mode`
+(default `DIFFERENTIAL`; also `AUTO`, `FULL`, `IMMEDIATE`), `index_type`
+(`hnsw` by default, or `ivfflat`), `hnsw_m`, `hnsw_ef_construction`,
+`ivfflat_lists`, and `post_refresh_action` (`none` by default, `analyze`,
+`reindex`, or `reindex_if_drift`). `IMMEDIATE` must omit `refresh_interval`.
+HNSW requires `m` 2–100 and `ef_construction` 4–1000, at least twice `m`;
+IVFFlat accepts `lists` 1–32768 and does not support `sparsevec`. Reindex
+actions can take blocking locks. Unknown options and invalid values fail.
+
+The seven-argument `embedding_stream_table` remains available and always uses
+L2. Existing stream tables and index definitions are not changed on upgrade.
 
 ---
 

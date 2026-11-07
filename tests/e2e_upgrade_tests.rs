@@ -524,6 +524,30 @@ fn upgrade_image_available() -> bool {
     matches!(std::env::var("PGS_UPGRADE_FROM"), Ok(v) if !v.is_empty())
 }
 
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_embedding_helpers_from_0109() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        return;
+    }
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+        .await;
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+        .await;
+    db.execute("CREATE TABLE upgrade_vectors (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO upgrade_vectors VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("SELECT * FROM pgtrickle.embedding_stream_table('upgrade_l2', 'upgrade_vectors', 'embedding', NULL, '1m', 'hnsw', false)").await;
+    db.execute("SELECT * FROM pgtrickle.embedding_stream_table_v2('upgrade_cosine', 'upgrade_vectors', 'embedding', 'cosine')").await;
+    let valid: i64 = db.query_scalar("SELECT count(*) FROM pg_index i JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid IN ('upgrade_l2'::regclass, 'upgrade_cosine'::regclass) AND i.indisready AND i.indisvalid AND op.opcname IN ('vector_l2_ops','vector_cosine_ops')").await;
+    assert_eq!(valid, 2);
+}
+
 /// A tracked source for an IMMEDIATE stream table has no CDC buffer, while a
 /// DIFFERENTIAL source with a buffer must still have its CDC trigger rebuilt.
 #[tokio::test]

@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**170 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**171 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -56,6 +56,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.drop_stream_table_publication()` | `pgtrickle` | `` | CDC-PUB-2: Drop the logical replication publication for a stream table. |
 | `pgtrickle.drop_watermark_group()` | `pgtrickle` | `void` | Drop a watermark group by name. |
 | `pgtrickle.embedding_stream_table()` | `pgtrickle` | `` | # Returns A single-column table with one row per action taken (or SQL line for dry_run). |
+| `pgtrickle.embedding_stream_table_v2()` | `pgtrickle` | `` | `metric` is `l2`, `cosine`, or `inner_product`. |
 | `pgtrickle.encode_row_id_v2()` | `pgtrickle` | `Vec<u8>` | Encode a PostgreSQL record into exact V2 identity bytes. |
 | `pgtrickle.encode_row_id_v3()` | `pgtrickle` | `Vec<u8>` | Encode a PostgreSQL record into corrected V3 identity bytes. |
 | `pgtrickle.error_catalog()` | `pgtrickle` | `SetOf row` | Stable operational error identifiers and their PostgreSQL SQLSTATEs. |

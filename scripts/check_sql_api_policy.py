@@ -104,6 +104,7 @@ _OWNER_LIFECYCLE_PREFIXES = (
 
 _OWNER_LIFECYCLE_NAMES = {
     "embedding_stream_table",
+    "embedding_stream_table_v2",
     "exec_stream_ddl",
     "refresh_if_stale",
     "reset_fuse",
@@ -116,6 +117,7 @@ _OWNER_LIFECYCLE_NAMES = {
 }
 
 _INVOKER_DELEGATE_NAMES = {
+    "embedding_stream_table_v2",
     "exec_stream_ddl",
     "refresh_if_stale",
     "subscribe",

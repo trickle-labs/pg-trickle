@@ -2317,10 +2317,10 @@ pub(crate) fn fire_distance_subscriptions(
 
 /// VA-1 (v0.48.0): One-call RAG corpus setup.
 ///
-/// Auto-generates a denormalisation query, creates the stream table, provisions
-/// HNSW indexes on vector/halfvec/sparsevec output columns, configures
-/// `post_refresh_action = 'reindex_if_drift'`, and returns a summary of what
-/// was created.
+/// Auto-generates a denormalisation query, creates the stream table and an
+/// L2 HNSW or IVFFlat index, and returns a summary of what was created. New
+/// tables retain the default post-refresh policy rather than enabling a
+/// blocking rebuild automatically. Index creation failure aborts the call.
 ///
 /// When `dry_run => true` the function returns the generated SQL without
 /// executing it — useful for expert users who want to audit or customise the
@@ -2351,186 +2351,386 @@ fn embedding_stream_table(
         name,
         source_table,
         vector_column,
-        extra_columns,
-        refresh_interval,
-        index_type,
-        dry_run,
+        &EmbeddingStreamConfig {
+            legacy_columns: extra_columns,
+            columns: None,
+            refresh_interval: Some(refresh_interval),
+            index_type,
+            metric: "l2",
+            refresh_mode: "DIFFERENTIAL",
+            post_refresh_action: "none",
+            hnsw_m: None,
+            hnsw_ef_construction: None,
+            ivfflat_lists: None,
+            dry_run,
+        },
     ) {
         Ok(rows) => TableIterator::new(rows.into_iter().map(|s| (Some(s),))),
         Err(e) => pgrx::error!("embedding_stream_table: {}", e),
     }
 }
 
+/// Metric-aware corpus setup with validated index options.
+///
+/// `metric` is `l2`, `cosine`, or `inner_product`. `options` may contain
+/// `columns` (an array of source column names), `refresh_interval`,
+/// `refresh_mode`, `post_refresh_action`, `index_type`, `hnsw_m`,
+/// `hnsw_ef_construction`, and `ivfflat_lists`. The default maintenance
+/// policy is `none`. `dry_run` returns validated SQL without creating objects.
+#[pg_extern(schema = "pgtrickle")]
+fn embedding_stream_table_v2(
+    name: &str,
+    source_table: &str,
+    vector_column: &str,
+    metric: &str,
+    options: default!(Option<pgrx::JsonB>, "NULL"),
+    dry_run: default!(bool, false),
+) -> TableIterator<'static, (name!(action, Option<String>),)> {
+    let parsed: Result<EmbeddingStreamV2Options, _> =
+        serde_json::from_value(options.map_or_else(|| serde_json::json!({}), |value| value.0));
+    let opts = parsed.unwrap_or_else(|error| {
+        pgrx::error!("embedding_stream_table_v2: invalid options: {error}")
+    });
+    let config = EmbeddingStreamConfig {
+        legacy_columns: None,
+        columns: opts.columns.as_deref(),
+        refresh_interval: opts.refresh_interval.as_deref(),
+        index_type: opts.index_type.as_deref().unwrap_or("hnsw"),
+        metric,
+        refresh_mode: opts.refresh_mode.as_deref().unwrap_or("DIFFERENTIAL"),
+        post_refresh_action: opts.post_refresh_action.as_deref().unwrap_or("none"),
+        hnsw_m: opts.hnsw_m,
+        hnsw_ef_construction: opts.hnsw_ef_construction,
+        ivfflat_lists: opts.ivfflat_lists,
+        dry_run,
+    };
+    match embedding_stream_table_impl(name, source_table, vector_column, &config) {
+        Ok(rows) => TableIterator::new(rows.into_iter().map(|s| (Some(s),))),
+        Err(e) => pgrx::error!("embedding_stream_table_v2: {}", e),
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct EmbeddingStreamV2Options {
+    columns: Option<Vec<String>>,
+    refresh_interval: Option<String>,
+    index_type: Option<String>,
+    refresh_mode: Option<String>,
+    post_refresh_action: Option<String>,
+    hnsw_m: Option<i32>,
+    hnsw_ef_construction: Option<i32>,
+    ivfflat_lists: Option<i32>,
+}
+
+struct EmbeddingStreamConfig<'a> {
+    legacy_columns: Option<&'a str>,
+    columns: Option<&'a [String]>,
+    refresh_interval: Option<&'a str>,
+    index_type: &'a str,
+    metric: &'a str,
+    refresh_mode: &'a str,
+    post_refresh_action: &'a str,
+    hnsw_m: Option<i32>,
+    hnsw_ef_construction: Option<i32>,
+    ivfflat_lists: Option<i32>,
+    dry_run: bool,
+}
+
 fn embedding_stream_table_impl(
     name: &str,
     source_table: &str,
     vector_col: &str,
-    extra_columns: Option<&str>,
-    refresh_interval: &str,
-    index_type: &str,
-    dry_run: bool,
+    config: &EmbeddingStreamConfig<'_>,
 ) -> Result<Vec<String>, PgTrickleError> {
     // Validate index type.
-    let idx_type_lc = index_type.trim_matches('\'').to_ascii_lowercase();
+    let idx_type_lc = config.index_type.trim_matches('\'').to_ascii_lowercase();
     if idx_type_lc != "hnsw" && idx_type_lc != "ivfflat" {
         return Err(PgTrickleError::InvalidArgument(format!(
-            "embedding_stream_table: index_type must be 'hnsw' or 'ivfflat', got '{index_type}'"
+            "embedding_stream_table: index_type must be 'hnsw' or 'ivfflat', got '{}'",
+            config.index_type
         )));
     }
-
-    // Resolve schema / table name for source.
-    let src_parts: Vec<&str> = source_table.splitn(2, '.').collect();
-    let (src_schema, src_tbl) = match src_parts.len() {
-        2 => (src_parts[0].to_string(), src_parts[1].to_string()),
+    let metric = config.metric.to_ascii_lowercase();
+    let metric_suffix = match metric.as_str() {
+        "l2" => "l2",
+        "cosine" => "cosine",
+        "inner_product" => "ip",
         _ => {
-            let schema = Spi::get_one::<String>("SELECT current_schema()::text")
-                .unwrap_or(None)
-                .unwrap_or_else(|| "public".to_string());
-            (schema, source_table.to_string())
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "invalid vector metric '{}': expected l2, cosine, or inner_product",
+                config.metric
+            )));
         }
     };
-
-    // Resolve destination schema / name.
-    let dst_parts: Vec<&str> = name.splitn(2, '.').collect();
-    let (dst_schema, dst_name) = match dst_parts.len() {
-        2 => (dst_parts[0].to_string(), dst_parts[1].to_string()),
-        _ => {
-            let schema = Spi::get_one::<String>("SELECT current_schema()::text")
-                .unwrap_or(None)
-                .unwrap_or_else(|| "public".to_string());
-            (schema, name.to_string())
+    let refresh_mode = config.refresh_mode.to_ascii_uppercase();
+    if !matches!(
+        refresh_mode.as_str(),
+        "AUTO" | "DIFFERENTIAL" | "FULL" | "IMMEDIATE"
+    ) {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "invalid refresh mode: {}",
+            config.refresh_mode
+        )));
+    }
+    let refresh_interval = if refresh_mode == "IMMEDIATE" {
+        if config.refresh_interval.is_some() {
+            return Err(PgTrickleError::InvalidArgument(
+                "IMMEDIATE mode does not accept refresh_interval".to_string(),
+            ));
         }
+        "NULL".to_string()
+    } else {
+        let interval = config.refresh_interval.unwrap_or("1m").trim_matches('\'');
+        if !interval.eq_ignore_ascii_case("calculated") {
+            parse_schedule(interval)?;
+        }
+        quote_literal(interval)
     };
+    let post_refresh_action = config.post_refresh_action.to_ascii_lowercase();
+    if !matches!(
+        post_refresh_action.as_str(),
+        "none" | "analyze" | "reindex" | "reindex_if_drift"
+    ) {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "invalid post_refresh_action: {}",
+            config.post_refresh_action
+        )));
+    }
+    let mut index_options = Vec::new();
+    if idx_type_lc == "hnsw" {
+        if config.ivfflat_lists.is_some() {
+            return Err(PgTrickleError::InvalidArgument(
+                "ivfflat_lists requires ivfflat".to_string(),
+            ));
+        }
+        let m = config.hnsw_m.unwrap_or(16);
+        let ef = config.hnsw_ef_construction.unwrap_or(64);
+        if !(2..=100).contains(&m) || !(4..=1000).contains(&ef) || ef < 2 * m {
+            return Err(PgTrickleError::InvalidArgument("HNSW requires 2 <= m <= 100, 4 <= ef_construction <= 1000, and ef_construction >= 2*m".to_string()));
+        }
+        if let Some(value) = config.hnsw_m {
+            index_options.push(format!("m = {value}"));
+        }
+        if let Some(value) = config.hnsw_ef_construction {
+            index_options.push(format!("ef_construction = {value}"));
+        }
+    } else {
+        if config.hnsw_m.is_some() || config.hnsw_ef_construction.is_some() {
+            return Err(PgTrickleError::InvalidArgument(
+                "HNSW options require hnsw".to_string(),
+            ));
+        }
+        if let Some(value) = config.ivfflat_lists {
+            if !(1..=32768).contains(&value) {
+                return Err(PgTrickleError::InvalidArgument(
+                    "IVFFlat lists must be between 1 and 32768".to_string(),
+                ));
+            }
+            index_options.push(format!("lists = {value}"));
+        }
+    }
+    let index_options_sql = if index_options.is_empty() {
+        String::new()
+    } else {
+        format!(" WITH ({})", index_options.join(", "))
+    };
+
+    let source_oid = Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT pg_catalog.to_regclass($1)::oid",
+        &[source_table.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InvalidArgument(format!("source relation not found: {source_table}"))
+    })?;
+    let source_sql = Spi::get_one_with_args::<String>(
+        "SELECT pg_catalog.format('%I.%I', n.nspname, c.relname) \
+         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.oid = $1",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InvalidArgument(format!("source relation not found: {source_table}"))
+    })?;
+    let destination = parse_qualified_identifier_with_current_schema(name)?;
+    let dst_schema = destination.schema();
+    let dst_name = destination.name();
+    let vector_column = TypedIdentifier::parse(vector_col)?;
+    let vector_col = vector_column.as_str();
+    let vector_schema = Spi::get_one::<String>(
+        "SELECT n.nspname::text FROM pg_catalog.pg_extension e \
+         JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector'",
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InvalidArgument("pgvector extension is not installed".to_string())
+    })?;
 
     // Build SELECT list: extra columns + vector column.
-    let select_list = match extra_columns {
-        Some(cols) if !cols.trim().is_empty() => {
-            format!("{}, {}", cols.trim(), quote_identifier(vector_col))
+    let select_list = if let Some(columns) = config.columns {
+        let mut seen = HashSet::new();
+        let mut selected = Vec::new();
+        for column in columns {
+            if column == vector_col || !seen.insert(column) {
+                return Err(PgTrickleError::InvalidArgument(format!(
+                    "duplicate selected column: {column}"
+                )));
+            }
+            let exists = Spi::get_one_with_args::<bool>(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = $1 AND attname = $2 AND attnum > 0 AND NOT attisdropped)",
+                &[source_oid.into(), column.as_str().into()],
+            ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false);
+            if !exists {
+                return Err(PgTrickleError::InvalidArgument(format!(
+                    "source column not found: {column}"
+                )));
+            }
+            selected.push(quote_identifier(column));
         }
-        _ => {
-            // Default: include all non-system columns from source.
-            let cols_sql = "SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) \
-                 FROM pg_attribute pa \
-                 JOIN pg_class pc ON pc.oid = pa.attrelid \
-                 JOIN pg_namespace pn ON pn.oid = pc.relnamespace \
-                 WHERE pn.nspname = $1 AND pc.relname = $2 \
-                   AND pa.attnum > 0 AND NOT pa.attisdropped"
-                .to_string();
-            Spi::get_one_with_args::<String>(
-                &cols_sql,
-                &[src_schema.as_str().into(), src_tbl.as_str().into()],
-            )
-            .unwrap_or(None)
-            .unwrap_or_else(|| format!("*, {}", quote_identifier(vector_col)))
+        selected.push(quote_identifier(vector_col));
+        selected.join(", ")
+    } else {
+        match config.legacy_columns {
+            Some(cols) if !cols.trim().is_empty() => {
+                format!("{}, {}", cols.trim(), quote_identifier(vector_col))
+            }
+            _ => {
+                // Default: include all non-system columns from source.
+                let cols_sql = "SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) \
+                 FROM pg_catalog.pg_attribute pa WHERE pa.attrelid = $1 \
+                   AND pa.attnum > 0 AND NOT pa.attisdropped";
+                Spi::get_one_with_args::<String>(cols_sql, &[source_oid.into()])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InvalidArgument(format!(
+                            "source relation has no columns: {source_table}"
+                        ))
+                    })?
+            }
         }
     };
 
     // Build the defining query.
-    let defining_query = format!(
-        "SELECT {} FROM {}.{}",
-        select_list,
-        quote_identifier(&src_schema),
-        quote_identifier(&src_tbl),
-    );
+    let defining_query = format!("SELECT {select_list} FROM {source_sql}");
 
     // Build index access method string.
     let idx_access_method = idx_type_lc.as_str();
 
     // Generate the statements.
     let create_st_sql = format!(
-        "SELECT pgtrickle.create_stream_table({}, $${defining_query}$$, {}, 'DIFFERENTIAL')",
-        quote_literal(&format!("{}.{}", dst_schema, dst_name)),
-        quote_literal(refresh_interval.trim_matches('\'')),
-    );
-
-    let alter_pra_sql = format!(
-        "SELECT pgtrickle.alter_stream_table({}, post_refresh_action => 'reindex_if_drift')",
-        quote_literal(&format!("{}.{}", dst_schema, dst_name)),
+        "SELECT pgtrickle.create_stream_table({}, {}, {}, {})",
+        quote_literal(&destination.quoted()),
+        quote_literal(&defining_query),
+        refresh_interval,
+        quote_literal(&refresh_mode),
     );
 
     // Infer vector column type for index operator class.
-    let type_sql = "SELECT t.typname::text FROM pg_attribute a \
-         JOIN pg_type t ON t.oid = a.atttypid \
-         JOIN pg_class c ON c.oid = a.attrelid \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3 \
-           AND a.attnum > 0 AND NOT a.attisdropped \
-         LIMIT 1"
-        .to_string();
+    let type_sql = "SELECT t.typname::text FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
+         JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_type'::regclass \
+           AND d.objid = t.oid AND d.refclassid = 'pg_catalog.pg_extension'::regclass AND d.deptype = 'e' \
+         JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid AND e.extname = 'vector' \
+         WHERE a.attrelid = $1 AND a.attname = $2 AND a.attnum > 0 AND NOT a.attisdropped";
     let vec_typename = Spi::get_one_with_args::<String>(
-        &type_sql,
-        &[
-            src_schema.as_str().into(),
-            src_tbl.as_str().into(),
-            vector_col.into(),
-        ],
+        type_sql,
+        &[source_oid.into(), vector_col.into()],
     )
-    .unwrap_or(None)
-    .unwrap_or_else(|| "vector".to_string());
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .filter(|name| matches!(name.as_str(), "vector" | "halfvec" | "sparsevec"))
+    .ok_or_else(|| {
+        PgTrickleError::InvalidArgument(format!(
+            "{source_table}.{vector_col} must be a pgvector vector, halfvec, or sparsevec column"
+        ))
+    })?;
 
     // Select operator class based on index type and vector type.
-    let opclass = match (idx_access_method, vec_typename.as_str()) {
-        ("hnsw", "halfvec") => "halfvec_l2_ops",
-        ("hnsw", "sparsevec") => "sparsevec_l2_ops",
-        ("ivfflat", "halfvec") => "halfvec_l2_ops",
-        ("ivfflat", "sparsevec") => {
-            return Err(PgTrickleError::InvalidArgument(
-                "embedding_stream_table: ivfflat does not support sparsevec; use hnsw".to_string(),
-            ));
-        }
-        _ => "vector_l2_ops",
-    };
-
-    // Look up the source column's format_type (e.g. "vector(2)") so we can
-    // build an explicit cast in the index expression.  pgvector HNSW/IVFFlat
-    // indexes require the column expression to have explicit dimensions; when
-    // pgtrickle creates the stream table it stores only the base type OID
-    // (without type modifier), so the stream table column ends up as `vector`
-    // (no dims).  Using `(col::vector(2))` in the index expression provides
-    // the required dimensions without altering the stream table schema.
-    let src_format_type: Option<String> = Spi::get_one_with_args::<String>(
-        "SELECT format_type(a.atttypid, a.atttypmod) \
-         FROM pg_attribute a \
-         JOIN pg_class c ON c.oid = a.attrelid \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3 \
-           AND a.attnum > 0 AND NOT a.attisdropped \
-         LIMIT 1",
-        &[
-            src_schema.as_str().into(),
-            src_tbl.as_str().into(),
-            vector_col.into(),
-        ],
+    if idx_access_method == "ivfflat" && vec_typename == "sparsevec" {
+        return Err(PgTrickleError::InvalidArgument(
+            "embedding_stream_table: ivfflat does not support sparsevec; use hnsw".to_string(),
+        ));
+    }
+    let opclass = format!("{vec_typename}_{metric_suffix}_ops");
+    let opclass_exists = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_opclass o JOIN pg_catalog.pg_namespace n ON n.oid = o.opcnamespace JOIN pg_catalog.pg_am a ON a.oid = o.opcmethod WHERE n.nspname = $1 AND o.opcname = $2 AND a.amname = $3)",
+        &[vector_schema.as_str().into(), opclass.as_str().into(), idx_access_method.into()],
     )
-    .unwrap_or(None);
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !opclass_exists {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "pgvector does not provide {opclass} for {idx_access_method}"
+        )));
+    }
 
-    // Use an explicit cast when the source type carries dimension info
-    // (e.g. "vector(2)" — contains a parenthesised modifier).
-    let idx_col_expr = match &src_format_type {
-        Some(fmt) if fmt.contains('(') => {
-            format!("({}::{})", quote_identifier(vector_col), fmt)
-        }
-        _ => quote_identifier(vector_col).to_string(),
-    };
+    // The storage column may lose its typmod, so index a dimensioned cast.
+    let dimension = Spi::get_one_with_args::<i32>(
+        "SELECT atttypmod FROM pg_catalog.pg_attribute WHERE attrelid = $1 AND attname = $2 AND attnum > 0 AND NOT attisdropped",
+        &[source_oid.into(), vector_col.into()],
+    ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .filter(|dimension| *dimension > 0)
+        .ok_or_else(|| PgTrickleError::InvalidArgument(format!("{source_table}.{vector_col} needs a fixed dimension for ANN indexing")))?;
+    if (vec_typename == "vector" && dimension > 2000)
+        || (vec_typename == "halfvec" && dimension > 4000)
+    {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "{vec_typename} dimension {dimension} exceeds the supported ANN index limit"
+        )));
+    }
+    let idx_col_expr = format!(
+        "({}::{}.{}({dimension}))",
+        quote_identifier(vector_col),
+        quote_identifier(&vector_schema),
+        quote_identifier(&vec_typename)
+    );
+    let opclass = format!(
+        "{}.{}",
+        quote_identifier(&vector_schema),
+        quote_identifier(&opclass)
+    );
 
+    let index_key = format!("{dst_schema}\0{dst_name}\0{vector_col}");
+    let index_digest = crate::integration_contract::sha256_hex(index_key.as_bytes());
+    let index_name = format!("pgt_ann_{}", &index_digest[..32]);
+    let index_exists = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2)",
+        &[dst_schema.into(), index_name.as_str().into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if index_exists {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "index name {dst_schema}.{index_name} already exists; refusing to reuse it"
+        )));
+    }
     let create_idx_sql = format!(
-        "CREATE INDEX IF NOT EXISTS {}_{}_idx ON {}.{} \
-         USING {} ({idx_col_expr} {opclass})",
-        dst_name,
-        vector_col,
-        quote_identifier(&dst_schema),
-        quote_identifier(&dst_name),
+        "CREATE INDEX {} ON {}.{} \
+         USING {} ({idx_col_expr} {opclass}){index_options_sql}",
+        quote_identifier(&index_name),
+        quote_identifier(dst_schema),
+        quote_identifier(dst_name),
         idx_access_method,
     );
 
     let mut actions: Vec<String> = Vec::new();
 
-    if dry_run {
+    let alter_sql = (post_refresh_action != "none").then(|| {
+        format!(
+            "SELECT pgtrickle.alter_stream_table({}, post_refresh_action => {})",
+            quote_literal(&destination.quoted()),
+            quote_literal(&post_refresh_action)
+        )
+    });
+    if config.dry_run {
         actions.push(format!("-- 1. Create stream table\n{create_st_sql}"));
-        actions.push(format!("-- 2. Set post-refresh action\n{alter_pra_sql}"));
         actions.push(format!(
-            "-- 3. Create {idx_access_method} index\n{create_idx_sql}"
+            "-- 2. Create {idx_access_method} index\n{create_idx_sql}"
         ));
+        if let Some(sql) = &alter_sql {
+            actions.push(format!("-- 3. Set post-refresh action\n{sql}"));
+        }
         return Ok(actions);
     }
 
@@ -2543,32 +2743,23 @@ fn embedding_stream_table_impl(
     })?;
     actions.push(format!("created stream table {}.{}", dst_schema, dst_name));
 
-    // Set post-refresh action.
-    if let Err(e) = Spi::run(&alter_pra_sql) {
-        pgrx::warning!(
-            "embedding_stream_table: failed to set post_refresh_action: {}",
-            e
-        );
-    } else {
-        actions.push("post_refresh_action = reindex_if_drift".to_string());
-    }
-
-    // Create vector index (best-effort — the ST may have no rows yet).
-    if let Err(e) = Spi::run(&create_idx_sql) {
-        pgrx::warning!(
-            "embedding_stream_table: {} index creation deferred: {}",
-            idx_access_method,
-            e
-        );
-        actions.push(format!(
-            "note: {} index creation deferred ({})",
-            idx_access_method, e
-        ));
-    } else {
-        actions.push(format!(
-            "created {} index on {}.{} ({})",
-            idx_access_method, dst_schema, dst_name, vector_col
-        ));
+    // A failed index build aborts the enclosing statement and stream creation.
+    Spi::run(&create_idx_sql).map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "embedding_stream_table: failed to create {idx_access_method} index {index_name}: {e}"
+        ))
+    })?;
+    actions.push(format!(
+        "created {} index {} on {}.{} ({})",
+        idx_access_method, index_name, dst_schema, dst_name, vector_col
+    ));
+    if let Some(sql) = alter_sql {
+        Spi::run(&sql).map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "embedding_stream_table: failed to set post-refresh action: {e}"
+            ))
+        })?;
+        actions.push(format!("post_refresh_action = {post_refresh_action}"));
     }
 
     Ok(actions)

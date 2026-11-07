@@ -359,6 +359,13 @@
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
     },
+    "pgtrickle.embedding_stream_table_v2(text, text, text, text, jsonb, boolean)": {
+      "schema": "pgtrickle",
+      "name": "embedding_stream_table_v2",
+      "identity_arguments": "text, text, text, text, jsonb, boolean",
+      "class": "owner_lifecycle",
+      "execution_policy": "invoker_delegating"
+    },
     "pgtrickle.encode_row_id_v2(text, anyelement)": {
       "schema": "pgtrickle",
       "name": "encode_row_id_v2",

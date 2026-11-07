@@ -272,6 +272,7 @@ def main() -> None:
     shared.QUALIFICATION = ROOT / f"tests/release/v{VERSION}-qualification.json"
     shared.GATE_SCRIPT = GATE_SCRIPT
     shared.EXPECTED_SUITES = EXPECTED_SUITES
+    criterion.configure_release(VERSION)
     check_support_contract()
     if args.unsafe_asan_log is not None:
         qualification = json.loads(
