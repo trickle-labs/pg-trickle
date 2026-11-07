@@ -35,14 +35,21 @@ to partitions unless those relations have equivalent protection.
 ## Pattern 1: Tenant Column + RLS Policy
 
 ```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- Source table; add source RLS separately if the owner must be restricted
 CREATE TABLE tenant_embeddings (
     id          BIGSERIAL PRIMARY KEY,
     tenant_id   UUID NOT NULL,
     tier        TEXT NOT NULL DEFAULT 'standard',
     content     TEXT NOT NULL,
-    embedding   vector(1536) NOT NULL
+    embedding   vector(3) NOT NULL
 );
+
+-- Three dimensions keep this example runnable; use your model's dimension.
+INSERT INTO tenant_embeddings (tenant_id, tier, content, embedding) VALUES
+    ('00000000-0000-0000-0000-000000000001', 'premium', 'red apple', '[1,0,0]'),
+    ('00000000-0000-0000-0000-000000000002', 'standard', 'blue berry', '[0,1,0]');
 
 -- Stream table (inherits tenant_id column)
 SELECT pgtrickle.create_stream_table(
@@ -75,9 +82,10 @@ BEGIN;
 SELECT set_config('app.tenant_id', $1::text, true);
 
 -- This query automatically applies the RLS policy
-SELECT id, content, embedding <=> '[...]'::vector AS distance
+SELECT id, content, embedding <=> '[1,0,0]'::vector AS distance
 FROM tenant_corpus
-ORDER BY embedding <=> '[...]'::vector
+WHERE tenant_id = $1::text::uuid
+ORDER BY embedding <=> '[1,0,0]'::vector
 LIMIT 10;
 COMMIT;
 ```
@@ -158,9 +166,10 @@ BEGIN;
 SELECT set_config('app.tenant_id', $1::text, true);
 
 -- PostgreSQL automatically routes to the correct partition
-SELECT id, content, embedding <=> '[...]'::vector AS distance
+SELECT id, content, embedding <=> '[1,0,0]'::vector AS distance
 FROM tenant_corpus_partitioned
-ORDER BY embedding <=> '[...]'::vector
+WHERE tenant_id = $1::text::uuid
+ORDER BY embedding <=> '[1,0,0]'::vector
 LIMIT 10;
 COMMIT;
 ```
@@ -212,7 +221,7 @@ SELECT pgtrickle.create_stream_table(
     'standard_corpus',
     $$
         SELECT id, tenant_id, content,
-               embedding::halfvec(1536) AS embedding
+               embedding::halfvec(3) AS embedding
         FROM tenant_embeddings
         WHERE tier = 'standard'
     $$,

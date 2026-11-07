@@ -7,6 +7,57 @@ use e2e::E2eDb;
 const TENANT_A: &str = "00000000-0000-0000-0000-000000000001";
 const TENANT_B: &str = "00000000-0000-0000-0000-000000000002";
 
+#[tokio::test]
+async fn test_tenant_tutorial_sql_runs_with_isolated_reader() {
+    let db = E2eDb::new().await.with_extension().await;
+    let tutorial = include_str!("../docs/tutorials/PER_TENANT_ANN_PATTERNS.md");
+    let sql_blocks: Vec<_> = tutorial
+        .split("```sql\n")
+        .skip(1)
+        .map(|block| block.split("```").next().expect("closing SQL fence"))
+        .collect();
+    for index in [0, 2, 3, 5] {
+        sqlx::raw_sql(sql_blocks[index])
+            .execute(&db.pool)
+            .await
+            .expect("execute tenant tutorial setup");
+    }
+    db.execute("CREATE ROLE tenant_tutorial_reader NOLOGIN")
+        .await;
+    db.execute(
+        "GRANT SELECT ON tenant_corpus, tenant_corpus_partitioned TO tenant_tutorial_reader",
+    )
+    .await;
+    for index in [1, 4] {
+        let sql = sql_blocks[index]
+            .split("SELECT id, content, ")
+            .nth(1)
+            .expect("tenant search query")
+            .split(';')
+            .next()
+            .expect("query terminator");
+        let query = format!("SELECT id, content, {sql}");
+        let mut tx = db.pool.begin().await.expect("begin reader transaction");
+        sqlx::query("SET LOCAL ROLE tenant_tutorial_reader")
+            .execute(&mut *tx)
+            .await
+            .expect("set reader");
+        sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
+            .bind(TENANT_A)
+            .execute(&mut *tx)
+            .await
+            .expect("set tenant");
+        let rows: Vec<(i64, String, f64)> = sqlx::query_as(sqlx::AssertSqlSafe(query))
+            .bind(TENANT_A)
+            .fetch_all(&mut *tx)
+            .await
+            .expect("execute tutorial search");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "red apple");
+        tx.rollback().await.expect("end reader transaction");
+    }
+}
+
 fn uses_index(plan: &serde_json::Value, expected: &str) -> bool {
     match plan {
         serde_json::Value::Object(fields) => {
