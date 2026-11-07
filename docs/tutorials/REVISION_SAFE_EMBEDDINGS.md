@@ -48,12 +48,16 @@ vectors, retry settings and sanitized error messages at the application
 boundary. This fixture is a protocol example, not a multi-tenant authorization
 scheme.
 
-1. In the **same transaction** as an insert or model-input update, call
+1. In the **same transaction** as an insert, model-input update, or transition
+   to published, call
    `embedding_demo.enqueue(document_id, model_version)` for each model that
    should be generated. The unique key makes duplicate enqueue calls harmless.
-   A metadata-only update does not need a new request. On deletion the foreign
-   keys remove jobs and results; document and chunk replacement follow the same
-   rule with new keys.
+   Enqueue ignores unpublished documents, so publication must enqueue a revision
+   that was not generated earlier. Republishing a revision with an existing job
+   does not create duplicate work. A metadata-only update that does not publish
+   the document does not need a new request. On deletion the foreign keys remove
+   jobs and results; document and chunk replacement follow the same rule with
+   new keys.
 2. A worker calls `embedding_demo.claim(model_version, positive_lease)` and
    commits the transaction immediately. It records the returned job ID, claim
    token and body, and generates the embedding **outside** the database

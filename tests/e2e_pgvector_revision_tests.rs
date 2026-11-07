@@ -62,6 +62,66 @@ async fn refresh_differential(db: &E2eDb, table: &str) {
 }
 
 #[tokio::test]
+async fn test_revision_safe_publication_enqueues_missing_work_without_duplicates() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(include_str!("fixtures/pgvector_revision_pipeline.sql"))
+        .execute(&db.pool)
+        .await
+        .expect("install revision fixture");
+    db.execute("INSERT INTO embedding_demo.documents (id, body, published) VALUES (1, 'A', false)")
+        .await;
+    enqueue(&db, "model-v1").await;
+    assert_eq!(db.count("embedding_demo.jobs").await, 0);
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE embedding_demo.documents SET published = true WHERE id = 1",
+        "SELECT embedding_demo.enqueue(1, 'model-v1')",
+        "ROLLBACK",
+    ])
+    .await;
+    assert_eq!(db.count("embedding_demo.jobs").await, 0);
+    let published: bool = db
+        .query_scalar("SELECT published FROM embedding_demo.documents WHERE id = 1")
+        .await;
+    assert!(!published);
+
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE embedding_demo.documents SET published = true WHERE id = 1",
+        "SELECT embedding_demo.enqueue(1, 'model-v1')",
+        "COMMIT",
+    ])
+    .await;
+    assert_eq!(db.count("embedding_demo.jobs").await, 1);
+    refresh_differential(&db, "corpus_v1").await;
+    assert_eq!(db.count("embedding_demo.corpus_v1").await, 0);
+    let job = claim(&db, "model-v1").await;
+    assert!(complete(&db, &job, "model-v1").await);
+    refresh_differential(&db, "corpus_v1").await;
+    assert_eq!(db.count("embedding_demo.corpus_v1").await, 1);
+
+    db.execute("UPDATE embedding_demo.documents SET published = false WHERE id = 1")
+        .await;
+    refresh_differential(&db, "corpus_v1").await;
+    assert_eq!(db.count("embedding_demo.corpus_v1").await, 0);
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE embedding_demo.documents SET published = true WHERE id = 1",
+        "SELECT embedding_demo.enqueue(1, 'model-v1')",
+        "COMMIT",
+    ])
+    .await;
+    assert_eq!(db.count("embedding_demo.jobs").await, 1);
+    refresh_differential(&db, "corpus_v1").await;
+    let row: (String, String) =
+        sqlx::query_as("SELECT body, embedding::text FROM embedding_demo.corpus_v1 WHERE id = 1")
+            .fetch_one(&db.pool)
+            .await
+            .expect("read republished corpus row");
+    assert_eq!(row, ("A".to_string(), "[1,0,0]".to_string()));
+}
+
+#[tokio::test]
 async fn test_revision_safe_generation_and_model_rollover() {
     let db = E2eDb::new().await.with_extension().await;
     sqlx::raw_sql(include_str!("fixtures/pgvector_revision_pipeline.sql"))
