@@ -38,6 +38,63 @@ async fn test_identity_scalar_frames_preserve_installed_v2_v3_bytes() {
 }
 
 #[tokio::test]
+async fn test_cdc_integer_pk_fast_path_matches_v3_in_both_trigger_modes() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute(
+        "DO $ BEGIN \
+           EXECUTE format('ALTER DATABASE %I SET pg_trickle.enabled = off', current_database()); \
+         END $",
+    )
+    .await;
+    db.execute(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE datname = current_database() AND backend_type = 'pg_trickle scheduler' \
+           AND pid <> pg_backend_pid()",
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    for mode in ["row", "statement"] {
+        let source = format!("cdc_{mode}_integer_identity_src");
+        let stream = format!("cdc_{mode}_integer_identity_st");
+        db.execute(&format!("CREATE TABLE {source} (id integer PRIMARY KEY)"))
+            .await;
+        db.execute_seq(&[
+            &format!("SET pg_trickle.cdc_trigger_mode = '{mode}'"),
+            &format!(
+                "SELECT pgtrickle.create_stream_table('{stream}', $SELECT id FROM {source}$, '24h', 'DIFFERENTIAL')"
+            ),
+        ])
+        .await;
+        let stable_name: String = db
+            .query_scalar(&format!(
+                "SELECT source_stable_name FROM pgtrickle.pgt_change_tracking \
+                 WHERE source_relid = '{source}'::regclass"
+            ))
+            .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (-2147483648), (-1), (0), (2147483647)"
+        ))
+        .await;
+        let buffer = format!("pgtrickle_changes.\"changes_{stable_name}\"");
+        let captured: i64 = db
+            .query_scalar(&format!("SELECT count(*) FROM {buffer} WHERE action = 'I'"))
+            .await;
+        let mismatched: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM {buffer} WHERE action = 'I' \
+                   AND __pgt_row_id IS DISTINCT FROM pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(id))"
+            ))
+            .await;
+        assert_eq!(
+            captured, 4,
+            "{mode} trigger should capture all boundary keys"
+        );
+        assert_eq!(mismatched, 0, "{mode} trigger IDs must match V3");
+    }
+}
+
+#[tokio::test]
 async fn test_identity_colliding_probes_preserve_merge_and_join_complete_ids() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
