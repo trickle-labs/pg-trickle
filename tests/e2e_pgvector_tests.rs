@@ -1581,6 +1581,70 @@ async fn test_ann_worker_rebuilds_only_the_requested_index() {
 }
 
 #[tokio::test]
+async fn test_ann_worker_rebuilds_only_the_requested_partition_leaf() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_partition_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_partition_source SELECT i, '[1,0,0]'::vector FROM generate_series(1, 20) i")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table('ann_partition_stream', $$SELECT id, embedding FROM ann_partition_source$$, '1h', 'DIFFERENTIAL', partition_by => 'HASH:id:4')").await;
+    db.execute("CREATE INDEX ann_partition_hnsw ON ann_partition_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let leaf_indexes: Vec<(i64, String, i64)> = sqlx::query_as(
+        "SELECT idx.oid::bigint, idx.relname::text, pg_relation_filenode(idx.oid)::bigint \
+         FROM pg_inherits h JOIN pg_index i ON i.indrelid = h.inhrelid \
+         JOIN pg_class idx ON idx.oid = i.indexrelid JOIN pg_am a ON a.oid = idx.relam \
+         WHERE h.inhparent = 'ann_partition_stream'::regclass AND a.amname = 'hnsw' \
+         ORDER BY idx.relname",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("find partition leaf indexes");
+    assert_eq!(leaf_indexes.len(), 4);
+    let request: i64 = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_partition_stream'::regclass::oid, $1::bigint::oid)")
+        .bind(leaf_indexes[0].0).fetch_one(&db.pool).await.expect("request one leaf");
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let output = ann_worker_command(&db, &database, "postgres", request, "5s")
+        .output()
+        .await
+        .expect("run partition leaf worker");
+    assert!(
+        output.status.success(),
+        "worker failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect partition request");
+    assert_eq!(status["state"], "SUCCEEDED");
+    for (position, (old_oid, name, old_node)) in leaf_indexes.iter().enumerate() {
+        let (oid, node): (i64, i64) = sqlx::query_as("SELECT oid::bigint, pg_relation_filenode(oid)::bigint FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname = $1")
+            .bind(name).fetch_one(&db.pool).await.expect("inspect leaf after rebuild");
+        if position == 0 {
+            assert_ne!(
+                (oid, node),
+                (*old_oid, *old_node),
+                "requested leaf must be rebuilt"
+            );
+        } else {
+            assert_eq!(
+                (oid, node),
+                (*old_oid, *old_node),
+                "other leaves must remain untouched"
+            );
+        }
+    }
+    db.assert_st_matches_query(
+        "ann_partition_stream",
+        "SELECT id, embedding FROM ann_partition_source",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_ann_worker_rejects_a_replaced_index() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
