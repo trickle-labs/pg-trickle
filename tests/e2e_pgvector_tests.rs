@@ -349,6 +349,121 @@ async fn test_ann_maintenance_intent_delayed_request_cannot_regress_epoch() {
 }
 
 #[tokio::test]
+async fn test_ann_maintenance_cooldown_survives_reindex_and_failure_backoff() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_cooldown_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_cooldown_stream",
+        "SELECT id, embedding FROM ann_cooldown_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_cooldown_idx ON ann_cooldown_stream USING hnsw (embedding vector_cosine_ops)").await;
+    let request = "SELECT pgtrickle.request_ann_maintenance('ann_cooldown_stream'::regclass::oid, 'ann_cooldown_idx'::regclass::oid)";
+    let first: i64 = db.query_scalar(request).await;
+    let mut worker = db.pool.acquire().await.expect("worker session");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(first)
+        .execute(&mut *worker)
+        .await
+        .expect("claim first request");
+    sqlx::query("REINDEX INDEX CONCURRENTLY ann_cooldown_idx")
+        .execute(&mut *worker)
+        .await
+        .expect("rebuild index");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(first)
+        .execute(&mut *worker)
+        .await
+        .expect("finish first request");
+    let next: i64 = db.query_scalar(request).await;
+    assert_ne!(first, next);
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(next)
+            .fetch_one(&db.pool)
+            .await
+            .expect("replacement status");
+    assert!(
+        status["next_eligible_at"].is_string(),
+        "successful rebuild must expose a cooldown for its replacement"
+    );
+    assert!(
+        sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+            .bind(next)
+            .execute(&mut *worker)
+            .await
+            .is_err(),
+        "cooldown must prevent another rebuild"
+    );
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    for (attempt, minimum_seconds, maximum_seconds) in [
+        (1, 15.0, 31.0),
+        (2, 40.0, 61.0),
+        (3, 100.0, 121.0),
+        (4, 200.0, 241.0),
+        (5, 400.0, 481.0),
+        (6, 800.0, 961.0),
+        (6, 800.0, 961.0),
+    ] {
+        sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+            .bind(next)
+            .execute(&mut *worker)
+            .await
+            .expect("claim after delay");
+        sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, false, 'test failure')")
+            .bind(next)
+            .execute(&mut *worker)
+            .await
+            .expect("record failed attempt");
+        let status: serde_json::Value =
+            sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                .bind(next)
+                .fetch_one(&db.pool)
+                .await
+                .expect("failure status");
+        assert_eq!(status["consecutive_failures"], attempt);
+        let delay: f64 = db.query_scalar("SELECT extract(epoch FROM (next_eligible_at - clock_timestamp()))::float8 FROM pgtrickle.pgt_ann_maintenance_claims").await;
+        assert!(
+            delay > minimum_seconds && delay < maximum_seconds,
+            "failure delay must increase on retry and stop at the cap"
+        );
+        assert!(
+            sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+                .bind(next)
+                .execute(&mut *worker)
+                .await
+                .is_err()
+        );
+        db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    }
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(next)
+        .execute(&mut *worker)
+        .await
+        .expect("claim after backoff");
+    sqlx::query("REINDEX INDEX CONCURRENTLY ann_cooldown_idx")
+        .execute(&mut *worker)
+        .await
+        .expect("rebuild after failures");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(next)
+        .execute(&mut *worker)
+        .await
+        .expect("record successful retry");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(next)
+            .fetch_one(&db.pool)
+            .await
+            .expect("successful retry status");
+    assert_eq!(status["consecutive_failures"], 0);
+}
+
+#[tokio::test]
 async fn test_ann_maintenance_claim_serializes_concurrent_reindex_replacement() {
     use sqlx::Connection;
 
@@ -410,6 +525,7 @@ async fn test_ann_maintenance_claim_serializes_concurrent_reindex_replacement() 
         .execute(&mut *worker)
         .await
         .expect("finish first claim");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE leaf_relid = 'ann_swap_stream'::regclass::oid AND request_id IS NULL").await;
     sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
         .bind(replacement)
         .execute(&mut *other)
@@ -505,6 +621,7 @@ async fn test_ann_maintenance_claim_is_session_bound_and_retryable() {
             .expect("failed status");
     assert_eq!(status["state"], "FAILED");
     assert_eq!(status["last_error"], "test failure");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
         .bind(id)
         .execute(&mut *worker)
@@ -553,6 +670,7 @@ async fn test_ann_maintenance_claim_is_session_bound_and_retryable() {
     );
     let next: i64 = db.query_scalar(request).await;
     assert_ne!(id, next);
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
         .bind(next)
         .execute(&mut *worker)
@@ -592,6 +710,19 @@ async fn test_ann_maintenance_intent_survives_restart() {
     db.execute("CREATE INDEX ann_intent_restart_idx ON ann_intent_restart_stream USING hnsw (embedding vector_cosine_ops)").await;
     let sql = "SELECT pgtrickle.request_ann_maintenance('ann_intent_restart_stream'::regclass::oid, 'ann_intent_restart_idx'::regclass::oid)";
     let before: i64 = db.query_scalar(sql).await;
+    let mut worker = db.pool.acquire().await.expect("restart worker");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(before)
+        .execute(&mut *worker)
+        .await
+        .expect("claim before restart");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, false, 'test failure')")
+        .bind(before)
+        .execute(&mut *worker)
+        .await
+        .expect("fail before restart");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() + interval '5 minutes'").await;
+    drop(worker);
     db.pool.close().await;
     let restarted = tokio::process::Command::new("docker")
         .args(["restart", db.container_id()])
@@ -604,6 +735,25 @@ async fn test_ann_maintenance_intent_survives_restart() {
     assert_eq!(
         before, after,
         "restart must preserve and deduplicate the request"
+    );
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(after)
+            .fetch_one(&db.pool)
+            .await
+            .expect("status after restart");
+    assert_eq!(status["consecutive_failures"], 1);
+    assert!(
+        status["next_eligible_at"].is_string(),
+        "retry schedule must survive restart"
+    );
+    assert!(
+        sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+            .bind(after)
+            .execute(&db.pool)
+            .await
+            .is_err(),
+        "restart must not erase backoff"
     );
 }
 

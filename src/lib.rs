@@ -903,9 +903,11 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ann_maintenance_claims (
     pgt_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
     leaf_relid OID NOT NULL,
     index_key BYTEA NOT NULL,
-    request_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_ann_maintenance_requests(request_id) ON DELETE CASCADE,
-    claim_pid INTEGER NOT NULL,
-    claim_backend_start TIMESTAMPTZ NOT NULL,
+    request_id BIGINT REFERENCES pgtrickle.pgt_ann_maintenance_requests(request_id) ON DELETE CASCADE,
+    claim_pid INTEGER,
+    claim_backend_start TIMESTAMPTZ,
+    next_eligible_at TIMESTAMPTZ,
+    consecutive_failures SMALLINT NOT NULL DEFAULT 0 CHECK (consecutive_failures BETWEEN 0 AND 6),
     PRIMARY KEY (pgt_id, leaf_relid, index_key)
 );
 REVOKE ALL ON TABLE pgtrickle.pgt_ann_maintenance_claims FROM PUBLIC;
