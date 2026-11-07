@@ -4321,7 +4321,8 @@ pgtrickle.ann_maintenance_request(request_id bigint) → jsonb
 ```
 
 Returns the request's recorded and current epochs, timestamps, object OIDs,
-and `identity_current`, after rechecking the caller's privileges. `REQUESTED`
+`next_eligible_at`, consecutive failures, and `identity_current`, after
+rechecking the caller's privileges. `REQUESTED`
 means only that intent was recorded. A false `identity_current` means the
 captured database, stream, leaf, or index identity is no longer valid; `true`
 is a point-in-time observation and does not prevent later DDL. An unchanged
@@ -4353,9 +4354,17 @@ nonempty error of at most 2048 bytes on failure. A success is the caller's
 report, not independent proof that a rebuild ran. Failure remains observable.
 If another request arrives during the run, success leaves it `REQUESTED`.
 Concurrent reindex replaces index identity, so an old pending request can
-become stale; inspect it and explicitly request the replacement index. No
-refresh counter is reset. This interface does not yet provide an executor,
-automatic cooldown, backoff, cancellation, or threshold-based requests.
+become stale; inspect it and explicitly request the replacement index. Claims
+for the same leaf and index definition have a five-minute cooldown after a
+reported success, including across the reindex swap. A reported failure delays
+the next claim by 30 seconds, doubling on each consecutive failure up to 16
+minutes; success resets the failure count. `next_eligible_at` shows the
+deadline. These schedules survive a physical restart and are discarded with
+requests on logical restore. An interrupted backend can be reclaimed without
+delay because no outcome was reported. Index renames or definition changes
+create a different schedule and require operator coordination. No refresh
+counter is reset. This interface does not yet provide an executor,
+cancellation, or threshold-based requests.
 
 ### pgtrickle.pgt_stream_tables
 

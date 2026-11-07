@@ -103,6 +103,13 @@ fn ann_maintenance_request_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickl
                AND a.backend_start = r.claim_backend_start) THEN 'INTERRUPTED' ELSE r.state END, \
            'claim_epoch', r.claim_epoch, 'pending_during_run', r.pending_during_run, \
            'last_error', r.last_error, 'completed_at', r.completed_at, \
+           'next_eligible_at', (SELECT g.next_eligible_at FROM pgtrickle.pgt_ann_maintenance_claims g \
+             WHERE g.pgt_id = r.pgt_id AND g.leaf_relid = r.leaf_relid \
+               AND g.index_key = pg_catalog.sha256(pg_catalog.convert_to(r.index_definition, 'UTF8'))), \
+           'consecutive_failures', COALESCE((SELECT g.consecutive_failures \
+             FROM pgtrickle.pgt_ann_maintenance_claims g WHERE g.pgt_id = r.pgt_id \
+               AND g.leaf_relid = r.leaf_relid \
+               AND g.index_key = pg_catalog.sha256(pg_catalog.convert_to(r.index_definition, 'UTF8'))), 0), \
            'stream_table_oid', r.root_relid, 'leaf_table_oid', r.leaf_relid, \
            'index_oid', r.index_relid, 'first_observed_epoch', r.first_observed_epoch, \
            'last_observed_epoch', r.last_observed_epoch, 'current_epoch', s.ann_refresh_epoch, \
@@ -168,8 +175,10 @@ fn claim_ann_maintenance_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickleE
              FROM pgtrickle.pgt_ann_maintenance_requests r WHERE r.request_id = $1 \
              ON CONFLICT (pgt_id, leaf_relid, index_key) DO UPDATE \
                SET request_id = EXCLUDED.request_id, claim_pid = EXCLUDED.claim_pid, \
-                   claim_backend_start = EXCLUDED.claim_backend_start \
-             WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                   claim_backend_start = EXCLUDED.claim_backend_start, next_eligible_at = NULL \
+             WHERE (pgtrickle.pgt_ann_maintenance_claims.next_eligible_at IS NULL \
+                 OR pgtrickle.pgt_ann_maintenance_claims.next_eligible_at <= pg_catalog.clock_timestamp()) \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
                WHERE a.pid = pgtrickle.pgt_ann_maintenance_claims.claim_pid \
                  AND a.backend_start = pgtrickle.pgt_ann_maintenance_claims.claim_backend_start) \
              RETURNING request_id",
@@ -198,7 +207,7 @@ fn claim_ann_maintenance_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickleE
     .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
     if !claimed {
         return Err(PgTrickleError::InvalidArgument(format!(
-            "request {request_id} or its index is already claimed, or the request is completed"
+            "request {request_id} or its index is already claimed, is cooling down, or the request is completed"
         )));
     }
     ann_maintenance_request_impl(request_id)
@@ -241,7 +250,14 @@ fn finish_ann_maintenance_impl(
                AND r.claim_backend_start = (SELECT backend_start FROM pg_catalog.pg_stat_activity \
                  WHERE pid = pg_catalog.pg_backend_pid()) \
              RETURNING r.request_id) \
-             DELETE FROM pgtrickle.pgt_ann_maintenance_claims guard USING finished \
+             UPDATE pgtrickle.pgt_ann_maintenance_claims guard \
+             SET request_id = NULL, claim_pid = NULL, claim_backend_start = NULL, \
+                 next_eligible_at = pg_catalog.clock_timestamp() + CASE WHEN $2 \
+                   THEN interval '5 minutes' \
+                   ELSE (30 * (1 << LEAST(guard.consecutive_failures::integer, 5))) * interval '1 second' END, \
+                 consecutive_failures = CASE WHEN $2 THEN 0 \
+                   ELSE LEAST(guard.consecutive_failures + 1, 6) END \
+             FROM finished \
              WHERE guard.request_id = finished.request_id \
                AND guard.claim_pid = pg_catalog.pg_backend_pid() \
                AND guard.claim_backend_start = (SELECT backend_start FROM pg_catalog.pg_stat_activity \
