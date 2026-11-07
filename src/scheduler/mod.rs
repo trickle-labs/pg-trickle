@@ -2000,20 +2000,55 @@ fn is_falling_behind(elapsed_ms: i64, schedule_ms: i64, threshold: f64) -> Optio
 /// VP-1/VP-2 (v0.47.0): Execute the post-refresh action for a stream table
 /// after a successful refresh that produced changed rows.
 ///
-/// Runs outside the refresh transaction (fire-and-forget after commit).
-/// Errors are logged but never propagated — post-refresh actions must not
-/// interrupt the refresh pipeline.
+/// The caller is still in the refresh transaction. Isolate PostgreSQL errors
+/// so a maintenance failure cannot abort the refresh.
 pub(crate) fn execute_post_refresh_action(st: &StreamTableMeta, rows_changed: i64) {
     let action = st.post_refresh_action.as_str();
 
     // Increment the drift counter first (regardless of action type).
     if action == "reindex_if_drift" || action == "reindex" || action == "analyze" {
-        let _ = crate::catalog::StreamTableMeta::increment_rows_changed_for_reindex(
-            st.pgt_id,
-            rows_changed,
-        );
+        isolate_post_refresh_action(st, || {
+            crate::catalog::StreamTableMeta::increment_rows_changed_for_reindex(
+                st.pgt_id,
+                rows_changed,
+            )
+        });
     }
 
+    if action != "none" {
+        isolate_post_refresh_action(st, || {
+            execute_post_refresh_action_inner(st, rows_changed);
+            Ok(())
+        });
+    }
+}
+
+fn isolate_post_refresh_action(
+    st: &StreamTableMeta,
+    f: impl FnOnce() -> Result<(), PgTrickleError>,
+) {
+    let subtxn = SubTransaction::begin();
+    let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        f().map_err(|error| error.to_string())
+    }))
+    .catch_others(|error| Err(format!("{error:?}")))
+    .execute();
+    match result {
+        Ok(()) => subtxn.commit(),
+        Err(error) => {
+            subtxn.rollback();
+            pgrx::warning!(
+                "pg_trickle: post-refresh action failed for {}.{}: {}",
+                st.pgt_schema,
+                st.pgt_name,
+                error
+            );
+        }
+    }
+}
+
+fn execute_post_refresh_action_inner(st: &StreamTableMeta, rows_changed: i64) {
+    let action = st.post_refresh_action.as_str();
     match action {
         "none" => {
             // No post-refresh action requested.
