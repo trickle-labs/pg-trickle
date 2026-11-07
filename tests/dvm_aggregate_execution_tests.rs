@@ -1060,6 +1060,15 @@ async fn test_cdc_image_policy_preserves_native_scalar_observations() {
         }
     }
     assert_eq!(observed, 195);
+    let bpchar_sql = cdc_elision::changed_column_sql_for_type("a.v", "b.v", "character(2)");
+    assert!(!bpchar_sql.contains("record_send"));
+    let bpchar_pairs: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT ({bpchar_sql})::text, (CASE WHEN record_send(ROW(a.v)) IS DISTINCT FROM record_send(ROW(b.v)) THEN B'1' ELSE B'0' END)::text FROM (VALUES (NULL::character(2)),('a'::character(2)),('a '::character(2)),('A'::character(2)),('b'::character(2))) a(v) CROSS JOIN (VALUES (NULL::character(2)),('a'::character(2)),('a '::character(2)),('A'::character(2)),('b'::character(2))) b(v)"
+    ))).fetch_all(&db.pool).await.unwrap();
+    assert!(
+        bpchar_pairs.iter().all(|(typed, binary)| typed == binary),
+        "fixed-width character comparisons must preserve binary-image distinctions: {bpchar_pairs:?}"
+    );
     let scale_control: (bool, String) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT a.v IS DISTINCT FROM b.v, ({rendered})::text FROM (VALUES(1.0::numeric)) a(v) CROSS JOIN (VALUES(1.00::numeric)) b(v)"
     ))).fetch_one(&db.pool).await.unwrap();
