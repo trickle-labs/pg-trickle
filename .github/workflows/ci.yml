@@ -472,6 +472,7 @@ jobs:
           exit 1
 
       - name: Upload v0.87 pgbench result
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: pgbench-v0.87
