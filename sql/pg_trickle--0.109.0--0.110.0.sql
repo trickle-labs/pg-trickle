@@ -61,6 +61,13 @@ RETURNS bigint STRICT SECURITY DEFINER
 SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c AS 'MODULE_PATHNAME', 'request_ann_maintenance_wrapper';
 REVOKE EXECUTE ON FUNCTION pgtrickle.request_ann_maintenance(oid, oid) FROM PUBLIC;
+CREATE FUNCTION pgtrickle.request_ann_maintenance_if_needed(
+    stream_table oid, index_oid oid, estimated_rows bigint,
+    estimate_generation bigint, estimate_operations bigint
+) RETURNS jsonb STRICT SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', 'request_ann_maintenance_if_needed_wrapper';
+REVOKE EXECUTE ON FUNCTION pgtrickle.request_ann_maintenance_if_needed(oid, oid, bigint, bigint, bigint) FROM PUBLIC;
 CREATE FUNCTION pgtrickle.ann_maintenance_request(request_id bigint)
 RETURNS jsonb STRICT SECURITY DEFINER
 SET search_path TO pgtrickle, pg_catalog, pg_temp

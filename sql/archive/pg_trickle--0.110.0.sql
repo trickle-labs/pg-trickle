@@ -1859,6 +1859,13 @@ CREATE FUNCTION pgtrickle.request_ann_maintenance(stream_table oid, index_oid oi
 RETURNS bigint STRICT SECURITY DEFINER
 SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c AS 'MODULE_PATHNAME', 'request_ann_maintenance_wrapper';
+
+CREATE FUNCTION pgtrickle.request_ann_maintenance_if_needed(
+    stream_table oid, index_oid oid, estimated_rows bigint,
+    estimate_generation bigint, estimate_operations bigint
+) RETURNS jsonb STRICT SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', 'request_ann_maintenance_if_needed_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -4625,6 +4632,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.cancel_ann_maintenance(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.claim_ann_maintenance(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.finish_ann_maintenance(bigint, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.request_ann_maintenance(oid, oid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.request_ann_maintenance_if_needed(oid, oid, bigint, bigint, bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.alter_stream_table(text, text, text, text, text, text, text, text, boolean, boolean, text, text, bigint, integer, text, integer, double precision, text, double precision, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.attach_embedding_outbox(text, text, integer, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.attach_outbox(text, integer, integer) FROM PUBLIC;
