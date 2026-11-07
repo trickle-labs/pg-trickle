@@ -4320,7 +4320,8 @@ pgtrickle.ann_maintenance_request(request_id bigint) → jsonb
 ```
 
 Returns the request's recorded and current epochs, timestamps, object OIDs,
-`next_eligible_at`, consecutive failures, cancellation status, and `identity_current`, after
+`next_eligible_at`, consecutive failures, cancellation status, the last
+reported coverage epoch and its timestamp, and `identity_current`, after
 rechecking the caller's privileges. `REQUESTED`
 means only that intent was recorded. A false `identity_current` means the
 captured database, stream, leaf, or index identity is no longer valid; `true`
@@ -4335,8 +4336,9 @@ pgtrickle.claim_ann_maintenance(request_id bigint) → jsonb
 pgtrickle.finish_ann_maintenance(request_id bigint, succeeded boolean, error_message text) → void
 ```
 
-Claiming records the current backend, its start time, caller role and observed
-epoch transactionally. The caller must have the same privileges required to
+Claiming records the current backend, its start time, caller role and the
+latest committed stream refresh epoch visible to the claim transaction. The
+caller must have the same privileges required to
 inspect the request, and its index identity must still match. A live backend's
 claim cannot be taken by another session. Claims for the same leaf and index
 definition also serialize across the identity swap made by concurrent reindex.
@@ -4361,8 +4363,16 @@ minutes; success resets the failure count. `next_eligible_at` shows the
 deadline. These schedules survive a physical restart and are discarded with
 requests on logical restore. An interrupted backend can be reclaimed without
 delay because no outcome was reported. Index renames or definition changes
-create a different schedule and require operator coordination. No refresh
-counter is reset. This interface does not create threshold-based requests.
+create a different schedule and require operator coordination. On reported
+success, the per-index `reported_covered_epoch` advances to the claim epoch;
+failure leaves the previous value intact. `refreshes_since_reported_coverage`
+is the difference from the current stream epoch when both are known. A refresh
+committed after the claim remains in that difference even if it completed
+while the rebuild ran. These are refresh generations, not changed-row counts
+or recall measurements, and success is the caller's report. A `NULL` epoch or
+missing coverage yields an unknown difference. A manual rebuild outside this
+interface does not advance reported coverage. No refresh counter is reset.
+This interface does not create threshold-based requests.
 
 The repository includes a one-request reference worker. After creating a
 request and granting the worker role `EXECUTE` on `claim_ann_maintenance`,

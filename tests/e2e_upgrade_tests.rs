@@ -580,6 +580,37 @@ async fn test_upgrade_embedding_helpers_from_0109() {
             .await
             .expect("cancel on upgraded catalog");
     assert_eq!(status["state"], "CANCELLED");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    let reopened: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('upgrade_cosine'::regclass::oid, \
+        (SELECT i.indexrelid FROM pg_index i JOIN pg_opclass op ON op.oid = i.indclass[0] \
+         WHERE i.indrelid = 'upgrade_cosine'::regclass AND op.opcname = 'vector_cosine_ops' LIMIT 1))").await;
+    assert_eq!(request, reopened);
+    let claim: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .fetch_one(&mut *worker)
+        .await
+        .expect("claim upgraded request");
+    let reindex: String = db.query_scalar("SELECT format('REINDEX INDEX CONCURRENTLY %I.%I', n.nspname, c.relname) \
+        FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace \
+        JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid='upgrade_cosine'::regclass AND op.opcname='vector_cosine_ops' LIMIT 1").await;
+    // The statement uses catalog identifiers quoted by PostgreSQL's format(%I).
+    sqlx::query(sqlx::AssertSqlSafe(reindex.as_str()))
+        .execute(&mut *worker)
+        .await
+        .expect("rebuild upgraded index");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("report upgraded coverage");
+    let covered: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect upgraded coverage");
+    assert_eq!(covered["reported_covered_epoch"], claim["claim_epoch"]);
+    assert!(covered["reported_covered_epoch"].is_number());
     db.execute("CREATE ROLE upgrade_ann_unprivileged NOLOGIN")
         .await;
     let private: bool = db.query_scalar("SELECT NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.request_ann_maintenance(oid,oid)', 'EXECUTE') \
