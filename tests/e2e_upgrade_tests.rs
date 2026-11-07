@@ -562,6 +562,17 @@ async fn test_upgrade_embedding_helpers_from_0109() {
         (SELECT i.indexrelid FROM pg_index i JOIN pg_opclass op ON op.oid = i.indclass[0] \
          WHERE i.indrelid = 'upgrade_cosine'::regclass AND op.opcname = 'vector_cosine_ops' LIMIT 1))").await;
     assert!(request > 0);
+    let mut worker = db.pool.acquire().await.expect("upgraded worker session");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("claim on upgraded catalog");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, false, 'test failure')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("release upgraded claim");
     db.execute("CREATE ROLE upgrade_ann_unprivileged NOLOGIN")
         .await;
     let private: bool = db.query_scalar("SELECT NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.request_ann_maintenance(oid,oid)', 'EXECUTE') \

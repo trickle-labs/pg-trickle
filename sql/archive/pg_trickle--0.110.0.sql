@@ -758,6 +758,19 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ann_maintenance_requests (
 REVOKE ALL ON TABLE pgtrickle.pgt_ann_maintenance_requests FROM PUBLIC;
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_ann_maintenance_requests', 'WHERE false');
 
+-- Serialize claims for the same leaf and index definition across REINDEX swaps.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ann_maintenance_claims (
+    pgt_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
+    leaf_relid OID NOT NULL,
+    index_key BYTEA NOT NULL,
+    request_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_ann_maintenance_requests(request_id) ON DELETE CASCADE,
+    claim_pid INTEGER NOT NULL,
+    claim_backend_start TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (pgt_id, leaf_relid, index_key)
+);
+REVOKE ALL ON TABLE pgtrickle.pgt_ann_maintenance_claims FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_ann_maintenance_claims', 'WHERE false');
+
 -- CIT-2: Cross-node advisory lock table for distributed stream table refresh.
 -- Uses INSERT … ON CONFLICT DO NOTHING for atomic acquisition; timestamp-based
 -- lease expiry handles crashed holders without requiring heartbeats.

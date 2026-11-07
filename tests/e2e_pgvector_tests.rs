@@ -91,6 +91,8 @@ async fn test_ann_maintenance_intent_is_transactional_deduplicated_and_identity_
         dump_condition, "WHERE false",
         "database-local requests must not be restored as valid work"
     );
+    let claim_dump_condition: String = db.query_scalar("SELECT extcondition[array_position(extconfig, 'pgtrickle.pgt_ann_maintenance_claims'::regclass::oid)] FROM pg_extension WHERE extname='pg_trickle'").await;
+    assert_eq!(claim_dump_condition, "WHERE false");
     let (original, latest): (Option<i64>, Option<i64>) = sqlx::query_as("SELECT first_observed_epoch, last_observed_epoch FROM pgtrickle.pgt_ann_maintenance_requests WHERE request_id = $1").bind(first).fetch_one(&db.pool).await.expect("updated request epochs");
     assert_eq!(original, first_epoch);
     assert!(latest > original);
@@ -147,7 +149,7 @@ async fn test_ann_maintenance_intent_requires_execute_select_and_maintain() {
         .await;
     db.execute("GRANT SELECT, MAINTAIN ON ann_intent_auth_stream TO ann_intent_operator")
         .await;
-    let private: bool = db.query_scalar("SELECT NOT has_table_privilege('ann_intent_operator', 'pgtrickle.pgt_ann_maintenance_requests', 'SELECT')").await;
+    let private: bool = db.query_scalar("SELECT NOT has_table_privilege('ann_intent_operator', 'pgtrickle.pgt_ann_maintenance_requests', 'SELECT') AND NOT has_table_privilege('ann_intent_operator', 'pgtrickle.pgt_ann_maintenance_claims', 'SELECT')").await;
     assert!(private, "request catalog must not be publicly readable");
     let mut tx = db.pool.begin().await.expect("begin unauthorized call");
     sqlx::query("SET LOCAL ROLE ann_intent_operator")
@@ -344,6 +346,90 @@ async fn test_ann_maintenance_intent_delayed_request_cannot_regress_epoch() {
         last, observed,
         "a delayed request must not lower the latest epoch"
     );
+}
+
+#[tokio::test]
+async fn test_ann_maintenance_claim_serializes_concurrent_reindex_replacement() {
+    use sqlx::Connection;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_swap_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_swap_stream",
+        "SELECT id, embedding FROM ann_swap_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "CREATE INDEX ann_swap_idx ON ann_swap_stream USING hnsw (embedding vector_cosine_ops)",
+    )
+    .await;
+    db.execute(
+        "CREATE INDEX ann_swap_other_idx ON ann_swap_stream USING hnsw (embedding vector_l2_ops)",
+    )
+    .await;
+    let request = "SELECT pgtrickle.request_ann_maintenance('ann_swap_stream'::regclass::oid, 'ann_swap_idx'::regclass::oid)";
+    let first: i64 = db.query_scalar(request).await;
+    let mut worker = db.pool.acquire().await.expect("first worker");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(first)
+        .execute(&mut *worker)
+        .await
+        .expect("first claim");
+    let distinct: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_swap_stream'::regclass::oid, 'ann_swap_other_idx'::regclass::oid)").await;
+    let mut other = db.pool.acquire().await.expect("second worker");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(distinct)
+        .execute(&mut *other)
+        .await
+        .expect("a different ANN index can be claimed independently");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, false, 'not run')")
+        .bind(distinct)
+        .execute(&mut *other)
+        .await
+        .expect("release unrelated claim");
+    sqlx::query("REINDEX INDEX CONCURRENTLY ann_swap_idx")
+        .execute(&mut *worker)
+        .await
+        .expect("replace index");
+    let replacement: i64 = db.query_scalar(request).await;
+    assert_ne!(first, replacement);
+    assert!(
+        sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+            .bind(replacement)
+            .execute(&mut *other)
+            .await
+            .is_err(),
+        "replacement index must remain claimed until the first worker finishes"
+    );
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(first)
+        .execute(&mut *worker)
+        .await
+        .expect("finish first claim");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(replacement)
+        .execute(&mut *other)
+        .await
+        .expect("claim after first worker finishes");
+    sqlx::query("REINDEX INDEX CONCURRENTLY ann_swap_idx")
+        .execute(&mut *other)
+        .await
+        .expect("replace index again");
+    let next: i64 = db.query_scalar(request).await;
+    other
+        .detach()
+        .close()
+        .await
+        .expect("disconnect second worker");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(next)
+        .execute(&mut *worker)
+        .await
+        .expect("reclaim replacement after worker disconnects");
 }
 
 #[tokio::test]
