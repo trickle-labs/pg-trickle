@@ -632,17 +632,17 @@ pub fn cleanup_ivm_triggers(source_relid: pg_sys::Oid, pgt_id: i64) -> Result<()
 fn run_immediate_phantom_cleanup(
     st: &crate::catalog::StreamTableMeta,
     st_qualified: &str,
-) -> Result<(), PgTrickleError> {
+) -> Result<i64, PgTrickleError> {
     let query_has_join = crate::dvm::query_has_join(&st.defining_query).unwrap_or(true);
     if !query_has_join || st.st_partition_key.is_some() {
-        return Ok(());
+        return Ok(0);
     }
     // Do NOT run the full-query reconciliation for recursive CTEs. The
     // ivm_recursive_max_depth guard intentionally limits how many rows
     // the delta engine materialises.  Running the full query here would
     // bypass the guard and insert the suppressed rows back.
     if crate::dvm::query_has_recursive_cte(&st.defining_query).unwrap_or(false) {
-        return Ok(());
+        return Ok(0);
     }
 
     let cleanup_result = crate::refresh::with_stream_owner(st, || {
@@ -673,7 +673,7 @@ fn run_immediate_phantom_cleanup(
         }
     }
 
-    Ok(())
+    Ok(phantom_cleanup_count)
 }
 
 fn apply_ivm_owner_delta(
@@ -931,11 +931,11 @@ fn pgt_ivm_apply_delta(
     // Run unconditionally — even when this trigger invocation produced an
     // empty delta, a prior invocation in the same statement (or a prior
     // statement) may have left orphans for non-monotone predicates.
-    run_immediate_phantom_cleanup(&st, &st_qualified)?;
+    let phantom_cleanup_count = run_immediate_phantom_cleanup(&st, &st_qualified)?;
 
     // Update data_timestamp so downstream stream tables that compare
     // upstream timestamps (ST-on-ST) detect the change.
-    if delta_count > 0 {
+    if delta_count > 0 || phantom_cleanup_count > 0 {
         let now = Spi::get_one::<pgrx::datum::TimestampWithTimeZone>("SELECT now()")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .ok_or_else(|| PgTrickleError::InternalError("now() returned NULL".into()))?;

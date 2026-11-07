@@ -259,6 +259,9 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
                      CHECK (reindex_drift_threshold IS NULL OR (reindex_drift_threshold > 0 AND reindex_drift_threshold <= 1.0)),
     rows_changed_since_last_reindex BIGINT NOT NULL DEFAULT 0,
     last_reindex_at TIMESTAMPTZ,
+    -- A conservative completion watermark, independent of the resettable churn counter.
+    -- NULL means the counter overflowed and must not be used for coverage claims.
+    ann_refresh_epoch BIGINT DEFAULT 0 CHECK (ann_refresh_epoch IS NULL OR ann_refresh_epoch >= 0),
     -- v0.36.0: column lineage metadata (F12)
     column_lineage  JSONB,
     -- v0.59.0 PERF-2: hash of defining_query to skip recomputation on every refresh

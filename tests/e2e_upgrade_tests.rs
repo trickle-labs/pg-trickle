@@ -536,8 +536,20 @@ async fn test_upgrade_embedding_helpers_from_0109() {
     db.execute("CREATE EXTENSION vector").await;
     db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
         .await;
+    db.execute("CREATE TABLE upgrade_epoch_storage (__pgt_row_id bytea, id int)")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_stream_tables \
+        (pgt_relid, pgt_name, pgt_schema, defining_query, original_query, refresh_mode, \
+         requested_refresh_mode, status, is_populated, defining_search_path) \
+        VALUES ('upgrade_epoch_storage'::regclass, 'upgrade_epoch_storage', 'public', \
+         'SELECT 1 AS id', 'SELECT 1 AS id', 'FULL', 'FULL', 'ACTIVE', true, 'public, pg_catalog')",
+    )
+    .await;
     db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
         .await;
+    let epoch: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'upgrade_epoch_storage'").await;
+    assert_eq!(epoch, 0, "existing stream tables receive an initial epoch");
     db.execute("CREATE TABLE upgrade_vectors (id int PRIMARY KEY, embedding vector(3))")
         .await;
     db.execute("INSERT INTO upgrade_vectors VALUES (1, '[1,0,0]')")

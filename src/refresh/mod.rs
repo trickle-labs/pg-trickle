@@ -960,7 +960,12 @@ pub fn finalize_success(
             execution.rows_inserted + execution.rows_updated,
         )?;
     } else {
-        StreamTableMeta::update_after_no_data_refresh(st.pgt_id)?;
+        let storage_rewritten = execution.effective_mode == "FULL"
+            || matches!(
+                execution.requested_action,
+                RefreshAction::Full | RefreshAction::Reinitialize
+            );
+        StreamTableMeta::update_after_no_data_refresh(st.pgt_id, storage_rewritten)?;
     }
 
     let history_action =

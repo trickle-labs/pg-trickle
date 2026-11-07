@@ -22,6 +22,215 @@ async fn setup_pgvector(db: &E2eDb) {
 }
 
 #[tokio::test]
+async fn test_ann_refresh_epoch_is_transactional_and_independent_of_legacy_counter() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_epoch_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_epoch_stream",
+        "SELECT id, embedding FROM ann_epoch_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let epoch_sql = "SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ann_epoch_stream'";
+    let before: i64 = db.query_scalar(epoch_sql).await;
+    db.execute("INSERT INTO ann_epoch_source VALUES (1, '[1,0,0]')")
+        .await;
+    let mut tx = db.pool.begin().await.expect("begin refresh transaction");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('ann_epoch_stream')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh in transaction");
+    let in_transaction: i64 = sqlx::query_scalar(epoch_sql)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read uncommitted epoch");
+    assert!(in_transaction > before);
+    let outside: i64 = db.query_scalar(epoch_sql).await;
+    assert_eq!(
+        outside, before,
+        "uncommitted refresh must not publish its epoch"
+    );
+    tx.rollback().await.expect("roll back refresh");
+    let rolled_back: i64 = db.query_scalar(epoch_sql).await;
+    assert_eq!(rolled_back, before);
+    db.refresh_st("ann_epoch_stream").await;
+    let committed: i64 = db.query_scalar(epoch_sql).await;
+    assert!(committed > before);
+    db.refresh_st("ann_epoch_stream").await;
+    let no_data: i64 = db.query_scalar(epoch_sql).await;
+    assert_eq!(
+        no_data, committed,
+        "a no-data differential check must not advance the epoch"
+    );
+    db.execute(
+        "SELECT pgtrickle.alter_stream_table('ann_epoch_stream', post_refresh_action => 'reindex')",
+    )
+    .await;
+    db.execute("INSERT INTO ann_epoch_source VALUES (2, '[0,1,0]')")
+        .await;
+    db.refresh_st("ann_epoch_stream").await;
+    let (after_reindex, counter): (i64, i64) = sqlx::query_as("SELECT ann_refresh_epoch, rows_changed_since_last_reindex FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ann_epoch_stream'")
+        .fetch_one(&db.pool).await.expect("read maintenance counters");
+    assert!(after_reindex > committed);
+    assert_eq!(counter, 0, "legacy reindex resets only the churn counter");
+    db.assert_st_matches_query(
+        "ann_epoch_stream",
+        "SELECT id, embedding FROM ann_epoch_source",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_ann_refresh_epoch_covers_immediate_and_full_rebuilds() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_epoch_modes_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO ann_epoch_modes_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table('ann_epoch_immediate', 'SELECT id, embedding FROM ann_epoch_modes_source', NULL, 'IMMEDIATE')").await;
+    db.create_st(
+        "ann_epoch_full",
+        "SELECT id, embedding FROM ann_epoch_modes_source",
+        "1h",
+        "FULL",
+    )
+    .await;
+    let immediate_before: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_epoch_immediate'").await;
+    let full_before: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_epoch_full'").await;
+    db.refresh_st("ann_epoch_full").await;
+    let full_noop: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_epoch_full'").await;
+    assert!(
+        full_noop > full_before,
+        "a full storage rewrite must advance the epoch even when its result is unchanged"
+    );
+    db.execute("INSERT INTO ann_epoch_modes_source VALUES (2, '[0,1,0]')")
+        .await;
+    let immediate_after: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_epoch_immediate'").await;
+    assert!(immediate_after > immediate_before);
+    db.refresh_st("ann_epoch_full").await;
+    let full_after: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_epoch_full'").await;
+    assert!(full_after > full_noop);
+    db.execute("SELECT pgtrickle.alter_stream_table('ann_epoch_full', query => 'SELECT id, embedding FROM ann_epoch_modes_source WHERE id > 1')").await;
+    let after_alter: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='ann_epoch_full'").await;
+    assert!(
+        after_alter > full_after,
+        "storage rebuild must advance the epoch"
+    );
+    db.assert_st_matches_query(
+        "ann_epoch_full",
+        "SELECT id, embedding FROM ann_epoch_modes_source WHERE id > 1",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_ann_refresh_epoch_overflow_becomes_unknown_without_losing_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE ann_epoch_overflow_source (id int PRIMARY KEY)")
+        .await;
+    db.create_st(
+        "ann_epoch_overflow",
+        "SELECT id FROM ann_epoch_overflow_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET ann_refresh_epoch = 9223372036854775807 WHERE pgt_name = 'ann_epoch_overflow'").await;
+    db.execute("INSERT INTO ann_epoch_overflow_source VALUES (1)")
+        .await;
+    db.refresh_st("ann_epoch_overflow").await;
+    let unknown: Option<i64> = db.query_scalar_opt("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ann_epoch_overflow'").await;
+    assert_eq!(unknown, None);
+    db.assert_st_matches_query(
+        "ann_epoch_overflow",
+        "SELECT id FROM ann_epoch_overflow_source",
+    )
+    .await;
+    db.execute("INSERT INTO ann_epoch_overflow_source VALUES (2)")
+        .await;
+    db.refresh_st("ann_epoch_overflow").await;
+    let still_unknown: Option<i64> = db.query_scalar_opt("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ann_epoch_overflow'").await;
+    assert_eq!(still_unknown, None);
+    db.assert_st_matches_query(
+        "ann_epoch_overflow",
+        "SELECT id FROM ann_epoch_overflow_source",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_ann_refresh_epoch_tracks_immediate_phantom_cleanup_without_delta() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE epoch_join_left (id int PRIMARY KEY, value int)")
+        .await;
+    db.execute("CREATE TABLE epoch_join_right (id int PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO epoch_join_left VALUES (1, 10)")
+        .await;
+    db.execute("INSERT INTO epoch_join_right VALUES (1)").await;
+    let query =
+        "SELECT l.id, l.value FROM epoch_join_left l JOIN epoch_join_right r ON l.id = r.id";
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table('epoch_join_stream', $${query}$$, NULL, 'IMMEDIATE')"
+    ))
+    .await;
+    // Simulate a pre-existing phantom to exercise cleanup when the new delta is empty.
+    db.execute("ALTER TABLE epoch_join_stream DISABLE TRIGGER USER")
+        .await;
+    db.execute("INSERT INTO epoch_join_stream (__pgt_row_id, id, value) VALUES (decode('00', 'hex'), 999, 999)").await;
+    db.execute("ALTER TABLE epoch_join_stream ENABLE TRIGGER USER")
+        .await;
+    let before: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'epoch_join_stream'").await;
+    db.execute("INSERT INTO epoch_join_left VALUES (2, 20)")
+        .await;
+    let after: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'epoch_join_stream'").await;
+    assert!(after > before, "cleanup-only writes must advance the epoch");
+    db.assert_st_matches_query("epoch_join_stream", query).await;
+}
+
+#[tokio::test]
+async fn test_ann_refresh_epoch_survives_database_restart() {
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("CREATE TABLE ann_epoch_restart_source (id int PRIMARY KEY)")
+        .await;
+    db.create_st(
+        "ann_epoch_restart",
+        "SELECT id FROM ann_epoch_restart_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("INSERT INTO ann_epoch_restart_source VALUES (1)")
+        .await;
+    db.refresh_st("ann_epoch_restart").await;
+    let before: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ann_epoch_restart'").await;
+    db.pool.close().await;
+    let restarted = tokio::process::Command::new("docker")
+        .args(["restart", db.container_id()])
+        .output()
+        .await
+        .expect("restart PostgreSQL");
+    assert!(restarted.status.success(), "container restart failed");
+    db.pool = db.reconnect_after_restart().await;
+    let after: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ann_epoch_restart'").await;
+    assert_eq!(after, before);
+    db.execute("INSERT INTO ann_epoch_restart_source VALUES (2)")
+        .await;
+    db.refresh_st("ann_epoch_restart").await;
+    let next: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ann_epoch_restart'").await;
+    assert!(next > after);
+    db.assert_st_matches_query(
+        "ann_epoch_restart",
+        "SELECT id FROM ann_epoch_restart_source",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_pgvector_compat_installed_version() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

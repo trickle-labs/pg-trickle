@@ -293,5 +293,17 @@ function or transaction block, or assume the original index OID survives a
 successful concurrent rebuild. Coordinate operators to prevent duplicate work,
 and inspect invalid `_ccnew`/`_ccold` indexes after a failed operation as
 described in the [PostgreSQL REINDEX documentation](https://www.postgresql.org/docs/18/sql-reindex.html).
-This manual recipe does not persist requests, retry failures, or account for
-changes arriving during a rebuild. Continue normal VACUUM and autovacuum care.
+To detect refreshes that committed during an operation, an operator can record
+the stream identity and epoch immediately before and after it:
+
+```sql
+SELECT pgt_id, pgt_relid, ann_refresh_epoch
+FROM pgtrickle.pgt_stream_tables
+WHERE pgt_relid = 'search_corpus'::regclass;
+```
+
+If the identity or epoch changes, or the epoch is `NULL`, the observation is
+not evidence that the rebuild covered the latest refresh. An unchanged epoch
+also does not rule out a refresh still in flight. This manual recipe does not
+persist requests, retry failures, or account for changes arriving after its
+last observation. Continue normal VACUUM and autovacuum care.
