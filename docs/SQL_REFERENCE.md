@@ -4441,10 +4441,13 @@ minutes; success resets the failure count. `next_eligible_at` shows the
 deadline. These schedules survive a physical restart and are discarded with
 requests on logical restore. Every claim reserves a minimum 30-second
 interval from its start, including when the backend disconnects without
-reporting an outcome. An interrupted request can be reclaimed when that
-interval has elapsed; a long-running interrupted attempt may therefore be
-retried immediately. Repeated unreported interruptions do not use exponential
-backoff, so a supervisor should apply its own retry policy. Index renames or definition changes
+reporting an outcome. When a later claim observes an abandoned backend, it
+increments `consecutive_failures` and reserves an exponentially increasing
+interval for the next attempt, capped at 16 minutes. The interruption is
+counted when reclaimed, because a disconnected backend cannot record it.
+An interrupted request can be reclaimed when its reserved interval has
+elapsed; a long-running interrupted attempt may therefore be retried
+immediately. Index renames or definition changes
 create a different schedule and require operator coordination. On reported
 success, the per-index `reported_covered_epoch` advances to the claim epoch;
 failure leaves the previous value intact. `epoch_advances_since_reported_coverage`

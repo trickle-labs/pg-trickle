@@ -2784,9 +2784,90 @@ async fn test_ann_claim_interval_starts_after_guard_lock_wait() {
     blocker.commit().await.expect("release guard");
     let remaining = claimant.await.expect("join claimant");
     assert!(
-        remaining > 28.0,
+        remaining > 58.0,
         "interval began before the guard was acquired: {remaining}"
     );
+}
+
+#[tokio::test]
+async fn test_ann_interrupted_claims_back_off_and_success_resets() {
+    use sqlx::Connection;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_crash_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.create_st(
+        "ann_crash_stream",
+        "SELECT id, embedding FROM ann_crash_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "CREATE INDEX ann_crash_idx ON ann_crash_stream USING hnsw (embedding vector_l2_ops)",
+    )
+    .await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_crash_stream'::regclass::oid, 'ann_crash_idx'::regclass::oid)").await;
+    let mut worker = db.pool.acquire().await.expect("initial worker");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("initial claim");
+    worker
+        .detach()
+        .close()
+        .await
+        .expect("interrupt initial claim");
+    for failures in 1..=6 {
+        assert!(
+            sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+                .bind(request)
+                .execute(&db.pool)
+                .await
+                .is_err(),
+            "interrupted retry must respect its deadline"
+        );
+        db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+        let mut worker = db.pool.acquire().await.expect("retry worker");
+        let status: serde_json::Value =
+            sqlx::query_scalar("SELECT pgtrickle.claim_ann_maintenance($1)")
+                .bind(request)
+                .fetch_one(&mut *worker)
+                .await
+                .expect("claim after deadline");
+        assert_eq!(status["consecutive_failures"], failures);
+        let expected_seconds = 30 * (1 << failures.min(5));
+        let remaining: f64 = sqlx::query_scalar("SELECT extract(epoch FROM next_eligible_at - clock_timestamp())::float8 FROM pgtrickle.pgt_ann_maintenance_claims WHERE request_id = $1")
+            .bind(request).fetch_one(&mut *worker).await.expect("read backoff");
+        assert!(
+            remaining > f64::from(expected_seconds) * 0.9
+                && remaining <= f64::from(expected_seconds),
+            "unexpected backoff: {remaining}"
+        );
+        if failures == 6 {
+            sqlx::query("REINDEX INDEX CONCURRENTLY ann_crash_idx")
+                .execute(&mut *worker)
+                .await
+                .expect("rebuild after interruptions");
+            sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+                .bind(request)
+                .execute(&mut *worker)
+                .await
+                .expect("report success");
+        } else {
+            worker.detach().close().await.expect("interrupt retry");
+        }
+    }
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect successful retry");
+    assert_eq!(status["state"], "SUCCEEDED");
+    assert_eq!(status["consecutive_failures"], 0);
 }
 
 #[tokio::test]
