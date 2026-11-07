@@ -4119,6 +4119,10 @@ async fn test_vector_centroid_rescan_matches_native_avg_under_sustained_churn() 
     db.execute("CREATE TABLE centroid_churn_source (id int PRIMARY KEY, grp int NOT NULL, embedding vector(3))").await;
     db.execute("INSERT INTO centroid_churn_source SELECT i, i % 4, CASE WHEN i % 7 = 0 THEN NULL ELSE ARRAY[((i % 11) - 5)::real, ((i % 13) - 6)::real, ((i % 17) - 8)::real]::vector(3) END FROM generate_series(1, 48) i").await;
     db.execute("INSERT INTO centroid_churn_source VALUES (101, 9, '[1e8,0,0]'), (102, 9, '[1,0,0]'), (103, 9, '[-1e8,0,0]')").await;
+    db.execute(
+        "INSERT INTO centroid_churn_source VALUES (104, 10, '[1e20,0,0]'), (105, 10, '[1,0,0]')",
+    )
+    .await;
     let (float32_sum, native_avg): (f32, f32) = sqlx::query_as("SELECT (sum(v ORDER BY ord)::real[])[1], (avg(v ORDER BY ord)::real[])[1] FROM (VALUES (1, '[1e8,0,0]'::vector), (2, '[1,0,0]'::vector), (3, '[-1e8,0,0]'::vector)) AS input(ord, v)")
         .fetch_one(&db.pool).await.expect("measure cancellation control");
     assert_eq!(float32_sum, 0.0);
@@ -4130,6 +4134,10 @@ async fn test_vector_centroid_rescan_matches_native_avg_under_sustained_churn() 
         .fetch_one(&db.pool).await.expect("measure native order sensitivity");
     assert_eq!(native_first, 0.0);
     assert!((native_reordered - 1.0 / 3.0).abs() < 1e-6);
+    let retracted_sum: f64 = db
+        .query_scalar("SELECT (1e20::float8 + 1::float8) - 1e20::float8")
+        .await;
+    assert_eq!(retracted_sum, 0.0, "float8 state loses the small value");
     db.execute_seq(&[
         "SET pg_trickle.enable_vector_agg = on",
         "SELECT pgtrickle.create_stream_table('centroid_churn_st', $$SELECT grp, avg(embedding) AS centroid FROM centroid_churn_source GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
@@ -4173,8 +4181,12 @@ async fn test_vector_centroid_rescan_matches_native_avg_under_sustained_churn() 
         if cycle % 2 == 0 {
             db.execute("DELETE FROM centroid_churn_source WHERE id = 103")
                 .await;
+            db.execute("DELETE FROM centroid_churn_source WHERE id = 104")
+                .await;
         } else {
             db.execute("INSERT INTO centroid_churn_source VALUES (103, 9, '[-1e8,0,0]')")
+                .await;
+            db.execute("INSERT INTO centroid_churn_source VALUES (104, 10, '[1e20,0,0]')")
                 .await;
         }
         db.try_execute_with_config(
@@ -4196,6 +4208,13 @@ async fn test_vector_centroid_rescan_matches_native_avg_under_sustained_churn() 
                 .expect("read maintained centroids");
         let expected: Vec<(i32, Option<Vec<f32>>)> = sqlx::query_as("SELECT grp, avg(embedding)::real[] FROM centroid_churn_source GROUP BY grp ORDER BY grp")
             .fetch_all(&db.pool).await.expect("read native centroids");
+        if cycle % 2 == 0 {
+            assert_eq!(
+                actual.iter().find(|(group, _)| *group == 10).unwrap().1,
+                Some(vec![1.0, 0.0, 0.0]),
+                "retracting the large vector must recover the small contribution on cycle {cycle}"
+            );
+        }
         assert_eq!(actual.len(), expected.len(), "group count on cycle {cycle}");
         for ((actual_group, actual), (expected_group, expected)) in actual.iter().zip(&expected) {
             assert_eq!(actual_group, expected_group, "group key on cycle {cycle}");

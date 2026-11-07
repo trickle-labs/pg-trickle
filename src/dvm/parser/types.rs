@@ -332,16 +332,10 @@ pub enum AggFunc {
     /// may use exotic syntax that cannot be reconstructed from parts.
     /// Any change in the group triggers full re-aggregation from source data.
     UserDefined(String),
-    /// F4 (v0.37.0): pgvector element-wise average — algebraic via aux.
-    ///
-    /// Maintains `__pgt_aux_sum_*` (vector) and `__pgt_aux_count_*` (bigint).
-    /// Result = `__pgt_aux_sum / __pgt_aux_count` (element-wise scalar division).
+    /// pgvector element-wise average, maintained by affected-group rescan.
     /// Gate: `pg_trickle.enable_vector_agg = on`.
     VectorAvg,
-    /// F4 (v0.37.0): pgvector element-wise sum — algebraically invertible.
-    ///
-    /// Maintains `__pgt_aux_sum_*` (vector) via running sum.
-    /// On INSERT: add element-wise; on DELETE: subtract element-wise.
+    /// pgvector element-wise sum, maintained by affected-group rescan.
     /// Gate: `pg_trickle.enable_vector_agg = on`.
     VectorSum,
 }
