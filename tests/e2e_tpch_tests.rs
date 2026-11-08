@@ -1,7 +1,7 @@
 //! TPC-H-derived correctness tests for pg_trickle DIFFERENTIAL refresh.
 //!
-//! Validates the core DBSP invariant: after every differential refresh,
-//! the stream table's contents must be multiset-equal to re-executing
+//! Validates the core DBSP invariant: after each mutation cycle's differential
+//! refreshes converge, the stream table must be multiset-equal to re-executing
 //! the defining query from scratch.
 //!
 //! **TPC-H Fair Use:** This workload is *derived from* the TPC-H Benchmark
