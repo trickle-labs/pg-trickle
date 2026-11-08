@@ -1825,7 +1825,7 @@ async fn test_mixed_upsert_on_conflict_do_nothing() {
          ON CONFLICT DO NOTHING",
     )
     .await;
-    db.refresh_st("mu_st_skip").await;
+    db.refresh_st_until_converged("mu_st_skip").await;
 
     assert_eq!(db.count("public.mu_st_skip").await, 3);
 
