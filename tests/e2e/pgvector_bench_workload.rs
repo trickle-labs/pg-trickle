@@ -20,12 +20,37 @@ fn has_index(value: &serde_json::Value, index: &str) -> bool {
     }
 }
 
+fn has_source_seq_scan(value: &serde_json::Value, relation: &str) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => {
+            (fields.get("Node Type").and_then(|v| v.as_str()) == Some("Seq Scan")
+                && fields.get("Relation Name").and_then(|v| v.as_str()) == Some(relation))
+                || fields.values().any(|v| has_source_seq_scan(v, relation))
+        }
+        serde_json::Value::Array(items) => items.iter().any(|v| has_source_seq_scan(v, relation)),
+        _ => false,
+    }
+}
+
 #[test]
 fn percentile_report_uses_nearest_rank() {
     let values = percentiles(vec![4.0, 1.0, 3.0, 2.0]);
     assert_eq!(values["p50"], 2.0);
     assert_eq!(values["p95"], 4.0);
     assert_eq!(values["p99"], 4.0);
+}
+
+#[test]
+fn exact_baseline_requires_source_sequential_scan() {
+    let plan = serde_json::json!([{"Plan": {"Node Type": "Limit", "Plans": [
+        {"Node Type": "Seq Scan", "Relation Name": "vector_bench_corpus"}
+    ]}}]);
+    assert!(has_source_seq_scan(&plan, "vector_bench_corpus"));
+    assert!(!has_source_seq_scan(&plan, "different_table"));
+    assert!(!has_source_seq_scan(
+        &serde_json::json!({"Node Type": "Index Scan", "Relation Name": "vector_bench_corpus"}),
+        "vector_bench_corpus"
+    ));
 }
 
 /// Writes one JSON report to stdout; no timing or recall thresholds are imposed.
@@ -107,6 +132,7 @@ async fn test_pgvector_filtered_ann_workload() {
         let mut latencies = Vec::new();
         let mut recalls = Vec::new();
         let mut recorded_plan = serde_json::Value::Null;
+        let mut exact_plan = serde_json::Value::Null;
         let mut settings = (String::new(), String::new());
         for id in 1..=samples {
             let (tenant, query): (i32, String) = sqlx::query_as(
@@ -176,6 +202,23 @@ async fn test_pgvector_filtered_ann_workload() {
                 "SELECT id FROM vector_bench_corpus WHERE tenant = $1 \
                  ORDER BY embedding::vector({dim}) <=> $2::text::vector, id LIMIT 10"
             );
+            if id == 1 {
+                let explain = format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {exact_sql}");
+                exact_plan = sqlx::query_scalar(sqlx::AssertSqlSafe(explain))
+                    .bind(tenant)
+                    .bind(&query)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .expect("exact baseline plan");
+                assert!(
+                    has_source_seq_scan(&exact_plan, "vector_bench_corpus"),
+                    "exact baseline did not scan the corpus: {exact_plan}"
+                );
+                assert!(
+                    !has_index(&exact_plan, "vector_bench_ann"),
+                    "exact baseline used the ANN index: {exact_plan}"
+                );
+            }
             let exact: Vec<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(exact_sql))
                 .bind(tenant)
                 .bind(&query)
@@ -192,7 +235,7 @@ async fn test_pgvector_filtered_ann_workload() {
         results.push(serde_json::json!({"method": method, "metric": "cosine", "tenant_fraction": 0.1,
             "k": 10, "retrieval_ms": percentiles(latencies), "recall_at_k": recalls,
             "hnsw_ef_search": settings.0, "ivfflat_probes": settings.1,
-            "index_bytes": index_bytes, "corpus_total_bytes_including_indexes": corpus_bytes, "ann_plan": recorded_plan}));
+            "index_bytes": index_bytes, "corpus_total_bytes_including_indexes": corpus_bytes, "ann_plan": recorded_plan, "exact_plan": exact_plan}));
         db.execute("DROP INDEX vector_bench_ann").await;
     }
     db.execute(&format!(

@@ -37,8 +37,9 @@ Coordinates derive deterministically from `md5(id:dimension)`; ten evenly
 sized tenants share the corpus. For HNSW and IVFFlat (10 lists), the test
 measures sequential client-observed cosine top-10 queries on one tenant and
 compares returned IDs to an exact scan with the same vector, filter and metric.
-It forces ANN index eligibility, checks the actual `EXPLAIN ANALYZE` plan, and
-stores that plan, buffer counts, index/corpus sizes, individual recalls and
+It forces ANN index eligibility and checks its `EXPLAIN ANALYZE` plan. It also
+requires a sequential scan of the corpus for the exact baseline and records
+both plans, buffer counts, index/corpus sizes, individual recalls and
 latencies, and nearest-rank p50/p95/p99. The report includes server and
 extension versions and the actual HNSW/IVFFlat search settings. ANN construction
 can use randomness despite deterministic input; do not infer production
