@@ -2660,21 +2660,27 @@ fn build_stmt_trigger_fn_sql(
         let old_event_cols = columns
             .iter()
             .enumerate()
-            .map(|(i, _)| format!(", (p.__pgt_old_row).f{}", i + 1))
+            .map(|(i, _)| format!(", p.__pgt_old_{}", i + 1))
             .collect::<String>();
         let new_event_cols = columns
             .iter()
             .enumerate()
-            .map(|(i, _)| format!(", (p.__pgt_new_row).f{}", i + 1))
+            .map(|(i, _)| format!(", p.__pgt_new_{}", i + 1))
             .collect::<String>();
         let new_pair_cols = columns
             .iter()
-            .map(|(col, _)| format!("n.\"{}\"", col.replace('"', "\"\"")))
+            .enumerate()
+            .map(|(i, (col, _))| {
+                format!("n.\"{}\" AS __pgt_new_{}", col.replace('"', "\"\""), i + 1)
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let old_pair_cols = columns
             .iter()
-            .map(|(col, _)| format!("o.\"{}\"", col.replace('"', "\"\"")))
+            .enumerate()
+            .map(|(i, (col, _))| {
+                format!("o.\"{}\" AS __pgt_old_{}", col.replace('"', "\"\""), i + 1)
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let matched_changed_cols = bitmask_opt.as_deref().map_or_else(
@@ -2700,7 +2706,7 @@ fn build_stmt_trigger_fn_sql(
              END IF;
              -- Pair stable keys and PK-changing UPDATEs once, then emit D before I.
              WITH pair_rows AS MATERIALIZED (
-                 SELECT ROW({new_pair_cols}) AS __pgt_new_row, ROW({old_pair_cols}) AS __pgt_old_row,
+                 SELECT {new_pair_cols}, {old_pair_cols},
                         ({n_present}) AS __pgt_new_present,
                         ({o_present}) AS __pgt_old_present,
                         ({pair_row_id}) AS __pgt_row_id,
@@ -3874,6 +3880,10 @@ mod tests {
             update.contains("WITH pair_rows AS MATERIALIZED"),
             "{update}"
         );
+        assert!(update.contains("p.__pgt_old_2"), "{update}");
+        assert!(update.contains("p.__pgt_new_2"), "{update}");
+        assert!(!update.contains("__pgt_old_row"), "{update}");
+        assert!(!update.contains("__pgt_new_row"), "{update}");
         let d_row = update
             .find("SELECT statement_lsn, 'D'")
             .expect("D event query");
