@@ -548,12 +548,145 @@ async fn test_upgrade_embedding_helpers_from_0109() {
     .await;
     db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
         .await;
+    let guard_upgraded: bool = db.query_scalar("SELECT pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[1.0]::float8[], ARRAY[1.0]::float8[]) IS NULL AND pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[[1.0]]::float8[], ARRAY[1.0]::float8[]) = 'INVALID_STATE'").await;
+    assert!(guard_upgraded, "upgrade must install the centroid guard");
+    let delta: Vec<f64> = db.query_scalar("SELECT pgtrickle._centroid_delta(v, sign) FROM (VALUES (ARRAY[1]::real[], 1::smallint), (ARRAY[2]::real[], -1::smallint)) AS input(v, sign)").await;
+    assert_eq!(delta, vec![0.0, 2.0, -1.0, 3.0]);
+    let merged: Vec<f64> = db
+        .query_scalar(
+            "SELECT pgtrickle._centroid_merge(ARRAY[]::float8[], ARRAY[0,2,-1,3]::float8[], 1, true)",
+        )
+        .await;
+    assert_eq!(merged, vec![0.0, 4.0, 2.0, -1.0, 3.0]);
+    let initialized: Vec<f64> = db
+        .query_scalar("SELECT pgtrickle._centroid_init(ARRAY[2,2,2,2]::float8[], 1)")
+        .await;
+    assert_eq!(initialized, vec![2.0, 2.0, 0.0, 2.0, 2.0]);
+    let finalized: Vec<f32> = db
+        .query_scalar("SELECT pgtrickle._centroid_finalize(ARRAY[2,2,0,2,2]::float8[], 1)")
+        .await;
+    assert_eq!(finalized, vec![1.0]);
     let epoch: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'upgrade_epoch_storage'").await;
     assert_eq!(epoch, 0, "existing stream tables receive an initial epoch");
     db.execute("CREATE TABLE upgrade_vectors (id int PRIMARY KEY, embedding vector(3))")
         .await;
     db.execute("INSERT INTO upgrade_vectors VALUES (1, '[1,0,0]')")
         .await;
+    let init_sql: Option<String> = sqlx::query_scalar("SELECT pgtrickle._centroid_initialization_sql('SELECT avg(embedding) AS centroid FROM upgrade_vectors')")
+        .fetch_one(&db.pool).await.expect("generate upgraded centroid initialization query");
+    let init_sql = init_sql.expect("upgrade must install initialization query generation");
+    let sql = format!(
+        "SELECT centroid::real[], __pgt_group_count, __pgt_centroid_state FROM ({init_sql}) AS initialized"
+    );
+    let initialized: (Vec<f32>, i64, Vec<f64>) = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_one(&db.pool)
+        .await
+        .expect("execute upgraded centroid initialization");
+    assert_eq!(
+        initialized,
+        (
+            vec![1.0, 0.0, 0.0],
+            1,
+            vec![1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        )
+    );
+    let staged: Option<String> = db.query_scalar("SELECT pgtrickle._centroid_staging_sql('SELECT avg(embedding) AS centroid FROM upgrade_vectors')").await;
+    assert!(
+        staged.is_some(),
+        "upgrade must install centroid staging generation"
+    );
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", "SELECT pgtrickle.create_stream_table('upgrade_centroid', $$SELECT avg(embedding) AS centroid FROM upgrade_vectors$$, '1h', 'DIFFERENTIAL')"]).await;
+    db.execute_seq(&[
+        "CREATE ROLE upgraded_centroid_owner NOLOGIN",
+        "GRANT USAGE ON SCHEMA pgtrickle TO upgraded_centroid_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_stage_state(oid) TO upgraded_centroid_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_prepare_state(oid) TO upgraded_centroid_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_candidate_sql(oid, text, text) TO upgraded_centroid_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_stage_delta(oid, text, text) TO upgraded_centroid_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_stage_candidates(oid, text, text) TO upgraded_centroid_owner",
+        "GRANT SELECT ON upgrade_vectors TO upgraded_centroid_owner",
+        "ALTER TABLE upgrade_centroid OWNER TO upgraded_centroid_owner",
+    ])
+    .await;
+    let frontier: String = db.query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'upgrade_centroid'::regclass").await;
+    let mut staging_tx = db.pool.begin().await.expect("begin upgraded staging");
+    sqlx::query("SET LOCAL ROLE upgraded_centroid_owner")
+        .execute(&mut *staging_tx)
+        .await
+        .expect("set upgraded stream owner role");
+    let staged: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_stage_state('upgrade_centroid'::regclass::oid)",
+    )
+    .fetch_one(&mut *staging_tx)
+    .await
+    .expect("stage upgraded centroid");
+    let sql = format!("SELECT count(*)::bigint FROM {staged}");
+    let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_one(&mut *staging_tx)
+        .await
+        .expect("read upgraded stage");
+    assert_eq!(count, 1);
+    let prepared: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_prepare_state('upgrade_centroid'::regclass::oid)",
+    )
+    .fetch_one(&mut *staging_tx)
+    .await
+    .expect("prepare upgraded centroid state");
+    let sql = format!("SELECT count(*)::bigint FROM {prepared}");
+    let groups: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_one(&mut *staging_tx)
+        .await
+        .expect("read prepared upgraded centroid snapshot");
+    assert_eq!(groups, 1);
+    let candidate_sql: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_candidate_sql('upgrade_centroid'::regclass::oid, $1, $1)",
+    )
+    .bind(&frontier)
+    .fetch_one(&mut *staging_tx)
+    .await
+    .expect("generate upgraded centroid candidates");
+    assert!(candidate_sql.contains("_centroid_check_count"));
+    let delta_stage: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_stage_delta('upgrade_centroid'::regclass::oid, $1, $1)",
+    )
+    .bind(&frontier)
+    .fetch_one(&mut *staging_tx)
+    .await
+    .expect("stage upgraded centroid delta");
+    let sql = format!("SELECT count(*)::bigint FROM {delta_stage}");
+    let delta_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_one(&mut *staging_tx)
+        .await
+        .expect("read upgraded centroid delta");
+    assert_eq!(delta_count, 0);
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle._centroid_stage_candidates('upgrade_centroid'::regclass::oid, $1, $1)",
+    )
+    .bind(&frontier)
+    .fetch_one(&mut *staging_tx)
+    .await
+    .expect_err("unbound upgraded centroid state must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("not bound to the current frontier")
+    );
+    staging_tx
+        .rollback()
+        .await
+        .expect("rollback upgraded stage");
+    let delta_sql: String = db.query_scalar("SELECT pgtrickle._centroid_delta_sql('upgrade_centroid'::regclass::oid, frontier::text, frontier::text) FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'upgrade_centroid'::regclass").await;
+    assert!(
+        delta_sql.contains("__pgt_centroid_delta"),
+        "upgrade must install signed centroid delta generation"
+    );
+    let state_count: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.pgt_centroid_states")
+        .await;
+    assert_eq!(
+        state_count, 0,
+        "upgraded state must roll back with the transaction"
+    );
     db.execute("SELECT * FROM pgtrickle.embedding_stream_table('upgrade_l2', 'upgrade_vectors', 'embedding', NULL, '1m', 'hnsw', false)").await;
     db.execute("SELECT * FROM pgtrickle.embedding_stream_table_v2('upgrade_cosine', 'upgrade_vectors', 'embedding', 'cosine')").await;
     let valid: i64 = db.query_scalar("SELECT count(*) FROM pg_index i JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid IN ('upgrade_l2'::regclass, 'upgrade_cosine'::regclass) AND i.indisready AND i.indisvalid AND op.opcname IN ('vector_l2_ops','vector_cosine_ops')").await;

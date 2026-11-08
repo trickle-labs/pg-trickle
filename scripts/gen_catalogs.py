@@ -629,6 +629,8 @@ def main() -> int:
         funcs = extract_sql_functions(SRC_DIR)
         print(f"  Found {len(funcs)} #[pg_extern] functions.", flush=True)
 
+    # Centroid staging helpers are private and have no public EXECUTE grant.
+    funcs = [f for f in funcs if not (f["schema"] == "pgtrickle" and f["fn_name"].startswith("_centroid_"))]
     guc_content = write_guc_catalog(gucs, GUC_CATALOG_PATH)
     sql_content = write_sql_catalog(funcs, SQL_CATALOG_PATH)
 

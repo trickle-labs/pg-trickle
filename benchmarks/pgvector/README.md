@@ -53,14 +53,30 @@ comparison. WAL is measured between cluster-wide LSN reads, excludes the source
 mutation and can include unrelated activity; refresh latencies include client
 overhead. A plan is recorded for retrieval, not for the refresh internals.
 The centroid baseline additionally compares one changed vector in roughly 100
-small groups and two large groups. It verifies the differential group-rescan
-strategy and both results, and records affected group size, refresh latency,
-WAL and stream storage size. A separate `EXPLAIN (ANALYZE, BUFFERS)` of the
-affected group query illustrates a possible rescan; it is not the actual
-refresh plan. This is one observation per strategy, with differential first.
-An algebraic vector strategy is not yet implemented and is not measured. The
-workload does not measure source-write overhead or concurrent load. Use a
-dedicated host and more repetitions before drawing performance conclusions.
+small groups and two large groups across group-rescan, opt-in algebraic, and
+FULL refresh. It records the selected strategy, affected group size, refresh
+latency, cluster-wide WAL, stream storage, estimated logical auxiliary-state
+bytes, and maximum component error against native AVG. Each refresh runs under
+`EXPLAIN (ANALYZE, BUFFERS, WAL)`; its top-level counters include the call but
+do not necessarily expose plans for statements executed through SPI. A separate
+affected-group query illustrates a possible rescan. Same-transaction PostgreSQL
+tuple counters record sequential returns and index fetches from the source during
+each refresh, including repeated visits; they are not counts of distinct rows.
+This is one observation per
+strategy in the order listed; EXPLAIN overhead and cache order affect timings.
+The workload also performs five repeated one-row changes by default, rotating
+the group and strategy order. It checks each selected strategy and affected
+group against native AVG, and records individual refresh times and percentiles
+without EXPLAIN. Set `PGVECTOR_CENTROID_SAMPLES` from 1 to 50 to change that
+count; a small sample cannot establish tail latency. The workload does not
+measure source-write overhead or concurrent load. Use a dedicated host and
+more repetitions before drawing performance conclusions.
 
 A [recorded emulated run](results/2026-11-07-emulated/README.md) includes the
 raw JSON for all three dimensions and documents its limitations.
+The later [local centroid comparison](results/2026-11-07-centroid-arm64/README.md)
+includes the experimental algebraic path and its raw observations.
+The [source-read comparison](results/2026-11-08-source-reads-arm64/README.md)
+adds same-transaction source tuple counters and larger affected groups.
+The [repeated centroid comparison](results/2026-11-08-repeated-centroid-arm64/README.md)
+records 20 rotated-order refreshes per group and strategy at each dimension.

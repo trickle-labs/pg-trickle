@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**151 configuration parameters** extracted from `src/config/`.
+**152 configuration parameters** extracted from `src/config/`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -55,6 +55,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |
 | `pg_trickle.drain_timeout_max_seconds` | `int4` | `86400` | v0.85.0: Hard upper bound for explicit drain waits. |
 | `pg_trickle.dvm_decision_trace` | `bool` | `false` | When enabled, the DVM logs JSON events containing operator paths, output schemas, snapshot plans, and generated delta CTEs. |
+| `pg_trickle.enable_centroid_state` | `bool` | `false` | Enable experimental algebraic maintenance for supported vector averages. |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
 | `pg_trickle.enable_fused_refresh` | `bool` | `false` | Disable if a specific DAG shape causes unexpected planner behaviour. |
 | `pg_trickle.enable_output_delta_qualification` | `bool` | `false` | Enable the constrained Delta V1 recovery qualification API. |

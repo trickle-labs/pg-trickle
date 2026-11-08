@@ -1,4 +1,154 @@
 -- Add the metric-aware embedding helper without changing legacy calls.
+CREATE TABLE pgtrickle.pgt_centroid_states (
+    pgt_id BIGINT PRIMARY KEY REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
+    stream_relid OID NOT NULL,
+    defining_query TEXT NOT NULL,
+    contract_generation BIGINT NOT NULL,
+    schema_version SMALLINT NOT NULL,
+    materialized_xid XID8,
+    baseline_frontier JSONB,
+    status TEXT NOT NULL CHECK (status IN ('BUILDING', 'READY'))
+);
+CREATE TABLE pgtrickle.pgt_centroid_groups (
+    pgt_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_centroid_states(pgt_id) ON DELETE CASCADE,
+    row_id BYTEA NOT NULL,
+    group_count BIGINT NOT NULL CHECK (group_count >= 0),
+    state DOUBLE PRECISION[] NOT NULL,
+    state_checksum TEXT NOT NULL,
+    PRIMARY KEY (pgt_id, row_id),
+    CHECK (array_ndims(state) = 1 AND array_lower(state, 1) = 1
+           AND cardinality(state) BETWEEN 5 AND 32003
+           AND (cardinality(state) - 3) % 2 = 0
+           AND array_position(state, NULL::double precision) IS NULL
+           AND state[1] >= 0 AND state[1] <= group_count AND state[1] = trunc(state[1]))
+);
+REVOKE ALL ON TABLE pgtrickle.pgt_centroid_states, pgtrickle.pgt_centroid_groups FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_centroid_states', 'WHERE false');
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_centroid_groups', 'WHERE false');
+
+CREATE FUNCTION pgtrickle._centroid_initialization_sql(text)
+RETURNS text STABLE LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_initialization_sql_wrapper';
+
+CREATE FUNCTION pgtrickle._centroid_staging_sql(text)
+RETURNS text STABLE LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_staging_sql_wrapper';
+
+CREATE FUNCTION pgtrickle._centroid_stage_state(oid)
+RETURNS text SECURITY DEFINER SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_stage_state_wrapper';
+REVOKE ALL ON FUNCTION pgtrickle._centroid_stage_state(oid) FROM PUBLIC;
+
+CREATE FUNCTION pgtrickle._centroid_prepare_state(oid)
+RETURNS text SECURITY DEFINER SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_prepare_state_wrapper';
+REVOKE ALL ON FUNCTION pgtrickle._centroid_prepare_state(oid) FROM PUBLIC;
+
+CREATE FUNCTION pgtrickle._centroid_delta_sql(oid, text, text)
+RETURNS text SECURITY DEFINER SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_delta_sql_wrapper';
+REVOKE ALL ON FUNCTION pgtrickle._centroid_delta_sql(oid, text, text) FROM PUBLIC;
+
+CREATE FUNCTION pgtrickle._centroid_stage_delta(oid, text, text)
+RETURNS text SECURITY DEFINER SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_stage_delta_wrapper';
+REVOKE ALL ON FUNCTION pgtrickle._centroid_stage_delta(oid, text, text) FROM PUBLIC;
+
+CREATE FUNCTION pgtrickle._centroid_stage_candidates(oid, text, text)
+RETURNS text SECURITY DEFINER SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_stage_candidates_wrapper';
+REVOKE ALL ON FUNCTION pgtrickle._centroid_stage_candidates(oid, text, text) FROM PUBLIC;
+
+CREATE FUNCTION pgtrickle._centroid_candidate_sql(oid, text, text)
+RETURNS text SECURITY DEFINER SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_candidate_sql_wrapper';
+REVOKE ALL ON FUNCTION pgtrickle._centroid_candidate_sql(oid, text, text) FROM PUBLIC;
+
+CREATE FUNCTION pgtrickle._centroid_delta_step(double precision[], real[], smallint)
+RETURNS double precision[] IMMUTABLE PARALLEL SAFE
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_delta_step_wrapper';
+
+CREATE AGGREGATE pgtrickle._centroid_delta(real[], smallint) (
+    SFUNC = pgtrickle._centroid_delta_step,
+    STYPE = double precision[],
+    INITCOND = '{}',
+    PARALLEL = UNSAFE
+);
+
+CREATE FUNCTION pgtrickle._centroid_init_raw(double precision[], integer)
+RETURNS double precision[] IMMUTABLE PARALLEL SAFE
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_init_raw_wrapper';
+
+CREATE FUNCTION pgtrickle._centroid_init(double precision[], integer)
+RETURNS double precision[] LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
+    SELECT pgtrickle._centroid_init_raw(
+        CASE WHEN $1 IS NULL OR (pg_catalog.cardinality($1) > 0 AND
+                 (pg_catalog.array_ndims($1) IS DISTINCT FROM 1 OR pg_catalog.array_lower($1, 1) IS DISTINCT FROM 1))
+             THEN NULL::double precision[] ELSE $1 END, $2)
+$$;
+
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_delta_step(double precision[], real[], smallint) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_delta(real[], smallint) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_init_raw(double precision[], integer) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_init(double precision[], integer) TO PUBLIC;
+
+CREATE FUNCTION pgtrickle._centroid_finalize_raw(double precision[], integer)
+RETURNS real[] IMMUTABLE PARALLEL SAFE
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_finalize_raw_wrapper';
+
+CREATE FUNCTION pgtrickle._centroid_check_count(double precision[], bigint, integer)
+RETURNS double precision[] IMMUTABLE PARALLEL SAFE
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_check_count_wrapper';
+REVOKE ALL ON FUNCTION pgtrickle._centroid_check_count(double precision[], bigint, integer) FROM PUBLIC;
+
+CREATE FUNCTION pgtrickle._centroid_finalize(double precision[], integer)
+RETURNS real[] LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
+    SELECT pgtrickle._centroid_finalize_raw(
+        CASE WHEN $1 IS NULL OR pg_catalog.array_ndims($1) IS DISTINCT FROM 1
+                   OR pg_catalog.array_lower($1, 1) IS DISTINCT FROM 1
+             THEN NULL::double precision[] ELSE $1 END, $2)
+$$;
+
+CREATE FUNCTION pgtrickle._centroid_merge_raw(double precision[], double precision[], integer, boolean)
+RETURNS double precision[] IMMUTABLE PARALLEL SAFE
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_merge_raw_wrapper';
+
+CREATE FUNCTION pgtrickle._centroid_merge(double precision[], double precision[], integer, boolean)
+RETURNS double precision[] LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
+    SELECT pgtrickle._centroid_merge_raw(
+        CASE WHEN $1 IS NULL OR $2 IS NULL
+                   OR (pg_catalog.cardinality($1) > 0 AND
+                       (pg_catalog.array_ndims($1) IS DISTINCT FROM 1 OR pg_catalog.array_lower($1, 1) IS DISTINCT FROM 1))
+                   OR (pg_catalog.cardinality($2) > 0 AND
+                       (pg_catalog.array_ndims($2) IS DISTINCT FROM 1 OR pg_catalog.array_lower($2, 1) IS DISTINCT FROM 1))
+             THEN NULL::double precision[] ELSE $1 END,
+        $2, $3, $4)
+$$;
+
+CREATE FUNCTION pgtrickle._centroid_rebase_reason_raw(
+    bigint, bigint, bigint, double precision[], double precision[]
+) RETURNS text IMMUTABLE PARALLEL SAFE
+LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_rebase_reason_raw_wrapper';
+
+CREATE FUNCTION pgtrickle._centroid_rebase_reason(
+    bigint, bigint, bigint, double precision[], double precision[]
+) RETURNS text LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
+    SELECT CASE WHEN pg_catalog.array_ndims($4) IS DISTINCT FROM 1
+                      OR pg_catalog.array_ndims($5) IS DISTINCT FROM 1
+                      OR pg_catalog.array_lower($4, 1) IS DISTINCT FROM 1
+                      OR pg_catalog.array_lower($5, 1) IS DISTINCT FROM 1
+                THEN 'INVALID_STATE'
+                ELSE pgtrickle._centroid_rebase_reason_raw($1, $2, $3, $4, $5)
+           END
+$$;
+
+REVOKE EXECUTE ON FUNCTION pgtrickle._centroid_initialization_sql(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle._centroid_staging_sql(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle._centroid_finalize_raw(double precision[], integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle._centroid_finalize(double precision[], integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle._centroid_merge_raw(double precision[], double precision[], integer, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle._centroid_merge(double precision[], double precision[], integer, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle._centroid_rebase_reason_raw(bigint, bigint, bigint, double precision[], double precision[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle._centroid_rebase_reason(bigint, bigint, bigint, double precision[], double precision[]) FROM PUBLIC;
+
 ALTER TABLE pgtrickle.pgt_stream_tables
     ADD COLUMN IF NOT EXISTS ann_refresh_epoch BIGINT DEFAULT 0
         CHECK (ann_refresh_epoch IS NULL OR ann_refresh_epoch >= 0),

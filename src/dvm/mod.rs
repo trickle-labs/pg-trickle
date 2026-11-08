@@ -50,6 +50,7 @@
 //! let oids = result.source_oids;
 //! ```
 
+pub(crate) mod centroid_numerics;
 pub mod diff;
 pub mod operators;
 pub mod parser;
@@ -75,6 +76,40 @@ pub use parser::{
 
 use crate::error::PgTrickleError;
 use crate::version::Frontier;
+
+/// Resolve pgvector's own strict binary-send functions for intermediate payloads.
+#[cfg(any(not(test), feature = "pg_test"))]
+pub(crate) fn pgvector_binary_senders()
+-> Result<std::collections::HashMap<u32, String>, PgTrickleError> {
+    use pgrx::prelude::*;
+    Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT t.oid::bigint, n.nspname::text, p.proname::text \
+             FROM pg_catalog.pg_type t \
+             JOIN pg_catalog.pg_depend td ON td.classid = 'pg_catalog.pg_type'::regclass AND td.objid = t.oid AND td.deptype = 'e' \
+             JOIN pg_catalog.pg_extension e ON e.oid = td.refobjid AND e.extname = 'vector' \
+             JOIN pg_catalog.pg_proc p ON p.oid = t.typsend AND p.proisstrict AND p.prorettype = 'pg_catalog.bytea'::regtype \
+             JOIN pg_catalog.pg_depend pd ON pd.classid = 'pg_catalog.pg_proc'::regclass AND pd.objid = p.oid AND pd.refobjid = e.oid AND pd.deptype = 'e' \
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+             WHERE t.typname IN ('vector', 'halfvec', 'sparsevec')",
+            None, &[],
+        )?;
+        let mut senders = std::collections::HashMap::new();
+        for row in rows {
+            if let (Some(oid), Some(schema), Some(name)) = (row.get::<i64>(1)?, row.get::<String>(2)?, row.get::<String>(3)?)
+                && let Ok(oid) = u32::try_from(oid) {
+                senders.insert(oid, crate::sql_builder::qualified(&schema, &name));
+            }
+        }
+        Ok::<_, pgrx::spi::Error>(senders)
+    }).map_err(|error| PgTrickleError::SpiError(error.to_string()))
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+pub(crate) fn pgvector_binary_senders()
+-> Result<std::collections::HashMap<u32, String>, PgTrickleError> {
+    Ok(std::collections::HashMap::new())
+}
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -633,6 +668,8 @@ pub fn generate_delta_query(
         None,
         None,
         None,
+        None,
+        false,
         defining_query,
         prev_frontier,
         new_frontier,
@@ -654,6 +691,8 @@ pub(crate) fn generate_delta_query_staged(
         Some(pgt_id),
         None,
         stream_owner,
+        None,
+        false,
         defining_query,
         prev_frontier,
         new_frontier,
@@ -679,6 +718,8 @@ pub(crate) fn generate_delta_query_staged_with_window_state(
         Some(pgt_id),
         Some(row_relation),
         stream_owner,
+        None,
+        false,
         defining_query,
         prev_frontier,
         new_frontier,
@@ -687,11 +728,52 @@ pub(crate) fn generate_delta_query_staged_with_window_state(
     )
 }
 
+pub(crate) fn generate_centroid_delta_query(
+    st: &crate::catalog::StreamTableMeta,
+    prev_frontier: &Frontier,
+    new_frontier: &Frontier,
+) -> Result<DeltaQueryResult, PgTrickleError> {
+    generate_delta_query_impl(
+        None,
+        None,
+        Some(st),
+        None,
+        true,
+        &st.defining_query,
+        prev_frontier,
+        new_frontier,
+        &st.pgt_schema,
+        &st.pgt_name,
+    )
+}
+
+pub(crate) fn generate_centroid_delta_query_staged(
+    st: &crate::catalog::StreamTableMeta,
+    prev_frontier: &Frontier,
+    new_frontier: &Frontier,
+    source_tables: &HashMap<u32, String>,
+) -> Result<DeltaQueryResult, PgTrickleError> {
+    generate_delta_query_impl(
+        None,
+        None,
+        Some(st),
+        Some(source_tables),
+        true,
+        &st.defining_query,
+        prev_frontier,
+        new_frontier,
+        &st.pgt_schema,
+        &st.pgt_name,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_delta_query_impl(
     stage_pgt_id: Option<i64>,
     window_state_row_relation: Option<&str>,
     stream_owner: Option<&crate::catalog::StreamTableMeta>,
+    source_stage_tables: Option<&HashMap<u32, String>>,
+    centroid_delta: bool,
     defining_query: &str,
     prev_frontier: &Frontier,
     new_frontier: &Frontier,
@@ -710,6 +792,19 @@ fn generate_delta_query_impl(
         Some(st) => crate::refresh::with_stream_owner(st, parse_query)?,
         None => parse_query()?,
     };
+    if centroid_delta {
+        let admitted = match stream_owner {
+            Some(st) => crate::refresh::with_stream_owner(st, || {
+                Ok(centroid_numerics::centroid_staging_sql(defining_query)?.is_some())
+            })?,
+            None => centroid_numerics::centroid_staging_sql(defining_query)?.is_some(),
+        };
+        if !admitted {
+            return Err(PgTrickleError::UnsupportedOperator(
+                "centroid differential query is not admitted".into(),
+            ));
+        }
+    }
 
     // Extract source OIDs before moving cte_registry.
     let mut source_oids: Vec<u32> = result.tree.source_oids();
@@ -792,7 +887,9 @@ fn generate_delta_query_impl(
     // CITUS-4: Pre-resolve stable buffer names so the scan generator
     // does not need to call SPI during SQL generation.
     ctx.set_source_buffer_names(resolve_buffer_names_for_sources(&source_oids));
-    if let Some(pgt_id) = stage_pgt_id {
+    if let Some(tables) = source_stage_tables {
+        ctx.set_source_stage_tables(tables.clone());
+    } else if let Some(pgt_id) = stage_pgt_id {
         ctx.set_source_stage_tables(
             source_oids
                 .iter()
@@ -827,8 +924,27 @@ fn generate_delta_query_impl(
     // exceeds max_delta_fraction use EXCEPT ALL instead of NOT EXISTS.
     ctx.set_fallback_leaf_oids(crate::refresh::get_fallback_leaf_oids());
 
-    let (delta_sql, output_columns, diff_dedup, diff_has_key_changed) =
-        ctx.differentiate_with_columns(&result.tree)?;
+    let (delta_sql, output_columns, diff_dedup, diff_has_key_changed) = if centroid_delta {
+        let parser::OpTree::Aggregate { child, .. } = &result.tree else {
+            return Err(PgTrickleError::UnsupportedOperator(
+                "centroid aggregate is missing".into(),
+            ));
+        };
+        let child_delta = ctx.diff_node_in_intermediate(child)?;
+        let child_sql = ctx.build_with_query(&child_delta.cte_name);
+        let (sql, mut columns) = operators::aggregate::centroid_signed_delta_sql(
+            &result.tree,
+            &child_sql,
+            &child_delta.columns,
+        )
+        .ok_or_else(|| {
+            PgTrickleError::UnsupportedOperator("centroid delta shape is unsupported".into())
+        })?;
+        columns.extend(["__pgt_group_delta".into(), "__pgt_centroid_delta".into()]);
+        (sql, columns, true, false)
+    } else {
+        ctx.differentiate_with_columns(&result.tree)?
+    };
     ctx.record_changed_leaf_bucket(&source_oids);
 
     if let Some(trace) = ctx.take_decision_trace()

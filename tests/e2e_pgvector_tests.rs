@@ -21,6 +21,2204 @@ async fn setup_pgvector(db: &E2eDb) {
     db.execute("CREATE EXTENSION IF NOT EXISTS vector").await;
 }
 
+#[tokio::test]
+async fn test_centroid_numerical_guard_reports_rebase_reasons() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let delta: Vec<f64> = db.query_scalar("SELECT pgtrickle._centroid_delta(v::real[], sign) FROM (VALUES ('[1,2]'::vector, 1::smallint), ('[1,2]'::vector, 1::smallint), (NULL::vector, -1::smallint), ('[1,2]'::vector, -1::smallint)) AS input(v, sign)").await;
+    assert_eq!(delta, vec![1.0, 3.0, 1.0, 2.0, 3.0, 6.0]);
+    let merged: Vec<f64> = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_merge(ARRAY[]::float8[], $1::float8[], 2, true)",
+    )
+    .bind(&delta)
+    .fetch_one(&db.pool)
+    .await
+    .expect("merge centroid delta");
+    assert_eq!(merged, vec![1.0, 5.0, 3.0, 1.0, 2.0, 3.0, 6.0]);
+    let initialized: Vec<f64> = db.query_scalar("SELECT pgtrickle._centroid_init(pgtrickle._centroid_delta(ARRAY[1]::real[], 1::smallint), 1) FROM generate_series(1, 5000)").await;
+    assert_eq!(initialized, vec![5000.0, 5000.0, 0.0, 5000.0, 5000.0]);
+    let finalized: bool = db.query_scalar("SELECT pgtrickle._centroid_finalize(ARRAY[2,2,0,3,4,3,4]::float8[], 2)::vector(2) = '[1.5,2]'::vector AND pgtrickle._centroid_finalize(ARRAY[0,0,0,0,0]::float8[], 1) IS NULL").await;
+    assert!(
+        finalized,
+        "finalization must produce a vector or NULL for no vectors"
+    );
+    let unsafe_finalize = db
+        .try_execute("SELECT pgtrickle._centroid_finalize(ARRAY[1,3,1,0,2e20]::float8[], 1)")
+        .await;
+    assert!(
+        unsafe_finalize.is_err(),
+        "unsafe state must not produce a centroid"
+    );
+    let init_reason: Option<String> = sqlx::query_scalar("SELECT pgtrickle._centroid_rebase_reason($1::bigint, $2::bigint, $3::bigint, ARRAY[$4]::float8[], ARRAY[$5]::float8[])")
+        .bind(5000_i64).bind(5000_i64).bind(0_i64).bind(5000.0_f64).bind(5000.0_f64)
+        .fetch_one(&db.pool).await.expect("check initialized state");
+    assert!(
+        init_reason.is_none(),
+        "initial group size is not a change budget"
+    );
+    let invalid_init = db
+        .try_execute("SELECT pgtrickle._centroid_init(ARRAY[1,3,1,3]::float8[], 1)")
+        .await;
+    assert!(
+        invalid_init.is_err(),
+        "initialization must reject retractions"
+    );
+    let invalid_merge = db
+        .try_execute(
+            "SELECT pgtrickle._centroid_merge(ARRAY[[1.0, 2.0]]::float8[], ARRAY[]::float8[], 1, false)",
+        )
+        .await;
+    assert!(
+        invalid_merge.is_err(),
+        "multidimensional state must fail safely"
+    );
+    let missing_state = db
+        .try_execute(
+            "SELECT pgtrickle._centroid_merge(ARRAY[]::float8[], ARRAY[]::float8[], 1, false)",
+        )
+        .await;
+    assert!(
+        missing_state.is_err(),
+        "existing groups cannot use missing state"
+    );
+    assert!(
+        db.try_execute("SELECT pgtrickle._centroid_check_count(ARRAY[2,2,0,2,2]::float8[], 1, 1)")
+            .await
+            .is_err(),
+        "non-null count cannot exceed group size"
+    );
+    let invalid_delta = db.try_execute("SELECT pgtrickle._centroid_delta(v, 1::smallint) FROM (VALUES (ARRAY[1]::real[]), (ARRAY[1,2]::real[])) AS input(v)").await;
+    assert!(invalid_delta.is_err(), "mixed dimensions must fail safely");
+    let matches: bool = db.query_scalar(
+        "SELECT pgtrickle._centroid_rebase_reason(2, 2, 0, ARRAY[5.0]::float8[], ARRAY[5.0]::float8[]) IS NULL \
+         AND pgtrickle._centroid_rebase_reason(1, 3, 1, ARRAY[0.0]::float8[], ARRAY[2e20]::float8[]) = 'NUMERICAL_ERROR' \
+         AND pgtrickle._centroid_rebase_reason(1, 4096, 4096, ARRAY[1.0]::float8[], ARRAY[1.0]::float8[]) = 'CHANGE_LIMIT' \
+         AND pgtrickle._centroid_rebase_reason(-1, 1, 0, ARRAY[1.0]::float8[], ARRAY[1.0]::float8[]) = 'INVALID_STATE' \
+         AND pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[NULL]::float8[], ARRAY[1.0]::float8[]) = 'INVALID_STATE' \
+         AND pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[[1.0, 2.0]]::float8[], ARRAY[1.0, 2.0]::float8[]) = 'INVALID_STATE' \
+         AND pgtrickle._centroid_rebase_reason(1, 1, 0, '[0:0]={1}'::float8[], ARRAY[1.0]::float8[]) = 'INVALID_STATE' \
+         AND pgtrickle._centroid_rebase_reason(NULL, 1, 0, ARRAY[1.0]::float8[], ARRAY[1.0]::float8[]) = 'INVALID_STATE'"
+    ).await;
+    assert!(
+        matches,
+        "guard must report safe, unsafe, and malformed state"
+    );
+    let cancellation: bool = db.query_scalar(
+        "WITH input AS (SELECT '[1e20]'::vector AS large, '[1]'::vector AS small), \
+         state AS (SELECT large, small, vector_accum(vector_accum(ARRAY[0]::float8[], large), small) AS a FROM input) \
+         SELECT pgtrickle._centroid_rebase_reason(1, 3, 1, \
+                    ARRAY[a[2] - (large::real[])[1]::float8], \
+                    ARRAY[2 * abs((large::real[])[1]::float8) + 1]) = 'NUMERICAL_ERROR' \
+                AND avg(small) = '[1]'::vector FROM state GROUP BY a, large"
+    ).await;
+    assert!(
+        cancellation,
+        "real pgvector state must rebase after cancellation"
+    );
+    db.execute("CREATE TABLE centroid_guard_toast (sums float8[], magnitudes float8[])")
+        .await;
+    db.execute("ALTER TABLE centroid_guard_toast ALTER COLUMN sums SET STORAGE EXTERNAL")
+        .await;
+    db.execute("ALTER TABLE centroid_guard_toast ALTER COLUMN magnitudes SET STORAGE EXTERNAL")
+        .await;
+    db.execute("INSERT INTO centroid_guard_toast SELECT array_agg(i::float8), array_agg(i::float8) FROM generate_series(1, 16000) i").await;
+    let external: bool = db.query_scalar("SELECT pg_relation_size(reltoastrelid) > 0 FROM pg_class WHERE oid = 'centroid_guard_toast'::regclass").await;
+    assert!(external, "test arrays must be stored in the TOAST relation");
+    let toasted_safe: bool = db.query_scalar("SELECT pgtrickle._centroid_rebase_reason(1, 1, 0, sums, magnitudes) IS NULL FROM centroid_guard_toast").await;
+    assert!(toasted_safe, "guard must detoast large state arrays safely");
+    db.execute("CREATE TABLE centroid_guard_values (id int PRIMARY KEY, v vector(1) NOT NULL)")
+        .await;
+    db.execute(
+        r#"DO $test$
+        DECLARE
+            cycle int; slot int; old_value real; value real; native real;
+            n bigint := 2; operations bigint := 2; changes bigint := 0;
+            total float8 := ('1e20'::real)::float8 + 1;
+            magnitude float8 := abs(('1e20'::real)::float8) + 1;
+            state float8[]; delta float8[];
+            reason text; accepted int := 0; rebased int := 0;
+        BEGIN
+            INSERT INTO centroid_guard_values VALUES (0, '[1e20]'), (1, '[1]');
+            DELETE FROM centroid_guard_values WHERE id = 0;
+            total := total - ('1e20'::real)::float8;
+            magnitude := magnitude + abs(('1e20'::real)::float8);
+            n := 1; operations := 3; changes := 1;
+            reason := pgtrickle._centroid_rebase_reason(n, operations, changes, ARRAY[total], ARRAY[magnitude]);
+            IF reason IS DISTINCT FROM 'NUMERICAL_ERROR' THEN
+                RAISE EXCEPTION 'lost contribution was not detected: %', reason;
+            END IF;
+            total := 1; magnitude := 1; operations := 1; changes := 0; rebased := 1;
+            state := ARRAY[1, 1, 0, 1, 1]::float8[];
+            FOR cycle IN 1..1000 LOOP
+                slot := 2 + (cycle * 17 + cycle / 7) % 61;
+                SELECT (v::real[])[1] INTO old_value FROM centroid_guard_values WHERE id = slot;
+                IF FOUND THEN
+                    DELETE FROM centroid_guard_values WHERE id = slot;
+                    SELECT pgtrickle._centroid_delta(ARRAY[old_value], -1::smallint) INTO delta;
+                ELSE
+                    value := CASE WHEN cycle % 97 = 0 THEN '1e20'::real
+                                  ELSE ((cycle * 17) % 2001 - 1000)::real END;
+                    INSERT INTO centroid_guard_values VALUES (slot, ARRAY[value]::vector(1));
+                    SELECT pgtrickle._centroid_delta(ARRAY[value], 1::smallint) INTO delta;
+                END IF;
+                state := pgtrickle._centroid_merge(state, delta, 1, false);
+                n := state[1]::bigint; operations := state[2]::bigint; changes := state[3]::bigint;
+                total := state[4]; magnitude := state[5];
+                reason := pgtrickle._centroid_rebase_reason(n, operations, changes, ARRAY[total], ARRAY[magnitude]);
+                IF reason IS NOT NULL THEN
+                    SELECT count(*), COALESCE(sum((v::real[])[1]::float8), 0),
+                           COALESCE(sum(abs((v::real[])[1]::float8)), 0)
+                      INTO n, total, magnitude FROM centroid_guard_values;
+                    operations := n; changes := 0; rebased := rebased + 1;
+                    state := ARRAY[n::float8, operations::float8, 0, total, magnitude];
+                ELSE
+                    SELECT (avg(v)::real[])[1] INTO native FROM centroid_guard_values;
+                    IF native IS NOT NULL AND abs((total / n)::real::float8 - native::float8)
+                        > 1e-5 + 1e-6 * abs(native::float8) THEN
+                        RAISE EXCEPTION 'guard accepted wrong centroid on cycle %', cycle;
+                    END IF;
+                    accepted := accepted + 1;
+                END IF;
+            END LOOP;
+            IF accepted < 100 OR rebased = 0 THEN
+                RAISE EXCEPTION 'insufficient guard coverage: accepted %, rebased %', accepted, rebased;
+            END IF;
+        END $test$"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_centroid_numerical_guard_multidimensional_churn() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE centroid_churn_values (id int PRIMARY KEY, v vector(3))")
+        .await;
+    db.execute(
+        r#"DO $test$
+        DECLARE
+            cycle int; slot int; component int; seed bigint := 17;
+            old_value real[]; new_value real[]; delta float8[]; state float8[];
+            actual real[]; native real[]; reason text;
+            accepted int := 0; rebased int := 0; change_limit int := 0; numerical int := 0;
+            native_count bigint;
+        BEGIN
+            INSERT INTO centroid_churn_values
+            SELECT i, CASE WHEN i % 5 = 0 THEN NULL
+                           ELSE ARRAY[i::real, (-i)::real, (i % 3)::real]::vector(3) END
+            FROM generate_series(0, 31) i;
+            SELECT pgtrickle._centroid_init(pgtrickle._centroid_delta(v::real[], 1::smallint), 3)
+              INTO state FROM centroid_churn_values;
+            FOR cycle IN 1..2600 LOOP
+                seed := (seed * 48271) % 2147483647;
+                slot := (seed % 32)::int;
+                SELECT v::real[] INTO old_value FROM centroid_churn_values WHERE id = slot;
+                seed := (seed * 48271) % 2147483647;
+                new_value := CASE WHEN cycle % 31 = 0 THEN NULL
+                    WHEN cycle > 2200 AND cycle % 71 = 0
+                        THEN ARRAY['1e20'::real, '-1e20'::real, 1::real]
+                    ELSE ARRAY[((seed % 2001) - 1000)::real / 7,
+                               (((seed / 17) % 2001) - 1000)::real / 11,
+                               (((seed / 113) % 2001) - 1000)::real / 13] END;
+                UPDATE centroid_churn_values SET v = new_value::vector(3) WHERE id = slot;
+                SELECT pgtrickle._centroid_delta(v, sign) INTO delta
+                FROM (VALUES (old_value, -1::smallint), (new_value, 1::smallint)) d(v, sign);
+                state := pgtrickle._centroid_merge(state, delta, 3, false);
+                SELECT count(v) INTO native_count FROM centroid_churn_values;
+                IF state[1] <> native_count THEN
+                    RAISE EXCEPTION 'centroid non-null count mismatch on cycle %', cycle;
+                END IF;
+                reason := pgtrickle._centroid_rebase_reason(
+                    state[1]::bigint, state[2]::bigint, state[3]::bigint,
+                    state[4:6], state[7:9]);
+                IF reason IS NOT NULL THEN
+                    IF reason = 'INVALID_STATE' THEN
+                        RAISE EXCEPTION 'valid update produced invalid state on cycle %', cycle;
+                    END IF;
+                    IF reason = 'CHANGE_LIMIT' THEN change_limit := change_limit + 1; END IF;
+                    IF reason = 'NUMERICAL_ERROR' THEN numerical := numerical + 1; END IF;
+                    SELECT pgtrickle._centroid_init(pgtrickle._centroid_delta(v::real[], 1::smallint), 3)
+                      INTO state FROM centroid_churn_values;
+                    rebased := rebased + 1;
+                    CONTINUE;
+                END IF;
+                actual := pgtrickle._centroid_finalize(state, 3);
+                SELECT avg(v)::real[] INTO native FROM centroid_churn_values;
+                IF actual IS NULL OR native IS NULL THEN
+                    IF actual IS DISTINCT FROM native THEN
+                        RAISE EXCEPTION 'centroid NULL mismatch on cycle %', cycle;
+                    END IF;
+                ELSE
+                    FOR component IN 1..3 LOOP
+                        IF abs(actual[component]::float8 - native[component]::float8)
+                            > 1e-5 + 1e-6 * abs(native[component]::float8) THEN
+                            RAISE EXCEPTION 'centroid mismatch on cycle %, component %: % vs %',
+                                cycle, component, actual[component], native[component];
+                        END IF;
+                    END LOOP;
+                END IF;
+                accepted := accepted + 1;
+            END LOOP;
+            IF accepted < 2000 OR rebased = 0 OR change_limit = 0 OR numerical = 0 THEN
+                RAISE EXCEPTION 'insufficient churn coverage: accepted %, rebased %, change limit %, numerical %',
+                    accepted, rebased, change_limit, numerical;
+            END IF;
+        END $test$"#,
+    ).await;
+}
+
+#[tokio::test]
+async fn test_centroid_initialization_query_preserves_nulls_and_join_multiplicity() {
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE centroid_init_values (id int PRIMARY KEY, grp int, v vector(2))")
+        .await;
+    db.execute(
+        "INSERT INTO centroid_init_values VALUES (1, 1, '[1,2]'), (2, 1, NULL), (3, 2, '[-1,4]'), (4, 3, NULL)",
+    )
+    .await;
+    db.execute("CREATE TABLE centroid_init_copies (source_id int NOT NULL)")
+        .await;
+    db.execute("INSERT INTO centroid_init_copies VALUES (1), (1), (2), (3), (4)")
+        .await;
+    let query = "SELECT v.grp, avg(v.v) AS centroid FROM centroid_init_values v JOIN centroid_init_copies c ON c.source_id = v.id GROUP BY v.grp";
+    let generated: Option<String> =
+        sqlx::query_scalar("SELECT pgtrickle._centroid_initialization_sql($1)")
+            .bind(query)
+            .fetch_one(&db.pool)
+            .await
+            .expect("generate initialization query");
+    let sql = generated.expect("fixed-dimension vector average over an inner join is admitted");
+    // The generated SQL comes from the fixed query and tables created above.
+    let sql = format!(
+        "SELECT grp, centroid::real[], __pgt_group_count, __pgt_centroid_state FROM ({sql}) AS initialized"
+    );
+    type InitializedCentroid = (i32, Option<Vec<f32>>, i64, Vec<f64>);
+    let mut rows: Vec<InitializedCentroid> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_all(&db.pool)
+        .await
+        .expect("execute initialization query");
+    rows.sort_by_key(|row| row.0);
+    assert_eq!(
+        rows,
+        vec![
+            (
+                1,
+                Some(vec![1.0, 2.0]),
+                3,
+                vec![2.0, 2.0, 0.0, 2.0, 4.0, 2.0, 4.0]
+            ),
+            (
+                2,
+                Some(vec![-1.0, 4.0]),
+                1,
+                vec![1.0, 1.0, 0.0, -1.0, 4.0, 1.0, 4.0]
+            ),
+            (3, None, 1, vec![0.0; 7]),
+        ]
+    );
+    let create = format!(
+        "SELECT pgtrickle.create_stream_table('centroid_init_st', $${query}$$, '1h', 'DIFFERENTIAL')"
+    );
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create])
+        .await;
+    let staged: Option<String> = sqlx::query_scalar("SELECT pgtrickle._centroid_staging_sql($1)")
+        .bind(query)
+        .fetch_one(&db.pool)
+        .await
+        .expect("generate staging query");
+    let staged = staged.expect("group identities are admitted");
+    let verify = format!(
+        "WITH staged AS ({staged}) SELECT NOT EXISTS ((SELECT grp, __pgt_row_id, centroid::text, __pgt_group_count FROM staged EXCEPT ALL SELECT grp, __pgt_row_id, centroid::text, __pgt_count FROM centroid_init_st) UNION ALL (SELECT grp, __pgt_row_id, centroid::text, __pgt_count FROM centroid_init_st EXCEPT ALL SELECT grp, __pgt_row_id, centroid::text, __pgt_group_count FROM staged))"
+    );
+    let matches: bool = db.query_scalar(&verify).await;
+    assert!(
+        matches,
+        "staged rows must match the stream table and its identities"
+    );
+    let restricted: bool = db.query_scalar("SELECT NOT EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a WHERE p.oid = 'pgtrickle._centroid_stage_state(oid)'::regprocedure AND a.grantee = 0 AND a.privilege_type = 'EXECUTE')").await;
+    assert!(restricted, "staging must not be executable by PUBLIC");
+    let mut transaction = db.pool.begin().await.expect("begin staging transaction");
+    let stage_one: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_stage_state('centroid_init_st'::regclass::oid)",
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("stage owner snapshot");
+    db.execute("UPDATE centroid_init_values SET v='[9,9]' WHERE id=1")
+        .await;
+    let stage_two: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_stage_state('centroid_init_st'::regclass::oid)",
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("stage newer owner snapshot");
+    assert_ne!(
+        stage_one, stage_two,
+        "staging must not overwrite an existing temp table"
+    );
+    let compare = format!(
+        "SELECT (SELECT centroid::text FROM {stage_one} WHERE grp=1), (SELECT centroid::text FROM {stage_two} WHERE grp=1)"
+    );
+    let (first, second): (String, String) = sqlx::query_as(sqlx::AssertSqlSafe(compare.as_str()))
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("compare staged snapshots");
+    assert_eq!(first, "[1,2]");
+    assert_eq!(second, "[9,9]");
+    transaction
+        .rollback()
+        .await
+        .expect("rollback staged tables");
+    let mut preparation = db.pool.begin().await.expect("begin state preparation");
+    let staged: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_prepare_state('centroid_init_st'::regclass::oid)",
+    )
+    .fetch_one(&mut *preparation)
+    .await
+    .expect("prepare centroid state");
+    let compare = format!(
+        "SELECT (SELECT count(*) FROM {staged}) = 3 AND NOT EXISTS ((SELECT __pgt_row_id, __pgt_group_count, __pgt_centroid_state FROM {staged} EXCEPT ALL SELECT row_id, group_count, state FROM pgtrickle.pgt_centroid_groups WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_init_st'::regclass)) UNION ALL (SELECT row_id, group_count, state FROM pgtrickle.pgt_centroid_groups WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_init_st'::regclass) EXCEPT ALL SELECT __pgt_row_id, __pgt_group_count, __pgt_centroid_state FROM {staged}))"
+    );
+    let equal: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(compare.as_str()))
+        .fetch_one(&mut *preparation)
+        .await
+        .expect("compare staged and stored state");
+    assert!(equal, "stored groups must come from the returned snapshot");
+    preparation.commit().await.expect("commit prepared state");
+    let matches_contract: bool = db.query_scalar("SELECT c.status = 'BUILDING' AND c.schema_version = 1 AND c.stream_relid = s.pgt_relid AND c.defining_query = s.defining_query AND c.contract_generation = s.contract_generation FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_relid = 'centroid_init_st'::regclass").await;
+    assert!(
+        matches_contract,
+        "prepared state must remain incomplete and bound to the current contract"
+    );
+    let state_sql = "SELECT g.state FROM pgtrickle.pgt_centroid_groups g JOIN centroid_init_st s ON s.__pgt_row_id = g.row_id WHERE s.grp = 1";
+    let state: Vec<f64> = db.query_scalar(state_sql).await;
+    assert_eq!(state, vec![2.0, 2.0, 0.0, 18.0, 18.0, 18.0, 18.0]);
+    assert!(
+        db.try_execute("UPDATE pgtrickle.pgt_centroid_groups SET state = ARRAY[1.0]::float8[]")
+            .await
+            .is_err()
+    );
+    assert!(db.try_execute("UPDATE pgtrickle.pgt_centroid_groups SET state = ARRAY[4.0, 4.0, 0.0, 1.0, 1.0]::float8[] WHERE group_count = 3").await.is_err());
+    let mut replacement = db.pool.begin().await.expect("begin state replacement");
+    sqlx::query("UPDATE centroid_init_values SET v = '[4,4]' WHERE id = 1")
+        .execute(&mut *replacement)
+        .await
+        .expect("update source in replacement transaction");
+    let replaced: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_prepare_state('centroid_init_st'::regclass::oid)",
+    )
+    .fetch_one(&mut *replacement)
+    .await
+    .expect("replace prepared state");
+    let new_state: Vec<f64> = sqlx::query_scalar(state_sql)
+        .fetch_one(&mut *replacement)
+        .await
+        .expect("read replacement state");
+    assert_eq!(new_state, vec![2.0, 2.0, 0.0, 8.0, 8.0, 8.0, 8.0]);
+    let staged_state: Vec<f64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT __pgt_centroid_state FROM {replaced} WHERE grp = 1"
+    )))
+    .fetch_one(&mut *replacement)
+    .await
+    .expect("read replacement staged state");
+    assert_eq!(staged_state, new_state);
+    replacement
+        .rollback()
+        .await
+        .expect("rollback state replacement");
+    let restored: Vec<f64> = db.query_scalar(state_sql).await;
+    assert_eq!(
+        restored, state,
+        "rollback must restore the original private state"
+    );
+    let restarted = tokio::process::Command::new("docker")
+        .args(["restart", db.container_id()])
+        .output()
+        .await
+        .expect("restart PostgreSQL with prepared centroid state");
+    assert!(
+        restarted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    db.pool.close().await;
+    db.pool = db.reconnect_after_restart().await;
+    let after_restart: Vec<f64> = db.query_scalar(state_sql).await;
+    assert_eq!(after_restart, state, "private state must survive restart");
+    db.execute("SET pg_trickle.enable_vector_agg = on").await;
+    db.execute_seq(&[
+        "CREATE ROLE centroid_stage_owner NOLOGIN",
+        "CREATE ROLE centroid_stage_other NOLOGIN",
+        "GRANT USAGE ON SCHEMA pgtrickle TO centroid_stage_owner, centroid_stage_other",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_stage_state(oid) TO centroid_stage_owner, centroid_stage_other",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.refresh_stream_table(text) TO centroid_stage_owner",
+        "ALTER TABLE centroid_init_st OWNER TO centroid_stage_owner",
+    ])
+    .await;
+    let private: bool = db.query_scalar("SELECT NOT has_table_privilege('centroid_stage_other', 'pgtrickle.pgt_centroid_states', 'SELECT') AND NOT has_table_privilege('centroid_stage_other', 'pgtrickle.pgt_centroid_groups', 'SELECT') AND NOT has_function_privilege('centroid_stage_other', 'pgtrickle._centroid_prepare_state(oid)', 'EXECUTE')").await;
+    assert!(
+        private,
+        "private centroid state must not be exposed to other roles"
+    );
+    let mut unauthorized = db.pool.begin().await.expect("begin unauthorized staging");
+    sqlx::query("SET LOCAL ROLE centroid_stage_other")
+        .execute(&mut *unauthorized)
+        .await
+        .expect("set unrelated role");
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle._centroid_stage_state('centroid_init_st'::regclass::oid)",
+    )
+    .fetch_one(&mut *unauthorized)
+    .await
+    .expect_err("a non-owner must not stage another stream table");
+    assert!(error.to_string().contains("must be owner of stream table"));
+    unauthorized
+        .rollback()
+        .await
+        .expect("rollback unauthorized staging");
+
+    let mut unprivileged_owner = db.pool.begin().await.expect("begin owner staging");
+    sqlx::query("SET LOCAL ROLE centroid_stage_owner")
+        .execute(&mut *unprivileged_owner)
+        .await
+        .expect("set stream owner role");
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle._centroid_stage_state('centroid_init_st'::regclass::oid)",
+    )
+    .fetch_one(&mut *unprivileged_owner)
+    .await
+    .expect_err("staging must respect the owner's source privileges");
+    let message = error.to_string();
+    assert!(
+        message.contains("permission denied for table centroid_init_values")
+            || message.contains("permission denied for table centroid_init_copies"),
+        "unexpected staging error: {message}"
+    );
+    unprivileged_owner
+        .rollback()
+        .await
+        .expect("rollback owner staging");
+
+    db.execute(
+        "GRANT SELECT ON centroid_init_values, centroid_init_copies TO centroid_stage_owner",
+    )
+    .await;
+    let mut owner = db.pool.begin().await.expect("begin authorized staging");
+    sqlx::query("SET LOCAL ROLE centroid_stage_owner")
+        .execute(&mut *owner)
+        .await
+        .expect("set authorized owner role");
+    let staged: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_stage_state('centroid_init_st'::regclass::oid)",
+    )
+    .fetch_one(&mut *owner)
+    .await
+    .expect("stage as stream owner");
+    let sql = format!("SELECT centroid::text FROM {staged} WHERE grp = 1");
+    let centroid: String = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_one(&mut *owner)
+        .await
+        .expect("read owner staging table");
+    assert_eq!(centroid, "[9,9]");
+    owner.rollback().await.expect("rollback authorized staging");
+    db.execute_seq(&[
+        "UPDATE centroid_init_values SET v = '[8,8]' WHERE id = 1",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_init_st'::regclass",
+    ]).await;
+    let mut owner_refresh = db.pool.begin().await.expect("begin owner refresh");
+    sqlx::query("SET LOCAL ROLE centroid_stage_owner")
+        .execute(&mut *owner_refresh)
+        .await
+        .expect("set owner for refresh");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_init_st')")
+        .execute(&mut *owner_refresh)
+        .await
+        .expect("refresh prepared centroid as owner");
+    owner_refresh.commit().await.expect("commit owner refresh");
+    let refreshed: bool = db.query_scalar("SELECT s.centroid::text = '[8,8]' AND g.state = ARRAY[2,2,0,16,16,16,16]::float8[] FROM centroid_init_st s JOIN pgtrickle.pgt_centroid_groups g ON g.row_id = s.__pgt_row_id WHERE s.grp = 1").await;
+    assert!(
+        refreshed,
+        "owner refresh must update visible rows and private state"
+    );
+    db.execute("CREATE TABLE centroid_init_empty (id int PRIMARY KEY, v vector(2))")
+        .await;
+    let empty_sql: Option<String> = db.query_scalar("SELECT pgtrickle._centroid_initialization_sql('SELECT avg(v) AS centroid FROM centroid_init_empty')").await;
+    let empty_sql = empty_sql.expect("empty scalar aggregate is admitted");
+    let empty_sql = format!(
+        "SELECT centroid::real[], __pgt_group_count, __pgt_centroid_state FROM ({empty_sql}) AS initialized"
+    );
+    let empty: (Option<Vec<f32>>, i64, Vec<f64>) =
+        sqlx::query_as(sqlx::AssertSqlSafe(empty_sql.as_str()))
+            .fetch_one(&db.pool)
+            .await
+            .expect("execute empty initialization query");
+    assert_eq!(empty, (None, 0, vec![0.0; 7]));
+    let unsupported: bool = db.query_scalar("SELECT pgtrickle._centroid_initialization_sql('SELECT grp, avg(DISTINCT v) FROM centroid_init_values GROUP BY grp') IS NULL").await;
+    assert!(unsupported, "DISTINCT must retain the safe rescan strategy");
+    let volatile: bool = db.query_scalar("SELECT pgtrickle._centroid_initialization_sql('SELECT grp, avg(v) FROM centroid_init_values WHERE random() < 1 GROUP BY grp') IS NULL").await;
+    assert!(
+        volatile,
+        "volatile queries must not be admitted for initialization"
+    );
+    let hidden_group: bool = db.query_scalar("SELECT pgtrickle._centroid_initialization_sql('SELECT avg(v) FROM centroid_init_values GROUP BY grp') IS NULL").await;
+    assert!(
+        hidden_group,
+        "groups missing from output cannot be matched to state"
+    );
+    let before_failed_prepare: Vec<f64> = db.query_scalar(state_sql).await;
+    db.execute("ALTER TABLE centroid_init_values ENABLE ROW LEVEL SECURITY")
+        .await;
+    let rls: bool = sqlx::query_scalar("SELECT pgtrickle._centroid_initialization_sql($1) IS NULL")
+        .bind(query)
+        .fetch_one(&db.pool)
+        .await
+        .expect("check RLS admission");
+    assert!(rls, "RLS sources must retain the safe strategy");
+    assert!(
+        db.try_execute(
+            "SELECT pgtrickle._centroid_prepare_state('centroid_init_st'::regclass::oid)"
+        )
+        .await
+        .is_err()
+    );
+    let after_failed_prepare: Vec<f64> = db.query_scalar(state_sql).await;
+    assert_eq!(
+        after_failed_prepare, before_failed_prepare,
+        "failed preparation must preserve prior state"
+    );
+    db.execute("SELECT pgtrickle.drop_stream_table('centroid_init_st')")
+        .await;
+    let remaining: i64 = db.query_scalar("SELECT (SELECT count(*) FROM pgtrickle.pgt_centroid_states) + (SELECT count(*) FROM pgtrickle.pgt_centroid_groups)").await;
+    assert_eq!(
+        remaining, 0,
+        "dropping the stream must remove private state"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_signed_join_delta_preserves_moves_and_multiplicity() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire centroid delta session");
+    for sql in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "CREATE TABLE centroid_delta_values (id int PRIMARY KEY, grp int, v vector(2))",
+        "CREATE TABLE centroid_delta_copies (source_id int NOT NULL)",
+        "INSERT INTO centroid_delta_values VALUES (1, 1, '[1,2]'), (2, 2, NULL)",
+        "INSERT INTO centroid_delta_copies VALUES (1), (1), (2)",
+        "SELECT pgtrickle.create_stream_table('centroid_delta_st', $$SELECT v.grp, avg(v.v) AS centroid FROM centroid_delta_values v JOIN centroid_delta_copies c ON c.source_id = v.id GROUP BY v.grp$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle._centroid_prepare_state('centroid_delta_st'::regclass::oid)",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_delta_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_delta_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("set up centroid delta");
+    }
+    let previous: serde_json::Value = sqlx::query_scalar("SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_delta_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("read initial frontier");
+    sqlx::query("UPDATE centroid_delta_values SET grp = 2, v = '[4,5]' WHERE id = 1")
+        .execute(&mut *conn)
+        .await
+        .expect("move vector group");
+    sqlx::query("UPDATE centroid_delta_values SET v = '[10,20]' WHERE id = 2")
+        .execute(&mut *conn)
+        .await
+        .expect("change NULL vector to a vector");
+    sqlx::query("INSERT INTO centroid_delta_copies VALUES (1)")
+        .execute(&mut *conn)
+        .await
+        .expect("add duplicate join contribution");
+    sqlx::query("INSERT INTO centroid_delta_values VALUES (3, 3, '[7,-3]')")
+        .execute(&mut *conn)
+        .await
+        .expect("create new group");
+    sqlx::query("INSERT INTO centroid_delta_copies VALUES (3), (3)")
+        .execute(&mut *conn)
+        .await
+        .expect("duplicate new group contribution");
+    let mut next = previous.clone();
+    for source in next["sources"]
+        .as_object_mut()
+        .expect("frontier sources")
+        .values_mut()
+    {
+        source["lsn"] = serde_json::json!("FF/FFFFFFFF");
+    }
+    let mut invalid = next.clone();
+    invalid["sources"]
+        .as_object_mut()
+        .expect("frontier sources")
+        .values_mut()
+        .next()
+        .expect("a source")["lsn"] = serde_json::json!("0/1' OR true --");
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle._centroid_delta_sql('centroid_delta_st'::regclass::oid, $1, $2)",
+    )
+    .bind(previous.to_string())
+    .bind(invalid.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .expect_err("invalid frontier must be rejected");
+    assert!(error.to_string().contains("invalid centroid frontier LSN"));
+    let source_key = previous["sources"]
+        .as_object()
+        .expect("frontier sources")
+        .keys()
+        .next()
+        .expect("a source")
+        .clone();
+    assert_ne!(previous["sources"][&source_key]["lsn"], "0/0");
+    let mut missing_previous = previous.clone();
+    missing_previous["sources"]
+        .as_object_mut()
+        .expect("previous sources")
+        .remove(&source_key);
+    let mut missing_next = next.clone();
+    missing_next["sources"]
+        .as_object_mut()
+        .expect("next sources")
+        .remove(&source_key);
+    let mut regressed = next.clone();
+    regressed["sources"][&source_key]["lsn"] = serde_json::json!("0/0");
+    for function in [
+        "_centroid_delta_sql",
+        "_centroid_candidate_sql",
+        "_centroid_stage_delta",
+        "_centroid_stage_candidates",
+    ] {
+        let sql =
+            format!("SELECT pgtrickle.{function}('centroid_delta_st'::regclass::oid, $1, $2)");
+        for (from, to, expected) in [
+            (&missing_previous, &next, "previous frontier is missing"),
+            (&previous, &missing_next, "next frontier is missing"),
+            (&previous, &regressed, "frontier regresses"),
+        ] {
+            let error = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql.as_str()))
+                .bind(from.to_string())
+                .bind(to.to_string())
+                .fetch_one(&mut *conn)
+                .await
+                .expect_err("incomplete or backwards frontier must be rejected");
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected frontier error: {error}"
+            );
+        }
+    }
+    let generated: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_delta_sql('centroid_delta_st'::regclass::oid, $1, $2)",
+    )
+    .bind(previous.to_string())
+    .bind(next.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .expect("generate signed centroid delta");
+    let sql = format!(
+        "SELECT grp, __pgt_group_delta, __pgt_centroid_delta, __pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(grp)) FROM ({generated}) AS delta ORDER BY grp"
+    );
+    let rows: Vec<(i32, i64, Vec<f64>, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_all(&mut *conn)
+        .await
+        .expect("execute signed centroid delta");
+    assert_eq!(rows.len(), 3);
+    assert_eq!((rows[0].0, rows[0].1, rows[0].2[0]), (1, -2, -2.0));
+    assert_eq!(&rows[0].2[2..4], &[-2.0, -4.0]);
+    assert_eq!((rows[1].0, rows[1].1, rows[1].2[0]), (2, 3, 4.0));
+    assert_eq!(&rows[1].2[2..4], &[22.0, 35.0]);
+    assert_eq!((rows[2].0, rows[2].1, rows[2].2[0]), (3, 2, 2.0));
+    assert_eq!(&rows[2].2[2..4], &[14.0, -6.0]);
+    assert!(
+        rows.iter().all(|row| row.3),
+        "group identities must match visible rows"
+    );
+    let candidates: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_candidate_sql('centroid_delta_st'::regclass::oid, $1, $2)",
+    )
+    .bind(previous.to_string())
+    .bind(next.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .expect("generate checked centroid candidates");
+    let compare = format!(
+        "WITH native AS MATERIALIZED (\
+         SELECT v.grp, avg(v.v)::text AS centroid FROM centroid_delta_values v \
+         JOIN centroid_delta_copies c ON c.source_id = v.id GROUP BY v.grp), raw_candidate AS MATERIALIZED ({candidates}), \
+         candidate AS MATERIALIZED (SELECT grp, centroid::text FROM raw_candidate WHERE __pgt_action = 'I') \
+         SELECT NOT EXISTS ((SELECT * FROM candidate EXCEPT ALL SELECT * FROM native) \
+                            UNION ALL (SELECT * FROM native EXCEPT ALL SELECT * FROM candidate))"
+    );
+    let matches: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(compare.as_str()))
+        .fetch_one(&mut *conn)
+        .await
+        .expect("compare merged centroid state to native AVG");
+    assert!(
+        matches,
+        "merged deltas must match native centroids, including new and removed groups"
+    );
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin missing-state check");
+    sqlx::query("DELETE FROM pgtrickle.pgt_centroid_groups WHERE row_id = (SELECT __pgt_row_id FROM centroid_delta_st WHERE grp = 2)")
+        .execute(&mut *conn).await.expect("remove an existing group's state");
+    let error = sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(compare.as_str()))
+        .fetch_one(&mut *conn)
+        .await
+        .expect_err("missing state must not be treated as a new group");
+    assert!(error.to_string().contains("missing state"));
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("restore deleted state");
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin inconsistent-count check");
+    sqlx::query("UPDATE pgtrickle.pgt_centroid_groups SET group_count = group_count + 1 WHERE row_id = (SELECT __pgt_row_id FROM centroid_delta_st WHERE grp = 2)")
+        .execute(&mut *conn).await.expect("make the private count inconsistent");
+    sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(compare.as_str()))
+        .fetch_one(&mut *conn)
+        .await
+        .expect_err("mismatched public and private counts must fail");
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("restore private count");
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin corrupt-accumulator check");
+    sqlx::query("UPDATE pgtrickle.pgt_centroid_groups SET state[4] = state[4] + 1 WHERE row_id = (SELECT __pgt_row_id FROM centroid_delta_st WHERE grp = 2)")
+        .execute(&mut *conn).await.expect("corrupt an otherwise plausible accumulator");
+    let error = sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(compare.as_str()))
+        .fetch_one(&mut *conn)
+        .await
+        .expect_err("changed accumulator must not produce a candidate");
+    assert!(error.to_string().contains("invalid prior state"));
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("restore private accumulator");
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin stale-contract check");
+    sqlx::query("UPDATE pgtrickle.pgt_centroid_states SET contract_generation = contract_generation - 1 WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_delta_st'::regclass)")
+        .execute(&mut *conn).await.expect("make state contract stale");
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle._centroid_candidate_sql('centroid_delta_st'::regclass::oid, $1, $2)",
+    )
+    .bind(previous.to_string())
+    .bind(next.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .expect_err("stale state must not produce candidates");
+    assert!(
+        error
+            .to_string()
+            .contains("centroid state is missing or stale")
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("restore state contract");
+    for statement in [
+        "CREATE ROLE centroid_delta_owner NOLOGIN",
+        "CREATE ROLE centroid_delta_outsider NOLOGIN",
+        "GRANT USAGE ON SCHEMA pgtrickle TO centroid_delta_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_stage_delta(oid, text, text) TO centroid_delta_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_stage_candidates(oid, text, text) TO centroid_delta_owner",
+        "GRANT SELECT ON centroid_delta_values, centroid_delta_copies TO centroid_delta_owner",
+        "ALTER TABLE centroid_delta_st OWNER TO centroid_delta_owner",
+        "BEGIN",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE postgres GRANT SELECT ON TABLES TO centroid_delta_owner",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE postgres GRANT SELECT ON TABLES TO centroid_delta_outsider",
+        "CREATE TEMP TABLE centroid_default_acl_probe (v int) ON COMMIT DROP",
+        "SET LOCAL ROLE centroid_delta_owner",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("set up owner delta staging");
+    }
+    let private: bool = sqlx::query_scalar("SELECT NOT has_table_privilege(current_user, 'pgtrickle.pgt_centroid_groups', 'SELECT') AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'pgtrickle_changes' AND c.relname IN ('changes_' || 'centroid_delta_values'::regclass::oid::text, 'changes_' || 'centroid_delta_copies'::regclass::oid::text) AND has_table_privilege(current_user, c.oid, 'SELECT'))")
+        .fetch_one(&mut *conn).await.expect("check private state and buffers");
+    assert!(
+        private,
+        "the stream owner must not read private state or CDC buffers"
+    );
+    let default_grant: bool = sqlx::query_scalar(
+        "SELECT has_table_privilege(current_user, 'pg_temp.centroid_default_acl_probe', 'SELECT')",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("check permissive default ACL fixture");
+    assert!(
+        default_grant,
+        "fixture must grant the owner SELECT by default"
+    );
+    let staged: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_stage_delta('centroid_delta_st'::regclass::oid, $1, $2)",
+    )
+    .bind(previous.to_string())
+    .bind(next.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .expect("stage signed delta as owner");
+    let no_raw_buffers: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace = pg_my_temp_schema() AND relname LIKE '__pgt_cd_%')")
+        .fetch_one(&mut *conn).await.expect("check raw CDC cleanup");
+    assert!(
+        no_raw_buffers,
+        "raw staged CDC must not remain readable by the owner"
+    );
+    let sql =
+        format!("SELECT grp, __pgt_group_delta, __pgt_centroid_delta FROM {staged} ORDER BY grp");
+    let staged_rows: Vec<(i32, i64, Vec<f64>)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_all(&mut *conn)
+        .await
+        .expect("read owner-staged delta");
+    assert_eq!(staged_rows.len(), rows.len());
+    for (staged, original) in staged_rows.iter().zip(&rows) {
+        assert_eq!(
+            (staged.0, staged.1, &staged.2),
+            (original.0, original.1, &original.2)
+        );
+    }
+    let (prefix, nonce) = staged
+        .trim_end_matches('"')
+        .rsplit_once('_')
+        .expect("generated stage name");
+    let next_nonce: u64 = nonce.parse::<u64>().expect("stage nonce") + 1;
+    let collision = format!("{prefix}_{next_nonce}\"");
+    let create = format!("CREATE TEMP TABLE {collision} (marker int) ON COMMIT DROP");
+    sqlx::query(sqlx::AssertSqlSafe(create.as_str()))
+        .execute(&mut *conn)
+        .await
+        .expect("create colliding temp table");
+    let insert = format!("INSERT INTO {collision} VALUES (73)");
+    sqlx::query(sqlx::AssertSqlSafe(insert.as_str()))
+        .execute(&mut *conn)
+        .await
+        .expect("seed colliding temp table");
+    sqlx::query("SAVEPOINT collision")
+        .execute(&mut *conn)
+        .await
+        .expect("savepoint before collision");
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle._centroid_stage_delta('centroid_delta_st'::regclass::oid, $1, $2)",
+    )
+    .bind(previous.to_string())
+    .bind(next.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .expect_err("colliding temp table must not be replaced");
+    assert!(error.to_string().contains("already exists"));
+    sqlx::query("ROLLBACK TO SAVEPOINT collision")
+        .execute(&mut *conn)
+        .await
+        .expect("recover after collision");
+    let select = format!("SELECT marker FROM {collision}");
+    let marker: i32 = sqlx::query_scalar(sqlx::AssertSqlSafe(select.as_str()))
+        .fetch_one(&mut *conn)
+        .await
+        .expect("read preserved temp table");
+    assert_eq!(marker, 73);
+    let pgt_id: i64 = prefix
+        .rsplit('_')
+        .next()
+        .expect("stream ID")
+        .parse()
+        .expect("numeric stream ID");
+    let source_oid: i64 =
+        sqlx::query_scalar("SELECT 'centroid_delta_values'::regclass::oid::bigint")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("source OID");
+    let buffer_collision = format!(
+        "pg_temp.\"__pgt_cd_{pgt_id}_{source_oid}_{}\"",
+        next_nonce + 1
+    );
+    let create = format!("CREATE TEMP TABLE {buffer_collision} (marker int) ON COMMIT DROP");
+    sqlx::query(sqlx::AssertSqlSafe(create.as_str()))
+        .execute(&mut *conn)
+        .await
+        .expect("create colliding CDC temp table");
+    let insert = format!("INSERT INTO {buffer_collision} VALUES (91)");
+    sqlx::query(sqlx::AssertSqlSafe(insert.as_str()))
+        .execute(&mut *conn)
+        .await
+        .expect("seed colliding CDC temp table");
+    sqlx::query("SAVEPOINT buffer_collision")
+        .execute(&mut *conn)
+        .await
+        .expect("savepoint before CDC collision");
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle._centroid_stage_delta('centroid_delta_st'::regclass::oid, $1, $2)",
+    )
+    .bind(previous.to_string())
+    .bind(next.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .expect_err("colliding CDC temp table must not be replaced");
+    assert!(error.to_string().contains("already exists"));
+    sqlx::query("ROLLBACK TO SAVEPOINT buffer_collision")
+        .execute(&mut *conn)
+        .await
+        .expect("recover after CDC collision");
+    let select = format!("SELECT marker FROM {buffer_collision}");
+    let marker: i32 = sqlx::query_scalar(sqlx::AssertSqlSafe(select.as_str()))
+        .fetch_one(&mut *conn)
+        .await
+        .expect("read preserved CDC temp table");
+    assert_eq!(marker, 91);
+    let public_collision = format!("pg_temp.\"__pgt_cp_{pgt_id}_{}\"", next_nonce + 3);
+    let create = format!("CREATE TEMP TABLE {public_collision} (marker int) ON COMMIT DROP");
+    sqlx::query(sqlx::AssertSqlSafe(create.as_str()))
+        .execute(&mut *conn)
+        .await
+        .expect("create colliding public candidate table");
+    let insert = format!("INSERT INTO {public_collision} VALUES (92)");
+    sqlx::query(sqlx::AssertSqlSafe(insert.as_str()))
+        .execute(&mut *conn)
+        .await
+        .expect("seed colliding public candidate table");
+    sqlx::query("SAVEPOINT public_collision")
+        .execute(&mut *conn)
+        .await
+        .expect("savepoint before public collision");
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle._centroid_stage_candidates('centroid_delta_st'::regclass::oid, $1, $2)",
+    )
+    .bind(previous.to_string())
+    .bind(next.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .expect_err("colliding public table must not be replaced");
+    assert!(error.to_string().contains("already exists"));
+    sqlx::query("ROLLBACK TO SAVEPOINT public_collision")
+        .execute(&mut *conn)
+        .await
+        .expect("recover after public collision");
+    let select = format!("SELECT marker FROM {public_collision}");
+    let marker: i32 = sqlx::query_scalar(sqlx::AssertSqlSafe(select.as_str()))
+        .fetch_one(&mut *conn)
+        .await
+        .expect("read preserved public candidate table");
+    assert_eq!(marker, 92);
+    let candidates: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_stage_candidates('centroid_delta_st'::regclass::oid, $1, $2)",
+    )
+    .bind(previous.to_string())
+    .bind(next.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .expect("stage candidates across owner boundary");
+    let can_read: bool =
+        sqlx::query_scalar("SELECT has_table_privilege(current_user, $1, 'SELECT')")
+            .bind(&candidates)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("check candidate table ACL");
+    assert!(
+        !can_read,
+        "candidate state must remain private even with permissive default privileges"
+    );
+    let public_candidates = candidates.replace("__pgt_cc_", "__pgt_cp_");
+    assert_ne!(public_candidates, candidates);
+    let public_acl: bool = sqlx::query_scalar("SELECT has_table_privilege(current_user, $1, 'SELECT') AND NOT has_table_privilege(current_user, $1, 'UPDATE') AND NOT has_table_privilege('centroid_delta_outsider', $1, 'SELECT') AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = pg_catalog.to_regclass($1) AND attname = '__pgt_centroid_state' AND NOT attisdropped)")
+        .bind(&public_candidates).fetch_one(&mut *conn).await.expect("check public candidate ACL and columns");
+    assert!(
+        public_acl,
+        "only visible candidate columns may be read by the stream owner"
+    );
+    let compare_public = format!(
+        "WITH native AS (SELECT v.grp, avg(v.v)::text AS centroid FROM centroid_delta_values v JOIN centroid_delta_copies c ON c.source_id = v.id GROUP BY v.grp), candidate AS (SELECT grp, centroid::text FROM {public_candidates} WHERE __pgt_action = 'I') SELECT NOT EXISTS ((SELECT * FROM candidate EXCEPT ALL SELECT * FROM native) UNION ALL (SELECT * FROM native EXCEPT ALL SELECT * FROM candidate))"
+    );
+    let public_matches: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(compare_public.as_str()))
+        .fetch_one(&mut *conn)
+        .await
+        .expect("compare owner-visible candidates");
+    assert!(
+        public_matches,
+        "owner-visible candidates must match native centroids"
+    );
+    sqlx::query("SAVEPOINT atomic_centroid_apply")
+        .execute(&mut *conn)
+        .await
+        .expect("begin candidate apply experiment");
+    sqlx::query("SET LOCAL pg_trickle.internal_refresh = 'true'")
+        .execute(&mut *conn)
+        .await
+        .expect("enable refresh guard for candidate apply");
+    let merge = format!(
+        "MERGE INTO centroid_delta_st AS s USING {public_candidates} AS d \
+         ON pgtrickle.row_probe_v1(s.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
+            AND s.__pgt_row_id = d.__pgt_row_id \
+         WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE \
+         WHEN MATCHED AND d.__pgt_action = 'I' AND \
+              (s.grp, s.centroid, s.__pgt_count) IS DISTINCT FROM (d.grp, d.centroid, d.__pgt_count) \
+              THEN UPDATE SET grp = d.grp, centroid = d.centroid, __pgt_count = d.__pgt_count \
+         WHEN NOT MATCHED AND d.__pgt_action = 'I' THEN \
+              INSERT (__pgt_row_id, grp, centroid, __pgt_count) \
+              VALUES (d.__pgt_row_id, d.grp, d.centroid, d.__pgt_count)"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(merge.as_str()))
+        .execute(&mut *conn)
+        .await
+        .expect("apply visible candidates as stream owner");
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("restore state owner");
+    let delete = format!(
+        "DELETE FROM pgtrickle.pgt_centroid_groups g USING {candidates} c WHERE g.pgt_id = $1 AND g.row_id = c.__pgt_row_id AND c.__pgt_action = 'D'"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(delete.as_str()))
+        .bind(pgt_id)
+        .execute(&mut *conn)
+        .await
+        .expect("delete private group state");
+    let upsert = format!(
+        "INSERT INTO pgtrickle.pgt_centroid_groups (pgt_id, row_id, group_count, state, state_checksum) SELECT $1, c.__pgt_row_id, c.__pgt_count, c.__pgt_centroid_state, pg_catalog.md5(pg_catalog.int8send($1::bigint) || c.__pgt_row_id || pg_catalog.int8send(c.__pgt_count) || pg_catalog.array_send(c.__pgt_centroid_state)) FROM {candidates} c WHERE c.__pgt_action = 'I' ON CONFLICT (pgt_id, row_id) DO UPDATE SET group_count = EXCLUDED.group_count, state = EXCLUDED.state, state_checksum = EXCLUDED.state_checksum"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(upsert.as_str()))
+        .bind(pgt_id)
+        .execute(&mut *conn)
+        .await
+        .expect("upsert private group state");
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_centroid_states SET baseline_frontier = $2::jsonb WHERE pgt_id = $1",
+    )
+    .bind(pgt_id)
+    .bind(next.to_string())
+    .execute(&mut *conn)
+    .await
+    .expect("advance candidate baseline");
+    sqlx::query("UPDATE pgtrickle.pgt_stream_tables SET frontier = $2::jsonb WHERE pgt_id = $1")
+        .bind(pgt_id)
+        .bind(next.to_string())
+        .execute(&mut *conn)
+        .await
+        .expect("advance candidate frontier");
+    let applied: bool = sqlx::query_scalar("WITH native AS (SELECT v.grp, avg(v.v)::text AS centroid, count(*)::bigint AS group_count, count(v.v)::bigint AS vector_count FROM centroid_delta_values v JOIN centroid_delta_copies c ON c.source_id = v.id GROUP BY v.grp), actual AS (SELECT s.grp, s.centroid::text AS centroid, s.__pgt_count AS group_count, g.state[1]::bigint AS vector_count FROM centroid_delta_st s JOIN pgtrickle.pgt_centroid_groups g ON g.pgt_id = $1 AND g.row_id = s.__pgt_row_id WHERE g.group_count = s.__pgt_count AND g.state_checksum = pg_catalog.md5(pg_catalog.int8send(g.pgt_id) || g.row_id || pg_catalog.int8send(g.group_count) || pg_catalog.array_send(g.state))) SELECT NOT EXISTS ((SELECT * FROM native EXCEPT ALL SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM native)) AND (SELECT count(*) FROM pgtrickle.pgt_centroid_groups WHERE pgt_id = $1) = (SELECT count(*) FROM native) AND EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE c.pgt_id = $1 AND c.baseline_frontier = t.frontier AND t.frontier = $2::jsonb)")
+        .bind(pgt_id).bind(next.to_string()).fetch_one(&mut *conn).await.expect("verify visible rows, state, and frontier");
+    assert!(
+        applied,
+        "candidate apply must match native results and private state"
+    );
+    sqlx::query("ROLLBACK TO SAVEPOINT atomic_centroid_apply")
+        .execute(&mut *conn)
+        .await
+        .expect("roll back candidate apply");
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("restore extension administrator");
+    let restored: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE c.pgt_id = $1 AND c.baseline_frontier = t.frontier AND t.frontier = $2::jsonb) AND EXISTS (SELECT 1 FROM centroid_delta_st WHERE grp = 1 AND __pgt_count = 2) AND NOT EXISTS (SELECT 1 FROM centroid_delta_st WHERE grp = 3) AND (SELECT count(*) FROM pgtrickle.pgt_centroid_groups WHERE pgt_id = $1) = 2")
+        .bind(pgt_id).bind(previous.to_string()).fetch_one(&mut *conn).await.expect("verify rollback of candidate apply");
+    assert!(
+        restored,
+        "candidate apply rollback must restore rows, state, and frontier"
+    );
+    let compare = format!(
+        "WITH native AS (SELECT v.grp, avg(v.v)::text AS centroid FROM centroid_delta_values v JOIN centroid_delta_copies c ON c.source_id = v.id GROUP BY v.grp), candidate AS (SELECT grp, centroid::text FROM {candidates} WHERE __pgt_action = 'I') SELECT NOT EXISTS ((SELECT * FROM candidate EXCEPT ALL SELECT * FROM native) UNION ALL (SELECT * FROM native EXCEPT ALL SELECT * FROM candidate))"
+    );
+    let matches: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(compare.as_str()))
+        .fetch_one(&mut *conn)
+        .await
+        .expect("compare privately staged candidates");
+    assert!(
+        matches,
+        "owner-separated candidates must match native centroids"
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("rollback staged delta");
+    for sql in [
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('centroid_delta_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("apply joined centroid delta");
+    }
+    let applied: bool = sqlx::query_scalar("WITH native AS (SELECT v.grp, avg(v.v)::text AS centroid, count(*)::bigint AS n FROM centroid_delta_values v JOIN centroid_delta_copies c ON c.source_id = v.id GROUP BY v.grp), actual AS (SELECT grp, centroid::text AS centroid, __pgt_count AS n FROM centroid_delta_st) SELECT NOT EXISTS ((SELECT * FROM native EXCEPT ALL SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM native)) AND (SELECT merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_delta_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1)")
+        .fetch_one(&mut *conn).await.expect("check joined centroid apply");
+    assert!(
+        applied,
+        "joined centroid refresh must preserve group moves and multiplicities"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_scalar_candidate_retains_null_row_after_last_delete() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire scalar centroid session");
+    for sql in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "CREATE TABLE centroid_scalar_src (id int PRIMARY KEY, v vector(2))",
+        "INSERT INTO centroid_scalar_src VALUES (1, '[1,2]')",
+        "SELECT pgtrickle.create_stream_table('centroid_scalar_st', $$SELECT avg(v) AS centroid FROM centroid_scalar_src$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle._centroid_prepare_state('centroid_scalar_st'::regclass::oid)",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_scalar_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_scalar_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("set up scalar centroid");
+    }
+    let previous: serde_json::Value = sqlx::query_scalar("SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_scalar_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("read scalar frontier");
+    sqlx::query("DELETE FROM centroid_scalar_src")
+        .execute(&mut *conn)
+        .await
+        .expect("delete last vector");
+    let mut next = previous.clone();
+    for source in next["sources"]
+        .as_object_mut()
+        .expect("frontier sources")
+        .values_mut()
+    {
+        source["lsn"] = serde_json::json!("FF/FFFFFFFF");
+    }
+    let candidate: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_candidate_sql('centroid_scalar_st'::regclass::oid, $1, $2)",
+    )
+    .bind(previous.to_string())
+    .bind(next.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .expect("generate scalar candidate");
+    let sql = format!(
+        "SELECT __pgt_action, centroid::text, __pgt_count, __pgt_row_id = (SELECT __pgt_row_id FROM centroid_scalar_st) FROM ({candidate}) AS result"
+    );
+    let row: (String, Option<String>, i64, bool) =
+        sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+            .fetch_one(&mut *conn)
+            .await
+            .expect("read scalar candidate");
+    assert_eq!(row, ("I".into(), None, 0, true));
+    for sql in [
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('centroid_scalar_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("apply scalar centroid deletion");
+    }
+    let retained: bool = sqlx::query_scalar("SELECT (SELECT count(*) = 1 AND bool_and(centroid IS NULL AND __pgt_count = 0) FROM centroid_scalar_st) AND (SELECT merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_scalar_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1)")
+        .fetch_one(&mut *conn).await.expect("check applied empty scalar centroid");
+    assert!(
+        retained,
+        "an empty scalar centroid must retain its NULL row"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_full_refresh_uses_prepared_snapshot_and_rolls_back() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "CREATE TABLE centroid_full_src (id int PRIMARY KEY, grp int, v vector(2))",
+        "INSERT INTO centroid_full_src VALUES (1, 1, '[1,2]'), (2, 1, NULL), (3, 2, '[3,4]')",
+        "SELECT pgtrickle.create_stream_table('centroid_full_st', $$SELECT grp, avg(v) AS centroid FROM centroid_full_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle._centroid_prepare_state('centroid_full_st'::regclass::oid)",
+    ]).await;
+    let mut contract_change = db.pool.begin().await.expect("begin contract change");
+    sqlx::query("UPDATE pgtrickle.pgt_stream_tables SET contract_generation = contract_generation + 1 WHERE pgt_relid = 'centroid_full_st'::regclass")
+        .execute(&mut *contract_change).await.expect("lock and change contract");
+    let mut waiter = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire preparation session");
+    let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *waiter)
+        .await
+        .expect("get preparation backend");
+    let waiting = tokio::spawn(async move {
+        sqlx::query_scalar::<_, String>(
+            "SELECT pgtrickle._centroid_prepare_state('centroid_full_st'::regclass::oid)",
+        )
+        .fetch_one(&mut *waiter)
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                .bind(waiter_pid)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect preparation lock");
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("preparation must wait for the catalog lock");
+    contract_change
+        .commit()
+        .await
+        .expect("commit contract change");
+    let error = waiting
+        .await
+        .expect("join preparation task")
+        .expect_err("changed contract must be rejected");
+    assert!(error.to_string().contains("stream table contract changed"));
+    db.execute_seq(&[
+        "SELECT pgtrickle._centroid_prepare_state('centroid_full_st'::regclass::oid)",
+        "UPDATE centroid_full_src SET v = '[5,6]' WHERE id = 1",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_full_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_full_st')",
+    ]).await;
+    let check = "SELECT s.centroid::text = '[5,6]' AND s.__pgt_count = 2 AND g.group_count = 2 AND g.state = ARRAY[1,1,0,5,6,5,6]::float8[] AND c.status = 'BUILDING' AND c.materialized_xid IS NULL AND c.baseline_frontier = t.frontier AND t.frontier IS NOT NULL FROM centroid_full_st s JOIN pgtrickle.pgt_centroid_groups g ON g.row_id = s.__pgt_row_id JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE s.grp = 1 AND t.pgt_relid = 'centroid_full_st'::regclass";
+    let matches: bool = db.query_scalar(check).await;
+    assert!(
+        matches,
+        "manual FULL refresh must use one snapshot for rows and state"
+    );
+    let mut rollback = db.pool.begin().await.expect("begin refresh rollback");
+    sqlx::query("UPDATE centroid_full_src SET v = '[7,8]' WHERE id = 1")
+        .execute(&mut *rollback)
+        .await
+        .expect("update source");
+    sqlx::query("UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_full_st'::regclass")
+        .execute(&mut *rollback).await.expect("force manual FULL refresh");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_full_st')")
+        .execute(&mut *rollback)
+        .await
+        .expect("refresh within transaction");
+    rollback.rollback().await.expect("roll back refresh");
+    let restored: bool = db.query_scalar(check).await;
+    assert!(
+        restored,
+        "rollback must restore visible rows, state, and frontier"
+    );
+
+    db.execute_seq(&[
+        "UPDATE centroid_full_src SET v = '[9,10]' WHERE id = 1",
+        "SET pg_trickle.force_full_refresh = on",
+        "SELECT pgtrickle.refresh_stream_table('centroid_full_st')",
+        "SET pg_trickle.force_full_refresh = off",
+    ])
+    .await;
+    let updated: bool = db.query_scalar("SELECT s.centroid::text = '[9,10]' AND s.__pgt_count = 2 AND g.group_count = 2 AND g.state = ARRAY[1,1,0,9,10,9,10]::float8[] AND c.status = 'BUILDING' AND c.baseline_frontier IS NOT NULL FROM centroid_full_st s JOIN pgtrickle.pgt_centroid_groups g ON g.row_id = s.__pgt_row_id JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE s.grp = 1").await;
+    assert!(
+        updated,
+        "differential FULL fallback must also rebuild from one snapshot"
+    );
+    let mut differential_rollback = db.pool.begin().await.expect("begin differential rollback");
+    for statement in [
+        "SET LOCAL pg_trickle.refresh_strategy = 'differential'",
+        "UPDATE centroid_full_src SET v = '[11,12]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_full_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *differential_rollback)
+            .await
+            .expect("perform differential refresh inside rollback");
+    }
+    let cleared: bool = sqlx::query_scalar("SELECT baseline_frontier IS NULL FROM pgtrickle.pgt_centroid_states WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_full_st'::regclass)")
+        .fetch_one(&mut *differential_rollback).await.expect("check transactional invalidation");
+    assert!(cleared, "differential refresh must invalidate its baseline");
+    differential_rollback
+        .rollback()
+        .await
+        .expect("roll back differential refresh");
+    let restored: bool = db.query_scalar("SELECT baseline_frontier IS NOT NULL FROM pgtrickle.pgt_centroid_states WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_full_st'::regclass)").await;
+    assert!(restored, "rollback must restore the prepared baseline");
+    db.execute_seq(&[
+        "UPDATE centroid_full_src SET v = '[11,12]' WHERE id = 1",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('centroid_full_st')",
+        "RESET pg_trickle.refresh_strategy",
+    ])
+    .await;
+    let invalidated: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND c.materialized_xid IS NULL FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_full_st'::regclass").await;
+    assert!(
+        invalidated,
+        "differential refresh must clear the prepared baseline"
+    );
+    let unbound = db.try_execute("SELECT pgtrickle._centroid_stage_candidates('centroid_full_st'::regclass::oid, frontier::text, frontier::text) FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_full_st'::regclass").await;
+    assert!(
+        unbound.is_err(),
+        "differential refresh must invalidate the old frontier binding"
+    );
+    db.execute_seq(&[
+        "UPDATE pgtrickle.pgt_centroid_states SET contract_generation = contract_generation - 1 WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_full_st'::regclass)",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_full_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_full_st')",
+    ]).await;
+    let safe_fallback: bool = db.query_scalar("SELECT NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_full_st'::regclass) AND EXISTS (SELECT 1 FROM centroid_full_st WHERE grp = 1 AND centroid::text = '[11,12]')").await;
+    assert!(
+        safe_fallback,
+        "stale contracts must discard prepared state and retain FULL refresh"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire centroid refresh session");
+    for sql in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE centroid_live_src (id int PRIMARY KEY, grp int, v vector(2))",
+        "INSERT INTO centroid_live_src VALUES (1, 1, '[1,2]'), (2, 1, NULL), (3, 2, '[3,4]')",
+        "SELECT pgtrickle.create_stream_table('centroid_live_st', $$SELECT grp, avg(v) AS centroid FROM centroid_live_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_live_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
+        "UPDATE centroid_live_src SET grp = 2, v = '[5,6]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("execute centroid refresh setup");
+    }
+    let strategy: String = sqlx::query_scalar("SELECT h.merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&mut *conn).await.expect("read centroid refresh strategy");
+    assert_eq!(strategy, "centroid_algebraic");
+    let check: bool = sqlx::query_scalar("WITH native AS (SELECT grp, avg(v)::text AS centroid, count(*)::bigint AS n FROM centroid_live_src GROUP BY grp), actual AS (SELECT grp, centroid::text AS centroid, __pgt_count AS n FROM centroid_live_st) SELECT NOT EXISTS ((SELECT * FROM native EXCEPT ALL SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM native)) AND EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL)")
+        .fetch_one(&mut *conn).await.expect("check applied centroid");
+    assert!(check, "visible rows and state must advance together");
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin live refresh rollback");
+    for sql in [
+        "UPDATE centroid_live_src SET v = '[9,10]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("refresh inside rollback");
+    }
+    let changed: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM centroid_live_st WHERE grp = 2 AND centroid::text = '[6,7]') AND (SELECT merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1)")
+        .fetch_one(&mut *conn).await.expect("check refresh before rollback");
+    assert!(changed, "rollback test must apply an algebraic refresh");
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("roll back live refresh");
+    let restored: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM centroid_live_st WHERE grp = 2 AND centroid::text = '[4,5]') AND EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL)")
+        .fetch_one(&mut *conn).await.expect("check live rollback");
+    assert!(
+        restored,
+        "rollback must restore visible rows and the state frontier"
+    );
+    for sql in [
+        "CREATE ROLE centroid_live_owner NOLOGIN",
+        "GRANT USAGE ON SCHEMA pgtrickle TO centroid_live_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.refresh_stream_table(text) TO centroid_live_owner",
+        "GRANT SELECT ON centroid_live_src TO centroid_live_owner",
+        "ALTER TABLE centroid_live_st OWNER TO centroid_live_owner",
+        "UPDATE centroid_live_src SET v = '[11,12]' WHERE id = 1",
+        "SET ROLE centroid_live_owner",
+        "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
+        "RESET ROLE",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("refresh centroid as stream owner");
+    }
+    let owner_refresh: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM centroid_live_st WHERE grp = 2 AND centroid::text = '[7,8]') AND (SELECT merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1)")
+        .fetch_one(&mut *conn).await.expect("check owner refresh");
+    assert!(
+        owner_refresh,
+        "a non-superuser owner must use the algebraic path"
+    );
+    for sql in [
+        "UPDATE pgtrickle.pgt_centroid_groups SET state[4] = state[4] + 1 WHERE row_id = (SELECT __pgt_row_id FROM centroid_live_st WHERE grp = 2)",
+        "UPDATE centroid_live_src SET v = '[7,8]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("execute corruption fallback");
+    }
+    let fallback: bool = sqlx::query_scalar("SELECT (SELECT merge_strategy_used = 'centroid_rebase_group_rescan' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) AND EXISTS (SELECT 1 FROM centroid_live_st WHERE grp = 2 AND centroid::text = '[5,6]') AND EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL)")
+        .fetch_one(&mut *conn).await.expect("check corruption fallback");
+    assert!(
+        fallback,
+        "corrupt state must be rebuilt after the native group rescan"
+    );
+    for sql in [
+        "INSERT INTO centroid_live_src VALUES (4, 3, '[8,9]')",
+        "UPDATE centroid_live_src SET v = '[2,4]' WHERE id = 2",
+        "DELETE FROM centroid_live_src WHERE id = 3",
+        "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("rebuild and apply centroid changes");
+    }
+    let recovered: bool = sqlx::query_scalar("WITH native AS (SELECT grp, avg(v)::text AS centroid, count(*)::bigint AS n FROM centroid_live_src GROUP BY grp), actual AS (SELECT grp, centroid::text AS centroid, __pgt_count AS n FROM centroid_live_st) SELECT NOT EXISTS ((SELECT * FROM native EXCEPT ALL SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM native)) AND (SELECT merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1)")
+        .fetch_one(&mut *conn).await.expect("check recovered centroid");
+    assert!(
+        recovered,
+        "rebuilt state must handle inserts, deletes, and NULL transitions"
+    );
+    for sql in [
+        "UPDATE pgtrickle.pgt_centroid_groups SET state[2] = 4096, state[3] = 4096 WHERE row_id = (SELECT __pgt_row_id FROM centroid_live_st WHERE grp = 2)",
+        "UPDATE pgtrickle.pgt_centroid_groups SET state_checksum = pg_catalog.md5(pg_catalog.int8send(pgt_id) || row_id || pg_catalog.int8send(group_count) || pg_catalog.array_send(state)) WHERE row_id = (SELECT __pgt_row_id FROM centroid_live_st WHERE grp = 2)",
+        "UPDATE centroid_live_src SET v = '[9,10]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("force bounded centroid rebase");
+    }
+    let change_limit: bool = sqlx::query_scalar("SELECT merge_strategy_used = 'centroid_rebase_group_rescan' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'reason' LIKE '%ChangeLimit%' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&mut *conn).await.expect("check centroid rebase reason");
+    assert!(
+        change_limit,
+        "change-limit rebases must be visible in refresh history"
+    );
+    for sql in [
+        "DELETE FROM centroid_live_src WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("remove last group member");
+    }
+    let removed: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM centroid_live_st WHERE grp = 2) AND (SELECT merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1)")
+        .fetch_one(&mut *conn).await.expect("check empty group removal");
+    assert!(removed, "the last deletion must remove its group");
+    for sql in [
+        "SELECT pgtrickle.create_stream_table('centroid_live_child', $$SELECT grp, centroid::text AS centroid FROM centroid_live_st$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE centroid_live_src SET v = '[4,6]' WHERE id = 2",
+        "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .unwrap_or_else(|error| panic!("downstream statement {sql}: {error}"));
+    }
+    let pgt_id: i64 = sqlx::query_scalar("SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_live_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("read downstream source ID");
+    let capture = format!("pgtrickle_changes.changes_pgt_{pgt_id}");
+    let check = format!(
+        "SELECT (SELECT merge_strategy_used <> 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) AND EXISTS (SELECT 1 FROM {capture} WHERE action = 'D' AND grp = 1 AND centroid::text = '[2,4]') AND EXISTS (SELECT 1 FROM {capture} WHERE action = 'I' AND grp = 1 AND centroid::text = '[4,6]')"
+    );
+    let downstream: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(check.as_str()))
+        .fetch_one(&mut *conn)
+        .await
+        .expect("check downstream fallback");
+    assert!(
+        downstream,
+        "downstream consumers must retain exact capture through fallback"
+    );
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_live_child')")
+        .execute(&mut *conn)
+        .await
+        .expect("refresh downstream centroid child");
+    let child_matches: bool = sqlx::query_scalar("SELECT NOT EXISTS ((SELECT grp, centroid::text FROM centroid_live_st EXCEPT ALL SELECT grp, centroid FROM centroid_live_child) UNION ALL (SELECT grp, centroid FROM centroid_live_child EXCEPT ALL SELECT grp, centroid::text FROM centroid_live_st))")
+        .fetch_one(&mut *conn).await.expect("compare downstream centroid child");
+    assert!(
+        child_matches,
+        "downstream centroid child must match the parent"
+    );
+    for sql in [
+        "UPDATE centroid_live_src SET v = NULL WHERE id = 2",
+        "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("refresh downstream NULL transition");
+    }
+    let check = format!(
+        "SELECT EXISTS (SELECT 1 FROM {capture} WHERE action = 'D' AND grp = 1 AND centroid::text = '[4,6]') AND EXISTS (SELECT 1 FROM {capture} WHERE action = 'I' AND grp = 1 AND centroid IS NULL)"
+    );
+    let null_transition: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(check.as_str()))
+        .fetch_one(&mut *conn)
+        .await
+        .expect("check downstream NULL transition");
+    assert!(
+        null_transition,
+        "downstream capture must preserve NULL transitions"
+    );
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_live_child')")
+        .execute(&mut *conn)
+        .await
+        .expect("refresh downstream NULL transition");
+    let child_null: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM centroid_live_child WHERE grp = 1 AND centroid IS NULL)",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("check downstream NULL result");
+    assert!(child_null, "the child must receive the NULL centroid");
+    for sql in [
+        "CREATE TABLE centroid_unrelated_src (id int PRIMARY KEY, v int)",
+        "INSERT INTO centroid_unrelated_src VALUES (1, 2)",
+        "SELECT pgtrickle.create_stream_table('centroid_unrelated_st', $$SELECT sum(v) AS total FROM centroid_unrelated_src$$, '1h', 'DIFFERENTIAL')",
+        "INSERT INTO centroid_unrelated_src VALUES (2, 3)",
+        "SELECT pgtrickle.refresh_stream_table('centroid_unrelated_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("refresh unrelated aggregate with centroid opt-in");
+    }
+    let unrelated: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM centroid_unrelated_st WHERE total = 5) AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_unrelated_st'::regclass)")
+        .fetch_one(&mut *conn).await.expect("check unrelated aggregate");
+    assert!(
+        unrelated,
+        "centroid opt-in must not change unrelated aggregates"
+    );
+    for sql in [
+        "SELECT pgtrickle.create_stream_table('centroid_sum_st', $$SELECT grp, sum(v) AS total FROM centroid_live_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE centroid_live_src SET v = '[6,7]' WHERE id = 4",
+        "SELECT pgtrickle.refresh_stream_table('centroid_sum_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("refresh vector SUM with centroid opt-in");
+    }
+    let sum_fallback: bool = sqlx::query_scalar("WITH native AS (SELECT grp, sum(v)::text AS total FROM centroid_live_src GROUP BY grp), actual AS (SELECT grp, total::text AS total FROM centroid_sum_st) SELECT NOT EXISTS ((SELECT * FROM native EXCEPT ALL SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM native)) AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_sum_st'::regclass)")
+        .fetch_one(&mut *conn).await.expect("check vector SUM fallback");
+    assert!(
+        sum_fallback,
+        "vector SUM must retain its own refresh strategy"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_randomized_refresh_churn_matches_native_avg() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let mut conn = db.pool.acquire().await.expect("acquire churn session");
+    for sql in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE centroid_churn_src (id int PRIMARY KEY, grp int NOT NULL, v vector(3))",
+        "INSERT INTO centroid_churn_src SELECT id, id % 5, format('[%s,%s,%s]', CASE WHEN id % 2 = 0 THEN 10000 ELSE -10000 END, id, -id)::vector FROM generate_series(1, 30) AS id",
+        "SELECT pgtrickle.create_stream_table('centroid_churn_st', $$SELECT grp, avg(v) AS centroid FROM centroid_churn_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_churn_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_churn_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("set up centroid churn");
+    }
+
+    let bound: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL)")
+        .fetch_one(&mut *conn).await.expect("inspect initial churn state");
+    assert!(bound, "churn fixture must initialize centroid state");
+
+    let mut seed = 0x7a13_9465_u64;
+    let mut algebraic = 0;
+    for step in 0..160 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let id = if step == 0 {
+            999
+        } else {
+            ((seed >> 32) % 48 + 1) as i32
+        };
+        let group = ((seed >> 24) % 5) as i32;
+        if step % 7 == 0 {
+            sqlx::query("DELETE FROM centroid_churn_src WHERE id = $1")
+                .bind(id)
+                .execute(&mut *conn)
+                .await
+                .expect("delete churn row");
+        } else {
+            let vector = (step % 9 != 0).then(|| {
+                let x = if seed & 1 == 0 { 10000.0 } else { -10000.0 };
+                format!(
+                    "[{x},{},{}]",
+                    (seed % 1000) as f64 / 17.0,
+                    step as f64 / -13.0
+                )
+            });
+            sqlx::query("INSERT INTO centroid_churn_src VALUES ($1, $2, $3::text::vector) ON CONFLICT (id) DO UPDATE SET grp = EXCLUDED.grp, v = EXCLUDED.v")
+                .bind(id).bind(group).bind(vector).execute(&mut *conn).await.expect("upsert churn row");
+        }
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_churn_st')")
+            .execute(&mut *conn)
+            .await
+            .expect("refresh centroid churn");
+        let matches: bool = sqlx::query_scalar(
+            "WITH native AS (SELECT grp, avg(v)::real[] AS v, count(*) AS n FROM centroid_churn_src GROUP BY grp), \
+             actual AS (SELECT grp, centroid::real[] AS v, __pgt_count AS n FROM centroid_churn_st) \
+             SELECT NOT EXISTS (SELECT 1 FROM native n FULL JOIN actual a USING (grp) \
+             WHERE n.n IS DISTINCT FROM a.n OR (n.v IS NULL) <> (a.v IS NULL) OR \
+               EXISTS (SELECT 1 FROM generate_series(1, 3) AS i \
+                 WHERE abs(n.v[i]::float8 - a.v[i]::float8) > 1e-5 + 1e-6 * abs(n.v[i]::float8)))"
+        ).fetch_one(&mut *conn).await.expect("compare churn with native AVG");
+        assert!(matches, "centroid diverged from native AVG at step {step}");
+        let used_algebraic: bool = sqlx::query_scalar("SELECT merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+            .fetch_one(&mut *conn).await.expect("inspect churn strategy");
+        let bound: bool = sqlx::query_scalar("SELECT COALESCE(c.baseline_frontier = t.frontier, false) FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass")
+            .fetch_one(&mut *conn).await.expect("inspect churn state");
+        assert!(
+            bound,
+            "churn state became unbound at step {step}, algebraic={used_algebraic}"
+        );
+        algebraic += usize::from(used_algebraic);
+    }
+    assert!(
+        algebraic >= 100,
+        "only {algebraic} refreshes used algebraic state"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() {
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire crash fixture session");
+    let durable: bool = sqlx::query_scalar("SELECT current_setting('fsync') = 'on' AND current_setting('synchronous_commit') IN ('on', 'local', 'remote_write', 'remote_apply')")
+        .fetch_one(&mut *conn).await.expect("check crash fixture durability");
+    assert!(durable, "crash test requires durable commits");
+    for sql in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE centroid_crash_src (id int PRIMARY KEY, grp int, v vector(2))",
+        "INSERT INTO centroid_crash_src VALUES (1, 1, '[1,2]'), (2, 1, '[3,4]')",
+        "SELECT pgtrickle.create_stream_table('centroid_crash_st', $$SELECT grp, avg(v) AS centroid FROM centroid_crash_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_crash_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_crash_st')",
+        "UPDATE centroid_crash_src SET v = '[5,6]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_crash_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("prepare crash fixture");
+    }
+    let state_sql = "SELECT g.state, g.state_checksum, t.frontier::text FROM pgtrickle.pgt_centroid_groups g JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_crash_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL";
+    let before: (Vec<f64>, String, String) = sqlx::query_as(state_sql)
+        .fetch_one(&mut *conn)
+        .await
+        .expect("capture committed centroid state");
+    let algebraic: bool = sqlx::query_scalar("SELECT h.merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_crash_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&mut *conn).await.expect("check pre-crash strategy");
+    assert!(algebraic, "fixture must establish live algebraic state");
+    for sql in [
+        "UPDATE centroid_crash_src SET v = '[7,8]' WHERE id = 2",
+        "BEGIN",
+        "UPDATE centroid_crash_src SET v = '[99,99]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_crash_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("prepare uncommitted refresh");
+    }
+    let uncommitted: bool = sqlx::query_scalar(
+        "SELECT s.centroid::text = '[53,53.5]' AND g.state_checksum <> $1 AND h.merge_strategy_used = 'centroid_algebraic' FROM centroid_crash_st s JOIN pgtrickle.pgt_centroid_groups g ON g.row_id = s.__pgt_row_id JOIN pgtrickle.pgt_stream_tables t ON t.pgt_id = g.pgt_id JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass AND s.grp = 1",
+    )
+    .bind(&before.1)
+    .fetch_one(&mut *conn)
+    .await
+    .expect("check uncommitted refresh");
+    assert!(
+        uncommitted,
+        "fixture must apply both visible and private algebraic changes before the crash"
+    );
+    let killed = tokio::process::Command::new("docker")
+        .args(["kill", "--signal", "KILL", db.container_id()])
+        .output()
+        .await
+        .expect("kill PostgreSQL container");
+    assert!(
+        killed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&killed.stderr)
+    );
+    drop(conn);
+    db.pool.close().await;
+    let started = tokio::process::Command::new("docker")
+        .args(["start", db.container_id()])
+        .output()
+        .await
+        .expect("start PostgreSQL container");
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    db.pool = db.reconnect_after_restart().await;
+    let mut conn = db.pool.acquire().await.expect("reconnect after crash");
+    let restored: (Vec<f64>, String, String) = sqlx::query_as(state_sql)
+        .fetch_one(&mut *conn)
+        .await
+        .expect("read recovered centroid state");
+    assert_eq!(
+        restored, before,
+        "crash must roll back state and frontier together"
+    );
+    let source_and_visible: bool = sqlx::query_scalar("SELECT (SELECT v::text FROM centroid_crash_src WHERE id = 1) = '[5,6]' AND (SELECT v::text FROM centroid_crash_src WHERE id = 2) = '[7,8]' AND (SELECT centroid::text FROM centroid_crash_st WHERE grp = 1) = '[4,5]'")
+        .fetch_one(&mut *conn).await.expect("inspect crash recovery");
+    assert!(
+        source_and_visible,
+        "committed source update must survive while the uncommitted refresh rolls back"
+    );
+    for sql in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('centroid_crash_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("refresh recovered centroid");
+    }
+    let recovered: bool = sqlx::query_scalar("SELECT public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)) AND s.centroid::text = '[6,7]' AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND h.merge_strategy_used = 'centroid_algebraic' FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("check post-crash catch-up");
+    assert!(
+        recovered,
+        "algebraic refresh must apply the committed source change after crash recovery"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_refresh_serializes_concurrent_source_writer() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let mut refresh = db.pool.acquire().await.expect("acquire refresh session");
+    for sql in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE centroid_concurrent_src (id int PRIMARY KEY, grp int, v vector(2))",
+        "INSERT INTO centroid_concurrent_src VALUES (1, 1, '[1,2]'), (2, 1, '[3,4]')",
+        "SELECT pgtrickle.create_stream_table('centroid_concurrent_st', $$SELECT grp, avg(v) AS centroid FROM centroid_concurrent_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_concurrent_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_concurrent_st')",
+        "UPDATE centroid_concurrent_src SET v = '[5,6]' WHERE id = 1",
+        "BEGIN",
+        "SELECT pgtrickle.refresh_stream_table('centroid_concurrent_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *refresh)
+            .await
+            .expect("prepare concurrent centroid refresh");
+    }
+    let applied: bool = sqlx::query_scalar("SELECT h.merge_strategy_used = 'centroid_algebraic' AND c.baseline_frontier = t.frontier FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_concurrent_st'::regclass")
+        .fetch_one(&mut *refresh).await.expect("inspect protected centroid refresh");
+    assert!(
+        applied,
+        "fixture must hold a completed algebraic refresh open"
+    );
+    let refresh_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *refresh)
+        .await
+        .expect("read refresh backend");
+    let mut writer = db.pool.acquire().await.expect("acquire writer session");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("read writer backend");
+    let write = tokio::spawn(async move {
+        sqlx::query("UPDATE centroid_concurrent_src SET v = '[7,8]' WHERE id = 2")
+            .execute(&mut *writer)
+            .await
+            .expect("execute concurrent source update");
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let blocked: bool =
+                sqlx::query_scalar("SELECT $1 = ANY(pg_catalog.pg_blocking_pids($2))")
+                    .bind(refresh_pid)
+                    .bind(writer_pid)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect writer lock");
+            if blocked {
+                break;
+            }
+            assert!(
+                !write.is_finished(),
+                "writer completed before the protected refresh committed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("writer did not wait for the centroid source lock");
+    sqlx::query("COMMIT")
+        .execute(&mut *refresh)
+        .await
+        .expect("commit protected refresh");
+    write.await.expect("join concurrent source update");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_concurrent_st')")
+        .execute(&mut *refresh)
+        .await
+        .expect("refresh concurrent source update");
+    let correct: bool = sqlx::query_scalar("SELECT public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_concurrent_src)) AND s.centroid::text = '[6,7]' AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND h.merge_strategy_used = 'centroid_algebraic' FROM centroid_concurrent_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_concurrent_st'::regclass")
+        .fetch_one(&mut *refresh).await.expect("compare concurrent refresh with native AVG");
+    assert!(
+        correct,
+        "the committed writer must appear in the next algebraic refresh"
+    );
+    sqlx::query("UPDATE centroid_concurrent_src SET v = '[9,10]' WHERE id = 1")
+        .execute(&mut *refresh)
+        .await
+        .expect("create a pending source change");
+    let mut writer = db.pool.begin().await.expect("begin concurrent writer");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("read concurrent writer backend");
+    sqlx::query("UPDATE centroid_concurrent_src SET v = '[11,12]' WHERE id = 2")
+        .execute(&mut *writer)
+        .await
+        .expect("hold uncommitted source update");
+    let waiting_refresh = tokio::spawn(async move {
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_concurrent_st')")
+            .execute(&mut *refresh)
+            .await
+            .expect("refresh while writer holds source lock");
+        refresh
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let blocked: bool =
+                sqlx::query_scalar("SELECT $1 = ANY(pg_catalog.pg_blocking_pids($2))")
+                    .bind(writer_pid)
+                    .bind(refresh_pid)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect refresh lock");
+            if blocked {
+                break;
+            }
+            assert!(
+                !waiting_refresh.is_finished(),
+                "refresh completed before the writer committed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("centroid refresh did not wait for the concurrent writer");
+    writer.commit().await.expect("commit concurrent writer");
+    let mut refresh = waiting_refresh.await.expect("join waiting refresh");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_concurrent_st')")
+        .execute(&mut *refresh)
+        .await
+        .expect("refresh after concurrent writer");
+    let correct: bool = sqlx::query_scalar("SELECT public.vector_send(centroid) = public.vector_send((SELECT avg(v) FROM centroid_concurrent_src)) AND centroid::text = '[10,11]' FROM centroid_concurrent_st WHERE grp = 1")
+        .fetch_one(&mut *refresh).await.expect("compare writer-first refresh with native AVG");
+    assert!(
+        correct,
+        "both committed updates must survive the concurrent refresh"
+    );
+    sqlx::query("UPDATE centroid_concurrent_src SET v = '[13,14]' WHERE id = 2")
+        .execute(&mut *refresh)
+        .await
+        .expect("update source after concurrency");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_concurrent_st')")
+        .execute(&mut *refresh)
+        .await
+        .expect("refresh after concurrency");
+    let correct_again: bool = sqlx::query_scalar("SELECT public.vector_send(centroid) = public.vector_send((SELECT avg(v) FROM centroid_concurrent_src)) AND centroid::text = '[11,12]' FROM centroid_concurrent_st WHERE grp = 1")
+        .fetch_one(&mut *refresh).await.expect("check post-concurrency refresh");
+    assert!(
+        correct_again,
+        "a later refresh must not reuse stale centroid state"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_missing_state_rebuilds_or_stays_unbound() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE centroid_missing_src (id int PRIMARY KEY, grp int, v vector(1))",
+        "INSERT INTO centroid_missing_src VALUES (1, 1, '[1]'), (2, 1, '[3]')",
+        "SELECT pgtrickle.create_stream_table('centroid_missing_st', $$SELECT grp, avg(v) AS centroid FROM centroid_missing_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_missing_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_missing_st')",
+        "DELETE FROM pgtrickle.pgt_centroid_states WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_missing_st'::regclass)",
+        "UPDATE centroid_missing_src SET v = '[5]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_missing_st')",
+    ]).await;
+    let rebuilt: bool = db.query_scalar("SELECT c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND h.merge_strategy_used = 'centroid_rebase_group_rescan' AND (h.refresh_reason_detail::jsonb->'centroid_rebase'->>'reason') = 'centroid private state is missing' AND EXISTS (SELECT 1 FROM centroid_missing_st WHERE centroid::text = '[4]') FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_missing_st'::regclass").await;
+    assert!(
+        rebuilt,
+        "missing state should be rebuilt after a verified group rescan"
+    );
+    db.execute_seq(&[
+        "UPDATE centroid_missing_src SET v = '[7]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_missing_st')",
+    ])
+    .await;
+    let resumed: bool = db.query_scalar("SELECT h.merge_strategy_used = 'centroid_algebraic' AND EXISTS (SELECT 1 FROM centroid_missing_st WHERE centroid::text = '[5]') FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_missing_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert!(
+        resumed,
+        "verified recovery must resume algebraic maintenance"
+    );
+    db.execute_seq(&[
+        "CREATE TABLE centroid_missing_unsafe_src (id int PRIMARY KEY, grp int, v vector(1))",
+        "INSERT INTO centroid_missing_unsafe_src VALUES (1, 1, '[1e20]'), (2, 1, '[-1e20]'), (3, 1, '[1]')",
+        "SELECT pgtrickle.create_stream_table('centroid_missing_unsafe_st', $$SELECT grp, avg(v) AS centroid FROM centroid_missing_unsafe_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_missing_unsafe_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_missing_unsafe_st')",
+        "DELETE FROM pgtrickle.pgt_centroid_states WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_missing_unsafe_st'::regclass)",
+        "UPDATE centroid_missing_unsafe_src SET v = '[2]' WHERE id = 3",
+        "SELECT pgtrickle.refresh_stream_table('centroid_missing_unsafe_st')",
+    ]).await;
+    let unbound: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome' = 'unbound' FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_missing_unsafe_st'::regclass").await;
+    assert!(
+        unbound,
+        "unsafe missing-state rebuild must leave an unbound marker"
+    );
+    db.execute_seq(&[
+        "UPDATE centroid_missing_unsafe_src SET v = '[3]' WHERE id = 3",
+        "SELECT pgtrickle.refresh_stream_table('centroid_missing_unsafe_st')",
+    ])
+    .await;
+    let no_retry: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND NOT (h.refresh_reason_detail::jsonb ? 'centroid_rebase') AND public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_missing_unsafe_src)) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_missing_unsafe_st s WHERE t.pgt_relid = 'centroid_missing_unsafe_st'::regclass").await;
+    assert!(
+        no_retry,
+        "failed missing-state rebuild must not retry on every refresh"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_unsafe_rebase_remains_unbound_without_retry_storm() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE centroid_unstable_src (id int PRIMARY KEY, grp int, v vector(1))",
+        "INSERT INTO centroid_unstable_src VALUES (1, 1, '[1e20]'), (2, 1, '[-1e20]'), (3, 1, '[1]')",
+        "SELECT pgtrickle.create_stream_table('centroid_unstable_st', $$SELECT grp, avg(v) AS centroid FROM centroid_unstable_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_unstable_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_unstable_st')",
+    ]).await;
+    let unsafe_baseline: bool = db.query_scalar("SELECT c.baseline_frontier = t.frontier AND pgtrickle._centroid_rebase_reason(g.state[1]::bigint, g.state[2]::bigint, g.state[3]::bigint, g.state[4:4], g.state[5:5]) = 'NUMERICAL_ERROR' FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN pgtrickle.pgt_centroid_groups g USING (pgt_id) WHERE t.pgt_relid = 'centroid_unstable_st'::regclass").await;
+    assert!(
+        unsafe_baseline,
+        "fixture must exceed the numerical error guard"
+    );
+    db.execute_seq(&[
+        "UPDATE centroid_unstable_src SET v = '[2]' WHERE id = 3",
+        "SELECT pgtrickle.refresh_stream_table('centroid_unstable_st')",
+    ])
+    .await;
+    let rejected: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome' = 'unbound' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'reason' LIKE '%NumericalError%' AND public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_unstable_src)) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_unstable_st s WHERE t.pgt_relid = 'centroid_unstable_st'::regclass").await;
+    assert!(
+        rejected,
+        "unsafe rebuild must stay unbound and report its trigger"
+    );
+    db.execute_seq(&[
+        "UPDATE centroid_unstable_src SET v = '[3]' WHERE id = 3",
+        "SELECT pgtrickle.refresh_stream_table('centroid_unstable_st')",
+    ])
+    .await;
+    let no_retry: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND NOT (h.refresh_reason_detail::jsonb ? 'centroid_rebase') AND public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_unstable_src)) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_unstable_st s WHERE t.pgt_relid = 'centroid_unstable_st'::regclass").await;
+    assert!(
+        no_retry,
+        "unbound state must use the safe strategy without another rebuild"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_rebase_rejects_mismatched_visible_groups() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE centroid_rebase_mismatch_src (id int PRIMARY KEY, grp int, v vector(2))",
+        "INSERT INTO centroid_rebase_mismatch_src VALUES (1, 1, '[1,2]'), (2, 2, '[3,4]')",
+        "SELECT pgtrickle.create_stream_table('centroid_rebase_mismatch_st', $$SELECT grp, avg(v) AS centroid FROM centroid_rebase_mismatch_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_rebase_mismatch_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_rebase_mismatch_st')",
+        "BEGIN",
+        "SET LOCAL pg_trickle.internal_refresh = 'true'",
+        "UPDATE centroid_rebase_mismatch_st SET centroid = '[99,99]' WHERE grp = 1",
+        "COMMIT",
+        "UPDATE pgtrickle.pgt_centroid_groups SET state[4] = state[4] + 1 WHERE row_id = (SELECT __pgt_row_id FROM centroid_rebase_mismatch_st WHERE grp = 2)",
+        "UPDATE centroid_rebase_mismatch_src SET v = '[5,6]' WHERE id = 2",
+        "SELECT pgtrickle.refresh_stream_table('centroid_rebase_mismatch_st')",
+    ]).await;
+    let safe: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM centroid_rebase_mismatch_st WHERE grp = 1 AND centroid::text = '[99,99]') AND EXISTS (SELECT 1 FROM centroid_rebase_mismatch_st WHERE grp = 2 AND centroid::text = '[5,6]') AND EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_rebase_mismatch_st'::regclass AND c.baseline_frontier IS NULL) AND (SELECT merge_strategy_used <> 'centroid_rebase_group_rescan' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_rebase_mismatch_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1)").await;
+    assert!(
+        safe,
+        "rebase must refuse to bind state when visible groups disagree"
+    );
+    let detail: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_rebase_mismatch_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    let evidence: serde_json::Value = serde_json::from_str(&detail)
+        .unwrap_or_else(|error| panic!("invalid rebase evidence {detail:?}: {error}"));
+    assert_eq!(
+        evidence["centroid_rebase"]["outcome"], "unbound",
+        "{detail}"
+    );
+}
+
+#[tokio::test]
+async fn test_vector_downstream_preserves_signed_zero_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "CREATE TABLE vector_sign_source (id int PRIMARY KEY, v vector(2))",
+        "INSERT INTO vector_sign_source VALUES (1, '[0,-0]')",
+        "SELECT pgtrickle.create_stream_table('vector_sign_parent', $$SELECT id, v FROM vector_sign_source$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.create_stream_table('vector_sign_child', $$SELECT id, get_byte(public.vector_send(v), 8) AS sign_byte FROM vector_sign_parent$$, '1h', 'DIFFERENTIAL')",
+    ]).await;
+    let before: i32 = db
+        .query_scalar("SELECT sign_byte FROM vector_sign_child WHERE id = 1")
+        .await;
+    assert_eq!(
+        before, 128,
+        "fixture must preserve the negative-zero sign bit"
+    );
+    db.execute_seq(&[
+        "UPDATE vector_sign_source SET v = '[0,0]' WHERE id = 1",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('vector_sign_parent')",
+        "SELECT pgtrickle.refresh_stream_table('vector_sign_child')",
+    ])
+    .await;
+    let correct: bool = db
+        .query_scalar(
+            "SELECT count(*) = 1 AND bool_and(sign_byte = 0) FROM vector_sign_child WHERE id = 1",
+        )
+        .await;
+    assert!(
+        correct,
+        "downstream expressions must observe signed-zero changes"
+    );
+}
+
+#[tokio::test]
+async fn test_vector_downstream_preserves_half_and_sparse_values() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "CREATE TABLE vector_kinds_source (id int PRIMARY KEY, h halfvec(2), s sparsevec(2))",
+        "INSERT INTO vector_kinds_source VALUES (1, '[1,2]', '{1:1,2:2}/2')",
+        "SELECT pgtrickle.create_stream_table('vector_kinds_parent', $$SELECT id, h, s FROM vector_kinds_source$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.create_stream_table('vector_kinds_child', $$SELECT id, h::text AS h, s::text AS s FROM vector_kinds_parent$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE vector_kinds_source SET h = '[3,4]', s = '{1:3,2:4}/2' WHERE id = 1",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('vector_kinds_parent')",
+        "SELECT pgtrickle.refresh_stream_table('vector_kinds_child')",
+    ]).await;
+    let matches: bool = db.query_scalar("SELECT NOT EXISTS ((SELECT id, h::text, s::text FROM vector_kinds_parent EXCEPT ALL SELECT id, h, s FROM vector_kinds_child) UNION ALL (SELECT id, h, s FROM vector_kinds_child EXCEPT ALL SELECT id, h::text, s::text FROM vector_kinds_parent))").await;
+    assert!(
+        matches,
+        "downstream child must receive halfvec and sparsevec changes"
+    );
+    db.execute_seq(&[
+        "UPDATE vector_kinds_source SET h = NULL, s = NULL WHERE id = 1",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('vector_kinds_parent')",
+        "SELECT pgtrickle.refresh_stream_table('vector_kinds_child')",
+    ])
+    .await;
+    let nulls: bool = db.query_scalar("SELECT count(*) = 1 AND bool_and(h IS NULL AND s IS NULL) FROM vector_kinds_child WHERE id = 1").await;
+    assert!(nulls, "downstream child must receive NULL vector values");
+}
+
+#[tokio::test]
+async fn test_vector_downstream_uses_relocated_extension_schema() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "CREATE SCHEMA relocated_vector",
+        "CREATE EXTENSION vector WITH SCHEMA relocated_vector",
+        "SET search_path = public, relocated_vector",
+        "CREATE TABLE vector_relocated_source (id int PRIMARY KEY, v relocated_vector.vector(2))",
+        "INSERT INTO vector_relocated_source VALUES (1, '[1,2]')",
+        "SELECT pgtrickle.create_stream_table('vector_relocated_parent', $$SELECT id, v FROM vector_relocated_source$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.create_stream_table('vector_relocated_child', $$SELECT id, v::text AS v FROM vector_relocated_parent$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE vector_relocated_source SET v = '[3,4]' WHERE id = 1",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('vector_relocated_parent')",
+        "SELECT pgtrickle.refresh_stream_table('vector_relocated_child')",
+    ]).await;
+    let correct: bool = db.query_scalar("SELECT count(*) = 1 AND bool_and(v = '[3,4]') FROM vector_relocated_child WHERE id = 1").await;
+    assert!(
+        correct,
+        "downstream identity must use the relocated pgvector sender"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_full_refresh_does_not_bind_ahead_buffer() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "CREATE TABLE centroid_ahead_src (id int PRIMARY KEY, v vector(2))",
+        "INSERT INTO centroid_ahead_src VALUES (1, '[1,2]')",
+        "SELECT pgtrickle.create_stream_table('centroid_ahead_st', $$SELECT avg(v) AS centroid FROM centroid_ahead_src$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle._centroid_prepare_state('centroid_ahead_st'::regclass::oid)",
+        "UPDATE centroid_ahead_src SET v = '[3,4]' WHERE id = 1",
+    ]).await;
+    let buffer: String = db.query_scalar("SELECT format('%I.%I', 'pgtrickle_changes', 'changes_' || COALESCE(source_stable_name, source_relid::text)) FROM pgtrickle.pgt_change_tracking WHERE source_relid = 'centroid_ahead_src'::regclass::oid").await;
+    let sql = format!(
+        "WITH changed AS (UPDATE {buffer} SET lsn = 'FF/FFFFFFFF'::pg_lsn WHERE action <> 'S' RETURNING 1) SELECT count(*)::bigint FROM changed"
+    );
+    let changed: i64 = db.query_scalar(&sql).await;
+    assert!(changed > 0, "the test must move a captured change ahead");
+    db.execute_seq(&[
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_ahead_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_ahead_st')",
+    ]).await;
+    let unbound: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND c.materialized_xid IS NULL AND t.frontier IS NOT NULL AND s.centroid::text = '[3,4]' FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) CROSS JOIN centroid_ahead_st s WHERE t.pgt_relid = 'centroid_ahead_st'::regclass").await;
+    assert!(
+        unbound,
+        "a FULL snapshot ahead of its frontier must stay unbound"
+    );
+}
+
 fn ann_worker_command(
     db: &E2eDb,
     database: &str,
@@ -4477,6 +6675,34 @@ async fn test_vector_aggregate_nonpublic_extension_schema() {
     db.execute_seq(&["SET search_path = public, \"Vec.X\"", "SET pg_trickle.enable_vector_agg = on", "SELECT pgtrickle.create_stream_table('private_vector_st', $$SELECT avg(embedding) AS centroid FROM private_vectors$$, '1m', 'DIFFERENTIAL')"]).await;
     let type_matches: bool = db.query_scalar("SELECT atttypid='\"Vec.X\".vector'::regtype AND atttypmod=3 FROM pg_attribute WHERE attrelid='private_vector_st'::regclass AND attname='centroid'").await;
     assert!(type_matches);
+    let mut owner_session = db.pool.begin().await.expect("begin vector-schema check");
+    sqlx::query("SET LOCAL search_path = public, \"Vec.X\"")
+        .execute(&mut *owner_session)
+        .await
+        .expect("set vector search path");
+    let initialization: Option<String> = sqlx::query_scalar("SELECT pgtrickle._centroid_initialization_sql('SELECT avg(embedding) AS centroid FROM private_vectors')")
+        .fetch_one(&mut *owner_session).await.expect("generate nonpublic initialization");
+    let initialization = initialization.expect("nonpublic vector aggregate is admitted");
+    let sql = format!(
+        "SELECT centroid::real[], __pgt_group_count, __pgt_centroid_state FROM ({initialization}) AS initialized"
+    );
+    let (centroid, count, state): (Vec<f32>, i64, Vec<f64>) =
+        sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+            .fetch_one(&mut *owner_session)
+            .await
+            .expect("execute nonpublic initialization");
+    assert_eq!(
+        (centroid, count, state),
+        (
+            vec![1.0, 0.0, 0.0],
+            1,
+            vec![1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        )
+    );
+    owner_session
+        .rollback()
+        .await
+        .expect("end vector-schema check");
     db.execute("UPDATE private_vectors SET embedding='[0,1,0]' WHERE id=1")
         .await;
     db.execute_seq(&[

@@ -811,6 +811,13 @@ fn execute_manual_full_refresh_target(
         st_source_lsn_snapshot.push((upstream_pgt_id, lsn));
     }
 
+    let centroid_insert = if schema == st.pgt_schema && table_name == st.pgt_name {
+        crate::api::centroid_stage::prepare_for_full_refresh(st)?
+            .map(|staged| crate::api::centroid_stage::staged_insert_sql(st, &staged))
+            .transpose()?
+    } else {
+        None
+    };
     let truncate_sql = format!("TRUNCATE {quoted_table}");
     refresh::with_stream_owner(st, || {
         Spi::run(&truncate_sql) // nosemgrep: rust.spi.run.dynamic-format — buffer name is catalog-derived.
@@ -862,7 +869,9 @@ fn execute_manual_full_refresh_target(
     // For UNION ALL, decompose into per-branch subqueries with
     // child-prefixed row IDs matching diff_union_all's formula.
     let insert_body = refresh::with_stream_owner(st, || {
-        if needs_dual_count {
+        if let Some(insert) = &centroid_insert {
+            Ok(insert.clone())
+        } else if needs_dual_count {
             Ok(crate::dvm::direct_full_refresh_insert_body(
                 &st.defining_query,
                 &effective_query,
@@ -1008,6 +1017,11 @@ fn execute_manual_full_refresh_target(
         || st.row_probe_version != Some(crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16)
     {
         crate::catalog::StreamTableMeta::mark_row_identity_reinitialized(st.pgt_id)?;
+    }
+
+    if centroid_insert.is_some() && lock_sources {
+        crate::api::centroid_stage::mark_materialized(st.pgt_id)?;
+        crate::api::centroid_stage::bind_materialized_frontier(st, &frontier)?;
     }
 
     Ok((rows_inserted as i64, 0i64))

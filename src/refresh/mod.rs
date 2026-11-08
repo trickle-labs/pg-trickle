@@ -975,6 +975,17 @@ pub fn finalize_success(
         StreamTableMeta::update_after_no_data_refresh(st.pgt_id, storage_rewritten)?;
     }
 
+    if execution.effective_mode == "FULL"
+        || matches!(
+            execution.requested_action,
+            RefreshAction::Full | RefreshAction::Reinitialize
+        )
+    {
+        crate::api::centroid_stage::bind_materialized_frontier(st, &execution.frontier)?;
+    } else if execution.effective_mode != "NO_DATA" {
+        crate::api::centroid_stage::invalidate_baseline(st)?;
+    }
+
     let history_action =
         effective_action_for_mode(execution.requested_action, execution.effective_mode);
     let window_reason =

@@ -374,6 +374,34 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_set_operation_states (
 
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_set_operation_states', '');
 
+-- Derived centroid state is discarded on logical restore and rebuilt.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_centroid_states (
+    pgt_id BIGINT PRIMARY KEY REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
+    stream_relid OID NOT NULL,
+    defining_query TEXT NOT NULL,
+    contract_generation BIGINT NOT NULL,
+    schema_version SMALLINT NOT NULL,
+    materialized_xid XID8,
+    baseline_frontier JSONB,
+    status TEXT NOT NULL CHECK (status IN ('BUILDING', 'READY'))
+);
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_centroid_groups (
+    pgt_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_centroid_states(pgt_id) ON DELETE CASCADE,
+    row_id BYTEA NOT NULL,
+    group_count BIGINT NOT NULL CHECK (group_count >= 0),
+    state DOUBLE PRECISION[] NOT NULL,
+    state_checksum TEXT NOT NULL,
+    PRIMARY KEY (pgt_id, row_id),
+    CHECK (array_ndims(state) = 1 AND array_lower(state, 1) = 1
+           AND cardinality(state) BETWEEN 5 AND 32003
+           AND (cardinality(state) - 3) % 2 = 0
+           AND array_position(state, NULL::double precision) IS NULL
+           AND state[1] >= 0 AND state[1] <= group_count AND state[1] = trunc(state[1]))
+);
+REVOKE ALL ON TABLE pgtrickle.pgt_centroid_states, pgtrickle.pgt_centroid_groups FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_centroid_states', 'WHERE false');
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_centroid_groups', 'WHERE false');
+
 -- v0.89.0: Durable private registry for incremental window state. The
 -- relations referenced here are permanent LOGGED extension members; their
 -- contents are derived and rebuilt after logical restore.
@@ -2404,6 +2432,12 @@ GRANT EXECUTE ON FUNCTION pgtrickle.worker_pool_status() TO PUBLIC;
 -- trigger_entry
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_ddl_end() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_sql_drop() FROM PUBLIC;
+
+-- Pure arithmetic used while staging under the stream owner's role.
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_delta_step(double precision[], real[], smallint) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_delta(real[], smallint) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_init_raw(double precision[], integer) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_init(double precision[], integer) TO PUBLIC;
 
 SELECT pgtrickle._signal_launcher_rescan();
 

@@ -458,11 +458,18 @@ fn diff_scan_change_buffer(
             .collect();
         let is_st_source = ctx.st_source_pgt_ids().contains_key(&table_oid);
         let payload_identity_select = if is_st_source {
+            let senders = crate::dvm::pgvector_binary_senders()?;
             let expression = crate::hash::build_row_identity_expr(
                 "KEYLESS_ROW",
                 &columns
                     .iter()
-                    .map(|c| format!("c.{}", quote_ident(&crate::cdc::cb_col_name(&c.name))))
+                    .map(|c| {
+                        let column =
+                            format!("c.{}", quote_ident(&crate::cdc::cb_col_name(&c.name)));
+                        senders
+                            .get(&c.type_oid)
+                            .map_or(column.clone(), |sender| format!("{sender}({column})"))
+                    })
                     .collect::<Vec<_>>(),
             );
             format!(", {expression} AS payload_identity")

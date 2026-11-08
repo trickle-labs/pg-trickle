@@ -2737,6 +2737,37 @@ SELECT pg_reload_conf();
 
 ---
 
+### pg_trickle.enable_centroid_state
+
+Opt in to experimental algebraic state for eligible fixed-dimension `avg(vector)`
+stream tables. The setting is independent of `enable_vector_agg`, which must
+also be enabled. Unsupported query shapes and refresh modes retain their
+existing refresh strategy. A protected FULL refresh establishes private state.
+The current admission requires group keys to appear under their original column
+names; renamed group-key outputs retain the existing strategy.
+Eligible refreshes take shared locks on their source tables until the refresh
+transaction ends, so concurrent source writes can wait. Tables with downstream
+consumers, output-delta consumers, subscriptions, outboxes, or user triggers
+retain their existing strategy. Rejected state falls back to a group rescan.
+After a detected state error or missing state, pg_trickle may scan all source groups to rebuild
+private state; it binds the result only when the locked source snapshot and
+visible rows match exactly. Refresh history reports this as
+`centroid_rebase_group_rescan`. Cost evidence records the trigger and whether
+the rebuild bound state; an unsuccessful attempt may scan all source groups.
+If it cannot rebuild, state stays unbound without automatically retrying; a protected FULL refresh can
+establish it again.
+The current cost decision does not account for centroid-state size or rebase
+cost, so the algebraic path can be slower for small groups.
+
+| Property | Value |
+|---|---|
+| Type | `boolean` |
+| Default | `false` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+---
+
 ### pg_trickle.enable_trace_propagation
 
 When `true`, pg_trickle reads `pg_trickle.trace_id` from the session GUC at

@@ -221,6 +221,205 @@ fn internal_group_columns(group_output: &[String]) -> Vec<String> {
     }
 }
 
+/// Build the source scan used to initialize private centroid state.
+/// Unsupported query shapes retain group-rescan maintenance.
+pub(crate) fn centroid_initialization_sql(
+    result: &crate::dvm::parser::ParseResult,
+) -> Option<String> {
+    fn column_sql(expr: &Expr) -> Option<String> {
+        let Expr::ColumnRef {
+            table_alias,
+            column_name,
+        } = expr
+        else {
+            return None;
+        };
+        Some(match table_alias {
+            Some(alias) => format!("{}.{}", quote_ident(alias), quote_ident(column_name)),
+            None => quote_ident(column_name),
+        })
+    }
+
+    fn safe_join_condition(expr: &Expr) -> bool {
+        match expr {
+            Expr::BinaryOp { op, left, right } if op.eq_ignore_ascii_case("and") => {
+                safe_join_condition(left) && safe_join_condition(right)
+            }
+            Expr::BinaryOp { op, left, right } if op == "=" => {
+                matches!(
+                    left.as_ref(),
+                    Expr::ColumnRef {
+                        table_alias: Some(_),
+                        ..
+                    }
+                ) && matches!(
+                    right.as_ref(),
+                    Expr::ColumnRef {
+                        table_alias: Some(_),
+                        ..
+                    }
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn safe_source(tree: &OpTree) -> bool {
+        match tree {
+            OpTree::Scan { .. } => true,
+            OpTree::InnerJoin {
+                left,
+                right,
+                condition,
+            } => {
+                matches!(left.as_ref(), OpTree::Scan { .. })
+                    && matches!(right.as_ref(), OpTree::Scan { .. })
+                    && safe_join_condition(condition)
+            }
+            _ => false,
+        }
+    }
+
+    if result.has_recursion || !result.cte_registry.entries.is_empty() {
+        return None;
+    }
+    let OpTree::Aggregate {
+        group_by,
+        aggregates,
+        child,
+    } = &result.tree
+    else {
+        return None;
+    };
+    let [agg] = aggregates.as_slice() else {
+        return None;
+    };
+    let metadata = agg.analyzed_argument.as_ref()?;
+    if !matches!(agg.function, AggFunc::VectorAvg)
+        || metadata.type_name != "vector"
+        || metadata.type_schema.is_empty()
+        || !(1..=16_000).contains(&metadata.typmod)
+        || agg.is_distinct
+        || agg.filter.is_some()
+        || agg.order_within_group.is_some()
+        || !matches!(agg.argument, Some(Expr::ColumnRef { .. }))
+        || !group_by
+            .iter()
+            .all(|expr| matches!(expr, Expr::ColumnRef { .. }))
+    {
+        return None;
+    }
+    if !safe_source(child) {
+        return None;
+    }
+    let mut names = std::collections::HashSet::new();
+    for group in group_by {
+        let name = group.output_name();
+        if name.starts_with("__pgt_") || !names.insert(name) {
+            return None;
+        }
+    }
+    if agg.alias.starts_with("__pgt_") || names.contains(&agg.alias) {
+        return None;
+    }
+    let source = child_to_from_sql(child, &result.cte_registry, false)?;
+    let groups = group_by
+        .iter()
+        .map(|expr| {
+            Some(format!(
+                "{} AS {}",
+                column_sql(expr)?,
+                quote_ident(&expr.output_name())
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let group_by_sql = if group_by.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " GROUP BY {}",
+            group_by
+                .iter()
+                .map(column_sql)
+                .collect::<Option<Vec<_>>>()?
+                .join(", ")
+        )
+    };
+    let prefix = if groups.is_empty() {
+        String::new()
+    } else {
+        format!("{}, ", groups.join(", "))
+    };
+    let argument = column_sql(agg.argument.as_ref()?)?;
+    Some(format!(
+        "SELECT {prefix}{}.avg({argument}) AS {}, COUNT(*)::bigint AS __pgt_group_count, \
+         pgtrickle._centroid_init(pgtrickle._centroid_delta(({argument})::pg_catalog.float4[], 1::smallint), {}) AS __pgt_centroid_state \
+         FROM {source}{group_by_sql}",
+        quote_ident(&metadata.type_schema),
+        quote_ident(&agg.alias),
+        metadata.typmod,
+    ))
+}
+
+/// Aggregate signed child deltas without rescanning unchanged group members.
+pub(crate) fn centroid_signed_delta_sql(
+    tree: &OpTree,
+    child_sql: &str,
+    child_columns: &[String],
+) -> Option<(String, Vec<String>)> {
+    let OpTree::Aggregate {
+        group_by,
+        aggregates,
+        ..
+    } = tree
+    else {
+        return None;
+    };
+    let [aggregate] = aggregates.as_slice() else {
+        return None;
+    };
+    if !matches!(aggregate.function, AggFunc::VectorAvg) {
+        return None;
+    }
+    let argument = col_ref_or_sql_expr(&resolve_expr_for_child(
+        aggregate.argument.as_ref()?,
+        child_columns,
+    ));
+    let resolved = group_by
+        .iter()
+        .map(|group| col_ref_or_sql_expr(&resolve_group_col(group, child_columns)))
+        .collect::<Vec<_>>();
+    let names = group_by.iter().map(Expr::output_name).collect::<Vec<_>>();
+    let selections = resolved
+        .iter()
+        .zip(&names)
+        .map(|(expression, name)| format!("{expression} AS {}", quote_ident(name)))
+        .collect::<Vec<_>>();
+    let prefix = if selections.is_empty() {
+        String::new()
+    } else {
+        format!("{}, ", selections.join(", "))
+    };
+    let group_clause = if resolved.is_empty() {
+        String::new()
+    } else {
+        format!(" GROUP BY {}", resolved.join(", "))
+    };
+    let keys = names
+        .iter()
+        .map(|name| format!("d.{}", quote_ident(name)))
+        .collect::<Vec<_>>();
+    let row_id = build_hash_expr_for_domain("GROUP_KEY", &keys);
+    let sql = format!(
+        "SELECT {row_id} AS __pgt_row_id, d.* FROM (\
+         SELECT {prefix}SUM(CASE __pgt_action WHEN 'I' THEN 1::bigint WHEN 'D' THEN -1::bigint ELSE NULL END)::bigint AS __pgt_group_delta, \
+         pgtrickle._centroid_delta(({argument})::pg_catalog.float4[], \
+             CASE __pgt_action WHEN 'I' THEN 1::smallint WHEN 'D' THEN -1::smallint ELSE 0::smallint END) AS __pgt_centroid_delta \
+         FROM ({child_sql}) AS changes{group_clause} HAVING COUNT(*) > 0) AS d"
+    );
+    Some((sql, names))
+}
+
 /// Reconstruct the FROM clause SQL from a child OpTree.
 ///
 /// Returns the SQL fragment for `FROM ...` suitable for the rescan CTE.
@@ -3748,6 +3947,41 @@ pub fn agg_merge_expr(agg: &AggExpr, has_rescan: bool) -> String {
 mod tests {
     use super::*;
     use crate::dvm::operators::test_helpers::*;
+
+    #[test]
+    fn test_centroid_initialization_admits_fixed_vector_and_rejects_distinct() {
+        let mut avg = avg_col("embedding", "centroid");
+        avg.function = AggFunc::VectorAvg;
+        avg.analyzed_argument = Some(crate::dvm::parser::AnalyzedAggregateArgument {
+            location: 0,
+            type_oid: 123,
+            typmod: 3,
+            type_schema: "public".into(),
+            type_name: "vector".into(),
+        });
+        let child = scan(1, "source", "public", "s", &["grp", "embedding"]);
+        let mut result = crate::dvm::parser::ParseResult {
+            tree: aggregate(vec![colref("grp")], vec![avg], child),
+            cte_registry: CteRegistry::default(),
+            has_recursion: false,
+            warnings: Vec::new(),
+            window_strategy: None,
+        };
+        let sql = centroid_initialization_sql(&result).unwrap();
+        assert!(sql.contains(
+            "pgtrickle._centroid_delta((\"embedding\")::pg_catalog.float4[], 1::smallint)"
+        ));
+        assert!(sql.contains("GROUP BY \"grp\""));
+        if let OpTree::Aggregate { group_by, .. } = &mut result.tree {
+            group_by[0] = colref("Case Sensitive");
+        }
+        let quoted = centroid_initialization_sql(&result).unwrap();
+        assert!(quoted.contains("GROUP BY \"Case Sensitive\""));
+        if let OpTree::Aggregate { aggregates, .. } = &mut result.tree {
+            aggregates[0].is_distinct = true;
+        }
+        assert!(centroid_initialization_sql(&result).is_none());
+    }
 
     /// Wrapper for tests: calls is_direct_agg_eligible with an empty ctx
     /// (no ST sources), matching the old 3-argument signature.

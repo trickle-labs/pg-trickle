@@ -105,6 +105,9 @@ pub(crate) fn execute_full_refresh_target(
             reason: format!("{}.{}: {e}", st.pgt_schema, st.pgt_name),
         })?;
     }
+    let centroid_insert = crate::api::centroid_stage::prepare_for_full_refresh(st)?
+        .map(|staged| crate::api::centroid_stage::staged_insert_sql(st, &staged))
+        .transpose()?;
     let (rows_inserted, needs_diff_capture, user_cols) = with_stream_owner(st, || {
         let schema = &st.pgt_schema;
         let name = &st.pgt_name;
@@ -211,7 +214,9 @@ pub(crate) fn execute_full_refresh_target(
         // UNION (dedup), convert to UNION ALL and count.
         // For UNION ALL, decompose into per-branch subqueries with
         // child-prefixed row IDs matching diff_union_all's formula.
-        let insert_body = if crate::dvm::query_needs_dual_count(query) {
+        let insert_body = if let Some(insert) = &centroid_insert {
+            insert.clone()
+        } else if crate::dvm::query_needs_dual_count(query) {
             crate::dvm::direct_full_refresh_insert_body(query, &effective_query)
         } else if crate::dvm::query_needs_union_dedup_count(query) {
             let col_names = crate::dvm::get_defining_query_columns(query)?;
@@ -289,6 +294,10 @@ pub(crate) fn execute_full_refresh_target(
     // partition of a partitioned stream table has accumulated rows.
     if st.st_partition_key.is_some() {
         warn_default_partition_growth(&st.pgt_schema, &st.pgt_name);
+    }
+
+    if centroid_insert.is_some() {
+        crate::api::centroid_stage::mark_materialized(st.pgt_id)?;
     }
 
     // Initial CREATE and reinitialization call the target-level FULL refresh
@@ -1310,6 +1319,20 @@ pub fn execute_differential_refresh_with_tuning(
                 return Ok((0, reconciled));
             }
         }
+        if crate::config::pg_trickle_enable_centroid_state()
+            && Spi::get_one::<pg_sys::Oid>(
+                "SELECT pg_catalog.to_regclass('pgtrickle.pgt_centroid_states')::oid",
+            )
+            .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
+            .is_some()
+        {
+            crate::api::centroid_stage::advance_empty_frontier(
+                st,
+                &dependencies,
+                prev_frontier,
+                new_frontier,
+            )?;
+        }
         return Ok((0, 0));
     }
 
@@ -1925,6 +1948,109 @@ pub fn execute_differential_refresh_with_tuning(
     // benchmark rejected the candidate. A manually enabled plan is used only
     // by lifecycle and benchmark tests and executes the candidate directly.
     let incremental_window_state = ready_window_state;
+    let mut centroid_rebase_reason = None;
+    let mut centroid_missing_state = false;
+
+    if crate::config::pg_trickle_enable_centroid_state()
+        && Spi::get_one::<pg_sys::Oid>("SELECT pg_catalog.to_regclass('pgtrickle.pgt_centroid_states')::oid")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?.is_some()
+        && st.st_partition_key.is_none()
+        && st.st_placement == "local"
+        && !has_user_triggers
+        && Spi::get_one_with_args::<bool>(
+            "SELECT NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies WHERE source_relid = $1) \
+             AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_output_delta_consumers WHERE pgt_id = $2 AND state <> 'DROPPED') \
+             AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_distance_subscriptions WHERE pgt_id = $2)",
+            &[st.pgt_relid.into(), st.pgt_id.into()],
+        ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false)
+        && crate::api::outbox::get_outbox_table_name(st.pgt_id)?.is_none()
+        && total_change_count > 0
+        && Spi::get_one::<bool>(
+            "SELECT current_setting('transaction_isolation') = 'read committed'",
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false)
+    {
+        let state_bound = Spi::get_one_with_args::<bool>(
+            "SELECT (SELECT COALESCE(c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL \
+               AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query \
+               AND c.contract_generation = t.contract_generation AND c.schema_version = 1 AND c.status = 'BUILDING', false) \
+             FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
+             WHERE c.pgt_id = $1)",
+            &[st.pgt_id.into()],
+        ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if state_bound.is_none()
+            && with_stream_owner(st, || Ok(crate::dvm::centroid_numerics::centroid_staging_sql(&st.defining_query)?.is_some()))?
+        {
+            centroid_missing_state = true;
+            centroid_rebase_reason = Some("centroid private state is missing".into());
+        }
+        if state_bound == Some(true) {
+        let subtxn = crate::scheduler::SubTransaction::begin();
+        let attempt = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            let source_oids = dependencies
+                .iter()
+                .map(|dependency| dependency.source_relid)
+                .collect::<Vec<_>>();
+            crate::cdc::lock_source_relations(&source_oids)?;
+            if !crate::api::centroid_stage::sources_at_frontier(&dependencies, new_frontier)? {
+                return Err(PgTrickleError::InvalidArgument(
+                    "centroid source snapshot is ahead of the frontier".into(),
+                ));
+            }
+            let staged = crate::api::centroid_stage::stage_centroid_candidates(
+                st,
+                prev_frontier,
+                new_frontier,
+                false,
+            )?;
+            crate::api::centroid_stage::apply_centroid_candidates(st, &staged, new_frontier)
+        }))
+        .catch_when(pgrx::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR, |error| {
+            use pgrx::pg_sys::panic::CaughtError;
+            let message = match &error {
+                CaughtError::PostgresError(report) | CaughtError::ErrorReport(report) => report.message(),
+                CaughtError::RustPanic { ereport, .. } => ereport.message(),
+            };
+            if !message.starts_with("centroid ") && !message.starts_with("invalid argument: centroid ") {
+                error.rethrow();
+            }
+            Err(PgTrickleError::InvalidArgument(format!("centroid candidate rejected: {message}")))
+        })
+        .execute();
+        match attempt {
+            Ok(applied) => {
+                subtxn.commit();
+                PENDING_CLEANUP.with(|queue| {
+                    queue.borrow_mut().push(PendingCleanup {
+                        change_schema: change_schema.clone(),
+                        source_oids: catalog_source_oids.clone(),
+                    })
+                });
+                set_merge_strategy("centroid_algebraic");
+                crate::refresh::set_last_ann_churn_operations(Some(applied));
+                crate::shmem::record_diff_refresh(true);
+                crate::shmem::record_refresh_mode(true);
+                return Ok((applied.max(1), 0));
+            }
+            Err(reason) => {
+                subtxn.rollback();
+                if let PgTrickleError::InvalidArgument(detail) = &reason
+                    && (detail.starts_with("centroid candidate rejected: centroid ")
+                        || detail.starts_with("centroid candidate rejected: invalid argument: centroid "))
+                {
+                    centroid_rebase_reason = Some(detail.clone());
+                }
+                pgrx::info!(
+                    "[pg_trickle] centroid state unavailable for {}.{}: {}; using group rescan",
+                    schema,
+                    name,
+                    reason
+                );
+            }
+        }
+        }
+    }
 
     let t_decision = t_decision_start.elapsed();
     // CDC staging precedes t0, so it was absent from the existing per-node
@@ -3771,7 +3897,7 @@ pub fn execute_differential_refresh_with_tuning(
         0
     };
 
-    let strategy_label = if uses_reconciliation_delta {
+    let mut strategy_label = if uses_reconciliation_delta {
         strategy_label
     } else if exact_rowwise_join {
         "explicit_dml_exact_join"
@@ -4034,6 +4160,77 @@ pub fn execute_differential_refresh_with_tuning(
             .and_then(|count| count.checked_add(phantom_cleanup_count))
     });
 
+    let mut centroid_rebase = None;
+    if let Some(reason) = centroid_rebase_reason {
+        let subtxn = crate::scheduler::SubTransaction::begin();
+        let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            crate::api::centroid_stage::rebase_after_rescan(st, &dependencies, new_frontier)
+        }))
+        .catch_when(pgrx::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR, |error| {
+            use pgrx::pg_sys::panic::CaughtError;
+            let message = match &error {
+                CaughtError::PostgresError(report) | CaughtError::ErrorReport(report) => {
+                    report.message()
+                }
+                CaughtError::RustPanic { ereport, .. } => ereport.message(),
+            };
+            if !message.starts_with("centroid ")
+                && !message.starts_with("invalid argument: centroid ")
+            {
+                error.rethrow();
+            }
+            Err(PgTrickleError::InvalidArgument(format!(
+                "centroid rebase rejected: {message}"
+            )))
+        })
+        .execute();
+        match result {
+            Ok(true) => {
+                subtxn.commit();
+                strategy_label = "centroid_rebase_group_rescan";
+                crate::refresh::set_merge_strategy(strategy_label);
+                pgrx::info!(
+                    "[pg_trickle] rebuilt centroid private state for {}.{} after group rescan: {}",
+                    schema,
+                    name,
+                    reason
+                );
+                centroid_rebase = Some(serde_json::json!({
+                    "reason": reason, "outcome": "bound", "scope": "all_private_groups"
+                }));
+            }
+            Ok(false) => {
+                subtxn.rollback();
+                if centroid_missing_state {
+                    crate::api::centroid_stage::mark_missing_state_unbound(st)?;
+                }
+                pgrx::info!(
+                    "[pg_trickle] centroid state for {}.{} remains unbound: source snapshot, numerical guard, or visible rows did not qualify",
+                    schema,
+                    name
+                );
+                centroid_rebase = Some(serde_json::json!({
+                    "reason": reason, "outcome": "unbound", "scope": "up_to_all_private_groups"
+                }));
+            }
+            Err(error) => {
+                subtxn.rollback();
+                if centroid_missing_state {
+                    crate::api::centroid_stage::mark_missing_state_unbound(st)?;
+                }
+                pgrx::info!(
+                    "[pg_trickle] centroid state for {}.{} remains unbound: {}",
+                    schema,
+                    name,
+                    error
+                );
+                centroid_rebase = Some(serde_json::json!({
+                    "reason": reason, "outcome": "unbound", "scope": "up_to_all_private_groups",
+                    "error": error.to_string()
+                }));
+            }
+        }
+    }
     let mut cost_evidence =
         crate::refresh::build_differential_cost_evidence(total_change_count, effective_count);
     if let Some(fields) = cost_evidence.as_object_mut() {
@@ -4051,6 +4248,9 @@ pub fn execute_differential_refresh_with_tuning(
             serde_json::json!(st.defining_query_hash),
         );
         fields.insert("merge_strategy".into(), serde_json::json!(strategy_label));
+        if let Some(rebase) = centroid_rebase {
+            fields.insert("centroid_rebase".into(), rebase);
+        }
         fields.insert("cache_path".into(), serde_json::json!(cache_path));
         fields.insert("planner_hint_tier".into(), serde_json::json!(hint_tier));
         fields.insert(
