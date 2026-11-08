@@ -12,6 +12,54 @@ use e2e::E2eDb;
 // ── Basic DML Refresh ──────────────────────────────────────────────────
 
 #[tokio::test]
+async fn test_refresh_rejects_unreadable_change_buffer_without_advancing_frontier() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE rf_broken_buffer (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO rf_broken_buffer VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "rf_broken_buffer_st",
+        "SELECT id, val FROM rf_broken_buffer",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let before: String = db
+        .query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_broken_buffer_st'")
+        .await;
+    db.execute("UPDATE rf_broken_buffer SET val = 20 WHERE id = 1")
+        .await;
+    let buffer: String = db.query_scalar("SELECT format('%I.%I', 'pgtrickle_changes', 'changes_' || COALESCE(source_stable_name, source_relid::text)) FROM pgtrickle.pgt_change_tracking WHERE source_relid = 'rf_broken_buffer'::regclass::oid").await;
+    db.execute(&format!(
+        "ALTER TABLE {buffer} RENAME COLUMN lsn TO hidden_lsn"
+    ))
+    .await;
+
+    let error = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('rf_broken_buffer_st')")
+        .await
+        .expect_err("an unreadable buffer must not look empty");
+    assert!(
+        error.to_string().contains("lsn"),
+        "unexpected error: {error}"
+    );
+    let after: String = db
+        .query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_broken_buffer_st'")
+        .await;
+    assert_eq!(after, before);
+    let value: i32 = db.query_scalar("SELECT val FROM rf_broken_buffer_st").await;
+    assert_eq!(value, 10);
+    db.execute(&format!(
+        "ALTER TABLE {buffer} RENAME COLUMN hidden_lsn TO lsn"
+    ))
+    .await;
+    db.refresh_st_until_converged("rf_broken_buffer_st").await;
+    let value: i32 = db.query_scalar("SELECT val FROM rf_broken_buffer_st").await;
+    assert_eq!(value, 20);
+}
+
+#[tokio::test]
 async fn test_refresh_picks_up_inserts() {
     let db = E2eDb::new().await.with_extension().await;
 
