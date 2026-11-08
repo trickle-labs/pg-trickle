@@ -2792,10 +2792,12 @@ async fn test_centroid_cost_model_rescans_and_rebinds_safely() {
         }
         assert_eq!(reason, "COST_MODEL_RESCAN_ACTIVE");
     }
+    let history: String = sqlx::query_scalar("SELECT COALESCE(string_agg(format('id=%s start=%s end=%s strategy=%s detail=%s', h.refresh_id, h.start_time, h.end_time, h.merge_strategy_used, h.refresh_reason_detail), E'\\n' ORDER BY h.start_time DESC, h.refresh_id DESC), '') FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect cost reversal history");
     assert_eq!(
         rebind_round,
         Some(7),
-        "cost reversal must wait for the cooldown"
+        "cost reversal must wait for the cooldown; refresh history:\n{history}"
     );
     let bound: bool = sqlx::query_scalar("SELECT c.baseline_frontier = t.frontier AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome' = 'bound' FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
         .fetch_one(&mut *conn).await.expect("inspect cost reversal");
