@@ -2479,6 +2479,14 @@ pub(crate) fn alter_stream_table_impl(
                 let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
                 let change_schema = config::pg_trickle_change_buffer_schema();
 
+                if old_mode == RefreshMode::Full && new_mode == RefreshMode::Differential {
+                    super::helpers::ensure_differential_storage_auxiliary_columns(
+                        &schema,
+                        &table_name,
+                        &st.defining_query,
+                    )?;
+                }
+
                 // ── Tear down OLD mode's infrastructure ─────────────────
                 match old_mode {
                     RefreshMode::Immediate => {

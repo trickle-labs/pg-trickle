@@ -223,7 +223,8 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
-Future changes will be listed here.
+- Switching a FULL stream table to DIFFERENTIAL or AUTO now initializes the
+  auxiliary aggregate state required by incremental refreshes.
 
 ## [0.109.0] — More dependable live data
 

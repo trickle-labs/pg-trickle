@@ -864,7 +864,29 @@ fn execute_manual_full_refresh_target(
         }
     })?;
 
-    let insert_sql = format!("INSERT INTO {quoted_table} {insert_body}");
+    let insert_sql = if st.refresh_mode.is_immediate() {
+        format!("INSERT INTO {quoted_table} {insert_body}")
+    } else {
+        let mut target_columns = vec!["__pgt_row_id".to_string()];
+        target_columns.extend(
+            crate::cdc::resolve_st_output_columns(st.pgt_relid)?
+                .into_iter()
+                .map(|(name, _)| name),
+        );
+        if st.refresh_mode == RefreshMode::Differential && !needs_dual_count {
+            target_columns.extend(
+                crate::api::helpers::differential_storage_auxiliary_columns(&st.defining_query)
+                    .into_iter()
+                    .map(|(name, _)| name),
+            );
+        }
+        let target_columns = target_columns
+            .iter()
+            .map(|name| quote_identifier(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("INSERT INTO {quoted_table} ({target_columns}) {insert_body}")
+    };
     let rows_inserted = refresh::with_stream_owner(st, || {
         Spi::connect_mut(|client| {
             let result = client
