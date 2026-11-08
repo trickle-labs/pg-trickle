@@ -2361,6 +2361,81 @@ async fn test_centroid_rebase_rejects_mismatched_visible_groups() {
 }
 
 #[tokio::test]
+async fn test_centroid_cost_model_accepts_real_refresh_history() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let mut conn = db.pool.acquire().await.expect("centroid history session");
+    for statement in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = off",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "CREATE TABLE centroid_history_src (id int PRIMARY KEY, grp int, v vector(2))",
+        "INSERT INTO centroid_history_src SELECT id, id % 2, '[1,2]'::vector FROM generate_series(1, 4) id",
+        "SELECT pgtrickle.create_stream_table('centroid_history_st', $$SELECT grp, avg(v) AS centroid FROM centroid_history_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.centroid_history_st'])",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("prepare real centroid history");
+    }
+    for _ in 0..3 {
+        sqlx::query("UPDATE centroid_history_src SET v = v + '[1,1]'::vector WHERE id IN (1, 2)")
+            .execute(&mut *conn)
+            .await
+            .expect("mutate rescan input");
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_history_st')")
+            .execute(&mut *conn)
+            .await
+            .expect("record rescan sample");
+    }
+    for statement in [
+        "SET pg_trickle.enable_centroid_state = on",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_history_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_history_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("bind algebraic state");
+    }
+    for _ in 0..3 {
+        sqlx::query("UPDATE centroid_history_src SET v = v + '[1,1]'::vector WHERE id IN (1, 2)")
+            .execute(&mut *conn)
+            .await
+            .expect("mutate algebraic input");
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_history_st')")
+            .execute(&mut *conn)
+            .await
+            .expect("record algebraic sample");
+    }
+    let (rescans, algebraic): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE h.merge_strategy_used IN ('merge', 'merge_prepared', 'explicit_dml')), \
+                count(*) FILTER (WHERE h.merge_strategy_used = 'centroid_algebraic') \
+         FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
+         WHERE t.pgt_relid = 'centroid_history_st'::regclass AND h.action = 'DIFFERENTIAL' \
+           AND h.status = 'COMPLETED' AND h.end_time > h.start_time \
+           AND (h.refresh_reason_detail::jsonb->>'schema_version')::int = 1 \
+           AND (h.refresh_reason_detail::jsonb->>'plan_identity')::bigint = t.defining_query_hash \
+           AND (h.refresh_reason_detail::jsonb->>'contract_generation')::bigint = t.contract_generation \
+           AND (h.refresh_reason_detail::jsonb->>'input_delta_rows')::bigint = 4 \
+           AND (h.refresh_reason_detail::jsonb->>'input_delta_rows_may_be_incomplete')::boolean = false \
+           AND (h.refresh_reason_detail::jsonb->>'output_rows_changed')::bigint > 0 \
+           AND (h.refresh_reason_detail::jsonb->>'source_rows_estimate')::bigint = 1000 \
+           AND NOT (h.refresh_reason_detail::jsonb ? 'centroid_fallback') \
+           AND NOT (h.refresh_reason_detail::jsonb ? 'centroid_rebase')",
+    ).fetch_one(&mut *conn).await.expect("inspect comparable real samples");
+    assert_eq!((rescans, algebraic), (3, 3));
+    drop(conn);
+    db.assert_st_matches_query(
+        "centroid_history_st",
+        "SELECT grp, avg(v)::vector(2) AS centroid FROM centroid_history_src GROUP BY grp",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_centroid_cost_model_rescans_and_rebinds_safely() {
     let mut db = E2eDb::new_dedicated().await.with_extension().await;
     setup_pgvector(&db).await;
