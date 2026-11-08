@@ -48,6 +48,13 @@ async fn test_centroid_tutorial_sql_runs_on_installed_extension() {
             .await
             .expect("tutorial centroid");
     assert_eq!(centroid, "[0.1,0.2,0.3]");
+    let (doc_id, distance): (i64, f64) = sqlx::query_as(sqlx::AssertSqlSafe(blocks[6]))
+        .bind(42_i32)
+        .fetch_one(&mut *conn)
+        .await
+        .expect("tutorial parameterized similarity search");
+    assert_eq!(doc_id, 999);
+    assert!(distance.abs() < 1e-6);
 }
 
 #[tokio::test]

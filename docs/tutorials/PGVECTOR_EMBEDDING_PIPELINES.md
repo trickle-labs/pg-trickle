@@ -171,13 +171,16 @@ ORDER BY h.refresh_id DESC;
 
 ## Cookbook: centroid similarity search
 
+Bind `$1` to a user ID. This example searches the `user_embeddings` table
+created above; production applications can search a separate document corpus.
+
 ```sql
 -- Find documents similar to a user's taste centroid
 WITH user_vec AS (
     SELECT centroid FROM user_centroid WHERE user_id = $1
 )
-SELECT d.id, d.title, d.embedding <=> (SELECT centroid FROM user_vec) AS distance
-FROM documents d
+SELECT d.doc_id, d.embedding <=> (SELECT centroid FROM user_vec) AS distance
+FROM user_embeddings d
 ORDER BY d.embedding <=> (SELECT centroid FROM user_vec)
 LIMIT 10;
 ```
