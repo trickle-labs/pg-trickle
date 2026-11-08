@@ -44,7 +44,7 @@ CREATE TABLE user_embeddings (
     id        BIGSERIAL PRIMARY KEY,
     user_id   INT NOT NULL,
     doc_id    BIGINT NOT NULL,
-    embedding vector(1536) NOT NULL
+    embedding vector(3) NOT NULL
 );
 
 -- Stream table: per-user centroid (incremental avg)
@@ -71,15 +71,15 @@ untouched.
 ```sql
 -- Insert new document embedding for user 42
 INSERT INTO user_embeddings (user_id, doc_id, embedding)
-VALUES (42, 999, '[0.1, 0.2, ...]');
+VALUES (42, 999, '[0.1, 0.2, 0.3]');
 
 -- Next scheduled refresh (or manual):
 SELECT pgtrickle.refresh_stream_table('user_centroid');
 
 -- Query: nearest users to a query embedding
-SELECT user_id, centroid <=> '[0.05, 0.15, ...]'::vector AS distance
+SELECT user_id, centroid <=> '[0.05, 0.15, 0.25]'::vector AS distance
 FROM user_centroid
-ORDER BY centroid <=> '[0.05, 0.15, ...]'::vector
+ORDER BY centroid <=> '[0.05, 0.15, 0.25]'::vector
 LIMIT 10;
 ```
 
@@ -89,7 +89,7 @@ LIMIT 10;
 CREATE TABLE doc_embeddings (
     id         BIGSERIAL PRIMARY KEY,
     cluster_id INT NOT NULL,
-    embedding  vector(768) NOT NULL
+    embedding  vector(3) NOT NULL
 );
 
 SELECT pgtrickle.create_stream_table(
@@ -108,7 +108,7 @@ SELECT pgtrickle.create_stream_table(
 
 ## Refresh strategy
 
-The current implementation uses the **group-rescan strategy** for vector
+By default, the implementation uses the **group-rescan strategy** for vector
 aggregates: an insert, delete or update re-aggregates affected groups using
 pgvector's native `avg(vector)` or `sum(vector)`. For supported query shapes,
 the group filter is pushed into the source query; other shapes may need to
@@ -122,8 +122,15 @@ tests include cancellation, NULLs and repeated mutations, and compare each
 component with native AVG using an absolute tolerance of `1e-5` plus a relative
 tolerance of `1e-6`; those tests are evidence for their inputs, not a universal
 error bound. A float32 `sum(vector)` can lose contributions that native AVG's
-double-precision state retains. A fully algebraic strategy with a qualified
-numerical and recovery contract is not yet implemented.
+double-precision state retains.
+
+Eligible fixed-dimension `avg(vector)` queries can opt into experimental
+algebraic state with `pg_trickle.enable_centroid_state`, in addition to
+`enable_vector_agg`. It is disabled by default and does not apply to SUM.
+Its admission, fallback, recovery and numerical limits are described in the
+[configuration reference](../CONFIGURATION.md#pg_trickleenable_centroid_state).
+Inspect refresh history for the strategy actually used; enabling the setting
+does not guarantee that a particular refresh uses algebraic maintenance.
 
 ## Distance operators and ANN queries
 
@@ -142,7 +149,7 @@ SELECT pgtrickle.create_stream_table(
     $$
         SELECT id, embedding
         FROM doc_embeddings
-        ORDER BY embedding <-> '[0.1, 0.2, ...]'
+        ORDER BY embedding <-> '[0.1, 0.2, 0.3]'::vector
         LIMIT 20
     $$,
     refresh_mode => 'FULL'
@@ -152,10 +159,14 @@ SELECT pgtrickle.create_stream_table(
 ## Monitoring
 
 ```sql
--- Check effective refresh mode (DIFFERENTIAL vs FULL fallback)
-SELECT pgt_name, last_effective_mode, last_refresh_duration_ms
-FROM pgtrickle.pgt_stream_tables
-WHERE pgt_name IN ('user_centroid', 'cluster_sum');
+-- Inspect completed refreshes and the strategy actually used.
+SELECT t.pgt_name, h.action, h.merge_strategy_used, h.was_full_fallback,
+       h.duration_ms, h.refresh_reason_detail
+FROM pgtrickle.pgt_stream_tables t
+JOIN pgtrickle.pgt_refresh_history h USING (pgt_id)
+WHERE t.pgt_name IN ('user_centroid', 'cluster_sum')
+  AND h.status = 'COMPLETED'
+ORDER BY h.refresh_id DESC;
 ```
 
 ## Cookbook: centroid similarity search

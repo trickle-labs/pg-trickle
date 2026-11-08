@@ -22,6 +22,35 @@ async fn setup_pgvector(db: &E2eDb) {
 }
 
 #[tokio::test]
+async fn test_centroid_tutorial_sql_runs_on_installed_extension() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let tutorial = include_str!("../docs/tutorials/PGVECTOR_EMBEDDING_PIPELINES.md");
+    let blocks: Vec<&str> = tutorial
+        .split("```sql\n")
+        .skip(1)
+        .map(|block| block.split("```").next().expect("SQL fence"))
+        .collect();
+    let mut conn = db.pool.acquire().await.expect("tutorial connection");
+    sqlx::query("SET pg_trickle.enable_vector_agg = on")
+        .execute(&mut *conn)
+        .await
+        .expect("enable vector aggregates");
+    for block in &blocks[1..=5] {
+        sqlx::raw_sql(*block)
+            .execute(&mut *conn)
+            .await
+            .unwrap_or_else(|error| panic!("tutorial SQL failed: {error}\n{block}"));
+    }
+    let centroid: String =
+        sqlx::query_scalar("SELECT centroid::text FROM user_centroid WHERE user_id = 42")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("tutorial centroid");
+    assert_eq!(centroid, "[0.1,0.2,0.3]");
+}
+
+#[tokio::test]
 async fn test_centroid_numerical_guard_reports_rebase_reasons() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
