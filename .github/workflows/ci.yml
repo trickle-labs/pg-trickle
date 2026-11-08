@@ -1056,7 +1056,9 @@ jobs:
         run: python3 scripts/gen_sql_reference.py
 
       - name: Validate saved vector aggregate benchmark evidence
-        run: python3 scripts/check_vector_aggregate_benchmark.py
+        run: |
+          python3 scripts/check_vector_aggregate_benchmark.py
+          python3 scripts/generate_pgvector_evidence_matrix.py --check
 
       - name: Generate test schema (TEST-005)
         run: mkdir -p tests/generated && python3 scripts/gen_test_schema.py > tests/generated/schema.rs

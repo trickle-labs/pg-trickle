@@ -14,6 +14,10 @@ Each version ran `cargo test --test e2e_pgvector_tests -- --test-threads=2`
 (7 passed). The two version suites ran concurrently. Host activity and
 container resources were not controlled.
 
+The [capability matrix](CAPABILITY_MATRIX.md) is generated from the recorded
+test results by `python3 scripts/generate_pgvector_evidence_matrix.py`; use
+`--check` to verify it is current. It describes only the tested cases.
+
 The 0.109.0-to-0.110.0 upgrade regression
 `test_upgrade_embedding_helpers_from_0109` ran with `--ignored --exact` and
 passed once against upgrade image
