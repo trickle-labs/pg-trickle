@@ -557,15 +557,37 @@ fn log_progress(qname: &str, tier: u8, cycle: usize, total_cycles: usize, elapse
 /// A 60-second lock_timeout prevents the test from hanging if the background
 /// scheduler unexpectedly holds a conflicting transaction lock.
 async fn try_refresh_st(db: &E2eDb, st_name: &str) -> Result<(), String> {
-    db.try_execute("SET lock_timeout = '60s'").await.ok();
-    let result = db
-        .try_execute(&format!(
-            "SELECT pgtrickle.refresh_stream_table('{st_name}')"
-        ))
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let mut tx = db.pool.begin().await.map_err(|e| e.to_string())?;
+        sqlx::query("SET LOCAL lock_timeout = '60s'")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
+            .bind(st_name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        let completed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history \
+             WHERE xmin = pg_current_xact_id()::xid \
+               AND initiated_by = 'MANUAL' AND status = 'COMPLETED')",
+        )
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| e.to_string());
-    db.try_execute("SET lock_timeout = 0").await.ok();
-    result
+        .map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        if completed {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "refresh_stream_table('{st_name}') did not complete after repeated busy responses"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 // ── TPCH_BENCH mode helpers ────────────────────────────────────────────
@@ -851,12 +873,20 @@ async fn test_tpch_differential_correctness() {
                 break 'cycles;
             }
 
+            // A completed manual window can hold back changes from an active
+            // writer; retry only when the first invariant check shows a lag.
+            let mut invariant = assert_tpch_invariant(&db, &st_name, q.sql, q.name, cycle).await;
+            if invariant.is_err() {
+                db.refresh_st_until_converged(&st_name).await;
+                invariant = assert_tpch_invariant(&db, &st_name, q.sql, q.name, cycle).await;
+            }
+
             // Assert the invariant.
             // Invariant violations are hard-failures (DVM correctness bugs),
             // distinct from DVM engine errors that prevent refresh (which are
             // soft-skips).  Populate `failed` so the final T2 guard can report
             // them separately from known infrastructure skips.
-            if let Err(e) = assert_tpch_invariant(&db, &st_name, q.sql, q.name, cycle).await {
+            if let Err(e) = invariant {
                 let msg = e.lines().next().unwrap_or(&e).to_string();
                 println!("  FAIL cycle {cycle} — {msg}");
                 failed.push((q.name, format!("invariant cycle {cycle}: {msg}")));
