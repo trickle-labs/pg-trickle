@@ -1406,15 +1406,51 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
     let strategy: String = sqlx::query_scalar("SELECT h.merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
         .fetch_one(&mut *conn).await.expect("read centroid refresh strategy");
     assert_eq!(strategy, "centroid_algebraic");
+    sqlx::query("ANALYZE centroid_live_st")
+        .execute(&mut *conn)
+        .await
+        .expect("collect centroid group estimate");
+    let fixed_payload: bool = sqlx::query_scalar("SELECT count(*) = 2 AND bool_and(octet_length(pg_catalog.array_send(g.state)) + octet_length(g.state_checksum) + 16 = 152) FROM pgtrickle.pgt_centroid_groups g JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("measure centroid fixed payload");
+    assert!(
+        fixed_payload,
+        "fixture must match the fixed-payload estimate"
+    );
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin explain scan check");
+    let counters_sql = "SELECT COALESCE(pg_stat_get_xact_tuples_returned('centroid_live_src'::regclass), 0), COALESCE(pg_stat_get_xact_tuples_fetched('centroid_live_src'::regclass), 0), COALESCE(pg_stat_get_xact_tuples_returned('pgtrickle.pgt_centroid_groups'::regclass), 0), COALESCE(pg_stat_get_xact_tuples_fetched('pgtrickle.pgt_centroid_groups'::regclass), 0)";
+    let before_reads: (i64, i64, i64, i64) = sqlx::query_as(counters_sql)
+        .fetch_one(&mut *conn)
+        .await
+        .expect("inspect initial explain tuple reads");
     let explanation: String =
         sqlx::query_scalar("SELECT pgtrickle.explain_stream_table('centroid_live_st')")
             .fetch_one(&mut *conn)
             .await
             .expect("explain algebraic centroid refresh");
+    let after_reads: (i64, i64, i64, i64) = sqlx::query_as(counters_sql)
+        .fetch_one(&mut *conn)
+        .await
+        .expect("inspect explain tuple reads");
+    assert_eq!(
+        before_reads, after_reads,
+        "explain must not scan source or private groups"
+    );
+    sqlx::query("COMMIT")
+        .execute(&mut *conn)
+        .await
+        .expect("end explain scan check");
     assert!(
         explanation.contains("centroid: GROUP_RESCAN")
             && explanation.contains("Last refresh strategy: centroid_algebraic"),
         "explain must distinguish fallback classification from the executed strategy: {explanation}"
+    );
+    assert!(
+        explanation
+            .contains("152 serialized fixed-payload bytes/group; 2 estimated groups, 304 bytes"),
+        "explain must estimate potential state without scanning groups: {explanation}"
     );
     let check: bool = sqlx::query_scalar("WITH native AS (SELECT grp, avg(v)::text AS centroid, count(*)::bigint AS n FROM centroid_live_src GROUP BY grp), actual AS (SELECT grp, centroid::text AS centroid, __pgt_count AS n FROM centroid_live_st) SELECT NOT EXISTS ((SELECT * FROM native EXCEPT ALL SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM native)) AND EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL)")
         .fetch_one(&mut *conn).await.expect("check applied centroid");
@@ -8156,6 +8192,13 @@ async fn test_pgvector_halfvec_avg_output_type() {
     assert!(
         tn.starts_with("halfvec"),
         "centroid column should be halfvec(4), got: {tn}"
+    );
+    let explanation: String = db
+        .query_scalar("SELECT pgtrickle.explain_stream_table('hv_avg_st')")
+        .await;
+    assert!(
+        explanation.contains("Potential centroid state: not estimated"),
+        "halfvec must not claim an algebraic vector-state estimate: {explanation}"
     );
 }
 

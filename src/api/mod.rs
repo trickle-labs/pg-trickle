@@ -3324,24 +3324,72 @@ fn explain_stream_table(name: &str) -> Result<String, PgTrickleError> {
         format!("L0 per-leaf snapshot (join depth {join_count} <= threshold {deep_threshold})")
     };
 
+    let mut centroid_dimensions = None;
     let aggregate_strategy_note = if has_case_in_agg {
         "GROUP_RESCAN — SUM(CASE) is not algebraically invertible (DI-8)".to_string()
     } else {
         let strategies = crate::refresh::with_stream_owner(&st, || {
             let mut parsed = crate::dvm::parser::parse_defining_query_full(&st.defining_query)?;
             crate::dvm::parser::enrich_vector_aggregates(&st.defining_query, &mut parsed, false)?;
-            Ok(parsed.tree.aggregate_strategies())
+            let dimensions = match &parsed.tree {
+                crate::dvm::parser::OpTree::Aggregate { aggregates, .. } => match aggregates
+                    .as_slice()
+                {
+                    [aggregate]
+                        if matches!(aggregate.function, crate::dvm::parser::AggFunc::VectorAvg) =>
+                    {
+                        aggregate
+                            .analyzed_argument
+                            .as_ref()
+                            .filter(|argument| argument.type_name == "vector")
+                            .map(|argument| argument.typmod)
+                            .filter(|dimension| (1..=16_000).contains(dimension))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            Ok((parsed.tree.aggregate_strategies(), dimensions))
         });
         match strategies {
-            Ok(strategies) if !strategies.is_empty() => strategies
-                .iter()
-                .map(|(alias, strategy)| format!("{alias}: {strategy}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            Ok(_) if !has_aggregate => "no_aggregate".to_string(),
-            Ok(_) => "unknown — no output aggregate strategy identified".to_string(),
+            Ok((strategies, dimensions)) => {
+                centroid_dimensions = dimensions;
+                if !strategies.is_empty() {
+                    strategies
+                        .iter()
+                        .map(|(alias, strategy)| format!("{alias}: {strategy}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                } else if !has_aggregate {
+                    "no_aggregate".to_string()
+                } else {
+                    "unknown — no output aggregate strategy identified".to_string()
+                }
+            }
             Err(_) => "unknown — aggregate strategy analysis failed".to_string(),
         }
+    };
+
+    let centroid_state_estimate = if let Some(dimensions) = centroid_dimensions {
+        // Binary array payload, checksum and two bigint fields; row identity and storage overhead vary.
+        let bytes_per_group = 104 + 24 * i64::from(dimensions);
+        let groups = Spi::get_one_with_args::<f64>(
+            "SELECT reltuples::float8 FROM pg_catalog.pg_class WHERE oid = $1",
+            &[st.pgt_relid.into()],
+        )
+        .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
+        match groups.filter(|estimate| estimate.is_finite() && *estimate >= 0.0) {
+            Some(groups) => format!(
+                "{bytes_per_group} serialized fixed-payload bytes/group; {:.0} estimated groups, {:.0} bytes (planner estimate may be stale; excludes row IDs, heap, indexes and TOAST; only if admitted)",
+                groups,
+                groups * bytes_per_group as f64
+            ),
+            None => format!(
+                "{bytes_per_group} serialized fixed-payload bytes/group; group estimate unknown (ANALYZE the stream table; excludes row IDs, heap, indexes and TOAST; only if admitted)"
+            ),
+        }
+    } else {
+        "not estimated".to_string()
     };
 
     let can_read_history = Spi::get_one::<bool>(
@@ -3404,6 +3452,7 @@ fn explain_stream_table(name: &str) -> Result<String, PgTrickleError> {
          Join count:        {join_count}\n\
          Join strategy:     {join_strategy}\n\
          Aggregate strategy:{aggregate_strategy}\n\
+         Potential centroid state: {centroid_state_estimate}\n\
          Last refresh strategy: {last_refresh_strategy}\n\
          Fallback reasons:  {fallbacks}\n\
          Suggestions:       {suggestions_text}\n\
@@ -3428,6 +3477,7 @@ fn explain_stream_table(name: &str) -> Result<String, PgTrickleError> {
         join_count = join_count,
         join_strategy = join_strategy_note,
         aggregate_strategy = aggregate_strategy_note,
+        centroid_state_estimate = centroid_state_estimate,
         last_refresh_strategy = last_refresh_strategy,
         fallbacks = if fallback_reasons.is_empty() {
             "none".to_string()
