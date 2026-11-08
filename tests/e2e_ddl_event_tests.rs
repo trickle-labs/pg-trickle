@@ -105,6 +105,56 @@ async fn test_replica_identity_full_keeps_trigger_stream_table_active() {
 }
 
 #[tokio::test]
+async fn test_replica_identity_full_keeps_auto_trigger_stream_table_active() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE evt_auto_replica_identity_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO evt_auto_replica_identity_src VALUES (1, 'before')")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_mode = 'auto'",
+        "SELECT pgtrickle.create_stream_table(\
+            name => 'evt_auto_replica_identity_st',\
+            query => $$SELECT id, val FROM evt_auto_replica_identity_src$$,\
+            schedule => '1h',\
+            refresh_mode => 'DIFFERENTIAL'\
+        )",
+    ])
+    .await;
+
+    let cdc_mode: String = db
+        .query_scalar(
+            "SELECT cdc_mode FROM pgtrickle.pgt_dependencies d \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'evt_auto_replica_identity_st'",
+        )
+        .await;
+    assert_eq!(cdc_mode, "TRIGGER");
+
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_mode = 'auto'",
+        "ALTER TABLE evt_auto_replica_identity_src REPLICA IDENTITY FULL",
+    ])
+    .await;
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'evt_auto_replica_identity_st'",
+        )
+        .await;
+    assert_eq!(status, "ACTIVE");
+
+    db.execute("UPDATE evt_auto_replica_identity_src SET val = 'after' WHERE id = 1")
+        .await;
+    db.refresh_st("evt_auto_replica_identity_st").await;
+    db.assert_st_matches_query(
+        "public.evt_auto_replica_identity_st",
+        "SELECT id, val FROM evt_auto_replica_identity_src",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_disabling_source_capture_suspends_until_reinitialize() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE evt_disabled_capture_src (id INT PRIMARY KEY, val TEXT)")
