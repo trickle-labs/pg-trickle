@@ -3514,6 +3514,9 @@ async fn test_tpch_explain_artifacts() {
             q.sql
         );
         if let Err(error) = db.try_execute(&create_sql).await {
+            if q.name == "q17" {
+                panic!("TPC-H q17 EXPLAIN stream table creation failed: {error}");
+            }
             println!(
                 "  [{}] SKIPPED — create_stream_table failed: {error}",
                 q.name
@@ -3528,6 +3531,9 @@ async fn test_tpch_explain_artifacts() {
             ))
             .await
         {
+            if q.name == "q17" {
+                panic!("TPC-H q17 EXPLAIN refresh failed: {error}");
+            }
             println!("  [{}] SKIPPED — refresh failed: {error}", q.name);
             let _ = db
                 .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
@@ -3552,10 +3558,11 @@ async fn test_tpch_explain_artifacts() {
         for run in 0..5_usize {
             let t0 = Instant::now();
             let explain_sql = format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) {}", q.sql);
-            let plan: String = db
-                .query_text(&explain_sql)
-                .await
-                .unwrap_or_else(|| "(no output)".to_string());
+            let plan = db.query_text(&explain_sql).await;
+            if q.name == "q17" {
+                assert!(plan.is_some(), "TPC-H q17 EXPLAIN query failed");
+            }
+            let plan = plan.unwrap_or_else(|| "(no output)".to_string());
             let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
             timings_ms.push(elapsed_ms);
 
