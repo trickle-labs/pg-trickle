@@ -8642,6 +8642,70 @@ async fn test_vector_diagnostics_catalog_visibility_and_index_metadata() {
 }
 
 #[tokio::test]
+async fn test_vector_diagnostics_idle_is_catalog_only_and_hides_query_vector() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE idle_vector_source (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO idle_vector_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.create_st(
+        "idle_vector_st",
+        "SELECT id, embedding FROM idle_vector_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.idle_vector_st'])")
+        .await;
+    db.execute("SELECT pgtrickle.subscribe_distance('idle_vector_st', 'idle_alert', 'embedding', '[0.123,0.456,0.789]', '<->', 0.5)").await;
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '30 days' WHERE pgt_relid = 'idle_vector_st'::regclass").await;
+    db.execute("CREATE ROLE idle_vector_reader").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO idle_vector_reader")
+        .await;
+    db.execute("GRANT SELECT ON idle_vector_st TO idle_vector_reader")
+        .await;
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin idle diagnostic inspection");
+    sqlx::query("SET LOCAL ROLE idle_vector_reader")
+        .execute(&mut *tx)
+        .await
+        .expect("set reader role");
+    let before: (i64, i64) = sqlx::query_as("SELECT pg_stat_get_xact_tuples_returned('idle_vector_st'::regclass)::bigint, pg_stat_get_xact_tuples_fetched('idle_vector_st'::regclass)::bigint")
+        .fetch_one(&mut *tx).await.expect("read initial vector table counters");
+    let status: serde_json::Value = sqlx::query_scalar(
+        "SELECT v FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'idle_vector_st'",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("inspect idle vector stream");
+    let after: (i64, i64) = sqlx::query_as("SELECT pg_stat_get_xact_tuples_returned('idle_vector_st'::regclass)::bigint, pg_stat_get_xact_tuples_fetched('idle_vector_st'::regclass)::bigint")
+        .fetch_one(&mut *tx).await.expect("read final vector table counters");
+    assert_eq!(
+        before, after,
+        "catalog inspection must not read vector rows"
+    );
+    assert_eq!(status["status"], "ACTIVE");
+    assert!(status["embedding_freshness"].is_null());
+    assert!(status["backlog"].is_null());
+    assert!(status["embedding_freshness_reason"].is_string());
+    assert!(status["backlog_reason"].is_string());
+    assert!(
+        !status.to_string().contains("0.123"),
+        "diagnostics must not expose the subscription vector"
+    );
+    tx.rollback().await.expect("end idle diagnostic inspection");
+    db.assert_st_matches_query(
+        "idle_vector_st",
+        "SELECT id, embedding FROM idle_vector_source",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_vector_index_expectation_reports_configuration_and_visibility() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
