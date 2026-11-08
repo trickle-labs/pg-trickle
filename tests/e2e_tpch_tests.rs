@@ -301,6 +301,24 @@ fn substitute_rf(sql: &str, next_orderkey: usize) -> String {
         .replace("__SF_SUPPLIERS__", &sf_suppliers().to_string())
 }
 
+fn normalize_tpch_query_name(query: &str) -> String {
+    let query = query.trim().to_ascii_lowercase();
+    let number = query
+        .strip_prefix('q')
+        .unwrap_or(&query)
+        .parse::<u8>()
+        .expect("TPC-H query filters must be numbers or names such as q17");
+    format!("q{number:02}")
+}
+
+#[test]
+fn test_tpch_query_filter_normalizes_numeric_and_named_inputs() {
+    assert_eq!(normalize_tpch_query_name("17"), "q17");
+    assert_eq!(normalize_tpch_query_name("4"), "q04");
+    assert_eq!(normalize_tpch_query_name("q17"), "q17");
+    assert_eq!(normalize_tpch_query_name("Q17"), "q17");
+}
+
 /// Load TPC-H schema into the database.
 async fn load_schema(db: &E2eDb) {
     // Execute each statement separately (sqlx doesn't support multi-statement).
@@ -3464,7 +3482,7 @@ async fn test_tpch_explain_artifacts() {
     let query_filter: Vec<String> = std::env::var("TPCH_EXPLAIN_QUERIES")
         .unwrap_or_else(|_| "q04,q05,q07,q08,q09,q20,q22".to_string())
         .split(',')
-        .map(|s| s.trim().to_lowercase())
+        .map(normalize_tpch_query_name)
         .collect();
 
     let output_dir = std::env::var("TPCH_EXPLAIN_OUTPUT_DIR").ok();
@@ -3477,6 +3495,10 @@ async fn test_tpch_explain_artifacts() {
         .iter()
         .filter(|q| query_filter.iter().any(|f| f == q.name))
         .collect();
+    assert!(
+        !target_queries.is_empty(),
+        "No TPC-H queries matched TPCH_EXPLAIN_QUERIES={query_filter:?}"
+    );
 
     println!(
         "\n[O39-10] TPC-H EXPLAIN artifacts — SF={:.3}, queries: {}",
