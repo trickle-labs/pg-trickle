@@ -144,7 +144,8 @@ fn store_centroid_state(st: &StreamTableMeta, staged: &str) -> Result<(), PgTric
          VALUES ($1, $2, $3, $4, 1, 'BUILDING') \
          ON CONFLICT (pgt_id) DO UPDATE SET stream_relid = EXCLUDED.stream_relid, \
          defining_query = EXCLUDED.defining_query, contract_generation = EXCLUDED.contract_generation, \
-         schema_version = 1, materialized_xid = NULL, baseline_frontier = NULL, status = 'BUILDING'",
+         schema_version = 1, materialized_xid = NULL, baseline_frontier = NULL, \
+         last_change_limit_rebase = false, status = 'BUILDING'",
         &[
             st.pgt_id.into(),
             st.pgt_relid.into(),
@@ -874,21 +875,23 @@ pub(crate) fn apply_centroid_candidates(
          ON CONFLICT (pgt_id, row_id) DO UPDATE SET group_count = EXCLUDED.group_count, \
            state = EXCLUDED.state, state_checksum = EXCLUDED.state_checksum"
     ), &[st.pgt_id.into()]).map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
-    set_pending_frontier(st, next)?;
+    set_pending_frontier(st, next, (applied > 0).then_some(false))?;
     Ok(applied)
 }
 
 fn set_pending_frontier(
     st: &StreamTableMeta,
     next: &crate::version::Frontier,
+    last_change_limit_rebase: Option<bool>,
 ) -> Result<(), PgTrickleError> {
     let next = serde_json::to_value(next).map_err(|error| {
         PgTrickleError::InternalError(format!("serialize centroid frontier: {error}"))
     })?;
     let updated = Spi::connect_mut(|client| {
         let rows = client.update(
-            "UPDATE pgtrickle.pgt_centroid_states SET baseline_frontier = $2, materialized_xid = pg_current_xact_id() WHERE pgt_id = $1",
-            None, &[st.pgt_id.into(), pgrx::JsonB(next).into()],
+            "UPDATE pgtrickle.pgt_centroid_states SET baseline_frontier = $2, materialized_xid = pg_current_xact_id(), \
+             last_change_limit_rebase = COALESCE($3, last_change_limit_rebase) WHERE pgt_id = $1",
+            None, &[st.pgt_id.into(), pgrx::JsonB(next).into(), last_change_limit_rebase.into()],
         ).map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
         Ok::<_, PgTrickleError>(rows.len())
     })?;
@@ -925,7 +928,7 @@ pub(crate) fn advance_empty_frontier(
             .collect::<Vec<_>>();
         crate::cdc::lock_source_relations(&oids)?;
         if sources_at_frontier(dependencies, next)? {
-            set_pending_frontier(st, next)?;
+            set_pending_frontier(st, next, None)?;
         }
     }
     Ok(())
@@ -936,6 +939,7 @@ pub(crate) fn rebase_after_rescan(
     st: &StreamTableMeta,
     dependencies: &[crate::catalog::StDependency],
     frontier: &crate::version::Frontier,
+    change_limit: bool,
 ) -> Result<bool, PgTrickleError> {
     let st = lock_centroid_stream(st, false)?;
     let source_oids = dependencies
@@ -996,7 +1000,7 @@ pub(crate) fn rebase_after_rescan(
         return Ok(false);
     }
     store_centroid_state(&st, &staged)?;
-    set_pending_frontier(&st, frontier)?;
+    set_pending_frontier(&st, frontier, Some(change_limit))?;
     Ok(true)
 }
 

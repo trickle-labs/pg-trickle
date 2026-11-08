@@ -550,6 +550,11 @@ async fn test_upgrade_embedding_helpers_from_0109() {
         .await;
     let guard_upgraded: bool = db.query_scalar("SELECT pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[1.0]::float8[], ARRAY[1.0]::float8[]) IS NULL AND pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[[1.0]]::float8[], ARRAY[1.0]::float8[]) = 'INVALID_STATE'").await;
     assert!(guard_upgraded, "upgrade must install the centroid guard");
+    let marker_upgraded: bool = db.query_scalar("SELECT a.attnotnull AND pg_catalog.pg_get_expr(d.adbin, d.adrelid) = 'false' FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid = 'pgtrickle.pgt_centroid_states'::regclass AND a.attname = 'last_change_limit_rebase' AND NOT a.attisdropped").await;
+    assert!(
+        marker_upgraded,
+        "upgrade must install the durable rebase marker"
+    );
     let delta: Vec<f64> = db.query_scalar("SELECT pgtrickle._centroid_delta(v, sign) FROM (VALUES (ARRAY[1]::real[], 1::smallint), (ARRAY[2]::real[], -1::smallint)) AS input(v, sign)").await;
     assert_eq!(delta, vec![0.0, 2.0, -1.0, 3.0]);
     let merged: Vec<f64> = db

@@ -2082,6 +2082,99 @@ async fn test_centroid_missing_state_rebuilds_or_stays_unbound() {
 }
 
 #[tokio::test]
+async fn test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh() {
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "CREATE TABLE centroid_rewrite_src (id int PRIMARY KEY, grp int, v vector(1))",
+        "INSERT INTO centroid_rewrite_src SELECT id, 1, '[1]'::vector FROM generate_series(1, 2100) id",
+        "SELECT pgtrickle.create_stream_table('centroid_rewrite_st', $$SELECT grp, avg(v) AS centroid FROM centroid_rewrite_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_rewrite_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
+        "UPDATE centroid_rewrite_src SET v = '[2]'",
+        "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
+    ]).await;
+    let first: bool = db.query_scalar("SELECT c.baseline_frontier = t.frontier AND c.last_change_limit_rebase AND h.merge_strategy_used = 'centroid_rebase_group_rescan' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'reason' LIKE '%ChangeLimit%' FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_rewrite_st'::regclass").await;
+    assert!(
+        first,
+        "first large rewrite must demonstrate a change-limit rebase"
+    );
+    db.execute_seq(&[
+        "UPDATE centroid_rewrite_src SET v = '[2.5]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
+    ])
+    .await;
+    let cleared: bool = db.query_scalar("SELECT NOT c.last_change_limit_rebase AND c.baseline_frontier = t.frontier AND h.merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_rewrite_st'::regclass").await;
+    assert!(
+        cleared,
+        "productive algebraic maintenance must clear the prior rebase marker"
+    );
+    db.execute_seq(&[
+        "UPDATE centroid_rewrite_src SET v = '[2]'",
+        "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
+    ])
+    .await;
+    let rebased_again: bool = db.query_scalar("SELECT c.last_change_limit_rebase AND c.baseline_frontier = t.frontier AND h.merge_strategy_used = 'centroid_rebase_group_rescan' FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_rewrite_st'::regclass").await;
+    assert!(
+        rebased_again,
+        "an intervening algebraic refresh must allow a later rebase"
+    );
+    db.execute("DELETE FROM pgtrickle.pgt_refresh_history WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_rewrite_st'::regclass)").await;
+    let restarted = tokio::process::Command::new("docker")
+        .args(["restart", db.container_id()])
+        .output()
+        .await
+        .expect("restart centroid rewrite fixture");
+    assert!(
+        restarted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    db.pool.close().await;
+    db.pool = db.reconnect_after_restart().await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
+        "UPDATE centroid_rewrite_src SET v = '[3]'",
+        "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
+    ])
+    .await;
+    let suppressed: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND h.merge_strategy_used <> 'centroid_rebase_group_rescan' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome' = 'unbound' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'rebuild' = 'suppressed_consecutive_change_limit' AND public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_rewrite_src)) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_rewrite_st s WHERE t.pgt_relid = 'centroid_rewrite_st'::regclass").await;
+    assert!(
+        suppressed,
+        "back-to-back change-limit failures must not rebuild all private groups repeatedly"
+    );
+    db.execute_seq(&[
+        "UPDATE centroid_rewrite_src SET v = '[4]'",
+        "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
+    ])
+    .await;
+    let no_retry: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND NOT (h.refresh_reason_detail::jsonb ? 'centroid_rebase') AND public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_rewrite_src)) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_rewrite_st s WHERE t.pgt_relid = 'centroid_rewrite_st'::regclass").await;
+    assert!(
+        no_retry,
+        "later high-rewrite refreshes must remain correct without another rebase"
+    );
+    db.execute_seq(&[
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_rewrite_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
+        "UPDATE centroid_rewrite_src SET v = '[5]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
+    ]).await;
+    let resumed: bool = db.query_scalar("SELECT c.baseline_frontier = t.frontier AND h.merge_strategy_used = 'centroid_algebraic' AND public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_rewrite_src)) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_rewrite_st s WHERE t.pgt_relid = 'centroid_rewrite_st'::regclass").await;
+    assert!(
+        resumed,
+        "a protected FULL refresh must allow algebraic maintenance to resume"
+    );
+}
+
+#[tokio::test]
 async fn test_centroid_unsafe_rebase_remains_unbound_without_retry_storm() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

@@ -4162,72 +4162,100 @@ pub fn execute_differential_refresh_with_tuning(
 
     let mut centroid_rebase = None;
     if let Some(reason) = centroid_rebase_reason {
-        let subtxn = crate::scheduler::SubTransaction::begin();
-        let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-            crate::api::centroid_stage::rebase_after_rescan(st, &dependencies, new_frontier)
-        }))
-        .catch_when(pgrx::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR, |error| {
-            use pgrx::pg_sys::panic::CaughtError;
-            let message = match &error {
-                CaughtError::PostgresError(report) | CaughtError::ErrorReport(report) => {
-                    report.message()
+        let change_limit = reason.contains("centroid state requires rebase: ChangeLimit");
+        let consecutive_change_limit = if change_limit {
+            Spi::get_one_with_args::<bool>(
+                    "SELECT last_change_limit_rebase FROM pgtrickle.pgt_centroid_states WHERE pgt_id = $1",
+                    &[st.pgt_id.into()],
+                )
+                .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if consecutive_change_limit {
+            pgrx::info!(
+                "[pg_trickle] centroid state for {}.{} remains unbound after consecutive change-limit rebases",
+                schema,
+                name
+            );
+            centroid_rebase = Some(serde_json::json!({
+                "reason": reason, "outcome": "unbound", "scope": "none",
+                "rebuild": "suppressed_consecutive_change_limit"
+            }));
+        } else {
+            let subtxn = crate::scheduler::SubTransaction::begin();
+            let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+                crate::api::centroid_stage::rebase_after_rescan(
+                    st,
+                    &dependencies,
+                    new_frontier,
+                    change_limit,
+                )
+            }))
+            .catch_when(pgrx::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR, |error| {
+                use pgrx::pg_sys::panic::CaughtError;
+                let message = match &error {
+                    CaughtError::PostgresError(report) | CaughtError::ErrorReport(report) => {
+                        report.message()
+                    }
+                    CaughtError::RustPanic { ereport, .. } => ereport.message(),
+                };
+                if !message.starts_with("centroid ")
+                    && !message.starts_with("invalid argument: centroid ")
+                {
+                    error.rethrow();
                 }
-                CaughtError::RustPanic { ereport, .. } => ereport.message(),
-            };
-            if !message.starts_with("centroid ")
-                && !message.starts_with("invalid argument: centroid ")
-            {
-                error.rethrow();
-            }
-            Err(PgTrickleError::InvalidArgument(format!(
-                "centroid rebase rejected: {message}"
-            )))
-        })
-        .execute();
-        match result {
-            Ok(true) => {
-                subtxn.commit();
-                strategy_label = "centroid_rebase_group_rescan";
-                crate::refresh::set_merge_strategy(strategy_label);
-                pgrx::info!(
-                    "[pg_trickle] rebuilt centroid private state for {}.{} after group rescan: {}",
-                    schema,
-                    name,
-                    reason
-                );
-                centroid_rebase = Some(serde_json::json!({
-                    "reason": reason, "outcome": "bound", "scope": "all_private_groups"
-                }));
-            }
-            Ok(false) => {
-                subtxn.rollback();
-                if centroid_missing_state {
-                    crate::api::centroid_stage::mark_missing_state_unbound(st)?;
+                Err(PgTrickleError::InvalidArgument(format!(
+                    "centroid rebase rejected: {message}"
+                )))
+            })
+            .execute();
+            match result {
+                Ok(true) => {
+                    subtxn.commit();
+                    strategy_label = "centroid_rebase_group_rescan";
+                    crate::refresh::set_merge_strategy(strategy_label);
+                    pgrx::info!(
+                        "[pg_trickle] rebuilt centroid private state for {}.{} after group rescan: {}",
+                        schema,
+                        name,
+                        reason
+                    );
+                    centroid_rebase = Some(serde_json::json!({
+                        "reason": reason, "outcome": "bound", "scope": "all_private_groups"
+                    }));
                 }
-                pgrx::info!(
-                    "[pg_trickle] centroid state for {}.{} remains unbound: source snapshot, numerical guard, or visible rows did not qualify",
-                    schema,
-                    name
-                );
-                centroid_rebase = Some(serde_json::json!({
-                    "reason": reason, "outcome": "unbound", "scope": "up_to_all_private_groups"
-                }));
-            }
-            Err(error) => {
-                subtxn.rollback();
-                if centroid_missing_state {
-                    crate::api::centroid_stage::mark_missing_state_unbound(st)?;
+                Ok(false) => {
+                    subtxn.rollback();
+                    if centroid_missing_state {
+                        crate::api::centroid_stage::mark_missing_state_unbound(st)?;
+                    }
+                    pgrx::info!(
+                        "[pg_trickle] centroid state for {}.{} remains unbound: source snapshot, numerical guard, or visible rows did not qualify",
+                        schema,
+                        name
+                    );
+                    centroid_rebase = Some(serde_json::json!({
+                        "reason": reason, "outcome": "unbound", "scope": "up_to_all_private_groups"
+                    }));
                 }
-                pgrx::info!(
-                    "[pg_trickle] centroid state for {}.{} remains unbound: {}",
-                    schema,
-                    name,
-                    error
-                );
-                centroid_rebase = Some(serde_json::json!({
-                    "reason": reason, "outcome": "unbound", "scope": "up_to_all_private_groups",
-                    "error": error.to_string()
-                }));
+                Err(error) => {
+                    subtxn.rollback();
+                    if centroid_missing_state {
+                        crate::api::centroid_stage::mark_missing_state_unbound(st)?;
+                    }
+                    pgrx::info!(
+                        "[pg_trickle] centroid state for {}.{} remains unbound: {}",
+                        schema,
+                        name,
+                        error
+                    );
+                    centroid_rebase = Some(serde_json::json!({
+                        "reason": reason, "outcome": "unbound", "scope": "up_to_all_private_groups",
+                        "error": error.to_string()
+                    }));
+                }
             }
         }
     }

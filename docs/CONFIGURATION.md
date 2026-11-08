@@ -2756,6 +2756,10 @@ visible rows match exactly. Refresh history reports this as
 the rebuild bound state; an unsuccessful attempt may scan all source groups.
 If it cannot rebuild, state stays unbound without automatically retrying; a protected FULL refresh can
 establish it again.
+To avoid repeated whole-state rebuilds under sustained rewrites, a change-limit
+rebase immediately following another data-changing rebase is suppressed. The
+group rescan remains active, the state becomes unbound, and cost evidence records
+`suppressed_consecutive_change_limit`; a protected FULL refresh can reestablish it.
 The current cost decision does not account for centroid-state size or rebase
 cost, so the algebraic path can be slower for small groups.
 

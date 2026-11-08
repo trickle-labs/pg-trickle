@@ -7,6 +7,7 @@ CREATE TABLE pgtrickle.pgt_centroid_states (
     schema_version SMALLINT NOT NULL,
     materialized_xid XID8,
     baseline_frontier JSONB,
+    last_change_limit_rebase BOOLEAN NOT NULL DEFAULT FALSE,
     status TEXT NOT NULL CHECK (status IN ('BUILDING', 'READY'))
 );
 CREATE TABLE pgtrickle.pgt_centroid_groups (
