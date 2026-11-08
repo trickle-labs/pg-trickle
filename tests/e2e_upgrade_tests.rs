@@ -555,6 +555,11 @@ async fn test_upgrade_embedding_helpers_from_0109() {
         marker_upgraded,
         "upgrade must install the durable rebase marker"
     );
+    let cost_markers: bool = db.query_scalar("SELECT count(*) = 2 FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid = 'pgtrickle.pgt_centroid_states'::regclass AND NOT a.attisdropped AND ((a.attname = 'cost_rescan_active' AND a.atttypid = 'boolean'::regtype AND a.attnotnull AND pg_catalog.pg_get_expr(d.adbin, d.adrelid) = 'false') OR (a.attname = 'cost_rescan_xid' AND a.atttypid = 'xid8'::regtype AND NOT a.attnotnull AND d.adbin IS NULL))").await;
+    assert!(
+        cost_markers,
+        "upgrade must install the transactional cost markers"
+    );
     let delta: Vec<f64> = db.query_scalar("SELECT pgtrickle._centroid_delta(v, sign) FROM (VALUES (ARRAY[1]::real[], 1::smallint), (ARRAY[2]::real[], -1::smallint)) AS input(v, sign)").await;
     assert_eq!(delta, vec![0.0, 2.0, -1.0, 3.0]);
     let merged: Vec<f64> = db

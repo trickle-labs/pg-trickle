@@ -384,6 +384,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_centroid_states (
     materialized_xid XID8,
     baseline_frontier JSONB,
     last_change_limit_rebase BOOLEAN NOT NULL DEFAULT FALSE,
+    cost_rescan_active BOOLEAN NOT NULL DEFAULT FALSE,
+    cost_rescan_xid XID8,
     status TEXT NOT NULL CHECK (status IN ('BUILDING', 'READY'))
 );
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_centroid_groups (

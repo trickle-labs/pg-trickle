@@ -145,7 +145,7 @@ fn store_centroid_state(st: &StreamTableMeta, staged: &str) -> Result<(), PgTric
          ON CONFLICT (pgt_id) DO UPDATE SET stream_relid = EXCLUDED.stream_relid, \
          defining_query = EXCLUDED.defining_query, contract_generation = EXCLUDED.contract_generation, \
          schema_version = 1, materialized_xid = NULL, baseline_frontier = NULL, \
-         last_change_limit_rebase = false, status = 'BUILDING'",
+         last_change_limit_rebase = false, cost_rescan_active = false, cost_rescan_xid = NULL, status = 'BUILDING'",
         &[
             st.pgt_id.into(),
             st.pgt_relid.into(),
@@ -274,7 +274,10 @@ pub(crate) fn mark_materialized(pgt_id: i64) -> Result<(), PgTrickleError> {
 }
 
 /// Discard the baseline after a refresh that did not maintain private state.
-pub(crate) fn invalidate_baseline(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+pub(crate) fn invalidate_baseline(
+    st: &StreamTableMeta,
+    no_data: bool,
+) -> Result<(), PgTrickleError> {
     if st.refresh_mode != crate::dag::RefreshMode::Differential {
         return Ok(());
     }
@@ -288,12 +291,49 @@ pub(crate) fn invalidate_baseline(st: &StreamTableMeta) -> Result<(), PgTrickleE
                CASE WHEN c.materialized_xid = pg_current_xact_id_if_assigned() \
                  AND c.baseline_frontier = t.frontier AND c.stream_relid = t.pgt_relid \
                  AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation \
-                 THEN c.baseline_frontier ELSE NULL END, materialized_xid = NULL \
+                 THEN c.baseline_frontier ELSE NULL END, materialized_xid = NULL, \
+             cost_rescan_active = COALESCE((c.cost_rescan_xid = pg_current_xact_id_if_assigned() \
+                 OR ($2 AND c.cost_rescan_xid IS NULL AND c.cost_rescan_active \
+                     AND c.baseline_frontier IS NULL AND c.materialized_xid IS NULL)) \
+                 AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query \
+                 AND c.contract_generation = t.contract_generation AND c.schema_version = 1 \
+                 AND c.status = 'BUILDING', false), cost_rescan_xid = NULL \
              FROM pgtrickle.pgt_stream_tables t WHERE c.pgt_id = $1 AND t.pgt_id = c.pgt_id \
-             AND (c.baseline_frontier IS NOT NULL OR c.materialized_xid IS NOT NULL)",
-            &[st.pgt_id.into()],
+             AND (c.baseline_frontier IS NOT NULL OR c.materialized_xid IS NOT NULL \
+                  OR c.cost_rescan_active OR c.cost_rescan_xid IS NOT NULL) \
+             AND NOT ($2 AND c.cost_rescan_active AND c.cost_rescan_xid IS NULL \
+                 AND c.baseline_frontier IS NULL AND c.materialized_xid IS NULL \
+                 AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query \
+                 AND c.contract_generation = t.contract_generation AND c.schema_version = 1 \
+                 AND c.status = 'BUILDING')",
+            &[st.pgt_id.into(), no_data.into()],
         )
         .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Persist cost-rescan mode only if this transaction completes its refresh.
+pub(crate) fn mark_cost_rescan(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+    let marked = Spi::get_one_with_args::<bool>(
+        "UPDATE pgtrickle.pgt_centroid_states SET cost_rescan_xid = pg_current_xact_id() \
+         WHERE pgt_id = $1 AND stream_relid = $2 AND defining_query = $3 \
+           AND contract_generation = $4 AND schema_version = 1 AND status = 'BUILDING' \
+         RETURNING true",
+        &[
+            st.pgt_id.into(),
+            st.pgt_relid.into(),
+            st.defining_query.as_str().into(),
+            st.contract_generation.into(),
+        ],
+    )
+    .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
+    .unwrap_or(false);
+    if !marked {
+        return Err(PgTrickleError::InternalError(format!(
+            "centroid state changed while marking cost rescan for {}.{}",
+            st.pgt_schema, st.pgt_name
+        )));
     }
     Ok(())
 }
@@ -334,7 +374,8 @@ pub(crate) fn bind_materialized_frontier(
     let safe = sources_at_frontier(&dependencies, frontier)?;
     if safe {
         Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_centroid_states c SET baseline_frontier = t.frontier, materialized_xid = NULL \
+            "UPDATE pgtrickle.pgt_centroid_states c SET baseline_frontier = t.frontier, materialized_xid = NULL, \
+             cost_rescan_active = false, cost_rescan_xid = NULL \
              FROM pgtrickle.pgt_stream_tables t WHERE c.pgt_id = $1 AND t.pgt_id = c.pgt_id \
              AND c.materialized_xid = pg_current_xact_id_if_assigned() AND c.stream_relid = t.pgt_relid \
              AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation \
@@ -343,7 +384,8 @@ pub(crate) fn bind_materialized_frontier(
         )
     } else {
         Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_centroid_states SET baseline_frontier = NULL, materialized_xid = NULL \
+            "UPDATE pgtrickle.pgt_centroid_states SET baseline_frontier = NULL, materialized_xid = NULL, \
+             cost_rescan_active = false, cost_rescan_xid = NULL \
              WHERE pgt_id = $1 AND materialized_xid = pg_current_xact_id_if_assigned()",
             &[st.pgt_id.into()],
         )
@@ -757,7 +799,8 @@ pub(crate) fn stage_centroid_candidates(
         "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c \
          JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
          WHERE c.pgt_id = $1 AND c.baseline_frontier = $2 AND t.frontier = $2 \
-           AND c.materialized_xid IS NULL AND c.stream_relid = t.pgt_relid \
+           AND c.materialized_xid IS NULL AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL \
+           AND c.stream_relid = t.pgt_relid \
            AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation \
            AND c.schema_version = 1 AND c.status = 'BUILDING')",
         &[st.pgt_id.into(), pgrx::JsonB(previous_json).into()],
@@ -916,7 +959,8 @@ pub(crate) fn advance_empty_frontier(
     let bound = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
          WHERE c.pgt_id = $1 AND c.baseline_frontier = $2 AND t.frontier = $2 \
-           AND c.materialized_xid IS NULL AND c.stream_relid = t.pgt_relid \
+           AND c.materialized_xid IS NULL AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL \
+           AND c.stream_relid = t.pgt_relid \
            AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation \
            AND c.schema_version = 1 AND c.status = 'BUILDING')",
         &[st.pgt_id.into(), pgrx::JsonB(previous).into()],

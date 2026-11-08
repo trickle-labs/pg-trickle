@@ -2361,6 +2361,265 @@ async fn test_centroid_rebase_rejects_mismatched_visible_groups() {
 }
 
 #[tokio::test]
+async fn test_centroid_cost_model_rescans_and_rebinds_safely() {
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let mut conn = db.pool.acquire().await.expect("centroid cost session");
+    for statement in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "CREATE TABLE centroid_policy_src (id int PRIMARY KEY, grp int, v vector(2))",
+        "INSERT INTO centroid_policy_src SELECT id, id % 2, '[1,2]'::vector FROM generate_series(1, 4) id",
+        "SELECT pgtrickle.create_stream_table('centroid_policy_st', $$SELECT grp, avg(v) AS centroid FROM centroid_policy_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.centroid_policy_st'])",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_policy_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_policy_st')",
+        "INSERT INTO pgtrickle.pgt_refresh_history (pgt_id, data_timestamp, start_time, end_time, action, status, merge_strategy_used, refresh_reason_detail) SELECT t.pgt_id, now() - interval '5 minutes', now() - interval '5 minutes', now() - interval '5 minutes' + CASE WHEN s.strategy = 'merge' THEN interval '2 milliseconds' ELSE interval '100 milliseconds' END, 'DIFFERENTIAL', 'COMPLETED', s.strategy, jsonb_build_object('schema_version', 1, 'input_delta_rows', 4, 'input_delta_rows_may_be_incomplete', false, 'output_rows_changed', 2, 'source_rows_estimate', 1000, 'plan_identity', t.defining_query_hash, 'contract_generation', t.contract_generation)::text FROM pgtrickle.pgt_stream_tables t CROSS JOIN (SELECT strategy FROM (VALUES ('merge'), ('centroid_algebraic')) s(strategy) CROSS JOIN generate_series(1, 3)) s WHERE t.pgt_relid = 'centroid_policy_st'::regclass",
+        "INSERT INTO pgtrickle.pgt_refresh_history (pgt_id, data_timestamp, start_time, end_time, action, status, merge_strategy_used, refresh_reason_detail) SELECT pgt_id, now(), '-infinity'::timestamptz, now(), 'DIFFERENTIAL', 'COMPLETED', 'merge', 'not-json' FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_policy_st'::regclass",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("prepare cost-based centroid rescan");
+    }
+    for statement in [
+        "BEGIN",
+        "UPDATE centroid_policy_src SET v = '[5,6]' WHERE id IN (1, 2)",
+        "SELECT pgtrickle.refresh_stream_table('centroid_policy_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("exercise cost-rescan rollback");
+    }
+    let provisional: bool = sqlx::query_scalar("SELECT c.baseline_frontier IS NULL AND c.cost_rescan_active FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect provisional cost marker");
+    assert!(
+        provisional,
+        "cost-rescan mode must be visible inside the transaction"
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("roll back cost rescan");
+    let restored: bool = sqlx::query_scalar("SELECT c.baseline_frontier = t.frontier AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect rolled-back cost marker");
+    assert!(
+        restored,
+        "rollback must restore the bound baseline and cost marker"
+    );
+    for statement in [
+        "UPDATE centroid_policy_src SET v = '[5,6]' WHERE id IN (1, 2)",
+        "SELECT pgtrickle.refresh_stream_table('centroid_policy_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("select cost-based rescan");
+    }
+    let selected: bool = sqlx::query_scalar("SELECT c.baseline_frontier IS NULL AND c.cost_rescan_active AND c.cost_rescan_xid IS NULL AND h.merge_strategy_used <> 'centroid_algebraic' AND h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' = 'COST_MODEL_RESCAN' FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect selected rescan");
+    assert!(
+        selected,
+        "cost-based rescan must leave private state unbound"
+    );
+    let idle_xmin: String = sqlx::query_scalar("SELECT c.xmin::text FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("read cost marker transaction");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_policy_st')")
+        .execute(&mut *conn)
+        .await
+        .expect("refresh without source changes");
+    let idle_marker: bool = sqlx::query_scalar("SELECT c.baseline_frontier IS NULL AND c.cost_rescan_active AND c.cost_rescan_xid IS NULL FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect idle cost marker");
+    assert!(
+        idle_marker,
+        "no-data refresh must preserve cost-rescan mode"
+    );
+    let after_idle_xmin: String = sqlx::query_scalar("SELECT c.xmin::text FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("read idle cost marker transaction");
+    assert_eq!(
+        idle_xmin, after_idle_xmin,
+        "idle refresh must not rewrite the cost marker"
+    );
+    drop(conn);
+    let restarted = tokio::process::Command::new("docker")
+        .args(["restart", db.container_id()])
+        .output()
+        .await
+        .expect("restart cost-rescan fixture");
+    assert!(
+        restarted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    db.pool.close().await;
+    db.pool = db.reconnect_after_restart().await;
+    let mut conn = db.pool.acquire().await.expect("reconnect cost session");
+    for statement in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.centroid_policy_st'])",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("restore cost settings");
+    }
+    let restarted_marker: bool = sqlx::query_scalar("SELECT c.baseline_frontier IS NULL AND c.cost_rescan_active AND c.cost_rescan_xid IS NULL FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect restarted cost marker");
+    assert!(
+        restarted_marker,
+        "committed cost-rescan mode must survive restart"
+    );
+    for statement in [
+        "UPDATE centroid_policy_src SET v = '[7,8]' WHERE id IN (1, 2)",
+        "SELECT pgtrickle.refresh_stream_table('centroid_policy_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("continue cost rescan");
+    }
+    let active: String = sqlx::query_scalar("SELECT h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' FROM pgtrickle.pgt_stream_tables t CROSS JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect active cost rescan");
+    assert_eq!(active, "COST_MODEL_RESCAN_ACTIVE");
+    for statement in [
+        "BEGIN",
+        "UPDATE pgtrickle.pgt_refresh_history SET end_time = start_time + interval '1 microsecond' WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_policy_st'::regclass) AND merge_strategy_used = 'centroid_algebraic'",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("prepare cost reversal");
+    }
+    let mut rebind_round = None;
+    for round in 0..10 {
+        let value = if round % 2 == 0 { "[5,6]" } else { "[7,8]" };
+        sqlx::query("UPDATE centroid_policy_src SET v = $1::vector WHERE id IN (1, 2)")
+            .bind(value)
+            .execute(&mut *conn)
+            .await
+            .expect("change cost fixture");
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_policy_st')")
+            .execute(&mut *conn)
+            .await
+            .expect("refresh cost fixture");
+        let reason: String = sqlx::query_scalar("SELECT h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' FROM pgtrickle.pgt_stream_tables t CROSS JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+            .fetch_one(&mut *conn).await.expect("read cost transition");
+        if reason == "COST_MODEL_REBIND" {
+            rebind_round = Some(round);
+            break;
+        }
+        assert_eq!(reason, "COST_MODEL_RESCAN_ACTIVE");
+    }
+    assert_eq!(
+        rebind_round,
+        Some(7),
+        "cost reversal must wait for the cooldown"
+    );
+    let bound: bool = sqlx::query_scalar("SELECT c.baseline_frontier = t.frontier AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome' = 'bound' FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect cost reversal");
+    assert!(bound, "cost reversal must bind a verified baseline");
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("roll back cost reversal fixture");
+    for statement in [
+        "BEGIN",
+        "SET LOCAL pg_trickle.internal_refresh = 'true'",
+        "UPDATE centroid_policy_st SET centroid = '[99,99]' WHERE grp = 0",
+        "SET LOCAL pg_trickle.internal_refresh = 'false'",
+        "UPDATE centroid_policy_src SET v = '[9,10]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_policy_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("exercise unsafe cost rebind");
+    }
+    let rejected: bool = sqlx::query_scalar("SELECT c.baseline_frontier IS NULL AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL AND h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' = 'COST_MODEL_REBIND' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome' = 'unbound' FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect rejected cost rebind");
+    assert!(
+        rejected,
+        "an untouched visible mismatch must prevent rebinding"
+    );
+    for statement in [
+        "UPDATE centroid_policy_src SET v = '[11,12]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_policy_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("refresh after rejected rebind");
+    }
+    let no_retry: bool = sqlx::query_scalar("SELECT c.baseline_frontier IS NULL AND h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' = 'STATE_UNBOUND' AND NOT (h.refresh_reason_detail::jsonb ? 'centroid_rebase') FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect failed rebind retry policy");
+    assert!(
+        no_retry,
+        "a rejected cost rebind must not cause a retry storm"
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("roll back unsafe rebind fixture");
+    for statement in [
+        "BEGIN",
+        "INSERT INTO pgtrickle.pgt_refresh_history (pgt_id, data_timestamp, start_time, end_time, action, status, merge_strategy_used) SELECT pgt_id, clock_timestamp(), clock_timestamp(), clock_timestamp(), 'NO_DATA', 'COMPLETED', 'DIFFERENTIAL' FROM pgtrickle.pgt_stream_tables CROSS JOIN generate_series(1, 70) WHERE pgt_relid = 'centroid_policy_st'::regclass",
+        "UPDATE centroid_policy_src SET v = '[9,10]' WHERE id IN (1, 2)",
+        "SELECT pgtrickle.refresh_stream_table('centroid_policy_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("rebind after bounded history expires");
+    }
+    let durable: bool = sqlx::query_scalar("SELECT c.baseline_frontier = t.frontier AND NOT c.cost_rescan_active AND h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' = 'COST_MODEL_REBIND' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'reason' = 'centroid cost history is inconclusive' FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect durable cost marker");
+    assert!(
+        durable,
+        "cost-rescan mode must survive history-window eviction"
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("roll back expired-history fixture");
+    for statement in [
+        "UPDATE centroid_policy_src SET v = '[9,10]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_policy_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("rebind after a small change");
+    }
+    let rebound: bool = sqlx::query_scalar("SELECT c.baseline_frontier = t.frontier AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL AND h.merge_strategy_used = 'centroid_rebase_group_rescan' AND h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' = 'COST_MODEL_REBIND' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome' = 'bound' FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect rebound centroid state");
+    assert!(
+        rebound,
+        "a small change must report and bind a protected rebase"
+    );
+    for statement in [
+        "UPDATE centroid_policy_src SET v = '[11,12]' WHERE id IN (1, 2)",
+        "SELECT pgtrickle.refresh_stream_table('centroid_policy_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("refresh during cost cooldown");
+    }
+    let correct: bool = sqlx::query_scalar("WITH native AS (SELECT grp, avg(v)::text AS centroid FROM centroid_policy_src GROUP BY grp), actual AS (SELECT grp, centroid::text AS centroid FROM centroid_policy_st) SELECT NOT EXISTS ((SELECT * FROM native EXCEPT ALL SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM native)) AND (SELECT h.merge_strategy_used = 'centroid_algebraic' AND c.baseline_frontier = t.frontier FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_policy_st'::regclass)")
+        .fetch_one(&mut *conn).await.expect("check cooldown result");
+    assert!(
+        correct,
+        "cooldown must preserve correct algebraic maintenance"
+    );
+}
+
+#[tokio::test]
 async fn test_centroid_cost_based_full_fallback_rebinds_state() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

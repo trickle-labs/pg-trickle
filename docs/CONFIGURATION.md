@@ -2764,9 +2764,31 @@ group rescan remains active, the state becomes unbound, and cost evidence record
 `suppressed_consecutive_change_limit`; a protected FULL refresh can reestablish it.
 With `refresh_strategy = 'auto'`, the general refresh cost model can select a
 FULL refresh based on historical timings; a successful protected FULL refresh
-can rebind centroid state for later algebraic maintenance. That model does not
-compare algebraic maintenance with group rescan or account for centroid-state
-size or rebase cost, so the algebraic path can be slower for small groups.
+can rebind centroid state for later algebraic maintenance.
+
+For a batch with at least three captured input rows, a bounded cost policy can
+select group rescan when recent comparable observations favor it by more than
+20%. It requires at least three completed samples of each strategy among the
+64 most recent history records, with the same query identity, contract generation,
+input count, and source-row estimate. Incomplete input counts are excluded.
+Estimates and timing history can be stale. Without enough comparable evidence,
+a bound state continues algebraic maintenance. A cost-unbound state continues
+rescan until a qualifying rebase or protected FULL refresh; once the bounded
+history window fills without a decision, it attempts a reported rebase after the
+cooldown so it can collect fresh algebraic samples. The policy does not infer a
+universal group-size threshold.
+
+A cost-selected rescan reports `COST_MODEL_RESCAN` and leaves private state
+unbound; later rescans report `COST_MODEL_RESCAN_ACTIVE`. If the evidence later
+favors algebraic maintenance, the policy waits for eight recorded data-changing
+refreshes, then attempts a protected whole-state rebase after the rescan. A
+one-row change with a complete input count (at most two captured records) also
+triggers that explicitly reported rebase instead of remaining on the
+cost-selected rescan path. History reports the
+attempt as `COST_MODEL_REBIND`, including whether it bound state. A failed
+attempt stays unbound without automatic retries; a protected FULL refresh can
+reestablish it. State size and rebase cost are not separately predicted, so
+this experimental policy can still select a slower path.
 
 | Property | Value |
 |---|---|

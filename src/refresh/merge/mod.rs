@@ -1977,14 +1977,26 @@ pub fn execute_differential_refresh_with_tuning(
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
         .unwrap_or(false)
     {
-        let state_bound = Spi::get_one_with_args::<bool>(
-            "SELECT (SELECT COALESCE(c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL \
-               AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query \
-               AND c.contract_generation = t.contract_generation AND c.schema_version = 1 AND c.status = 'BUILDING', false) \
-             FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
-             WHERE c.pgt_id = $1)",
-            &[st.pgt_id.into()],
-        ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let state = Spi::connect(|client| {
+            let rows = client.select(
+                "SELECT COALESCE(c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL \
+                   AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL \
+                   AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query \
+                   AND c.contract_generation = t.contract_generation AND c.schema_version = 1 AND c.status = 'BUILDING', false), \
+                 COALESCE(c.cost_rescan_active AND c.cost_rescan_xid IS NULL AND c.baseline_frontier IS NULL \
+                   AND c.materialized_xid IS NULL AND c.stream_relid = t.pgt_relid \
+                   AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation \
+                   AND c.schema_version = 1 AND c.status = 'BUILDING', false) \
+                 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
+                 WHERE c.pgt_id = $1", None, &[st.pgt_id.into()],
+            )?;
+            match rows.into_iter().next() {
+                Some(row) => Ok(Some((row.get::<bool>(1)?.unwrap_or(false), row.get::<bool>(2)?.unwrap_or(false)))),
+                None => Ok(None),
+            }
+        }).map_err(|e: pgrx::spi::Error| PgTrickleError::SpiError(e.to_string()))?;
+        let state_bound = state.map(|(bound, _)| bound);
+        let cost_rescan_active = state.is_some_and(|(_, active)| active);
         if state_bound.is_none()
             && with_stream_owner(st, || Ok(crate::dvm::centroid_numerics::centroid_staging_sql(&st.defining_query)?.is_some()))?
         {
@@ -1994,7 +2006,48 @@ pub fn execute_differential_refresh_with_tuning(
         } else if state_bound == Some(false) {
             centroid_fallback = Some("STATE_UNBOUND");
         }
-        if state_bound == Some(true) {
+        let comparable = total_change_count >= 3 && !input_delta_rows_may_be_incomplete;
+        let history = if comparable && (state_bound == Some(true) || cost_rescan_active) {
+            crate::refresh::centroid_cost::read_history(st.pgt_id)
+        } else {
+            None
+        };
+        let preference = history.as_ref().map(|history| {
+            if comparable {
+                history.preference(st.defining_query_hash, st.contract_generation, total_change_count, _total_table_size)
+            } else {
+                crate::refresh::centroid_cost::Preference::Unknown
+            }
+        });
+        let cost_rescan = state_bound == Some(true)
+            && preference == Some(crate::refresh::centroid_cost::Preference::Rescan)
+            && history.as_ref().is_some_and(|history| !history.in_cooldown(st.defining_query_hash, st.contract_generation));
+        if cost_rescan {
+            centroid_fallback = Some(crate::refresh::centroid_cost::RESCAN);
+        } else if state_bound == Some(false) && cost_rescan_active
+        {
+            let small_change = !input_delta_rows_may_be_incomplete && total_change_count <= 2;
+            let inconclusive_history = preference == Some(crate::refresh::centroid_cost::Preference::Unknown)
+                && history.as_ref().is_some_and(|history| history.window_full()
+                    && !history.in_cooldown(st.defining_query_hash, st.contract_generation));
+            if small_change
+                || (preference == Some(crate::refresh::centroid_cost::Preference::Algebraic)
+                    && history.as_ref().is_some_and(|history| !history.in_cooldown(st.defining_query_hash, st.contract_generation)))
+                || inconclusive_history
+            {
+                centroid_fallback = Some(crate::refresh::centroid_cost::REBIND);
+                centroid_rebase_reason = Some(if small_change {
+                    "centroid state rebind for a small change".into()
+                } else if inconclusive_history {
+                    "centroid cost history is inconclusive".into()
+                } else {
+                    "centroid cost model prefers algebraic maintenance".into()
+                });
+            } else {
+                centroid_fallback = Some(crate::refresh::centroid_cost::RESCAN_ACTIVE);
+            }
+        }
+        if state_bound == Some(true) && !cost_rescan {
         let subtxn = crate::scheduler::SubTransaction::begin();
         let attempt = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
             let source_oids = dependencies
@@ -2053,6 +2106,10 @@ pub fn execute_differential_refresh_with_tuning(
                     fields.insert(
                         "plan_identity".into(),
                         serde_json::json!(st.defining_query_hash),
+                    );
+                    fields.insert(
+                        "contract_generation".into(),
+                        serde_json::json!(st.contract_generation),
                     );
                     fields.insert("merge_strategy".into(), serde_json::json!("centroid_algebraic"));
                 }
@@ -4297,8 +4354,13 @@ pub fn execute_differential_refresh_with_tuning(
             }
         }
     }
+    if centroid_fallback == Some(crate::refresh::centroid_cost::RESCAN)
+        || centroid_fallback == Some(crate::refresh::centroid_cost::RESCAN_ACTIVE)
+    {
+        crate::api::centroid_stage::mark_cost_rescan(st)?;
+    }
     let mut cost_evidence =
-        crate::refresh::build_differential_cost_evidence(total_change_count, effective_count);
+        crate::refresh::build_differential_cost_evidence(total_change_count, merge_count as i64);
     if let Some(fields) = cost_evidence.as_object_mut() {
         fields.insert(
             "input_delta_rows_may_be_incomplete".into(),
@@ -4316,6 +4378,10 @@ pub fn execute_differential_refresh_with_tuning(
         fields.insert(
             "plan_identity".into(),
             serde_json::json!(st.defining_query_hash),
+        );
+        fields.insert(
+            "contract_generation".into(),
+            serde_json::json!(st.contract_generation),
         );
         fields.insert("merge_strategy".into(), serde_json::json!(strategy_label));
         if let Some(rebase) = centroid_rebase {

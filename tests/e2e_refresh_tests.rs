@@ -12,6 +12,28 @@ use e2e::E2eDb;
 // ── Basic DML Refresh ──────────────────────────────────────────────────
 
 #[tokio::test]
+async fn test_refresh_cost_evidence_reports_empty_filtered_output() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE rf_cost_filter_src (id INT PRIMARY KEY, active BOOLEAN, val INT)",
+        "INSERT INTO rf_cost_filter_src VALUES (1, true, 10), (2, false, 20)",
+        "SELECT pgtrickle.create_stream_table('rf_cost_filter_st', 'SELECT id, val FROM rf_cost_filter_src WHERE active', '1h', 'DIFFERENTIAL')",
+        "UPDATE rf_cost_filter_src SET val = 21 WHERE id = 2",
+        "SELECT pgtrickle.refresh_stream_table('rf_cost_filter_st')",
+    ]).await;
+    let detail: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'rf_cost_filter_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    let evidence: serde_json::Value = serde_json::from_str(&detail).expect("parse cost evidence");
+    assert_eq!(evidence["input_delta_rows"], 2);
+    assert_eq!(evidence["output_rows_changed"], 0);
+    db.assert_st_matches_query(
+        "rf_cost_filter_st",
+        "SELECT id, val FROM rf_cost_filter_src WHERE active",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_refresh_cost_evidence_marks_unaccounted_stream_changes() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute_seq(&[

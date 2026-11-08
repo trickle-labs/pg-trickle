@@ -29,6 +29,7 @@ use crate::error::PgTrickleError;
 use pgrx::{Spi, prelude::TimestampWithTimeZone};
 use std::cell::RefCell;
 
+pub(crate) mod centroid_cost;
 pub(crate) mod codegen;
 pub(crate) mod delta_stage;
 pub(crate) mod fused;
@@ -983,7 +984,7 @@ pub fn finalize_success(
     {
         crate::api::centroid_stage::bind_materialized_frontier(st, &execution.frontier)?;
     } else if execution.effective_mode != "NO_DATA" {
-        crate::api::centroid_stage::invalidate_baseline(st)?;
+        crate::api::centroid_stage::invalidate_baseline(st, !execution.data_changed)?;
     }
 
     let history_action =

@@ -2242,7 +2242,8 @@ FROM pgtrickle.get_refresh_history('order_totals', 5);
 
 Completed differential refreshes that perform a merge can record bounded JSON
 cost evidence in `refresh_reason_detail`. It includes input and changed-output
-row counts, output amplification, plan identity, and the executed merge strategy.
+row counts, output amplification, plan identity, contract generation, and the
+executed merge strategy.
 When `input_delta_rows_may_be_incomplete` is true, the input count may be a lower
 bound because the change-buffer probe reached its threshold or failed; it can
 also omit upstream stream-table changes or be exact when the count equals the
