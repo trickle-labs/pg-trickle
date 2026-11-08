@@ -50,11 +50,16 @@ async fn test_pgvector_filtered_ann_workload() {
         .unwrap_or_else(|_| "5".into())
         .parse()
         .expect("centroid samples");
+    let centroid_rewrite_rows: usize = std::env::var("PGVECTOR_CENTROID_REWRITE_ROWS")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
+        .expect("centroid rewrite rows");
     assert!(
         (1..=2000).contains(&dim)
             && rows >= 100
             && (1..=rows).contains(&samples)
             && (1..=50).contains(&centroid_samples)
+            && (1..=rows.saturating_sub(rows / 10 + 2)).contains(&centroid_rewrite_rows)
     );
     db.execute(&format!("CREATE TABLE vector_bench_source (id bigint PRIMARY KEY, tenant int NOT NULL, embedding vector({dim}) NOT NULL)")).await;
     // Stable hash-derived coordinates make the input reproducible without a session RNG.
@@ -501,23 +506,32 @@ async fn test_pgvector_filtered_ann_workload() {
             .await
             .expect("configure repeated centroid benchmark");
     }
+    let first_rewritten = rows - centroid_rewrite_rows;
+    let alternate_source = rows / 10 + 1;
+    let distinct_inputs: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT public.vector_send((SELECT embedding FROM vector_centroid_source WHERE id = {alternate_source})) <> public.vector_send((SELECT embedding FROM vector_centroid_source WHERE id = {rows}))"
+    )))
+    .fetch_one(&mut *conn)
+    .await
+    .expect("check repeated centroid inputs");
+    assert!(distinct_inputs, "repeated source vectors must be distinct");
     for round in 0..centroid_samples {
-        let source_id = if round % 2 == 0 { rows - 2 } else { rows };
+        let source_id = if round % 2 == 0 {
+            alternate_source
+        } else {
+            rows
+        };
         let mutation = format!(
-            "UPDATE vector_centroid_source SET embedding = (SELECT embedding FROM vector_centroid_source WHERE id = {source_id}) WHERE id = {target}"
+            "UPDATE vector_centroid_source SET embedding = (SELECT embedding FROM vector_centroid_source WHERE id = {source_id}) WHERE id >= {first_rewritten} AND id < {rows}"
         );
-        sqlx::query(sqlx::AssertSqlSafe(mutation))
+        let updated = sqlx::query(sqlx::AssertSqlSafe(mutation))
             .execute(&mut *conn)
             .await
             .expect("mutate repeated centroid source");
+        assert_eq!(updated.rows_affected(), centroid_rewrite_rows as u64);
         for group_offset in 0..groups.len() {
             let group_idx = (group_offset + round) % groups.len();
             let group = groups[group_idx];
-            let group_value = if group == "small" {
-                target % 100
-            } else {
-                target % 2
-            };
             for offset in 0..variants.len() {
                 let variant_idx = (offset + round) % variants.len();
                 let variant = variants[variant_idx];
@@ -548,19 +562,37 @@ async fn test_pgvector_filtered_ann_workload() {
                     }
                 );
                 assert!(!history.1, "repeated centroid refresh fell back to FULL");
-                if variant == "algebraic" {
-                    assert_eq!(history.2, "centroid_algebraic");
+                if variant == "algebraic" && history.2 != "centroid_algebraic" {
+                    let detail: String = sqlx::query_scalar("SELECT format('baseline=%s frontier=%s materialized_xid=%s rebase_marker=%s history=%s', COALESCE(c.baseline_frontier::text, 'null'), COALESCE(t.frontier::text, 'null'), COALESCE(c.materialized_xid::text, 'null'), COALESCE(c.last_change_limit_rebase::text, 'null'), COALESCE(h.refresh_reason_detail, 'null')) FROM pgtrickle.pgt_stream_tables t LEFT JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) LEFT JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_name = $1")
+                        .bind(&stream).fetch_one(&mut *conn).await.expect("inspect unexpected centroid fallback");
+                    panic!(
+                        "round {round} {group} expected algebraic maintenance, got {}: {detail}",
+                        history.2
+                    );
                 }
                 let comparison = format!(
-                    "SELECT count(*) = {dim} AND COALESCE(bool_and(abs(x.actual::float8 - x.expected::float8) <= 1e-5 + 1e-6 * abs(x.expected::float8)), false) FROM {stream} s CROSS JOIN LATERAL unnest(s.centroid::real[], (SELECT avg(embedding)::real[] FROM vector_centroid_source WHERE {group}_group = {group_value})) x(actual, expected) WHERE s.{group}_group = {group_value}"
+                    "WITH affected AS (SELECT DISTINCT {group}_group FROM vector_centroid_source WHERE id >= {first_rewritten} AND id < {rows}), \
+                     native AS (SELECT {group}_group, avg(embedding)::real[] AS centroid FROM vector_centroid_source WHERE {group}_group IN (SELECT {group}_group FROM affected) GROUP BY {group}_group) \
+                     SELECT count(*)::bigint, (SELECT count(*) FROM native)::bigint, count(DISTINCT s.{group}_group)::bigint, \
+                       COALESCE(max(abs(x.actual::float8 - x.expected::float8)), 0)::float8, \
+                       COALESCE(bool_and(abs(x.actual::float8 - x.expected::float8) <= 1e-5 + 1e-6 * abs(x.expected::float8)), false) \
+                     FROM {stream} s JOIN native n USING ({group}_group) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid) x(actual, expected)"
                 );
-                let correct: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(comparison))
+                let (components, expected_groups, actual_groups, max_error, within_bound): (
+                    i64,
+                    i64,
+                    i64,
+                    f64,
+                    bool,
+                ) = sqlx::query_as(sqlx::AssertSqlSafe(comparison))
                     .fetch_one(&mut *conn)
                     .await
                     .expect("compare repeated centroid refresh");
                 assert!(
-                    correct,
-                    "repeated {variant} centroid exceeded its numerical bound"
+                    components == expected_groups * dim as i64
+                        && actual_groups == expected_groups
+                        && within_bound,
+                    "round {round} {group} {variant}: components={components}, expected_groups={expected_groups}, actual_groups={actual_groups}, max_error={max_error}"
                 );
                 timings[group_idx][variant_idx].push(elapsed_ms);
                 repeated.push(serde_json::json!({"round": round, "group_shape": group, "strategy": variant, "actual_strategy": history.2, "elapsed_ms": elapsed_ms}));
@@ -588,7 +620,7 @@ async fn test_pgvector_filtered_ann_workload() {
         serde_json::json!({"schema": 1, "postgres": versions.0,
         "pgvector": versions.1, "pg_trickle": versions.2, "host_arch": std::env::consts::ARCH,
         "data": "md5(id:dimension), seedless deterministic", "rows": rows, "dimensions": dim,
-        "ann": results, "centroid_baseline": centroid, "centroid_repeated": {"rounds": centroid_samples, "observations": repeated, "summary": repeated_summary, "notes": "Each round changes one source vector; group and strategy order rotate. Times cover the refresh call without EXPLAIN, mutation or validation. No warmup, concurrent load, or repeated rebase measurements."}, "centroid_notes": "Each refresh is executed under EXPLAIN ANALYZE; SPI work may not be individually visible in the plan. Source tuple counters cover same-transaction sequential returns and index fetches, including repeated visits, during the refresh. Group rescan, algebraic and FULL run in that order. WAL excludes the source mutation; auxiliary bytes are logical payload estimates.", "refresh": {"operations": ["update embedding", "update embedding", "delete"],
+        "ann": results, "centroid_baseline": centroid, "centroid_repeated": {"rounds": centroid_samples, "changed_rows_per_round": centroid_rewrite_rows, "observations": repeated, "summary": repeated_summary, "notes": "Each round changes the configured number of source vectors; group and strategy order rotate. All affected groups are checked against native AVG. Times cover the refresh call without EXPLAIN, mutation or validation. No warmup, concurrent load, or repeated rebase measurements."}, "centroid_notes": "Each refresh is executed under EXPLAIN ANALYZE; SPI work may not be individually visible in the plan. Source tuple counters cover same-transaction sequential returns and index fetches, including repeated visits, during the refresh. Group rescan, algebraic and FULL run in that order. WAL excludes the source mutation; auxiliary bytes are logical payload estimates.", "refresh": {"operations": ["update embedding", "update embedding", "delete"],
         "changed_rows": [1, rows / 10, rows / 10], "elapsed_ms": refresh_ms,
         "wal_bytes_cluster_wide": wal_bytes,
         "full_elapsed_ms": full_refresh_ms, "full_wal_bytes_cluster_wide": full_wal_bytes,

@@ -65,10 +65,14 @@ each refresh, including repeated visits; they are not counts of distinct rows.
 This is one observation per
 strategy in the order listed; EXPLAIN overhead and cache order affect timings.
 The workload also performs five repeated one-row changes by default, rotating
-the group and strategy order. It checks each selected strategy and affected
-group against native AVG, and records individual refresh times and percentiles
-without EXPLAIN. Set `PGVECTOR_CENTROID_SAMPLES` from 1 to 50 to change that
-count; a small sample cannot establish tail latency. The workload does not
+the group and strategy order. Set `PGVECTOR_CENTROID_REWRITE_ROWS` to update
+more rows per round, up to the surviving source rows less two fixed inputs.
+It checks each selected strategy and all affected groups against native AVG,
+and records individual refresh times and percentiles without EXPLAIN. Set
+`PGVECTOR_CENTROID_SAMPLES` from 1 to 50 to change the number of rounds; a
+small sample cannot establish tail latency. The algebraic measurement asserts
+that every round uses algebraic state, so batches that trigger a rebase fail
+the benchmark rather than being silently counted as algebraic. The workload does not
 measure source-write overhead or concurrent load. Use a dedicated host and
 more repetitions before drawing performance conclusions.
 
@@ -80,3 +84,5 @@ The [source-read comparison](results/2026-11-08-source-reads-arm64/README.md)
 adds same-transaction source tuple counters and larger affected groups.
 The [repeated centroid comparison](results/2026-11-08-repeated-centroid-arm64/README.md)
 records 20 rotated-order refreshes per group and strategy at each dimension.
+The [rewrite comparison](results/2026-11-08-rewrite-centroid-arm64/README.md)
+repeats 200-row updates and checks every affected group.
