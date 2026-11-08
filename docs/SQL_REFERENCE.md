@@ -2240,9 +2240,14 @@ SELECT action, status, rows_inserted, duration_ms
 FROM pgtrickle.get_refresh_history('order_totals', 5);
 ```
 
-For completed differential refreshes, `refresh_reason_detail` contains a JSON
-document with bounded cost evidence. It includes the input delta size, changed
-output size, output amplification ratio, plan identity, and phase timings.
+Completed differential refreshes that perform a merge can record bounded JSON
+cost evidence in `refresh_reason_detail`. It includes input and changed-output
+row counts, output amplification, plan identity, and the executed merge strategy.
+When `input_delta_rows_may_be_capped` is true, the input count may be a lower
+bound because the change-buffer probe stops at a threshold; the resulting
+amplification ratio can consequently be overstated. Phase timings and
+resource samples are available only for strategies that collect them; the
+algebraic centroid path does not currently record those phase details.
 
 ---
 
@@ -4671,7 +4676,7 @@ Audit log of all refresh operations.
 | `freshness_deadline` | `timestamptz` | SLA deadline (duration schedules only; NULL for cron) |
 | `fixpoint_iteration` | `int` | Iteration of the fixed-point loop (`NULL` for non-cyclic refreshes) |
 | `refresh_reason` | `text` | Stable strategy or FULL reason. Window partition recomputation uses a `WINDOW_*` code without setting `was_full_fallback`. |
-| `refresh_reason_detail` | `text` | Deterministic JSON for window execution or bounded differential cost evidence. Cost evidence includes input and output rows, output amplification, plan identity, resource samples, and phase timings. Partition keys are not stored. |
+| `refresh_reason_detail` | `text` | JSON for window execution or bounded differential cost evidence. Cost evidence can include input and output rows, output amplification, plan identity, resource samples, and phase timings. Input counts may be capped, and available details vary by strategy. Partition keys are not stored. |
 
 ### pgtrickle.pgt_change_tracking
 

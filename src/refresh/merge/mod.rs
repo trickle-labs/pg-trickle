@@ -2032,6 +2032,30 @@ pub fn execute_differential_refresh_with_tuning(
                     })
                 });
                 set_merge_strategy("centroid_algebraic");
+                let mut cost_evidence = crate::refresh::build_differential_cost_evidence(
+                    total_change_count,
+                    applied,
+                );
+                if let Some(fields) = cost_evidence.as_object_mut() {
+                    fields.insert(
+                        "input_delta_rows_may_be_capped".into(),
+                        serde_json::json!(max_ratio > 0.0),
+                    );
+                    fields.insert(
+                        "source_rows_estimate".into(),
+                        serde_json::json!(_total_table_size.max(0)),
+                    );
+                    fields.insert(
+                        "plan_identity".into(),
+                        serde_json::json!(st.defining_query_hash),
+                    );
+                    fields.insert("merge_strategy".into(), serde_json::json!("centroid_algebraic"));
+                }
+                crate::refresh::set_last_cost_evidence(
+                    serde_json::to_string(&cost_evidence).map_err(|e| {
+                        PgTrickleError::InternalError(format!("serialize cost evidence: {e}"))
+                    })?,
+                );
                 crate::refresh::set_last_ann_churn_operations(Some(applied));
                 crate::shmem::record_diff_refresh(true);
                 crate::shmem::record_refresh_mode(true);
@@ -4271,6 +4295,10 @@ pub fn execute_differential_refresh_with_tuning(
     let mut cost_evidence =
         crate::refresh::build_differential_cost_evidence(total_change_count, effective_count);
     if let Some(fields) = cost_evidence.as_object_mut() {
+        fields.insert(
+            "input_delta_rows_may_be_capped".into(),
+            serde_json::json!(max_ratio > 0.0),
+        );
         fields.insert(
             "source_rows_estimate".into(),
             serde_json::json!(_total_table_size.max(0)),

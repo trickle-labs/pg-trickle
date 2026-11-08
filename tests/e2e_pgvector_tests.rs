@@ -1442,6 +1442,15 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
     let strategy: String = sqlx::query_scalar("SELECT h.merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
         .fetch_one(&mut *conn).await.expect("read centroid refresh strategy");
     assert_eq!(strategy, "centroid_algebraic");
+    let cost: String = sqlx::query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&mut *conn).await.expect("read algebraic cost evidence");
+    let cost: serde_json::Value =
+        serde_json::from_str(&cost).expect("parse algebraic cost evidence");
+    assert_eq!(cost["merge_strategy"], "centroid_algebraic");
+    assert_eq!(cost["input_delta_rows"], 2);
+    assert_eq!(cost["output_rows_changed"], 2);
+    assert_eq!(cost["input_delta_rows_may_be_capped"], true);
+    assert!(cost["source_rows_estimate"].as_i64().is_some());
     sqlx::query("ANALYZE centroid_live_st")
         .execute(&mut *conn)
         .await
@@ -1496,6 +1505,7 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
         .await
         .expect("begin live refresh rollback");
     for sql in [
+        "SET LOCAL pg_trickle.differential_max_change_ratio = 0",
         "UPDATE centroid_live_src SET v = '[9,10]' WHERE id = 1",
         "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
     ] {
@@ -1507,6 +1517,11 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
     let changed: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM centroid_live_st WHERE grp = 2 AND centroid::text = '[6,7]') AND (SELECT merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1)")
         .fetch_one(&mut *conn).await.expect("check refresh before rollback");
     assert!(changed, "rollback test must apply an algebraic refresh");
+    let uncapped: String = sqlx::query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&mut *conn).await.expect("read uncapped cost evidence");
+    let uncapped: serde_json::Value =
+        serde_json::from_str(&uncapped).expect("parse uncapped cost evidence");
+    assert_eq!(uncapped["input_delta_rows_may_be_capped"], false);
     sqlx::query("ROLLBACK")
         .execute(&mut *conn)
         .await
@@ -2528,6 +2543,10 @@ async fn test_centroid_source_ahead_fallback_is_reported() {
         safe_and_reported,
         "source-ahead fallback must remain correct, unbound, and observable: {detail}"
     );
+    let evidence: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_stream_tables t CROSS JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
+    let evidence: serde_json::Value =
+        serde_json::from_str(&evidence).expect("parse fallback evidence");
+    assert!(evidence["input_delta_rows_may_be_capped"].is_boolean());
 }
 
 #[tokio::test]
