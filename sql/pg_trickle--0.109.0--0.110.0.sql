@@ -274,11 +274,11 @@ DO $$ BEGIN
 END $$;
 
 ALTER FUNCTION pgtrickle.subscribe_distance(text, text, text, text, text, double precision)
-    SECURITY DEFINER SET search_path = pgtrickle, pg_catalog, pg_temp;
+    SECURITY DEFINER SET search_path = pgtrickle, pg_catalog, pg_temp; -- nosemgrep: sql.security-definer.present -- pinned path; caller ownership is checked.
 ALTER FUNCTION pgtrickle.unsubscribe_distance(text, text)
-    SECURITY DEFINER SET search_path = pgtrickle, pg_catalog, pg_temp;
+    SECURITY DEFINER SET search_path = pgtrickle, pg_catalog, pg_temp; -- nosemgrep: sql.security-definer.present -- pinned path; caller ownership is checked.
 ALTER FUNCTION pgtrickle.list_distance_subscriptions(text)
-    SECURITY DEFINER SET search_path = pgtrickle, pg_catalog, pg_temp;
+    SECURITY DEFINER SET search_path = pgtrickle, pg_catalog, pg_temp; -- nosemgrep: sql.security-definer.present -- pinned path; results are owner-filtered.
 
 CREATE FUNCTION pgtrickle.vector_stream_status_v2() RETURNS SETOF jsonb
 LANGUAGE c STRICT SECURITY DEFINER SET search_path = pgtrickle, pg_catalog, pg_temp

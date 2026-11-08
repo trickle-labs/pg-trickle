@@ -2464,6 +2464,7 @@ impl LifecycleDistanceSnapshot {
                 "pg_temp.{}",
                 quote_identifier(&format!("__pgt_distance_pre_{}", self.pgt_id))
             );
+            // nosemgrep: rust.spi.query.dynamic-format -- snapshot is an internally generated, quoted pg_temp name.
             let rows_deleted = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {snapshot}"))
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .ok_or_else(|| {

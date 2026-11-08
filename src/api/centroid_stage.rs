@@ -159,7 +159,7 @@ fn store_centroid_state(st: &StreamTableMeta, staged: &str) -> Result<(), PgTric
         &[st.pgt_id.into()],
     )
     .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
-    // nosemgrep: rust.spi.run.dynamic-format -- staged is an internally generated, quoted pg_temp name.
+    // nosemgrep: rust.spi.run_with_args.dynamic-format -- staged is an internally generated, quoted pg_temp name.
     Spi::run_with_args(
         &format!(
             "INSERT INTO pgtrickle.pgt_centroid_groups (pgt_id, row_id, group_count, state, state_checksum) \
@@ -1020,7 +1020,7 @@ pub(crate) fn rebase_after_rescan(
         return Ok(false);
     };
     let staged = stage_centroid_initialization(&st)?;
-    // nosemgrep: rust.spi.get_one.dynamic-format -- staged is an internally generated, quoted temp relation.
+    // nosemgrep: rust.spi.query.dynamic-format -- staged is an internally generated, quoted temp relation.
     let qualified = Spi::get_one::<bool>(&format!(
         "SELECT NOT EXISTS (SELECT 1 FROM {staged} s CROSS JOIN LATERAL \
          (SELECT (pg_catalog.cardinality(s.__pgt_centroid_state) - 3) / 2 AS dim) d \
@@ -1033,7 +1033,7 @@ pub(crate) fn rebase_after_rescan(
     }
     let target = crate::sql_builder::qualified(&st.pgt_schema, &st.pgt_name);
     let column = crate::sql_builder::ident(column);
-    // nosemgrep: rust.spi.get_one.dynamic-format -- relations and sender are internally generated or catalog-derived and quoted.
+    // nosemgrep: rust.spi.query.dynamic-format -- relations and sender are internally generated or catalog-derived and quoted.
     let matches = Spi::get_one::<bool>(&format!(
         "WITH expected AS MATERIALIZED (SELECT __pgt_row_id, __pgt_group_count AS n, {sender}({column}) AS value FROM {staged}), \
          actual AS MATERIALIZED (SELECT __pgt_row_id, __pgt_count AS n, {sender}({column}) AS value FROM {target}) \

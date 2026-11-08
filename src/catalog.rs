@@ -763,6 +763,7 @@ impl StreamTableMeta {
         } else {
             ANN_CHURN_UNKNOWN
         };
+        // nosemgrep: rust.spi.run_with_args.dynamic-format -- epoch and churn are static SQL fragments; values are bound.
         Spi::run_with_args(
             &format!(
                 "UPDATE pgtrickle.pgt_stream_tables \
@@ -804,6 +805,7 @@ impl StreamTableMeta {
         } else {
             ANN_CHURN_UNKNOWN
         };
+        // nosemgrep: rust.spi.run_with_args.dynamic-format -- epoch and churn are static SQL fragments; values are bound.
         Spi::run_with_args(
             &format!(
                 "UPDATE pgtrickle.pgt_stream_tables \
@@ -837,6 +839,7 @@ impl StreamTableMeta {
         } else {
             ANN_CHURN_UNKNOWN
         };
+        // nosemgrep: rust.spi.run_with_args.dynamic-format -- epoch and churn are static SQL fragments; values are bound.
         Spi::run_with_args(
             &format!(
                 "UPDATE pgtrickle.pgt_stream_tables \
@@ -876,6 +879,7 @@ impl StreamTableMeta {
         } else {
             ANN_CHURN_UNKNOWN
         };
+        // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- epoch and churn are static SQL fragments; values are bound.
         Spi::get_one_with_args::<TimestampWithTimeZone>(
             &format!(
                 "UPDATE pgtrickle.pgt_stream_tables \
