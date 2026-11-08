@@ -35,3 +35,10 @@ catalog and DVM fixtures without loading the packaged extension. An initial
 build failed after another checkout shared its Cargo target directory; cleaning
 the `pg_trickle` package artifacts and rebuilding resolved the stale-library
 field mismatch. The successful run is recorded in [integration.log](integration.log).
+
+Against the packaged pgvector 0.8.7 image above, the row-security suite passed
+19 tests, the WAL row-security suite passed 4, and the v0.87.8, v0.87.10,
+v0.87.11 and v0.87.12 security suites passed 8, 6, 6 and 11 tests respectively.
+Those counts include the shared oracle unit tests compiled into each binary.
+The individual results are in [security.log](security.log); they do not replace
+the static Semgrep or Gitleaks checks.

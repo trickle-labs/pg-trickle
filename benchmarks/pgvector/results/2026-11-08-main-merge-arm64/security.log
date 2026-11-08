@@ -1,0 +1,91 @@
+   Compiling pg_trickle v0.110.0 (/private/tmp/pg-trickle-1384)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.85s
+     Running tests/e2e_rls_tests.rs (target/debug/deps/e2e_rls_tests-1d9a720344883e5c)
+
+running 19 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test test_cdc_trigger_functions_security_definer ... ok
+test test_all_security_definer_trigger_fns_have_search_path ... ok
+test test_change_buffer_rls_disabled ... ok
+test test_disable_rls_on_source_triggers_reinit ... ok
+test test_force_rls_on_source_triggers_reinit ... ok
+test test_enable_rls_on_source_triggers_reinit ... ok
+test test_ivm_trigger_functions_security_definer ... ok
+test test_rls_bypass_owner_differential_tracks_source_mutations ... ok
+test test_rls_differential_allowed_for_superuser_owner ... ok
+test test_rls_differential_allowed_for_bypassrls_owner_until_revoked ... ok
+test test_rls_enabled_after_immediate_creation_fails_closed ... ok
+test test_rls_on_source_does_not_filter_stream_table ... ok
+test test_rls_on_source_rejects_explicit_immediate ... ok
+test test_rls_on_source_rejects_explicit_differential ... ok
+test test_rls_on_stream_table_filters_reads ... ok
+test test_rls_on_stream_table_immediate_mode ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 40.88s
+
+     Running tests/e2e_rls_wal_tests.rs (target/debug/deps/e2e_rls_wal_tests-7eb9fad1c4b92465)
+
+running 4 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test test_rls_bypassrls_owner_differential_wal_matches_query ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.21s
+
+     Running tests/e2e_v08710_security_tests.rs (target/debug/deps/e2e_v08710_security_tests-dae5bb9d25874f3a)
+
+running 6 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test test_v08710_lifecycle_preflight_reports_exact_missing_grants ... ok
+test test_v08710_bulk_lifecycle_authorizes_all_targets_before_mutation ... ok
+test test_v08710_owner_lifecycle_enforces_caller_owner ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.26s
+
+     Running tests/e2e_v08711_snapshot_security_tests.rs (target/debug/deps/e2e_v08711_snapshot_security_tests-e2c2e3ae7e556e55)
+
+running 6 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test test_v08711_snapshot_name_reuse_rejected_without_dropping_lookalike ... ok
+test test_v08711_snapshot_restore_select_and_transfer_policy ... ok
+test test_v08711_snapshot_target_schema_and_owner_policy ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.24s
+
+     Running tests/e2e_v08712_publication_security_tests.rs (target/debug/deps/e2e_v08712_publication_security_tests-76cf40ea2c7c868e)
+
+running 11 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test test_v08712_publication_binding_catalog_shape_is_compatible ... ok
+test test_v08712_bulk_drop_prevalidates_all_bindings_before_mutation ... ok
+test test_v08712_publication_functions_pin_definer_boundary ... ok
+test test_v08712_publication_requires_database_create_and_leaves_no_partial_state ... ok
+test test_v08712_publication_uses_caller_privileges_and_owner ... ok
+test test_v08712_renamed_publication_is_not_dropped_by_name ... ok
+test test_v08712_same_name_recreation_is_not_dropped ... ok
+test test_v08712_stream_drop_and_repair_reject_stale_binding ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.40s
+
+     Running tests/e2e_v0878_security_tests.rs (target/debug/deps/e2e_v0878_security_tests-bf215b8a3a4d5800)
+
+running 8 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test test_v0878_private_buffer_probe_rolls_back_refresh ... ok
+test test_v0878_refresh_paths_run_as_stream_owner ... ok
+test test_v0878_revoked_source_preserves_state_and_stages ... ok
+test test_v0878_reinitialize_uses_stream_owner ... ok
+test test_v0878_source_rls_uses_stream_owner ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.69s
