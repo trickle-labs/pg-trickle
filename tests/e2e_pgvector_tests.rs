@@ -2949,6 +2949,7 @@ async fn test_centroid_source_ahead_fallback_is_reported() {
         "CREATE TABLE centroid_ahead_live_src (id int PRIMARY KEY, grp int, v vector(2))",
         "INSERT INTO centroid_ahead_live_src VALUES (1, 1, '[1,2]')",
         "SELECT pgtrickle.create_stream_table('centroid_ahead_live_st', $$SELECT grp, avg(v) AS centroid FROM centroid_ahead_live_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.centroid_ahead_live_st'])",
         "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_ahead_live_st'::regclass",
         "SELECT pgtrickle.refresh_stream_table('centroid_ahead_live_st')",
     ]).await;
