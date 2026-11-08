@@ -8658,6 +8658,10 @@ async fn test_vector_diagnostics_idle_is_catalog_only_and_hides_query_vector() {
     .await;
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.idle_vector_st'])")
         .await;
+    db.execute(
+        "CREATE INDEX idle_vector_ann ON idle_vector_st USING hnsw (embedding vector_l2_ops)",
+    )
+    .await;
     db.execute("SELECT pgtrickle.subscribe_distance('idle_vector_st', 'idle_alert', 'embedding', '[0.123,0.456,0.789]', '<->', 0.5)").await;
     db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '30 days' WHERE pgt_relid = 'idle_vector_st'::regclass").await;
     db.execute("CREATE ROLE idle_vector_reader").await;
@@ -8674,7 +8678,7 @@ async fn test_vector_diagnostics_idle_is_catalog_only_and_hides_query_vector() {
         .execute(&mut *tx)
         .await
         .expect("set reader role");
-    let before: (i64, i64) = sqlx::query_as("SELECT pg_stat_get_xact_tuples_returned('idle_vector_st'::regclass)::bigint, pg_stat_get_xact_tuples_fetched('idle_vector_st'::regclass)::bigint")
+    let before: (i64, i64, i64, i64) = sqlx::query_as("SELECT pg_stat_get_xact_tuples_returned('idle_vector_st'::regclass)::bigint, pg_stat_get_xact_tuples_fetched('idle_vector_st'::regclass)::bigint, pg_stat_get_xact_tuples_returned('idle_vector_source'::regclass)::bigint, pg_stat_get_xact_tuples_fetched('idle_vector_source'::regclass)::bigint")
         .fetch_one(&mut *tx).await.expect("read initial vector table counters");
     let status: serde_json::Value = sqlx::query_scalar(
         "SELECT v FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'idle_vector_st'",
@@ -8682,7 +8686,13 @@ async fn test_vector_diagnostics_idle_is_catalog_only_and_hides_query_vector() {
     .fetch_one(&mut *tx)
     .await
     .expect("inspect idle vector stream");
-    let after: (i64, i64) = sqlx::query_as("SELECT pg_stat_get_xact_tuples_returned('idle_vector_st'::regclass)::bigint, pg_stat_get_xact_tuples_fetched('idle_vector_st'::regclass)::bigint")
+    let index: serde_json::Value = sqlx::query_scalar(
+        "SELECT v FROM pgtrickle.ann_index_status_v2() v WHERE v->>'index' = 'idle_vector_ann'",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("inspect idle vector index");
+    let after: (i64, i64, i64, i64) = sqlx::query_as("SELECT pg_stat_get_xact_tuples_returned('idle_vector_st'::regclass)::bigint, pg_stat_get_xact_tuples_fetched('idle_vector_st'::regclass)::bigint, pg_stat_get_xact_tuples_returned('idle_vector_source'::regclass)::bigint, pg_stat_get_xact_tuples_fetched('idle_vector_source'::regclass)::bigint")
         .fetch_one(&mut *tx).await.expect("read final vector table counters");
     assert_eq!(
         before, after,
@@ -8693,8 +8703,10 @@ async fn test_vector_diagnostics_idle_is_catalog_only_and_hides_query_vector() {
     assert!(status["backlog"].is_null());
     assert!(status["embedding_freshness_reason"].is_string());
     assert!(status["backlog_reason"].is_string());
+    assert_eq!(index["valid"], true);
+    assert_eq!(index["opclass"], "vector_l2_ops");
     assert!(
-        !status.to_string().contains("0.123"),
+        !status.to_string().contains("0.123") && !index.to_string().contains("0.123"),
         "diagnostics must not expose the subscription vector"
     );
     tx.rollback().await.expect("end idle diagnostic inspection");
