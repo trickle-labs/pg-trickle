@@ -5,7 +5,8 @@
 # must not block PRs or push-to-main gating. They run daily at 20:00 UTC and on manual
 # dispatch, matching the pattern established by stability-tests.yml.
 #
-#   SF-1  (150K orders, 3 cycles): timeout 180 min — all 15 tests
+#   SF-1 broad suite (150K orders, 3 cycles): timeout 240 min
+#   SF-1 DIFF vs IMMEDIATE (150K orders, 3 cycles): timeout 360 min
 #   SF-10 (1.5M orders, 2 cycles): timeout 120 min — differential_correctness only
 #
 # SF-10 runs only test_tpch_differential_correctness because:
@@ -14,9 +15,9 @@
 #   - SF-1 already covers all 15 tests for broad correctness coverage
 #   - SF-10 adds scale-factor coverage: hash collisions, sort spill, plan changes
 #
-# Per-test hard limit: nextest slow-timeout 90 min (terminate-after=1) prevents
-# any single test from hanging indefinitely (e.g., WAL/disk exhaustion during
-# initial materialisation of 6M-lineitem queries).
+# The DIFF-vs-IMMEDIATE test runs separately because q05's first SF-1 mutation
+# cycle took 57 minutes; this keeps the complete three-cycle test within the
+# runner's job limit without reducing query or mutation coverage.
 # =============================================================================
 name: TPC-H Nightly
 
@@ -47,12 +48,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - scale: "SF-1"
+          - scale: "SF-1 broad suite"
             tpch_scale: "1.0"
             tpch_cycles: "3"
-            timeout_minutes: 180
-            # SF-1: run all 15 tests — full breadth coverage
-            filter_expr: ""
+            timeout_minutes: 240
+            # Run every SF-1 test except the separately budgeted long test.
+            filter_expr: "not test(test_tpch_differential_vs_immediate)"
+          - scale: "SF-1 DIFF vs IMMEDIATE"
+            tpch_scale: "1.0"
+            tpch_cycles: "3"
+            timeout_minutes: 360
+            filter_expr: "test(test_tpch_differential_vs_immediate)"
           - scale: "SF-10"
             tpch_scale: "10.0"
             tpch_cycles: "2"
