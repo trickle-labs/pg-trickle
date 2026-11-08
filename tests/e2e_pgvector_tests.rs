@@ -6310,9 +6310,11 @@ async fn test_ann_worker_retries_after_restart_during_concurrent_reindex() {
         invalid_before > 0,
         "interrupted concurrent reindex should leave an invalid index for operator inspection"
     );
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.ann_restart_live_stream'])")
+        .await;
     db.execute("INSERT INTO ann_restart_live_source VALUES (2, '[0,1,0]')")
         .await;
-    db.refresh_st("ann_restart_live_stream").await;
+    db.refresh_st_with_retry("ann_restart_live_stream").await;
     let retried = ann_worker_command(&db, &database, "postgres", request, "30s")
         .output()
         .await
