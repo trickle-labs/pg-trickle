@@ -98,3 +98,5 @@ The [repeated centroid comparison](results/2026-11-08-repeated-centroid-arm64/RE
 records 20 rotated-order refreshes per group and strategy at each dimension.
 The [rewrite comparison](results/2026-11-08-rewrite-centroid-arm64/README.md)
 repeats 200-row updates and checks every affected group.
+The [scheduler-isolated rewrite run](results/2026-11-08-paused-rewrite-arm64/README.md)
+repeats that 384-dimensional workload with manually controlled refreshes.
