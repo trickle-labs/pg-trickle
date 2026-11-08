@@ -1,0 +1,8 @@
+   Compiling pg_trickle v0.110.0 (/private/tmp/pg-trickle-1384)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.26s
+     Running tests/e2e_upgrade_tests.rs (target/debug/deps/e2e_upgrade_tests-9954e42feb14e67a)
+
+running 1 test
+test test_upgrade_embedding_helpers_from_0109 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 2.18s

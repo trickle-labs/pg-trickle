@@ -1,0 +1,12 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running tests/e2e_pgvector_hybrid_tests.rs (target/debug/deps/e2e_pgvector_hybrid_tests-6e4f875e37423f62)
+
+running 6 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test test_partitioned_corpus_parent_rls_and_leaf_privileges ... ok
+test test_hybrid_candidates_refresh_and_tenant_isolation ... ok
+test test_tenant_tutorial_sql_runs_with_isolated_reader ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.30s
