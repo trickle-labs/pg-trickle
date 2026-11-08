@@ -1519,6 +1519,9 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
         fallback,
         "corrupt state must be rebuilt after the native group rescan"
     );
+    let fallback_reason: String = sqlx::query_scalar("SELECT h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' FROM pgtrickle.pgt_stream_tables t CROSS JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h WHERE t.pgt_relid = 'centroid_live_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("read rejected-state fallback reason");
+    assert_eq!(fallback_reason, "STATE_REJECTED");
     let explanation: String =
         sqlx::query_scalar("SELECT pgtrickle.explain_stream_table('centroid_live_st')")
             .fetch_one(&mut *conn)
@@ -2044,7 +2047,12 @@ async fn test_centroid_missing_state_rebuilds_or_stays_unbound() {
         rebuilt,
         "missing state should be rebuilt after a verified group rescan"
     );
+    let fallback_reason: String = db.query_scalar("SELECT h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' FROM pgtrickle.pgt_stream_tables t CROSS JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h WHERE t.pgt_relid = 'centroid_missing_st'::regclass").await;
+    assert_eq!(fallback_reason, "STATE_MISSING");
     db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
         "UPDATE centroid_missing_src SET v = '[7]' WHERE id = 1",
         "SELECT pgtrickle.refresh_stream_table('centroid_missing_st')",
     ])
@@ -2055,6 +2063,9 @@ async fn test_centroid_missing_state_rebuilds_or_stays_unbound() {
         "verified recovery must resume algebraic maintenance"
     );
     db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
         "CREATE TABLE centroid_missing_unsafe_src (id int PRIMARY KEY, grp int, v vector(1))",
         "INSERT INTO centroid_missing_unsafe_src VALUES (1, 1, '[1e20]'), (2, 1, '[-1e20]'), (3, 1, '[1]')",
         "SELECT pgtrickle.create_stream_table('centroid_missing_unsafe_st', $$SELECT grp, avg(v) AS centroid FROM centroid_missing_unsafe_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
@@ -2070,6 +2081,9 @@ async fn test_centroid_missing_state_rebuilds_or_stays_unbound() {
         "unsafe missing-state rebuild must leave an unbound marker"
     );
     db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
         "UPDATE centroid_missing_unsafe_src SET v = '[3]' WHERE id = 3",
         "SELECT pgtrickle.refresh_stream_table('centroid_missing_unsafe_st')",
     ])
@@ -2104,6 +2118,10 @@ async fn test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh() {
         "first large rewrite must demonstrate a change-limit rebase"
     );
     db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
         "UPDATE centroid_rewrite_src SET v = '[2.5]' WHERE id = 1",
         "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
     ])
@@ -2114,6 +2132,10 @@ async fn test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh() {
         "productive algebraic maintenance must clear the prior rebase marker"
     );
     db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
         "UPDATE centroid_rewrite_src SET v = '[2]'",
         "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
     ])
@@ -2152,6 +2174,10 @@ async fn test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh() {
         "back-to-back change-limit failures must not rebuild all private groups repeatedly"
     );
     db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
         "UPDATE centroid_rewrite_src SET v = '[4]'",
         "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
     ])
@@ -2162,6 +2188,10 @@ async fn test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh() {
         "later high-rewrite refreshes must remain correct without another rebase"
     );
     db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
         "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_rewrite_st'::regclass",
         "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
         "UPDATE centroid_rewrite_src SET v = '[5]' WHERE id = 1",
@@ -2194,6 +2224,9 @@ async fn test_centroid_unsafe_rebase_remains_unbound_without_retry_storm() {
         "fixture must exceed the numerical error guard"
     );
     db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
         "UPDATE centroid_unstable_src SET v = '[2]' WHERE id = 3",
         "SELECT pgtrickle.refresh_stream_table('centroid_unstable_st')",
     ])
@@ -2204,6 +2237,9 @@ async fn test_centroid_unsafe_rebase_remains_unbound_without_retry_storm() {
         "unsafe rebuild must stay unbound and report its trigger"
     );
     db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
         "UPDATE centroid_unstable_src SET v = '[3]' WHERE id = 3",
         "SELECT pgtrickle.refresh_stream_table('centroid_unstable_st')",
     ])
@@ -2213,6 +2249,8 @@ async fn test_centroid_unsafe_rebase_remains_unbound_without_retry_storm() {
         no_retry,
         "unbound state must use the safe strategy without another rebuild"
     );
+    let fallback_reason: String = db.query_scalar("SELECT h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' FROM pgtrickle.pgt_stream_tables t CROSS JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h WHERE t.pgt_relid = 'centroid_unstable_st'::regclass").await;
+    assert_eq!(fallback_reason, "STATE_UNBOUND");
 }
 
 #[tokio::test]
@@ -2335,6 +2373,50 @@ async fn test_vector_downstream_uses_relocated_extension_schema() {
     assert!(
         correct,
         "downstream identity must use the relocated pgvector sender"
+    );
+}
+
+#[tokio::test]
+async fn test_centroid_source_ahead_fallback_is_reported() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE centroid_ahead_live_src (id int PRIMARY KEY, grp int, v vector(2))",
+        "INSERT INTO centroid_ahead_live_src VALUES (1, 1, '[1,2]')",
+        "SELECT pgtrickle.create_stream_table('centroid_ahead_live_st', $$SELECT grp, avg(v) AS centroid FROM centroid_ahead_live_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_ahead_live_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_ahead_live_st')",
+    ]).await;
+    let bound: bool = db.query_scalar("SELECT COALESCE(c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL, false) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
+    assert!(bound, "source-ahead fixture requires a bound initial state");
+    db.execute("UPDATE centroid_ahead_live_src SET v = '[3,4]' WHERE id = 1")
+        .await;
+    let buffer: String = db.query_scalar("SELECT format('%I.%I', 'pgtrickle_changes', 'changes_' || COALESCE(source_stable_name, source_relid::text)) FROM pgtrickle.pgt_change_tracking WHERE source_relid = 'centroid_ahead_live_src'::regclass::oid").await;
+    let moved: i64 = db.query_scalar(&format!("WITH moved AS (UPDATE {buffer} SET lsn = 'FF/FFFFFFFF'::pg_lsn WHERE action = 'D' RETURNING 1) SELECT count(*)::bigint FROM moved")).await;
+    assert_eq!(
+        moved, 1,
+        "fixture must put one captured change ahead of the frontier"
+    );
+    let still_bound: bool = db.query_scalar("SELECT COALESCE(c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL, false) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
+    assert!(
+        still_bound,
+        "the injected ahead row must not itself unbind state"
+    );
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('centroid_ahead_live_st')",
+    ])
+    .await;
+    let safe_and_reported: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND h.merge_strategy_used <> 'centroid_algebraic' AND h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' = 'SOURCE_AHEAD_OF_FRONTIER' AND s.centroid::text = '[3,4]' FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_ahead_live_st s WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
+    let detail: String = db.query_scalar("SELECT format('baseline=%s strategy=%s detail=%s centroid=%s', coalesce(c.baseline_frontier::text, 'null'), h.merge_strategy_used, coalesce(h.refresh_reason_detail, 'null'), s.centroid::text) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_ahead_live_st s WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
+    assert!(
+        safe_and_reported,
+        "source-ahead fallback must remain correct, unbound, and observable: {detail}"
     );
 }
 

@@ -1950,6 +1950,7 @@ pub fn execute_differential_refresh_with_tuning(
     let incremental_window_state = ready_window_state;
     let mut centroid_rebase_reason = None;
     let mut centroid_missing_state = false;
+    let mut centroid_fallback = None;
 
     if crate::config::pg_trickle_enable_centroid_state()
         && Spi::get_one::<pg_sys::Oid>("SELECT pg_catalog.to_regclass('pgtrickle.pgt_centroid_states')::oid")
@@ -1984,6 +1985,9 @@ pub fn execute_differential_refresh_with_tuning(
         {
             centroid_missing_state = true;
             centroid_rebase_reason = Some("centroid private state is missing".into());
+            centroid_fallback = Some("STATE_MISSING");
+        } else if state_bound == Some(false) {
+            centroid_fallback = Some("STATE_UNBOUND");
         }
         if state_bound == Some(true) {
         let subtxn = crate::scheduler::SubTransaction::begin();
@@ -2035,6 +2039,11 @@ pub fn execute_differential_refresh_with_tuning(
             }
             Err(reason) => {
                 subtxn.rollback();
+                centroid_fallback = Some(match &reason {
+                    PgTrickleError::InvalidArgument(detail) if detail == "centroid source snapshot is ahead of the frontier" => "SOURCE_AHEAD_OF_FRONTIER",
+                    PgTrickleError::InvalidArgument(detail) if detail.starts_with("centroid candidate rejected:") => "STATE_REJECTED",
+                    _ => "STAGING_FAILED",
+                });
                 if let PgTrickleError::InvalidArgument(detail) = &reason
                     && (detail.starts_with("centroid candidate rejected: centroid ")
                         || detail.starts_with("centroid candidate rejected: invalid argument: centroid "))
@@ -4278,6 +4287,12 @@ pub fn execute_differential_refresh_with_tuning(
         fields.insert("merge_strategy".into(), serde_json::json!(strategy_label));
         if let Some(rebase) = centroid_rebase {
             fields.insert("centroid_rebase".into(), rebase);
+        }
+        if let Some(reason) = centroid_fallback {
+            fields.insert(
+                "centroid_fallback".into(),
+                serde_json::json!({"reason": reason}),
+            );
         }
         fields.insert("cache_path".into(), serde_json::json!(cache_path));
         fields.insert("planner_hint_tier".into(), serde_json::json!(hint_tier));

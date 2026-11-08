@@ -56,4 +56,5 @@ During development, two preliminary one-row smoke runs at 384 dimensions and
 did not use the expected algebraic strategy. They occurred before detailed
 failure diagnostics were added, so the cause is unknown. Thirteen subsequent
 sequential runs and forty subsequent runs in pairs of isolated containers passed;
-those passes do not explain or rule out the earlier failures.
+ten further paired-container runs with 50 rounds each also passed, checking
+3,000 refreshes. Those passes do not explain or rule out the earlier failures.

@@ -2754,6 +2754,8 @@ private state; it binds the result only when the locked source snapshot and
 visible rows match exactly. Refresh history reports this as
 `centroid_rebase_group_rescan`. Cost evidence records the trigger and whether
 the rebuild bound state; an unsuccessful attempt may scan all source groups.
+For eligible refreshes that use the fallback, cost evidence also records a
+`centroid_fallback` reason such as `SOURCE_AHEAD_OF_FRONTIER` or `STATE_UNBOUND`.
 If it cannot rebuild, state stays unbound without automatically retrying; a protected FULL refresh can
 establish it again.
 To avoid repeated whole-state rebuilds under sustained rewrites, a change-limit
