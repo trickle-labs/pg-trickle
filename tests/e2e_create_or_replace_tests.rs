@@ -368,11 +368,12 @@ async fn test_cor_mode_switch_differential_to_full() {
 async fn test_cor_refresh_mode_auto_over_full() {
     let db = E2eDb::new().await.with_extension().await;
 
-    db.execute("CREATE TABLE cor_auto_src (id INT PRIMARY KEY)")
+    db.execute("CREATE TABLE cor_auto_src (id INT PRIMARY KEY, k INT)")
         .await;
-    db.execute("INSERT INTO cor_auto_src VALUES (1)").await;
+    db.execute("INSERT INTO cor_auto_src SELECT g, g % 4 FROM generate_series(1, 20) g")
+        .await;
 
-    let query = "SELECT id FROM cor_auto_src";
+    let query = "SELECT k, count(*) AS n FROM cor_auto_src GROUP BY k";
     db.create_st("cor_auto_oracle", query, "1m", "AUTO").await;
     db.create_st("cor_auto_explicit", query, "1m", "FULL").await;
     create_or_replace(&db, "cor_auto_explicit", query, "1m", "AUTO").await;
@@ -392,18 +393,19 @@ async fn test_cor_refresh_mode_auto_over_full() {
 
     assert_eq!(oracle, "DIFFERENTIAL/AUTO");
     assert_eq!(actual, oracle);
+    db.assert_st_matches_query("cor_auto_explicit", query).await;
 }
 
 #[tokio::test]
 async fn test_cor_default_refresh_mode_auto_over_full() {
     let db = E2eDb::new().await.with_extension().await;
 
-    db.execute("CREATE TABLE cor_default_auto_src (id INT PRIMARY KEY)")
+    db.execute("CREATE TABLE cor_default_auto_src (id INT PRIMARY KEY, k INT)")
         .await;
-    db.execute("INSERT INTO cor_default_auto_src VALUES (1)")
+    db.execute("INSERT INTO cor_default_auto_src SELECT g, g % 4 FROM generate_series(1, 20) g")
         .await;
 
-    let query = "SELECT id FROM cor_default_auto_src";
+    let query = "SELECT k, count(*) AS n FROM cor_default_auto_src GROUP BY k";
     db.create_st("cor_default_auto_oracle", query, "1m", "AUTO")
         .await;
     db.create_st("cor_default_auto", query, "1m", "FULL").await;
@@ -428,6 +430,7 @@ async fn test_cor_default_refresh_mode_auto_over_full() {
 
     assert_eq!(oracle, "DIFFERENTIAL/AUTO");
     assert_eq!(actual, oracle);
+    db.assert_st_matches_query("cor_default_auto", query).await;
 }
 
 // ── 10. Incompatible schema change → full rebuild ──────────────────────

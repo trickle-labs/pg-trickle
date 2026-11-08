@@ -3182,6 +3182,73 @@ pub(crate) fn quote_identifier(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// Differential materializations keep these auxiliary columns in query-output order.
+pub(crate) fn differential_storage_auxiliary_columns(query: &str) -> Vec<(String, String)> {
+    let Ok(tree) = crate::dvm::parse_defining_query(query) else {
+        return Vec::new();
+    };
+    let mut columns = Vec::new();
+    if tree.needs_dual_count() {
+        columns.extend([
+            ("__pgt_count_l".into(), "BIGINT NOT NULL DEFAULT 0".into()),
+            ("__pgt_count_r".into(), "BIGINT NOT NULL DEFAULT 0".into()),
+        ]);
+    } else if tree.needs_pgt_count() || tree.needs_union_dedup_count() {
+        columns.push(("__pgt_count".into(), "BIGINT NOT NULL DEFAULT 0".into()));
+    }
+
+    for (sum, count, _) in tree.avg_aux_columns() {
+        columns.push((sum, "NUMERIC NOT NULL DEFAULT 0".into()));
+        columns.push((count, "BIGINT NOT NULL DEFAULT 0".into()));
+    }
+    let statistical_types = tree.statistical_aux_types();
+    for (column, _) in tree
+        .sum2_aux_columns()
+        .into_iter()
+        .chain(tree.covar_aux_columns())
+    {
+        let ty = statistical_types
+            .iter()
+            .find(|(name, _)| name == &column)
+            .map(|(_, ty)| ty.as_str())
+            .unwrap_or("numeric");
+        columns.push((column, format!("{ty} NOT NULL DEFAULT 0")));
+    }
+    for (column, _) in tree.nonnull_aux_columns() {
+        let definition = if column.starts_with("__pgt_aux_special_") {
+            "JSONB NOT NULL DEFAULT 'null'::jsonb"
+        } else {
+            "BIGINT NOT NULL DEFAULT 0"
+        };
+        columns.push((column, definition.into()));
+    }
+    columns
+}
+
+pub(crate) fn ensure_differential_storage_auxiliary_columns(
+    schema: &str,
+    table_name: &str,
+    query: &str,
+) -> Result<(), PgTrickleError> {
+    let table = format!(
+        "{}.{}",
+        quote_identifier(schema),
+        quote_identifier(table_name)
+    );
+    for (column, definition) in differential_storage_auxiliary_columns(query) {
+        Spi::run(&format!(
+            "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {} {definition}",
+            quote_identifier(&column),
+        ))
+        .map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "Failed to add differential state column {column}: {e}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// Inject `COUNT(*) AS __pgt_count` into an aggregate/distinct defining query
 /// so that the full refresh populates the auxiliary count column.
 ///
