@@ -10737,6 +10737,36 @@ async fn test_embedding_stream_table_quoted_names_and_vector_schema() {
 }
 
 #[tokio::test]
+async fn test_embedding_stream_table_long_names_have_distinct_valid_indexes() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE helper_long_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    let prefix = "long_corpus_".to_string() + &"x".repeat(45);
+    let first = format!("{prefix}a");
+    let second = format!("{prefix}b");
+    for name in [&first, &second] {
+        db.execute(&format!(
+            "SELECT * FROM pgtrickle.embedding_stream_table('{name}', 'helper_long_src', 'embedding')"
+        ))
+        .await;
+    }
+    let indexes: Vec<(String,)> = sqlx::query_as(
+        "SELECT c.relname::text FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+         JOIN pg_am am ON am.oid = c.relam WHERE i.indrelid IN ($1::regclass, $2::regclass) \
+         AND am.amname = 'hnsw' AND i.indisvalid AND i.indisready ORDER BY c.relname",
+    )
+    .bind(&first)
+    .bind(&second)
+    .fetch_all(&db.pool)
+    .await
+    .expect("inspect long-name indexes");
+    assert_eq!(indexes.len(), 2);
+    assert_ne!(indexes[0].0, indexes[1].0);
+    assert!(indexes.iter().all(|(name,)| name.len() <= 63));
+}
+
+#[tokio::test]
 async fn test_embedding_stream_table_dry_run_rejects_invalid_source_types() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE scalar_source (id int PRIMARY KEY, embedding int)")
