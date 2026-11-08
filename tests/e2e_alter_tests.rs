@@ -74,11 +74,12 @@ async fn test_alter_refresh_mode() {
 async fn test_alter_refresh_mode_auto_from_full_and_differential() {
     let db = E2eDb::new().await.with_extension().await;
 
-    db.execute("CREATE TABLE al_auto_mode (id INT PRIMARY KEY)")
+    db.execute("CREATE TABLE al_auto_mode (id INT PRIMARY KEY, k INT)")
         .await;
-    db.execute("INSERT INTO al_auto_mode VALUES (1)").await;
+    db.execute("INSERT INTO al_auto_mode SELECT g, g % 4 FROM generate_series(1, 20) g")
+        .await;
 
-    let query = "SELECT id FROM al_auto_mode";
+    let query = "SELECT k, count(*) AS n FROM al_auto_mode GROUP BY k";
     db.create_st("al_auto_mode_oracle", query, "1m", "AUTO")
         .await;
     let oracle: String = db
@@ -103,7 +104,71 @@ async fn test_alter_refresh_mode_auto_from_full_and_differential() {
             ))
             .await;
         assert_eq!(actual, oracle, "AUTO resolution for {starting_mode}");
+        db.assert_st_matches_query(name, query).await;
     }
+}
+
+#[tokio::test]
+async fn test_alter_refresh_mode_full_to_differential_aggregate() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE al_full_to_diff_src (id INT PRIMARY KEY, k INT, val INT)")
+        .await;
+    db.execute(
+        "INSERT INTO al_full_to_diff_src \
+         SELECT g, g % 4, g * 10 FROM generate_series(1, 20) g",
+    )
+    .await;
+
+    let query = "SELECT k, count(*) AS n, avg(val) AS average, sum(val) AS total \
+                 FROM al_full_to_diff_src GROUP BY k";
+    db.create_st("al_full_to_diff_st", query, "1m", "FULL")
+        .await;
+    db.alter_st("al_full_to_diff_st", "refresh_mode => 'DIFFERENTIAL'")
+        .await;
+
+    let (_, mode, populated, _) = db.pgt_status("al_full_to_diff_st").await;
+    assert_eq!(mode, "DIFFERENTIAL");
+    assert!(populated);
+    db.assert_st_matches_query("al_full_to_diff_st", query)
+        .await;
+
+    db.execute("INSERT INTO al_full_to_diff_src VALUES (21, 1, 210)")
+        .await;
+    db.refresh_st("al_full_to_diff_st").await;
+    db.assert_st_matches_query("al_full_to_diff_st", query)
+        .await;
+
+    db.alter_st("al_full_to_diff_st", "refresh_mode => 'FULL'")
+        .await;
+    db.assert_st_matches_query("al_full_to_diff_st", query)
+        .await;
+}
+
+#[tokio::test]
+async fn test_alter_full_to_differential_uses_saved_search_path() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "CREATE SCHEMA al_context",
+        "CREATE TABLE al_context.source (id INT PRIMARY KEY, k INT, val INT)",
+        "INSERT INTO al_context.source VALUES (1, 1, 10), (2, 1, 20)",
+        "SET search_path = al_context, public",
+        "SELECT pgtrickle.create_stream_table('public.al_context_st', \
+         'SELECT k, avg(val) AS mean FROM source GROUP BY k', '1m', 'FULL')",
+        "RESET search_path",
+    ])
+    .await;
+
+    db.alter_st("public.al_context_st", "refresh_mode => 'DIFFERENTIAL'")
+        .await;
+    db.execute("INSERT INTO al_context.source VALUES (3, 1, 30)")
+        .await;
+    db.refresh_st("public.al_context_st").await;
+    db.assert_st_matches_query(
+        "public.al_context_st",
+        "SELECT k, avg(val) AS mean FROM al_context.source GROUP BY k",
+    )
+    .await;
 }
 
 #[tokio::test]
