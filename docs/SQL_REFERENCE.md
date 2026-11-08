@@ -4415,11 +4415,10 @@ is a point-in-time observation and does not prevent later DDL. An unchanged
 epoch does not rule out an in-flight refresh. Execution is revoked from
 `PUBLIC`; an administrator must grant it explicitly.
 
-### pgtrickle.claim_ann_maintenance and pgtrickle.finish_ann_maintenance
+### pgtrickle.claim_ann_maintenance
 
 ```sql
 pgtrickle.claim_ann_maintenance(request_id bigint) → jsonb
-pgtrickle.finish_ann_maintenance(request_id bigint, succeeded boolean, error_message text) → void
 ```
 
 Claiming records the current backend, its start time, caller role and the
@@ -4436,6 +4435,13 @@ be retried. The claim and completion functions are revoked from `PUBLIC`.
 Commit the claim before running any top-level `REINDEX INDEX CONCURRENTLY` on
 the **same connection and role**. Recheck identity and privileges immediately
 before execution; a claim does not prevent concurrent DDL or authorize SQL.
+
+### pgtrickle.finish_ann_maintenance
+
+```sql
+pgtrickle.finish_ann_maintenance(request_id bigint, succeeded boolean, error_message text) → void
+```
+
 Report the outcome on that connection with an empty error on success, or a
 nonempty error of at most 2048 bytes on failure. A success is the caller's
 report, not independent proof that a rebuild ran. Failure remains observable.
