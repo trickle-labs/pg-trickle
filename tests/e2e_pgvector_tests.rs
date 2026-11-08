@@ -8146,8 +8146,8 @@ async fn test_pgvector_row_local_distance_refresh_avoids_source_scan() {
         .await
         .expect("read final source counters");
     assert!(
-        after.0 - before.0 + after.1 - before.1 < 1000,
-        "one changed row must not scan the source: before={before:?}, after={after:?}"
+        after.0 - before.0 + after.1 - before.1 <= 10,
+        "one changed row must not read unrelated source history: before={before:?}, after={after:?}"
     );
     tx.commit().await.expect("commit measured refresh");
     let differential: bool = db.query_scalar("SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'distance_scan_st' ORDER BY h.refresh_id DESC LIMIT 1").await;
