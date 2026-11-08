@@ -3082,7 +3082,7 @@ async fn test_centroid_source_ahead_fallback_is_reported() {
         moved, 1,
         "fixture must put one captured change ahead of the frontier"
     );
-    let still_bound: bool = db.query_scalar("SELECT COALESCE(c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL, false) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
+    let still_bound: bool = db.query_scalar("SELECT COALESCE(c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation AND c.schema_version = 1 AND c.status = 'BUILDING', false) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
     assert!(
         still_bound,
         "the injected ahead row must not itself unbind state"
@@ -3096,9 +3096,10 @@ async fn test_centroid_source_ahead_fallback_is_reported() {
     .await;
     let safe_and_reported: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND h.merge_strategy_used <> 'centroid_algebraic' AND h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' = 'SOURCE_AHEAD_OF_FRONTIER' AND s.centroid::text = '[3,4]' FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_ahead_live_st s WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
     let detail: String = db.query_scalar("SELECT format('baseline=%s strategy=%s detail=%s centroid=%s', coalesce(c.baseline_frontier::text, 'null'), h.merge_strategy_used, coalesce(h.refresh_reason_detail, 'null'), s.centroid::text) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_ahead_live_st s WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
+    let history: String = db.query_scalar("SELECT COALESCE(string_agg(format('id=%s by=%s status=%s detail=%s', h.refresh_id, h.initiated_by, h.status, h.refresh_reason_detail), E'\\n' ORDER BY h.refresh_id), '') FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
     assert!(
         safe_and_reported,
-        "source-ahead fallback must remain correct, unbound, and observable: {detail}"
+        "source-ahead fallback must remain correct, unbound, and observable: {detail}\n{history}"
     );
     let evidence: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_stream_tables t CROSS JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
     let evidence: serde_json::Value =
