@@ -22,6 +22,56 @@ async fn setup_pgvector(db: &E2eDb) {
 }
 
 #[tokio::test]
+async fn test_vector_aggregate_mode_change_uses_saved_path_and_admission_setting() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let mut conn = db.pool.acquire().await.expect("vector mode session");
+    for statement in [
+        "CREATE SCHEMA vector_mode_context",
+        "CREATE TABLE vector_mode_context.source (id int PRIMARY KEY, grp int, v public.vector(2))",
+        "INSERT INTO vector_mode_context.source VALUES (1, 1, '[1,2]'), (2, 1, '[3,4]')",
+        "SET search_path = vector_mode_context, public",
+        "SELECT pgtrickle.create_stream_table('public.vector_mode_st', 'SELECT grp, avg(v) AS centroid FROM source GROUP BY grp', '1h', 'FULL')",
+        "RESET search_path",
+        "SET pg_trickle.enable_vector_agg = off",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("prepare vector mode change");
+    }
+    let alter = "SELECT pgtrickle.alter_stream_table('public.vector_mode_st', refresh_mode => 'DIFFERENTIAL')";
+    let error = sqlx::query(alter)
+        .execute(&mut *conn)
+        .await
+        .expect_err("disabled vector aggregates must be rejected");
+    assert!(error.to_string().contains("enable_vector_agg"), "{error}");
+    sqlx::query("SET pg_trickle.enable_vector_agg = on")
+        .execute(&mut *conn)
+        .await
+        .expect("enable vector aggregates");
+    sqlx::query(alter)
+        .execute(&mut *conn)
+        .await
+        .expect("alter with saved search path");
+    sqlx::query("INSERT INTO vector_mode_context.source VALUES (3, 1, '[5,6]')")
+        .execute(&mut *conn)
+        .await
+        .expect("mutate vector source");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('public.vector_mode_st')")
+        .execute(&mut *conn)
+        .await
+        .expect("refresh vector stream");
+    let correct: bool = sqlx::query_scalar(
+        "SELECT centroid::text = '[3,4]' FROM public.vector_mode_st WHERE grp = 1",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("inspect centroid");
+    assert!(correct);
+}
+
+#[tokio::test]
 async fn test_centroid_tutorial_sql_runs_on_installed_extension() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
