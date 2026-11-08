@@ -1716,7 +1716,7 @@ impl StDependency {
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
     }
 
-    /// Resolve the effective CDC request for a source across all deferred STs.
+    /// Resolve the requested CDC mode for a source across all deferred STs.
     ///
     /// A trigger request wins for shared sources because WAL transition drops
     /// the source trigger. Otherwise preserve an explicit `wal` request, then
@@ -1731,6 +1731,32 @@ impl StDependency {
                     WHEN bool_or(lower(COALESCE(st.requested_cdc_mode, current_setting('pg_trickle.cdc_mode'))) = 'wal') THEN 'wal' \
                     WHEN bool_or(lower(COALESCE(st.requested_cdc_mode, current_setting('pg_trickle.cdc_mode'))) = 'auto') THEN 'auto' \
                     ELSE NULL \
+                END \
+             FROM pgtrickle.pgt_dependencies d \
+             JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id \
+             WHERE d.source_relid = $1 \
+               AND d.source_type = 'TABLE' \
+               AND st.refresh_mode <> 'IMMEDIATE'",
+            &[source_relid.into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
+    /// Resolve the active CDC mode for a source across all deferred STs.
+    ///
+    /// A source is considered trigger-based only when every deferred TABLE
+    /// dependency currently uses triggers. Mixed or transitioning states stay
+    /// conservative for DDL handling.
+    /// Returns `None` when no deferred TABLE dependencies exist.
+    pub fn effective_cdc_mode_for_source(
+        source_relid: pg_sys::Oid,
+    ) -> Result<Option<String>, PgTrickleError> {
+        Spi::get_one_with_args::<String>(
+            "SELECT CASE \
+                    WHEN count(*) = 0 THEN NULL \
+                    WHEN bool_and(d.cdc_mode = 'TRIGGER') THEN 'trigger' \
+                    WHEN bool_or(d.cdc_mode = 'WAL') THEN 'wal' \
+                    ELSE 'transitioning' \
                 END \
              FROM pgtrickle.pgt_dependencies d \
              JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id \

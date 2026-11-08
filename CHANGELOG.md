@@ -223,7 +223,10 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
-Future changes will be listed here.
+### Fixes
+
+- Keep stream tables active after `REPLICA IDENTITY FULL` or an empty partition
+  attach when auto CDC is still using triggers.
 
 ## [0.109.0] — More dependable live data
 

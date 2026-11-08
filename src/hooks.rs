@@ -976,11 +976,11 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &Alt
 
     // IMMEDIATE consumers use transition-table IVM triggers, not CDC buffers.
     // A source shared with any deferred consumer still needs CDC maintenance.
-    let requested_cdc_mode = match StDependency::effective_requested_mode_for_source(objid) {
+    let effective_cdc_mode = match StDependency::effective_cdc_mode_for_source(objid) {
         Ok(mode) => mode,
         Err(e) => {
             pgrx::error!(
-                "pg_trickle: DDL hook could not inspect refresh modes — \
+                "pg_trickle: DDL hook could not inspect CDC modes — \
                  schema change blocked to prevent inconsistent state \
                  (source: {}, error: {})",
                 identity,
@@ -988,8 +988,8 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &Alt
             );
         }
     };
-    let uses_deferred_cdc = requested_cdc_mode.is_some();
-    let trigger_cdc = requested_cdc_mode.as_deref() == Some("trigger");
+    let uses_deferred_cdc = effective_cdc_mode.is_some();
+    let trigger_cdc = effective_cdc_mode.as_deref() == Some("trigger");
     let empty_partition_attach = if trigger_cdc {
         if let AlterTableHint::AttachPartition { schema, relation } = alter_table_hint {
             match attached_partition_is_empty(objid, schema.as_deref(), relation) {
