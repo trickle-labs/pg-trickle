@@ -190,7 +190,7 @@ FROM generate_series(1, __SF_ORDERS__) AS orders(o),
 
 -- ── ANALYZE all tables for stable query plans ──────────────────────
 
--- Q17 has a correlated lookup by part key; make that access path available.
+-- Q17 has a correlated lookup by part key
 CREATE INDEX IF NOT EXISTS lineitem_l_partkey_idx ON lineitem (l_partkey);
 
 ANALYZE region;
