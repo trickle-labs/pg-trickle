@@ -474,6 +474,21 @@ async fn test_repair_missing_statement_update_trigger_restores_capture() {
              ORDER BY h.refresh_id DESC LIMIT 1",
         )
         .await;
+    assert_eq!(refresh_action, "REINITIALIZE");
+    db.assert_st_matches_query("repair_partial_st", "SELECT id, v FROM repair_partial_src")
+        .await;
+
+    db.execute("UPDATE repair_partial_src SET v = 12 WHERE id = 1")
+        .await;
+    db.execute(refresh_external).await;
+    let refresh_action: String = db
+        .query_scalar(
+            "SELECT h.action FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'repair_partial_st' \
+             ORDER BY h.refresh_id DESC LIMIT 1",
+        )
+        .await;
     assert_eq!(refresh_action, "DIFFERENTIAL");
     db.assert_st_matches_query("repair_partial_st", "SELECT id, v FROM repair_partial_src")
         .await;
