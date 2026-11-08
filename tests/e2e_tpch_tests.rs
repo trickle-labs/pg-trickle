@@ -3515,12 +3515,7 @@ async fn test_tpch_explain_artifacts() {
 
         // Create the stream table.
         let create_sql = format!(
-            "SELECT pgtrickle.create_stream_table(\
-             name => '{st_name}', \
-             defining_query => $SQL${}$SQL$, \
-             schedule => '1m', \
-             mode => 'FULL'\
-             )",
+            "SELECT pgtrickle.create_stream_table('{st_name}', $SQL${}$SQL$, '1m', 'FULL')",
             q.sql
         );
         if let Err(error) = db.try_execute(&create_sql).await {
