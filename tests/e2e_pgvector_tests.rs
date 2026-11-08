@@ -7362,23 +7362,36 @@ async fn test_vector_aggregate_cast_uses_cast_type() {
     );
     db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create])
         .await;
-    db.execute("UPDATE typed_casts SET embedding = '[0,0,1]' WHERE id = 2")
-        .await;
-    db.execute_seq(&[
-        "SET pg_trickle.enable_vector_agg = on",
-        "SET pg_trickle.differential_max_change_ratio = 0",
-        "SELECT pgtrickle.refresh_stream_table('typed_cast_st')",
-    ])
-    .await;
-    let differential: bool = db.query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name='typed_cast_st' ORDER BY h.refresh_id DESC LIMIT 1").await;
-    assert!(differential);
-    db.assert_st_matches_query(
-        "typed_cast_st",
-        "SELECT avg(embedding::halfvec(3))::halfvec(3) AS centroid FROM typed_casts",
-    )
-    .await;
     let typ: String = db.query_scalar("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='typed_cast_st'::regclass AND attname='centroid'").await;
     assert_eq!(typ, "halfvec(3)");
+    for mutation in [
+        "UPDATE typed_casts SET embedding = '[0,0,1]' WHERE id = 2",
+        "INSERT INTO typed_casts VALUES (3, '[1,1,0]')",
+        "UPDATE typed_casts SET embedding = NULL WHERE id = 1",
+        "UPDATE typed_casts SET embedding = '[1,0,1]' WHERE id = 1",
+        "DELETE FROM typed_casts WHERE id = 2",
+    ] {
+        db.execute(mutation).await;
+        let previous: i64 = db.query_scalar("SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='typed_cast_st'").await;
+        db.execute_seq(&[
+            "SET pg_trickle.enable_vector_agg = on",
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+            "SELECT pgtrickle.refresh_stream_table('typed_cast_st')",
+        ])
+        .await;
+        let differential: bool = sqlx::query_scalar("SELECT h.refresh_id > $1 AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='typed_cast_st' ORDER BY h.refresh_id DESC LIMIT 1")
+            .bind(previous).fetch_one(&db.pool).await.expect("inspect cast aggregate refresh");
+        assert!(
+            differential,
+            "cast aggregate must refresh differentially after {mutation}"
+        );
+        db.assert_st_matches_query(
+            "typed_cast_st",
+            "SELECT avg(embedding::halfvec(3))::halfvec(3) AS centroid FROM typed_casts",
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
@@ -7574,15 +7587,30 @@ async fn test_vector_aggregate_cte_alias_and_group_key_changes() {
         .await;
     let typ: String = db.query_scalar("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='cte_vectors_st'::regclass AND attname='centroid'").await;
     assert_eq!(typ, "vector(3)");
-    db.execute("UPDATE cte_vectors SET grp=2, embedding='[0,0,1]' WHERE id=1")
+    for mutation in [
+        "UPDATE cte_vectors SET grp=2, embedding='[0,0,1]' WHERE id=1",
+        "INSERT INTO cte_vectors VALUES (3, 1, '[1,1,0]')",
+        "UPDATE cte_vectors SET embedding=NULL WHERE id=2",
+        "UPDATE cte_vectors SET embedding='[1,0,1]' WHERE id=2",
+        "DELETE FROM cte_vectors WHERE id=1",
+    ] {
+        db.execute(mutation).await;
+        let previous: i64 = db.query_scalar("SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='cte_vectors_st'").await;
+        db.execute_seq(&[
+            "SET pg_trickle.enable_vector_agg = on",
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+            "SELECT pgtrickle.refresh_stream_table('cte_vectors_st')",
+        ])
         .await;
-    db.execute_seq(&[
-        "SET pg_trickle.enable_vector_agg = on",
-        "SET pg_trickle.differential_max_change_ratio = 0",
-        "SELECT pgtrickle.refresh_stream_table('cte_vectors_st')",
-    ])
-    .await;
-    db.assert_st_matches_query("cte_vectors_st", "WITH c AS (SELECT id, grp, embedding AS vec FROM cte_vectors) SELECT grp, avg(vec)::vector(3) AS centroid FROM c GROUP BY grp").await;
+        let differential: bool = sqlx::query_scalar("SELECT h.refresh_id > $1 AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='cte_vectors_st' ORDER BY h.refresh_id DESC LIMIT 1")
+            .bind(previous).fetch_one(&db.pool).await.expect("inspect CTE aggregate refresh");
+        assert!(
+            differential,
+            "CTE aggregate must refresh differentially after {mutation}"
+        );
+        db.assert_st_matches_query("cte_vectors_st", "WITH c AS (SELECT id, grp, embedding AS vec FROM cte_vectors) SELECT grp, avg(vec)::vector(3) AS centroid FROM c GROUP BY grp").await;
+    }
 }
 
 #[tokio::test]
