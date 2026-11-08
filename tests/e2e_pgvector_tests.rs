@@ -1406,6 +1406,16 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
     let strategy: String = sqlx::query_scalar("SELECT h.merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
         .fetch_one(&mut *conn).await.expect("read centroid refresh strategy");
     assert_eq!(strategy, "centroid_algebraic");
+    let explanation: String =
+        sqlx::query_scalar("SELECT pgtrickle.explain_stream_table('centroid_live_st')")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("explain algebraic centroid refresh");
+    assert!(
+        explanation.contains("centroid: GROUP_RESCAN")
+            && explanation.contains("Last refresh strategy: centroid_algebraic"),
+        "explain must distinguish fallback classification from the executed strategy: {explanation}"
+    );
     let check: bool = sqlx::query_scalar("WITH native AS (SELECT grp, avg(v)::text AS centroid, count(*)::bigint AS n FROM centroid_live_src GROUP BY grp), actual AS (SELECT grp, centroid::text AS centroid, __pgt_count AS n FROM centroid_live_st) SELECT NOT EXISTS ((SELECT * FROM native EXCEPT ALL SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM native)) AND EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL)")
         .fetch_one(&mut *conn).await.expect("check applied centroid");
     assert!(check, "visible rows and state must advance together");
@@ -1472,6 +1482,15 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
     assert!(
         fallback,
         "corrupt state must be rebuilt after the native group rescan"
+    );
+    let explanation: String =
+        sqlx::query_scalar("SELECT pgtrickle.explain_stream_table('centroid_live_st')")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("explain centroid rebase");
+    assert!(
+        explanation.contains("Last refresh strategy: centroid_rebase_group_rescan"),
+        "explain must report the executed rebase: {explanation}"
     );
     for sql in [
         "INSERT INTO centroid_live_src VALUES (4, 3, '[8,9]')",

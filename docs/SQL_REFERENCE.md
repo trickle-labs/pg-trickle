@@ -5384,7 +5384,7 @@ table management.
 | `pgtrickle.row_identity_v2_recreation_preflight()` | `jsonb` | Owner/superuser-only, read-only V2 recreation gate. Checks storage, markers, source contracts, indexes, PostgreSQL major, scheduler quiescence, and consumer acknowledgments without returning identity bytes. |
 | `pgtrickle.row_identity_v2_consumer_inventory()` | `SETOF record` | Owner/superuser-only inventory of external consumers and their `BYTEA` schema/resnapshot plans. |
 | `pgtrickle.validate_query(sql text)` | `SetOf row` | Validates whether a SQL query is IVM-compatible. Returns analysis results including unsupported patterns. |
-| `pgtrickle.explain_stream_table(st_name text)` | `text` | Shows the effective refresh mode, per-output aggregate classification, fallback reasons, and current state flags for a stream table. Aggregate classification is unknown if analysis fails. |
+| `pgtrickle.explain_stream_table(st_name text)` | `text` | Shows the configured refresh mode, per-output fallback aggregate classification, last completed refresh strategy when history is readable, fallback reasons, and current state flags. Aggregate classification is unknown if analysis fails; the last strategy does not predict the next refresh. |
 | `pgtrickle.explain_dag()` | `text` (DOT) | Returns a Graphviz DOT representation of the full dependency graph. |
 | `pgtrickle.stream_table_lineage(st_name text)` | `SetOf row` | Returns the lineage graph for a single stream table — direct and transitive source tables with metadata. |
 | `pgtrickle.cdc_pause_status()` | `SetOf row` | Shows whether CDC is paused, the capture mode (`discard` / lossless `hold`), and a human-readable explanation. |

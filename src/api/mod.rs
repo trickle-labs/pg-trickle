@@ -3344,6 +3344,23 @@ fn explain_stream_table(name: &str) -> Result<String, PgTrickleError> {
         }
     };
 
+    let can_read_history = Spi::get_one::<bool>(
+        "SELECT COALESCE(pg_catalog.has_table_privilege(pg_catalog.to_regclass('pgtrickle.pgt_refresh_history'), 'SELECT'), false)",
+    )
+    .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
+    .unwrap_or(false);
+    let last_refresh_strategy = if can_read_history {
+        Spi::get_one_with_args::<String>(
+            "SELECT COALESCE(merge_strategy_used, action) FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = $1 AND status = 'COMPLETED' ORDER BY start_time DESC, refresh_id DESC LIMIT 1",
+            &[st.pgt_id.into()],
+        )
+        .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
+        .unwrap_or_else(|| "none recorded".to_string())
+    } else {
+        "unavailable (no SELECT on refresh history)".to_string()
+    };
+
     let mut fallback_reasons: Vec<String> = Vec::new();
     if has_case_in_agg {
         fallback_reasons.push("SUM(CASE) → GROUP_RESCAN (DI-8)".to_string());
@@ -3387,6 +3404,7 @@ fn explain_stream_table(name: &str) -> Result<String, PgTrickleError> {
          Join count:        {join_count}\n\
          Join strategy:     {join_strategy}\n\
          Aggregate strategy:{aggregate_strategy}\n\
+         Last refresh strategy: {last_refresh_strategy}\n\
          Fallback reasons:  {fallbacks}\n\
          Suggestions:       {suggestions_text}\n\
          \n\
@@ -3410,6 +3428,7 @@ fn explain_stream_table(name: &str) -> Result<String, PgTrickleError> {
         join_count = join_count,
         join_strategy = join_strategy_note,
         aggregate_strategy = aggregate_strategy_note,
+        last_refresh_strategy = last_refresh_strategy,
         fallbacks = if fallback_reasons.is_empty() {
             "none".to_string()
         } else {

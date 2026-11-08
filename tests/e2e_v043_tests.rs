@@ -137,6 +137,39 @@ async fn test_t_a44_3_explain_stream_table_returns_result() {
     );
 }
 
+/// Explain remains usable when the caller cannot read refresh history.
+#[tokio::test]
+async fn test_explain_stream_table_without_history_privilege() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "CREATE TABLE a44_private_history_src (id int PRIMARY KEY, val int)",
+        "INSERT INTO a44_private_history_src VALUES (1, 10)",
+        "SELECT pgtrickle.create_stream_table('a44_private_history_st', 'SELECT id, val FROM a44_private_history_src', '1h', 'DIFFERENTIAL')",
+        "CREATE ROLE a44_explain_reader NOLOGIN",
+        "GRANT USAGE ON SCHEMA pgtrickle TO a44_explain_reader",
+        "GRANT SELECT ON pgtrickle.pgt_stream_tables TO a44_explain_reader",
+        "GRANT SELECT ON a44_private_history_src TO a44_explain_reader",
+    ]).await;
+    let mut conn = db.pool.acquire().await.expect("acquire explain reader");
+    sqlx::query("SET ROLE a44_explain_reader")
+        .execute(&mut *conn)
+        .await
+        .expect("assume explain reader");
+    let explanation: String =
+        sqlx::query_scalar("SELECT pgtrickle.explain_stream_table('a44_private_history_st')")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("explain without history access");
+    assert!(
+        explanation.contains("Last refresh strategy: unavailable (no SELECT on refresh history)"),
+        "{explanation}"
+    );
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("restore role");
+}
+
 /// T-A44-3b: explain_stream_table includes refresh mode and plan info.
 #[tokio::test]
 async fn test_t_a44_3_explain_stream_table_includes_plan_info() {
