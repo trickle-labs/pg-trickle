@@ -388,6 +388,15 @@ jobs:
             2>&1 | tee target/pgvector-bench/stdout.txt
           sed -n 's/^PGVECTOR_BENCHMARK_JSON=//p' target/pgvector-bench/stdout.txt > target/pgvector-bench/results.json
           test -s target/pgvector-bench/results.json
+      - name: Measure distance subscription scaling
+        if: matrix.dimensions == 384
+        run: |
+          ./scripts/run_e2e_tests.sh --retries 0 --test e2e_bench_tests \
+            --run-ignored ignored-only --no-capture \
+            -E 'test(test_pgvector_subscription_scaling_workload)' \
+            2>&1 | tee target/pgvector-bench/subscriptions.txt
+          sed -n 's/^PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON=//p' target/pgvector-bench/subscriptions.txt > target/pgvector-bench/subscriptions.json
+          test -s target/pgvector-bench/subscriptions.json
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7

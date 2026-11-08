@@ -77,6 +77,16 @@ the benchmark rather than being silently counted as algebraic. The workload does
 measure source-write overhead or concurrent load. Use a dedicated host and
 more repetitions before drawing performance conclusions.
 
+The scheduled run also measures distance subscriptions separately with 1,000
+and 10,000 rows and zero, one, or ten subscriptions. Five one-row changes per
+case alternate across the threshold. It verifies the affected-row snapshot and
+differential strategy, and records refresh-call time plus same-transaction
+source and stream tuple counters. The stream is analyzed before measurement;
+the counters include repeated visits and are not distinct row counts. A listener
+verifies each event after commit; those timings exclude client delivery. The
+[local report](results/2026-11-08-subscription-scaling-arm64/README.md) also
+records an unanalysed control and its limitations.
+
 A [recorded emulated run](results/2026-11-07-emulated/README.md) includes the
 raw JSON for all three dimensions and documents its limitations.
 The later [local centroid comparison](results/2026-11-07-centroid-arm64/README.md)

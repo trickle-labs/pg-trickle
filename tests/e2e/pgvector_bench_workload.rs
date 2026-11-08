@@ -1,7 +1,10 @@
 //! Opt-in database measurements for filtered pgvector retrieval and refresh.
 
 use super::e2e::E2eDb;
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 fn percentiles(mut values: Vec<f64>) -> serde_json::Value {
     values.sort_by(f64::total_cmp);
@@ -51,6 +54,175 @@ fn exact_baseline_requires_source_sequential_scan() {
         &serde_json::json!({"Node Type": "Index Scan", "Relation Name": "vector_bench_corpus"}),
         "vector_bench_corpus"
     ));
+}
+
+/// Measure one-row membership transitions across corpus and subscription counts.
+#[tokio::test]
+#[ignore = "database benchmark; run explicitly with --run-ignored all --no-capture"]
+async fn test_pgvector_subscription_scaling_workload() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    let versions: (String, String, String) = sqlx::query_as(
+        "SELECT version(), (SELECT extversion FROM pg_extension WHERE extname='vector'), \
+         (SELECT extversion FROM pg_extension WHERE extname='pg_trickle')",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("inspect benchmark versions");
+    let mut measurements = Vec::new();
+    for rows in [1_000, 10_000] {
+        for subscriptions in [0, 1, 10] {
+            let source = format!("alert_measure_src_{rows}_{subscriptions}");
+            let stream = format!("alert_measure_st_{rows}_{subscriptions}");
+            db.execute(&format!(
+                "CREATE TABLE {source} (id int PRIMARY KEY, embedding vector(3))"
+            ))
+            .await;
+            db.execute(&format!(
+                "INSERT INTO {source} SELECT i, '[1,0,0]'::vector FROM generate_series(1,{rows}) i"
+            ))
+            .await;
+            db.create_st(
+                &stream,
+                &format!("SELECT id, embedding FROM {source}"),
+                "1h",
+                "DIFFERENTIAL",
+            )
+            .await;
+            db.execute(&format!(
+                "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
+            ))
+            .await;
+            db.execute(&format!("ANALYZE {stream}")).await;
+            let mut listener = sqlx::postgres::PgListener::connect_with(&db.pool)
+                .await
+                .expect("connect subscription benchmark listener");
+            for index in 0..subscriptions {
+                let channel = format!("alert_measure_{index}");
+                listener
+                    .listen(&channel)
+                    .await
+                    .expect("listen for measured transitions");
+                db.execute(&format!("SELECT pgtrickle.subscribe_distance('{stream}', '{channel}', 'embedding', '[1,0,0]', '<->', 0.5)")).await;
+            }
+            let pgt_id: i64 = sqlx::query_scalar(
+                "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid=$1::text::regclass",
+            )
+            .bind(&stream)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect subscription stream");
+            let mut samples = Vec::new();
+            for round in 0..5 {
+                let vector = if round % 2 == 0 { "[0,1,0]" } else { "[1,0,0]" };
+                db.execute(&format!(
+                    "UPDATE {source} SET embedding='{vector}' WHERE id=1"
+                ))
+                .await;
+                let mut tx = db
+                    .pool
+                    .begin()
+                    .await
+                    .expect("begin subscription measurement");
+                sqlx::query("SET LOCAL pg_trickle.refresh_strategy = 'differential'")
+                    .execute(&mut *tx)
+                    .await
+                    .expect("force differential refresh");
+                sqlx::query("SET LOCAL pg_trickle.differential_max_change_ratio = 0")
+                    .execute(&mut *tx)
+                    .await
+                    .expect("disable ratio fallback");
+                let counters = "SELECT pg_stat_get_xact_tuples_returned($1::text::regclass)::bigint, \
+                    pg_stat_get_xact_tuples_fetched($1::text::regclass)::bigint, \
+                    pg_stat_get_xact_tuples_returned($2::text::regclass)::bigint, \
+                    pg_stat_get_xact_tuples_fetched($2::text::regclass)::bigint";
+                let before: (i64, i64, i64, i64) = sqlx::query_as(counters)
+                    .bind(&stream)
+                    .bind(&source)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .expect("read initial tuple counters");
+                let start = Instant::now();
+                sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
+                    .bind(&stream)
+                    .execute(&mut *tx)
+                    .await
+                    .expect("refresh subscription stream");
+                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                let after: (i64, i64, i64, i64) = sqlx::query_as(counters)
+                    .bind(&stream)
+                    .bind(&source)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .expect("read final tuple counters");
+                let (snapshot, ids) = if subscriptions == 0 {
+                    (None, None)
+                } else {
+                    let snapshot: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                        "SELECT count(*) FROM pg_temp.__pgt_distance_pre_{pgt_id}"
+                    )))
+                    .fetch_one(&mut *tx)
+                    .await
+                    .expect("inspect affected snapshot");
+                    let ids: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                        "SELECT count(*) FROM pg_temp.__pgt_distance_ids_{pgt_id}"
+                    )))
+                    .fetch_one(&mut *tx)
+                    .await
+                    .expect("inspect affected identities");
+                    assert_eq!(
+                        (snapshot, ids),
+                        (1, 1),
+                        "one changed row must use the bounded snapshot"
+                    );
+                    (Some(snapshot), Some(ids))
+                };
+                let (differential, strategy, refresh_id): (bool, String, i64) = sqlx::query_as("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback, h.merge_strategy_used, h.refresh_id FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id=$1 ORDER BY h.refresh_id DESC LIMIT 1")
+                    .bind(pgt_id).fetch_one(&mut *tx).await.expect("inspect measured strategy");
+                assert!(differential, "measurement must use differential refresh");
+                tx.commit().await.expect("commit measured refresh");
+                let mut channels = HashSet::new();
+                for _ in 0..subscriptions {
+                    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+                        .await
+                        .expect("wait for measured transition")
+                        .expect("receive measured transition");
+                    assert!(
+                        channels.insert(event.channel().to_string()),
+                        "duplicate subscription event"
+                    );
+                    let payload: serde_json::Value =
+                        serde_json::from_str(event.payload()).expect("parse transition payload");
+                    assert_eq!(payload["refresh_id"], refresh_id);
+                    assert_eq!(payload["entered"], if round % 2 == 0 { 0 } else { 1 });
+                    assert_eq!(payload["exited"], if round % 2 == 0 { 1 } else { 0 });
+                }
+                assert_eq!(channels.len(), subscriptions as usize);
+                let correct: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT s.embedding::text = d.embedding::text FROM {stream} s JOIN {source} d USING(id) WHERE s.id=1")))
+                    .fetch_one(&db.pool).await.expect("check changed result");
+                assert!(
+                    correct,
+                    "measured refresh must propagate the changed vector"
+                );
+                let tuple_delta = [
+                    after.0 - before.0,
+                    after.1 - before.1,
+                    after.2 - before.2,
+                    after.3 - before.3,
+                ];
+                assert!(tuple_delta.iter().all(|value| *value >= 0));
+                samples.push(serde_json::json!({"round":round,"refresh_ms":elapsed_ms,"merge_strategy":strategy,
+                    "stream_sequential_tuples_returned":tuple_delta[0],"stream_index_tuples_fetched":tuple_delta[1],
+                    "source_sequential_tuples_returned":tuple_delta[2],"source_index_tuples_fetched":tuple_delta[3],
+                    "snapshot_rows":snapshot,"affected_identities":ids}));
+            }
+            measurements.push(serde_json::json!({"initial_rows":rows,"subscriptions":subscriptions,"samples":samples}));
+        }
+    }
+    println!(
+        "PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON={}",
+        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"dimensions":3,"measurements":measurements,"notes":"One row alternates across the threshold; each subscription emits its expected event. Refresh call excludes mutation, commit, listener delivery and validation. Tuple counters include repeated visits, not distinct rows. No controlled concurrency."})
+    );
 }
 
 /// Writes one JSON report to stdout; no timing or recall thresholds are imposed.
