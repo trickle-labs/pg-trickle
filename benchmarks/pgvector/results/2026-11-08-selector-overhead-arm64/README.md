@@ -36,3 +36,11 @@ differences cannot be attributed solely to the selector. They do not measure
 switching, rebase cost, or a cold-start policy, and do not establish a general
 threshold. Earlier intermittent smoke failures remain unexplained. Raw reports:
 [baseline](baseline.json) and [candidate](candidate.json).
+
+As an additional smoke check, the candidate image passed ten sequential fresh
+container runs each at 100 and 1,000 initial rows, 384 dimensions, one ANN
+sample, one centroid round and one rewritten row. Each run checked its refresh
+strategy and native AVG result. The 1,000-row case covers the size of the
+earlier preliminary failures, but those failures used an older development
+image and their cause remains unknown; these passes do not establish that the
+underlying cause was fixed.
