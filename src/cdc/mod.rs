@@ -277,7 +277,8 @@ fn is_insert_only_table(source_oid: pg_sys::Oid) -> bool {
 
 pub(crate) fn buffer_uses_sync_commit(buffer_key: &str) -> Result<bool, PgTrickleError> {
     Spi::get_one_with_args::<bool>(
-        "SELECT durability = 'sync' FROM pgtrickle.pgt_change_buffers WHERE buffer_key = $1",
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_change_buffers \
+         WHERE buffer_key = $1 AND durability = 'sync')",
         &[buffer_key.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(format!("change-buffer durability lookup failed: {e}")))
