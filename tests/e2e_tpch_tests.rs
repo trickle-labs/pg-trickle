@@ -67,9 +67,7 @@ fn rf_count() -> usize {
 // signalling a DVM regression where a previously-passing query no longer
 // creates or runs correctly.
 //
-// DIFFERENTIAL: queries with known resource limits are explicitly allowlisted;
-//               q17 can hit the 16 GB temp-file limit even at SF-1. At SF≥10,
-//               q15/q17 are in LARGE_SCALE_DIFFERENTIAL_SKIP.
+// DIFFERENTIAL: q12 uses a documented FULL fallback; q15/q17 are pre-skipped at SF≥10.
 // IMMEDIATE:    a subset cannot be created (IVM restriction). Populate by
 //               running with the guard disabled, then hardening the set.
 //
@@ -84,9 +82,6 @@ const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[
     // v0.77.0: q12 uses CASE aggregate + IN-list predicate and is currently
     // forced to FULL refresh by CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK.
     "q12",
-    // q17's correlated AVG delta can exceed the 16 GB temp-file limit even
-    // at SF-1 (observed in the 2026-11-05 nightly run).
-    "q17",
 ];
 
 /// Scale factor threshold above which LARGE_SCALE_DIFFERENTIAL_SKIP applies.
@@ -3538,6 +3533,16 @@ async fn test_tpch_explain_artifacts() {
                 .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
                 .await;
             continue;
+        }
+
+        if q.name == "q17" {
+            let query = q.sql.trim().trim_end_matches(';');
+            let has_result: bool = db
+                .query_scalar(&format!(
+                    "SELECT avg_yearly IS NOT NULL FROM ({query}) AS q17_result"
+                ))
+                .await;
+            assert!(has_result, "TPC-H fixture produced no q17 rows to explain");
         }
 
         // Collect 5 EXPLAIN ANALYZE runs for timing statistics.
