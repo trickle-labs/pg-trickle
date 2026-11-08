@@ -2518,6 +2518,125 @@ async fn test_centroid_cost_model_accepts_real_refresh_history() {
 }
 
 #[tokio::test]
+async fn test_centroid_auto_samples_cold_rescan_history() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let mut conn = db.pool.acquire().await.expect("centroid sampling session");
+    for statement in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "CREATE TABLE centroid_sample_src (id int PRIMARY KEY, grp int, v vector(2))",
+        "INSERT INTO centroid_sample_src SELECT id, id, '[1,2]'::vector FROM generate_series(1, 40) id",
+        "ANALYZE centroid_sample_src",
+        "SELECT pgtrickle.create_stream_table('centroid_sample_st', $$SELECT grp, avg(v) AS centroid FROM centroid_sample_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.centroid_sample_st'])",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_sample_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_sample_st')",
+        "ANALYZE centroid_sample_st",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("prepare centroid sampling");
+    }
+    for _ in 0..3 {
+        sqlx::query("UPDATE centroid_sample_src SET v = v + '[1,1]'::vector WHERE id IN (1, 2)")
+            .execute(&mut *conn)
+            .await
+            .expect("mutate algebraic sample");
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_sample_st')")
+            .execute(&mut *conn)
+            .await
+            .expect("refresh algebraic sample");
+    }
+    for statement in [
+        "SET pg_trickle.refresh_strategy = 'auto'",
+        "UPDATE centroid_sample_src SET v = v + '[1,1]'::vector WHERE id IN (1, 2)",
+        "BEGIN",
+        "SELECT pgtrickle.refresh_stream_table('centroid_sample_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("prepare rolled-back centroid sample");
+    }
+    let sampled_in_transaction: bool = sqlx::query_scalar(
+        "SELECT c.baseline_frontier IS NULL AND (c.cost_rescan_active OR c.cost_rescan_xid IS NOT NULL) \
+         FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) \
+         WHERE t.pgt_relid = 'centroid_sample_st'::regclass",
+    ).fetch_one(&mut *conn).await.expect("inspect transactional sample");
+    assert!(sampled_in_transaction);
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("roll back sampled rescan");
+    let restored: bool = sqlx::query_scalar(
+        "SELECT c.baseline_frontier = t.frontier AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL \
+         AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id \
+           AND CASE WHEN h.refresh_reason_detail IS JSON THEN \
+             h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' = 'COST_MODEL_SAMPLE_RESCAN' \
+             ELSE false END) \
+         FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) \
+         WHERE t.pgt_relid = 'centroid_sample_st'::regclass",
+    ).fetch_one(&mut *conn).await.expect("inspect rolled-back sample");
+    assert!(restored);
+    for statement in ["SELECT pgtrickle.refresh_stream_table('centroid_sample_st')"] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("sample centroid rescan");
+    }
+    let (strategy, reason, unbound): (String, Option<String>, bool) = sqlx::query_as(
+        "SELECT h.merge_strategy_used, h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason', \
+                c.baseline_frontier IS NULL AND c.cost_rescan_active \
+         FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) \
+         JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id \
+           AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true \
+         WHERE t.pgt_relid = 'centroid_sample_st'::regclass",
+    ).fetch_one(&mut *conn).await.expect("inspect sampled rescan");
+    assert_ne!(strategy, "centroid_algebraic");
+    assert_eq!(reason.as_deref(), Some("COST_MODEL_SAMPLE_RESCAN"));
+    assert!(unbound);
+    let sampled_correct: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS ((SELECT grp, centroid FROM centroid_sample_st EXCEPT ALL \
+           SELECT grp, avg(v)::vector(2) FROM centroid_sample_src GROUP BY grp) UNION ALL \
+          (SELECT grp, avg(v)::vector(2) FROM centroid_sample_src GROUP BY grp EXCEPT ALL \
+           SELECT grp, centroid FROM centroid_sample_st))",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("compare sampled rescan with native query");
+    assert!(sampled_correct);
+    for statement in [
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "UPDATE centroid_sample_src SET v = '[9,10]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_sample_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("rebind after sampled rescan");
+    }
+    let rebound: bool = sqlx::query_scalar(
+        "SELECT c.baseline_frontier = t.frontier AND NOT c.cost_rescan_active \
+                AND h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' = 'COST_MODEL_REBIND' \
+         FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) \
+         JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id \
+           AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true \
+         WHERE t.pgt_relid = 'centroid_sample_st'::regclass",
+    ).fetch_one(&mut *conn).await.expect("inspect rebind after sample");
+    assert!(rebound);
+    drop(conn);
+    db.assert_st_matches_query(
+        "centroid_sample_st",
+        "SELECT grp, avg(v)::vector(2) AS centroid FROM centroid_sample_src GROUP BY grp",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_centroid_cost_model_rescans_and_rebinds_safely() {
     let mut db = E2eDb::new_dedicated().await.with_extension().await;
     setup_pgvector(&db).await;

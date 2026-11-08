@@ -2771,17 +2771,20 @@ select group rescan when recent comparable observations favor it by more than
 20%. It requires at least three completed samples of each strategy among the
 64 most recent history records, with the same query identity, contract generation,
 input count, and source-row estimate. Incomplete input counts are excluded.
-Estimates and timing history can be stale. Without enough comparable evidence,
-a bound state continues algebraic maintenance. The policy does not proactively
-run a group rescan to collect samples, so a newly created algebraic stream may
-never switch unless comparable rescan observations already exist in its history.
+Estimates and timing history can be stale. In `auto` mode, after three
+comparable algebraic samples, a batch of at least three captured records can
+start an explicitly reported group-rescan sample if fewer than three
+comparable rescan samples exist. Forced `differential` mode does not start
+sampling. Without enough comparable evidence, a bound state otherwise
+continues algebraic maintenance.
 A cost-unbound state continues
 rescan until a qualifying rebase or protected FULL refresh; once the bounded
 history window fills without a decision, it attempts a reported rebase after the
 cooldown so it can collect fresh algebraic samples. The policy does not infer a
 universal group-size threshold.
 
-A cost-selected rescan reports `COST_MODEL_RESCAN` and leaves private state
+A sampled rescan reports `COST_MODEL_SAMPLE_RESCAN`; a cost-selected rescan
+reports `COST_MODEL_RESCAN`. Both leave private state
 unbound; later rescans report `COST_MODEL_RESCAN_ACTIVE`. If the evidence later
 favors algebraic maintenance, the policy waits for eight recorded data-changing
 refreshes, then attempts a protected whole-state rebase after the rescan. A

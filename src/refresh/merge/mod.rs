@@ -2019,11 +2019,17 @@ pub fn execute_differential_refresh_with_tuning(
                 crate::refresh::centroid_cost::Preference::Unknown
             }
         });
+        let sample_rescan = strategy == crate::config::RefreshStrategy::Auto
+            && preference == Some(crate::refresh::centroid_cost::Preference::SampleRescan);
         let cost_rescan = state_bound == Some(true)
-            && preference == Some(crate::refresh::centroid_cost::Preference::Rescan)
+            && (preference == Some(crate::refresh::centroid_cost::Preference::Rescan) || sample_rescan)
             && history.as_ref().is_some_and(|history| !history.in_cooldown(st.defining_query_hash, st.contract_generation));
         if cost_rescan {
-            centroid_fallback = Some(crate::refresh::centroid_cost::RESCAN);
+            centroid_fallback = Some(if sample_rescan {
+                crate::refresh::centroid_cost::SAMPLE
+            } else {
+                crate::refresh::centroid_cost::RESCAN
+            });
         } else if state_bound == Some(false) && cost_rescan_active
         {
             let small_change = !input_delta_rows_may_be_incomplete && total_change_count <= 2;
@@ -4355,6 +4361,7 @@ pub fn execute_differential_refresh_with_tuning(
         }
     }
     if centroid_fallback == Some(crate::refresh::centroid_cost::RESCAN)
+        || centroid_fallback == Some(crate::refresh::centroid_cost::SAMPLE)
         || centroid_fallback == Some(crate::refresh::centroid_cost::RESCAN_ACTIVE)
     {
         crate::api::centroid_stage::mark_cost_rescan(st)?;

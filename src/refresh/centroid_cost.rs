@@ -8,6 +8,7 @@ const MIN_SAMPLES: usize = 3;
 const COOLDOWN_REFRESHES: usize = 8;
 
 pub(crate) const RESCAN: &str = "COST_MODEL_RESCAN";
+pub(crate) const SAMPLE: &str = "COST_MODEL_SAMPLE_RESCAN";
 pub(crate) const RESCAN_ACTIVE: &str = "COST_MODEL_RESCAN_ACTIVE";
 pub(crate) const REBIND: &str = "COST_MODEL_REBIND";
 
@@ -15,6 +16,7 @@ pub(crate) const REBIND: &str = "COST_MODEL_REBIND";
 pub(crate) enum Preference {
     Algebraic,
     Rescan,
+    SampleRescan,
     Unknown,
 }
 
@@ -66,7 +68,7 @@ impl CostHistory {
             .take(COOLDOWN_REFRESHES)
             .any(|observation| {
                 observation.matches_contract(plan, generation)
-                    && matches!(observation.reason(), Some(RESCAN | REBIND))
+                    && matches!(observation.reason(), Some(RESCAN | SAMPLE | REBIND))
             })
     }
 
@@ -106,13 +108,18 @@ impl CostHistory {
                     algebraic.push(elapsed_ms)
                 }
                 "merge" | "merge_prepared" | "explicit_dml"
-                    if matches!(observation.reason(), None | Some(RESCAN | RESCAN_ACTIVE))
-                        && detail.get("centroid_rebase").is_none() =>
+                    if matches!(
+                        observation.reason(),
+                        None | Some(RESCAN | SAMPLE | RESCAN_ACTIVE)
+                    ) && detail.get("centroid_rebase").is_none() =>
                 {
                     rescan.push(elapsed_ms);
                 }
                 _ => {}
             }
+        }
+        if algebraic.len() >= MIN_SAMPLES && rescan.len() < MIN_SAMPLES {
+            return Preference::SampleRescan;
         }
         if algebraic.len() < MIN_SAMPLES || rescan.len() < MIN_SAMPLES {
             return Preference::Unknown;
@@ -212,7 +219,7 @@ mod tests {
         assert_eq!(history.preference(42, 7, 4, 1001), Preference::Unknown);
         history.observations[1].detail.as_mut().unwrap()["input_delta_rows_may_be_incomplete"] =
             serde_json::json!(true);
-        assert_eq!(history.preference(42, 7, 4, 1000), Preference::Unknown);
+        assert_eq!(history.preference(42, 7, 4, 1000), Preference::SampleRescan);
         history.observations[1].detail.as_mut().unwrap()["input_delta_rows_may_be_incomplete"] =
             serde_json::json!(false);
         for observation in &mut history.observations {
@@ -233,7 +240,7 @@ mod tests {
         assert_eq!(history.preference(42, 7, 4, 1000), Preference::Algebraic);
         history.observations[1].detail.as_mut().unwrap()["centroid_fallback"] =
             serde_json::json!({"reason": "SOURCE_AHEAD_OF_FRONTIER"});
-        assert_eq!(history.preference(42, 7, 4, 1000), Preference::Unknown);
+        assert_eq!(history.preference(42, 7, 4, 1000), Preference::SampleRescan);
     }
 
     #[test]
@@ -243,6 +250,27 @@ mod tests {
         };
         assert!(history.in_cooldown(42, 7));
         assert!(!history.in_cooldown(42, 8));
+    }
+
+    #[test]
+    fn sampling_requires_comparable_algebraic_history_and_counts_sampled_rescans() {
+        let mut history = CostHistory {
+            observations: (0..3)
+                .map(|_| observation("centroid_algebraic", 20.0, None))
+                .collect(),
+        };
+        assert_eq!(history.preference(42, 7, 4, 1000), Preference::SampleRescan);
+        assert_eq!(history.preference(42, 7, 5, 1000), Preference::Unknown);
+        history
+            .observations
+            .insert(0, observation("merge", 10.0, Some(SAMPLE)));
+        assert!(history.in_cooldown(42, 7));
+        for _ in 0..2 {
+            history
+                .observations
+                .insert(0, observation("merge", 10.0, Some(RESCAN_ACTIVE)));
+        }
+        assert_eq!(history.preference(42, 7, 4, 1000), Preference::Rescan);
     }
 
     #[test]
