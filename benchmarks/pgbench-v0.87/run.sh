@@ -189,8 +189,10 @@ run_one() {
     local warmup_file="$run_dir/warmup.stdout"
     local history_before refresh_count refresh_duration correct workload_finished_at postgres_version postgres_settings
     local cpu_before cpu_after cpu_hz sampler_pid
+    # Avoid checkpoint interference from PostgreSQL's default 1 GB WAL limit.
     local postgres_args=(-c wal_level=logical -c track_commit_timestamp=on \
-        -c max_replication_slots=10 -c max_worker_processes=128)
+        -c max_replication_slots=10 -c max_worker_processes=128 \
+        -c max_wal_size=8GB)
 
     mkdir -p "$log_dir"
     chmod 777 "$run_dir" "$log_dir"
@@ -201,7 +203,7 @@ run_one() {
         -e POSTGRES_PASSWORD=postgres "$image" "${postgres_args[@]}" >/dev/null
     wait_for_postgres
     postgres_version="$(db_query 'SHOW server_version_num')"
-    postgres_settings="$(db_query "SELECT current_setting('wal_level') || '|' || current_setting('track_commit_timestamp') || '|' || current_setting('max_replication_slots') || '|' || current_setting('max_worker_processes')")"
+    postgres_settings="$(db_query "SELECT current_setting('wal_level') || '|' || current_setting('track_commit_timestamp') || '|' || current_setting('max_replication_slots') || '|' || current_setting('max_worker_processes') || '|' || current_setting('max_wal_size')")"
 
     if [[ "$config" != absent ]]; then
         db_query "CREATE EXTENSION IF NOT EXISTS pg_trickle;" >/dev/null
