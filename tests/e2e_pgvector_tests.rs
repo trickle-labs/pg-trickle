@@ -8112,6 +8112,50 @@ async fn test_pgvector_row_local_distance_differential() {
 }
 
 #[tokio::test]
+async fn test_pgvector_row_local_distance_refresh_avoids_source_scan() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "CREATE TABLE distance_scan_src (id int PRIMARY KEY, embedding vector(3))",
+        "INSERT INTO distance_scan_src SELECT i, '[1,0,0]'::vector FROM generate_series(1, 1000) i",
+        "SELECT pgtrickle.create_stream_table('distance_scan_st', $$SELECT id, embedding <=> '[1,0,0]'::vector AS distance FROM distance_scan_src WHERE embedding <-> '[1,0,0]'::vector < 1$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.distance_scan_st'])",
+        "UPDATE distance_scan_src SET embedding = '[0,1,0]' WHERE id = 1",
+    ]).await;
+    let mut tx = db.pool.begin().await.expect("begin measured refresh");
+    for setting in [
+        "SET LOCAL pg_trickle.refresh_strategy = 'differential'",
+        "SET LOCAL pg_trickle.differential_max_change_ratio = 0",
+    ] {
+        sqlx::query(setting)
+            .execute(&mut *tx)
+            .await
+            .expect("configure refresh");
+    }
+    let counters = "SELECT pg_stat_get_xact_tuples_returned('distance_scan_src'::regclass)::bigint, pg_stat_get_xact_tuples_fetched('distance_scan_src'::regclass)::bigint";
+    let before: (i64, i64) = sqlx::query_as(counters)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read initial source counters");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('distance_scan_st')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh row-local distance");
+    let after: (i64, i64) = sqlx::query_as(counters)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read final source counters");
+    assert!(
+        after.0 - before.0 + after.1 - before.1 < 1000,
+        "one changed row must not scan the source: before={before:?}, after={after:?}"
+    );
+    tx.commit().await.expect("commit measured refresh");
+    let differential: bool = db.query_scalar("SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'distance_scan_st' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert!(differential, "refresh must use the differential path");
+    db.assert_st_matches_query("distance_scan_st", "SELECT id, embedding <=> '[1,0,0]'::vector AS distance FROM distance_scan_src WHERE embedding <-> '[1,0,0]'::vector < 1").await;
+}
+
+#[tokio::test]
 async fn test_pgvector_distance_topk_recomputes() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
