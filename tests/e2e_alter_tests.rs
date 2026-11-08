@@ -146,6 +146,32 @@ async fn test_alter_refresh_mode_full_to_differential_aggregate() {
 }
 
 #[tokio::test]
+async fn test_alter_full_to_differential_uses_saved_search_path() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "CREATE SCHEMA al_context",
+        "CREATE TABLE al_context.source (id INT PRIMARY KEY, k INT, val INT)",
+        "INSERT INTO al_context.source VALUES (1, 1, 10), (2, 1, 20)",
+        "SET search_path = al_context, public",
+        "SELECT pgtrickle.create_stream_table('public.al_context_st', \
+         'SELECT k, avg(val) AS mean FROM source GROUP BY k', '1m', 'FULL')",
+        "RESET search_path",
+    ])
+    .await;
+
+    db.alter_st("public.al_context_st", "refresh_mode => 'DIFFERENTIAL'")
+        .await;
+    db.execute("INSERT INTO al_context.source VALUES (3, 1, 30)")
+        .await;
+    db.refresh_st("public.al_context_st").await;
+    db.assert_st_matches_query(
+        "public.al_context_st",
+        "SELECT k, avg(val) AS mean FROM al_context.source GROUP BY k",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_alter_to_immediate_ignores_global_wal_cdc_guc() {
     let db = E2eDb::new().await.with_extension().await;
 

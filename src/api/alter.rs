@@ -2339,15 +2339,8 @@ pub(crate) fn alter_stream_table_impl(
         });
     }
 
-    // LSEC-7 (v0.87.9): the rest of this function may re-parse
-    // `st.defining_query` (e.g. `validate_incremental_mode_for_query`,
-    // `validate_immediate_mode_support`) to resolve caller-controlled,
-    // possibly-unqualified source names — not just the single query-change
-    // path in `alter_stream_table_query`. Scope the *entire* remaining body
-    // under the caller's captured search_path rather than hunting down each
-    // individual re-parse call site; every catalog write below already uses
-    // fully qualified `pgtrickle.*` identifiers, so nothing here depends on
-    // search_path being the pinned definer path.
+    // New query text uses the caller's path; stored definitions use the
+    // stream owner's captured context at their individual call sites below.
     let mut requested_refresh_mode = refresh_mode;
     with_invoker_search_path(&caller_search_path, || {
         if let Some(raw_target) = target_freshness {
@@ -2365,7 +2358,9 @@ pub(crate) fn alter_stream_table_impl(
             ));
             }
             if target.mode == TargetFreshnessMode::OnCommit {
-                crate::dvm::validate_immediate_mode_support(&st.defining_query)?;
+                refresh::with_stream_owner(&st, || {
+                    crate::dvm::validate_immediate_mode_support(&st.defining_query)
+                })?;
                 requested_refresh_mode = Some("IMMEDIATE");
             }
             apply_target_freshness(st.pgt_id, target)?;
@@ -2417,11 +2412,14 @@ pub(crate) fn alter_stream_table_impl(
         // Validate the complete incremental admission before changing CDC mode,
         // schedule, catalog state, or trigger infrastructure.
         if target_refresh_mode != RefreshMode::Full {
-            super::validate_incremental_mode_for_query(
-                &st.defining_query,
-                target_refresh_mode,
-                relation_owner(st.pgt_relid)?,
-            )?;
+            let owner = relation_owner(st.pgt_relid)?;
+            refresh::with_stream_owner(&st, || {
+                super::validate_incremental_mode_for_query(
+                    &st.defining_query,
+                    target_refresh_mode,
+                    owner,
+                )
+            })?;
         }
 
         if requested_cdc_mode_override != st.requested_cdc_mode {
@@ -2472,7 +2470,9 @@ pub(crate) fn alter_stream_table_impl(
 
                 // Validate query restrictions for IMMEDIATE mode.
                 if new_mode.is_immediate() {
-                    crate::dvm::validate_immediate_mode_support(&st.defining_query)?;
+                    refresh::with_stream_owner(&st, || {
+                        crate::dvm::validate_immediate_mode_support(&st.defining_query)
+                    })?;
                 }
 
                 // Get dependencies for trigger migration.
@@ -2480,11 +2480,13 @@ pub(crate) fn alter_stream_table_impl(
                 let change_schema = config::pg_trickle_change_buffer_schema();
 
                 if old_mode == RefreshMode::Full && new_mode == RefreshMode::Differential {
-                    super::helpers::ensure_differential_storage_auxiliary_columns(
-                        &schema,
-                        &table_name,
-                        &st.defining_query,
-                    )?;
+                    refresh::with_stream_owner(&st, || {
+                        super::helpers::ensure_differential_storage_auxiliary_columns(
+                            &schema,
+                            &table_name,
+                            &st.defining_query,
+                        )
+                    })?;
                 }
 
                 // ── Tear down OLD mode's infrastructure ─────────────────
@@ -2627,7 +2629,9 @@ pub(crate) fn alter_stream_table_impl(
                 // Normalize legacy set-operation storage even when the caller
                 // explicitly reasserts FULL without requesting a refresh.
                 if new_mode == RefreshMode::Full
-                    && crate::dvm::query_needs_dual_count(&st.defining_query)
+                    && refresh::with_stream_owner(&st, || {
+                        Ok(crate::dvm::query_needs_dual_count(&st.defining_query))
+                    })?
                 {
                     crate::api::helpers::normalize_full_set_operation_storage(
                         &schema,

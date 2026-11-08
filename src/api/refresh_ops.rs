@@ -875,9 +875,13 @@ fn execute_manual_full_refresh_target(
         );
         if st.refresh_mode == RefreshMode::Differential && !needs_dual_count {
             target_columns.extend(
-                crate::api::helpers::differential_storage_auxiliary_columns(&st.defining_query)
-                    .into_iter()
-                    .map(|(name, _)| name),
+                refresh::with_stream_owner(st, || {
+                    Ok(crate::api::helpers::differential_storage_auxiliary_columns(
+                        &st.defining_query,
+                    ))
+                })?
+                .into_iter()
+                .map(|(name, _)| name),
             );
         }
         let target_columns = target_columns
