@@ -7459,19 +7459,34 @@ async fn test_vector_aggregate_normalized_expression_keeps_unknown_dimension() {
         .await;
     let typ: String = db.query_scalar("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='normalized_st'::regclass AND attname='centroid'").await;
     assert_eq!(typ, "vector");
-    db.execute("UPDATE normalized_source SET embedding='[0,0,1]' WHERE id=2")
+    for mutation in [
+        "UPDATE normalized_source SET embedding='[0,0,1]' WHERE id=2",
+        "INSERT INTO normalized_source VALUES (3, '[1,1,0]')",
+        "UPDATE normalized_source SET embedding=NULL WHERE id=1",
+        "UPDATE normalized_source SET embedding='[1,0,1]' WHERE id=1",
+        "DELETE FROM normalized_source WHERE id=2",
+    ] {
+        db.execute(mutation).await;
+        let previous: i64 = db.query_scalar("SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='normalized_st'").await;
+        db.execute_seq(&[
+            "SET pg_trickle.enable_vector_agg = on",
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+            "SELECT pgtrickle.refresh_stream_table('normalized_st')",
+        ])
         .await;
-    db.execute_seq(&[
-        "SET pg_trickle.enable_vector_agg = on",
-        "SET pg_trickle.differential_max_change_ratio = 0",
-        "SELECT pgtrickle.refresh_stream_table('normalized_st')",
-    ])
-    .await;
-    db.assert_st_matches_query(
-        "normalized_st",
-        "SELECT avg(l2_normalize(embedding)) AS centroid FROM normalized_source",
-    )
-    .await;
+        let differential: bool = sqlx::query_scalar("SELECT h.refresh_id > $1 AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='normalized_st' ORDER BY h.refresh_id DESC LIMIT 1")
+            .bind(previous).fetch_one(&db.pool).await.expect("inspect normalized aggregate refresh");
+        assert!(
+            differential,
+            "normalized aggregate must refresh differentially after {mutation}"
+        );
+        db.assert_st_matches_query(
+            "normalized_st",
+            "SELECT avg(l2_normalize(embedding)) AS centroid FROM normalized_source",
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
@@ -7531,19 +7546,32 @@ async fn test_vector_aggregate_nonpublic_extension_schema() {
         .rollback()
         .await
         .expect("end vector-schema check");
-    db.execute("UPDATE private_vectors SET embedding='[0,1,0]' WHERE id=1")
+    for mutation in [
+        "UPDATE private_vectors SET embedding='[0,1,0]' WHERE id=1",
+        "INSERT INTO private_vectors VALUES (2, '[1,1,0]')",
+        "UPDATE private_vectors SET embedding=NULL WHERE id=1",
+        "UPDATE private_vectors SET embedding='[1,0,1]' WHERE id=1",
+        "DELETE FROM private_vectors WHERE id=2",
+    ] {
+        db.execute(mutation).await;
+        let previous: i64 = db.query_scalar("SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='private_vector_st'").await;
+        db.execute_seq(&[
+            "SET search_path = public, \"Vec.X\"",
+            "SET pg_trickle.enable_vector_agg = on",
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+            "SELECT pgtrickle.refresh_stream_table('private_vector_st')",
+        ])
         .await;
-    db.execute_seq(&[
-        "SET search_path = public, \"Vec.X\"",
-        "SET pg_trickle.enable_vector_agg = on",
-        "SET pg_trickle.differential_max_change_ratio = 0",
-        "SELECT pgtrickle.refresh_stream_table('private_vector_st')",
-    ])
-    .await;
-    let same: bool = db
-        .query_scalar("SELECT centroid::text = '[0,1,0]' FROM private_vector_st")
-        .await;
-    assert!(same);
+        let differential: bool = sqlx::query_scalar("SELECT h.refresh_id > $1 AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='private_vector_st' ORDER BY h.refresh_id DESC LIMIT 1")
+            .bind(previous).fetch_one(&db.pool).await.expect("inspect nonpublic aggregate refresh");
+        assert!(
+            differential,
+            "nonpublic aggregate must refresh differentially after {mutation}"
+        );
+        let same: bool = db.query_scalar("SELECT centroid::text IS NOT DISTINCT FROM (SELECT \"Vec.X\".avg(embedding)::text FROM private_vectors) FROM private_vector_st").await;
+        assert!(same, "nonpublic aggregate differs after {mutation}");
+    }
 }
 
 #[tokio::test]
