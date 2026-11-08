@@ -2427,6 +2427,38 @@ async fn test_centroid_cost_model_accepts_real_refresh_history() {
            AND NOT (h.refresh_reason_detail::jsonb ? 'centroid_rebase')",
     ).fetch_one(&mut *conn).await.expect("inspect comparable real samples");
     assert_eq!((rescans, algebraic), (3, 3));
+    let (rescan_seconds, algebraic_seconds): (f64, f64) = sqlx::query_as(
+        "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM h.end_time - h.start_time)::float8) \
+                    FILTER (WHERE h.merge_strategy_used IN ('merge', 'merge_prepared', 'explicit_dml')), \
+                percentile_disc(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM h.end_time - h.start_time)::float8) \
+                    FILTER (WHERE h.merge_strategy_used = 'centroid_algebraic') \
+         FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
+         WHERE t.pgt_relid = 'centroid_history_st'::regclass AND h.action = 'DIFFERENTIAL' \
+           AND h.status = 'COMPLETED'",
+    ).fetch_one(&mut *conn).await.expect("measure recorded strategy medians");
+    sqlx::query("UPDATE centroid_history_src SET v = v + '[1,1]'::vector WHERE id IN (1, 2)")
+        .execute(&mut *conn)
+        .await
+        .expect("mutate selection input");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_history_st')")
+        .execute(&mut *conn)
+        .await
+        .expect("select from real timing history");
+    let (strategy, reason): (String, Option<String>) = sqlx::query_as(
+        "WITH latest AS MATERIALIZED ( \
+           SELECT h.merge_strategy_used, h.refresh_reason_detail \
+           FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
+           WHERE t.pgt_relid = 'centroid_history_st'::regclass AND h.status = 'COMPLETED' \
+           ORDER BY h.refresh_id DESC LIMIT 1) \
+         SELECT merge_strategy_used, refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' FROM latest",
+    ).fetch_one(&mut *conn).await.expect("inspect real-history decision");
+    if rescan_seconds < algebraic_seconds * 0.8 {
+        assert_ne!(strategy, "centroid_algebraic");
+        assert_eq!(reason.as_deref(), Some("COST_MODEL_RESCAN"));
+    } else {
+        assert_eq!(strategy, "centroid_algebraic");
+        assert_eq!(reason, None);
+    }
     drop(conn);
     db.assert_st_matches_query(
         "centroid_history_st",
