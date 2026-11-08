@@ -21,6 +21,25 @@ async fn setup_pgvector(db: &E2eDb) {
     db.execute("CREATE EXTENSION IF NOT EXISTS vector").await;
 }
 
+async fn wait_for_ann_worker_exit(db: &E2eDb, id: i64) -> serde_json::Value {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect disconnected worker");
+            if status["state"] != "RUNNING" {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("worker backend did not exit")
+}
+
 #[tokio::test]
 async fn test_vector_aggregate_mode_change_uses_saved_path_and_admission_setting() {
     let db = E2eDb::new().await.with_extension().await;
@@ -5507,12 +5526,7 @@ async fn test_ann_maintenance_cancel_is_transactional_and_reopens_only_on_reques
         .close()
         .await
         .expect("disconnect canceled worker");
-    let status: serde_json::Value =
-        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
-            .bind(id)
-            .fetch_one(&db.pool)
-            .await
-            .expect("inspect stopped worker");
+    let status = wait_for_ann_worker_exit(&db, id).await;
     assert_eq!(status["state"], "CANCELLED");
     assert!(
         sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
@@ -5541,12 +5555,7 @@ async fn test_ann_maintenance_cancel_is_transactional_and_reopens_only_on_reques
         .close()
         .await
         .expect("disconnect after a later request");
-    let status: serde_json::Value =
-        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
-            .bind(id)
-            .fetch_one(&db.pool)
-            .await
-            .expect("inspect interrupted later request");
+    let status = wait_for_ann_worker_exit(&db, id).await;
     assert_eq!(status["state"], "INTERRUPTED");
     db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     let mut worker = db.pool.acquire().await.expect("final worker");
@@ -5896,6 +5905,7 @@ async fn test_ann_maintenance_claim_serializes_concurrent_reindex_replacement() 
         .close()
         .await
         .expect("disconnect second worker");
+    wait_for_ann_worker_exit(&db, replacement).await;
     db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
         .bind(next)
@@ -5932,6 +5942,7 @@ async fn test_ann_claim_interval_starts_after_guard_lock_wait() {
         .await
         .expect("initial claim");
     first.detach().close().await.expect("disconnect worker");
+    wait_for_ann_worker_exit(&db, request).await;
     db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     let mut blocker = db.pool.begin().await.expect("begin guard lock");
     sqlx::query("SELECT 1 FROM pgtrickle.pgt_ann_maintenance_claims FOR UPDATE")
@@ -6001,6 +6012,7 @@ async fn test_ann_interrupted_claims_back_off_and_success_resets() {
         .close()
         .await
         .expect("interrupt initial claim");
+    wait_for_ann_worker_exit(&db, request).await;
     for failures in 1..=6 {
         assert!(
             sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
@@ -6039,6 +6051,7 @@ async fn test_ann_interrupted_claims_back_off_and_success_resets() {
                 .expect("report success");
         } else {
             worker.detach().close().await.expect("interrupt retry");
+            wait_for_ann_worker_exit(&db, request).await;
         }
     }
     let status: serde_json::Value =
@@ -6131,12 +6144,7 @@ async fn test_ann_maintenance_claim_is_session_bound_and_retryable() {
         .await
         .expect("retry failed request");
     worker.detach().close().await.expect("disconnect worker");
-    let status: serde_json::Value =
-        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
-            .bind(id)
-            .fetch_one(&db.pool)
-            .await
-            .expect("interrupted status");
+    let status = wait_for_ann_worker_exit(&db, id).await;
     assert_eq!(status["state"], "INTERRUPTED");
     assert!(status["next_eligible_at"].is_string());
     assert!(
