@@ -3523,20 +3523,22 @@ async fn test_tpch_explain_artifacts() {
              )",
             q.sql
         );
-        if db.try_execute(&create_sql).await.is_err() {
-            println!("  [{}] SKIPPED — create_stream_table failed", q.name);
+        if let Err(error) = db.try_execute(&create_sql).await {
+            println!(
+                "  [{}] SKIPPED — create_stream_table failed: {error}",
+                q.name
+            );
             continue;
         }
 
         // Initial refresh.
-        if db
+        if let Err(error) = db
             .try_execute(&format!(
                 "SELECT pgtrickle.refresh_stream_table('{st_name}')"
             ))
             .await
-            .is_err()
         {
-            println!("  [{}] SKIPPED — refresh failed", q.name);
+            println!("  [{}] SKIPPED — refresh failed: {error}", q.name);
             let _ = db
                 .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
                 .await;
