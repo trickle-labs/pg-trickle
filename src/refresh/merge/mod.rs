@@ -1487,7 +1487,7 @@ pub fn execute_differential_refresh_with_tuning(
                     entry.is_deduplicated,
                 )
             })
-            .unwrap_or((false, true)) // no cache: allow promotion; assume dedup (safe)
+            .unwrap_or((true, false)) // A cold cache cannot prove the fast path is safe.
     });
     if !is_append_only
         && !st.has_keyless_source
