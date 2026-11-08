@@ -434,6 +434,25 @@ async fn test_repair_missing_statement_update_trigger_restores_capture() {
         .await;
 
     let buffer = db.change_buffer_table(source_oid).await;
+    db.execute(&format!("DROP TABLE {buffer}")).await;
+    db.execute_seq(&[
+        "SET pg_trickle.change_buffer_durability = 'sync'",
+        "SELECT pgtrickle.repair_stream_table('repair_partial_st')",
+    ])
+    .await;
+    let sync_guard_is_baked_in: bool = db
+        .query_scalar(&format!(
+            "SELECT pg_get_functiondef(p.oid) LIKE '%PERFORM set_config(''synchronous_commit'', ''on'', true)%' \
+                    AND pg_get_functiondef(p.oid) NOT LIKE '%pgt_change_buffers%' \
+             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = 'pgtrickle_changes' \
+               AND p.proname = 'pg_trickle_cdc_upd_fn_{stable_name}'"
+        ))
+        .await;
+    assert!(
+        sync_guard_is_baked_in,
+        "repaired sync CDC trigger must avoid per-write registry lookup"
+    );
     let max_change_before: Option<i64> = db
         .query_scalar_opt(&format!("SELECT max(change_id) FROM {buffer}"))
         .await;

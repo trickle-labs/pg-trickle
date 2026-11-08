@@ -3561,6 +3561,7 @@ fn repair_stream_table_impl(name: &str, refresh_immediate: bool) -> Result<Strin
         .unwrap_or(None)
         .unwrap_or(false);
 
+        let mut buffer_rebuilt = false;
         if !buf_exists {
             let col_defs = cdc::resolve_referenced_column_defs(source_oid).unwrap_or_default();
             let stable_name = cdc::get_cdc_name_for_source(source_oid);
@@ -3578,11 +3579,14 @@ fn repair_stream_table_impl(name: &str, refresh_immediate: bool) -> Result<Strin
                     source_oid.to_u32()
                 ));
                 cdc_rebuilt = true;
+                buffer_rebuilt = true;
             }
         }
 
-        // Rebuild CDC trigger if absent.
-        if !matches!(dep.cdc_mode, CdcMode::Wal) && !cdc::trigger_exists(source_oid)? {
+        // Trigger bodies bake in durability, so refresh them when the buffer is recreated.
+        if !matches!(dep.cdc_mode, CdcMode::Wal)
+            && (buffer_rebuilt || !cdc::trigger_exists(source_oid)?)
+        {
             cdc::drop_change_trigger(source_oid, &change_schema)?;
             let pk_columns = cdc::resolve_pk_columns(source_oid).unwrap_or_default();
             let col_defs = cdc::resolve_referenced_column_defs(source_oid).unwrap_or_default();
