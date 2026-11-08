@@ -783,6 +783,73 @@ async fn test_upgrade_embedding_helpers_from_0109() {
 
 #[tokio::test]
 #[ignore]
+async fn test_upgrade_preserves_existing_vector_expression_index() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        return;
+    }
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+        .await;
+    db.execute("CREATE TABLE upgrade_index_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO upgrade_index_src VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    db.create_st(
+        "upgrade_index_st",
+        "SELECT id, embedding FROM upgrade_index_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX upgrade_existing_ann ON upgrade_index_st USING hnsw ((embedding::vector(3)) vector_l2_ops)").await;
+    let before: (i64, i64, String) = sqlx::query_as("SELECT c.oid::bigint, pg_relation_filenode(c.oid)::bigint, format_type(a.atttypid, a.atttypmod) FROM pg_class c JOIN pg_attribute a ON a.attrelid='upgrade_index_st'::regclass AND a.attname='embedding' WHERE c.oid='upgrade_existing_ann'::regclass")
+        .fetch_one(&db.pool).await.expect("inspect pre-upgrade index and type");
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+        .await;
+    db.execute("UPDATE upgrade_index_src SET embedding='[0,0,1]' WHERE id=2")
+        .await;
+    let previous: i64 = db.query_scalar("SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='upgrade_index_st'").await;
+    db.execute_seq(&[
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('upgrade_index_st')",
+    ])
+    .await;
+    let differential: bool = sqlx::query_scalar("SELECT h.refresh_id > $1 AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='upgrade_index_st' ORDER BY h.refresh_id DESC LIMIT 1")
+        .bind(previous).fetch_one(&db.pool).await.expect("inspect upgraded refresh");
+    assert!(differential, "upgraded stream must refresh differentially");
+    let after: (i64, i64, String, bool) = sqlx::query_as("SELECT c.oid::bigint, pg_relation_filenode(c.oid)::bigint, format_type(a.atttypid, a.atttypmod), i.indisvalid AND i.indisready FROM pg_class c JOIN pg_index i ON i.indexrelid=c.oid JOIN pg_attribute a ON a.attrelid='upgrade_index_st'::regclass AND a.attname='embedding' WHERE c.oid='upgrade_existing_ann'::regclass")
+        .fetch_one(&db.pool).await.expect("inspect post-upgrade index and type");
+    assert_eq!((after.0, after.1, after.2), before);
+    assert!(
+        after.3,
+        "pre-existing ANN index must remain valid and ready"
+    );
+    let equal: bool = db.query_scalar("SELECT NOT EXISTS ((SELECT id, embedding FROM upgrade_index_st EXCEPT ALL SELECT id, embedding FROM upgrade_index_src) UNION ALL (SELECT id, embedding FROM upgrade_index_src EXCEPT ALL SELECT id, embedding FROM upgrade_index_st))").await;
+    assert!(equal, "upgraded stream must match the source");
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin upgraded index plan check");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("force index eligibility");
+    let plan: serde_json::Value = sqlx::query_scalar("EXPLAIN (FORMAT JSON) SELECT id FROM upgrade_index_st ORDER BY (embedding::vector(3)) <-> '[1,0,0]'::vector LIMIT 1")
+        .fetch_one(&mut *tx).await.expect("explain upgraded vector search");
+    assert!(
+        plan.to_string().contains("upgrade_existing_ann"),
+        "upgraded index must remain eligible: {plan}"
+    );
+    tx.rollback().await.expect("end upgraded plan check");
+}
+
+#[tokio::test]
+#[ignore]
 async fn test_upgrade_distance_subscriptions_preserves_legacy_rows() {
     if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
         || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
