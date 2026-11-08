@@ -329,7 +329,7 @@ async fn test_partition_attach_triggers_reinit() {
 }
 
 #[tokio::test]
-async fn test_empty_partition_attach_keeps_trigger_stream_table_active() {
+async fn test_empty_partition_attach_keeps_auto_trigger_stream_table_active() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute(
@@ -348,17 +348,25 @@ async fn test_empty_partition_attach_keeps_trigger_stream_table_active() {
     .await;
     db.execute("INSERT INTO empty_attach_orders (created_at, total) VALUES ('2025-06-01', 100.00)")
         .await;
-    db.execute(
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_mode = 'auto'",
         "SELECT pgtrickle.create_stream_table(\
             name => 'empty_attach_st',\
             query => $$SELECT id, created_at, total FROM empty_attach_orders$$,\
             schedule => '1m',\
-            refresh_mode => 'DIFFERENTIAL',\
-            cdc_mode => 'trigger'\
+            refresh_mode => 'DIFFERENTIAL'\
         )",
-    )
+    ])
     .await;
-    db.refresh_st("empty_attach_st").await;
+
+    let cdc_mode: String = db
+        .query_scalar(
+            "SELECT cdc_mode FROM pgtrickle.pgt_dependencies d \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'empty_attach_st'",
+        )
+        .await;
+    assert_eq!(cdc_mode, "TRIGGER");
 
     db.execute(
         "CREATE TABLE empty_attach_orders_2026 (
@@ -369,10 +377,11 @@ async fn test_empty_partition_attach_keeps_trigger_stream_table_active() {
         )",
     )
     .await;
-    db.execute(
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_mode = 'auto'",
         "ALTER TABLE empty_attach_orders ATTACH PARTITION empty_attach_orders_2026
             FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
-    )
+    ])
     .await;
 
     let status: String = db

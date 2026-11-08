@@ -427,7 +427,7 @@ async fn test_mixed_matview_on_stream_table() {
     // Add more events
     db.execute("INSERT INTO md_events (event_type, amount) VALUES ('sale', 300), ('return', 25)")
         .await;
-    db.refresh_st("md_st_events").await;
+    db.refresh_st_with_retry("md_st_events").await;
 
     // Matview is stale — it still has old data
     let mv_count: i64 = db.query_scalar("SELECT count(*) FROM md_mv_summary").await;
