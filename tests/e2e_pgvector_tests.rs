@@ -2325,6 +2325,50 @@ async fn test_centroid_rebase_rejects_mismatched_visible_groups() {
 }
 
 #[tokio::test]
+async fn test_centroid_cost_based_full_fallback_rebinds_state() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    let mut conn = db.pool.acquire().await.expect("centroid cost session");
+    for statement in [
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE centroid_cost_src (id int PRIMARY KEY, grp int, v vector(2))",
+        "INSERT INTO centroid_cost_src SELECT id, id % 2, '[1,2]'::vector FROM generate_series(1, 100) id",
+        "ANALYZE centroid_cost_src",
+        "SELECT pgtrickle.create_stream_table('centroid_cost_st', $$SELECT grp, avg(v) AS centroid FROM centroid_cost_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_cost_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_cost_st')",
+        "INSERT INTO pgtrickle.pgt_cost_model_summary (pgt_id, avg_full_ms, avg_diff_ms, sample_count) SELECT pgt_id, 0.1, 100.0, 3 FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_cost_st'::regclass ON CONFLICT (pgt_id) DO UPDATE SET avg_full_ms = EXCLUDED.avg_full_ms, avg_diff_ms = EXCLUDED.avg_diff_ms, sample_count = EXCLUDED.sample_count",
+        "SET pg_trickle.refresh_strategy = 'auto'",
+        "SET pg_trickle.differential_max_change_ratio = 0.8",
+        "UPDATE centroid_cost_src SET v = '[5,6]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_cost_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("prepare cost-based centroid fallback");
+    }
+    let fell_back: bool = sqlx::query_scalar("SELECT h.action = 'FULL' AND h.was_full_fallback AND h.refresh_reason = 'COST_MODEL_PREFERRED_FULL' AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_cost_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect cost-based fallback");
+    assert!(fell_back, "cost-based FULL must bind refreshed state");
+    for statement in [
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "UPDATE centroid_cost_src SET v = '[7,8]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_cost_st')",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("resume algebraic centroid maintenance");
+    }
+    let resumed: bool = sqlx::query_scalar("WITH native AS (SELECT grp, avg(v)::text AS centroid FROM centroid_cost_src GROUP BY grp), actual AS (SELECT grp, centroid::text AS centroid FROM centroid_cost_st) SELECT NOT EXISTS ((SELECT * FROM native EXCEPT ALL SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM native)) AND (SELECT h.merge_strategy_used = 'centroid_algebraic' AND c.baseline_frontier = t.frontier FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_cost_st'::regclass)")
+        .fetch_one(&mut *conn).await.expect("inspect resumed centroid state");
+    assert!(resumed, "algebraic refresh must resume with correct output");
+}
+
+#[tokio::test]
 async fn test_centroid_change_limit_rebase_rejects_untouched_visible_mismatch() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;

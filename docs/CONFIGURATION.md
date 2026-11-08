@@ -2762,8 +2762,11 @@ To avoid repeated whole-state rebuilds under sustained rewrites, a change-limit
 rebase immediately following another data-changing rebase is suppressed. The
 group rescan remains active, the state becomes unbound, and cost evidence records
 `suppressed_consecutive_change_limit`; a protected FULL refresh can reestablish it.
-The current cost decision does not account for centroid-state size or rebase
-cost, so the algebraic path can be slower for small groups.
+With `refresh_strategy = 'auto'`, the general refresh cost model can select a
+FULL refresh based on historical timings; a successful protected FULL refresh
+can rebind centroid state for later algebraic maintenance. That model does not
+compare algebraic maintenance with group rescan or account for centroid-state
+size or rebase cost, so the algebraic path can be slower for small groups.
 
 | Property | Value |
 |---|---|
