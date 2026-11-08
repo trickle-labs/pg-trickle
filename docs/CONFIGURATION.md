@@ -2772,7 +2772,10 @@ select group rescan when recent comparable observations favor it by more than
 64 most recent history records, with the same query identity, contract generation,
 input count, and source-row estimate. Incomplete input counts are excluded.
 Estimates and timing history can be stale. Without enough comparable evidence,
-a bound state continues algebraic maintenance. A cost-unbound state continues
+a bound state continues algebraic maintenance. The policy does not proactively
+run a group rescan to collect samples, so a newly created algebraic stream may
+never switch unless comparable rescan observations already exist in its history.
+A cost-unbound state continues
 rescan until a qualifying rebase or protected FULL refresh; once the bounded
 history window fills without a decision, it attempts a reported rebase after the
 cooldown so it can collect fresh algebraic samples. The policy does not infer a
