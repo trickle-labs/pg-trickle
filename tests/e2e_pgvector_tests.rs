@@ -7403,15 +7403,34 @@ async fn test_vector_aggregate_join_uses_each_bound_dimension() {
             ("two".into(), "vector(2)".into())
         ]
     );
-    db.execute("UPDATE dims_two SET embedding='[0,1]' WHERE id=1")
+    let oracle = "SELECT avg(a.embedding)::vector(3) AS three, avg(b.embedding)::vector(2) AS two FROM dims_three a JOIN dims_two b USING(id)";
+    for mutations in [
+        vec!["UPDATE dims_two SET embedding='[0,1]' WHERE id=1"],
+        vec![
+            "INSERT INTO dims_three VALUES (2, '[0,1,0]')",
+            "INSERT INTO dims_two VALUES (2, '[1,1]')",
+        ],
+        vec!["UPDATE dims_three SET embedding=NULL WHERE id=1"],
+        vec!["UPDATE dims_three SET embedding='[0,0,1]' WHERE id=1"],
+        vec!["DELETE FROM dims_two WHERE id=2"],
+    ] {
+        db.execute_seq(&mutations).await;
+        let previous: i64 = db.query_scalar("SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='dims_st'").await;
+        db.execute_seq(&[
+            "SET pg_trickle.enable_vector_agg = on",
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+            "SELECT pgtrickle.refresh_stream_table('dims_st')",
+        ])
         .await;
-    db.execute_seq(&[
-        "SET pg_trickle.enable_vector_agg = on",
-        "SET pg_trickle.differential_max_change_ratio = 0",
-        "SELECT pgtrickle.refresh_stream_table('dims_st')",
-    ])
-    .await;
-    db.assert_st_matches_query("dims_st", "SELECT avg(a.embedding)::vector(3) AS three, avg(b.embedding)::vector(2) AS two FROM dims_three a JOIN dims_two b USING(id)").await;
+        let differential: bool = sqlx::query_scalar("SELECT h.refresh_id > $1 AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='dims_st' ORDER BY h.refresh_id DESC LIMIT 1")
+            .bind(previous).fetch_one(&db.pool).await.expect("inspect dimensioned join refresh");
+        assert!(
+            differential,
+            "dimensioned join must refresh differentially after {mutations:?}"
+        );
+        db.assert_st_matches_query("dims_st", oracle).await;
+    }
 }
 
 #[tokio::test]
