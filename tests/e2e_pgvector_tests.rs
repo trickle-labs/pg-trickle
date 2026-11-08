@@ -2325,6 +2325,36 @@ async fn test_centroid_rebase_rejects_mismatched_visible_groups() {
 }
 
 #[tokio::test]
+async fn test_centroid_change_limit_rebase_rejects_untouched_visible_mismatch() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "SET pg_trickle.enable_vector_agg = on",
+        "SET pg_trickle.enable_centroid_state = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "CREATE TABLE centroid_limit_mismatch_src (id int PRIMARY KEY, grp int, v vector(2))",
+        "INSERT INTO centroid_limit_mismatch_src VALUES (1, 1, '[1,2]'), (2, 2, '[3,4]')",
+        "SELECT pgtrickle.create_stream_table('centroid_limit_mismatch_st', $$SELECT grp, avg(v) AS centroid FROM centroid_limit_mismatch_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_limit_mismatch_st'::regclass",
+        "SELECT pgtrickle.refresh_stream_table('centroid_limit_mismatch_st')",
+        "BEGIN",
+        "SET LOCAL pg_trickle.internal_refresh = 'true'",
+        "UPDATE centroid_limit_mismatch_st SET centroid = '[99,99]' WHERE grp = 1",
+        "COMMIT",
+        "UPDATE pgtrickle.pgt_centroid_groups SET state[2] = 4096, state[3] = 4096 WHERE row_id = (SELECT __pgt_row_id FROM centroid_limit_mismatch_st WHERE grp = 2)",
+        "UPDATE pgtrickle.pgt_centroid_groups SET state_checksum = pg_catalog.md5(pg_catalog.int8send(pgt_id) || row_id || pg_catalog.int8send(group_count) || pg_catalog.array_send(state)) WHERE row_id = (SELECT __pgt_row_id FROM centroid_limit_mismatch_st WHERE grp = 2)",
+        "UPDATE centroid_limit_mismatch_src SET v = '[5,6]' WHERE id = 2",
+        "SELECT pgtrickle.refresh_stream_table('centroid_limit_mismatch_st')",
+    ]).await;
+    let safe: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome' = 'unbound' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'reason' LIKE '%ChangeLimit%' AND EXISTS (SELECT 1 FROM centroid_limit_mismatch_st WHERE grp = 1 AND centroid::text = '[99,99]') AND EXISTS (SELECT 1 FROM centroid_limit_mismatch_st WHERE grp = 2 AND centroid::text = '[5,6]') FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_limit_mismatch_st'::regclass").await;
+    assert!(
+        safe,
+        "a change-limit rebase must not bind an unchecked mismatch"
+    );
+}
+
+#[tokio::test]
 async fn test_vector_downstream_preserves_signed_zero_changes() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
