@@ -268,12 +268,16 @@ async fn test_pgvector_filtered_ann_workload() {
         'SELECT id, tenant, embedding FROM vector_bench_source', '1h', 'DIFFERENTIAL')",
     )
     .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.vector_bench_corpus'])")
+        .await;
     db.execute("ANALYZE vector_bench_corpus").await;
     db.execute(
         "SELECT pgtrickle.create_stream_table('vector_bench_full', \
         'SELECT id, tenant, embedding FROM vector_bench_source', '1h', 'FULL')",
     )
     .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.vector_bench_full'])")
+        .await;
     let versions: (String, String, String) = sqlx::query_as(
         "SELECT version(), \
         (SELECT extversion FROM pg_extension WHERE extname = 'vector'), \
@@ -523,10 +527,12 @@ async fn test_pgvector_filtered_ann_workload() {
             } else {
                 "SET pg_trickle.enable_centroid_state = off"
             };
+            let pause = format!("SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])");
             db.execute_seq(&[
                 "SET pg_trickle.enable_vector_agg = on",
                 centroid_setting,
                 &create,
+                &pause,
             ])
             .await;
         }

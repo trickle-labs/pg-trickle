@@ -21,7 +21,8 @@ To build a matching image locally, run `just build-e2e-image` followed by
 This opt-in database benchmark runs against the packaged extension in a
 Testcontainers PostgreSQL instance. It emits one `PGVECTOR_BENCHMARK_JSON=`
 line containing raw observations; it does not impose universal latency or
-recall thresholds. The weekly E2E Benchmarks workflow runs dimensions 384,
+recall thresholds. The scheduler is paused for each benchmark stream so the
+workload controls its refreshes. The weekly E2E Benchmarks workflow runs dimensions 384,
 768 and 1536 and uploads the JSON, complete output, commit, host CPU and Docker
 version as artifacts.
 
