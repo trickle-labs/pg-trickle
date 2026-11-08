@@ -2894,11 +2894,12 @@ fn build_changed_cols_bitmask_stmt_expr(
     }
     let parts: Vec<String> = columns
         .iter()
-        .map(|(col_name, _)| {
+        .map(|(col_name, sql_type)| {
             let qcol = col_name.replace('"', "\"\"");
-            crate::cdc_elision::changed_column_sql(
+            crate::cdc_elision::changed_column_sql_for_type(
                 &format!("o.\"{qcol}\""),
                 &format!("n.\"{qcol}\""),
+                sql_type,
             )
         })
         .collect();
@@ -4077,6 +4078,10 @@ mod tests {
             ("amount".to_string(), "numeric(12, 2)".to_string()),
         ];
         let expr = build_changed_cols_bitmask_stmt_expr(&pk, &cols).unwrap();
+        assert!(
+            expr.contains("o.\"id\" IS DISTINCT FROM n.\"id\""),
+            "fixed-width columns should use scalar comparison: {expr}"
+        );
         assert!(
             expr.contains("pg_catalog.pg_typeof(n.\"amount\")::oid IN")
                 && expr.contains("ELSE B'1' END)::varbit"),
