@@ -35,6 +35,9 @@ async fn test_upgrade_catalog_schema_stability() {
 
     // Expected columns in pgt_stream_tables (alphabetical)
     let expected_columns = vec![
+        ("ann_churn_generation", "bigint"),
+        ("ann_churn_operations", "bigint"),
+        ("ann_refresh_epoch", "bigint"),
         ("auto_threshold", "double precision"),
         ("blow_reason", "text"),
         ("blown_at", "timestamp with time zone"),

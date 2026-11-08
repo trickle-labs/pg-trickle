@@ -1,0 +1,61 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.35s
+     Running tests/e2e_upgrade_tests.rs (target/debug/deps/e2e_upgrade_tests-9954e42feb14e67a)
+
+running 39 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test test_upgrade_ann_epoch_handles_old_catalog_and_rollback ... ignored
+test test_upgrade_catalog_indexes_present ... ok
+test test_upgrade_chain_event_triggers_present ... ignored
+test test_upgrade_chain_function_parity_with_fresh_install ... ignored
+test test_upgrade_chain_new_functions_exist ... ignored
+test test_upgrade_chain_stream_tables_survive ... ignored
+test test_upgrade_chain_version_consistency ... ignored
+test test_upgrade_chain_views_queryable ... ignored
+test test_upgrade_catalog_schema_stability ... FAILED
+test test_upgrade_distance_subscriptions_preserves_legacy_rows ... ignored
+test test_upgrade_dependencies_schema_stability ... ok
+test test_upgrade_embedding_helpers_from_0109 ... ignored
+test test_upgrade_drop_recreate_roundtrip ... ok
+test test_upgrade_extension_version_consistency ... ok
+test test_upgrade_major_version_active_stream_table_with_pending_deltas ... ignored, v0.92 PostgreSQL major-upgrade coverage runs in the full upgrade job
+test test_upgrade_event_triggers_installed ... ok
+test test_upgrade_monitoring_views_present ... ok
+test test_upgrade_preflight_reports_stable_statuses ... ignored, v0.92 upgrade boundary coverage runs in the full upgrade job
+test test_upgrade_quick_health_reports_broken_immediate_cascades ... ignored
+test test_upgrade_quiesce_preserves_pending_deltas ... ignored, v0.92 upgrade boundary coverage runs in the full upgrade job
+test test_upgrade_rebuild_cdc_triggers_immediate_without_buffer_succeeds ... ignored
+test test_upgrade_migration_era_catalog_tables_and_config_dump_policy_present ... ok
+test test_upgrade_schema_additions_from_sql ... ignored
+test test_upgrade_refresh_history_fk_cascade ... ok
+test test_upgrade_schema_version_table_present ... ok
+test test_upgrade_v019_catalog_indexes_present ... ok
+test test_upgrade_v078_catalog_additions ... ok
+test test_upgrade_v080_metrics_summary_columns ... ok
+test test_upgrade_v08713_backfills_outbox_provenance ... ignored
+test test_upgrade_v0877_backfills_defining_search_path ... ignored
+test test_upgrade_v0877_missing_storage_aborts_before_catalog_mutation ... ignored
+test test_upgrade_v088_window_catalog_rows_remain_valid ... ignored
+test test_upgrade_v090_catalog_additions ... ok
+test test_upgrade_v1082_rebuilds_bpchar_identity_before_differential ... ignored
+test test_upgrade_v1083_preserves_intersect_private_state_for_differential ... ignored
+test test_upgrade_v079_new_functions ... ok
+
+failures:
+
+---- test_upgrade_catalog_schema_stability stdout ----
+
+thread 'test_upgrade_catalog_schema_stability' (3726172) panicked at tests/e2e_upgrade_tests.rs:142:5:
+assertion `left == right` failed: Unexpected number of columns in pgt_stream_tables (schema drift?)
+  left: 79
+ right: 76
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    test_upgrade_catalog_schema_stability
+
+test result: FAILED. 17 passed; 1 failed; 21 ignored; 0 measured; 0 filtered out; finished in 39.63s
+
+error: test failed, to rerun pass `--test e2e_upgrade_tests`

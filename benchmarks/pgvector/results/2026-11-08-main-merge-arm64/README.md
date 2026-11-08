@@ -21,3 +21,10 @@ passed once against upgrade image
 The remaining upgrade tests were filtered out. The logs in this directory
 record the individual test names and results; these local runs do not replace
 the repository's complete CI gates.
+
+The targeted 0.109.0-to-0.110.0 legacy distance-subscription and ANN epoch
+rollback regressions also passed once each. The non-ignored catalog suite
+initially failed because its expected column list omitted the three ANN epoch
+and churn columns. After updating that test expectation, the suite passed
+18 tests with 21 ignored. The before/after logs preserve the failure and rerun;
+the final test source includes that expectation change beyond `0dcb4a94`.
