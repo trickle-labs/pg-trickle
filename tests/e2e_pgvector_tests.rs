@@ -1449,7 +1449,7 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
     assert_eq!(cost["merge_strategy"], "centroid_algebraic");
     assert_eq!(cost["input_delta_rows"], 2);
     assert_eq!(cost["output_rows_changed"], 2);
-    assert_eq!(cost["input_delta_rows_may_be_capped"], true);
+    assert_eq!(cost["input_delta_rows_may_be_incomplete"], false);
     assert!(cost["source_rows_estimate"].as_i64().is_some());
     sqlx::query("ANALYZE centroid_live_st")
         .execute(&mut *conn)
@@ -1521,7 +1521,7 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
         .fetch_one(&mut *conn).await.expect("read uncapped cost evidence");
     let uncapped: serde_json::Value =
         serde_json::from_str(&uncapped).expect("parse uncapped cost evidence");
-    assert_eq!(uncapped["input_delta_rows_may_be_capped"], false);
+    assert_eq!(uncapped["input_delta_rows_may_be_incomplete"], false);
     sqlx::query("ROLLBACK")
         .execute(&mut *conn)
         .await
@@ -1532,6 +1532,27 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
         restored,
         "rollback must restore visible rows and the state frontier"
     );
+    for sql in [
+        "BEGIN",
+        "SET LOCAL pg_trickle.differential_max_change_ratio = 0.001",
+        "UPDATE pgtrickle.pgt_stream_tables SET auto_threshold = NULL WHERE pgt_relid = 'centroid_live_st'::regclass",
+        "UPDATE centroid_live_src SET v = '[9,10]' WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('centroid_live_st')",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("exercise the bounded change probe");
+    }
+    let bounded: String = sqlx::query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&mut *conn).await.expect("read bounded cost evidence");
+    let bounded: serde_json::Value =
+        serde_json::from_str(&bounded).expect("parse bounded cost evidence");
+    assert_eq!(bounded["input_delta_rows_may_be_incomplete"], true);
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("roll back bounded refresh");
     for sql in [
         "CREATE ROLE centroid_live_owner NOLOGIN",
         "GRANT USAGE ON SCHEMA pgtrickle TO centroid_live_owner",
@@ -2546,7 +2567,7 @@ async fn test_centroid_source_ahead_fallback_is_reported() {
     let evidence: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_stream_tables t CROSS JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
     let evidence: serde_json::Value =
         serde_json::from_str(&evidence).expect("parse fallback evidence");
-    assert!(evidence["input_delta_rows_may_be_capped"].is_boolean());
+    assert!(evidence["input_delta_rows_may_be_incomplete"].is_boolean());
 }
 
 #[tokio::test]

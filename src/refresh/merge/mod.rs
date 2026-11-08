@@ -1658,6 +1658,7 @@ pub fn execute_differential_refresh_with_tuning(
     let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential;
     let mut total_change_count: i64 = 0;
     let mut _total_table_size: i64 = 0;
+    let mut input_delta_rows_may_be_incomplete = !st_source_pgt_ids.is_empty();
     // DI-2: Collect per-source (change_count, table_size) for the per-leaf
     // fallback decision after the P2 loop completes.
     let mut per_source_stats: Vec<(u32, i64, i64)> = Vec::new();
@@ -1676,7 +1677,9 @@ pub fn execute_differential_refresh_with_tuning(
         };
 
         let sql = format!(
-            "SELECT sz.table_size, cnt.change_count \
+            "SELECT sz.table_size, cnt.change_count, \
+                    ({max_ratio_lit} > 0 AND cnt.change_count >= \
+                       (sz.table_size::double precision * {max_ratio_lit})::bigint + 1) \
              FROM (SELECT GREATEST(reltuples::bigint, 1000) AS table_size \
                    FROM pg_class WHERE oid = {oid}::oid) sz, \
              LATERAL (SELECT count(*)::bigint AS change_count FROM (\
@@ -1693,14 +1696,15 @@ pub fn execute_differential_refresh_with_tuning(
         // EXISTS check and this threshold query (e.g., during concurrent
         // DROP STREAM TABLE), treat it as zero changes rather than
         // propagating a "relation does not exist" error.
-        let (table_size, change_count) = match Spi::connect(|client| {
+        let (table_size, change_count, may_be_capped) = match Spi::connect(|client| {
             let row = client
                 .select(&sql, None, &[])
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .first();
             let ts: i64 = row.get::<i64>(1).unwrap_or(Some(1000)).unwrap_or(1000);
             let cc: i64 = row.get::<i64>(2).unwrap_or(Some(0)).unwrap_or(0);
-            Ok::<(i64, i64), PgTrickleError>((ts, cc))
+            let capped = row.get::<bool>(3).unwrap_or(Some(true)).unwrap_or(true);
+            Ok::<(i64, i64, bool), PgTrickleError>((ts, cc, capped))
         }) {
             Ok(pair) => pair,
             Err(e) => {
@@ -1709,9 +1713,10 @@ pub fn execute_differential_refresh_with_tuning(
                     buf_name,
                     e,
                 );
-                (1000, 0)
+                (1000, 0, true)
             }
         };
+        input_delta_rows_may_be_incomplete |= may_be_capped;
 
         let threshold_rows = if max_ratio > 0.0 {
             ((table_size as f64) * max_ratio).ceil() as i64
@@ -2038,8 +2043,8 @@ pub fn execute_differential_refresh_with_tuning(
                 );
                 if let Some(fields) = cost_evidence.as_object_mut() {
                     fields.insert(
-                        "input_delta_rows_may_be_capped".into(),
-                        serde_json::json!(max_ratio > 0.0),
+                        "input_delta_rows_may_be_incomplete".into(),
+                        serde_json::json!(input_delta_rows_may_be_incomplete),
                     );
                     fields.insert(
                         "source_rows_estimate".into(),
@@ -4296,8 +4301,8 @@ pub fn execute_differential_refresh_with_tuning(
         crate::refresh::build_differential_cost_evidence(total_change_count, effective_count);
     if let Some(fields) = cost_evidence.as_object_mut() {
         fields.insert(
-            "input_delta_rows_may_be_capped".into(),
-            serde_json::json!(max_ratio > 0.0),
+            "input_delta_rows_may_be_incomplete".into(),
+            serde_json::json!(input_delta_rows_may_be_incomplete),
         );
         fields.insert(
             "source_rows_estimate".into(),

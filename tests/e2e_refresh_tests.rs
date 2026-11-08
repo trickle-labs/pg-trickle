@@ -12,6 +12,27 @@ use e2e::E2eDb;
 // ── Basic DML Refresh ──────────────────────────────────────────────────
 
 #[tokio::test]
+async fn test_refresh_cost_evidence_marks_unaccounted_stream_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE rf_cost_chain_src (id INT PRIMARY KEY)",
+        "INSERT INTO rf_cost_chain_src VALUES (1)",
+        "SELECT pgtrickle.create_stream_table('rf_cost_chain_parent', 'SELECT id FROM rf_cost_chain_src', '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.create_stream_table('rf_cost_chain_child', 'SELECT id FROM rf_cost_chain_parent', '1h', 'DIFFERENTIAL')",
+        "INSERT INTO rf_cost_chain_src VALUES (2)",
+    ]).await;
+    db.refresh_st_until_converged("rf_cost_chain_parent").await;
+    db.refresh_st_until_converged("rf_cost_chain_child").await;
+    let detail: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'rf_cost_chain_child'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    let evidence: serde_json::Value = serde_json::from_str(&detail).expect("parse cost evidence");
+    assert_eq!(evidence["input_delta_rows"], 0);
+    assert_eq!(evidence["input_delta_rows_may_be_incomplete"], true);
+    db.assert_st_matches_query("rf_cost_chain_child", "SELECT id FROM rf_cost_chain_src")
+        .await;
+}
+
+#[tokio::test]
 async fn test_refresh_rejects_unreadable_change_buffer_without_advancing_frontier() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE rf_broken_buffer (id INT PRIMARY KEY, val INT)")
