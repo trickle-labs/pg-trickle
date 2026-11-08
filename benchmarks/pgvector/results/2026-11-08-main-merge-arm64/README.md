@@ -28,3 +28,10 @@ initially failed because its expected column list omitted the three ANN epoch
 and churn columns. After updating that test expectation, the suite passed
 18 tests with 21 ignored. The before/after logs preserve the failure and rerun;
 the final test source includes that expectation change beyond `0dcb4a94`.
+
+The repository's `just test-integration` suite also passed 161 tests using
+stock PostgreSQL 18.6 Testcontainers and four test threads. This suite tests
+catalog and DVM fixtures without loading the packaged extension. An initial
+build failed after another checkout shared its Cargo target directory; cleaning
+the `pg_trickle` package artifacts and rebuilding resolved the stale-library
+field mismatch. The successful run is recorded in [integration.log](integration.log).

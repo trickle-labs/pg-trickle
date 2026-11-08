@@ -1,0 +1,169 @@
+cargo nextest run --test catalog_tests --test catalog_compat_tests --test extension_tests --test monitoring_tests --test smoke_tests --test resilience_tests --test scenario_tests --test trigger_detection_tests --test workflow_tests --test property_tests
+   Compiling pg_trickle v0.110.0 (/private/tmp/pg-trickle-1384)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 30.33s
+────────────
+ Nextest run ID ecc07c3c-6af2-41f1-a767-e8602304181a with nextest profile: default
+    Starting 161 tests across 10 binaries
+        PASS [   0.021s] (  1/161) pg_trickle::catalog_compat_tests test_catalog_ddl_no_phantom_columns
+        PASS [   0.012s] (  2/161) pg_trickle::catalog_compat_tests test_catalog_ddl_no_phantom_tables
+        PASS [   2.770s] (  3/161) pg_trickle::catalog_compat_tests test_advisory_lock_roundtrip
+        PASS [   2.827s] (  4/161) pg_trickle::catalog_compat_tests test_array_length_returns_int4
+        PASS [   2.882s] (  5/161) pg_trickle::catalog_compat_tests test_array_length_bigint_cast_comparison
+        PASS [   2.898s] (  6/161) pg_trickle::catalog_compat_tests test_nspname_lookup_for_nonexistent_relation_returns_empty
+        PASS [   2.747s] (  7/161) pg_trickle::catalog_compat_tests test_nspname_text_cast_works
+        PASS [   2.747s] (  8/161) pg_trickle::catalog_compat_tests test_nspname_via_search_path_resolution
+        PASS [   2.703s] (  9/161) pg_trickle::catalog_compat_tests test_pg_get_viewdef_complex_view
+        PASS [   2.766s] ( 10/161) pg_trickle::catalog_compat_tests test_pg_available_extensions_shape
+        PASS [   2.615s] ( 11/161) pg_trickle::catalog_compat_tests test_pg_proc_volatility_column_values
+        PASS [   2.654s] ( 12/161) pg_trickle::catalog_compat_tests test_relkind_for_materialized_view
+        PASS [   2.783s] ( 13/161) pg_trickle::catalog_compat_tests test_pg_get_viewdef_returns_trimmed_definition
+        PASS [   2.850s] ( 14/161) pg_trickle::catalog_compat_tests test_pg_get_viewdef_cte_view
+        PASS [   2.606s] ( 15/161) pg_trickle::catalog_compat_tests test_relkind_for_regular_table
+        PASS [   2.655s] ( 16/161) pg_trickle::catalog_compat_tests test_relkind_for_view
+        PASS [   2.768s] ( 17/161) pg_trickle::catalog_compat_tests test_relkind_for_partitioned_table
+        PASS [   2.871s] ( 18/161) pg_trickle::catalog_compat_tests test_relkind_for_partitioned_index
+        PASS [   2.750s] ( 19/161) pg_trickle::catalog_compat_tests test_union_all_requires_matching_column_count
+        PASS [   2.872s] ( 20/161) pg_trickle::catalog_compat_tests test_union_all_grouping_sets_manual_rewrite_pattern
+        PASS [   2.817s] ( 21/161) pg_trickle::catalog_tests test_catalog_schemas_created
+        PASS [   2.838s] ( 22/161) pg_trickle::catalog_tests test_catalog_tables_exist
+        PASS [   2.822s] ( 23/161) pg_trickle::catalog_tests test_change_tracking_crud
+        PASS [   2.941s] ( 24/161) pg_trickle::catalog_tests test_change_buffer_table_schema
+        PASS [   2.812s] ( 25/161) pg_trickle::catalog_tests test_insert_stream_table
+        PASS [   2.896s] ( 26/161) pg_trickle::catalog_tests test_dependency_insertion_and_cascade_delete
+        PASS [   2.728s] ( 27/161) pg_trickle::catalog_tests test_pg_stat_stream_tables_stale_null_when_never_refreshed
+        PASS [   2.773s] ( 28/161) pg_trickle::catalog_tests test_pg_stat_stream_tables_stale_true_when_overdue
+        PASS [   2.953s] ( 29/161) pg_trickle::catalog_tests test_multiple_sts_sharing_source
+        PASS [   2.946s] ( 30/161) pg_trickle::catalog_tests test_pg_stat_stream_tables_nodata_not_stale
+        PASS [   2.682s] ( 31/161) pg_trickle::catalog_tests test_refresh_history_action_check_constraint
+        PASS [   2.855s] ( 32/161) pg_trickle::catalog_tests test_quick_health_status_ok_when_no_stale_tables
+        PASS [   2.990s] ( 33/161) pg_trickle::catalog_tests test_quick_health_stale_count_uses_last_refresh_at
+        PASS [   2.948s] ( 34/161) pg_trickle::catalog_tests test_quick_health_status_warning_when_stale
+        PASS [   2.848s] ( 35/161) pg_trickle::catalog_tests test_refresh_mode_check_constraint
+        PASS [   2.828s] ( 36/161) pg_trickle::catalog_tests test_stale_false_when_last_refresh_at_is_recent
+        PASS [   3.018s] ( 37/161) pg_trickle::catalog_tests test_refresh_history_recording
+        PASS [   2.856s] ( 38/161) pg_trickle::catalog_tests test_stale_null_when_last_refresh_at_is_null
+        PASS [   2.778s] ( 39/161) pg_trickle::catalog_tests test_status_check_constraint
+        PASS [   2.935s] ( 40/161) pg_trickle::catalog_tests test_stale_null_without_schedule
+        PASS [   2.839s] ( 41/161) pg_trickle::catalog_tests test_status_transitions
+        PASS [   2.982s] ( 42/161) pg_trickle::catalog_tests test_staleness_uses_last_refresh_at_not_data_timestamp
+        PASS [   2.861s] ( 43/161) pg_trickle::catalog_tests test_stream_tables_info_view_exists
+        PASS [   2.856s] ( 44/161) pg_trickle::catalog_tests test_unique_name_constraint
+        PASS [   2.871s] ( 45/161) pg_trickle::extension_tests test_all_catalog_objects_exist
+        PASS [   3.044s] ( 46/161) pg_trickle::catalog_tests test_stream_tables_info_view
+        PASS [   2.684s] ( 47/161) pg_trickle::extension_tests test_pg_hashtext_works_in_container
+        PASS [   2.681s] ( 48/161) pg_trickle::extension_tests test_pg_lsn_type_works
+        PASS [   2.894s] ( 49/161) pg_trickle::extension_tests test_frontier_jsonb_column
+        PASS [   2.826s] ( 50/161) pg_trickle::extension_tests test_pg_trickle_schema_exists
+        PASS [   0.014s] ( 51/161) pg_trickle::extension_tests test_xxhash_deterministic
+        PASS [   2.849s] ( 52/161) pg_trickle::extension_tests test_refresh_history_column_types
+        PASS [   2.851s] ( 53/161) pg_trickle::extension_tests test_stream_tables_column_types
+        PASS [   2.820s] ( 54/161) pg_trickle::extension_tests test_stream_tables_columns
+        PASS [   2.811s] ( 55/161) pg_trickle::monitoring_tests test_full_stats_lateral_join
+        PASS [   2.654s] ( 56/161) pg_trickle::monitoring_tests test_notify_pg_trickle_alert
+        PASS [   2.846s] ( 57/161) pg_trickle::monitoring_tests test_monitoring_empty_state
+        PASS [   2.716s] ( 58/161) pg_trickle::monitoring_tests test_refresh_stats_aggregation
+        PASS [   2.847s] ( 59/161) pg_trickle::monitoring_tests test_refresh_history_by_name
+        PASS [   0.027s] ( 60/161) pg_trickle::property_tests prop_agg_func_sql_name_nonempty
+        PASS [   0.027s] ( 61/161) pg_trickle::property_tests prop_avg_is_algebraic
+        PASS [   0.385s] ( 62/161) pg_trickle::property_tests prop_calculated_schedule_within_downstream_bounds
+        PASS [   0.025s] ( 63/161) pg_trickle::property_tests prop_canonical_period_is_48_power_of_2
+        PASS [   0.024s] ( 64/161) pg_trickle::property_tests prop_canonical_period_within_bounds
+        PASS [   0.044s] ( 65/161) pg_trickle::property_tests prop_col_list_contains_all_columns
+        PASS [   0.011s] ( 66/161) pg_trickle::property_tests prop_condensation_order_no_back_edges
+        PASS [   0.011s] ( 67/161) pg_trickle::property_tests prop_dag_acyclic_topological_order_respects_edges
+        PASS [   0.012s] ( 68/161) pg_trickle::property_tests prop_dag_base_table_edges
+        PASS [   0.011s] ( 69/161) pg_trickle::property_tests prop_dag_calculated_schedule_resolution
+        PASS [   0.013s] ( 70/161) pg_trickle::property_tests prop_dag_cycle_detected
+        PASS [   0.015s] ( 71/161) pg_trickle::property_tests prop_dag_empty_is_acyclic
+        PASS [   0.086s] ( 72/161) pg_trickle::property_tests prop_dag_fuzz_cycle_and_topological_sort
+        PASS [   0.012s] ( 73/161) pg_trickle::property_tests prop_dag_linear_chain_order
+        PASS [   0.027s] ( 74/161) pg_trickle::property_tests prop_dag_random_topological_order_respects_edges
+        PASS [   0.028s] ( 75/161) pg_trickle::property_tests prop_dag_scc_partition_contains_all_nodes
+        PASS [   0.011s] ( 76/161) pg_trickle::property_tests prop_dag_single_node_no_cycle
+        PASS [   0.019s] ( 77/161) pg_trickle::property_tests prop_diamond_policy_fastest_is_identity
+        PASS [   0.018s] ( 78/161) pg_trickle::property_tests prop_diamond_policy_slowest_dominates
+        PASS [   0.022s] ( 79/161) pg_trickle::property_tests prop_diamond_policy_stricter_associative
+        PASS [   0.020s] ( 80/161) pg_trickle::property_tests prop_diamond_policy_stricter_commutative
+        PASS [   0.019s] ( 81/161) pg_trickle::property_tests prop_diamond_policy_stricter_idempotent
+        PASS [   0.023s] ( 82/161) pg_trickle::property_tests prop_distinct_stddev_not_algebraic
+        PASS [   0.043s] ( 83/161) pg_trickle::property_tests prop_expr_to_sql_deterministic
+        PASS [   0.029s] ( 84/161) pg_trickle::property_tests prop_frontier_is_empty
+        PASS [   0.061s] ( 85/161) pg_trickle::property_tests prop_frontier_json_roundtrip
+        PASS [   0.038s] ( 86/161) pg_trickle::property_tests prop_frontier_merge_monotonic
+        PASS [   0.025s] ( 87/161) pg_trickle::property_tests prop_frontier_set_get_roundtrip
+        PASS [   0.012s] ( 88/161) pg_trickle::property_tests prop_hash_determinism
+        PASS [   0.011s] ( 89/161) pg_trickle::property_tests prop_hash_null_encoding_distinct
+        PASS [   0.011s] ( 90/161) pg_trickle::property_tests prop_hash_separator_distinguishes
+        PASS [   0.011s] ( 91/161) pg_trickle::property_tests prop_independent_nodes_produce_single_level
+        PASS [   0.011s] ( 92/161) pg_trickle::property_tests prop_linear_chain_produces_n_levels
+        PASS [   0.023s] ( 93/161) pg_trickle::property_tests prop_lsn_antisymmetric
+        PASS [   0.025s] ( 94/161) pg_trickle::property_tests prop_lsn_gte_consistent
+        PASS [   0.024s] ( 95/161) pg_trickle::property_tests prop_lsn_reflexive
+        PASS [   0.025s] ( 96/161) pg_trickle::property_tests prop_lsn_trichotomy
+        PASS [   0.026s] ( 97/161) pg_trickle::property_tests prop_min_max_delta_uses_matching_function
+        PASS [   0.026s] ( 98/161) pg_trickle::property_tests prop_min_max_merge_uses_correct_function
+        PASS [   0.027s] ( 99/161) pg_trickle::property_tests prop_min_max_rescan_guard_direction
+        PASS [   0.449s] (100/161) pg_trickle::property_tests prop_multi_source_branch_order
+        PASS [   0.024s] (101/161) pg_trickle::property_tests prop_pgt_status_roundtrip
+        PASS [   0.057s] (102/161) pg_trickle::property_tests prop_prefixed_col_list_has_prefix
+        PASS [   0.065s] (103/161) pg_trickle::property_tests prop_quota_always_at_least_one
+        PASS [   0.062s] (104/161) pg_trickle::property_tests prop_quota_base_under_high_load
+        PASS [   0.062s] (105/161) pg_trickle::property_tests prop_quota_burst_gte_base_when_spare
+        PASS [   0.065s] (106/161) pg_trickle::property_tests prop_quota_disabled_returns_fallback
+        PASS [   0.043s] (107/161) pg_trickle::property_tests prop_quote_ident_roundtrip
+        PASS [   0.049s] (108/161) pg_trickle::property_tests prop_quote_ident_wraps_in_double_quotes
+        PASS [   0.023s] (109/161) pg_trickle::property_tests prop_refresh_mode_roundtrip
+        PASS [   2.912s] (110/161) pg_trickle::monitoring_tests test_stale_flag
+        PASS [   0.013s] (111/161) pg_trickle::property_tests prop_scc_partition_covers_all_st_nodes
+        PASS [   0.014s] (112/161) pg_trickle::property_tests prop_self_loop_is_cyclic_scc
+        PASS [   0.465s] (113/161) pg_trickle::property_tests prop_remove_node_cleans_up_edges
+        PASS [   2.835s] (114/161) pg_trickle::monitoring_tests test_staleness_calculation
+        PASS [   2.786s] (115/161) pg_trickle::monitoring_tests test_stream_tables_info_view
+        PASS [   0.026s] (116/161) pg_trickle::property_tests prop_stddev_var_is_algebraic
+        PASS [   0.262s] (117/161) pg_trickle::property_tests prop_sla3_consistent_pressure_converges
+        PASS [   0.415s] (118/161) pg_trickle::property_tests prop_sla3_tier_no_oscillation
+        PASS [   0.629s] (119/161) pg_trickle::property_tests prop_sla3_tier_bounded
+        PASS [   1.507s] (120/161) pg_trickle::property_tests prop_topological_levels_consistent_with_order
+        PASS [   2.607s] (121/161) pg_trickle::resilience_tests test_advisory_lock_mechanism
+        PASS [   2.679s] (122/161) pg_trickle::resilience_tests test_crash_recovery_covers_all_stream_tables
+        PASS [   2.630s] (123/161) pg_trickle::resilience_tests test_crash_recovery_does_not_suspend_stream_table
+        PASS [   2.793s] (124/161) pg_trickle::resilience_tests test_crash_recovery_marks_running_as_failed
+        PASS [   2.850s] (125/161) pg_trickle::resilience_tests test_crash_recovery_no_stale_running_records
+        PASS [   2.749s] (126/161) pg_trickle::resilience_tests test_error_count_resets_on_success
+        PASS [   2.732s] (127/161) pg_trickle::resilience_tests test_error_escalation_exact_threshold
+        PASS [   2.844s] (128/161) pg_trickle::resilience_tests test_error_escalation_to_suspension
+        PASS [   2.784s] (129/161) pg_trickle::resilience_tests test_error_handling_independent_per_st
+        PASS [   2.770s] (130/161) pg_trickle::resilience_tests test_needs_reinit_lifecycle
+        PASS [   2.720s] (131/161) pg_trickle::resilience_tests test_refresh_history_status_transitions
+        PASS [   2.839s] (132/161) pg_trickle::resilience_tests test_suspended_to_active_recovery
+        PASS [   2.786s] (133/161) pg_trickle::scenario_tests test_scenario_aggregate_st
+        PASS [   2.730s] (134/161) pg_trickle::scenario_tests test_scenario_create_and_full_refresh
+        PASS [   2.809s] (135/161) pg_trickle::scenario_tests test_scenario_filtered_st
+        PASS [   2.844s] (136/161) pg_trickle::scenario_tests test_scenario_join_st
+        PASS [   2.834s] (137/161) pg_trickle::scenario_tests test_scenario_no_data_refresh
+        PASS [   2.828s] (138/161) pg_trickle::scenario_tests test_scenario_refresh_after_delete
+        PASS [   2.730s] (139/161) pg_trickle::scenario_tests test_scenario_refresh_after_insert
+        PASS [   2.874s] (140/161) pg_trickle::scenario_tests test_scenario_refresh_after_update
+        PASS [   2.763s] (141/161) pg_trickle::smoke_tests test_infra_basic_crud_works
+        PASS [   2.956s] (142/161) pg_trickle::scenario_tests test_scenario_refresh_history
+        PASS [   2.932s] (143/161) pg_trickle::scenario_tests test_scenario_st_info_view
+        PASS [   2.693s] (144/161) pg_trickle::smoke_tests test_infra_container_connects_to_postgres
+        PASS [   2.747s] (145/161) pg_trickle::smoke_tests test_infra_schema_creation_works
+        PASS [   2.747s] (146/161) pg_trickle::trigger_detection_tests test_trigger_detection_after_drop
+        PASS [   2.736s] (147/161) pg_trickle::trigger_detection_tests test_trigger_detection_before_trigger
+        PASS [   2.688s] (148/161) pg_trickle::trigger_detection_tests test_trigger_detection_detects_pg_trickle_prefixed_application_trigger
+        PASS [   2.739s] (149/161) pg_trickle::trigger_detection_tests test_trigger_detection_detects_pgt_prefixed_application_trigger
+        PASS [   2.737s] (150/161) pg_trickle::trigger_detection_tests test_trigger_detection_detects_statement_level
+        PASS [   2.708s] (151/161) pg_trickle::trigger_detection_tests test_trigger_detection_excludes_ivm_function_identity
+        PASS [   2.696s] (152/161) pg_trickle::trigger_detection_tests test_trigger_detection_mixed_triggers
+        PASS [   2.759s] (153/161) pg_trickle::trigger_detection_tests test_trigger_detection_no_triggers
+        PASS [   2.759s] (154/161) pg_trickle::trigger_detection_tests test_trigger_detection_with_user_trigger
+        PASS [   2.847s] (155/161) pg_trickle::workflow_tests test_scheduler_job_lifecycle_queued_to_succeeded
+        PASS [   2.797s] (156/161) pg_trickle::workflow_tests test_scheduler_job_lifecycle_retryable_failure
+        PASS [   2.807s] (157/161) pg_trickle::workflow_tests test_workflow_cdc_changes_tracked_in_buffer
+        PASS [   2.805s] (158/161) pg_trickle::workflow_tests test_workflow_chained_sts_dependency_dag
+        PASS [   2.791s] (159/161) pg_trickle::workflow_tests test_workflow_error_escalation_suspends_st
+        PASS [   2.758s] (160/161) pg_trickle::workflow_tests test_workflow_full_refresh_lifecycle
+        PASS [   2.650s] (161/161) pg_trickle::workflow_tests test_workflow_st_drop_cascade
+────────────
+     Summary [  73.021s] 161 tests run: 161 passed, 0 skipped
