@@ -106,6 +106,9 @@ candidates; `--k` changes only the vector-only measurement. Their exact and
 normal-planner plans are included, with ANN index use reported separately.
 The forced plan is diagnostic and is not used to compute recall. The candidate
 and plan queries execute separately in the same repeatable-read snapshot.
+Exact-baseline queries disable index scans and discourage nested loops to avoid
+repeatedly scanning the corpus; the original nested-loop setting is restored before the
+normal-planner and forced-index queries.
 Boundary ties can make ID-based recall ambiguous.
 The supplied commit and digest are declarations: this script does not attest
 the installed package. Retain separate installation and environment evidence.
@@ -113,6 +116,10 @@ the installed package. Retain separate installation and environment evidence.
 For a batched-update comparison, start with another empty disposable database
 with both `pg_trickle` and `vector` installed. The benchmark creates the two
 fixture schemas and refuses to run if either is already present:
+
+For larger Docker runs, allocate sufficient container shared memory (for
+example, `--shm-size=1g`); the default 64 MiB failed the 100,000-row exact
+corpus comparison in one local run.
 
 ```sh
 python3 benchmarks/pgvector/run_live_rag_batches.py \
