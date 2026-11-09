@@ -171,6 +171,7 @@ async fn test_ann_supervisor_processes_authorized_request() {
             .env("PGSSLMODE", "disable")
             .env("PGS_ANN_POLL_SECONDS", "1")
             .env("PGS_ANN_LOCK_TIMEOUT", "30s")
+            .env("PGS_ANN_STATEMENT_TIMEOUT", "10s")
             .kill_on_drop(true)
             .spawn()
             .expect("start ANN supervisor")
@@ -341,6 +342,96 @@ async fn test_ann_supervisor_processes_authorized_request() {
     })
     .await
     .expect("supervisor did not resume interrupted request");
+    db.execute("CREATE INDEX ann_supervisor_death_idx ON ann_supervisor_stream USING hnsw (embedding vector_l2_ops)").await;
+    let mut blocker = db.pool.begin().await.expect("begin worker death barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("inspect death barrier backend");
+    sqlx::query("LOCK TABLE ann_supervisor_stream IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold worker death barrier");
+    let death: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_supervisor_stream'::regclass::oid, 'ann_supervisor_death_idx'::regclass::oid)").await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)) AND query LIKE 'REINDEX INDEX CONCURRENTLY%')")
+                .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect blocked worker");
+            if blocked { break; }
+            assert!(child.try_wait().expect("inspect supervisor").is_none(), "supervisor exited before worker death");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.expect("worker did not reach death barrier");
+    let output = tokio::process::Command::new("pgrep")
+        .args(["-P", &child.id().expect("supervisor PID").to_string()])
+        .output()
+        .await
+        .expect("find psql child");
+    assert!(output.status.success(), "worker process was not found");
+    let worker_pids = String::from_utf8(output.stdout).expect("worker PIDs");
+    let worker_pids: Vec<&str> = worker_pids.lines().collect();
+    assert_eq!(worker_pids.len(), 1, "expected one active psql child");
+    let killed = tokio::process::Command::new("kill")
+        .args(["-KILL", worker_pids[0]])
+        .status()
+        .await
+        .expect("kill active psql child");
+    assert!(killed.success());
+    let lost = wait_for_ann_worker_exit(&db, death).await;
+    assert_eq!(
+        lost["state"], "INTERRUPTED",
+        "lost worker must remain observable"
+    );
+    assert!(
+        lost["next_eligible_at"].is_string(),
+        "lost worker must retain cooldown"
+    );
+    assert!(
+        child.try_wait().expect("inspect supervisor").is_none(),
+        "supervisor must survive worker death"
+    );
+    blocker
+        .rollback()
+        .await
+        .expect("release worker death barrier");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let cooling: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(death)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect interrupted cooldown");
+    assert_eq!(
+        cooling["state"], "INTERRUPTED",
+        "supervisor must not rapidly retry"
+    );
+    sqlx::query("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE request_id = $1")
+        .bind(death).execute(&db.pool).await.expect("expire interrupted cooldown for test");
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(death)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect worker death retry");
+            if status["state"] == "SUCCEEDED" {
+                break;
+            }
+            assert!(
+                child.try_wait().expect("inspect supervisor").is_none(),
+                "supervisor exited during retry"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not retry lost worker");
+    let death_valid: bool = db.query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_supervisor_death_idx'::regclass").await;
+    assert!(
+        death_valid,
+        "index must be valid after worker death recovery"
+    );
     let signal = tokio::process::Command::new("kill")
         .args(["-TERM", &child.id().expect("supervisor PID").to_string()])
         .status()

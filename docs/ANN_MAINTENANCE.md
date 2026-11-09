@@ -63,6 +63,7 @@ Environment=PGSERVICE=ann_maintenance
 ExecStart=/usr/bin/python3 /opt/pg-trickle/scripts/ann_maintenance_supervisor.py
 Restart=always
 RestartSec=10
+KillMode=control-group
 TimeoutStopSec=70
 ```
 
@@ -73,6 +74,11 @@ connection loss can instead leave an interrupted request, which is reclaimed
 only after its reservation expires. An interrupted concurrent reindex can
 leave an invalid intermediate index. Inspect active builds and index identity before
 removing remnants, as described in the [SQL reference](SQL_REFERENCE.md#pgtricklefinish_ann_maintenance).
+Use a service manager that cleans up the whole service process group; restarting
+only a killed supervisor can leave its `psql` child running. Loss of a `psql`
+process does not guarantee immediate cancellation of an active server command.
+Choose a statement timeout appropriate to the maximum acceptable rebuild time
+and inspect the backend before retrying or removing intermediate indexes.
 After upgrade or logical restore, recreate requests: the queue is not dumped.
 
 The supervisor polls every 30 seconds by default. `PGS_ANN_POLL_SECONDS`
