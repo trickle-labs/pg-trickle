@@ -5456,11 +5456,19 @@ async fn test_ann_maintenance_coverage_rolls_back_and_keeps_unknown_unknown() {
 #[tokio::test]
 async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
     for method in ["hnsw", "ivfflat"] {
-        assert_ann_worker_allows_reads_and_refresh(method).await;
+        assert_ann_worker_allows_reads_and_refresh(method, 5, false).await;
     }
 }
 
-async fn assert_ann_worker_allows_reads_and_refresh(method: &str) {
+#[tokio::test]
+#[ignore = "sustained concurrent ANN maintenance qualification"]
+async fn test_ann_worker_sustains_reads_and_refresh_during_concurrent_reindex() {
+    for method in ["hnsw", "ivfflat"] {
+        assert_ann_worker_allows_reads_and_refresh(method, 120, true).await;
+    }
+}
+
+async fn assert_ann_worker_allows_reads_and_refresh(method: &str, writes: i32, paced: bool) {
     use std::time::Duration;
 
     let db = E2eDb::new().await.with_extension().await;
@@ -5495,7 +5503,7 @@ async fn assert_ann_worker_allows_reads_and_refresh(method: &str) {
         .await
         .expect("establish old snapshot");
     let database: String = db.query_scalar("SELECT current_database()::text").await;
-    let mut command = ann_worker_command(&db, &database, "postgres", request, "60s");
+    let mut command = ann_worker_command(&db, &database, "postgres", request, "120s");
     command.kill_on_drop(true);
     let mut worker = command.spawn().expect("start worker");
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -5510,8 +5518,12 @@ async fn assert_ann_worker_allows_reads_and_refresh(method: &str) {
         }
     }).await.expect("worker did not reach concurrent reindex snapshot wait");
 
-    tokio::time::timeout(Duration::from_secs(30), async {
-        for id in 2..=6 {
+    let started = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(90), async {
+        for id in 2..=(writes + 1) {
+            if paced {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
             let embedding = format!("[0,{id},0]");
             sqlx::query("INSERT INTO ann_live_source VALUES ($1, $2::text::vector)")
                 .bind(id).bind(&embedding).execute(&db.pool).await.expect("commit source write");
@@ -5531,6 +5543,13 @@ async fn assert_ann_worker_allows_reads_and_refresh(method: &str) {
     })
     .await
     .expect("reads or refresh writes blocked during concurrent reindex");
+    if paced {
+        assert!(started.elapsed() >= Duration::from_secs(30));
+        eprintln!(
+            "{method}: {writes} committed writes, refreshes and indexed reads in {:?}",
+            started.elapsed()
+        );
+    }
     old_snapshot.commit().await.expect("release old snapshot");
     let output = tokio::time::timeout(Duration::from_secs(30), worker.wait_with_output())
         .await
@@ -5548,7 +5567,7 @@ async fn assert_ann_worker_allows_reads_and_refresh(method: &str) {
             .await
             .expect("inspect result");
     assert_eq!(status["state"], "SUCCEEDED");
-    assert_eq!(db.count("ann_live_stream").await, 6);
+    assert_eq!(db.count("ann_live_stream").await, i64::from(writes + 1));
     db.assert_st_matches_query(
         "ann_live_stream",
         "SELECT id, embedding FROM ann_live_source",
