@@ -141,6 +141,9 @@ jobs:
       - name: Validate monitoring contract
         run: python3 scripts/check_monitoring_contract.py
 
+      - name: Test ANN release payload verification
+        run: python3 scripts/test_ann_release_payload.py
+
   # ── Build release artifacts for each platform ───────────────────────────
   build-release:
     name: Build (${{ matrix.artifact_suffix }})
@@ -221,6 +224,9 @@ jobs:
 
           # Copy docs
           cp README.md LICENSE INSTALL.md "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
+          mkdir -p "dist/${ARCHIVE_NAME}/scripts" "dist/${ARCHIVE_NAME}/docs"
+          cp scripts/ann_maintenance_supervisor.py scripts/ann_maintenance_worker.sql scripts/ann_threshold_request.sql "dist/${ARCHIVE_NAME}/scripts/"
+          cp docs/ANN_MAINTENANCE.md docs/SQL_REFERENCE.md "dist/${ARCHIVE_NAME}/docs/"
 
           test -z "${RUSTFLAGS:-}"
           printf '{"candidate_commit":"%s","build_kind":"exact-release","feature_scope":"default-release","build_provenance":{"workflow":"release.yml","cargo_profile":"release","instrumentation":"none"}}\n' \
@@ -290,6 +296,9 @@ jobs:
 
           # Copy docs
           Copy-Item README.md, LICENSE, INSTALL.md "dist\${archiveName}\" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path "dist\${archiveName}\scripts", "dist\${archiveName}\docs" -Force
+          Copy-Item scripts/ann_maintenance_supervisor.py, scripts/ann_maintenance_worker.sql, scripts/ann_threshold_request.sql "dist\${archiveName}\scripts\"
+          Copy-Item docs/ANN_MAINTENANCE.md, docs/SQL_REFERENCE.md "dist\${archiveName}\docs\"
 
           if ($env:RUSTFLAGS) { throw "release builds must not set RUSTFLAGS" }
           '{"candidate_commit":"${{ github.sha }}","build_kind":"exact-release","feature_scope":"default-release","build_provenance":{"workflow":"release.yml","cargo_profile":"release","instrumentation":"none"}}' |
@@ -297,6 +306,14 @@ jobs:
 
           Compress-Archive -Path "dist\${archiveName}" -DestinationPath "dist\${archiveName}.zip"
           Write-Host "Archive: ${archiveName}.zip"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Verify packaged ANN operator files
+        shell: bash
+        run: python scripts/check_ann_release_payload.py "dist/pg_trickle-${{ steps.version.outputs.version }}-pg${{ env.PG_VERSION }}-${{ matrix.artifact_suffix }}.${{ matrix.archive_ext }}"
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v7

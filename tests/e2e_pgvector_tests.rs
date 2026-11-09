@@ -155,12 +155,13 @@ async fn test_ann_supervisor_processes_authorized_request() {
         .rsplit(':')
         .next()
         .expect("port");
+    let operator_root = std::env::var_os("PGT_ANN_OPERATOR_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let supervisor_script = operator_root.join("scripts/ann_maintenance_supervisor.py");
     let spawn_supervisor = || {
         tokio::process::Command::new("python3")
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/scripts/ann_maintenance_supervisor.py"
-            ))
+            .arg(&supervisor_script)
             .env_remove("PGSERVICE")
             .env("PGHOST", "127.0.0.1")
             .env("PGPORT", port)

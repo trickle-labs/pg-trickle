@@ -3,6 +3,7 @@
 
 import json
 
+import check_ann_release_payload
 import v0_108_3_release_gate as prior
 
 
@@ -102,6 +103,16 @@ def check_pgvector_upgrade_script(script: str) -> None:
         prior.shared.require(marker in script, f"published vector upgrade check is missing {marker}")
 
 
+def check_ann_packaging_workflow(workflow: str) -> None:
+    tar_section = workflow.partition("name: Create archive (tar.gz)")[2].partition("name: Archive full SQL")[0]
+    zip_section = workflow.partition("name: Create archive (zip)")[2].partition("name: Verify packaged ANN operator files")[0]
+    for path in check_ann_release_payload.FILES:
+        name = path.rsplit("/", 1)[-1]
+        prior.shared.require(name in tar_section and name in zip_section, f"release archives must include {path}")
+    prior.shared.require("run: python scripts/check_ann_release_payload.py" in workflow,
+                         "release archives must verify the packaged ANN operator files")
+
+
 def check_retirement_contract(contract: dict) -> None:
     release_gate = next(item for item in contract["required_suites"] if item["id"] == "release-gate")
     prior.shared.require(
@@ -138,6 +149,7 @@ def main() -> None:
     contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
     check_retirement_contract(contract)
     check_pgvector_contract(contract)
+    check_ann_packaging_workflow((prior.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
     check_pgvector_upgrade_script((prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8"))
     prior.main()
 
