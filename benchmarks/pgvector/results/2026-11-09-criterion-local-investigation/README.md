@@ -52,6 +52,12 @@ aggregate SQL generation, formatting and allocation in their sampled stacks.
 The candidate profile includes the reverted experiment, and these samples do
 not isolate the cause of the release-to-release difference.
 
+A second uncommitted experiment built the checked group-action SQL directly
+into one string instead of formatting intermediate branch strings. It measured
+5.205–5.214 µs; Criterion reported a 1.61% slowdown against the saved candidate
+baseline. This single ordered result does not establish a general effect, and
+the experiment was discarded.
+
 The hosted release qualification still reports 41 gated regressions on retry;
 see the [qualification failure evidence](../2026-11-09-c138-qualification-failures/README.md).
 No release budget has been waived, and the regression cause remains open.
