@@ -86,7 +86,12 @@ async fn test_ann_request_listing_filters_privileges_and_pages() {
             .await
             .is_err()
     );
-    db.execute("CREATE ROLE ann_list_reader NOLOGIN; GRANT USAGE ON SCHEMA pgtrickle, public TO ann_list_reader; GRANT SELECT, MAINTAIN ON ann_list_st_a TO ann_list_reader; GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer) TO ann_list_reader").await;
+    db.execute_seq(&[
+        "CREATE ROLE ann_list_reader NOLOGIN",
+        "GRANT USAGE ON SCHEMA pgtrickle, public TO ann_list_reader",
+        "GRANT SELECT, MAINTAIN ON ann_list_st_a TO ann_list_reader",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer) TO ann_list_reader",
+    ]).await;
     let mut conn = db.pool.acquire().await.expect("listing role session");
     sqlx::query("SET ROLE ann_list_reader")
         .execute(&mut *conn)
@@ -113,7 +118,11 @@ async fn test_ann_supervisor_processes_authorized_request() {
 
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
-    db.execute("CREATE TABLE ann_supervisor_source (id int PRIMARY KEY, embedding vector(3)); INSERT INTO ann_supervisor_source VALUES (1, '[1,0,0]')").await;
+    db.execute_seq(&[
+        "CREATE TABLE ann_supervisor_source (id int PRIMARY KEY, embedding vector(3))",
+        "INSERT INTO ann_supervisor_source VALUES (1, '[1,0,0]')",
+    ])
+    .await;
     db.create_st(
         "ann_supervisor_stream",
         "SELECT id, embedding FROM ann_supervisor_source",
@@ -123,7 +132,12 @@ async fn test_ann_supervisor_processes_authorized_request() {
     .await;
     db.execute("CREATE INDEX ann_supervisor_idx ON ann_supervisor_stream USING hnsw (embedding vector_l2_ops)").await;
     let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_supervisor_stream'::regclass::oid, 'ann_supervisor_idx'::regclass::oid)").await;
-    db.execute("CREATE ROLE ann_supervisor_operator LOGIN PASSWORD 'ann-test-only'; GRANT USAGE ON SCHEMA pgtrickle, public TO ann_supervisor_operator; GRANT SELECT ON ann_supervisor_stream TO ann_supervisor_operator; GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer), pgtrickle.ann_maintenance_request(bigint), pgtrickle.claim_ann_maintenance(bigint), pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO ann_supervisor_operator").await;
+    db.execute_seq(&[
+        "CREATE ROLE ann_supervisor_operator LOGIN PASSWORD 'ann-test-only'",
+        "GRANT USAGE ON SCHEMA pgtrickle, public TO ann_supervisor_operator",
+        "GRANT SELECT ON ann_supervisor_stream TO ann_supervisor_operator",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer), pgtrickle.ann_maintenance_request(bigint), pgtrickle.claim_ann_maintenance(bigint), pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO ann_supervisor_operator",
+    ]).await;
     let private: bool = db.query_scalar("SELECT NOT has_table_privilege('ann_supervisor_operator', 'pgtrickle.pgt_ann_maintenance_requests', 'SELECT')").await;
     assert!(
         private,
