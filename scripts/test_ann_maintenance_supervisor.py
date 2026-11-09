@@ -39,6 +39,23 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(spawn.call_count, 2)
         self.assertIn("request_id=5", spawn.call_args.args[0])
 
+    def test_stop_interrupts_psql_to_cancel_the_server_query(self):
+        handlers = {}
+        child = Mock(returncode=1)
+        child.poll.return_value = None
+
+        def communicate(_sql):
+            handlers[supervisor.signal.SIGTERM](supervisor.signal.SIGTERM, None)
+            return "", None
+
+        child.communicate.side_effect = communicate
+        with (
+            patch.object(supervisor.signal, "signal", side_effect=lambda number, handler: handlers.update({number: handler})),
+            patch.object(supervisor.subprocess, "Popen", return_value=child),
+        ):
+            self.assertEqual(supervisor.main(), 0)
+        child.send_signal.assert_called_once_with(supervisor.signal.SIGINT)
+
 
 if __name__ == "__main__":
     unittest.main()

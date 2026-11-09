@@ -60,10 +60,12 @@ RestartSec=10
 TimeoutStopSec=70
 ```
 
-Start or stop the service with the host's service manager. Stopping the process
-terminates its active `psql`; an interrupted request is reclaimed only after
-its reservation expires. An interrupted concurrent reindex can leave an
-invalid intermediate index. Inspect active builds and index identity before
+Start or stop the service with the host's service manager. On a graceful stop,
+the supervisor interrupts active `psql` so it requests server-side query
+cancellation; a canceled request can be recorded as failed. Abrupt process or
+connection loss can instead leave an interrupted request, which is reclaimed
+only after its reservation expires. An interrupted concurrent reindex can
+leave an invalid intermediate index. Inspect active builds and index identity before
 removing remnants, as described in the [SQL reference](SQL_REFERENCE.md#pgtricklefinish_ann_maintenance).
 After upgrade or logical restore, recreate requests: the queue is not dumped.
 
