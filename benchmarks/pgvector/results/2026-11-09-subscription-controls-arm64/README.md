@@ -63,6 +63,13 @@ used `explicit_dml`; these three samples do not isolate subscription cost or
 establish a capacity limit. Commit and post-commit listener-wait times are
 reported separately in the JSON.
 
+`scale-1m-1000.json` records one additional local, analyzed, trigger-free
+case with one million rows, 384 dimensions and 1,000 subscriptions. The
+single changed row used a bounded snapshot, all 1,000 expected exit
+notifications arrived, and the refresh call took 445.33 ms. No zero-count
+control, repeat, concurrent load or execution plan was collected for this
+case; the number is a smoke observation, not a scaling or capacity claim.
+
 [Hosted benchmark run 42588168262](https://github.com/trickle-labs/pg-trickle/actions/runs/42588168262)
 repeated the instrumented explicit-merge controls on Linux amd64, with five
 one-row updates per case. Its [raw measurements](hosted-amd64.json) show the
