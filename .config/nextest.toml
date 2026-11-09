@@ -15,9 +15,9 @@ retries = 0
 [[profile.ci.overrides]]
 # TPC-H tests run for 10–330 minutes at high scale factors.
 # retries = 2 would multiply the already-long runtime by 3×.
-# The longest SF-1 DIFF-vs-IMMEDIATE test is isolated in its own job; a
-# 330-minute slow-timeout leaves room for q05's measured long mutation
-# cycles while still failing a genuinely stuck test before the job limit.
+# The two longest SF-1 tests are isolated in their own jobs; a 330-minute
+# slow-timeout leaves room for q05's measured long mutation cycles while still
+# failing a genuinely stuck test before the job limit.
 filter = 'binary(/^e2e_tpch_tests/)'
 retries = 0
 slow-timeout = { period = "330m", terminate-after = 1 }
