@@ -62,6 +62,195 @@ async fn refresh_differential(db: &E2eDb, table: &str) {
 }
 
 #[tokio::test]
+async fn test_live_rag_baselines_recheck_revisions_and_converge() {
+    let db = E2eDb::new().await.with_extension().await;
+    for script in [
+        include_str!("fixtures/pgvector_revision_pipeline.sql"),
+        include_str!("../benchmarks/pgvector/live_rag_baselines.sql"),
+    ] {
+        sqlx::raw_sql(script)
+            .execute(&db.pool)
+            .await
+            .expect("install live RAG fixture");
+    }
+    db.execute_seq(&[
+        "INSERT INTO embedding_demo.documents(id, body) VALUES (1, 'A'), (2, 'A')",
+        "INSERT INTO live_rag.access(document_id, tenant_id) VALUES (1, 10), (2, 20)",
+    ])
+    .await;
+    enqueue(&db, "model-v1").await;
+    db.execute("SELECT embedding_demo.enqueue(2, 'model-v1')")
+        .await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let port = db
+        .connection_string()
+        .split('@')
+        .nth(1)
+        .expect("connection authority")
+        .split('/')
+        .next()
+        .expect("host and port")
+        .rsplit(':')
+        .next()
+        .expect("port");
+    let output = tokio::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/benchmarks/pgvector/fake_embedding_worker.py"
+        ))
+        .args(["--model", "model-v1", "--duplicate"])
+        .env_remove("PGSERVICE")
+        .env("PGHOST", "127.0.0.1")
+        .env("PGPORT", port)
+        .env("PGDATABASE", &database)
+        .env("PGUSER", "postgres")
+        .env("PGPASSWORD", "postgres")
+        .env("PGSSLMODE", "disable")
+        .output()
+        .await
+        .expect("run fake embedding worker");
+    assert!(
+        output.status.success(),
+        "fake worker failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse worker report");
+    assert_eq!(report["accepted"], 2);
+    assert_eq!(report["duplicate_rejected"], 2);
+    db.execute_seq(&[
+        "SELECT live_rag.sync_application(ARRAY[1,2]::bigint[])",
+        "SELECT live_rag.recompute_full()",
+    ])
+    .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy='differential'",
+            "SET pg_trickle.differential_max_change_ratio=0",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('live_rag.differential')",
+    )
+    .await
+    .expect("refresh differential corpus");
+    let differential: bool = db.query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert!(
+        differential,
+        "live RAG comparison requires differential maintenance"
+    );
+    for table in ["application", "periodic_full", "differential"] {
+        db.assert_st_matches_query(&format!("live_rag.{table}"), "SELECT * FROM live_rag.truth")
+            .await;
+    }
+    let mut results = Vec::new();
+    for view in [
+        "application_current",
+        "periodic_full_current",
+        "differential_current",
+    ] {
+        let output = tokio::process::Command::new("psql")
+            .args([
+                "-X",
+                "-w",
+                "-qAt",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-v",
+                &format!("corpus={view}"),
+                "-v",
+                "tenant=10",
+                "-v",
+                "query_vector=[1,0,0]",
+                "-v",
+                "terms=A",
+                "-f",
+            ])
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/benchmarks/pgvector/live_rag_hybrid_query.sql"
+            ))
+            .env_remove("PGSERVICE")
+            .env("PGHOST", "127.0.0.1")
+            .env("PGPORT", port)
+            .env("PGDATABASE", &database)
+            .env("PGUSER", "postgres")
+            .env("PGPASSWORD", "postgres")
+            .env("PGSSLMODE", "disable")
+            .output()
+            .await
+            .expect("run hybrid query");
+        assert!(
+            output.status.success(),
+            "hybrid query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        results.push(String::from_utf8(output.stdout).expect("hybrid output"));
+    }
+    assert!(
+        results[0].starts_with("1|"),
+        "tenant result must contain its authorized row"
+    );
+    assert_eq!(
+        results[0].lines().count(),
+        1,
+        "other tenants must not appear"
+    );
+    assert_eq!(results[0], results[1]);
+    assert_eq!(results[0], results[2]);
+
+    db.execute_seq(&[
+        "UPDATE embedding_demo.documents SET body='B' WHERE id=1",
+        "SELECT embedding_demo.enqueue(1, 'model-v1')",
+    ])
+    .await;
+    let stale = claim(&db, "model-v1").await;
+    db.execute_seq(&[
+        "UPDATE embedding_demo.documents SET body='C' WHERE id=1",
+        "UPDATE live_rag.access SET visible=false WHERE document_id=2",
+        "SELECT embedding_demo.enqueue(1, 'model-v1')",
+    ])
+    .await;
+    for view in [
+        "application_current",
+        "periodic_full_current",
+        "differential_current",
+    ] {
+        assert_eq!(
+            db.count(&format!("live_rag.{view}")).await,
+            0,
+            "{view} exposed a stale or hidden row"
+        );
+    }
+    assert!(!complete(&db, &stale, "model-v1").await);
+    let current = claim(&db, "model-v1").await;
+    assert!(complete(&db, &current, "model-v1").await);
+    assert!(!complete(&db, &current, "model-v1").await);
+    db.execute("DELETE FROM embedding_demo.documents WHERE id=2")
+        .await;
+    db.execute_seq(&[
+        "SELECT live_rag.sync_application(ARRAY[1,2]::bigint[])",
+        "SELECT live_rag.recompute_full()",
+    ])
+    .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy='differential'",
+            "SET pg_trickle.differential_max_change_ratio=0",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('live_rag.differential')",
+    )
+    .await
+    .expect("refresh changed differential corpus");
+    for table in ["application", "periodic_full", "differential"] {
+        db.assert_st_matches_query(&format!("live_rag.{table}"), "SELECT * FROM live_rag.truth")
+            .await;
+    }
+    let tenant: i64 = db
+        .query_scalar("SELECT tenant_id FROM live_rag.differential_current WHERE id=1")
+        .await;
+    assert_eq!(tenant, 10);
+}
+
+#[tokio::test]
 async fn test_revision_safe_publication_enqueues_missing_work_without_duplicates() {
     let db = E2eDb::new().await.with_extension().await;
     sqlx::raw_sql(include_str!("fixtures/pgvector_revision_pipeline.sql"))
