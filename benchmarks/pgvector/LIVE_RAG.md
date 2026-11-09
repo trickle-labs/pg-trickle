@@ -5,6 +5,9 @@ periodic full recomputation and a differential stream against the same
 revision-safe source. It uses the existing revision-safe example's job lease,
 claim token, stale-completion checks and two model versions. The local fake
 provider is deterministic and requires no credentials beyond PostgreSQL.
+It supports `--dimensions` up to 1536, but the SQL fixture below currently
+creates three-dimensional embeddings; the worker dimension must match the
+installed result column.
 
 Use a disposable database with the packaged v0.109.0 candidate, PostgreSQL 18
 and pgvector installed. Record the candidate commit, package digest, image,

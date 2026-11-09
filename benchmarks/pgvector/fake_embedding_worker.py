@@ -14,9 +14,10 @@ COMPLETE = """SELECT embedding_demo.complete(:'job'::uuid, :'token'::uuid,
     :'embedding'::vector);"""
 
 
-def embedding(body: str, model: str) -> str:
-    digest = hashlib.sha256((model + "\0" + body).encode("utf-8")).digest()
-    values = [int.from_bytes(digest[offset : offset + 4], "big") % 2001 - 1000 for offset in (0, 4, 8)]
+def embedding(body: str, model: str, dimensions: int = 3) -> str:
+    source = (model + "\0" + body).encode("utf-8")
+    digest = hashlib.sha256(source).digest() if dimensions <= 8 else hashlib.shake_256(source).digest(dimensions * 4)
+    values = [int.from_bytes(digest[offset : offset + 4], "big") % 2001 - 1000 for offset in range(0, dimensions * 4, 4)]
     if not any(values):
         values[0] = 1
     return "[" + ",".join(str(value / 1000) for value in values) + "]"
@@ -29,7 +30,7 @@ def psql(sql: str, **variables: str) -> str:
     return subprocess.run(command, input=sql, text=True, stdout=subprocess.PIPE, check=True).stdout.strip()
 
 
-def drain(model: str, lease_seconds: int, delay_seconds: float, max_jobs: int, duplicate: bool) -> dict[str, int]:
+def drain(model: str, lease_seconds: int, delay_seconds: float, max_jobs: int, duplicate: bool, dimensions: int = 3) -> dict[str, int]:
     counts = {"claimed": 0, "accepted": 0, "stale": 0, "duplicate_rejected": 0}
     for _ in range(max_jobs):
         result = psql(CLAIM, model=model, lease_seconds=str(lease_seconds))
@@ -40,7 +41,7 @@ def drain(model: str, lease_seconds: int, delay_seconds: float, max_jobs: int, d
         if delay_seconds:
             time.sleep(delay_seconds)
         args = {"job": claim["claimed_job"], "token": claim["claimed_token"],
-                "embedding": embedding(claim["source_body"], model)}
+                "embedding": embedding(claim["source_body"], model, dimensions)}
         accepted = psql(COMPLETE, **args)
         if accepted not in {"t", "f"}:
             raise ValueError("completion did not return a PostgreSQL boolean")
@@ -58,11 +59,13 @@ def main() -> None:
     parser.add_argument("--lease-seconds", type=int, default=60)
     parser.add_argument("--delay-seconds", type=float, default=0)
     parser.add_argument("--max-jobs", type=int, default=1000)
+    parser.add_argument("--dimensions", type=int, default=3)
     parser.add_argument("--duplicate", action="store_true")
     args = parser.parse_args()
-    if not args.model or not 1 <= args.lease_seconds <= 3600 or not 0 <= args.delay_seconds <= 3600 or not 1 <= args.max_jobs <= 1_000_000:
-        parser.error("model must be nonempty; lease, delay and job limits must be in range")
-    print(json.dumps(drain(args.model, args.lease_seconds, args.delay_seconds, args.max_jobs, args.duplicate), sort_keys=True))
+    if not args.model or not 1 <= args.lease_seconds <= 3600 or not 0 <= args.delay_seconds <= 3600 or not 1 <= args.max_jobs <= 1_000_000 or not 1 <= args.dimensions <= 1536:
+        parser.error("model must be nonempty; lease, delay, job and dimension limits must be in range")
+    result = drain(args.model, args.lease_seconds, args.delay_seconds, args.max_jobs, args.duplicate, args.dimensions)
+    print(json.dumps({"model": args.model, "dimensions": args.dimensions, **result}, sort_keys=True))
 
 
 if __name__ == "__main__":

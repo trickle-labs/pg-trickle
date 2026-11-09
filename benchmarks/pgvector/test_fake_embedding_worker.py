@@ -12,6 +12,11 @@ class FakeEmbeddingWorkerTests(unittest.TestCase):
         self.assertNotEqual(first, json.loads(worker.embedding("body", "model-v2")))
         self.assertEqual(len(first), 3)
         self.assertTrue(any(first))
+        for dimensions in (384, 768, 1536):
+            values = json.loads(worker.embedding("body", "model-v1", dimensions))
+            self.assertEqual(len(values), dimensions)
+            self.assertEqual(values, json.loads(worker.embedding("body", "model-v1", dimensions)))
+            self.assertTrue(any(values))
 
     def test_drain_counts_stale_and_duplicate_completions(self):
         claim = json.dumps({"claimed_job": "job", "claimed_token": "token", "source_body": "A"})
