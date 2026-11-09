@@ -176,8 +176,10 @@ report includes client-side read latency, query counts, and the count whose
 database statement intervals overlapped the maintenance interval. A zero
 overlap count is not evidence of concurrent query performance. These readers
 use administrative current views and do not generate concurrent writes. A read
-is stopped after 30 seconds and counted separately; its client-window overlap
-does not prove that the database executed it throughout that interval.
+is cancelled by PostgreSQL after 29 seconds and counted separately; its
+client-window overlap does not prove that the database executed it throughout
+that interval. A 35-second client timeout fails the run because server cleanup
+cannot be confirmed.
 
 This runner uses a fixed per-job delay (`--delay-seconds`), not concurrent
 writes, a delay distribution, or per-document freshness percentiles. It does

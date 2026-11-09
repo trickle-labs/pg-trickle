@@ -35,12 +35,18 @@ class ReaderLoadTests(unittest.TestCase):
         timed_out = threading.Event()
         def timeout(*_args, **_kwargs):
             timed_out.set()
-            raise subprocess.TimeoutExpired("psql", 30)
+            raise subprocess.CalledProcessError(3, "psql", stderr="ERROR: canceling statement due to statement timeout")
         def operation():
             self.assertTrue(timed_out.wait(2))
         with patch.object(live_rag_load.subprocess, "run", side_effect=timeout):
             _, observations, _ = live_rag_load.measure_during(operation, "SELECT 1", {}, 1)
         self.assertTrue(any(item.get("timed_out") for item in observations))
+        self.assertEqual(observations[0]["timeout_source"], "server_statement_timeout")
+
+    def test_client_timeout_fails_the_measurement(self):
+        with patch.object(live_rag_load.subprocess, "run", side_effect=subprocess.TimeoutExpired("psql", 35)):
+            with self.assertRaisesRegex(ValueError, "concurrent reader failed"):
+                live_rag_load.measure_during(lambda: "done", "SELECT 1", {}, 1)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,1 @@
+{"active_readers_while_locked": 1, "overdue_readers_while_locked": 0, "timed_out_readers": 1, "timeout_source": "server_statement_timeout", "remaining_reader_backends": 0, "observations": 2}
