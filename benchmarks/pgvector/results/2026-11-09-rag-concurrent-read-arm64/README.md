@@ -32,7 +32,10 @@ Completed-read overlap uses the PostgreSQL statement interval. A timed-out
 read has no completed database interval; its overlap is only with the
 client-side maintenance window. Client latency includes `psql` startup and
 the 30-second timeouts are excluded from completed-read percentiles. The
-initial [warmup attempt](warmup-failure.log.gz) stopped after a reader exceeded
+then-current harness had no server-side statement deadline; later inspection
+in a separate run observed timed-out clients leaving blocked backends behind,
+so this run's one-reader setting does not prove a one-query server-side limit.
+The initial [warmup attempt](warmup-failure.log.gz) stopped after a reader exceeded
 30 seconds before measurement; the reported run used a fresh container and a
 revised harness that records timeouts.
 

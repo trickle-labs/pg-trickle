@@ -22,11 +22,13 @@ def measure_during(operation, query, variables, readers):
                 start = time.monotonic()
                 started.set()
                 try:
-                    result = subprocess.run(command, input=query, text=True, capture_output=True,
-                                            check=True, timeout=30)
-                except subprocess.TimeoutExpired:
+                    result = subprocess.run(command, input="SET statement_timeout = '29s';\n" + query,
+                                            text=True, capture_output=True, check=True, timeout=35)
+                except subprocess.CalledProcessError as error:
+                    if not error.stderr or "canceling statement due to statement timeout" not in error.stderr:
+                        raise
                     events.put({"timed_out": True, "client_started": start,
-                                "client_finished": time.monotonic()})
+                                "client_finished": time.monotonic(), "timeout_source": "server_statement_timeout"})
                     continue
                 observation = json.loads(result.stdout.splitlines()[-1])
                 observation["client_seconds"] = time.monotonic() - start
@@ -44,7 +46,7 @@ def measure_during(operation, query, variables, readers):
         thread.start()
     try:
         for event in ready:
-            if not event.wait(35):
+            if not event.wait(40):
                 raise ValueError("concurrent reader did not become ready")
         if not errors.empty():
             raise ValueError(f"concurrent reader failed: {errors.get()}")
@@ -54,7 +56,7 @@ def measure_during(operation, query, variables, readers):
     finally:
         stop.set()
         for thread in threads:
-            thread.join(timeout=35)
+            thread.join(timeout=40)
     if any(thread.is_alive() for thread in threads):
         raise ValueError("concurrent reader did not stop")
     if not errors.empty():

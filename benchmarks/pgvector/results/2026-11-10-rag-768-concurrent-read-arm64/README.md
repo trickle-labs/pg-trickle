@@ -28,6 +28,14 @@ database activity showed readers waiting on its relation lock. Client timeout
 overlap is measured against the client window, not a completed database
 interval. The report retains individual samples and query plans.
 
+The then-current harness killed a timed-out client without a server-side
+statement deadline. Inspection during this run observed two blocked reader
+backends at once despite the one-reader setting: an earlier timed-out client
+could leave its backend waiting while the next read began. This may have
+affected full-maintenance timings and invalidates treating the reader setting
+as a strict limit on server-side outstanding queries. The later harness sets
+a server-side deadline before the client timeout.
+
 The normal planner selected no ANN index for these tenant-filtered queries.
 The forced differential HNSW path returned recall@10 of 0.6 with no underfill
 in each sample; forced application and full plans did not use ANN indexes.
