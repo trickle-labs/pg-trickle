@@ -429,6 +429,90 @@ async fn test_ann_supervisor_processes_authorized_request() {
         death_valid,
         "index must be valid after worker death recovery"
     );
+
+    db.execute("CREATE INDEX ann_supervisor_parent_death_idx ON ann_supervisor_stream USING hnsw (embedding vector_l2_ops)").await;
+    let mut blocker = db
+        .pool
+        .begin()
+        .await
+        .expect("begin supervisor death barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("inspect supervisor death barrier");
+    sqlx::query("LOCK TABLE ann_supervisor_stream IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold supervisor death barrier");
+    let parent_death: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_supervisor_stream'::regclass::oid, 'ann_supervisor_parent_death_idx'::regclass::oid)").await;
+    let claim_epoch = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let status: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                .bind(parent_death).fetch_one(&db.pool).await.expect("inspect parent death request");
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)) AND query LIKE 'REINDEX INDEX CONCURRENTLY%')")
+                .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect parent death worker");
+            if status["state"] == "RUNNING" && blocked {
+                break status["claim_epoch"].as_i64().expect("claim epoch");
+            }
+            assert!(child.try_wait().expect("inspect supervisor").is_none());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.expect("supervisor death worker did not reach barrier");
+    child
+        .kill()
+        .await
+        .expect("kill supervisor without signaling its worker");
+    let mut child = spawn_supervisor();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        child
+            .try_wait()
+            .expect("inspect replacement supervisor")
+            .is_none()
+    );
+    let blocked_workers: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)) AND query LIKE 'REINDEX INDEX CONCURRENTLY%'")
+        .bind(blocker_pid).fetch_one(&db.pool).await.expect("count active workers");
+    assert_eq!(
+        blocked_workers, 1,
+        "replacement must not start a duplicate worker"
+    );
+    blocker
+        .rollback()
+        .await
+        .expect("release supervisor death barrier");
+    let completed = tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(parent_death)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect parent death completion");
+            if status["state"] == "SUCCEEDED" {
+                break status;
+            }
+            assert!(
+                child
+                    .try_wait()
+                    .expect("inspect replacement supervisor")
+                    .is_none()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("orphaned worker did not finish");
+    assert_eq!(
+        completed["claim_epoch"].as_i64(),
+        Some(claim_epoch),
+        "replacement must not reclaim an active worker's request"
+    );
+    let parent_death_valid: bool = db.query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_supervisor_parent_death_idx'::regclass").await;
+    assert!(
+        parent_death_valid,
+        "index must remain valid after supervisor death"
+    );
+
     let signal = tokio::process::Command::new("kill")
         .args(["-TERM", &child.id().expect("supervisor PID").to_string()])
         .status()
