@@ -1,0 +1,21 @@
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-1398-evidence)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.16s
+     Running tests/e2e_pgvector_tests.rs (/private/tmp/pg-trickle-task-1399/target/debug/deps/e2e_pgvector_tests-0b480014c9ba917b)
+
+running 1 test
+test test_centroid_diverse_high_dimensional_drift_matches_native_avg has been running for over 60 seconds
+CENTROID_UNBOUND_JSON={"state": {"pgt_id": 1, "status": "BUILDING", "stream_relid": "19136", "defining_query": "SELECT grp, avg(v) AS centroid FROM centroid_churn_src GROUP BY grp", "schema_version": 1, "cost_rescan_xid": null, "materialized_xid": null, "baseline_frontier": null, "cost_rescan_active": false, "contract_generation": 4, "last_change_limit_rebase": false}, "history": {"action": "DIFFERENTIAL", "pgt_id": 1, "status": "COMPLETED", "end_time": "2026-11-09T18:21:41.972904+00:00", "retryable": null, "error_code": null, "refresh_id": 1471, "start_time": "2026-11-09T18:21:41.935612+00:00", "visible_at": null, "duration_ms": 37.292, "initiated_by": "MANUAL", "rows_deleted": 0, "rows_updated": 0, "error_message": null, "plan_identity": -231043057116748117, "rows_inserted": 2, "data_timestamp": "2026-11-09T18:21:41.931331+00:00", "error_sqlstate": null, "refresh_reason": null, "visibility_xid": "15808", "delta_row_count": 2, "source_commit_at": "2026-11-09T18:21:41.929812+00:00", "was_full_fallback": false, "fixpoint_iteration": null, "freshness_deadline": null, "tick_watermark_lsn": "0/14817018", "merge_strategy_used": "merge", "commit_to_visible_ms": null, "refresh_reason_detail": "{\"cache_path\":\"cache_miss\",\"centroid_fallback\":{\"reason\":\"STATE_REJECTED\"},\"centroid_rebase\":{\"outcome\":\"unbound\",\"reason\":\"centroid candidate rejected: invalid argument: centroid state requires rebase: InvalidState\",\"scope\":\"up_to_all_private_groups\"},\"contract_generation\":4,\"estimated_output_rows\":null,\"input_delta_rows\":2,\"input_delta_rows_may_be_incomplete\":false,\"merge_strategy\":\"merge\",\"operator_scan_count\":1,\"output_amplification_ratio\":1.0,\"output_rows_changed\":2,\"plan_identity\":-231043057116748117,\"planner_hint_tier\":\"none\",\"schema_version\":1,\"source_rows_estimate\":1000,\"temp_blocks_written\":-1,\"timings_ms\":{\"apply\":1.844042,\"cdc_stage\":1.037667,\"cleanup_enqueue\":0.000458,\"decision\":13.775832999999999,\"generate_and_build\":2.011916,\"measured_total_with_staging\":18.669916,\"total\":17.632248999999998}}"}, "frontier": {"sources": {"19091": {"lsn": "0/14813890", "snapshot_ts": "1794248501Z"}}, "data_timestamp": "1794248501Z"}}
+
+thread 'test_centroid_diverse_high_dimensional_drift_matches_native_avg' (2993400) panicked at tests/e2e_pgvector_tests.rs:1970:9:
+churn state became unbound at step 1468, algebraic=false
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test test_centroid_diverse_high_dimensional_drift_matches_native_avg ... FAILED
+
+failures:
+
+failures:
+    test_centroid_diverse_high_dimensional_drift_matches_native_avg
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 139 filtered out; finished in 396.44s
+
+error: test failed, to rerun pass `--test e2e_pgvector_tests`

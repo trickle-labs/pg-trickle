@@ -2610,22 +2610,28 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
 
 #[tokio::test]
 async fn test_centroid_randomized_refresh_churn_matches_native_avg() {
-    run_centroid_randomized_refresh_churn(160, 3).await;
+    run_centroid_randomized_refresh_churn(160, 3, false).await;
 }
 
 #[tokio::test]
 #[ignore = "long-running numerical qualification; run explicitly"]
 async fn test_centroid_long_running_drift_matches_native_avg() {
-    run_centroid_randomized_refresh_churn(2000, 3).await;
+    run_centroid_randomized_refresh_churn(2000, 3, false).await;
 }
 
 #[tokio::test]
 #[ignore = "long-running high-dimensional numerical qualification; run explicitly"]
 async fn test_centroid_high_dimensional_drift_matches_native_avg() {
-    run_centroid_randomized_refresh_churn(2000, 1536).await;
+    run_centroid_randomized_refresh_churn(2000, 1536, false).await;
 }
 
-async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize) {
+#[tokio::test]
+#[ignore = "long-running diverse high-dimensional numerical qualification; run explicitly"]
+async fn test_centroid_diverse_high_dimensional_drift_matches_native_avg() {
+    run_centroid_randomized_refresh_churn(2000, 1536, true).await;
+}
+
+async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, diverse: bool) {
     assert!(dimensions == 3 || dimensions == 1536);
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
@@ -2669,6 +2675,8 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize) 
 
     let mut seed = 0x7a13_9465_u64;
     let mut algebraic = 0;
+    let mut unbound_refreshes = 0;
+    let mut last_unbound_refresh_id = None;
     let mut max_error: f64 = 0.0;
     let mut max_bound_fraction: f64 = 0.0;
     let mut checkpoints = Vec::new();
@@ -2693,7 +2701,20 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize) 
                 format!(
                     "[{}]",
                     (0..dimensions)
-                        .map(|i| values[i % 3].to_string())
+                        .map(|i| {
+                            let value = if diverse {
+                                let offset = ((i as u64 * 17 + seed % 997) % 997) as f64 / 113.0;
+                                match i % 4 {
+                                    0 => x + offset,
+                                    1 => -x + offset,
+                                    2 => offset / 1_000_000.0,
+                                    _ => values[1] + offset,
+                                }
+                            } else {
+                                values[i % 3]
+                            };
+                            value.to_string()
+                        })
                         .collect::<Vec<_>>()
                         .join(",")
                 )
@@ -2710,10 +2731,17 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize) 
              actual AS (SELECT grp, centroid::real[] AS v, __pgt_count AS n FROM centroid_churn_st) \
              SELECT NOT EXISTS (SELECT 1 FROM native n FULL JOIN actual a USING (grp) \
              WHERE n.n IS DISTINCT FROM a.n OR (n.v IS NULL) <> (a.v IS NULL) OR \
+               array_length(n.v, 1) IS DISTINCT FROM array_length(a.v, 1) OR \
                EXISTS (SELECT 1 FROM generate_series(1, array_length(n.v, 1)) AS i \
                  WHERE abs(n.v[i]::float8 - a.v[i]::float8) > 1e-5 + 1e-6 * abs(n.v[i]::float8)))"
         ).fetch_one(&mut *conn).await.expect("compare churn with native AVG");
-        assert!(matches, "centroid diverged from native AVG at step {step}");
+        if !matches {
+            let details: serde_json::Value = sqlx::query_scalar("WITH native AS (SELECT grp, avg(v)::real[] AS v, count(*) AS n FROM centroid_churn_src GROUP BY grp), actual AS (SELECT grp, centroid::real[] AS v, __pgt_count AS n FROM centroid_churn_st), failures AS (SELECT n.grp, i, n.v[i] AS native, a.v[i] AS actual, abs(n.v[i]::float8 - a.v[i]::float8) AS error, 1e-5 + 1e-6 * abs(n.v[i]::float8) AS bound FROM native n JOIN actual a USING (grp) CROSS JOIN generate_series(1, array_length(n.v, 1)) i WHERE abs(n.v[i]::float8 - a.v[i]::float8) > 1e-5 + 1e-6 * abs(n.v[i]::float8) ORDER BY error DESC LIMIT 10) SELECT jsonb_build_object('failures', (SELECT jsonb_agg(to_jsonb(failures)) FROM failures), 'history', (SELECT to_jsonb(h) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1))")
+                .fetch_one(&mut *conn).await.expect("inspect centroid mismatch");
+            let groups: serde_json::Value = sqlx::query_scalar("WITH native AS (SELECT grp, count(*) AS n, avg(v) IS NULL AS null_centroid FROM centroid_churn_src GROUP BY grp), actual AS (SELECT grp, __pgt_count AS n, centroid IS NULL AS null_centroid FROM centroid_churn_st) SELECT jsonb_build_object('native', (SELECT jsonb_agg(to_jsonb(native)) FROM native), 'actual', (SELECT jsonb_agg(to_jsonb(actual)) FROM actual))")
+                .fetch_one(&mut *conn).await.expect("inspect centroid groups");
+            panic!("centroid diverged from native AVG at step {step}: {details}; groups={groups}");
+        }
         let (error, bound_fraction): (f64, f64) = sqlx::query_as(
             "WITH native AS (SELECT grp, avg(v)::real[] AS v FROM centroid_churn_src GROUP BY grp), \
              actual AS (SELECT grp, centroid::real[] AS v FROM centroid_churn_st), \
@@ -2731,10 +2759,32 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize) 
             .fetch_one(&mut *conn).await.expect("inspect churn strategy");
         let bound: bool = sqlx::query_scalar("SELECT COALESCE(c.baseline_frontier = t.frontier, false) FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass")
             .fetch_one(&mut *conn).await.expect("inspect churn state");
-        assert!(
-            bound,
-            "churn state became unbound at step {step}, algebraic={used_algebraic}"
-        );
+        if !bound {
+            assert!(
+                diverse && !used_algebraic,
+                "unexpected unbound state at step {step}"
+            );
+            let (refresh_id, delta_rows, fallback, outcome, reason): (i64, i64, Option<String>, Option<String>, Option<String>) = sqlx::query_as("SELECT h.refresh_id, COALESCE(h.delta_row_count, 0)::bigint, h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason', h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome', h.refresh_reason_detail::jsonb->'centroid_rebase'->>'reason' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+                .fetch_one(&mut *conn).await.expect("inspect unbound churn fallback");
+            if unbound_refreshes == 0 {
+                assert_eq!(fallback.as_deref(), Some("STATE_REJECTED"));
+                assert_eq!(outcome.as_deref(), Some("unbound"));
+                assert!(
+                    reason
+                        .as_deref()
+                        .is_some_and(|value| value.contains("InvalidState"))
+                );
+            } else if last_unbound_refresh_id != Some(refresh_id) {
+                assert!(
+                    fallback.as_deref() == Some("STATE_UNBOUND")
+                        || (fallback.is_none() && delta_rows == 0),
+                    "unexpected fallback {fallback:?} with {delta_rows} delta rows at step {step}"
+                );
+                assert!(outcome.is_none(), "unbound state must not retry rebase");
+            }
+            last_unbound_refresh_id = Some(refresh_id);
+            unbound_refreshes += 1;
+        }
         algebraic += usize::from(used_algebraic);
     }
     assert!(
@@ -2743,7 +2793,7 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize) 
     );
     println!(
         "CENTROID_DRIFT_JSON={}",
-        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"seed":"0x7a139465","dimensions":dimensions,"refresh_calls":steps,"latest_history_algebraic_observations":algebraic,"absolute_tolerance":1e-5,"relative_tolerance":1e-6,"checkpoints":checkpoints})
+        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"seed":"0x7a139465","dimensions":dimensions,"diverse_components":diverse,"refresh_calls":steps,"latest_history_algebraic_observations":algebraic,"unbound_refreshes":unbound_refreshes,"absolute_tolerance":1e-5,"relative_tolerance":1e-6,"checkpoints":checkpoints})
     );
 }
 
