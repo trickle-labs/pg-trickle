@@ -105,6 +105,61 @@ async fn run_live_rag_script_as(
 }
 
 #[tokio::test]
+async fn test_live_rag_batched_benchmark_compares_equivalent_corpora() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    let args = [
+        "--rows",
+        "4",
+        "--dimensions",
+        "384",
+        "--batch",
+        "2",
+        "--cycles",
+        "3",
+        "--candidate-commit",
+        "0000000000000000000000000000000000000000",
+        "--package-sha256",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ];
+    let output = run_live_rag_script(&db, "run_live_rag_batches.py", &args).await;
+    assert!(
+        output.status.success(),
+        "batch benchmark failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse batch report");
+    let samples = report["samples"].as_array().expect("batch samples");
+    assert_eq!(samples.len(), 3);
+    assert_eq!(
+        samples[0]["order"],
+        serde_json::json!(["application", "periodic_full", "differential"])
+    );
+    assert_eq!(
+        samples[1]["order"],
+        serde_json::json!(["periodic_full", "differential", "application"])
+    );
+    for sample in samples {
+        assert_eq!(sample["generation"]["accepted"], 2);
+        for name in ["application", "periodic_full", "differential"] {
+            assert_eq!(sample["corpora_exact"][name], true);
+            assert_eq!(
+                sample["retrieval"][name]["metrics"]["hybrid_recall_at_10"],
+                1.0
+            );
+            assert!(sample["maintenance"][name]["cluster_wal_bytes"].is_number());
+        }
+        assert_eq!(sample["differential_refresh"]["status"], "COMPLETED");
+    }
+    let repeated = run_live_rag_script(&db, "run_live_rag_batches.py", &args).await;
+    assert!(
+        !repeated.status.success(),
+        "must refuse an already populated fixture"
+    );
+}
+
+#[tokio::test]
 async fn test_live_rag_baselines_recheck_revisions_and_converge() {
     let db = E2eDb::new().await.with_extension().await;
     let database: String = db.query_scalar("SELECT current_database()::text").await;

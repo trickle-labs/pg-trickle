@@ -40,8 +40,11 @@ SELECT NOT EXISTS ((TABLE live_rag.application EXCEPT ALL TABLE live_rag.truth)
                    UNION ALL (TABLE live_rag.truth EXCEPT ALL TABLE live_rag.application)) AS application_exact,
        NOT EXISTS ((TABLE live_rag.periodic_full EXCEPT ALL TABLE live_rag.truth)
                    UNION ALL (TABLE live_rag.truth EXCEPT ALL TABLE live_rag.periodic_full)) AS full_exact,
-       NOT EXISTS ((TABLE live_rag.differential EXCEPT ALL TABLE live_rag.truth)
-                   UNION ALL (TABLE live_rag.truth EXCEPT ALL TABLE live_rag.differential)) AS differential_exact;
+       NOT EXISTS ((SELECT id, tenant_id, body, incarnation, revision, chunk_version, model_version, embedding
+                    FROM live_rag.differential EXCEPT ALL TABLE live_rag.truth)
+                   UNION ALL (TABLE live_rag.truth EXCEPT ALL
+                    SELECT id, tenant_id, body, incarnation, revision, chunk_version, model_version, embedding
+                    FROM live_rag.differential)) AS differential_exact;
 ```
 
 The `*_current` views recheck source visibility and exact revision/embedding
@@ -106,6 +109,38 @@ and plan queries execute separately in the same repeatable-read snapshot.
 Boundary ties can make ID-based recall ambiguous.
 The supplied commit and digest are declarations: this script does not attest
 the installed package. Retain separate installation and environment evidence.
+
+For a batched-update comparison, start with another empty disposable database
+with both `pg_trickle` and `vector` installed. The benchmark creates the two
+fixture schemas and refuses to run if either is already present:
+
+```sh
+python3 benchmarks/pgvector/run_live_rag_batches.py \
+  --rows 10000 --dimensions 384 --batch 10 --cycles 3 --tenant 1 \
+  --candidate-commit "$CANDIDATE_COMMIT" --package-sha256 "$PACKAGE_SHA256" \
+  > batch-results.json
+```
+
+`--rows` supports up to one million, and `--dimensions` accepts 384, 768 or
+1536. The deterministic initial backfill bypasses the job worker; subsequent
+updates enqueue generation transactionally and use the fake worker. Every
+cycle gives all three approaches the same updated IDs, rotates their serial
+execution order, checks each entire corpus against the defining SQL, records
+the effective differential refresh state, and runs vector and hybrid recall
+measurements. The report includes individual batch and maintenance times,
+nearest-rank p50/p95/p99 across batches, index-inclusive relation sizes and
+cluster-wide WAL insert-LSN movement. Startup of each `psql` process is
+included. Eligible-to-searchable time includes earlier approaches in that
+cycle; use the individual maintenance duration for a less order-dependent
+comparison. Other cluster activity contaminates WAL measurements. Retrieval
+uses administrative current views after all approaches converge, and the
+EXPLAIN plans contain per-query timing and buffer information.
+
+This runner measures updates only and a fixed per-job delay (`--delay-seconds`),
+not concurrent writes, insert/delete/visibility churn, a delay distribution,
+or per-document freshness percentiles. It does not attest the package, collect
+CPU or lock metrics, or provide a representative decision table. Record the
+environment and run repeated, isolated scenarios before drawing conclusions.
 
 This is a functional fixture, not the finished #1396 benchmark. The measurement
 script substitutes the configured vector dimensions into the hybrid query;
