@@ -25,3 +25,9 @@ respectively. Both used the pg_trickle library SHA-256
 This checks graceful supervisor shutdown during a blocked operation, not
 abrupt supervisor death, database restart, or natural cooldown duration. The
 images are development builds rather than the final release artifact.
+
+The same test was extended from commit `def38de1` to insert a source row and
+refresh the stream while the reindex is blocked, then assert that the new row
+is visible before canceling the worker. It passed with the same development
+images for pgvector [0.8.1](concurrent-081.log) and [0.8.7](concurrent-087.log).
+This is one controlled concurrent write and refresh, not a sustained-load test.
