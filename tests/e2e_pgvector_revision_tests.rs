@@ -316,7 +316,12 @@ async fn test_live_rag_baselines_recheck_revisions_and_converge() {
 #[tokio::test]
 async fn test_live_rag_wide_setup_and_worker_match() {
     let db = E2eDb::new().await.with_extension().await;
-    let setup = run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", "384"]).await;
+    let dimension = std::env::var("LIVE_RAG_TEST_DIM").unwrap_or_else(|_| "384".into());
+    let expected: i32 = dimension
+        .parse()
+        .expect("LIVE_RAG_TEST_DIM must be an integer");
+    assert!((1..=1536).contains(&expected));
+    let setup = run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", &dimension]).await;
     assert!(
         setup.status.success(),
         "wide setup failed: {}",
@@ -331,7 +336,7 @@ async fn test_live_rag_wide_setup_and_worker_match() {
     let output = run_live_rag_script(
         &db,
         "fake_embedding_worker.py",
-        &["--model", "model-v1", "--dimensions", "384"],
+        &["--model", "model-v1", "--dimensions", &dimension],
     )
     .await;
     assert!(
@@ -344,7 +349,7 @@ async fn test_live_rag_wide_setup_and_worker_match() {
             "SELECT vector_dims(embedding) FROM embedding_demo.results WHERE document_id=1",
         )
         .await;
-    assert_eq!(dimensions, 384);
+    assert_eq!(dimensions, expected);
     db.execute_seq(&[
         "SELECT live_rag.sync_application(ARRAY[1]::bigint[])",
         "SELECT live_rag.recompute_full()",
