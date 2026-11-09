@@ -293,7 +293,7 @@ if [[ "$VECTOR_UPGRADE" == true ]]; then
         SELECT pgtrickle.refresh_stream_table('public.upgrade_vector_st')" >/dev/null
     psql "SELECT NOT EXISTS ((SELECT id,embedding FROM public.upgrade_vector_st EXCEPT ALL SELECT id,embedding FROM public.upgrade_vector_source)
         UNION ALL (SELECT id,embedding FROM public.upgrade_vector_source EXCEPT ALL SELECT id,embedding FROM public.upgrade_vector_st))" | grep -qx t
-    psql "SELECT action='DIFFERENTIAL' AND status='COMPLETED' AND NOT was_full_fallback
+    psql "SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback
         FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id)
         WHERE s.pgt_name='upgrade_vector_st' ORDER BY h.refresh_id DESC LIMIT 1" | grep -qx t
 fi
