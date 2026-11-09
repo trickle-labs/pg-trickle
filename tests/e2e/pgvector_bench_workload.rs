@@ -399,8 +399,8 @@ async fn test_pgvector_subscription_scaling_workload() {
                         .fetch_one(&mut *tx)
                         .await
                         .expect("read final tuple counters");
-                    let (snapshot, ids) = if subscriptions == 0 {
-                        (None, None)
+                    let (snapshot, ids, snapshot_kind) = if subscriptions == 0 {
+                        (None, None, "none")
                     } else {
                         let snapshot: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                             "SELECT count(*) FROM pg_temp.__pgt_distance_pre_{pgt_id}"
@@ -408,18 +408,33 @@ async fn test_pgvector_subscription_scaling_workload() {
                         .fetch_one(&mut *tx)
                         .await
                         .expect("inspect affected snapshot");
-                        let ids: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                            "SELECT count(*) FROM pg_temp.__pgt_distance_ids_{pgt_id}"
-                        )))
-                        .fetch_one(&mut *tx)
-                        .await
-                        .expect("inspect affected identities");
-                        assert_eq!(
-                            (snapshot, ids),
-                            (1, 1),
-                            "one changed row must use the bounded snapshot"
-                        );
-                        (Some(snapshot), Some(ids))
+                        let ids_name = format!("pg_temp.__pgt_distance_ids_{pgt_id}");
+                        let bounded: bool =
+                            sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                                .bind(&ids_name)
+                                .fetch_one(&mut *tx)
+                                .await
+                                .expect("inspect snapshot path");
+                        if bounded {
+                            let ids: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                                "SELECT count(*) FROM {ids_name}"
+                            )))
+                            .fetch_one(&mut *tx)
+                            .await
+                            .expect("inspect affected identities");
+                            assert_eq!(
+                                (snapshot, ids),
+                                (1, 1),
+                                "bounded snapshot must contain the changed row"
+                            );
+                            (Some(snapshot), Some(ids), "bounded")
+                        } else {
+                            assert_eq!(
+                                snapshot, rows as i64,
+                                "full snapshot must cover the stream"
+                            );
+                            (Some(snapshot), None, "full")
+                        }
                     };
                     let (differential, strategy, refresh_id): (bool, String, i64) = sqlx::query_as("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback, h.merge_strategy_used, h.refresh_id FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id=$1 ORDER BY h.refresh_id DESC LIMIT 1")
                     .bind(pgt_id).fetch_one(&mut *tx).await.expect("inspect measured strategy");
@@ -469,7 +484,7 @@ async fn test_pgvector_subscription_scaling_workload() {
                     samples.push(serde_json::json!({"round":round,"refresh_ms":elapsed_ms,"commit_ms":commit_ms,"notification_wait_ms":delivery_ms,"merge_strategy":strategy,
                     "stream_sequential_tuples_returned":tuple_delta[0],"stream_index_tuples_fetched":tuple_delta[1],
                     "source_sequential_tuples_returned":tuple_delta[2],"source_index_tuples_fetched":tuple_delta[3],
-                    "snapshot_rows":snapshot,"affected_identities":ids}));
+                    "snapshot_rows":snapshot,"affected_identities":ids,"snapshot_kind":snapshot_kind}));
                 }
                 measurements.push(serde_json::json!({"initial_rows":rows,"subscriptions":subscriptions,"analyzed":analyzed,"estimated_rows":estimated_rows,"last_analyze":last_analyze,"last_autoanalyze":last_autoanalyze,"samples":samples}));
             }

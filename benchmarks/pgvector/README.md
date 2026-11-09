@@ -11,7 +11,10 @@ statistics were already collected. `PGVECTOR_SUB_FORCE_EXPLICIT=1` adds the
 same no-op row trigger to every stream, including the zero-subscription
 control, and requires the recorded merge path to be `explicit_dml` throughout.
 Trigger overhead is part of every control measurement, so these timings do not
-represent trigger-free production workloads.
+represent trigger-free production workloads. User triggers also disable the
+bounded distance snapshot, so subscribed cases take a full stream snapshot and
+scan the stream during evaluation. The report records the observed snapshot
+kind and row count; run without the trigger to investigate the bounded path.
 
 For a bounded control run on a packaged candidate image:
 
