@@ -1,5 +1,5 @@
--- Invoke with -v corpus=application_current (or periodic_full_current /
--- differential_current), -v tenant=10, -v query_vector='[1,0,0]', -v terms=alpha.
+-- Invoke with -v corpus=application_authorized (or periodic_full_authorized /
+-- differential_authorized), -v tenant=10, -v query_vector='[1,0,0]', -v terms=alpha.
 WITH vector_candidates AS MATERIALIZED (
     SELECT id, embedding::vector(3) <=> :'query_vector'::vector AS distance
     FROM live_rag.:"corpus"

@@ -66,3 +66,23 @@ CREATE VIEW live_rag.differential_current AS
 SELECT c.* FROM live_rag.differential c JOIN live_rag.truth t
   ON (c.id, c.tenant_id, c.body, c.incarnation, c.revision, c.chunk_version, c.model_version, c.embedding)
    = (t.id, t.tenant_id, t.body, t.incarnation, t.revision, t.chunk_version, t.model_version, t.embedding);
+
+-- Provision role OIDs as an administrator; readers cannot edit this mapping.
+CREATE TABLE live_rag.tenant_readers (
+    role_oid oid NOT NULL,
+    tenant_id bigint NOT NULL,
+    PRIMARY KEY (role_oid, tenant_id)
+);
+CREATE VIEW live_rag.application_authorized WITH (security_barrier = true) AS
+SELECT c.* FROM live_rag.application_current c
+WHERE EXISTS (SELECT 1 FROM live_rag.tenant_readers r
+              WHERE r.role_oid = current_user::regrole::oid AND r.tenant_id = c.tenant_id);
+CREATE VIEW live_rag.periodic_full_authorized WITH (security_barrier = true) AS
+SELECT c.* FROM live_rag.periodic_full_current c
+WHERE EXISTS (SELECT 1 FROM live_rag.tenant_readers r
+              WHERE r.role_oid = current_user::regrole::oid AND r.tenant_id = c.tenant_id);
+CREATE VIEW live_rag.differential_authorized WITH (security_barrier = true) AS
+SELECT c.* FROM live_rag.differential_current c
+WHERE EXISTS (SELECT 1 FROM live_rag.tenant_readers r
+              WHERE r.role_oid = current_user::regrole::oid AND r.tenant_id = c.tenant_id);
+REVOKE ALL ON ALL TABLES IN SCHEMA live_rag FROM PUBLIC;

@@ -12,8 +12,11 @@ from pathlib import Path
 SQL = Path(__file__).with_name("live_rag_recall.sql")
 CORPORA = {
     "application_current": "application_ann",
+    "application_authorized": "application_ann",
     "periodic_full_current": "periodic_full_ann",
+    "periodic_full_authorized": "periodic_full_ann",
     "differential_current": "differential_ann",
+    "differential_authorized": "differential_ann",
 }
 
 

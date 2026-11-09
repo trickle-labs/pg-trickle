@@ -46,22 +46,39 @@ SELECT NOT EXISTS ((TABLE live_rag.application EXCEPT ALL TABLE live_rag.truth)
 
 The `*_current` views recheck source visibility and exact revision/embedding
 identity at query time, so an outdated corpus entry is excluded before its
-next refresh. They are example correctness guards, not a complete tenant
-authorization system: apply the RLS and role guidance in the
-[hybrid-search recipe](../../docs/tutorials/PGVECTOR_RAG_COOKBOOK.md) and
-filter every query by its authorized tenant. The extra source join has a cost
-that must be included in any comparison.
+next refresh. They are administrative views and do not authorize tenants.
+For the fixture's restricted role-per-tenant example, an administrator can
+grant only the security-barrier `*_authorized` views:
+
+```sql
+CREATE ROLE rag_tenant_10 NOLOGIN;
+INSERT INTO live_rag.tenant_readers(role_oid, tenant_id)
+  SELECT oid, 10 FROM pg_roles WHERE rolname = 'rag_tenant_10';
+GRANT USAGE ON SCHEMA live_rag TO rag_tenant_10;
+GRANT SELECT ON live_rag.application_authorized,
+  live_rag.periodic_full_authorized, live_rag.differential_authorized TO rag_tenant_10;
+```
+
+Connect as that role or grant it only to trusted login roles. Do not give
+readers direct access to the corpus, current views, mapping table, or source
+tables. The mapping is keyed by the active database role OID; remove its row
+when dropping a role, and update it transactionally when access changes. A
+client-supplied tenant parameter alone is not authorization. Owners and
+superusers are trusted administrators. This fixture is not a general identity
+system; see the [hybrid-search recipe](../../docs/tutorials/PGVECTOR_RAG_COOKBOOK.md)
+for production role and RLS guidance. The source and authorization joins have
+a cost that must be included in any comparison.
 
 The same hybrid candidate-fusion query can target each guarded view for the
 three-dimensional setup:
 
 ```sh
-psql -X -v ON_ERROR_STOP=1 -v corpus=application_current -v tenant=10 \
+PGOPTIONS='-c role=rag_tenant_10' psql -X -v ON_ERROR_STOP=1 -v corpus=application_authorized -v tenant=10 \
   -v query_vector='[1,0,0]' -v terms=alpha \
   -f benchmarks/pgvector/live_rag_hybrid_query.sql
 ```
 
-Repeat with `periodic_full_current` and `differential_current`. Indexes are
+Repeat with `periodic_full_authorized` and `differential_authorized`. Indexes are
 identical in kind, but the guard joins can affect planner choice. Inspect the
 actual plan; the existence of an HNSW index does not prove it was used.
 
@@ -69,8 +86,8 @@ To compare filtered vector results with an exact scan on the same tenant and
 snapshot, supply the candidate's recorded commit and package SHA-256:
 
 ```sh
-python3 benchmarks/pgvector/measure_live_rag_recall.py \
-  --corpus differential_current --tenant 10 --dimensions 3 \
+PGOPTIONS='-c role=rag_tenant_10' python3 benchmarks/pgvector/measure_live_rag_recall.py \
+  --corpus differential_authorized --tenant 10 --dimensions 3 \
   --query-vector '[1,0,0]' --terms alpha --k 10 --expected-pgvector 0.8.7 \
   --candidate-commit "$CANDIDATE_COMMIT" --package-sha256 "$PACKAGE_SHA256" \
   > recall.json

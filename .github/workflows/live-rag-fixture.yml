@@ -36,4 +36,4 @@ jobs:
           LIVE_RAG_TEST_DIM: ${{ matrix.dimension }}
         run: |
           ./scripts/run_e2e_tests.sh --retries 0 --test e2e_pgvector_revision_tests \
-            -E 'test(test_live_rag_baselines_recheck_revisions_and_converge) | test(test_live_rag_wide_setup_and_worker_match)'
+            -E 'test(test_live_rag_baselines_recheck_revisions_and_converge) | test(test_live_rag_wide_setup_and_worker_match) | test(test_live_rag_authorized_views_enforce_tenant_and_visibility)'
