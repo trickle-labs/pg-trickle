@@ -2,7 +2,7 @@
 
 ### Long-running centroid drift
 
-The manually dispatched `Centroid numerical drift` workflow runs 2,000 seeded
+The `centroid-drift` job in the manually dispatched E2E Benchmarks workflow runs 2,000 seeded
 mutation and refresh calls against a development image with pgvector 0.8.7.
 It compares every group to native `avg(vector)` after each call and records
 the largest component error and fraction of the absolute-plus-relative
