@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running tests/e2e_pgvector_tests.rs (target/debug/deps/e2e_pgvector_tests-0b480014c9ba917b)
+
+running 1 test
+
+thread 'test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex' (1087389) panicked at tests/e2e_pgvector_tests.rs:3593:14:
+open ANN worker script: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex ... FAILED
+
+failures:
+
+failures:
+    test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 138 filtered out; finished in 1.68s
+
+error: test failed, to rerun pass `--test e2e_pgvector_tests`

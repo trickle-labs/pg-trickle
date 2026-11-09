@@ -155,10 +155,7 @@ async fn test_ann_supervisor_processes_authorized_request() {
         .rsplit(':')
         .next()
         .expect("port");
-    let operator_root = std::env::var_os("PGT_ANN_OPERATOR_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let supervisor_script = operator_root.join("scripts/ann_maintenance_supervisor.py");
+    let supervisor_script = ann_operator_root().join("scripts/ann_maintenance_supervisor.py");
     let spawn_supervisor = || {
         tokio::process::Command::new("python3")
             .arg(&supervisor_script)
@@ -3576,6 +3573,12 @@ async fn test_centroid_full_refresh_does_not_bind_ahead_buffer() {
     );
 }
 
+fn ann_operator_root() -> std::path::PathBuf {
+    std::env::var_os("PGT_ANN_OPERATOR_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
 fn ann_worker_command(
     db: &E2eDb,
     database: &str,
@@ -3585,11 +3588,9 @@ fn ann_worker_command(
 ) -> tokio::process::Command {
     use std::process::Stdio;
 
-    let script = std::fs::File::open(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/scripts/ann_maintenance_worker.sql"
-    ))
-    .expect("open ANN worker script");
+    let script =
+        std::fs::File::open(ann_operator_root().join("scripts/ann_maintenance_worker.sql"))
+            .expect("open ANN worker script");
     let mut command = tokio::process::Command::new("docker");
     command
         .args([
@@ -3626,11 +3627,8 @@ fn ann_threshold_command(
     lock_timeout: &str,
 ) -> tokio::process::Command {
     use std::process::Stdio;
-    let script = std::fs::File::open(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/scripts/ann_threshold_request.sql"
-    ))
-    .expect("open threshold request script");
+    let script = std::fs::File::open(ann_operator_root().join("scripts/ann_threshold_request.sql"))
+        .expect("open threshold request script");
     let mut command = tokio::process::Command::new("docker");
     command
         .args([
@@ -4965,6 +4963,12 @@ async fn test_ann_maintenance_coverage_rolls_back_and_keeps_unknown_unknown() {
 
 #[tokio::test]
 async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
+    for method in ["hnsw", "ivfflat"] {
+        assert_ann_worker_allows_reads_and_refresh(method).await;
+    }
+}
+
+async fn assert_ann_worker_allows_reads_and_refresh(method: &str) {
     use std::time::Duration;
 
     let db = E2eDb::new().await.with_extension().await;
@@ -4980,7 +4984,12 @@ async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
         "DIFFERENTIAL",
     )
     .await;
-    db.execute("CREATE INDEX ann_live_idx ON ann_live_stream USING hnsw (embedding vector_l2_ops)")
+    let options = if method == "ivfflat" {
+        " WITH (lists=1)"
+    } else {
+        ""
+    };
+    db.execute(&format!("CREATE INDEX ann_live_idx ON ann_live_stream USING {method} (embedding vector_l2_ops){options}"))
         .await;
     let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_live_stream'::regclass::oid, 'ann_live_idx'::regclass::oid)").await;
 
@@ -4994,7 +5003,7 @@ async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
         .await
         .expect("establish old snapshot");
     let database: String = db.query_scalar("SELECT current_database()::text").await;
-    let mut command = ann_worker_command(&db, &database, "postgres", request, "30s");
+    let mut command = ann_worker_command(&db, &database, "postgres", request, "60s");
     command.kill_on_drop(true);
     let mut worker = command.spawn().expect("start worker");
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -5009,23 +5018,24 @@ async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
         }
     }).await.expect("worker did not reach concurrent reindex snapshot wait");
 
-    tokio::time::timeout(Duration::from_secs(5), async {
-        db.execute("INSERT INTO ann_live_source VALUES (2, '[0,1,0]')")
-            .await;
-        db.refresh_st("ann_live_stream").await;
-        assert_eq!(db.count("ann_live_stream").await, 2);
-        let mut reader = db.pool.begin().await.expect("begin reader");
-        sqlx::query("SET LOCAL enable_seqscan = off")
-            .execute(&mut *reader)
-            .await
-            .expect("enable index plan");
-        let plan: Vec<String> = sqlx::query_scalar("EXPLAIN (COSTS OFF) SELECT id FROM ann_live_stream ORDER BY embedding <-> '[0,1,0]'::vector LIMIT 1")
-            .fetch_all(&mut *reader).await.expect("explain nearest-neighbor read");
-        assert!(plan.iter().any(|line| line.contains("ann_live_idx")), "expected ANN index in {plan:?}");
-        let nearest: i32 = sqlx::query_scalar("SELECT id FROM ann_live_stream ORDER BY embedding <-> '[0,1,0]'::vector LIMIT 1")
-            .fetch_one(&mut *reader).await.expect("read nearest neighbor");
-        assert_eq!(nearest, 2);
-        reader.commit().await.expect("finish reader");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for id in 2..=6 {
+            let embedding = format!("[0,{id},0]");
+            sqlx::query("INSERT INTO ann_live_source VALUES ($1, $2::text::vector)")
+                .bind(id).bind(&embedding).execute(&db.pool).await.expect("commit source write");
+            db.refresh_st("ann_live_stream").await;
+            assert_eq!(db.count("ann_live_stream").await, i64::from(id));
+            let mut reader = db.pool.begin().await.expect("begin reader");
+            sqlx::query("SET LOCAL enable_seqscan = off")
+                .execute(&mut *reader).await.expect("enable index plan");
+            let plan: Vec<String> = sqlx::query_scalar("EXPLAIN (COSTS OFF) SELECT id FROM ann_live_stream ORDER BY embedding <-> $1::text::vector LIMIT 1")
+                .bind(&embedding).fetch_all(&mut *reader).await.expect("explain nearest-neighbor read");
+            assert!(plan.iter().any(|line| line.contains("ann_live_idx")), "expected {method} index in {plan:?}");
+            let nearest: i32 = sqlx::query_scalar("SELECT id FROM ann_live_stream ORDER BY embedding <-> $1::text::vector LIMIT 1")
+                .bind(&embedding).fetch_one(&mut *reader).await.expect("read nearest neighbor");
+            assert_eq!(nearest, id);
+            reader.commit().await.expect("finish reader");
+        }
     })
     .await
     .expect("reads or refresh writes blocked during concurrent reindex");
@@ -5046,7 +5056,12 @@ async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
             .await
             .expect("inspect result");
     assert_eq!(status["state"], "SUCCEEDED");
-    assert_eq!(db.count("ann_live_stream").await, 2);
+    assert_eq!(db.count("ann_live_stream").await, 6);
+    db.assert_st_matches_query(
+        "ann_live_stream",
+        "SELECT id, embedding FROM ann_live_source",
+    )
+    .await;
 }
 
 #[tokio::test]

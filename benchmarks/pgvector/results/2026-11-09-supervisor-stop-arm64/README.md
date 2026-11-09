@@ -45,3 +45,16 @@ The 0.8.7 test also passed with scripts extracted from a
 final candidate archive.
 This tests worker-process death, not abrupt death of the supervisor or a
 database restart, and does not measure the full natural cooldown period.
+
+The one-request worker's concurrent-rebuild test was extended from commit
+`650c095f` to run HNSW and IVFFlat separately. While each rebuild waited for
+an old snapshot, five committed source writes and refreshes completed and
+separate readers used the ANN index to find each new row. The final corpus
+matched its defining query. The test passed using worker SQL extracted from
+the release-layout smoke archive with pgvector [0.8.1](live-rebuild-081.log)
+and [0.8.7](live-rebuild-087.log). With the operator root set to a nonexistent
+directory, the [negative control](missing-script-negative.log) failed to open
+the worker script instead of falling back to the checkout. These are short
+controlled concurrency tests, not sustained-load or final-archive evidence.
+The shared threshold-script helper also passed its
+[0.8.7 test](threshold-release-layout-087.log) using the extracted payload.
