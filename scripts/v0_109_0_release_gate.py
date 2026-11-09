@@ -42,6 +42,8 @@ PGVECTOR_CASES = {
         "test_distance_subscription_notifies_only_membership_crossings",
         "test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
         "test_ann_worker_records_lock_timeout_and_can_retry",
+        "test_ann_request_listing_filters_privileges_and_pages",
+        "test_ann_supervisor_processes_authorized_request",
     )
 } | {
     "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components",

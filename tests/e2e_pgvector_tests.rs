@@ -41,6 +41,150 @@ async fn wait_for_ann_worker_exit(db: &E2eDb, id: i64) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn test_ann_request_listing_filters_privileges_and_pages() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    for suffix in ["a", "b"] {
+        db.execute(&format!(
+            "CREATE TABLE ann_list_src_{suffix} (id int PRIMARY KEY, embedding vector(3))"
+        ))
+        .await;
+        db.create_st(
+            &format!("ann_list_st_{suffix}"),
+            &format!("SELECT id, embedding FROM ann_list_src_{suffix}"),
+            "1h",
+            "DIFFERENTIAL",
+        )
+        .await;
+        db.execute(&format!("CREATE INDEX ann_list_idx_{suffix} ON ann_list_st_{suffix} USING hnsw (embedding vector_l2_ops)")).await;
+    }
+    let first: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_list_st_a'::regclass::oid, 'ann_list_idx_a'::regclass::oid)").await;
+    let second: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_list_st_b'::regclass::oid, 'ann_list_idx_b'::regclass::oid)").await;
+    assert!(first < second);
+    let first_page: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT * FROM pgtrickle.list_ann_maintenance_requests(0, 1)")
+            .fetch_all(&db.pool)
+            .await
+            .expect("first page");
+    assert_eq!(first_page.len(), 1);
+    assert_eq!(first_page[0]["request_id"], first);
+    let second_page: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT * FROM pgtrickle.list_ann_maintenance_requests($1, 1)")
+            .bind(first)
+            .fetch_all(&db.pool)
+            .await
+            .expect("second page");
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page[0]["request_id"], second);
+    assert!(
+        db.try_execute("SELECT * FROM pgtrickle.list_ann_maintenance_requests(-1, 1)")
+            .await
+            .is_err()
+    );
+    assert!(
+        db.try_execute("SELECT * FROM pgtrickle.list_ann_maintenance_requests(0, 1001)")
+            .await
+            .is_err()
+    );
+    db.execute("CREATE ROLE ann_list_reader NOLOGIN; GRANT USAGE ON SCHEMA pgtrickle, public TO ann_list_reader; GRANT SELECT, MAINTAIN ON ann_list_st_a TO ann_list_reader; GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer) TO ann_list_reader").await;
+    let mut conn = db.pool.acquire().await.expect("listing role session");
+    sqlx::query("SET ROLE ann_list_reader")
+        .execute(&mut *conn)
+        .await
+        .expect("assume listing role");
+    let visible: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT * FROM pgtrickle.list_ann_maintenance_requests(0, 10)")
+            .fetch_all(&mut *conn)
+            .await
+            .expect("list authorized requests");
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0]["request_id"], first);
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("reset role");
+    let public_access: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_proc p, LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a WHERE p.oid='pgtrickle.list_ann_maintenance_requests(bigint,integer)'::regprocedure AND a.grantee=0 AND a.privilege_type='EXECUTE')").await;
+    assert!(!public_access);
+}
+
+#[tokio::test]
+async fn test_ann_supervisor_processes_authorized_request() {
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_supervisor_source (id int PRIMARY KEY, embedding vector(3)); INSERT INTO ann_supervisor_source VALUES (1, '[1,0,0]')").await;
+    db.create_st(
+        "ann_supervisor_stream",
+        "SELECT id, embedding FROM ann_supervisor_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_supervisor_idx ON ann_supervisor_stream USING hnsw (embedding vector_l2_ops)").await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_supervisor_stream'::regclass::oid, 'ann_supervisor_idx'::regclass::oid)").await;
+    db.execute("CREATE ROLE ann_supervisor_operator LOGIN PASSWORD 'ann-test-only'; GRANT USAGE ON SCHEMA pgtrickle, public TO ann_supervisor_operator; GRANT SELECT, MAINTAIN ON ann_supervisor_stream TO ann_supervisor_operator; GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer), pgtrickle.ann_maintenance_request(bigint), pgtrickle.claim_ann_maintenance(bigint), pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO ann_supervisor_operator").await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let port = db
+        .connection_string()
+        .split('@')
+        .nth(1)
+        .expect("connection authority")
+        .split('/')
+        .next()
+        .expect("host and port")
+        .rsplit(':')
+        .next()
+        .expect("port");
+    let mut child = tokio::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/ann_maintenance_supervisor.py"
+        ))
+        .env_remove("PGSERVICE")
+        .env("PGHOST", "127.0.0.1")
+        .env("PGPORT", port)
+        .env("PGDATABASE", database)
+        .env("PGUSER", "ann_supervisor_operator")
+        .env("PGPASSWORD", "ann-test-only")
+        .env("PGSSLMODE", "disable")
+        .env("PGS_ANN_POLL_SECONDS", "1")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start ANN supervisor");
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let state: String =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)->>'state'")
+                    .bind(request)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect supervisor request");
+            if state == "SUCCEEDED" {
+                break;
+            }
+            assert_ne!(state, "FAILED", "supervisor failed the request");
+            assert!(
+                child
+                    .try_wait()
+                    .expect("inspect supervisor process")
+                    .is_none(),
+                "supervisor exited early"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not complete the request");
+    child.kill().await.expect("stop supervisor");
+    db.assert_st_matches_query(
+        "ann_supervisor_stream",
+        "SELECT id, embedding FROM ann_supervisor_source",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_vector_aggregate_mode_change_uses_saved_path_and_admission_setting() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
