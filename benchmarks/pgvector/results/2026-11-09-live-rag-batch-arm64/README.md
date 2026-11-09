@@ -55,3 +55,33 @@ Each four-slot batch covers an update, visibility change, deletion and
 insertion. The test checks that the affected rows are withheld before the
 new embeddings and refresh, and that each maintained corpus matches its
 defining SQL afterward. This is functional evidence, not a scale result.
+
+## 10,000-row mixed-churn rehearsal
+
+Runner commit `1dbfff92` used the same earlier candidate, image, processor and
+Docker resource envelope as above. Three batches each changed twelve slots:
+three updates, three visibility changes, three deletes and three inserts.
+The initial vectors used the newer hash-derived seed; 384 dimensions and
+tenant 2 were selected. At the end, tenant 2 had 105 eligible rows and tenant
+1 had 7,991. The installed extension binary SHA-256 matched the value above;
+the run did not independently attest all installed files.
+
+All corpora matched defining SQL after every cycle. After each source commit,
+the affected set contained no eligible or searchable rows; after generation it
+contained six eligible rows, none yet present in any guarded view. Each
+approach exposed its eligible rows after its maintenance step. Differential
+updates completed without full fallback and used `explicit_dml_reconciled`;
+initial loading fell back to FULL.
+
+Median maintenance times across the three serial, rotated batches were
+0.082 s for application updates, 0.684 s for differential refresh and
+35.214 s for full recomputation. Median generation time was 0.441 s; initial
+setup took 104.674 s. These times include `psql` startup and are not a general
+ranking or SLA. The normal planner did not choose an ANN index for any of the
+three corpora; the forced plan used the differential ANN index but did not
+choose the application or full index. Recall of 1.0 therefore does not measure
+normal-path ANN quality. The [compressed report](mixed-10k-384.json.gz) has the
+samples, plans, WAL movement and guarded availability counts; the
+[log](mixed-10k-384.log) retains refresh messages. This remains a single
+serial scenario on an earlier artifact, without concurrent writers or final
+package attestation.
