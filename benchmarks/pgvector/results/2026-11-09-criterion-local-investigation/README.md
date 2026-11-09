@@ -69,3 +69,17 @@ Hosted release qualifications reported 41 and 25 gated regressions on retry;
 see the [first](../2026-11-09-c138-qualification-failures/README.md) and
 [second](../2026-11-09-b7-qualification-failures/README.md) failure evidence.
 No release budget has been waived, and the regression cause remains open.
+
+A further isolated [direct-buffer experiment](direct-buffer-experiment.patch)
+on integrated source `a6493ee8` replaced one intermediate joined SELECT string
+with direct writes into a pre-sized string. After compiling both binaries, the
+same host ran control, experiment, experiment, control in that order, with
+100 samples, five-second measurement and one-second warm-up per run. The
+[controls](direct-buffer-control-1.log) reported 5.1305–5.1370 µs and
+[5.1248–5.1323 µs](direct-buffer-control-2.log); the
+[experiments](direct-buffer-probe-1.log) reported 5.0172–5.0336 µs and
+[5.0169–5.0259 µs](direct-buffer-probe-2.log). The roughly 0.11 µs difference
+is below the 0.25 µs materiality floor and does not explain the hosted
+slowdowns. The change was discarded. Formatting and lint passed on the probe;
+SQL behavior was not independently verified because the result was not
+material. These local sequential samples are not the release comparison.

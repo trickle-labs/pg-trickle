@@ -1,0 +1,12 @@
+Gnuplot not found, using plotters backend
+Benchmarking diff_aggregate/count_star_1group
+Benchmarking diff_aggregate/count_star_1group: Warming up for 1.0000 s
+Benchmarking diff_aggregate/count_star_1group: Collecting 100 samples in estimated 5.0102 s (970k iterations)
+Benchmarking diff_aggregate/count_star_1group: Analyzing
+diff_aggregate/count_star_1group
+                        time:   [5.1248 µs 5.1284 µs 5.1323 µs]
+                        change: [+1.8773% +2.0261% +2.1722%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+
