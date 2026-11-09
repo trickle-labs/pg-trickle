@@ -2002,6 +2002,9 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
         algebraic >= 100,
         "only {algebraic} refreshes used algebraic state"
     );
+    if diverse {
+        assert_eq!(unbound_refreshes, 0, "diverse churn lost its bound state");
+    }
     println!(
         "CENTROID_DRIFT_JSON={}",
         serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"seed":"0x7a139465","dimensions":dimensions,"diverse_components":diverse,"refresh_calls":steps,"latest_history_algebraic_observations":algebraic,"unbound_refreshes":unbound_refreshes,"absolute_tolerance":1e-5,"relative_tolerance":1e-6,"checkpoints":checkpoints})
