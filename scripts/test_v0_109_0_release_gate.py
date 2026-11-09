@@ -35,6 +35,12 @@ class RetirementContractTests(unittest.TestCase):
             next(s for s in broken["required_suites"] if s["id"] == "pgvector-0.8.1")[field] = value
             with self.assertRaises(SystemExit):
                 gate.check_pgvector_contract(broken)
+        for version in ("0.8.1", "0.8.7"):
+            broken = copy.deepcopy(contract)
+            cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
+            cases.remove("e2e_pgvector_tests::test_centroid_crash_recovers_committed_source_and_rolls_back_refresh")
+            with self.assertRaises(SystemExit):
+                gate.check_pgvector_contract(broken)
         broken = copy.deepcopy(contract)
         next(s for s in broken["required_suites"] if s["id"] == "pgvector-catalog-upgrade")["required_cases"].pop()
         with self.assertRaises(SystemExit):

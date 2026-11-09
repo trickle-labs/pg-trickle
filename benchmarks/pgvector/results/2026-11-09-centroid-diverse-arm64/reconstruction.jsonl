@@ -1,0 +1,2 @@
+{"group": 2, "old_group": 2, "new_group": 0, "count": 0.0, "operations": 1226.0, "changes": 428.0, "nonzero_sums": 137, "max_residual": 1.2924772363476222e-11, "max_fraction_of_accumulation_bound": 4.937567785818854e-05, "invalid_components": []}
+{"group": 0, "old_group": 2, "new_group": 0, "count": 9.0, "operations": 1145.0, "changes": 399.0, "nonzero_sums": 1536, "max_residual": 30053.1513671875, "max_fraction_of_accumulation_bound": 12050845269.365623, "invalid_components": []}
