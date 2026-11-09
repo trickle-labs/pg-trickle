@@ -31,3 +31,17 @@ refresh the stream while the reindex is blocked, then assert that the new row
 is visible before canceling the worker. It passed with the same development
 images for pgvector [0.8.1](concurrent-081.log) and [0.8.7](concurrent-087.log).
 This is one controlled concurrent write and refresh, not a sustained-load test.
+
+The test was extended from commit `19931bf3` to kill the active `psql` child
+with SIGKILL during another blocked rebuild while the supervisor remains
+running. With a ten-second statement timeout, the backend exited and the
+request became INTERRUPTED with a cooldown. It remained interrupted during a
+two-second observation; the test then advanced the cooldown explicitly and
+verified supervisor retry, a valid rebuilt index, the untouched unrelated
+index and exact corpus contents. It passed on the same development images for
+pgvector [0.8.1](worker-death-081.log) and [0.8.7](worker-death-087.log).
+The 0.8.7 test also passed with scripts extracted from a
+[release-layout smoke archive](worker-death-release-layout-087.log), not the
+final candidate archive.
+This tests worker-process death, not abrupt death of the supervisor or a
+database restart, and does not measure the full natural cooldown period.
