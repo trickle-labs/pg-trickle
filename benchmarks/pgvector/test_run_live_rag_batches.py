@@ -23,6 +23,16 @@ class BenchmarkTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("deleted IDs are not reused", result.stderr)
 
+    def test_attestation_requires_both_archive_and_container(self):
+        result = subprocess.run(
+            [sys.executable, benchmark.__file__, "--rows", "4", "--dimensions", "384",
+             "--candidate-commit", "0" * 40, "--package-sha256", "0" * 64,
+             "--candidate-archive", "candidate.tar.gz"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be supplied together", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
