@@ -237,7 +237,7 @@
       "requires_postgresql": true,
       "suite_version": "0.109.0",
       "nextest_retries": 0,
-      "command": "bash scripts/run_e2e_tests.sh --test-threads 1 --test e2e_failure_recovery_tests --test e2e_dvm_failpoint_tests --test e2e_refresh_atomicity_tests -E test(/^(test_lock_timeout_during_refresh|test_statement_timeout_during_refresh_recovers|test_cancel_backend_during_refresh_recovers|test_dvm_failpoint_preserves_last_committed_result_and_recovers|test_refresh_after_apply_failure_rolls_back|test_refresh_finalization_failure_rolls_back|test_refresh_caller_rollback_preserves_committed_state|test_refresh_savepoint_rollback_preserves_outer_transaction|test_refresh_two_callers_publish_one_consistent_result|test_refresh_concurrent_writer_preserves_next_batch|test_refresh_auxiliary_state_failure_rolls_back|test_refresh_partial_finalization_control_is_detected|test_refresh_early_progress_control_is_detected)$/)",
+      "command": "bash scripts/run_e2e_tests.sh --test-threads 1 --test e2e_failure_recovery_tests --test e2e_dvm_failpoint_tests --test e2e_refresh_atomicity_tests -E 'test(/^(test_cancel_backend_during_refresh_recovers|test_dvm_failpoint_preserves_last_committed_result_and_recovers|test_lock_timeout_during_refresh|test_refresh_after_apply_failure_rolls_back|test_refresh_auxiliary_state_failure_rolls_back|test_refresh_caller_rollback_preserves_committed_state|test_refresh_concurrent_writer_preserves_next_batch|test_refresh_early_progress_control_is_detected|test_refresh_finalization_failure_rolls_back|test_refresh_partial_finalization_control_is_detected|test_refresh_savepoint_rollback_preserves_outer_transaction|test_refresh_two_callers_publish_one_consistent_result|test_scheduler_pause_drain_protects_transitive_immediate_descendant|test_scheduler_pause_drain_waits_for_witnessed_inline_refresh|test_scheduler_pause_rejects_dispatch_queued_after_pause_returns|test_scheduler_repeatable_read_job_rechecks_pause_before_refresh|test_statement_timeout_during_refresh_recovers)$/)'",
       "command_argv": [
         "bash",
         "scripts/run_e2e_tests.sh",
@@ -250,7 +250,7 @@
         "--test",
         "e2e_refresh_atomicity_tests",
         "-E",
-        "test(/^(test_lock_timeout_during_refresh|test_statement_timeout_during_refresh_recovers|test_cancel_backend_during_refresh_recovers|test_dvm_failpoint_preserves_last_committed_result_and_recovers|test_refresh_after_apply_failure_rolls_back|test_refresh_finalization_failure_rolls_back|test_refresh_caller_rollback_preserves_committed_state|test_refresh_savepoint_rollback_preserves_outer_transaction|test_refresh_two_callers_publish_one_consistent_result|test_refresh_concurrent_writer_preserves_next_batch|test_refresh_auxiliary_state_failure_rolls_back|test_refresh_partial_finalization_control_is_detected|test_refresh_early_progress_control_is_detected)$/)"
+        "test(/^(test_cancel_backend_during_refresh_recovers|test_dvm_failpoint_preserves_last_committed_result_and_recovers|test_lock_timeout_during_refresh|test_refresh_after_apply_failure_rolls_back|test_refresh_auxiliary_state_failure_rolls_back|test_refresh_caller_rollback_preserves_committed_state|test_refresh_concurrent_writer_preserves_next_batch|test_refresh_early_progress_control_is_detected|test_refresh_finalization_failure_rolls_back|test_refresh_partial_finalization_control_is_detected|test_refresh_savepoint_rollback_preserves_outer_transaction|test_refresh_two_callers_publish_one_consistent_result|test_scheduler_pause_drain_protects_transitive_immediate_descendant|test_scheduler_pause_drain_waits_for_witnessed_inline_refresh|test_scheduler_pause_rejects_dispatch_queued_after_pause_returns|test_scheduler_repeatable_read_job_rechecks_pause_before_refresh|test_statement_timeout_during_refresh_recovers)$/)"
       ],
       "e2e_image": "pg_trickle_release_candidate:local",
       "shard": {
@@ -747,13 +747,16 @@
       "upgrade": false,
       "requires_postgresql": true,
       "suite_version": "0.109.0",
-      "command": "bash scripts/run_light_e2e_tests.sh --no-capture --test e2e_wal_receipt_recovery_tests",
+      "command": "bash scripts/run_e2e_tests.sh --test-threads 1 --test e2e_wal_receipt_recovery_tests -E 'test(/^(test_deferred_consumer_registration_rollback_preserves_wal_slot|test_dropped_wal_source_retains_retirement_until_last_consumer_commits|test_last_wal_consumer_drop_rollback_preserves_slot_and_frontier|test_replacement_source_cannot_reassign_pending_slot_retirement|test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash|test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash|test_slot_retirement_keeps_active_stale_and_mismatched_slots|test_slot_retirement_keeps_null_named_reference_across_source_oids)$/)'",
       "command_argv": [
         "bash",
-        "scripts/run_light_e2e_tests.sh",
-        "--no-capture",
+        "scripts/run_e2e_tests.sh",
+        "--test-threads",
+        "1",
         "--test",
-        "e2e_wal_receipt_recovery_tests"
+        "e2e_wal_receipt_recovery_tests",
+        "-E",
+        "test(/^(test_deferred_consumer_registration_rollback_preserves_wal_slot|test_dropped_wal_source_retains_retirement_until_last_consumer_commits|test_last_wal_consumer_drop_rollback_preserves_slot_and_frontier|test_replacement_source_cannot_reassign_pending_slot_retirement|test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash|test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash|test_slot_retirement_keeps_active_stale_and_mismatched_slots|test_slot_retirement_keeps_null_named_reference_across_source_oids)$/)"
       ],
       "e2e_image": "pg_trickle_release_candidate:local",
       "shard": {
