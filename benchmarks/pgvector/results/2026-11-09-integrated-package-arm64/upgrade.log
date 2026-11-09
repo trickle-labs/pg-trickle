@@ -1,0 +1,64 @@
+Published package SHA-256: 498bbe3bc7415a22389d767c0b0fae4d96aa0618c7e64704c500af934835cf99
+PGT_ACTUAL_POSTGRESQL_VERSION=18.6 (Debian 18.6-1.pgdg12+2)
+NOTICE:  publication "pgtrickle_cdc_606dc555b7b8c605" does not exist, skipping
+INFO:  Stream table public.upgrade_vector_st created (pgt_id=1, mode=DIFFERENTIAL, initialized=true)
+Published vector baseline: pgvector=0.8.7 image=pgvector/pgvector:0.8.7-pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47 index=1|17762|SELECT id, embedding FROM "public"."upgrade_vector_source"|17797|17797|CREATE INDEX upgrade_vector_st_embedding_idx ON public.upgrade_vector_st USING hnsw (embedding vector_l2_ops)
+NOTICE:  publication "pgtrickle_cdc_72ecb7556ed5bab8" does not exist, skipping
+INFO:  Stream table public.retirement_upgrade_st created (pgt_id=2, mode=DIFFERENTIAL, initialized=true)
+Published WAL slot established before upgrade: slot=pgtrickle_72ecb7556ed5bab8 cdc_mode=TRANSITIONING state={"frontier":{"sources": {"17798": {"lsn": "0/1C2D5E8", "snapshot_ts": "1794225541Z"}}, "data_timestamp": "1794225541Z"},"is_populated":true,"needs_reinit":false}
+NOTICE:  publication "pgtrickle_cdc_51e7dd28a55f2a34" does not exist, skipping
+INFO:  Stream table public.v106_upgrade_st created (pgt_id=3, mode=DIFFERENTIAL, initialized=false)
+INFO:  Stream table public.v106_upgrade_st: no previous frontier, performing FULL refresh first
+NOTICE:  table "__pgt_pre_3" does not exist, skipping
+INFO:  Stream table public.v106_upgrade_st refreshed (FULL)
+NOTICE:  table "__pgt_cdc_3_17845" does not exist, skipping
+NOTICE:  table "__pgt_delta_3" does not exist, skipping
+NOTICE:  table "__pgt_pre_3" does not exist, skipping
+INFO:  [PGS_PROFILE] explicit_dml: materialize=0.53ms delete=0.05ms(0) update=0.40ms(1) insert=0.04ms(0) for public.v106_upgrade_st
+INFO:  [PGS_PROFILE] decision=1.31ms generate+build=0.56ms merge_exec=4.79ms cleanup_enqueue=0.00ms total=6.66ms affected=1 phantom_cleanup=0 delta_est=2 mode=INCR path=cache_miss hints=none strategy=explicit_dml
+INFO:  Stream table public.v106_upgrade_st refreshed (DIFFERENTIAL: +1 -0)
+NOTICE:  relation "output_delta_3" already exists, skipping
+Upgrade preflight: {"checks":[{"detail":"capture ownership identity is valid","name":"capture_instance","status":"SAFE"},{"detail":"0 stream table(s) are suspended, errored, or awaiting rebuild","name":"suspended_tables","status":"SAFE"},{"detail":"0 scheduler job(s) are queued or running","name":"in_flight_refreshes","status":"SAFE"},{"detail":"16 estimated change-buffer row(s) remain","name":"capture_backlog","status":"DRAIN_RECOMMENDED"},{"detail":"0 invalid stream-table catalog row(s) found","name":"catalog_integrity","status":"SAFE"},{"detail":"the extension version and server version require review before upgrade","name":"persistent_state_versions","status":"WARNING"},{"detail":"verify free filesystem space externally; protected rebuilds may temporarily require a second result table","name":"rebuild_disk_headroom","status":"WARNING"}],"safe":false,"status":"DRAIN_RECOMMENDED"}
+WARNING:  Legacy distance subscriptions are retained inactive because their thresholds may be incorrect; inspect and re-register them
+Published vector stream, L2 index, inactive legacy subscription and default-off centroid state preserved.
+NOTICE:  schema "pg_temp" does not exist, skipping
+INFO:  [PGS_PROFILE] decision=0.91ms generate+build=2.02ms merge_exec=2.35ms cleanup_enqueue=0.00ms total=5.28ms affected=3 phantom_cleanup=0 delta_est=4 mode=INCR path=cache_miss hints=none strategy=merge
+INFO:  Stream table public.upgrade_vector_st refreshed (DIFFERENTIAL: +3 -0)
+NOTICE:  schema "pg_temp" does not exist, skipping
+NOTICE:  table "__pgt_delta_3" does not exist, skipping
+NOTICE:  table "__pgt_pre_3" does not exist, skipping
+INFO:  [PGS_PROFILE] explicit_dml: materialize=0.69ms delete=0.42ms(1) update=0.08ms(1) insert=0.05ms(1) for public.v106_upgrade_st
+INFO:  [PGS_PROFILE] decision=1.46ms generate+build=0.74ms merge_exec=6.15ms cleanup_enqueue=0.00ms total=8.35ms affected=3 phantom_cleanup=0 delta_est=4 mode=INCR path=cache_miss hints=none strategy=explicit_dml
+INFO:  Stream table public.v106_upgrade_st refreshed (DIFFERENTIAL: +3 -0)
+NOTICE:  trigger "pg_trickle_cdc_72ecb7556ed5bab8" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  trigger "pg_trickle_cdc_17798" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  trigger "pg_trickle_cdc_ins_17798" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  trigger "pg_trickle_cdc_upd_17798" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  trigger "pg_trickle_cdc_del_17798" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  trigger "pg_trickle_cdc_truncate_17798" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_fn_72ecb7556ed5bab8() does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_fn_17798() does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_ins_fn_17798() does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_upd_fn_17798() does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_del_fn_17798() does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_truncate_fn_17798() does not exist, skipping
+NOTICE:  table "changes_17823" does not exist, skipping
+NOTICE:  table "snapshot_17798" does not exist, skipping
+INFO:  Stream table public.retirement_upgrade_st dropped (pgt_id=2)
+NOTICE:  trigger "pg_trickle_cdc_72ecb7556ed5bab8" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  trigger "pg_trickle_cdc_17798" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  trigger "pg_trickle_cdc_ins_17798" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  trigger "pg_trickle_cdc_upd_17798" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  trigger "pg_trickle_cdc_del_17798" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  trigger "pg_trickle_cdc_truncate_17798" for relation "public.retirement_upgrade_source" does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_fn_72ecb7556ed5bab8() does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_fn_17798() does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_ins_fn_17798() does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_upd_fn_17798() does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_del_fn_17798() does not exist, skipping
+NOTICE:  function pgtrickle_changes.pg_trickle_cdc_truncate_fn_17798() does not exist, skipping
+NOTICE:  table "changes_17823" does not exist, skipping
+NOTICE:  table "snapshot_17798" does not exist, skipping
+INFO:  Stream table public.retirement_upgrade_st dropped (pgt_id=2)
+Published WAL state survived upgrade; durable private retirement catalog, rollback and committed drain passed.
+Published v0.108.3 binary upgraded to v0.109.0 with pending changes and durable consumer data preserved.
