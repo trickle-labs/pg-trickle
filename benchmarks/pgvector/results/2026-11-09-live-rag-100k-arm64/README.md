@@ -32,7 +32,10 @@ with [nested loops initially enabled](hash-join-check.json.gz) and
 [initially disabled](hash-join-original-off.json.gz). Both exact and hybrid
 exact plans used hash joins and no index scans. The normal-planner plans
 respected each caller setting. These checks use the updated query at commit
-`394e0484226e34878b125b150519b2e25227144d`.
+`394e0484226e34878b125b150519b2e25227144d`. Revision-convergence and
+tenant-authorization E2E tests using the revised query also passed with
+[pgvector 0.8.1](query-tests-081.log) and [0.8.7](query-tests-087.log) on
+images built from the same earlier archive.
 
 At 13:56:32 UTC, the three hourly fixture schedulers were
 [paused](scheduler-control.txt) during the interrupted cycle's retrieval
