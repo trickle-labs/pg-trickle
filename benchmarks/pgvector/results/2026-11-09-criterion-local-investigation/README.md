@@ -83,3 +83,14 @@ is below the 0.25 µs materiality floor and does not explain the hosted
 slowdowns. The change was discarded. Formatting and lint passed on the probe;
 SQL behavior was not independently verified because the result was not
 material. These local sequential samples are not the release comparison.
+
+A second isolated [experiment](quote-fastpath-experiment.patch) added a fast
+path for identifiers without embedded double quotes, keeping the existing
+escaping path for other names. The same host ran control, experiment,
+experiment, control with the same sample and timing settings. The
+[controls](quote-control-1.log) measured 5.1628–5.1752 µs and
+[5.1189–5.1273 µs](quote-control-2.log); the
+[experiments](quote-probe-1.log) measured 5.1087–5.1167 µs and
+[5.0746–5.0830 µs](quote-probe-2.log). The observed difference was about
+0.04–0.09 µs, below the materiality floor. The experiment was discarded;
+formatting and lint passed, but SQL behavior was not independently verified.
