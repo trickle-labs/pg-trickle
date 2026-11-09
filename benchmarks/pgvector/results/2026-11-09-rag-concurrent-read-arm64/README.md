@@ -45,3 +45,12 @@ cleanup was tightened, the summary calculation was factored into a unit-tested
 helper, and the eligible-to-searchable endpoint was corrected to exclude
 reader-drain time. Do not use that interval from this run. The maintenance
 durations and reported read intervals above do not include that drain time.
+
+A separate [fresh one-cycle run](corrected-frozen.json.gz) used the corrected
+source at `0cb70773` and the same earlier attested archive, with a
+[separate log](corrected-frozen.log.gz). All corpora matched. Application,
+differential, and periodic-full maintenance took 0.074, 0.655, and 29.808
+seconds, with 1, 6, and 2 completed reads overlapping respectively; no client
+read timed out in this sample. The differential eligible-to-searchable time
+still includes the earlier serial full-maintenance step and intervening
+checks. This single sample does not replace repeated final-candidate evidence.
