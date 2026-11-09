@@ -58,7 +58,8 @@ def main() -> int:
         nonlocal stopped
         stopped = True
         if child is not None and child.poll() is None:
-            child.terminate()
+            # psql forwards SIGINT as a server-side cancellation request.
+            child.send_signal(signal.SIGINT)
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
