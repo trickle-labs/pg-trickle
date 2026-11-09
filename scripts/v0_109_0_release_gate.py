@@ -34,6 +34,13 @@ PAUSE_CASES = {
 PGVECTOR_CASES = {
     "e2e_pgvector_tests::" + name
     for name in (
+        "test_centroid_randomized_refresh_churn_matches_native_avg",
+        "test_centroid_crash_recovers_committed_source_and_rolls_back_refresh",
+        "test_centroid_opt_in_applies_and_falls_back_after_corruption",
+        "test_centroid_missing_state_rebuilds_or_stays_unbound",
+        "test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh",
+        "test_centroid_unsafe_rebase_remains_unbound_without_retry_storm",
+        "test_centroid_refresh_serializes_concurrent_source_writer",
         "test_pgvector_compat_installed_version",
         "test_pgvector_distance_types_and_functions_differential",
         "test_embedding_stream_table_v2_metrics_and_options",

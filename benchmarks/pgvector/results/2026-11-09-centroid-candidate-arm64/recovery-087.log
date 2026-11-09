@@ -1,0 +1,58 @@
+warning: ignoring --test-threads because --no-capture is specified
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-task-1399)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.20s
+────────────
+ Nextest run ID ae506a6c-2c1c-4bb5-90c9-2333b7a99dcd with nextest profile: default
+    Starting 6 tests across 1 binary (132 tests skipped)
+       START [         ] (1/6) pg_trickle::e2e_pgvector_tests test_centroid_crash_recovers_committed_source_and_rolls_back_refresh
+
+running 1 test
+E2E connect attempt 1/30: error communicating with database: Connection reset by peer (os error 54)
+test test_centroid_crash_recovers_committed_source_and_rolls_back_refresh ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 15.51s
+
+        PASS [  15.522s] (1/6) pg_trickle::e2e_pgvector_tests test_centroid_crash_recovers_committed_source_and_rolls_back_refresh
+       START [         ] (2/6) pg_trickle::e2e_pgvector_tests test_centroid_missing_state_rebuilds_or_stays_unbound
+
+running 1 test
+test test_centroid_missing_state_rebuilds_or_stays_unbound ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 14.40s
+
+        PASS [  14.622s] (2/6) pg_trickle::e2e_pgvector_tests test_centroid_missing_state_rebuilds_or_stays_unbound
+       START [         ] (3/6) pg_trickle::e2e_pgvector_tests test_centroid_opt_in_applies_and_falls_back_after_corruption
+
+running 1 test
+test test_centroid_opt_in_applies_and_falls_back_after_corruption ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 14.53s
+
+        PASS [  14.762s] (3/6) pg_trickle::e2e_pgvector_tests test_centroid_opt_in_applies_and_falls_back_after_corruption
+       START [         ] (4/6) pg_trickle::e2e_pgvector_tests test_centroid_refresh_serializes_concurrent_source_writer
+
+running 1 test
+test test_centroid_refresh_serializes_concurrent_source_writer ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 14.67s
+
+        PASS [  14.898s] (4/6) pg_trickle::e2e_pgvector_tests test_centroid_refresh_serializes_concurrent_source_writer
+       START [         ] (5/6) pg_trickle::e2e_pgvector_tests test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh
+
+running 1 test
+E2E connect attempt 1/30: error communicating with database: Connection reset by peer (os error 54)
+test test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 17.19s
+
+        PASS [  17.203s] (5/6) pg_trickle::e2e_pgvector_tests test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh
+       START [         ] (6/6) pg_trickle::e2e_pgvector_tests test_centroid_unsafe_rebase_remains_unbound_without_retry_storm
+
+running 1 test
+test test_centroid_unsafe_rebase_remains_unbound_without_retry_storm ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 14.33s
+
+        PASS [  14.571s] (6/6) pg_trickle::e2e_pgvector_tests test_centroid_unsafe_rebase_remains_unbound_without_retry_storm
+────────────
+     Summary [  91.581s] 6 tests run: 6 passed, 132 skipped

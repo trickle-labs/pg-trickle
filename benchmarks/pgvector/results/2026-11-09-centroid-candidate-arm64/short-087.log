@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
+     Running tests/e2e_pgvector_tests.rs (target/debug/deps/e2e_pgvector_tests-0b480014c9ba917b)
+
+running 1 test
+CENTROID_DRIFT_JSON={"absolute_tolerance":0.00001,"checkpoints":[{"max_absolute_error":0.0,"max_bound_fraction":0.0,"refreshes":100},{"max_absolute_error":0.0,"max_bound_fraction":0.0,"refreshes":160}],"latest_history_algebraic_observations":154,"pg_trickle":"0.109.0","pgvector":"0.8.7","postgres":"PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit","refresh_calls":160,"relative_tolerance":1e-6,"seed":"0x7a139465"}
+test test_centroid_randomized_refresh_churn_matches_native_avg ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 18.52s
+
