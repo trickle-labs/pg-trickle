@@ -69,7 +69,7 @@ class RetirementContractTests(unittest.TestCase):
     def test_ann_restart_case_is_required_for_both_versions(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
         for version in ("0.8.1", "0.8.7"):
-            for case in ("test_ann_worker_retries_after_restart_during_concurrent_reindex", "test_ann_supervisor_reconnects_after_database_restart"):
+            for case in ("test_ann_worker_retries_after_restart_during_concurrent_reindex", "test_ann_supervisor_reconnects_after_database_restart", "test_ann_supervisor_bounds_repeated_failures"):
                 broken = copy.deepcopy(contract)
                 cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
                 cases.remove(f"e2e_pgvector_tests::{case}")

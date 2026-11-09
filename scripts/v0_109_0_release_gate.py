@@ -47,6 +47,7 @@ PGVECTOR_CASES = {
         "test_ann_request_listing_filters_privileges_and_pages",
         "test_ann_supervisor_processes_authorized_request",
         "test_ann_supervisor_reconnects_after_database_restart",
+        "test_ann_supervisor_bounds_repeated_failures",
     )
 } | {
     "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components",
