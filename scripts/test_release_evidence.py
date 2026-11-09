@@ -6,7 +6,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -39,7 +39,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 patch.object(release_install_attestation, "payload_files", return_value=expected),
                 patch.object(release_install_attestation, "server_observation", return_value={}),
                 patch.object(release_install_attestation, "installed_files", side_effect=[expected, mismatch]),
-                redirect_stdout(messages),
+                redirect_stderr(messages),
             ):
                 self.assertEqual(release_install_attestation.main(), 0)
                 self.assertEqual(release_install_attestation.main(), 1)
