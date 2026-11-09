@@ -1,4 +1,6 @@
 -- pg_trickle v0.108.4 -> v0.109.0
+ALTER TABLE pgtrickle.pgt_scheduler_jobs
+    ADD COLUMN member_failure_recorded BOOLEAN NOT NULL DEFAULT false;
 -- The WAL retirement table already exists in the 0.108.4 development candidate.
 
 -- Add the metric-aware embedding helper without changing legacy calls.

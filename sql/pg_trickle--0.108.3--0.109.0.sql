@@ -1,4 +1,6 @@
 -- pg_trickle v0.108.3 -> v0.109.0
+ALTER TABLE pgtrickle.pgt_scheduler_jobs
+    ADD COLUMN member_failure_recorded BOOLEAN NOT NULL DEFAULT false;
 -- Local WAL slots are removed only after their retirement has committed.
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_wal_slot_retirements (
     slot_name            TEXT PRIMARY KEY,
