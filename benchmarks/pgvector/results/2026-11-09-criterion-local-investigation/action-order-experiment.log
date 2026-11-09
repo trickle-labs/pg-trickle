@@ -1,0 +1,18 @@
+BENCH_QUICK=1: using sample-size=100, measurement-time=5s, warm-up-time=1s
+Building libpg_stub.dylib ...
+Compiling benchmarks ...
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-action-order-perf)
+    Finished `bench` profile [optimized] target(s) in 3m 07s
+  Executable benches/diff_operators.rs (/private/tmp/pg-trickle-task-1399/target/release/deps/diff_operators-917b504a01cea39a)
+
+Running: diff_operators-917b504a01cea39a (with libpg_stub.dylib)
+Gnuplot not found, using plotters backend
+Benchmarking diff_aggregate/count_star_1group
+Benchmarking diff_aggregate/count_star_1group: Warming up for 1.0000 s
+Benchmarking diff_aggregate/count_star_1group: Collecting 100 samples in estimated 5.0033 s (970k iterations)
+Benchmarking diff_aggregate/count_star_1group: Analyzing
+diff_aggregate/count_star_1group
+                        time:   [5.0456 µs 5.0513 µs 5.0572 µs]
+                        change: [-1.7906% -1.6377% -1.4899%] (p = 0.00 < 0.05)
+                        Performance has improved.
+

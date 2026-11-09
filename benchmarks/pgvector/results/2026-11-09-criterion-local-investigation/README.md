@@ -58,6 +58,13 @@ into one string instead of formatting intermediate branch strings. It measured
 baseline. This single ordered result does not establish a general effect, and
 the experiment was discarded.
 
+A third isolated experiment reversed the nesting order of the checked group
+action decision, intending to preserve its lifecycle outcomes. It measured
+5.046–5.057 µs, about 1.64% (roughly 85 ns) faster than the saved candidate
+sample. This is below the release gate's 250 ns absolute materiality floor
+and does not resolve its regressions; the experiment was discarded without
+changing production SQL.
+
 The hosted release qualification still reports 41 gated regressions on retry;
 see the [qualification failure evidence](../2026-11-09-c138-qualification-failures/README.md).
 No release budget has been waived, and the regression cause remains open.
