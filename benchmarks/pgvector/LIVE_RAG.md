@@ -5,9 +5,8 @@ periodic full recomputation and a differential stream against the same
 revision-safe source. It uses the existing revision-safe example's job lease,
 claim token, stale-completion checks and two model versions. The local fake
 provider is deterministic and requires no credentials beyond PostgreSQL.
-It supports `--dimensions` up to 1536, but the SQL fixture below currently
-creates three-dimensional embeddings; the worker dimension must match the
-installed result column.
+The setup and worker support `--dimensions` up to 1536; both must use the same
+dimension. The example below uses three dimensions.
 
 Use a disposable database with the packaged v0.109.0 candidate, PostgreSQL 18
 and pgvector installed. Record the candidate commit, package digest, image,
@@ -16,8 +15,7 @@ with a service or environment variables, then:
 
 ```sh
 psql -X -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION pg_trickle CASCADE'
-psql -X -v ON_ERROR_STOP=1 -f tests/fixtures/pgvector_revision_pipeline.sql
-psql -X -v ON_ERROR_STOP=1 -f benchmarks/pgvector/live_rag_baselines.sql
+python3 benchmarks/pgvector/setup_live_rag.py --dimensions 3
 psql -X -v ON_ERROR_STOP=1 -c "INSERT INTO embedding_demo.documents(id, body) VALUES (1, 'alpha'), (2, 'beta'); INSERT INTO live_rag.access(document_id, tenant_id) VALUES (1, 10), (2, 20); SELECT embedding_demo.enqueue(1, 'model-v1'); SELECT embedding_demo.enqueue(2, 'model-v1')"
 python3 benchmarks/pgvector/fake_embedding_worker.py --model model-v1 --duplicate
 psql -X -v ON_ERROR_STOP=1 -c "SELECT live_rag.sync_application(ARRAY[1,2]::bigint[]); SELECT live_rag.recompute_full(); SELECT pgtrickle.refresh_stream_table('live_rag.differential')"
@@ -52,7 +50,8 @@ authorization system: apply the RLS and role guidance in the
 filter every query by its authorized tenant. The extra source join has a cost
 that must be included in any comparison.
 
-The same hybrid candidate-fusion query can target each guarded view:
+The same hybrid candidate-fusion query can target each guarded view for the
+three-dimensional setup:
 
 ```sh
 psql -X -v ON_ERROR_STOP=1 -v corpus=application_current -v tenant=10 \
@@ -64,8 +63,9 @@ Repeat with `periodic_full_current` and `differential_current`. Indexes are
 identical in kind, but the guard joins can affect planner choice. Inspect the
 actual plan; the existence of an HNSW index does not prove it was used.
 
-This is a three-dimensional functional fixture, not the finished #1396
-benchmark. It does not yet provide the 384/768/1536-dimensional scale matrix,
+This is a functional fixture, not the finished #1396 benchmark. Wider setup
+is supported, but the sample hybrid query is currently three-dimensional. It
+does not yet provide the 384/768/1536-dimensional scale matrix,
 hybrid recall and underfill analysis, concurrent workload, latency and resource
 measurements, or a decision table. Do not infer a performance advantage from
 this example.

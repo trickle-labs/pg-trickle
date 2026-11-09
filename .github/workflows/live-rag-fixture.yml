@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-pgrx
       - name: Check fake provider
-        run: python3 -m unittest discover -s benchmarks/pgvector -p 'test_fake_embedding_worker.py'
+        run: python3 -m unittest discover -s benchmarks/pgvector -p 'test_*.py'
       - name: Build packaged pgvector image
         run: |
           ./tests/build_e2e_image.sh
@@ -30,4 +30,4 @@ jobs:
           PGS_E2E_IMAGE: pg_trickle_e2e_pgvector:0.8.7
         run: |
           ./scripts/run_e2e_tests.sh --retries 0 --test e2e_pgvector_revision_tests \
-            -E 'test(test_live_rag_baselines_recheck_revisions_and_converge)'
+            -E 'test(test_live_rag_baselines_recheck_revisions_and_converge) | test(test_live_rag_wide_setup_and_worker_match)'

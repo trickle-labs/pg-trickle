@@ -61,26 +61,7 @@ async fn refresh_differential(db: &E2eDb, table: &str) {
     assert!(differential, "{table} did not refresh differentially");
 }
 
-#[tokio::test]
-async fn test_live_rag_baselines_recheck_revisions_and_converge() {
-    let db = E2eDb::new().await.with_extension().await;
-    for script in [
-        include_str!("fixtures/pgvector_revision_pipeline.sql"),
-        include_str!("../benchmarks/pgvector/live_rag_baselines.sql"),
-    ] {
-        sqlx::raw_sql(script)
-            .execute(&db.pool)
-            .await
-            .expect("install live RAG fixture");
-    }
-    db.execute_seq(&[
-        "INSERT INTO embedding_demo.documents(id, body) VALUES (1, 'A'), (2, 'A')",
-        "INSERT INTO live_rag.access(document_id, tenant_id) VALUES (1, 10), (2, 20)",
-    ])
-    .await;
-    enqueue(&db, "model-v1").await;
-    db.execute("SELECT embedding_demo.enqueue(2, 'model-v1')")
-        .await;
+async fn run_live_rag_script(db: &E2eDb, script: &str, args: &[&str]) -> std::process::Output {
     let database: String = db.query_scalar("SELECT current_database()::text").await;
     let port = db
         .connection_string()
@@ -93,22 +74,59 @@ async fn test_live_rag_baselines_recheck_revisions_and_converge() {
         .rsplit(':')
         .next()
         .expect("port");
-    let output = tokio::process::Command::new("python3")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/benchmarks/pgvector/fake_embedding_worker.py"
+    tokio::process::Command::new("python3")
+        .arg(format!(
+            "{}/benchmarks/pgvector/{script}",
+            env!("CARGO_MANIFEST_DIR")
         ))
-        .args(["--model", "model-v1", "--duplicate"])
+        .args(args)
         .env_remove("PGSERVICE")
         .env("PGHOST", "127.0.0.1")
         .env("PGPORT", port)
-        .env("PGDATABASE", &database)
+        .env("PGDATABASE", database)
         .env("PGUSER", "postgres")
         .env("PGPASSWORD", "postgres")
         .env("PGSSLMODE", "disable")
         .output()
         .await
-        .expect("run fake embedding worker");
+        .expect("run live RAG script")
+}
+
+#[tokio::test]
+async fn test_live_rag_baselines_recheck_revisions_and_converge() {
+    let db = E2eDb::new().await.with_extension().await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let port = db
+        .connection_string()
+        .split('@')
+        .nth(1)
+        .expect("connection authority")
+        .split('/')
+        .next()
+        .expect("host and port")
+        .rsplit(':')
+        .next()
+        .expect("port");
+    let setup = run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", "3"]).await;
+    assert!(
+        setup.status.success(),
+        "live RAG setup failed: {}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    db.execute_seq(&[
+        "INSERT INTO embedding_demo.documents(id, body) VALUES (1, 'A'), (2, 'A')",
+        "INSERT INTO live_rag.access(document_id, tenant_id) VALUES (1, 10), (2, 20)",
+    ])
+    .await;
+    enqueue(&db, "model-v1").await;
+    db.execute("SELECT embedding_demo.enqueue(2, 'model-v1')")
+        .await;
+    let output = run_live_rag_script(
+        &db,
+        "fake_embedding_worker.py",
+        &["--model", "model-v1", "--duplicate"],
+    )
+    .await;
     assert!(
         output.status.success(),
         "fake worker failed: {}",
@@ -248,6 +266,60 @@ async fn test_live_rag_baselines_recheck_revisions_and_converge() {
         .query_scalar("SELECT tenant_id FROM live_rag.differential_current WHERE id=1")
         .await;
     assert_eq!(tenant, 10);
+}
+
+#[tokio::test]
+async fn test_live_rag_wide_setup_and_worker_match() {
+    let db = E2eDb::new().await.with_extension().await;
+    let setup = run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", "384"]).await;
+    assert!(
+        setup.status.success(),
+        "wide setup failed: {}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    db.execute_seq(&[
+        "INSERT INTO embedding_demo.documents(id, body) VALUES (1, 'wide vector')",
+        "INSERT INTO live_rag.access(document_id, tenant_id) VALUES (1, 10)",
+        "SELECT embedding_demo.enqueue(1, 'model-v1')",
+    ])
+    .await;
+    let output = run_live_rag_script(
+        &db,
+        "fake_embedding_worker.py",
+        &["--model", "model-v1", "--dimensions", "384"],
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "wide worker failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dimensions: i32 = db
+        .query_scalar(
+            "SELECT vector_dims(embedding) FROM embedding_demo.results WHERE document_id=1",
+        )
+        .await;
+    assert_eq!(dimensions, 384);
+    db.execute_seq(&[
+        "SELECT live_rag.sync_application(ARRAY[1]::bigint[])",
+        "SELECT live_rag.recompute_full()",
+    ])
+    .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy='differential'",
+            "SET pg_trickle.differential_max_change_ratio=0",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('live_rag.differential')",
+    )
+    .await
+    .expect("refresh wide differential corpus");
+    let differential: bool = db.query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert!(differential, "wide corpus must refresh differentially");
+    for table in ["application", "periodic_full", "differential"] {
+        db.assert_st_matches_query(&format!("live_rag.{table}"), "SELECT * FROM live_rag.truth")
+            .await;
+    }
 }
 
 #[tokio::test]
