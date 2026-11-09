@@ -4937,8 +4937,23 @@ async fn test_ann_worker_records_lock_timeout_and_can_retry() {
     )
     .await;
     db.execute("CREATE INDEX ann_worker_timeout_idx ON ann_worker_timeout_stream USING hnsw (embedding vector_cosine_ops)").await;
-    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_worker_timeout_stream'::regclass::oid, 'ann_worker_timeout_idx'::regclass::oid)").await;
+    db.execute("INSERT INTO ann_worker_timeout_source VALUES (1, '[1,0,0]')")
+        .await;
+    db.refresh_st_until_converged("ann_worker_timeout_stream")
+        .await;
     let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let mut request_tx = db.pool.begin().await.expect("begin request transaction");
+    let request: i64 = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_worker_timeout_stream'::regclass::oid, 'ann_worker_timeout_idx'::regclass::oid)")
+        .fetch_one(&mut *request_tx).await.expect("request maintenance");
+    let output = ann_worker_command(&db, &database, "postgres", request, "250ms")
+        .output()
+        .await
+        .expect("run worker before commit");
+    assert!(!output.status.success(), "uncommitted request must not run");
+    request_tx
+        .commit()
+        .await
+        .expect("commit maintenance request");
     let mut blocker = db.pool.begin().await.expect("begin barrier");
     sqlx::query("LOCK TABLE ann_worker_timeout_stream IN ROW EXCLUSIVE MODE")
         .execute(&mut *blocker)
@@ -4975,6 +4990,11 @@ async fn test_ann_worker_records_lock_timeout_and_can_retry() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("lock timeout"));
     assert!(status["next_eligible_at"].is_string());
     blocker.rollback().await.expect("release barrier");
+    db.assert_st_matches_query(
+        "ann_worker_timeout_stream",
+        "SELECT id, embedding FROM ann_worker_timeout_source",
+    )
+    .await;
     db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
     let output = ann_worker_command(&db, &database, "postgres", request, "5s")
         .output()
