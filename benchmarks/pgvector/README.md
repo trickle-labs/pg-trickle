@@ -60,6 +60,10 @@ identify the development image, not a published release artifact. The harness
 does not yet measure controlled concurrent load, WAL, or CPU, and a run alone
 does not establish a general scaling limit. Larger cases remain opt-in.
 
+The [v0.109.0 candidate measurements](results/2026-11-09-candidate-subscription-arm64/README.md)
+compare the forced-trigger and bounded paths through 100,000 rows and 100
+subscriptions, with representative nested plans and explicit limitations.
+
 ## Version conformance
 
 The PR compatibility workflow packages pg_trickle for PostgreSQL 18.6 and
