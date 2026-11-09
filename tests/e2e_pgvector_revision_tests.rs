@@ -214,6 +214,51 @@ async fn test_live_rag_baselines_recheck_revisions_and_converge() {
     );
     assert_eq!(results[0], results[1]);
     assert_eq!(results[0], results[2]);
+    let vector_version: String = db
+        .query_scalar("SELECT extversion FROM pg_extension WHERE extname='vector'")
+        .await;
+    for view in [
+        "application_current",
+        "periodic_full_current",
+        "differential_current",
+    ] {
+        let output = run_live_rag_script(
+            &db,
+            "measure_live_rag_recall.py",
+            &[
+                "--corpus",
+                view,
+                "--tenant",
+                "10",
+                "--dimensions",
+                "3",
+                "--query-vector",
+                "[1,0,0]",
+                "--terms",
+                "A",
+                "--k",
+                "2",
+                "--expected-pgvector",
+                &vector_version,
+                "--candidate-commit",
+                "0000000000000000000000000000000000000000",
+                "--package-sha256",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ],
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "recall measurement failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse recall report");
+        assert_eq!(report["metrics"]["exact_count"], 1);
+        assert_eq!(report["metrics"]["candidate_count"], 1);
+        assert_eq!(report["metrics"]["recall_at_k"], 1.0);
+        assert_eq!(report["metrics"]["underfill"], 1);
+    }
 
     db.execute_seq(&[
         "UPDATE embedding_demo.documents SET body='B' WHERE id=1",

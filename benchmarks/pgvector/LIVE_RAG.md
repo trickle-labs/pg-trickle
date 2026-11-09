@@ -63,9 +63,29 @@ Repeat with `periodic_full_current` and `differential_current`. Indexes are
 identical in kind, but the guard joins can affect planner choice. Inspect the
 actual plan; the existence of an HNSW index does not prove it was used.
 
+To compare filtered vector results with an exact scan on the same tenant and
+snapshot, supply the candidate's recorded commit and package SHA-256:
+
+```sh
+python3 benchmarks/pgvector/measure_live_rag_recall.py \
+  --corpus differential_current --tenant 10 --dimensions 3 \
+  --query-vector '[1,0,0]' --terms alpha --k 10 --expected-pgvector 0.8.7 \
+  --candidate-commit "$CANDIDATE_COMMIT" --package-sha256 "$PACKAGE_SHA256" \
+  > recall.json
+```
+
+The report records recall@K against a scan with index paths disabled, result
+underfill, lexical candidate count, boundary ties, installed versions, and
+EXPLAIN ANALYZE/BUFFERS plans for the exact query, normal planner choice and
+forced index eligibility. The forced plan is diagnostic and is not used to
+compute recall. The candidate and plan queries execute separately in the same
+repeatable-read snapshot. Boundary ties can make ID-based recall ambiguous.
+The supplied commit and digest are declarations: this script does not attest
+the installed package. Retain separate installation and environment evidence.
+
 This is a functional fixture, not the finished #1396 benchmark. Wider setup
 is supported, but the sample hybrid query is currently three-dimensional. It
 does not yet provide the 384/768/1536-dimensional scale matrix,
-hybrid recall and underfill analysis, concurrent workload, latency and resource
+hybrid-fusion recall analysis, concurrent workload, end-to-end latency and resource
 measurements, or a decision table. Do not infer a performance advantage from
 this example.
