@@ -52,6 +52,17 @@ used one-row bounded snapshots and delivered the expected transition to every
 listener. Each case has only one sample and the zero-subscription case used a
 different merge strategy; its timings are not a controlled overhead estimate.
 
+`scale-100k-1000.json` extends the same local, analyzed, trigger-free
+configuration to 0, 100 and 1,000 subscriptions, with three alternating
+one-row updates each. All expected enter/exit notifications arrived and each
+subscribed refresh used a one-row bounded snapshot. Observed refresh-call
+times were 20.71–31.02 ms for zero subscriptions, 73.25–88.11 ms for 100,
+and 462.32–540.12 ms for 1,000. All subscriptions shared one pivot and
+threshold. The zero-subscription case used `delete_insert`, while the others
+used `explicit_dml`; these three samples do not isolate subscription cost or
+establish a capacity limit. Commit and post-commit listener-wait times are
+reported separately in the JSON.
+
 [Hosted benchmark run 42588168262](https://github.com/trickle-labs/pg-trickle/actions/runs/42588168262)
 repeated the instrumented explicit-merge controls on Linux amd64, with five
 one-row updates per case. Its [raw measurements](hosted-amd64.json) show the
