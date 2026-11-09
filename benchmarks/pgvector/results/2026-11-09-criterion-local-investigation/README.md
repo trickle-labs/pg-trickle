@@ -65,6 +65,7 @@ sample. This is below the release gate's 250 ns absolute materiality floor
 and does not resolve its regressions; the experiment was discarded without
 changing production SQL.
 
-The hosted release qualification still reports 41 gated regressions on retry;
-see the [qualification failure evidence](../2026-11-09-c138-qualification-failures/README.md).
+Hosted release qualifications reported 41 and 25 gated regressions on retry;
+see the [first](../2026-11-09-c138-qualification-failures/README.md) and
+[second](../2026-11-09-b7-qualification-failures/README.md) failure evidence.
 No release budget has been waived, and the regression cause remains open.

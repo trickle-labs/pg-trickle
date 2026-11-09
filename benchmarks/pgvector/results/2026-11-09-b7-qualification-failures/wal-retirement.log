@@ -1,0 +1,88 @@
+Running light-E2E shard 1/1 with 1 test targets
+  e2e_wal_receipt_recovery_tests
+Light-E2E run id: light-e2e-935523-1794249600
+Creating shared light-E2E PostgreSQL container...
+PGT_ACTUAL_POSTGRESQL_VERSION=18.6 (Debian 18.6-1.pgdg13+2)
+Shared container 862161fa2fa1 ready on port 32861
+[1m[92m   Compiling[0m pg_trickle v0.109.0 (/home/runner/work/pg-trickle/pg-trickle)
+[1m[91merror[E0599][0m[1m: no method named `reconnect_after_restart` found for struct `E2eDb` in the current scope[0m
+   [1m[94m--> [0mtests/e2e_wal_receipt_recovery_tests.rs:478:27
+    [1m[94m|[0m
+[1m[94m478[0m [1m[94m|[0m     let pool = fixture.db.reconnect_after_restart().await;
+    [1m[94m|[0m                           [1m[91m^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mmethod not found in `E2eDb`[0m
+    [1m[94m|[0m
+   [1m[94m::: [0mtests/e2e/light.rs:323:1
+    [1m[94m|[0m
+[1m[94m323[0m [1m[94m|[0m pub struct E2eDb {
+    [1m[94m|[0m [1m[94m----------------[0m [1m[94mmethod `reconnect_after_restart` not found for this struct[0m
+
+[1m[91merror[E0599][0m[1m: no method named `reconnect_after_restart` found for struct `E2eDb` in the current scope[0m
+   [1m[94m--> [0mtests/e2e_wal_receipt_recovery_tests.rs:495:27
+    [1m[94m|[0m
+[1m[94m495[0m [1m[94m|[0m     let pool = fixture.db.reconnect_after_restart().await;
+    [1m[94m|[0m                           [1m[91m^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mmethod not found in `E2eDb`[0m
+    [1m[94m|[0m
+   [1m[94m::: [0mtests/e2e/light.rs:323:1
+    [1m[94m|[0m
+[1m[94m323[0m [1m[94m|[0m pub struct E2eDb {
+    [1m[94m|[0m [1m[94m----------------[0m [1m[94mmethod `reconnect_after_restart` not found for this struct[0m
+
+[1m[91merror[E0599][0m[1m: no method named `reconnect_after_restart` found for struct `E2eDb` in the current scope[0m
+    [1m[94m--> [0mtests/e2e_wal_receipt_recovery_tests.rs:1085:31
+     [1m[94m|[0m
+[1m[94m1085[0m [1m[94m|[0m         let pool = fixture.db.reconnect_after_restart().await;
+     [1m[94m|[0m                               [1m[91m^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mmethod not found in `E2eDb`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0mtests/e2e/light.rs:323:1
+     [1m[94m|[0m
+[1m[94m 323[0m [1m[94m|[0m pub struct E2eDb {
+     [1m[94m|[0m [1m[94m----------------[0m [1m[94mmethod `reconnect_after_restart` not found for this struct[0m
+
+[1m[91merror[E0599][0m[1m: no method named `reconnect_after_restart` found for struct `E2eDb` in the current scope[0m
+    [1m[94m--> [0mtests/e2e_wal_receipt_recovery_tests.rs:1472:34
+     [1m[94m|[0m
+[1m[94m1472[0m [1m[94m|[0m     fixture.db.pool = fixture.db.reconnect_after_restart().await;
+     [1m[94m|[0m                                  [1m[91m^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mmethod not found in `E2eDb`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0mtests/e2e/light.rs:323:1
+     [1m[94m|[0m
+[1m[94m 323[0m [1m[94m|[0m pub struct E2eDb {
+     [1m[94m|[0m [1m[94m----------------[0m [1m[94mmethod `reconnect_after_restart` not found for this struct[0m
+
+[1m[91merror[E0599][0m[1m: no method named `reconnect_after_restart` found for struct `E2eDb` in the current scope[0m
+    [1m[94m--> [0mtests/e2e_wal_receipt_recovery_tests.rs:2654:34
+     [1m[94m|[0m
+[1m[94m2654[0m [1m[94m|[0m     fixture.db.pool = fixture.db.reconnect_after_restart().await;
+     [1m[94m|[0m                                  [1m[91m^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mmethod not found in `E2eDb`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0mtests/e2e/light.rs:323:1
+     [1m[94m|[0m
+[1m[94m 323[0m [1m[94m|[0m pub struct E2eDb {
+     [1m[94m|[0m [1m[94m----------------[0m [1m[94mmethod `reconnect_after_restart` not found for this struct[0m
+
+[1m[91merror[E0599][0m[1m: no method named `reconnect_after_restart` found for struct `E2eDb` in the current scope[0m
+    [1m[94m--> [0mtests/e2e_wal_receipt_recovery_tests.rs:3176:18
+     [1m[94m|[0m
+[1m[94m3176[0m [1m[94m|[0m     db.pool = db.reconnect_after_restart().await;
+     [1m[94m|[0m                  [1m[91m^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mmethod not found in `E2eDb`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0mtests/e2e/light.rs:323:1
+     [1m[94m|[0m
+[1m[94m 323[0m [1m[94m|[0m pub struct E2eDb {
+     [1m[94m|[0m [1m[94m----------------[0m [1m[94mmethod `reconnect_after_restart` not found for this struct[0m
+
+[1m[91merror[E0599][0m[1m: no method named `reconnect_after_restart` found for struct `E2eDb` in the current scope[0m
+    [1m[94m--> [0mtests/e2e_wal_receipt_recovery_tests.rs:4022:38
+     [1m[94m|[0m
+[1m[94m4022[0m [1m[94m|[0m         fixture.db.pool = fixture.db.reconnect_after_restart().await;
+     [1m[94m|[0m                                      [1m[91m^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mmethod not found in `E2eDb`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0mtests/e2e/light.rs:323:1
+     [1m[94m|[0m
+[1m[94m 323[0m [1m[94m|[0m pub struct E2eDb {
+     [1m[94m|[0m [1m[94m----------------[0m [1m[94mmethod `reconnect_after_restart` not found for this struct[0m
+
+[1mFor more information about this error, try `rustc --explain E0599`.[0m
+[1m[91merror[0m: could not compile `pg_trickle` (test "e2e_wal_receipt_recovery_tests") due to 7 previous errors
+[31;1merror[0m: command `[1m/home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo '--color=always' test --no-run '--message-format=json-render-diagnostics' '--test=e2e_wal_receipt_recovery_tests' '--features=light-e2e'[0m` exited with code [1m101[0m
+Cleaning up light-E2E containers for run light-e2e-935523-1794249600
