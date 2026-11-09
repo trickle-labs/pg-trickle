@@ -161,7 +161,7 @@ jobs:
           - os: ubuntu-24.04-arm
             artifact_suffix: linux-arm64
             archive_ext: tar.gz
-          - os: macos-14
+          - os: macos-15
             artifact_suffix: macos-arm64
             archive_ext: tar.gz
           - os: windows-2022
@@ -169,6 +169,10 @@ jobs:
             archive_ext: zip
     steps:
       - uses: actions/checkout@v7
+
+      - name: Verify macOS ARM64 runner
+        if: matrix.artifact_suffix == 'macos-arm64'
+        run: test "$(uname -m)" = arm64
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
