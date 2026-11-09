@@ -44,5 +44,13 @@ reproduction; they do not prove that every visit in the earlier exploratory
 report had the same cause. They also expose a real full-snapshot cost when
 user triggers are present. Before changing that safety boundary, compare a
 targeted remedy with the current behavior and verify trigger and notification
-semantics. The larger scale matrix, repeated timings, concurrent load,
+semantics.
+
+`scale-100k.json` records a separate uninstrumented, analyzed, trigger-free
+run at 100,000 rows and 0, 1, 10 and 100 subscriptions. The subscribed cases
+used one-row bounded snapshots and delivered the expected transition to every
+listener. Each case has only one sample and the zero-subscription case used a
+different merge strategy; its timings are not a controlled overhead estimate.
+
+The larger scale matrix, repeated timings, concurrent load,
 restart/retry behavior, and final candidate-artifact evidence remain open.
