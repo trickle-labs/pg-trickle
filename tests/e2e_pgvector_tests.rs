@@ -114,6 +114,16 @@ async fn test_ann_request_listing_filters_privileges_and_pages() {
 
 #[tokio::test]
 async fn test_ann_supervisor_processes_authorized_request() {
+    exercise_ann_supervisor_recovery(false).await;
+}
+
+#[tokio::test]
+#[ignore = "waits for the actual ANN worker cooldown"]
+async fn test_ann_supervisor_waits_for_natural_worker_cooldown() {
+    exercise_ann_supervisor_recovery(true).await;
+}
+
+async fn exercise_ann_supervisor_recovery(natural_cooldown: bool) {
     use std::time::Duration;
 
     let db = E2eDb::new().await.with_extension().await;
@@ -405,16 +415,24 @@ async fn test_ann_supervisor_processes_authorized_request() {
         cooling["state"], "INTERRUPTED",
         "supervisor must not rapidly retry"
     );
-    sqlx::query("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE request_id = $1")
-        .bind(death).execute(&db.pool).await.expect("expire interrupted cooldown for test");
-    tokio::time::timeout(Duration::from_secs(45), async {
+    let deadline: Option<String> = if natural_cooldown {
+        Some(sqlx::query_scalar("SELECT next_eligible_at::text FROM pgtrickle.pgt_ann_maintenance_claims WHERE request_id = $1")
+            .bind(death).fetch_one(&db.pool).await.expect("read natural cooldown deadline"))
+    } else {
+        sqlx::query("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE request_id = $1")
+            .bind(death).execute(&db.pool).await.expect("expire interrupted cooldown for test");
+        None
+    };
+    let mut observed_cooldown = false;
+    tokio::time::timeout(Duration::from_secs(90), async {
         loop {
-            let status: serde_json::Value =
-                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
-                    .bind(death)
-                    .fetch_one(&db.pool)
-                    .await
-                    .expect("inspect worker death retry");
+            let (before_deadline, status): (bool, serde_json::Value) = sqlx::query_as(
+                "SELECT COALESCE(clock_timestamp() < $2::text::timestamptz - interval '1 second', false), pgtrickle.ann_maintenance_request($1)",
+            ).bind(death).bind(deadline.as_deref()).fetch_one(&db.pool).await.expect("inspect worker death retry");
+            if before_deadline {
+                observed_cooldown = true;
+                assert_eq!(status["state"], "INTERRUPTED", "supervisor retried before the cooldown deadline");
+            }
             if status["state"] == "SUCCEEDED" {
                 break;
             }
@@ -427,6 +445,18 @@ async fn test_ann_supervisor_processes_authorized_request() {
     })
     .await
     .expect("supervisor did not retry lost worker");
+    if let Some(deadline) = deadline {
+        assert!(
+            observed_cooldown,
+            "must observe a live cooldown before retry"
+        );
+        let after_deadline: bool = sqlx::query_scalar("SELECT completed_at >= $2::text::timestamptz FROM pgtrickle.pgt_ann_maintenance_requests WHERE request_id = $1")
+            .bind(death).bind(&deadline).fetch_one(&db.pool).await.expect("check natural retry completion");
+        assert!(
+            after_deadline,
+            "retry completed before the original cooldown deadline"
+        );
+    }
     let death_valid: bool = db.query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_supervisor_death_idx'::regclass").await;
     assert!(
         death_valid,
