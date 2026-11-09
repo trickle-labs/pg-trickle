@@ -1,5 +1,25 @@
 # Filtered pgvector workload
 
+### Long-running centroid drift
+
+The `centroid-drift` job in the manually dispatched E2E Benchmarks workflow runs 2,000 seeded
+mutation and refresh calls against a development image with pgvector 0.8.7.
+It compares every group to native `avg(vector)` after each call and records
+the largest component error and fraction of the absolute-plus-relative
+tolerance at 100-call checkpoints. The run includes updates, deletes, NULL
+transitions and group moves; it uses three dimensions and does not qualify
+large dimensions, concurrent workloads, crash recovery or release artifacts.
+The uploaded results identify the image and its extension files.
+
+To run it locally after building the version-specific image:
+
+```sh
+PGS_E2E_IMAGE=pg_trickle_e2e_pgvector:0.8.7 PGVECTOR_EXPECTED_VERSION=0.8.7 \
+  ./scripts/run_e2e_tests.sh --retries 0 --test e2e_pgvector_tests \
+  --run-ignored ignored-only --no-capture \
+  -E 'test(test_centroid_long_running_drift_matches_native_avg)'
+```
+
 ### Controlled distance-subscription measurements
 
 The opt-in subscription workload accepts comma-separated `PGVECTOR_SUB_ROWS`
