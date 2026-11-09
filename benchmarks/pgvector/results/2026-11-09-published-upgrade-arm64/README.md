@@ -22,8 +22,15 @@ records matching candidate and installed payload digests for 157 files. Its
 candidate-commit and archive-identity fields are null: the archive SHA and
 embedded metadata above were verified separately, not bound into that record.
 
+The same candidate archive was also installed into fresh PostgreSQL 18.6
+containers for the 11 declared pgvector cases with each of pgvector 0.8.1 and
+0.8.7. Both runs passed all 11 cases: [0.8.1 log](fresh-081.log) and
+[0.8.7 log](fresh-087.log). Each run's compressed installation attestations
+([0.8.1](fresh-081-attestations.json.gz), [0.8.7](fresh-087-attestations.json.gz))
+contain 11 observations whose candidate and installed payload digests match.
+These local direct-suite runs are not a full machine-enforced release report.
+
 This is evidence for that earlier ARM64 artifact and these specific checks.
-It does not qualify the later combined candidate, establish fresh-install
-coverage on the same artifact, or replace the full release recovery and
-platform matrix. The associated hosted qualification run was canceled because
-its macOS build did not complete.
+It does not qualify the later combined candidate or replace the full release
+recovery and platform matrix. The associated hosted qualification run was
+canceled because its macOS build did not complete.
