@@ -44,5 +44,36 @@ corpus equality before running cycles 1 and 2. It reports no setup time and uses
 from the ordinary fresh-database command and is not a controlled comparison
 with the earlier 10,000-row run.
 
-The resumed cycles are still running. No completed 100,000-row performance
-claim or final release qualification follows from this partial evidence.
+## Two completed resumed cycles
+
+The resumed run completed cycles 1 and 2, each with twelve mixed update,
+visibility, deletion and insertion slots, tenant 2 and 384 dimensions. All
+three corpora matched the defining SQL after each cycle. The affected rows were
+not visible immediately after source commit; after generation, six rows were
+eligible and none were yet present in the guarded current views. Both measured
+differential refreshes completed without FULL fallback and reported
+`explicit_dml_reconciled`.
+
+For these two serial, rotated samples, application maintenance took
+0.136–0.174 seconds, differential refresh 5.991–6.186 seconds, and full
+recomputation 552.954–580.008 seconds. Generation took 0.415–0.467 seconds;
+commit-to-eligible time was 0.487–0.543 seconds. These timings include process
+startup and availability checks as described in the
+[complete report](completed-cycles.json.gz). Eligible-to-searchable values
+also include earlier approaches in the serial order and are not independent
+latencies. Two samples do not establish percentiles or a general ranking.
+
+Vector and hybrid recall were 1.0 with no underfill in these samples, but the
+normal planner selected no ANN index for any approach; this does not qualify
+ANN retrieval quality. Forced eligibility selected the differential ANN
+index but not the other two. The report retains plans, row availability,
+cluster-wide WAL movement, sizes and individual timings; the
+[log](completed-cycles.log) retains refresh notices. An
+[autovacuum observation](autovacuum-observation.txt) during the final batch
+may have affected timing and WAL. Parallel query workers were disabled, the
+schedulers were paused during the preceding interrupted cycle, and the
+fixture ran without controlled concurrent traffic or a delay distribution.
+
+These measurements use an earlier archive, include a resumed state and do not
+qualify the final release candidate. The broader workload matrix and release
+qualification remain open.
