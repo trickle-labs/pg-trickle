@@ -638,6 +638,149 @@ async fn exercise_ann_supervisor_recovery(natural_cooldown: bool) {
 }
 
 #[tokio::test]
+async fn test_ann_supervisor_bounds_repeated_failures() {
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_retry_src (id int PRIMARY KEY, v vector(3))")
+        .await;
+    db.create_st(
+        "ann_retry_st",
+        "SELECT id, v FROM ann_retry_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute_seq(&[
+        "CREATE INDEX ann_retry_bad_idx ON ann_retry_st USING hnsw (v vector_l2_ops)",
+        "CREATE ROLE ann_retry_operator LOGIN PASSWORD 'ann-test-only'",
+        "GRANT USAGE ON SCHEMA pgtrickle, public TO ann_retry_operator",
+        "GRANT SELECT, MAINTAIN ON ann_retry_st TO ann_retry_operator",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer), pgtrickle.ann_maintenance_request(bigint), pgtrickle.claim_ann_maintenance(bigint), pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO ann_retry_operator",
+    ])
+    .await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let port = db
+        .connection_string()
+        .split('@')
+        .nth(1)
+        .expect("authority")
+        .split('/')
+        .next()
+        .expect("host and port")
+        .rsplit(':')
+        .next()
+        .expect("port");
+    let mut blocker = db.pool.begin().await.expect("begin reindex barrier");
+    sqlx::query("LOCK TABLE ann_retry_st IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold reindex barrier");
+    let failed: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_retry_st'::regclass::oid, 'ann_retry_bad_idx'::regclass::oid)").await;
+    let mut child = tokio::process::Command::new("python3")
+        .arg(ann_operator_root().join("scripts/ann_maintenance_supervisor.py"))
+        .env_remove("PGSERVICE")
+        .env("PGHOST", "127.0.0.1")
+        .env("PGPORT", port)
+        .env("PGDATABASE", &database)
+        .env("PGUSER", "ann_retry_operator")
+        .env("PGPASSWORD", "ann-test-only")
+        .env("PGSSLMODE", "disable")
+        .env("PGS_ANN_POLL_SECONDS", "1")
+        .env("PGS_ANN_LOCK_TIMEOUT", "250ms")
+        .env("PGS_ANN_STATEMENT_TIMEOUT", "10s")
+        .env("PGS_ANN_MAX_FAILURES", "2")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start supervisor");
+
+    for failures in 1..=2 {
+        let status = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let status: serde_json::Value =
+                    sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                        .bind(failed)
+                        .fetch_one(&db.pool)
+                        .await
+                        .expect("inspect failed request");
+                if status["state"] == "FAILED" && status["consecutive_failures"] == failures {
+                    break status;
+                }
+                assert!(
+                    child.try_wait().expect("inspect supervisor").is_none(),
+                    "supervisor exited: {status}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("supervisor did not record failure");
+        assert!(
+            status["last_error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Concurrent reindex failed"),
+            "{status}"
+        );
+        let remaining: f64 = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (pgtrickle.ann_maintenance_request($1)->>'next_eligible_at')::timestamptz - clock_timestamp())::float8")
+            .bind(failed).fetch_one(&db.pool).await.expect("inspect cooldown");
+        let expected = if failures == 1 { 30.0 } else { 60.0 };
+        assert!(
+            remaining > expected - 10.0 && remaining <= expected,
+            "failure {failures}: {remaining}s"
+        );
+        if failures == 1 {
+            // Advance only the first deadline to exercise the second failure quickly.
+            db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+        }
+    }
+    blocker.rollback().await.expect("release barrier");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    db.execute("INSERT INTO ann_retry_src VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('ann_retry_st')")
+        .await;
+    db.execute("CREATE INDEX ann_retry_good_idx ON ann_retry_st USING hnsw (v vector_l2_ops)")
+        .await;
+    let good: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_retry_st'::regclass::oid, 'ann_retry_good_idx'::regclass::oid)").await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(good)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect unrelated request");
+            if status["state"] == "SUCCEEDED" {
+                break;
+            }
+            assert_ne!(
+                status["state"], "FAILED",
+                "unrelated request failed: {status}"
+            );
+            assert!(child.try_wait().expect("inspect supervisor").is_none());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("unrelated request did not complete");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(failed)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect capped request");
+    assert_eq!(status["state"], "FAILED", "{status}");
+    assert_eq!(status["consecutive_failures"], 2, "{status}");
+    db.assert_st_matches_query("ann_retry_st", "SELECT id, v FROM ann_retry_src")
+        .await;
+    child.start_kill().expect("stop supervisor");
+    child.wait().await.expect("reap supervisor");
+}
+
+#[tokio::test]
 async fn test_ann_supervisor_reconnects_after_database_restart() {
     use std::time::Duration;
 
