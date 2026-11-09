@@ -52,5 +52,18 @@ used one-row bounded snapshots and delivered the expected transition to every
 listener. Each case has only one sample and the zero-subscription case used a
 different merge strategy; its timings are not a controlled overhead estimate.
 
+[Hosted benchmark run 42588168262](https://github.com/trickle-labs/pg-trickle/actions/runs/42588168262)
+repeated the instrumented explicit-merge controls on Linux amd64, with five
+one-row updates per case. Its [raw measurements](hosted-amd64.json) show the
+same sequential tuple returns as the local control for every corresponding
+case and round. The run's 384-dimensional artifact also contains the full
+nested-plan log, host details, and package-file hashes (90-day retention).
+It used commit `1f1517ba77dcc8d7d47dccccba0d936e644db34a`, PostgreSQL 18.6,
+pgvector 0.8.7, and pg_trickle 0.109.0. Its development image ID was
+`sha256:662a6f1fbb3d7f4d1ce16ca2c77cdb6d3441c9c03f1e5d52b94bef10f9c4dba1`,
+and its extension library SHA-256 was
+`efb56fa3eb120795988315973773b84d5ba178c9702052a60099a472d75200c0`.
+This is a second development environment, not the final release artifact.
+
 The larger scale matrix, repeated timings, concurrent load,
 restart/retry behavior, and final candidate-artifact evidence remain open.
