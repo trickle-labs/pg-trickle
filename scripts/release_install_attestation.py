@@ -167,7 +167,7 @@ def main() -> int:
             "server": server,
         },
     )
-    return 0
+    return int(observed != files)
 
 
 if __name__ == "__main__":
