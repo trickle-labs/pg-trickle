@@ -1,0 +1,58 @@
+Full E2E run id: full-e2e-30093-1794229530
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-task-1399)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.09s
+────────────
+ Nextest run ID 4d6d1963-51b9-4ac7-9733-e5cb15077885 with nextest profile: default
+    Starting 6 tests across 1 binary (137 tests skipped)
+       START [         ] (1/6) pg_trickle::e2e_pgvector_tests test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex
+
+running 1 test
+test test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 7.90s
+
+        PASS [   8.210s] (1/6) pg_trickle::e2e_pgvector_tests test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex
+       START [         ] (2/6) pg_trickle::e2e_pgvector_tests test_centroid_crash_recovers_committed_source_and_rolls_back_refresh
+
+running 1 test
+E2E connect attempt 1/30: error communicating with database: Connection reset by peer (os error 54)
+test test_centroid_crash_recovers_committed_source_and_rolls_back_refresh ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 2.99s
+
+        PASS [   3.000s] (2/6) pg_trickle::e2e_pgvector_tests test_centroid_crash_recovers_committed_source_and_rolls_back_refresh
+       START [         ] (3/6) pg_trickle::e2e_pgvector_tests test_distance_subscription_concurrent_commit_and_rollback
+
+running 1 test
+DISTANCE_CONCURRENCY_JSON={"dimensions":3,"exit_post_commit_drain_ms":0.166875,"first_post_commit_drain_ms":0.29550000000000004,"listener_connections":1,"pg_trickle":"0.109.0","pgvector":"0.8.7","postgres":"18.6 (Debian 18.6-1.pgdg12+2)","rows":100,"second_post_commit_drain_ms":0.260167,"subscriptions":10}
+test test_distance_subscription_concurrent_commit_and_rollback ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 3.21s
+
+        PASS [   3.502s] (3/6) pg_trickle::e2e_pgvector_tests test_distance_subscription_concurrent_commit_and_rollback
+       START [         ] (4/6) pg_trickle::e2e_pgvector_tests test_distance_subscription_duplicate_predicates_with_user_trigger
+
+running 1 test
+test test_distance_subscription_duplicate_predicates_with_user_trigger ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 2.15s
+
+        PASS [   2.497s] (4/6) pg_trickle::e2e_pgvector_tests test_distance_subscription_duplicate_predicates_with_user_trigger
+       START [         ] (5/6) pg_trickle::e2e_pgvector_tests test_distance_subscription_notifies_only_membership_crossings
+
+running 1 test
+test test_distance_subscription_notifies_only_membership_crossings ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 3.42s
+
+        PASS [   3.723s] (5/6) pg_trickle::e2e_pgvector_tests test_distance_subscription_notifies_only_membership_crossings
+       START [         ] (6/6) pg_trickle::e2e_pgvector_tests test_distance_subscription_typed_predicates_and_authorization
+
+running 1 test
+test test_distance_subscription_typed_predicates_and_authorization ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 1.87s
+
+        PASS [   2.099s] (6/6) pg_trickle::e2e_pgvector_tests test_distance_subscription_typed_predicates_and_authorization
+────────────
+     Summary [  23.032s] 6 tests run: 6 passed, 137 skipped
