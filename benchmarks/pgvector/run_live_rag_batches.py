@@ -10,6 +10,7 @@ import time
 
 import fake_embedding_worker as worker
 import live_rag_attestation as attestation
+import live_rag_load
 import measure_live_rag_recall as recall
 import setup_live_rag
 
@@ -107,6 +108,30 @@ def json_result(output: str) -> dict:
     return json.loads(output.splitlines()[-1])
 
 
+def reader_sql(dimensions: int) -> str:
+    hybrid = recall.HYBRID_SQL.read_text(encoding="utf-8").strip()
+    if not hybrid.endswith(";"):
+        raise ValueError("hybrid query is invalid")
+    hybrid = hybrid[:-1].replace("vector(3)", f"vector({dimensions})")
+    return "WITH read_result AS MATERIALIZED (" + hybrid + """),
+read_count AS MATERIALIZED (SELECT count(*) AS n FROM read_result)
+SELECT json_build_object('server_started', extract(epoch FROM statement_timestamp()),
+ 'server_finished', extract(epoch FROM clock_timestamp()), 'rows', n)::text FROM read_count;
+"""
+
+
+def reader_summary(reads, client_window, begin, end, readers):
+    completed = [read for read in reads if not read.get("timed_out")]
+    timeouts = [read for read in reads if read.get("timed_out")]
+    overlap = [read for read in completed if read["server_started"] < end and read["server_finished"] > begin]
+    timeout_overlap = [read for read in timeouts if read["client_started"] < client_window[1] and read["client_finished"] > client_window[0]]
+    return {"readers": readers, "queries": len(completed), "timed_out_queries": len(timeouts),
+            "timeouts_overlapping_maintenance_client_window": len(timeout_overlap),
+            "overlapping_queries": len(overlap),
+            "client_latency_seconds": summary([read["client_seconds"] for read in completed]) if completed else None,
+            "overlapping_client_latency_seconds": summary([read["client_seconds"] for read in overlap]) if overlap else None}
+
+
 def run(args: argparse.Namespace) -> dict:
     metadata = json_result(worker.psql("""
 SELECT json_build_object('postgres', current_setting('server_version'),
@@ -160,10 +185,21 @@ SELECT json_build_object('postgres', current_setting('server_version'),
         names = names[cycle % len(names):] + names[:cycle % len(names)]
         maintenance = {}
         for name in names:
-            sql = "CREATE TEMP TABLE bench_wal AS SELECT pg_current_wal_insert_lsn() AS start_lsn;\n" + MAINTENANCE[name].replace("{changed_ids}", changed_ids) + "\nSELECT json_build_object('cluster_wal_bytes', pg_wal_lsn_diff(pg_current_wal_insert_lsn(), start_lsn))::text FROM bench_wal;"
-            output, seconds = timed(sql, **variables)
+            sql = "CREATE TEMP TABLE bench_wal AS SELECT pg_current_wal_insert_lsn() AS start_lsn, clock_timestamp() AS started;\n" + MAINTENANCE[name].replace("{changed_ids}", changed_ids) + "\nSELECT json_build_object('cluster_wal_bytes', pg_wal_lsn_diff(pg_current_wal_insert_lsn(), start_lsn), 'server_started', extract(epoch FROM started), 'server_finished', extract(epoch FROM clock_timestamp()))::text FROM bench_wal;"
+            if args.concurrent_readers:
+                reader_variables = {"corpus": f"{name}_current", "tenant": str(args.tenant),
+                                    "query_vector": worker.embedding("seed document 1", "model-v1", args.dimensions),
+                                    "terms": "seed"}
+                (output, seconds), reads, client_window = live_rag_load.measure_during(
+                    lambda: timed(sql, **variables), reader_sql(args.dimensions), reader_variables, args.concurrent_readers)
+            else:
+                output, seconds = timed(sql, **variables)
+                reads = []
             maintenance[name] = {"duration_seconds": seconds, "eligible_to_searchable_seconds": time.monotonic() - eligible,
                                  **json_result(output)}
+            if args.concurrent_readers:
+                begin, end = maintenance[name]["server_started"], maintenance[name]["server_finished"]
+                maintenance[name]["reader_load"] = reader_summary(reads, client_window, begin, end, args.concurrent_readers)
             maintenance[name]["availability"] = json_result(worker.psql(availability_query, **variables))
         exact = json_result(worker.psql(EXACT))
         if not all(exact.values()):
@@ -201,12 +237,12 @@ SELECT json_build_object('application', pg_total_relation_size('live_rag.applica
             "identity_source": "archive manifest and installed files checked before and after run" if initial_attestation else "operator-declared; installed payload not attested",
             "attestation": initial_attestation, "rows": args.rows,
             "dimensions": args.dimensions, "batch": args.batch, "cycles": args.cycles, "workload": args.workload,
-            "delay_seconds_per_job": args.delay_seconds, "retrieval_tenant": args.tenant, "initial_setup_seconds": initial_seconds,
+            "delay_seconds_per_job": args.delay_seconds, "concurrent_readers": args.concurrent_readers, "retrieval_tenant": args.tenant, "initial_setup_seconds": initial_seconds,
             "initial_corpora_exact": initial_exact, "samples": samples, "relation_bytes_including_indexes": sizes,
             "batch_latency_seconds": {"commit_to_eligible": summary([s["commit_to_eligible_seconds"] for s in samples]),
               "generation": summary([s["generation_seconds"] for s in samples]),
               **{name: summary([s["maintenance"][name]["duration_seconds"] for s in samples]) for name in MAINTENANCE}},
-            "notes": "Deterministic hash-derived synthetic initial backfill bypasses claims; changed revisions use the fake worker. Timings include psql startup; commit-to-eligible also includes the post-commit availability check. Approaches run serially in rotating order; eligible-to-searchable includes preceding approaches and availability checks. WAL is cluster-wide insert-LSN movement around maintenance; other activity can contaminate it. Retrieval uses administrative current views after all approaches converge, not restricted-role latency. No concurrent load or embedding-delay distribution."}
+            "notes": "Deterministic hash-derived synthetic initial backfill bypasses claims; changed revisions use the fake worker. Timings include psql startup; commit-to-eligible also includes the post-commit availability check. Approaches run serially in rotating order; eligible-to-searchable includes preceding approaches and availability checks. WAL is cluster-wide insert-LSN movement around maintenance; other activity can contaminate it. Retrieval and optional concurrent reads use administrative current views, not restricted-role latency. Reader overlap uses database timestamps and client latencies include psql startup. No concurrent writes or embedding-delay distribution."}
 
 
 def main() -> None:
@@ -218,6 +254,7 @@ def main() -> None:
     parser.add_argument("--delay-seconds", type=float, default=0)
     parser.add_argument("--tenant", type=int, default=1)
     parser.add_argument("--workload", choices=("updates", "mixed"), default="updates")
+    parser.add_argument("--concurrent-readers", type=int, default=0, help="bounded hybrid readers per maintenance step (0-4)")
     parser.add_argument("--candidate-commit", required=True)
     parser.add_argument("--package-sha256", required=True)
     parser.add_argument("--candidate-archive", help="candidate release archive for Docker payload attestation")
@@ -225,7 +262,7 @@ def main() -> None:
     args = parser.parse_args()
     if bool(args.candidate_archive) != bool(args.attest_container):
         parser.error("--candidate-archive and --attest-container must be supplied together")
-    if not 1 <= args.rows <= 1_000_000 or not 1 <= args.batch <= min(args.rows, 1000) or not 1 <= args.cycles <= 1000 or not 0 <= args.delay_seconds <= 10 or not math.isfinite(args.delay_seconds) or not 1 <= args.tenant <= 20:
+    if not 1 <= args.rows <= 1_000_000 or not 1 <= args.batch <= min(args.rows, 1000) or not 1 <= args.cycles <= 1000 or not 0 <= args.delay_seconds <= 10 or not math.isfinite(args.delay_seconds) or not 1 <= args.tenant <= 20 or not 0 <= args.concurrent_readers <= 4:
         parser.error("rows, batch, cycles, delay or tenant is outside the supported range")
     if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_commit) or not re.fullmatch(r"[0-9a-f]{64}", args.package_sha256):
         parser.error("candidate commit and package SHA-256 must be lowercase hexadecimal")

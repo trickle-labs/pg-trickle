@@ -184,6 +184,8 @@ async fn test_live_rag_mixed_benchmark_guards_churn_before_refresh() {
         "2",
         "--workload",
         "mixed",
+        "--concurrent-readers",
+        "1",
         "--candidate-commit",
         "0000000000000000000000000000000000000000",
         "--package-sha256",
@@ -198,6 +200,7 @@ async fn test_live_rag_mixed_benchmark_guards_churn_before_refresh() {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("parse mixed report");
     assert_eq!(report["workload"], "mixed");
+    assert_eq!(report["concurrent_readers"], 1);
     let samples = report["samples"].as_array().expect("mixed samples");
     assert_eq!(samples.len(), 2);
     for sample in samples {
@@ -205,6 +208,13 @@ async fn test_live_rag_mixed_benchmark_guards_churn_before_refresh() {
         assert_eq!(sample["availability_after_commit"]["eligible"], 0);
         assert_eq!(sample["availability_after_generation"]["eligible"], 2);
         for name in ["application", "periodic_full", "differential"] {
+            let load = &sample["maintenance"][name]["reader_load"];
+            assert_eq!(load["readers"], 1);
+            assert!(load["queries"].as_u64().expect("reader count") > 0);
+            assert!(
+                load["overlapping_queries"].as_u64().expect("overlap count")
+                    <= load["queries"].as_u64().unwrap()
+            );
             assert_eq!(sample["availability_after_commit"][name], 0);
             assert_eq!(sample["availability_after_generation"][name], 0);
             assert_eq!(sample["maintenance"][name]["availability"][name], 2);

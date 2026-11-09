@@ -169,6 +169,16 @@ activity contaminates WAL measurements. Retrieval
 uses administrative current views after all approaches converge, and the
 EXPLAIN plans contain per-query timing and buffer information.
 
+Add `--concurrent-readers 1` (up to four) to issue repeated tenant-filtered
+hybrid reads against each approach while its maintenance runs. Each reader
+starts a new `psql` process per query and pauses 50 ms between queries. The
+report includes client-side read latency, query counts, and the count whose
+database statement intervals overlapped the maintenance interval. A zero
+overlap count is not evidence of concurrent query performance. These readers
+use administrative current views and do not generate concurrent writes. A read
+is stopped after 30 seconds and counted separately; its client-window overlap
+does not prove that the database executed it throughout that interval.
+
 This runner uses a fixed per-job delay (`--delay-seconds`), not concurrent
 writes, a delay distribution, or per-document freshness percentiles. It does
 not collect
@@ -178,6 +188,6 @@ environment and run repeated, isolated scenarios before drawing conclusions.
 This is a functional fixture, not the finished #1396 benchmark. The measurement
 script substitutes the configured vector dimensions into the hybrid query;
 the standalone SQL example above remains three-dimensional. It does not yet
-provide the 384/768/1536-dimensional scale matrix, concurrent workload, end-to-end latency and resource
+provide the 384/768/1536-dimensional scale matrix, representative concurrent writes, end-to-end latency and resource
 measurements, or a decision table. Do not infer a performance advantage from
 this example.
