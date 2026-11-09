@@ -105,6 +105,115 @@ async fn run_live_rag_script_as(
 }
 
 #[tokio::test]
+async fn test_live_rag_batched_benchmark_compares_equivalent_corpora() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    let args = [
+        "--rows",
+        "4",
+        "--dimensions",
+        "384",
+        "--batch",
+        "2",
+        "--cycles",
+        "3",
+        "--candidate-commit",
+        "0000000000000000000000000000000000000000",
+        "--package-sha256",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ];
+    let output = run_live_rag_script(&db, "run_live_rag_batches.py", &args).await;
+    assert!(
+        output.status.success(),
+        "batch benchmark failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse batch report");
+    let samples = report["samples"].as_array().expect("batch samples");
+    assert_eq!(samples.len(), 3);
+    assert_eq!(
+        samples[0]["order"],
+        serde_json::json!(["application", "periodic_full", "differential"])
+    );
+    assert_eq!(
+        samples[1]["order"],
+        serde_json::json!(["periodic_full", "differential", "application"])
+    );
+    for sample in samples {
+        assert_eq!(sample["generation"]["accepted"], 2);
+        for name in ["application", "periodic_full", "differential"] {
+            assert_eq!(sample["corpora_exact"][name], true);
+            assert_eq!(
+                sample["retrieval"][name]["metrics"]["hybrid_recall_at_10"],
+                1.0
+            );
+            assert!(sample["maintenance"][name]["cluster_wal_bytes"].is_number());
+        }
+        assert_eq!(sample["differential_refresh"]["status"], "COMPLETED");
+        assert!(
+            sample["differential_refresh"]
+                .get("refresh_reason")
+                .is_some()
+        );
+        assert!(
+            sample["differential_refresh"]
+                .get("merge_strategy_used")
+                .is_some()
+        );
+    }
+    let repeated = run_live_rag_script(&db, "run_live_rag_batches.py", &args).await;
+    assert!(
+        !repeated.status.success(),
+        "must refuse an already populated fixture"
+    );
+}
+
+#[tokio::test]
+async fn test_live_rag_mixed_benchmark_guards_churn_before_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    let args = [
+        "--rows",
+        "8",
+        "--dimensions",
+        "384",
+        "--batch",
+        "4",
+        "--cycles",
+        "2",
+        "--workload",
+        "mixed",
+        "--candidate-commit",
+        "0000000000000000000000000000000000000000",
+        "--package-sha256",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ];
+    let output = run_live_rag_script(&db, "run_live_rag_batches.py", &args).await;
+    assert!(
+        output.status.success(),
+        "mixed benchmark failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse mixed report");
+    assert_eq!(report["workload"], "mixed");
+    let samples = report["samples"].as_array().expect("mixed samples");
+    assert_eq!(samples.len(), 2);
+    for sample in samples {
+        assert_eq!(sample["generation"]["accepted"], 2);
+        assert_eq!(sample["availability_after_commit"]["eligible"], 0);
+        assert_eq!(sample["availability_after_generation"]["eligible"], 2);
+        for name in ["application", "periodic_full", "differential"] {
+            assert_eq!(sample["availability_after_commit"][name], 0);
+            assert_eq!(sample["availability_after_generation"][name], 0);
+            assert_eq!(sample["maintenance"][name]["availability"][name], 2);
+            assert_eq!(sample["corpora_exact"][name], true);
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_live_rag_baselines_recheck_revisions_and_converge() {
     let db = E2eDb::new().await.with_extension().await;
     let database: String = db.query_scalar("SELECT current_database()::text").await;
@@ -270,6 +379,10 @@ async fn test_live_rag_baselines_recheck_revisions_and_converge() {
         assert_eq!(report["metrics"]["candidate_count"], 1);
         assert_eq!(report["metrics"]["recall_at_k"], 1.0);
         assert_eq!(report["metrics"]["underfill"], 1);
+        assert_eq!(report["metrics"]["hybrid_exact_count"], 1);
+        assert_eq!(report["metrics"]["hybrid_candidate_count"], 1);
+        assert_eq!(report["metrics"]["hybrid_recall_at_10"], 1.0);
+        assert_eq!(report["metrics"]["hybrid_underfill"], 9);
     }
 
     db.execute_seq(&[
@@ -455,6 +568,43 @@ async fn test_live_rag_authorized_views_enforce_tenant_and_visibility() {
         serde_json::from_slice(&recall.stdout).expect("parse restricted recall");
     assert_eq!(report["metrics"]["exact_count"], 1);
     assert_eq!(report["metrics"]["candidate_count"], 1);
+    assert_eq!(report["metrics"]["hybrid_exact_count"], 1);
+    assert_eq!(report["metrics"]["hybrid_candidate_count"], 1);
+    assert_eq!(report["metrics"]["hybrid_recall_at_10"], 1.0);
+    let empty = run_live_rag_script_as(
+        &db,
+        "measure_live_rag_recall.py",
+        &[
+            "--corpus",
+            "differential_authorized",
+            "--tenant",
+            "20",
+            "--dimensions",
+            "3",
+            "--query-vector",
+            "[1,0,0]",
+            "--terms",
+            "tenant",
+            "--expected-pgvector",
+            &vector_version,
+            "--candidate-commit",
+            "0000000000000000000000000000000000000000",
+            "--package-sha256",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ],
+        Some("live_rag_reader_a"),
+    )
+    .await;
+    assert!(
+        empty.status.success(),
+        "empty restricted recall failed: {}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    let empty_report: serde_json::Value =
+        serde_json::from_slice(&empty.stdout).expect("parse empty recall");
+    assert_eq!(empty_report["metrics"]["hybrid_exact_count"], 0);
+    assert_eq!(empty_report["metrics"]["hybrid_candidate_count"], 0);
+    assert!(empty_report["metrics"]["hybrid_recall_at_10"].is_null());
     db.execute("UPDATE live_rag.access SET tenant_id=20 WHERE document_id=1")
         .await;
     sqlx::query("SET ROLE live_rag_reader_a")
@@ -612,6 +762,41 @@ async fn test_live_rag_wide_setup_and_worker_match() {
         db.assert_st_matches_query(&format!("live_rag.{table}"), "SELECT * FROM live_rag.truth")
             .await;
     }
+    let vector_version: String = db
+        .query_scalar("SELECT extversion FROM pg_extension WHERE extname='vector'")
+        .await;
+    let query_vector = format!("[{}]", vec!["1"; expected as usize].join(","));
+    let report = run_live_rag_script(
+        &db,
+        "measure_live_rag_recall.py",
+        &[
+            "--corpus",
+            "differential_current",
+            "--tenant",
+            "10",
+            "--dimensions",
+            &dimension,
+            "--query-vector",
+            &query_vector,
+            "--terms",
+            "wide",
+            "--expected-pgvector",
+            &vector_version,
+            "--candidate-commit",
+            "0000000000000000000000000000000000000000",
+            "--package-sha256",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ],
+    )
+    .await;
+    assert!(
+        report.status.success(),
+        "wide recall failed: {}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&report.stdout).expect("parse wide recall");
+    assert_eq!(report["metrics"]["hybrid_recall_at_10"], 1.0);
 }
 
 #[tokio::test]

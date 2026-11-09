@@ -262,6 +262,18 @@ async fn test_ann_supervisor_processes_authorized_request() {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }).await.expect("reindex did not reach barrier");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        db.execute("INSERT INTO ann_supervisor_source VALUES (2, '[0,1,0]')")
+            .await;
+        db.execute("SELECT pgtrickle.refresh_stream_table('ann_supervisor_stream')")
+            .await;
+        let visible: i64 = db
+            .query_scalar("SELECT count(*) FROM ann_supervisor_stream WHERE id = 2")
+            .await;
+        assert_eq!(visible, 1, "refresh must remain visible during reindex");
+    })
+    .await
+    .expect("write and refresh stalled during concurrent reindex");
     let pid = child.id().expect("supervisor PID");
     let signal = tokio::process::Command::new("kill")
         .args(["-TERM", &pid.to_string()])

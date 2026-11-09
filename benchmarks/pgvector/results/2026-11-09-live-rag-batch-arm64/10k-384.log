@@ -1,0 +1,39 @@
+NOTICE:  extension "vector" already exists, skipping
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table embedding_demo.corpus_v1 created (pgt_id=1, mode=DIFFERENTIAL, initialized=true)
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table embedding_demo.corpus_v2 created (pgt_id=2, mode=DIFFERENTIAL, initialized=true)
+WARNING:  [pg_trickle] SELECT_STAR: The defining query uses SELECT *, so source schema changes can require reinitialization. HINT: List output columns explicitly for a more stable stream-table schema.
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_6779e0a335f92cd5" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table live_rag.differential created (pgt_id=3, mode=DIFFERENTIAL, initialized=true)
+NOTICE:  stream table "live_rag"."differential" using FULL refresh: 151 changes exceed the 150-row threshold for source OID 17914.
+WARNING:  [pg_trickle] Falling back to FULL refresh for live_rag.differential: DELTA_RATIO_EXCEEDED (151 changes exceed the 150-row threshold for source OID 17914.)
+INFO:  Stream table live_rag.differential refreshed (DIFFERENTIAL: +10000 -0)
+NOTICE:  table "__pgt_cdc_3_17914" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_18076" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_17969" does not exist, skipping
+NOTICE:  table "__pgt_delta_3" does not exist, skipping
+INFO:  [PGS_PROFILE] explicit_dml: materialize=29.44ms delete=1.01ms(10) update=0.18ms(0) insert=10.79ms(10) for live_rag.differential
+NOTICE:  table "__pgt_recon_3" does not exist, skipping
+INFO:  [PGS_PROFILE] decision=2.80ms generate+build=5.59ms merge_exec=489.84ms cleanup_enqueue=0.00ms total=498.23ms affected=20 phantom_cleanup=0 delta_est=30 mode=INCR path=cache_miss hints=none strategy=explicit_dml_reconciled
+INFO:  Stream table live_rag.differential refreshed (DIFFERENTIAL: +20 -0)
+NOTICE:  table "__pgt_cdc_3_17914" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_18076" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_17969" does not exist, skipping
+NOTICE:  table "__pgt_delta_3" does not exist, skipping
+INFO:  [PGS_PROFILE] explicit_dml: materialize=31.17ms delete=1.08ms(10) update=0.21ms(0) insert=11.51ms(10) for live_rag.differential
+NOTICE:  table "__pgt_recon_3" does not exist, skipping
+INFO:  [PGS_PROFILE] decision=2.71ms generate+build=6.23ms merge_exec=511.43ms cleanup_enqueue=0.00ms total=520.37ms affected=20 phantom_cleanup=0 delta_est=30 mode=INCR path=cache_miss hints=none strategy=explicit_dml_reconciled
+INFO:  Stream table live_rag.differential refreshed (DIFFERENTIAL: +20 -0)
+NOTICE:  table "__pgt_cdc_3_17914" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_18076" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_17969" does not exist, skipping
+NOTICE:  table "__pgt_delta_3" does not exist, skipping
+INFO:  [PGS_PROFILE] explicit_dml: materialize=29.10ms delete=0.98ms(10) update=0.16ms(0) insert=11.09ms(10) for live_rag.differential
+NOTICE:  table "__pgt_recon_3" does not exist, skipping
+INFO:  [PGS_PROFILE] decision=2.86ms generate+build=3.06ms merge_exec=493.30ms cleanup_enqueue=0.00ms total=499.23ms affected=20 phantom_cleanup=0 delta_est=30 mode=INCR path=cache_miss hints=none strategy=explicit_dml_reconciled
+INFO:  Stream table live_rag.differential refreshed (DIFFERENTIAL: +20 -0)

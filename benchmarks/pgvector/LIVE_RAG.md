@@ -40,8 +40,11 @@ SELECT NOT EXISTS ((TABLE live_rag.application EXCEPT ALL TABLE live_rag.truth)
                    UNION ALL (TABLE live_rag.truth EXCEPT ALL TABLE live_rag.application)) AS application_exact,
        NOT EXISTS ((TABLE live_rag.periodic_full EXCEPT ALL TABLE live_rag.truth)
                    UNION ALL (TABLE live_rag.truth EXCEPT ALL TABLE live_rag.periodic_full)) AS full_exact,
-       NOT EXISTS ((TABLE live_rag.differential EXCEPT ALL TABLE live_rag.truth)
-                   UNION ALL (TABLE live_rag.truth EXCEPT ALL TABLE live_rag.differential)) AS differential_exact;
+       NOT EXISTS ((SELECT id, tenant_id, body, incarnation, revision, chunk_version, model_version, embedding
+                    FROM live_rag.differential EXCEPT ALL TABLE live_rag.truth)
+                   UNION ALL (TABLE live_rag.truth EXCEPT ALL
+                    SELECT id, tenant_id, body, incarnation, revision, chunk_version, model_version, embedding
+                    FROM live_rag.differential)) AS differential_exact;
 ```
 
 The `*_current` views recheck source visibility and exact revision/embedding
@@ -93,18 +96,63 @@ PGOPTIONS='-c role=rag_tenant_10' python3 benchmarks/pgvector/measure_live_rag_r
   > recall.json
 ```
 
-The report records recall@K against a scan with index paths disabled, result
-underfill, lexical candidate count, boundary ties, installed versions, and
-EXPLAIN ANALYZE/BUFFERS plans for the exact query, normal planner choice and
-forced index eligibility. The forced plan is diagnostic and is not used to
-compute recall. The candidate and plan queries execute separately in the same
-repeatable-read snapshot. Boundary ties can make ID-based recall ambiguous.
+The report records vector recall@K against a scan with index paths disabled,
+result underfill, lexical candidate count, boundary ties, installed versions,
+and EXPLAIN ANALYZE/BUFFERS plans for the exact query, normal planner choice
+and forced index eligibility. It also reports hybrid recall@10 and underfill
+for the shared fusion query against the same query with exact vector candidates
+and index paths disabled. Both hybrid queries use up to 20 vector and 20 lexical
+candidates; `--k` changes only the vector-only measurement. Their exact and
+normal-planner plans are included, with ANN index use reported separately.
+The forced plan is diagnostic and is not used to compute recall. The candidate
+and plan queries execute separately in the same repeatable-read snapshot.
+Boundary ties can make ID-based recall ambiguous.
 The supplied commit and digest are declarations: this script does not attest
 the installed package. Retain separate installation and environment evidence.
 
-This is a functional fixture, not the finished #1396 benchmark. Wider setup
-is supported, but the sample hybrid query is currently three-dimensional. It
-does not yet provide the 384/768/1536-dimensional scale matrix,
-hybrid-fusion recall analysis, concurrent workload, end-to-end latency and resource
+For a batched-update comparison, start with another empty disposable database
+with both `pg_trickle` and `vector` installed. The benchmark creates the two
+fixture schemas and refuses to run if either is already present:
+
+```sh
+python3 benchmarks/pgvector/run_live_rag_batches.py \
+  --rows 10000 --dimensions 384 --batch 10 --cycles 3 --tenant 1 \
+  --candidate-commit "$CANDIDATE_COMMIT" --package-sha256 "$PACKAGE_SHA256" \
+  > batch-results.json
+```
+
+`--rows` supports up to one million, and `--dimensions` accepts 384, 768 or
+1536. The deterministic initial backfill bypasses the job worker; subsequent
+updates enqueue generation transactionally and use the fake worker. Add
+`--workload mixed` to apply an update, a visibility toggle, a deletion and an
+insertion in each group of four batch slots. Mixed batches must contain at
+least four slots and `rows >= batch * cycles`; each cycle targets fresh IDs so
+the runner does not silently reuse deleted rows. Every cycle gives all three
+approaches the same changed IDs, rotates their serial
+execution order, checks each entire corpus against the defining SQL, records
+the effective differential refresh state, and runs vector and hybrid recall
+measurements. The report includes individual batch and maintenance times,
+nearest-rank p50/p95/p99 across batches, index-inclusive relation sizes and
+cluster-wide WAL insert-LSN movement. Startup of each `psql` process is
+included. Changed-row eligible and searchable counts are sampled immediately
+after commit, after generation and after each maintenance step. Generation
+duration is recorded separately; commit-to-eligible also includes the
+post-commit availability query. Eligible-to-searchable time includes earlier
+approaches and availability queries in that cycle; use the individual
+maintenance duration for a less order-dependent comparison. Other cluster
+activity contaminates WAL measurements. Retrieval
+uses administrative current views after all approaches converge, and the
+EXPLAIN plans contain per-query timing and buffer information.
+
+This runner uses a fixed per-job delay (`--delay-seconds`), not concurrent
+writes, a delay distribution, or per-document freshness percentiles. It does
+not attest the package, collect
+CPU or lock metrics, or provide a representative decision table. Record the
+environment and run repeated, isolated scenarios before drawing conclusions.
+
+This is a functional fixture, not the finished #1396 benchmark. The measurement
+script substitutes the configured vector dimensions into the hybrid query;
+the standalone SQL example above remains three-dimensional. It does not yet
+provide the 384/768/1536-dimensional scale matrix, concurrent workload, end-to-end latency and resource
 measurements, or a decision table. Do not infer a performance advantage from
 this example.

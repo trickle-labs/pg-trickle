@@ -37,6 +37,28 @@ FROM live_rag.:"corpus" WHERE tenant_id = :'tenant'::bigint
 ORDER BY embedding::vector(3) <=> :'query_vector'::vector LIMIT :'k'::integer;
 \echo LIVE_RAG_ELIGIBILITY_PLAN_END
 
+-- Compare the same fusion query with exact vector candidates and with the
+-- planner's ordinary index choices, in the same repeatable-read snapshot.
+SET LOCAL enable_seqscan = on;
+SET LOCAL enable_indexscan = off;
+SET LOCAL enable_indexonlyscan = off;
+SET LOCAL enable_bitmapscan = off;
+\echo LIVE_RAG_HYBRID_EXACT_PLAN_BEGIN
+EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+{{HYBRID_QUERY}};
+\echo LIVE_RAG_HYBRID_EXACT_PLAN_END
+CREATE TEMP TABLE live_rag_hybrid_exact ON COMMIT DROP AS
+{{HYBRID_QUERY}};
+SET LOCAL enable_indexscan = on;
+SET LOCAL enable_indexonlyscan = on;
+SET LOCAL enable_bitmapscan = on;
+\echo LIVE_RAG_HYBRID_PLANNER_PLAN_BEGIN
+EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+{{HYBRID_QUERY}};
+\echo LIVE_RAG_HYBRID_PLANNER_PLAN_END
+CREATE TEMP TABLE live_rag_hybrid_candidate ON COMMIT DROP AS
+{{HYBRID_QUERY}};
+
 SELECT 'LIVE_RAG_METRICS=' || jsonb_build_object(
     'tenant', :'tenant'::bigint, 'k', :'k'::integer,
     'exact_count', (SELECT count(*) FROM live_rag_exact),
@@ -46,6 +68,13 @@ SELECT 'LIVE_RAG_METRICS=' || jsonb_build_object(
         ELSE (SELECT count(*)::float8 FROM live_rag_candidate c JOIN live_rag_exact e USING (id))
              / (SELECT count(*) FROM live_rag_exact) END,
     'underfill', GREATEST(0, :'k'::integer - (SELECT count(*) FROM live_rag_candidate)),
+    'hybrid_exact_count', (SELECT count(*) FROM live_rag_hybrid_exact),
+    'hybrid_candidate_count', (SELECT count(*) FROM live_rag_hybrid_candidate),
+    'hybrid_matched', (SELECT count(*) FROM live_rag_hybrid_candidate c JOIN live_rag_hybrid_exact e USING (id)),
+    'hybrid_recall_at_10', CASE WHEN (SELECT count(*) FROM live_rag_hybrid_exact) = 0 THEN NULL
+        ELSE (SELECT count(*)::float8 FROM live_rag_hybrid_candidate c JOIN live_rag_hybrid_exact e USING (id))
+             / (SELECT count(*) FROM live_rag_hybrid_exact) END,
+    'hybrid_underfill', GREATEST(0, 10 - (SELECT count(*) FROM live_rag_hybrid_candidate)),
     'exact_boundary_distance', (SELECT max(distance) FROM live_rag_exact),
     'boundary_tie_rows', (SELECT count(*) FROM live_rag.:"corpus"
         WHERE tenant_id = :'tenant'::bigint AND (embedding::vector(3) <=> :'query_vector'::vector)

@@ -6,7 +6,8 @@ import measure_live_rag_recall as measure
 
 def output(exact, planner, eligibility):
     sections = []
-    for name, plan in (("EXACT", exact), ("PLANNER", planner), ("ELIGIBILITY", eligibility)):
+    for name, plan in (("EXACT", exact), ("PLANNER", planner), ("ELIGIBILITY", eligibility),
+                       ("HYBRID_EXACT", exact), ("HYBRID_PLANNER", planner)):
         sections.append(f"LIVE_RAG_{name}_PLAN_BEGIN\n{json.dumps(plan)}\nLIVE_RAG_{name}_PLAN_END")
     sections.append('LIVE_RAG_METRICS={"recall_at_k":0.5}')
     return "\n".join(sections) + "\n"
@@ -19,6 +20,12 @@ class RecallTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 measure.vector_arg(value, 3)
 
+    def test_hybrid_query_uses_requested_dimensions(self):
+        sql = measure.measurement_sql(768)
+        self.assertNotIn("{{HYBRID_QUERY}}", sql)
+        self.assertNotIn("vector(3)", sql)
+        self.assertIn("vector(768)", sql)
+
     def test_reports_planner_choice_separately_from_eligibility(self):
         exact = [{"Plan": {"Node Type": "Seq Scan"}}]
         index = [{"Plan": {"Node Type": "Index Scan", "Index Name": "application_ann"}}]
@@ -28,6 +35,12 @@ class RecallTests(unittest.TestCase):
         self.assertTrue(result["forced_plan_used_ann_index"])
         with self.assertRaisesRegex(ValueError, "exact baseline"):
             measure.parse_output(output(index, exact, index), "application_current")
+        hybrid_index = output(exact, exact, index).replace(
+            f"LIVE_RAG_HYBRID_EXACT_PLAN_BEGIN\n{json.dumps(exact)}",
+            f"LIVE_RAG_HYBRID_EXACT_PLAN_BEGIN\n{json.dumps(index)}",
+        )
+        with self.assertRaisesRegex(ValueError, "exact baseline"):
+            measure.parse_output(hybrid_index, "application_current")
         with self.assertRaises(ValueError):
             measure.parse_output("missing", "application_current")
 
