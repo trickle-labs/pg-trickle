@@ -3,10 +3,69 @@
 use super::e2e::E2eDb;
 use std::{
     collections::HashSet,
+    path::PathBuf,
+    process::Command,
     time::{Duration, Instant},
 };
 
 const CENTROID_COMPONENT_WITHIN_BOUND: &str = "x.actual IS NOT NULL AND x.expected IS NOT NULL AND abs(x.actual::float8 - x.expected::float8) <= 1e-5 + 1e-6 * abs(x.expected::float8)";
+
+struct SubscriptionPlanLog {
+    container: String,
+    path: PathBuf,
+}
+
+impl SubscriptionPlanLog {
+    fn capture(&self) -> Result<(), String> {
+        let output = Command::new("docker")
+            .args(["logs", "--timestamps", &self.container])
+            .output()
+            .map_err(|error| format!("read PostgreSQL logs: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "docker logs failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let mut logs = output.stdout;
+        logs.extend_from_slice(&output.stderr);
+        std::fs::write(&self.path, logs).map_err(|error| format!("write PostgreSQL logs: {error}"))
+    }
+}
+
+impl Drop for SubscriptionPlanLog {
+    fn drop(&mut self) {
+        if let Err(error) = self.capture() {
+            eprintln!("could not preserve subscription plan log: {error}");
+        }
+    }
+}
+
+fn subscription_plan_marker(
+    stage: &str,
+    rows: usize,
+    subscriptions: usize,
+    analyzed: bool,
+    round: usize,
+) -> String {
+    format!(
+        "DO $marker$ BEGIN RAISE LOG 'PGVECTOR_SUB_{stage} rows={rows} subscriptions={subscriptions} analyzed={analyzed} round={round}'; END; $marker$"
+    )
+}
+
+#[test]
+fn subscription_plan_marker_identifies_the_case() {
+    assert!(
+        subscription_plan_marker("START", 1000, 10, false, 2)
+            .contains("PGVECTOR_SUB_START rows=1000 subscriptions=10 analyzed=false round=2")
+    );
+}
+
+fn require_pgvector_version(installed: &str) {
+    if let Ok(expected) = std::env::var("PGVECTOR_EXPECTED_VERSION") {
+        assert_eq!(installed, expected, "unexpected pgvector version");
+    }
+}
 
 fn percentiles(mut values: Vec<f64>) -> serde_json::Value {
     values.sort_by(f64::total_cmp);
@@ -125,6 +184,11 @@ async fn test_pgvector_subscription_scaling_workload() {
     .fetch_one(&db.pool)
     .await
     .expect("inspect benchmark versions");
+    require_pgvector_version(&versions.1);
+    let plan_log = std::env::var_os("PGVECTOR_SUB_PLAN_LOG").map(|path| SubscriptionPlanLog {
+        container: db.container_id().to_owned(),
+        path: path.into(),
+    });
     let row_counts = subscription_counts(
         &std::env::var("PGVECTOR_SUB_ROWS").unwrap_or_else(|_| "1000,10000".into()),
         1_000_000,
@@ -274,6 +338,32 @@ async fn test_pgvector_subscription_scaling_workload() {
                             .await
                             .expect("enable control trigger");
                     }
+                    if plan_log.is_some() {
+                        for statement in [
+                            "LOAD 'auto_explain'",
+                            "SET LOCAL auto_explain.log_min_duration = 0",
+                            "SET LOCAL auto_explain.log_analyze = on",
+                            "SET LOCAL auto_explain.log_buffers = on",
+                            "SET LOCAL auto_explain.log_timing = off",
+                            "SET LOCAL auto_explain.log_nested_statements = on",
+                            "SET LOCAL auto_explain.log_format = 'json'",
+                        ] {
+                            sqlx::query(statement)
+                                .execute(&mut *tx)
+                                .await
+                                .expect("configure nested plan capture");
+                        }
+                        sqlx::query(sqlx::AssertSqlSafe(subscription_plan_marker(
+                            "START",
+                            rows,
+                            subscriptions,
+                            analyzed,
+                            round,
+                        )))
+                        .execute(&mut *tx)
+                        .await
+                        .expect("mark plan capture start");
+                    }
                     let counters = "SELECT pg_stat_get_xact_tuples_returned($1::text::regclass)::bigint, \
                     pg_stat_get_xact_tuples_fetched($1::text::regclass)::bigint, \
                     pg_stat_get_xact_tuples_returned($2::text::regclass)::bigint, \
@@ -291,14 +381,26 @@ async fn test_pgvector_subscription_scaling_workload() {
                         .await
                         .expect("refresh subscription stream");
                     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    if plan_log.is_some() {
+                        sqlx::query(sqlx::AssertSqlSafe(subscription_plan_marker(
+                            "END",
+                            rows,
+                            subscriptions,
+                            analyzed,
+                            round,
+                        )))
+                        .execute(&mut *tx)
+                        .await
+                        .expect("mark plan capture end");
+                    }
                     let after: (i64, i64, i64, i64) = sqlx::query_as(counters)
                         .bind(&stream)
                         .bind(&source)
                         .fetch_one(&mut *tx)
                         .await
                         .expect("read final tuple counters");
-                    let (snapshot, ids) = if subscriptions == 0 {
-                        (None, None)
+                    let (snapshot, ids, snapshot_kind) = if subscriptions == 0 {
+                        (None, None, "none")
                     } else {
                         let snapshot: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                             "SELECT count(*) FROM pg_temp.__pgt_distance_pre_{pgt_id}"
@@ -306,18 +408,33 @@ async fn test_pgvector_subscription_scaling_workload() {
                         .fetch_one(&mut *tx)
                         .await
                         .expect("inspect affected snapshot");
-                        let ids: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                            "SELECT count(*) FROM pg_temp.__pgt_distance_ids_{pgt_id}"
-                        )))
-                        .fetch_one(&mut *tx)
-                        .await
-                        .expect("inspect affected identities");
-                        assert_eq!(
-                            (snapshot, ids),
-                            (1, 1),
-                            "one changed row must use the bounded snapshot"
-                        );
-                        (Some(snapshot), Some(ids))
+                        let ids_name = format!("pg_temp.__pgt_distance_ids_{pgt_id}");
+                        let bounded: bool =
+                            sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                                .bind(&ids_name)
+                                .fetch_one(&mut *tx)
+                                .await
+                                .expect("inspect snapshot path");
+                        if bounded {
+                            let ids: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                                "SELECT count(*) FROM {ids_name}"
+                            )))
+                            .fetch_one(&mut *tx)
+                            .await
+                            .expect("inspect affected identities");
+                            assert_eq!(
+                                (snapshot, ids),
+                                (1, 1),
+                                "bounded snapshot must contain the changed row"
+                            );
+                            (Some(snapshot), Some(ids), "bounded")
+                        } else {
+                            assert_eq!(
+                                snapshot, rows as i64,
+                                "full snapshot must cover the stream"
+                            );
+                            (Some(snapshot), None, "full")
+                        }
                     };
                     let (differential, strategy, refresh_id): (bool, String, i64) = sqlx::query_as("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback, h.merge_strategy_used, h.refresh_id FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id=$1 ORDER BY h.refresh_id DESC LIMIT 1")
                     .bind(pgt_id).fetch_one(&mut *tx).await.expect("inspect measured strategy");
@@ -367,15 +484,18 @@ async fn test_pgvector_subscription_scaling_workload() {
                     samples.push(serde_json::json!({"round":round,"refresh_ms":elapsed_ms,"commit_ms":commit_ms,"notification_wait_ms":delivery_ms,"merge_strategy":strategy,
                     "stream_sequential_tuples_returned":tuple_delta[0],"stream_index_tuples_fetched":tuple_delta[1],
                     "source_sequential_tuples_returned":tuple_delta[2],"source_index_tuples_fetched":tuple_delta[3],
-                    "snapshot_rows":snapshot,"affected_identities":ids}));
+                    "snapshot_rows":snapshot,"affected_identities":ids,"snapshot_kind":snapshot_kind}));
                 }
                 measurements.push(serde_json::json!({"initial_rows":rows,"subscriptions":subscriptions,"analyzed":analyzed,"estimated_rows":estimated_rows,"last_analyze":last_analyze,"last_autoanalyze":last_autoanalyze,"samples":samples}));
             }
         }
     }
+    if let Some(log) = &plan_log {
+        log.capture().expect("preserve subscription plan log");
+    }
     println!(
         "PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON={}",
-        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"dimensions":dimensions,"force_explicit_with_noop_trigger":force_explicit,"measurements":measurements,"notes":"One row alternates across the threshold; each subscription emits its expected event. Refresh, commit, and post-commit listener wait are timed separately; notification delivery can begin before the listener wait. Tuple counters include repeated visits, not distinct rows. No controlled concurrency or internal execution plans are recorded."})
+        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"dimensions":dimensions,"force_explicit_with_noop_trigger":force_explicit,"nested_plan_capture":plan_log.is_some(),"measurements":measurements,"notes":"One row alternates across the threshold; each subscription emits its expected event. Refresh, commit, and post-commit listener wait are timed separately; notification delivery can begin before the listener wait. Tuple counters include repeated visits, not distinct rows. Plan instrumentation adds overhead. No controlled concurrency is recorded."})
     );
 }
 
@@ -440,6 +560,7 @@ async fn test_pgvector_filtered_ann_workload() {
     .fetch_one(&db.pool)
     .await
     .expect("versions");
+    require_pgvector_version(&versions.1);
     let mut results = Vec::new();
     for method in ["hnsw", "ivfflat"] {
         db.execute(&format!(

@@ -1,0 +1,35 @@
+{
+  "dimensions": 384,
+  "force_explicit_with_noop_trigger": false,
+  "measurements": [
+    {
+      "analyzed": true,
+      "estimated_rows": 1000000.0,
+      "initial_rows": 1000000,
+      "last_analyze": "2026-11-09 09:24:12.796112+00",
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "commit_ms": 3.220208,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 7.3088750000000005,
+          "refresh_ms": 445.332792,
+          "round": 0,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 1000
+    }
+  ],
+  "nested_plan_capture": false,
+  "notes": "One row alternates across the threshold; each subscription emits its expected event. Refresh, commit, and post-commit listener wait are timed separately; notification delivery can begin before the listener wait. Tuple counters include repeated visits, not distinct rows. Plan instrumentation adds overhead. No controlled concurrency is recorded.",
+  "pg_trickle": "0.109.0",
+  "pgvector": "0.8.7",
+  "postgres": "PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit"
+}
