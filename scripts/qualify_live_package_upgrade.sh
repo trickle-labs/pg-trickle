@@ -6,6 +6,12 @@ set -euo pipefail
 FROM_VERSION="${1:?previous release version required}"
 TO_VERSION="${2:?candidate release version required}"
 IDENTITY_MIGRATION=false
+VECTOR_UPGRADE=false
+POSTGRES_IMAGE=postgres:18.6
+if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.109.0" ]]; then
+    VECTOR_UPGRADE=true
+    POSTGRES_IMAGE='pgvector/pgvector:0.8.7-pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47'
+fi
 if [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.3" || "$TO_VERSION" == "0.109.0" ) ]]; then
     IDENTITY_MIGRATION=true
 fi
@@ -32,9 +38,10 @@ else
 fi
 mkdir "$WORK_DIR/previous"
 tar xzf "$WORK_DIR/$ARCHIVE_NAME" -C "$WORK_DIR/previous" --strip-components=1
+echo "Published package SHA-256: $(shasum -a 256 "$WORK_DIR/$ARCHIVE_NAME" | cut -d' ' -f1)"
 
 CONTAINER_ID="$(docker create \
-    -e POSTGRES_PASSWORD=postgres postgres:18.6 \
+    -e POSTGRES_PASSWORD=postgres "$POSTGRES_IMAGE" \
     -c shared_preload_libraries=pg_trickle \
     -c track_commit_timestamp=on \
     -c wal_level=logical \
@@ -67,6 +74,22 @@ OLD_VERSION="$(psql 'SELECT pgtrickle.version()')"
     echo "previous package reports $OLD_VERSION, expected $FROM_VERSION" >&2
     exit 1
 }
+
+if [[ "$VECTOR_UPGRADE" == true ]]; then
+    psql "CREATE EXTENSION vector; CREATE TABLE public.upgrade_vector_source(id int PRIMARY KEY, embedding vector(3));
+        INSERT INTO public.upgrade_vector_source VALUES (1, '[1,0,0]'), (2, '[0,1,0]');
+        SELECT * FROM pgtrickle.embedding_stream_table('upgrade_vector_st', 'public.upgrade_vector_source', 'embedding', NULL, '24h', 'hnsw', false);
+        INSERT INTO pgtrickle.pgt_distance_subscriptions(stream_table,channel,vector_column,query_vector,op,threshold)
+        VALUES ('public.upgrade_vector_st','upgrade_vector_channel','embedding','[1,0,0]','<->',0.5)" >/dev/null
+    [[ "$(psql "SELECT extversion FROM pg_extension WHERE extname='vector'")" == '0.8.7' ]]
+    VECTOR_BEFORE="$(psql "SELECT s.pgt_id::text || '|' || s.pgt_relid::text || '|' || s.defining_query || '|' ||
+        i.indexrelid::text || '|' || pg_relation_filenode(i.indexrelid)::text || '|' || pg_get_indexdef(i.indexrelid)
+        FROM pgtrickle.pgt_stream_tables s JOIN pg_index i ON i.indrelid=s.pgt_relid
+        JOIN pg_opclass op ON op.oid=i.indclass[0]
+        WHERE s.pgt_name='upgrade_vector_st' AND op.opcname='vector_l2_ops' AND i.indisvalid AND i.indisready")"
+    [[ -n "$VECTOR_BEFORE" ]] || { echo "published helper did not create a valid L2 index" >&2; exit 1; }
+    echo "Published vector baseline: pgvector=0.8.7 image=$POSTGRES_IMAGE index=$VECTOR_BEFORE"
+fi
 
 WAL_SLOT=""
 if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.109.0" ]]; then
@@ -241,7 +264,39 @@ UPDATED_VERSION="$(psql "SELECT extversion FROM pg_extension WHERE extname = 'pg
     echo "extension update reported $UPDATED_VERSION, expected $TO_VERSION" >&2
     exit 1
 }
+if [[ "$VECTOR_UPGRADE" == true ]]; then
+    VECTOR_AFTER="$(psql "SELECT s.pgt_id::text || '|' || s.pgt_relid::text || '|' || s.defining_query || '|' ||
+        i.indexrelid::text || '|' || pg_relation_filenode(i.indexrelid)::text || '|' || pg_get_indexdef(i.indexrelid)
+        FROM pgtrickle.pgt_stream_tables s JOIN pg_index i ON i.indrelid=s.pgt_relid
+        JOIN pg_opclass op ON op.oid=i.indclass[0]
+        WHERE s.pgt_name='upgrade_vector_st' AND op.opcname='vector_l2_ops' AND i.indisvalid AND i.indisready")"
+    [[ "$VECTOR_AFTER" == "$VECTOR_BEFORE" ]] || { echo "vector stream or L2 index changed across upgrade" >&2; exit 1; }
+    psql "SELECT count(*)=1 AND bool_and(pgt_id IS NULL) FROM pgtrickle.pgt_distance_subscriptions
+        WHERE stream_table='public.upgrade_vector_st' AND channel='upgrade_vector_channel' AND threshold=0.5" | grep -qx t
+    [[ "$(psql 'SHOW pg_trickle.enable_centroid_state')" == off ]]
+    psql "SELECT NOT EXISTS (SELECT 1 FROM pg_class c, LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
+        WHERE c.oid IN ('pgtrickle.pgt_ann_maintenance_requests'::regclass, 'pgtrickle.pgt_centroid_states'::regclass) AND a.grantee=0)
+        AND NOT EXISTS (SELECT 1 FROM pg_proc p, LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+        WHERE p.oid='pgtrickle.claim_ann_maintenance(bigint)'::regprocedure AND a.grantee=0 AND a.privilege_type='EXECUTE')" | grep -qx t
+    psql "SELECT NOT EXISTS ((SELECT id,embedding FROM public.upgrade_vector_st EXCEPT ALL SELECT id,embedding FROM public.upgrade_vector_source)
+        UNION ALL (SELECT id,embedding FROM public.upgrade_vector_source EXCEPT ALL SELECT id,embedding FROM public.upgrade_vector_st))" | grep -qx t
+    psql "SET enable_seqscan=off; EXPLAIN SELECT id FROM public.upgrade_vector_st ORDER BY (embedding::vector(3)) <-> '[1,0,0]'::vector LIMIT 1" | grep -q 'upgrade_vector_st_embedding_idx'
+    echo "Published vector stream, L2 index, inactive legacy subscription and default-off centroid state preserved."
+fi
 psql 'SELECT pgtrickle.resume_all()' >/dev/null
+if [[ "$VECTOR_UPGRADE" == true ]]; then
+    psql "UPDATE public.upgrade_vector_source SET embedding='[0,0,1]' WHERE id=1;
+        INSERT INTO public.upgrade_vector_source VALUES (3, '[1,1,0]');
+        DELETE FROM public.upgrade_vector_source WHERE id=2" >/dev/null
+    psql "SET pg_trickle.refresh_strategy='differential';
+        SET pg_trickle.differential_max_change_ratio=0;
+        SELECT pgtrickle.refresh_stream_table('public.upgrade_vector_st')" >/dev/null
+    psql "SELECT NOT EXISTS ((SELECT id,embedding FROM public.upgrade_vector_st EXCEPT ALL SELECT id,embedding FROM public.upgrade_vector_source)
+        UNION ALL (SELECT id,embedding FROM public.upgrade_vector_source EXCEPT ALL SELECT id,embedding FROM public.upgrade_vector_st))" | grep -qx t
+    psql "SELECT action='DIFFERENTIAL' AND status='COMPLETED' AND NOT was_full_fallback
+        FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id)
+        WHERE s.pgt_name='upgrade_vector_st' ORDER BY h.refresh_id DESC LIMIT 1" | grep -qx t
+fi
 CAPTURE_STATE="$(psql 'SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton')"
 [[ "$CAPTURE_STATE" == "ACTIVE" ]] || { echo "capture did not resume after update" >&2; exit 1; }
 

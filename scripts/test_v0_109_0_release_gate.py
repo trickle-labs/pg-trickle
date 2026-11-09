@@ -1,11 +1,45 @@
 import copy
 import json
 import unittest
+from unittest.mock import patch
 
+import run_release_pgvector_suite as pgvector_suite
 import v0_109_0_release_gate as gate
 
 
 class RetirementContractTests(unittest.TestCase):
+    def test_published_vector_upgrade_checks_cannot_be_removed(self):
+        script = (gate.prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text()
+        gate.check_pgvector_upgrade_script(script)
+        with self.assertRaises(SystemExit):
+            gate.check_pgvector_upgrade_script(script.replace("bool_and(pgt_id IS NULL)", "true"))
+
+    def test_pgvector_runner_selects_declared_cases_and_version(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        cases = next(s for s in contract["required_suites"] if s["id"] == "pgvector-0.8.7")["required_cases"]
+        with patch("sys.argv", ["runner", "0.8.7"]), patch.object(pgvector_suite.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(pgvector_suite.main(), 0)
+        command = run.call_args.args[0]
+        for case in cases:
+            binary, name = case.split("::", 1)
+            self.assertIn(binary, command)
+            self.assertIn(f"test({name})", command[-1])
+        self.assertEqual(run.call_args.kwargs["env"]["PGVECTOR_EXPECTED_VERSION"], "0.8.7")
+
+    def test_pgvector_contract_rejects_missing_cases_and_wrong_image(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        gate.check_pgvector_contract(contract)
+        for field, value in [("required_cases", []), ("e2e_image", "pg_trickle_e2e:latest"), ("runtime", False)]:
+            broken = copy.deepcopy(contract)
+            next(s for s in broken["required_suites"] if s["id"] == "pgvector-0.8.1")[field] = value
+            with self.assertRaises(SystemExit):
+                gate.check_pgvector_contract(broken)
+        broken = copy.deepcopy(contract)
+        next(s for s in broken["required_suites"] if s["id"] == "pgvector-catalog-upgrade")["required_cases"].pop()
+        with self.assertRaises(SystemExit):
+            gate.check_pgvector_contract(broken)
+
     def test_metadata_tracks_package_and_never_precedes_gate(self):
         check = gate.prior.shared.check_metadata_version
         check("0.110.0", "0.110.0", "0.109.0")

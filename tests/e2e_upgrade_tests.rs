@@ -529,15 +529,15 @@ fn upgrade_image_available() -> bool {
 
 #[tokio::test]
 #[ignore]
-async fn test_upgrade_embedding_helpers_from_0109() {
-    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+async fn test_upgrade_embedding_helpers_from_01083() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.108.3")
         || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
     {
         return;
     }
     let db = E2eDb::new_without_extension().await;
     db.execute("CREATE EXTENSION vector").await;
-    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.108.3' CASCADE")
         .await;
     db.execute("CREATE TABLE upgrade_epoch_storage (__pgt_row_id bytea, id int)")
         .await;
@@ -549,7 +549,7 @@ async fn test_upgrade_embedding_helpers_from_0109() {
          'SELECT 1 AS id', 'SELECT 1 AS id', 'FULL', 'FULL', 'ACTIVE', true, 'public, pg_catalog')",
     )
     .await;
-    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.109.0'")
         .await;
     let guard_upgraded: bool = db.query_scalar("SELECT pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[1.0]::float8[], ARRAY[1.0]::float8[]) IS NULL AND pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[[1.0]]::float8[], ARRAY[1.0]::float8[]) = 'INVALID_STATE'").await;
     assert!(guard_upgraded, "upgrade must install the centroid guard");
@@ -784,14 +784,14 @@ async fn test_upgrade_embedding_helpers_from_0109() {
 #[tokio::test]
 #[ignore]
 async fn test_upgrade_preserves_existing_vector_expression_index() {
-    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.108.3")
         || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
     {
         return;
     }
     let db = E2eDb::new_without_extension().await;
     db.execute("CREATE EXTENSION vector").await;
-    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.108.3' CASCADE")
         .await;
     db.execute("CREATE TABLE upgrade_index_src (id int PRIMARY KEY, embedding vector(3))")
         .await;
@@ -807,7 +807,7 @@ async fn test_upgrade_preserves_existing_vector_expression_index() {
     db.execute("CREATE INDEX upgrade_existing_ann ON upgrade_index_st USING hnsw ((embedding::vector(3)) vector_l2_ops)").await;
     let before: (i64, i64, String) = sqlx::query_as("SELECT c.oid::bigint, pg_relation_filenode(c.oid)::bigint, format_type(a.atttypid, a.atttypmod) FROM pg_class c JOIN pg_attribute a ON a.attrelid='upgrade_index_st'::regclass AND a.attname='embedding' WHERE c.oid='upgrade_existing_ann'::regclass")
         .fetch_one(&db.pool).await.expect("inspect pre-upgrade index and type");
-    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.109.0'")
         .await;
     db.execute("UPDATE upgrade_index_src SET embedding='[0,0,1]' WHERE id=2")
         .await;
@@ -851,14 +851,14 @@ async fn test_upgrade_preserves_existing_vector_expression_index() {
 #[tokio::test]
 #[ignore]
 async fn test_upgrade_distance_subscriptions_preserves_legacy_rows() {
-    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.108.3")
         || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
     {
         return;
     }
     let db = E2eDb::new_without_extension().await;
     db.execute("CREATE EXTENSION vector").await;
-    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.108.3' CASCADE")
         .await;
     db.execute(
         "CREATE TABLE upgrade_alert_src (id int PRIMARY KEY, embedding vector(3), bits bit(3))",
@@ -872,7 +872,7 @@ async fn test_upgrade_distance_subscriptions_preserves_legacy_rows() {
     )
     .await;
     db.execute("INSERT INTO pgtrickle.pgt_distance_subscriptions(stream_table,channel,vector_column,query_vector,op,threshold) VALUES ('public.upgrade_alert_st','known','embedding','[1,0,0]','<->',0.5), ('missing.legacy','unresolved','embedding','[1,0,0]','<->',0.5), ('public.upgrade_alert_st','legacy_bits','bits','101','<<->>',1)").await;
-    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.109.0'")
         .await;
     let bound: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_distance_subscriptions WHERE pgt_id=(SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_alert_st')").await;
     let unresolved: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_distance_subscriptions WHERE stream_table='missing.legacy' AND pgt_id IS NULL").await;
@@ -894,13 +894,13 @@ async fn test_upgrade_distance_subscriptions_preserves_legacy_rows() {
 #[tokio::test]
 #[ignore]
 async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
-    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.108.3")
         || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
     {
         return;
     }
     let db = E2eDb::new_without_extension().await;
-    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.108.3' CASCADE")
         .await;
     db.execute("CREATE TABLE upgrade_epoch_source (id int PRIMARY KEY)")
         .await;
@@ -921,7 +921,7 @@ async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
         .execute(&mut *conn)
         .await
         .expect("begin upgrade");
-    sqlx::query("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+    sqlx::query("ALTER EXTENSION pg_trickle UPDATE TO '0.109.0'")
         .execute(&mut *conn)
         .await
         .expect("upgrade in transaction");
@@ -955,7 +955,7 @@ async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
         .execute(&mut *conn)
         .await
         .expect("old catalog still refreshes in same backend");
-    sqlx::query("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+    sqlx::query("ALTER EXTENSION pg_trickle UPDATE TO '0.109.0'")
         .execute(&mut *conn)
         .await
         .expect("commit upgrade");

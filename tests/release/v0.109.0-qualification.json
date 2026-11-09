@@ -790,6 +790,93 @@
         "0.109.0"
       ],
       "workload": "published v0.108.3 binary and live WAL slot upgraded to v0.109.0: preserve rows/frontier, private logged queue, rollback and committed retirement"
+    },
+    {
+      "id": "pgvector-0.8.1",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.109.0",
+      "command": "python3 scripts/run_release_pgvector_suite.py 0.8.1",
+      "command_argv": [
+        "python3",
+        "scripts/run_release_pgvector_suite.py",
+        "0.8.1"
+      ],
+      "e2e_image": "pg_trickle_e2e_pgvector:0.8.1",
+      "nextest_retries": 0,
+      "required_cases": [
+        "e2e_pgvector_tests::test_pgvector_compat_installed_version",
+        "e2e_pgvector_tests::test_pgvector_distance_types_and_functions_differential",
+        "e2e_pgvector_tests::test_embedding_stream_table_v2_metrics_and_options",
+        "e2e_pgvector_tests::test_embedding_stream_table_halfvec_and_sparsevec_indexes",
+        "e2e_pgvector_tests::test_distance_subscription_typed_predicates_and_authorization",
+        "e2e_pgvector_tests::test_distance_subscription_notifies_only_membership_crossings",
+        "e2e_pgvector_tests::test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
+        "e2e_pgvector_tests::test_ann_worker_records_lock_timeout_and_can_retry",
+        "e2e_pgvector_hybrid_tests::test_tenant_tutorial_sql_runs_with_isolated_reader",
+        "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
+        "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components"
+      ],
+      "workload": "candidate package with pgvector 0.8.1: corpus, index plans, notifications, authorization, revision safety and concurrent maintenance"
+    },
+    {
+      "id": "pgvector-0.8.7",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.109.0",
+      "command": "python3 scripts/run_release_pgvector_suite.py 0.8.7",
+      "command_argv": [
+        "python3",
+        "scripts/run_release_pgvector_suite.py",
+        "0.8.7"
+      ],
+      "e2e_image": "pg_trickle_e2e_pgvector:0.8.7",
+      "nextest_retries": 0,
+      "required_cases": [
+        "e2e_pgvector_tests::test_pgvector_compat_installed_version",
+        "e2e_pgvector_tests::test_pgvector_distance_types_and_functions_differential",
+        "e2e_pgvector_tests::test_embedding_stream_table_v2_metrics_and_options",
+        "e2e_pgvector_tests::test_embedding_stream_table_halfvec_and_sparsevec_indexes",
+        "e2e_pgvector_tests::test_distance_subscription_typed_predicates_and_authorization",
+        "e2e_pgvector_tests::test_distance_subscription_notifies_only_membership_crossings",
+        "e2e_pgvector_tests::test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
+        "e2e_pgvector_tests::test_ann_worker_records_lock_timeout_and_can_retry",
+        "e2e_pgvector_hybrid_tests::test_tenant_tutorial_sql_runs_with_isolated_reader",
+        "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
+        "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components"
+      ],
+      "workload": "candidate package with pgvector 0.8.7: corpus, index plans, notifications, authorization, revision safety and concurrent maintenance"
+    },
+    {
+      "id": "pgvector-catalog-upgrade",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": true,
+      "requires_postgresql": true,
+      "suite_version": "0.109.0",
+      "command": "bash scripts/run_release_pgvector_upgrade.sh",
+      "command_argv": [
+        "bash",
+        "scripts/run_release_pgvector_upgrade.sh"
+      ],
+      "nextest_retries": 0,
+      "required_cases": [
+        "e2e_upgrade_tests::test_upgrade_embedding_helpers_from_01083",
+        "e2e_upgrade_tests::test_upgrade_preserves_existing_vector_expression_index",
+        "e2e_upgrade_tests::test_upgrade_distance_subscriptions_preserves_legacy_rows",
+        "e2e_upgrade_tests::test_upgrade_ann_epoch_handles_old_catalog_and_rollback"
+      ],
+      "workload": "v0.108.3 catalog snapshot on candidate binary: vector helpers, legacy subscriptions, index identity and transactional rollback"
     }
   ],
   "artifacts": [

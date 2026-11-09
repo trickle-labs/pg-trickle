@@ -473,6 +473,8 @@ jobs:
           test -f candidate/lib/pg_trickle.so
           docker build -t pg_trickle_release_candidate:local \
             -f tests/Dockerfile.release-e2e .
+          PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_pgvector_image.sh 0.8.1
+          PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_pgvector_image.sh 0.8.7
 
       - name: Run contract suites against the exact Linux package
         id: qualify

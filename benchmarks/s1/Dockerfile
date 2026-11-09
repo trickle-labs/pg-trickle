@@ -54,7 +54,7 @@ COPY _s1/mdm/sql/configure_helper.sql /sql/configure_helper.sql
 COPY _s1/react/bin/pg-reactd /usr/local/bin/pg-reactd
 COPY _s1/react/docker/00-pg-trickle.sql /docker-entrypoint-initdb.d/10-pg-react.sql
 # Reconstruct the R53 stack's exact patch-version admission; keep every runtime/capability check.
-ARG S1_PG_TRICKLE_PIN=0.110.0
+ARG S1_PG_TRICKLE_PIN=0.109.0
 RUN grep -Fx "default_version = '${S1_PG_TRICKLE_PIN}'" /usr/share/postgresql/18/extension/pg_trickle.control && \
     sed -i "s/0\.108\.0/${S1_PG_TRICKLE_PIN}/g" \
     /usr/share/postgresql/18/extension/pg_react--0.46.0.sql \
