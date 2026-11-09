@@ -15,6 +15,12 @@ paired 113 cases and reported a maximum relative slowdown of 78.18%; the
 largest individual cases and raw Criterion estimates are in the run's
 `qualification-evidence` artifact. No budget was waived.
 
+The [cross-run comparison](common-regressions.json) finds 24 labels above both
+thresholds in the retry measurements of this run and the earlier `c138e4fe`
+and `b7b6c0ca` qualifications. They include aggregate, scan, filter, join,
+top-k and vector aggregate cases. This identifies repeatable candidates for
+profiling; different hosted runs and changing source do not establish a cause.
+
 This is an earlier integrated candidate, before subsequent scheduler,
 subscription and test changes. It cannot qualify the latest candidate or
 establish the cause of the measured slowdowns. The final candidate requires a
