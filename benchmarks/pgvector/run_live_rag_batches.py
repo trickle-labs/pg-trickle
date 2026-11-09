@@ -20,7 +20,7 @@ SELECT id, CASE WHEN id % 10 < 8 THEN 1 ELSE 2 + id % 19 END
 FROM embedding_demo.documents;
 INSERT INTO embedding_demo.results(document_id, incarnation, revision, chunk_version, model_version, embedding)
 SELECT d.id, d.incarnation, d.revision, d.chunk_version, 'model-v1',
-       ARRAY(SELECT (((d.id * 17 + i * 31) % 2001) - 1000)::real / 1000
+       ARRAY(SELECT ((((pg_catalog.hashint8(d.id * 8191 + i * 104729)::bigint & 2147483647) % 2001) - 1000)::real / 1000)
              FROM generate_series(1, :'dimensions'::integer) i ORDER BY i)::vector
 FROM embedding_demo.documents d;
 """
@@ -128,7 +128,7 @@ SELECT json_build_object('postgres', current_setting('server_version'),
             retrieval[name] = {"measurement_command_seconds": seconds, **recall.parse_output(output, corpus)}
         refresh = json_result(worker.psql("""
 SELECT row_to_json(h)::text FROM (
- SELECT h.action, h.status, h.was_full_fallback
+ SELECT h.action, h.status, h.was_full_fallback, h.refresh_reason, h.refresh_reason_detail, h.merge_strategy_used
  FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id)
  WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1
 ) h;
@@ -150,7 +150,7 @@ SELECT json_build_object('application', pg_total_relation_size('live_rag.applica
             "initial_corpora_exact": initial_exact, "samples": samples, "relation_bytes_including_indexes": sizes,
             "batch_latency_seconds": {"commit_to_eligible": summary([s["commit_to_eligible_seconds"] for s in samples]),
               **{name: summary([s["maintenance"][name]["duration_seconds"] for s in samples]) for name in MAINTENANCE}},
-            "notes": "Deterministic synthetic initial backfill bypasses claims; measured updates use the fake worker. Timings include psql startup. Approaches run serially in rotating order; eligible-to-searchable includes preceding approaches. WAL is cluster-wide insert-LSN movement around maintenance; other activity can contaminate it. Retrieval uses administrative current views after all approaches converge, not restricted-role latency. This measures update batches only; no concurrent load or embedding-delay distribution."}
+            "notes": "Deterministic hash-derived synthetic initial backfill bypasses claims; measured updates use the fake worker. Timings include psql startup. Approaches run serially in rotating order; eligible-to-searchable includes preceding approaches. WAL is cluster-wide insert-LSN movement around maintenance; other activity can contaminate it. Retrieval uses administrative current views after all approaches converge, not restricted-role latency. This measures update batches only; no concurrent load or embedding-delay distribution."}
 
 
 def main() -> None:

@@ -151,6 +151,16 @@ async fn test_live_rag_batched_benchmark_compares_equivalent_corpora() {
             assert!(sample["maintenance"][name]["cluster_wal_bytes"].is_number());
         }
         assert_eq!(sample["differential_refresh"]["status"], "COMPLETED");
+        assert!(
+            sample["differential_refresh"]
+                .get("refresh_reason")
+                .is_some()
+        );
+        assert!(
+            sample["differential_refresh"]
+                .get("merge_strategy_used")
+                .is_some()
+        );
     }
     let repeated = run_live_rag_script(&db, "run_live_rag_batches.py", &args).await;
     assert!(
