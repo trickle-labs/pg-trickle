@@ -8,6 +8,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 
 - [Functions](#functions)
   - [Core Lifecycle](#core-lifecycle)
+    - [pgtrickle.embedding\_stream\_table\_v2](#pgtrickleembedding_stream_table_v2)
     - [pgtrickle.create\_stream\_table](#pgtricklecreate_stream_table)
     - [pgtrickle.create\_stream\_table\_fast\_append\_only](#pgtricklecreate_stream_table_fast_append_only)
     - [pgtrickle.create\_stream\_table\_realtime](#pgtricklecreate_stream_table_realtime)
@@ -229,6 +230,36 @@ extension schema or schema-version audit.
 ### Core Lifecycle
 
 Create, modify, and manage the lifecycle of stream tables.
+
+---
+
+### pgtrickle.embedding_stream_table_v2
+
+```sql
+pgtrickle.embedding_stream_table_v2(
+    name text, source_table text, vector_column text, metric text,
+    options jsonb DEFAULT NULL, dry_run boolean DEFAULT false
+) RETURNS TABLE(action text)
+```
+
+Creates a stream table and pgvector ANN index atomically. `metric` is `l2`,
+`cosine`, or `inner_product`; queries must use the corresponding `<->`, `<=>`,
+or `<#>` operator and repeat the index's dimensioned cast. The source column
+must be a fixed-dimension pgvector type. Names may be schema-qualified and
+quoted. `dry_run` returns generated SQL without creating objects.
+
+The optional JSON object accepts `columns` (an array of source column names;
+the default is all columns), `refresh_interval` (default `1m`), `refresh_mode`
+(default `DIFFERENTIAL`; also `AUTO`, `FULL`, `IMMEDIATE`), `index_type`
+(`hnsw` by default, or `ivfflat`), `hnsw_m`, `hnsw_ef_construction`,
+`ivfflat_lists`, and `post_refresh_action` (`none` by default, `analyze`,
+`reindex`, or `reindex_if_drift`). `IMMEDIATE` must omit `refresh_interval`.
+HNSW requires `m` 2–100 and `ef_construction` 4–1000, at least twice `m`;
+IVFFlat accepts `lists` 1–32768 and does not support `sparsevec`. Reindex
+actions can take blocking locks. Unknown options and invalid values fail.
+
+The seven-argument `embedding_stream_table` remains available and always uses
+L2. Existing stream tables and index definitions are not changed on upgrade.
 
 ---
 
@@ -1209,8 +1240,17 @@ pgtrickle.alter_stream_table(
 | `partition_by` | `text` | `NULL` | Partition key column for the storage table. Pass `NULL` to leave unchanged. Changing the key rebuilds storage and is rejected if external objects depend on it. |
 | `max_differential_joins` | `integer` | `NULL` | Per-stream-table cap on join combinations during differential refresh. Pass `NULL` to leave unchanged. |
 | `max_delta_fraction` | `float8` | `NULL` | Per-stream-table AUTO cost model threshold (0.0–1.0). Pass `NULL` to leave unchanged. |
-| `post_refresh_action` | `text` | `NULL` | Action to take after each successful refresh: `'reindex'` (rebuild indexes when drift exceeds threshold) or `NULL` (no action). |
-| `reindex_drift_threshold` | `float8` | `NULL` | Index drift ratio threshold (0.0–1.0) for `post_refresh_action = 'reindex'`. Pass `NULL` to leave unchanged. |
+| `post_refresh_action` | `text` | `NULL` | Set to `'none'`, `'analyze'`, `'reindex'` after each changed refresh, or `'reindex_if_drift'` when the changed-row ratio reaches its threshold. `NULL` leaves the existing setting unchanged. |
+| `reindex_drift_threshold` | `float8` | `NULL` | Changed-row ratio threshold for `post_refresh_action = 'reindex_if_drift'`. Pass `NULL` to leave unchanged. This is a churn estimate, not measured recall or semantic drift. |
+
+The current `reindex` actions run non-concurrent `REINDEX TABLE` in the refresh
+transaction after applying the data changes. They rebuild all indexes on the
+table and may block writes and queries until the transaction ends. Errors are
+isolated and logged so they do not abort the refresh; the changed-row counter
+remains available after a failed rebuild. For separately scheduled concurrent
+maintenance, set the action to `none` and execute the appropriate PostgreSQL
+`REINDEX ... CONCURRENTLY` command outside a transaction block. There is no
+durable maintenance request queue in this release.
 
 If you switch a stream table to `refresh_mode => 'IMMEDIATE'` while the
 cluster-wide `pg_trickle.cdc_mode` GUC is set to `'wal'`, pg_trickle rejects the
@@ -1271,6 +1311,7 @@ SELECT pgtrickle.alter_stream_table('order_totals', status => 'ACTIVE');
 **Notes:**
 - When `query` is provided, the function runs the full query rewrite pipeline (view inlining, DISTINCT ON, GROUPING SETS, etc.) and validates the new query before applying changes.
 - The entire ALTER QUERY operation runs within a single transaction. If any step fails, the stream table is left unchanged.
+- If a query change requires a shadow-table rebuild and the stream table has an expression or ANN index, the change is rejected to prevent silently losing that index. Drop the index explicitly, perform the change, and recreate it.
 - For same-schema and compatible-schema changes, the storage table OID is preserved — views, policies, and publications referencing the stream table remain valid.
 - For incompatible schema changes (e.g., changing a column from `integer` to `text`), the storage table is rebuilt and the OID changes. A `WARNING` is emitted.
 - The stream table is temporarily suspended during query migration to prevent concurrent scheduler refreshes.
@@ -2199,9 +2240,17 @@ SELECT action, status, rows_inserted, duration_ms
 FROM pgtrickle.get_refresh_history('order_totals', 5);
 ```
 
-For completed differential refreshes, `refresh_reason_detail` contains a JSON
-document with bounded cost evidence. It includes the input delta size, changed
-output size, output amplification ratio, plan identity, and phase timings.
+Completed differential refreshes that perform a merge can record bounded JSON
+cost evidence in `refresh_reason_detail`. It includes input and changed-output
+row counts, output amplification, plan identity, contract generation, and the
+executed merge strategy.
+When `input_delta_rows_may_be_incomplete` is true, the input count may be a lower
+bound because the change-buffer probe reached its threshold or failed; it can
+also omit upstream stream-table changes or be exact when the count equals the
+threshold. The resulting
+amplification ratio can consequently be overstated. Phase timings and
+resource samples are available only for strategies that collect them; the
+algebraic centroid path does not currently record those phase details.
 
 ---
 
@@ -4252,6 +4301,274 @@ See also: [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [FAQ.md](FAQ.md).
 
 ## Catalog Tables
 
+### pgtrickle.request_ann_maintenance_if_needed
+
+```sql
+pgtrickle.request_ann_maintenance_if_needed(
+    stream_table oid, index_oid oid, estimated_rows bigint,
+    estimate_generation bigint, estimate_operations bigint
+) → jsonb
+```
+
+Checks one authorized ANN index against the stream table's configured
+`reindex_drift_threshold` (or the global default) and records a durable
+request only when measured operations since reported coverage reach the
+threshold. The caller supplies a positive row estimate and the exact churn
+generation and operation count captured with that estimate. The function
+locks the stream metadata while it compares the watermark and records intent;
+it does not scan the corpus, run ANALYZE, or rebuild an index.
+The metadata row lock is held until the caller's transaction ends; use a short
+transaction and configure the caller's lock and statement timeouts.
+Its return `decision` is `requested`, `already_requested`, `already_running`,
+`below_threshold`, `cooldown`, `missing_baseline`, `unknown_work`,
+`stale_estimate`, `partitioned_unknown`, or `raced`. A `raced` decision means
+another session changed the request during the check; recheck it later.
+Requests made inside a transaction roll back with it. The function is revoked
+from `PUBLIC` and checks the same SELECT, schema USAGE and MAINTAIN privileges
+as `request_ann_maintenance`.
+
+The estimate and watermark must describe the same committed contents. For
+example, a table owner with `SELECT` on `pgtrickle.pgt_stream_tables` can block concurrent writes,
+run ANALYZE and capture the planner estimate and watermark together:
+
+```sql
+BEGIN;
+LOCK TABLE public.search_corpus IN SHARE ROW EXCLUSIVE MODE;
+ANALYZE public.search_corpus;
+SELECT c.reltuples::bigint AS estimated_rows,
+       s.ann_churn_generation, s.ann_churn_operations
+FROM pgtrickle.pgt_stream_tables s
+JOIN pg_catalog.pg_class c ON c.oid = s.pgt_relid
+WHERE s.pgt_relid = 'public.search_corpus'::regclass;
+COMMIT;
+```
+
+Pass those three returned values to the function. A different current
+watermark makes the estimate stale and prevents a request. An estimate of zero
+or less is rejected; missing or unmeasured coverage remains unknown. The
+caller is responsible for obtaining a trustworthy estimate and watermark;
+pairing an old estimate with a newer watermark defeats this check. ANALYZE and
+the explicit lock have a cost and are operator choices, not monitoring work
+performed by this API. The ratio is a whole-stream operation heuristic, not
+the number of distinct changed rows, the size of a partial index, or recall.
+Partitioned streams remain unknown until per-leaf accounting is available.
+A successful maintenance report is needed to establish the first baseline.
+
+The optional [threshold request script](../scripts/ann_threshold_request.sql)
+captures the estimate and watermark under a table lock and records eligible
+intent in the same transaction. For example:
+
+```sh
+psql "$DATABASE_URL" -X -w \
+  -v ann_stream='public.search_corpus' -v ann_index='public.search_corpus_ann' \
+  -f scripts/ann_threshold_request.sql
+```
+
+Run it as a trusted operator with schema USAGE, stream SELECT and MAINTAIN,
+SELECT on `pgtrickle.pgt_stream_tables`, and EXECUTE on the threshold API.
+The script uses `ANALYZE` and a `SHARE ROW EXCLUSIVE` lock, so it can delay
+refresh writes. `ann_lock_timeout` and `ann_statement_timeout` default to 5
+seconds and 5 minutes and can be overridden with `-v`. A timeout or SQL error
+rolls back the request transaction. The final JSON reports `unknown_estimate`
+for an empty or unavailable estimate and `unknown_work` for a missing
+watermark; neither creates a request. Other decisions come from the API. A
+job scheduler can run this script for operator-selected indexes, inspect the
+decision, and invoke the separate concurrent worker for a `requested` ID.
+The script does not discover indexes, perform the rebuild, or establish an
+initial baseline. Avoid granting catalog SELECT to untrusted roles merely to
+run this example.
+
+### pgtrickle.request_ann_maintenance
+
+```sql
+pgtrickle.request_ann_maintenance(stream_table oid, index_oid oid) → bigint
+```
+
+Records an explicit maintenance intent for a valid HNSW or IVFFlat leaf index
+on the specified stream table. The caller must have `SELECT` on the stream
+table, `MAINTAIN` on the leaf, and schema usage on both. Execution is revoked
+from `PUBLIC`; an administrator must grant it explicitly. The operation does
+not rebuild an index or start a worker. Repeated requests for the same captured
+index identity return the same ID and update the last observed epoch.
+
+Requests commit or roll back with the caller's transaction and are stored in
+the private `pgtrickle.pgt_ann_maintenance_requests` catalog. Index and table
+OIDs and filenodes are database-local: a future worker must revalidate them,
+the index definition, database identity, and current privileges before acting.
+Requests are deliberately excluded from logical dump/restore; operators must
+recreate them after a restore. This API does not execute maintenance or create
+automatic threshold-based requests.
+
+### pgtrickle.ann_maintenance_request
+
+```sql
+pgtrickle.ann_maintenance_request(request_id bigint) → jsonb
+```
+
+Returns the request's recorded and current epochs, timestamps, object OIDs,
+`next_eligible_at`, consecutive failures, cancellation status, the last
+reported coverage epoch and its timestamp, and `identity_current`, after
+rechecking the caller's privileges. `REQUESTED`
+means only that intent was recorded. A false `identity_current` means the
+captured database, stream, leaf, or index identity is no longer valid; `true`
+is a point-in-time observation and does not prevent later DDL. An unchanged
+epoch does not rule out an in-flight refresh. Execution is revoked from
+`PUBLIC`; an administrator must grant it explicitly.
+
+### pgtrickle.claim_ann_maintenance
+
+```sql
+pgtrickle.claim_ann_maintenance(request_id bigint) → jsonb
+```
+
+Claiming records the current backend, its start time, caller role and the
+latest committed stream refresh epoch visible to the claim transaction. The
+caller must have the same privileges required to
+inspect the request, and its index identity must still match. A live backend's
+claim cannot be taken by another session. Claims for the same leaf and index
+definition also serialize across the identity swap made by concurrent reindex.
+The definition includes the index name; renaming or changing an index requires
+the operator to coordinate DDL with maintenance. If that backend disconnects, status
+becomes `INTERRUPTED` and a new session can claim it. A failed claim can also
+be retried. The claim and completion functions are revoked from `PUBLIC`.
+
+Commit the claim before running any top-level `REINDEX INDEX CONCURRENTLY` on
+the **same connection and role**. Recheck identity and privileges immediately
+before execution; a claim does not prevent concurrent DDL or authorize SQL.
+
+### pgtrickle.finish_ann_maintenance
+
+```sql
+pgtrickle.finish_ann_maintenance(request_id bigint, succeeded boolean, error_message text) → void
+```
+
+Report the outcome on that connection with an empty error on success, or a
+nonempty error of at most 2048 bytes on failure. A success is the caller's
+report, not independent proof that a rebuild ran. Failure remains observable.
+If another request arrives during the run, success leaves it `REQUESTED`.
+Concurrent reindex replaces index identity, so an old pending request can
+become stale; inspect it and explicitly request the replacement index. Claims
+for the same leaf and index definition have a five-minute cooldown after a
+reported success, including across the reindex swap. A reported failure delays
+the next claim by 30 seconds, doubling on each consecutive failure up to 16
+minutes; success resets the failure count. `next_eligible_at` shows the
+deadline. These schedules survive a physical restart and are discarded with
+requests on logical restore. Every claim reserves a minimum 30-second
+interval from its start, including when the backend disconnects without
+reporting an outcome. When a later claim observes an abandoned backend, it
+increments `consecutive_failures` and reserves an exponentially increasing
+interval for the next attempt, capped at 16 minutes. The interruption is
+counted when reclaimed, because a disconnected backend cannot record it.
+An interrupted request can be reclaimed when its reserved interval has
+elapsed; a long-running interrupted attempt may therefore be retried
+immediately. Index renames or definition changes
+create a different schedule and require operator coordination. On reported
+success, the per-index `reported_covered_epoch` advances to the claim epoch;
+failure leaves the previous value intact. `epoch_advances_since_reported_coverage`
+is the difference from the current stream epoch when both are known. A refresh
+committed after the claim remains in that difference even if it completed
+while the rebuild ran. These are epoch advances, not counts of refreshes or
+changed rows; a single manual refresh can advance the epoch more than once,
+and an immediate Top-K recomputation can advance it even when its result is
+unchanged.
+They do not measure recall, and success is the caller's report. A `NULL` epoch or
+missing coverage yields an unknown difference. A manual rebuild outside this
+interface does not advance reported coverage. No refresh counter is reset.
+This interface does not create threshold-based requests.
+
+`known_operations_since_reported_coverage` is a separate, per-index-baseline
+estimate of stream-table storage operations committed after the claim reported
+as successful. It counts measured INSERT, UPDATE and DELETE operations from
+differential, append-only, fused, immediate delta and scheduled Top-K refresh execution, including
+reconciliation writes; an update implemented as DELETE plus INSERT counts
+twice. It is a work estimate, not a count of distinct rows, vector changes,
+or measured recall. A successful report captures the claim's counter, so work
+committed while the rebuild runs remains outstanding. Failure leaves the
+previous baseline unchanged. Until a successful report, or after an unmeasured
+rewrite, immediate Top-K recomputation or TRUNCATE, partitioned refresh, refresh with active application triggers,
+counter overflow, or missing metadata, the
+value is `NULL` (unknown). A later successful report can establish a new
+baseline. The value is stream-wide even for a partition leaf; it cannot tell
+which leaf changed and must not be used to select leaves automatically.
+
+The repository includes a one-request reference worker. After creating a
+request and granting the worker role `EXECUTE` on `claim_ann_maintenance`,
+`ann_maintenance_request`, and `finish_ann_maintenance`, run:
+
+```sh
+PGSERVICE=ann_maintenance psql -X -w -v request_id=123 \
+  -f scripts/ann_maintenance_worker.sql
+```
+
+Configure the libpq service with the intended role, authentication and TLS
+policy. Use a direct connection or session pooling: transaction pooling can
+move commands between backends and is incompatible with session-bound claims.
+Do not use psql's `--single-transaction` option or wrap the script in a
+transaction; concurrent reindex must run at the top level.
+The worker handles one request and exits; a supervisor must choose requests
+and retries. Reference workers admit at most four concurrent executions per
+database using session advisory locks; a worker that cannot obtain a slot
+exits without claiming its request. Custom clients are not subject to this
+limit. Run the script as a one-shot psql process so unexpected errors release
+its session lock on disconnect; session pools must reset session locks when a
+connection is returned. It commits the claim, rechecks
+identity and privileges, then runs only that index's top-level concurrent
+reindex. Coordinate index renames, drops and definition changes with the
+worker: the recheck and the DDL are separate commands, so the check is not a
+lock. The worker does not reset refresh counters.
+
+The worker defaults to a five-second lock timeout and a 30-minute statement
+timeout. Override them with psql variables, for example
+`-v ann_lock_timeout=10s -v ann_statement_timeout=1h`. It records a failure
+when possible and exits nonzero; retain psql's diagnostics for the underlying
+error. Errors in commands generated by `\gexec` do not provide a reliable
+SQLSTATE in psql's status variables, so the stored error directs operators to
+those diagnostics. A lost connection can leave the request `INTERRUPTED`.
+An interrupted concurrent reindex can also leave an invalid intermediate index
+on the storage table, even after a later retry succeeds. Inspect invalid indexes
+and active builds before deciding whether they are remnants:
+
+```sql
+SELECT i.indexrelid::regclass AS index_name, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid) AS definition
+FROM pg_catalog.pg_index i
+WHERE i.indrelid = 'public.search_corpus'::regclass AND NOT i.indisvalid;
+
+SELECT pid, command, phase, index_relid::regclass
+FROM pg_catalog.pg_stat_progress_create_index
+WHERE relid = 'public.search_corpus'::regclass;
+```
+
+After confirming that an invalid index is an abandoned rebuild artifact and
+no build is using it, an authorized operator can drop it with top-level
+`DROP INDEX CONCURRENTLY` using its quoted, schema-qualified name. Do not drop
+an index based on its name or invalid flag alone. Repeated interrupted rebuilds
+can accumulate artifacts; the reference worker does not remove them.
+
+### pgtrickle.cancel_ann_maintenance
+
+```sql
+pgtrickle.cancel_ann_maintenance(request_id bigint) → jsonb
+```
+
+Cancels queued or failed work transactionally. For a live claim it records
+`cancel_requested` and returns `RUNNING` with the claimant's PID and backend
+start time; it does not signal the backend. The caller must have the same
+privileges required to inspect the request, plus an explicit `EXECUTE` grant.
+An external coordinator may use PostgreSQL's `pg_cancel_backend` under its own
+native privileges after verifying the PID and backend start. Use a dedicated
+worker connection and coordinate its lifetime: a PID or connection can be
+reused, and a delayed signal could cancel unrelated work. Committing the
+request alone does not stop an active `REINDEX`.
+
+If the worker reports failure after cancellation was requested, the request
+becomes `CANCELLED`; the stored error is the worker's report and does not prove
+the signal caused the failure. A successful rebuild still reports success if
+the cancellation arrived too late. A new request made after cancellation
+remains pending, including if the worker disconnects. A canceled request does
+not restart on its own, but an explicit new request can reopen it. Failure
+backoff still applies to a worker-reported failure.
+
 ### pgtrickle.pgt_stream_tables
 
 Core metadata for each stream table.
@@ -4271,6 +4588,7 @@ Core metadata for each stream table.
 | `data_timestamp` | `timestamptz` | Timestamp of the data in the ST |
 | `frontier` | `jsonb` | Per-source LSN positions (version tracking) |
 | `last_refresh_at` | `timestamptz` | When last refreshed |
+| `ann_refresh_epoch` | `bigint` | Conservative committed refresh-completion epoch for maintenance coordination; `NULL` means unknown. It is not a changed-row count or a durable maintenance request. |
 | `consecutive_errors` | `int` | Current error streak count |
 | `needs_reinit` | `bool` | Whether upstream DDL requires reinitialization |
 | `row_identity_version` | `smallint` | Composite row-identity framing version; legacy or `NULL` values block incremental maintenance |
@@ -4289,6 +4607,17 @@ Core metadata for each stream table.
 | `last_fixpoint_iterations` | `int` | Number of iterations in the last SCC fixpoint convergence (`NULL` if never iterated) |
 | `created_at` | `timestamptz` | Creation timestamp |
 | `updated_at` | `timestamptz` | Last modification timestamp |
+
+`ann_refresh_epoch` advances transactionally when a refresh changes storage,
+when a full refresh rewrites storage, and for IMMEDIATE changes. A no-data
+differential check does not advance it; a rolled-back refresh does not advance
+it. It is independent of `rows_changed_since_last_reindex`,
+which legacy blocking maintenance can reset. `NULL` means the epoch cannot be
+used to establish coverage; it remains `NULL` on subsequent refreshes. Treat a
+changed or missing stream-table identity, a database restore, and index
+replacement as separate invalidation conditions. An unchanged epoch alone does
+not prove that a rebuild ran, that no refresh is in flight, or that an index is
+healthy. This catalog value does not itself enqueue or complete maintenance.
 
 ### pgtrickle.pgt_window_states
 
@@ -4356,7 +4685,7 @@ Audit log of all refresh operations.
 | `freshness_deadline` | `timestamptz` | SLA deadline (duration schedules only; NULL for cron) |
 | `fixpoint_iteration` | `int` | Iteration of the fixed-point loop (`NULL` for non-cyclic refreshes) |
 | `refresh_reason` | `text` | Stable strategy or FULL reason. Window partition recomputation uses a `WINDOW_*` code without setting `was_full_fallback`. |
-| `refresh_reason_detail` | `text` | Deterministic JSON for window execution or bounded differential cost evidence. Cost evidence includes input and output rows, output amplification, plan identity, resource samples, and phase timings. Partition keys are not stored. |
+| `refresh_reason_detail` | `text` | JSON for window execution or bounded differential cost evidence. Cost evidence can include input and output rows, output amplification, plan identity, resource samples, and phase timings. Input counts may be capped, and available details vary by strategy. Partition keys are not stored. |
 
 ### pgtrickle.pgt_change_tracking
 
@@ -5069,7 +5398,7 @@ table management.
 | `pgtrickle.row_identity_v2_recreation_preflight()` | `jsonb` | Owner/superuser-only, read-only V2 recreation gate. Checks storage, markers, source contracts, indexes, PostgreSQL major, scheduler quiescence, and consumer acknowledgments without returning identity bytes. |
 | `pgtrickle.row_identity_v2_consumer_inventory()` | `SETOF record` | Owner/superuser-only inventory of external consumers and their `BYTEA` schema/resnapshot plans. |
 | `pgtrickle.validate_query(sql text)` | `SetOf row` | Validates whether a SQL query is IVM-compatible. Returns analysis results including unsupported patterns. |
-| `pgtrickle.explain_stream_table(st_name text)` | `text` | Shows the effective refresh mode, delta plan, fallback reasons, and current state flags for a stream table. |
+| `pgtrickle.explain_stream_table(st_name text)` | `text` | Shows the configured refresh mode, per-output fallback aggregate classification, last completed refresh strategy when history is readable, and a catalog-statistics estimate of potential serialized centroid fixed payload where applicable. Estimates can be stale and omit row IDs and storage overhead; they are not allocated memory or disk measurements. The last strategy does not predict the next refresh. Aggregate classification is unknown if analysis fails. |
 | `pgtrickle.explain_dag()` | `text` (DOT) | Returns a Graphviz DOT representation of the full dependency graph. |
 | `pgtrickle.stream_table_lineage(st_name text)` | `SetOf row` | Returns the lineage graph for a single stream table — direct and transitive source tables with metadata. |
 | `pgtrickle.cdc_pause_status()` | `SetOf row` | Shows whether CDC is paused, the capture mode (`discard` / lossless `hold`), and a human-readable explanation. |
@@ -5223,8 +5552,80 @@ pgtrickle.resume_after_drain() → bool
 | `pgtrickle.reliability_counters()` | `SetOf row` | Returns shared-memory reliability counters (scheduler errors, worker crashes, CDC pause events). Useful for alert dashboards. |
 | `pgtrickle.wal_source_status()` | `SetOf row` | Per-source WAL CDC slot status: LSN lag, slot name, active/inactive state. Only populated when WAL-based CDC is active. |
 | `pgtrickle.worker_allocation_status()` | `SetOf row` | Per-database dynamic background worker allocation: quota, active count, and DB name. |
-| `pgtrickle.vector_status()` | `SetOf row` | One row per stream table that has a `post_refresh_action` configured or any ANN-relevant index. Shows index type, dimensions, and last rebuild time. |
+| `pgtrickle.vector_status()` | `SetOf row` | One row per stream table whose `post_refresh_action` is not `none`. `embedding_lag` is time since `data_timestamp`, not embedding-generation freshness; `drift_pct` is the changed-row counter as a percentage of estimated rows, or NULL when the estimate is not positive. It does not report index type, dimensions, validity, or recall. |
+| `pgtrickle.vector_stream_status_v2()` | `SETOF jsonb` | One record per visible pgvector column, including streams with maintenance disabled. |
+| `pgtrickle.ann_index_status_v2()` | `SETOF jsonb` | One record per key of each visible HNSW or IVFFlat index, including partition leaves. |
 | `pgtrickle.st_auto_threshold(st_name text)` | `float8` | Returns the effective `differential_max_change_ratio` for a specific stream table — the per-ST override if set, otherwise the global `pg_trickle.differential_max_change_ratio` GUC. |
+
+### pgtrickle.vector_stream_status_v2
+
+The v2 diagnostics inspect catalogs without scanning vector data. They require
+`SELECT` on the stream table and `USAGE` on its schema. Column dimensions are
+NULL when the type has no known typmod.
+
+The column records include refresh timestamps and frontier, not embedding
+generation freshness. Backlog and requested ANN index intent are NULL with a
+reason because these catalog checks do not measure or record them. The
+stream-wide `maintenance_pending` and `maintenance_failed` fields summarize
+durable requests, and `maintenance_error` is the most recent failed request's
+error. `maintenance_pending` includes requested and running work, including
+interrupted claims that have not yet been recovered. `maintenance_stale` is
+true when requested, failed, or interrupted work no longer identifies its
+original index. Inspect the request, explicitly request the replacement index
+if needed, and cancel the stale request. Running work with a live claim is not
+marked stale while a concurrent rebuild is replacing the index. These fields are NULL
+with a reason unless the caller can inspect all storage leaves and stale
+requests; SELECT alone does not expose maintenance details. An old timestamp
+alone does not mean an idle corpus is stale, and
+the absence of an index cannot distinguish intentional exact search from a
+missing requested index. Compare application revision and model metadata to
+assess embedding freshness. If dimensions are unknown, declare a dimensioned
+vector type; for invalid indexes use a supported rebuild, and investigate
+refresh progress separately when backlog is suspected.
+
+### pgtrickle.ann_index_status_v2
+
+Partition leaf indexes appear only when the caller also has `SELECT` on the
+leaf and `USAGE` on its schema; access to the parent alone is insufficient.
+Index dimensions come from the index key's type modifier, including explicit
+casts, and are NULL when that modifier does not specify a dimension. Index size
+is in bytes, and index options are PostgreSQL
+reloptions. Opclass names identify the indexed metric; use `EXPLAIN` to check
+whether a query can use the index.
+
+```sql
+SELECT i->>'index', i->>'opclass', i->>'expression', i->>'predicate',
+       i->>'valid', i->>'ready'
+FROM pgtrickle.ann_index_status_v2() AS i;
+-- Compare the opclass and expression with the query, then inspect EXPLAIN.
+```
+
+To distinguish intentional exact search from a missing requested index, supply
+the application's own expectation to the tested
+[session-local query](../tests/fixtures/pgvector_index_expectation.sql). For
+example, in `psql` from the repository root:
+
+```sql
+\i tests/fixtures/pgvector_index_expectation.sql
+SELECT pg_temp.ann_expectation(
+  'public.search_corpus'::regclass, 'public.search_corpus_ann',
+  'vector_cosine_ops', 'embedding', NULL
+);
+-- Pass NULL for the index name when exact search is intentional.
+SELECT pg_temp.ann_expectation('public.search_corpus'::regclass, NULL, NULL, NULL, NULL);
+```
+
+The expected expression and partial predicate must match the `expression` and
+`predicate` text returned by `ann_index_status_v2()`; pass NULL when no partial
+predicate is intended. `missing_index` calls for creating the requested index;
+`invalid_index` calls for a supported rebuild; `metric_mismatch` or
+`expression_mismatch` or `predicate_mismatch` calls for aligning the index and
+query. An index on a different stream or an inaccessible leaf can return
+`unavailable_or_wrong_stream`; resolving a name may require schema access.
+The query returns NULL for a stream not visible through the vector diagnostic.
+`ready` describes catalog state only; use `EXPLAIN` to check query eligibility
+and the planner's choice. The expectation belongs to the application and is
+not stored by pg_trickle.
 
 See also:
 - [Delta SQL Profiling](#delta-sql-profiling-v0130) — `explain_delta`, `dedup_stats`, `shared_buffer_stats`

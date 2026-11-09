@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**151 configuration parameters** extracted from `src/config/`.
+**152 configuration parameters** extracted from `src/config/`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -22,7 +22,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.allow_circular` | `bool` | `false` | When `false` (default), cycle detection rejects any stream table creation that would introduce a cycle in the dependency graph. |
 | `pg_trickle.analyze_before_delta` | `bool` | `true` | Graph refreshes analyze their bounded CDC stages and materialized deltas; other refreshes analyze persistent source change buffers. |
 | `pg_trickle.auto_backoff` | `bool` | `true` | This prevents CPU runaway when a stream table's refresh cost exceeds its schedule budget and an operator is not available to respond manually. |
-| `pg_trickle.auto_index` | `bool` | `true` | When enabled, `create_stream_table()` automatically creates indexes on GROUP BY keys, DISTINCT columns, and adds INCLUDE clauses to the `__pgt_row_id` index for stream tables with ≤ 8 output columns. |
+| `pg_trickle.auto_index` | `bool` | `true` | When enabled, `create_stream_table()` automatically creates indexes on GROUP BY keys, DISTINCT columns, and adds INCLUDE clauses to the `__pgt_row_id` index for stream tables with ≤ 8 output columns when the identity and output values have a bounded combined size. |
 | `pg_trickle.backpressure_consecutive_limit` | `int4` | `3` | Default: 3 cycles. |
 | `pg_trickle.block_source_ddl` | `bool` | `true` | Default is `true` (enabled) as of v0.11.0 — set to `false` to restore the previous permissive behavior (DDL triggers reinitialization instead of blocking). |
 | `pg_trickle.buffer_alert_threshold` | `int4` | `1000000` | When any source table's change buffer exceeds this number of rows, a `BufferGrowthWarning` alert is emitted. |
@@ -55,6 +55,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |
 | `pg_trickle.drain_timeout_max_seconds` | `int4` | `86400` | v0.85.0: Hard upper bound for explicit drain waits. |
 | `pg_trickle.dvm_decision_trace` | `bool` | `false` | When enabled, the DVM logs JSON events containing operator paths, output schemas, snapshot plans, and generated delta CTEs. |
+| `pg_trickle.enable_centroid_state` | `bool` | `false` | Enable experimental algebraic maintenance for supported vector averages. |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
 | `pg_trickle.enable_fused_refresh` | `bool` | `false` | Disable if a specific DAG shape causes unexpected planner behaviour. |
 | `pg_trickle.enable_output_delta_qualification` | `bool` | `false` | Enable the constrained Delta V1 recovery qualification API. |

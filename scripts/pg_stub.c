@@ -38,6 +38,12 @@ void *PortalContext             = NULL;
 void *PostmasterContext         = NULL;
 void *TopMemoryContext          = NULL;
 void *TopTransactionContext     = NULL;
+void *CurrentResourceOwner      = NULL;
+
+/* Pure Rust tests do not enter PostgreSQL subtransactions. */
+void BeginInternalSubTransaction(const char *name) { (void)name; }
+void ReleaseCurrentSubTransaction(void) {}
+void RollbackAndReleaseCurrentSubTransaction(void) {}
 
 /* ── Error handling globals ───────────────────────────────────────────── */
 void *error_context_stack       = NULL;

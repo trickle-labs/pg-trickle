@@ -1,6 +1,7 @@
 # pgvector RAG Cookbook: Always-Fresh Embedding Pipelines with pg_trickle
 
-> **Status: Stable** — pgvector RAG pipelines using stream tables are production-ready.
+> **Status:** Vector aggregates are experimental and disabled by default. See
+> the [support summary](../SUPPORT_SUMMARY.md) for capability-specific maturity.
 
 **Prerequisites:** PostgreSQL 18, `pg_trickle`, `pgvector` extension.
 
@@ -8,16 +9,20 @@
 
 ## Overview
 
-This cookbook shows you how to build a production-ready Retrieval-Augmented
-Generation (RAG) pipeline using `pg_trickle` and `pgvector`. The key insight:
-embeddings are **derived state** — they must be recomputed whenever source
-documents change. `pg_trickle` incremental view maintenance keeps that derived
-state fresh automatically, without batch jobs or cron scripts.
+This cookbook describes Retrieval-Augmented Generation (RAG) patterns using
+`pg_trickle` and `pgvector`. Applications must recompute embeddings when model
+inputs change. pg_trickle maintains the stored query result from committed
+inputs; scheduled refresh adds propagation lag and does not generate vectors.
 
 Embeddings are **generated at the application layer** (via OpenAI, Cohere,
 Ollama, or any embedding API) and stored in a source table. `pg_trickle` then
 incrementally maintains the denormalised corpus, the vector index, and any
 aggregate centroids.
+
+The first pattern below does not track whether an embedding matches the latest
+document content. For asynchronous generation, retries and model changes, use
+the [revision-safe embedding workflow](REVISION_SAFE_EMBEDDINGS.md): a stream
+refresh alone cannot make a stale provider result current.
 
 ---
 
@@ -110,11 +115,13 @@ SELECT pgtrickle.create_stream_table(
 
 ---
 
-## Pattern 3: Drift-Aware HNSW Reindexing (VP-1/VP-2)
+## Pattern 3: Changed-Row-Triggered Reindexing (VP-1/VP-2)
 
-HNSW indexes degrade as rows are deleted and tombstones accumulate. Use
-`post_refresh_action = 'reindex_if_drift'` to automatically rebuild the index
-when enough rows have changed.
+`post_refresh_action = 'reindex_if_drift'` requests a table-wide, non-concurrent
+`REINDEX` after the changed-row counter reaches a fraction of the estimated
+table size. This ratio is a churn estimate, not a measurement of index quality,
+semantic drift, or recall. Rebuilding every index on the table can block writes;
+measure the effect on your workload before enabling it.
 
 ```sql
 -- Create a vector stream table
@@ -141,26 +148,33 @@ SELECT pgtrickle.alter_stream_table(
 );
 ```
 
-### Monitor Drift
+### Inspect the Changed-Row Estimate
 
 ```sql
--- Check vector status for all vector stream tables
+-- This function lists only stream tables with a non-'none' post-refresh action.
 SELECT
     name,
     post_refresh_action,
     rows_changed_since_last_reindex,
     estimated_rows,
-    drift_pct || '%' AS drift,
+    drift_pct AS changed_rows_pct,
     last_reindex_at,
-    embedding_lag
+    embedding_lag AS time_since_data_timestamp
 FROM pgtrickle.vector_status();
 ```
+
+`drift_pct` is the changed-row counter divided by PostgreSQL's estimated row
+count, expressed as a percentage; it is NULL when the estimate is not positive.
+`embedding_lag` is the time since the stream's data timestamp. An idle corpus
+can have an old timestamp even when it is current, and neither field reports
+whether an embedding matches the latest document revision or model. Track that
+freshness with application-provided revision and model metadata.
 
 ---
 
 ## Pattern 4: Centroid Maintenance for Cluster-Aware Search
 
-`pg_trickle` supports `vector_avg()` for per-cluster centroid maintenance.
+`pg_trickle` supports pgvector's `avg(vector)` for per-cluster centroid maintenance.
 This enables fast cluster-first ANN search on large corpora.
 
 ```sql
@@ -177,7 +191,7 @@ SELECT pgtrickle.create_stream_table(
     $$
         SELECT
             cluster_id,
-            vector_avg(embedding) AS centroid,
+            avg(embedding) AS centroid,
             count(*) AS member_count
         FROM cluster_assignments
         GROUP BY cluster_id
@@ -187,8 +201,9 @@ SELECT pgtrickle.create_stream_table(
 );
 ```
 
-> **Note:** `vector_avg()` requires `pg_trickle.enable_vector_agg = on` in
-> `postgresql.conf` and the `pgvector` extension to be installed.
+> **Note:** Vector aggregates are experimental and disabled by default. Install
+> pgvector and enable `pg_trickle.enable_vector_agg` in the sessions that create
+> and refresh the stream table, including scheduler workers.
 
 ---
 
@@ -209,33 +224,31 @@ SELECT pgtrickle.alter_stream_table(
 
 ## Operational Sizing Guidance
 
-| Table size | Recommended `post_refresh_action` | Notes |
-|------------|-----------------------------------|-------|
-| < 100k rows | `analyze` | Statistics are cheap; skip REINDEX unless deletes are heavy |
-| 100k – 2M | `reindex_if_drift` with threshold 0.20–0.30 | Balance freshness vs. rebuild cost |
-| > 2M rows | `reindex_if_drift` with threshold 0.10–0.15 | ANN quality degrades faster at scale |
-| Append-only | `none` | HNSW handles inserts well; only deletions cause tombstones |
+Choose maintenance from measurements of your own query and update workload.
+`analyze` updates planner statistics; `reindex_if_drift` can rebuild all indexes
+on the table synchronously. With `none`, manage any index maintenance yourself.
+Use `EXPLAIN` to check a query plan and an application-specific benchmark to
+measure recall and latency.
 
 ---
 
 ## Monitoring
 
 ```sql
--- Comprehensive embedding pipeline health check
+-- Inspect refresh timestamp age and changed-row estimates.
 SELECT
     name,
     post_refresh_action,
-    embedding_lag,
-    drift_pct || '%' AS drift,
-    last_reindex_at,
-    CASE
-        WHEN embedding_lag > INTERVAL '5 minutes' THEN 'STALE'
-        WHEN drift_pct > 30 THEN 'REINDEX_NEEDED'
-        ELSE 'OK'
-    END AS health
+    data_timestamp,
+    embedding_lag AS time_since_data_timestamp,
+    drift_pct AS changed_rows_pct,
+    last_reindex_at
 FROM pgtrickle.vector_status()
 ORDER BY drift_pct DESC NULLS LAST;
 ```
+
+This query does not establish refresh backlog, embedding freshness, index
+validity, or recall. Tables with `post_refresh_action = 'none'` are omitted.
 
 ---
 
@@ -247,10 +260,10 @@ API, Ollama, or pgai). pg_trickle maintains the derived state once embeddings
 are stored in the source table.
 
 **Q: Should I use IVFFlat or HNSW with pg_trickle?**
-HNSW is strongly preferred. HNSW handles incremental writes and deletes via
-tombstones. IVFFlat requires periodic full rebuilds because it uses fixed
-k-means centroids built at index creation time. Use `reindex_if_drift` to
-manage HNSW tombstone accumulation.
+Both support approximate search with different build, memory, and query
+tradeoffs. Benchmark recall and latency for your data and workload. Rebuilding
+may be useful as data changes, but the changed-row threshold does not measure
+recall or establish when a rebuild is needed.
 
 **Q: What is the `reindex_drift_threshold`?**
 It is the fraction of estimated rows that must change since the last REINDEX
@@ -258,9 +271,59 @@ before a drift-triggered REINDEX fires. The default is 0.20 (20%). You can
 set a per-table override via `ALTER STREAM TABLE ... reindex_drift_threshold`.
 
 **Q: Does REINDEX block reads?**
-In PostgreSQL, `REINDEX TABLE` acquires a `SHARE UPDATE EXCLUSIVE` lock, which
-allows concurrent reads but blocks writes and other REINDEX operations. For
-zero-downtime reindexing on large tables, use `REINDEX TABLE CONCURRENTLY`
-(PostgreSQL 12+). pg_trickle uses the standard `REINDEX TABLE` form; if
-concurrency is critical, set `post_refresh_action = 'none'` and schedule
-`REINDEX TABLE CONCURRENTLY` yourself.
+The legacy `reindex` and `reindex_if_drift` actions run a non-concurrent,
+table-wide `REINDEX` inside the refresh transaction. It blocks writes and can
+also block reads while the indexes are locked. A failure is isolated, but the
+rebuild still extends the refresh transaction. The threshold is not evidence
+of index quality. Leave `post_refresh_action = 'none'` to manage maintenance
+independently.
+
+For manual concurrent maintenance, the tested
+[candidate query](../../tests/fixtures/pgvector_ann_maintenance_candidates.sql)
+accepts a stream-table name as its `$1` parameter and returns valid HNSW and
+IVFFlat leaf indexes for which the caller has `MAINTAIN` privilege. Run it as a
+trusted maintenance role with access to the pg_trickle stream-table catalog and
+the stream table. The role must also have schema usage and `MAINTAIN` on each
+leaf table; PostgreSQL checks privileges again at execution. The returned index
+names are quoted identifiers, not SQL supplied by another user. For each chosen
+index, recheck its identity and access method immediately before executing
+`REINDEX INDEX CONCURRENTLY` on an ordinary connection in autocommit mode, with
+appropriate lock and statement timeouts. Do not run concurrent DDL inside a
+function or transaction block, or assume the original index OID survives a
+successful concurrent rebuild. Coordinate operators to prevent duplicate work,
+and inspect invalid `_ccnew`/`_ccold` indexes after a failed operation as
+described in the [PostgreSQL REINDEX documentation](https://www.postgresql.org/docs/18/sql-reindex.html).
+To detect refreshes that committed during an operation, an operator can record
+the stream identity and epoch immediately before and after it:
+
+```sql
+SELECT pgt_id, pgt_relid, ann_refresh_epoch
+FROM pgtrickle.pgt_stream_tables
+WHERE pgt_relid = 'search_corpus'::regclass;
+```
+
+If the identity or epoch changes, or the epoch is `NULL`, the observation is
+not evidence that the rebuild covered the latest refresh. An unchanged epoch
+also does not rule out a refresh still in flight.
+
+An authorized operator can persist an explicit intent for a selected leaf:
+
+```sql
+SELECT pgtrickle.request_ann_maintenance(
+    'search_corpus'::regclass::oid, 'search_corpus_embedding_idx'::regclass::oid
+);
+```
+
+The function records intent only. It does not start a worker, perform the
+rebuild, or mark it complete; an administrator must grant `EXECUTE` explicitly.
+The returned ID can be inspected with `pgtrickle.ann_maintenance_request(id)`
+after an administrator grants `EXECUTE` on that function too. The inspection
+rechecks privileges and reports whether the captured identity still matches;
+it is not a lock and cannot prevent later DDL. Requests are not restored
+across a logical dump/restore because their OIDs are database-local. The
+session-bound claim and completion APIs can record a manually executed rebuild
+and its failure. The repository's one-request psql worker is documented in
+[the SQL reference](../SQL_REFERENCE.md#pgtricklefinish_ann_maintenance),
+including its connection, identity and timeout requirements. A supervisor is
+responsible for selecting requests and retries. Continue normal VACUUM and
+autovacuum care.

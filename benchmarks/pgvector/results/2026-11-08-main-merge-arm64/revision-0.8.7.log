@@ -1,0 +1,14 @@
+   Compiling pg_trickle v0.110.0 (/private/tmp/pg-trickle-1384)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.06s
+     Running tests/e2e_pgvector_revision_tests.rs (target/debug/deps/e2e_pgvector_revision_tests-f2f3507fc93c4e2b)
+
+running 7 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test test_revision_safe_generation_and_model_rollover ... ok
+test test_model_cutover_holds_source_lock_and_rolls_back ... ok
+test test_revision_safe_publication_enqueues_missing_work_without_duplicates ... ok
+test test_revision_safe_rechunk_rejects_inflight_results ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.00s

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default)]
 pub struct DeltaStage {
     names: HashMap<u32, String>,
+    centroid_nonce: Option<u64>,
 }
 
 impl DeltaStage {
@@ -27,11 +28,34 @@ impl DeltaStage {
         prev_frontier: &Frontier,
         new_frontier: &Frontier,
     ) -> Result<Self, PgTrickleError> {
+        Self::prepare_inner(st, dependencies, prev_frontier, new_frontier, None)
+    }
+
+    pub(crate) fn prepare_centroid(
+        st: &StreamTableMeta,
+        dependencies: &[StDependency],
+        prev_frontier: &Frontier,
+        new_frontier: &Frontier,
+        nonce: u64,
+    ) -> Result<Self, PgTrickleError> {
+        Self::prepare_inner(st, dependencies, prev_frontier, new_frontier, Some(nonce))
+    }
+
+    fn prepare_inner(
+        st: &StreamTableMeta,
+        dependencies: &[StDependency],
+        prev_frontier: &Frontier,
+        new_frontier: &Frontier,
+        centroid_nonce: Option<u64>,
+    ) -> Result<Self, PgTrickleError> {
         let owner = crate::refresh::stream_owner_name(st)?;
         let owner = quote_ident(&owner);
         let change_schema = crate::config::pg_trickle_change_buffer_schema();
         let bypass_tables = crate::refresh::get_st_bypass_tables();
-        let mut stage = Self::default();
+        let mut stage = Self {
+            names: HashMap::new(),
+            centroid_nonce,
+        };
 
         for dependency in dependencies {
             let source_oid = dependency.source_relid.to_u32();
@@ -87,11 +111,27 @@ impl DeltaStage {
     ) -> Result<(), PgTrickleError> {
         let pgt_id = st.pgt_id;
         let source_oid = dependency.source_relid.to_u32();
-        let name = Self::table_name(pgt_id, source_oid);
+        let name = match self.centroid_nonce {
+            Some(nonce) => format!("__pgt_cd_{pgt_id}_{source_oid}_{nonce}"),
+            None => Self::table_name(pgt_id, source_oid),
+        };
         let qualified_name = format!("pg_temp.{}", quote_ident(&name));
         let source = quote_qualified(source_buffer)?;
-        Spi::run(&format!("DROP TABLE IF EXISTS {qualified_name}")) // nosemgrep: rust.spi.run.dynamic-format — qualified_name is built from quote_ident.
+        if self.centroid_nonce.is_some() {
+            let existing = Spi::get_one_with_args::<pg_sys::Oid>(
+                "SELECT pg_catalog.to_regclass($1)::oid",
+                &[qualified_name.as_str().into()],
+            )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if existing.is_some() {
+                return Err(PgTrickleError::InternalError(format!(
+                    "centroid CDC staging relation {qualified_name} already exists"
+                )));
+            }
+        } else {
+            Spi::run(&format!("DROP TABLE IF EXISTS {qualified_name}")) // nosemgrep: rust.spi.run.dynamic-format — qualified_name is built from quote_ident.
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
         // nosemgrep: rust.spi.run_with_args.dynamic-format — qualified_name and source are quoted identifiers; LSNs are parameters.
         Spi::run_with_args(
             &format!(

@@ -686,6 +686,7 @@ proptest! {
     ) {
         let alias = format!("{col}_val");
         let agg = AggExpr {
+            analyzed_argument: None,
             function: func.clone(),
             argument: Some(Expr::ColumnRef { table_alias: None, column_name: col }),
             alias: alias.clone(),
@@ -735,6 +736,7 @@ proptest! {
     ) {
         let alias = format!("{col}_val");
         let agg = AggExpr {
+            analyzed_argument: None,
             function: func,
             argument: Some(Expr::ColumnRef { table_alias: None, column_name: col }),
             alias: alias.clone(),
@@ -788,6 +790,7 @@ proptest! {
     ) {
         let alias = format!("{col}_val");
         let agg = AggExpr {
+            analyzed_argument: None,
             function: func.clone(),
             argument: Some(Expr::ColumnRef { table_alias: None, column_name: col.clone() }),
             alias,
@@ -823,6 +826,7 @@ proptest! {
     fn prop_avg_is_algebraic(col in arb_col_name()) {
         let alias = format!("avg_{col}");
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::Avg,
             argument: Some(Expr::ColumnRef { table_alias: None, column_name: col }),
             alias: alias.clone(),
@@ -871,6 +875,7 @@ proptest! {
     ) {
         let alias = format!("stat_{col}");
         let agg = AggExpr {
+            analyzed_argument: None,
             function: variant.clone(),
             argument: Some(Expr::ColumnRef { table_alias: None, column_name: col }),
             alias: alias.clone(),
@@ -933,6 +938,7 @@ proptest! {
     #[test]
     fn prop_distinct_stddev_not_algebraic(col in arb_col_name()) {
         let agg = AggExpr {
+            analyzed_argument: None,
             function: AggFunc::StddevPop,
             argument: Some(Expr::ColumnRef { table_alias: None, column_name: col }),
             alias: "sd".to_string(),

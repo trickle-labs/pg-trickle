@@ -1,0 +1,292 @@
+{
+  "decisions": {
+    "active_p99_latency_ratio": {
+      "budget": 2.0,
+      "ci_noise_tolerated": false,
+      "passed": true,
+      "product_budget_passed": true,
+      "value": 1.5878342044696878
+    },
+    "installed_no_st_tps_ratio": {
+      "budget": 0.99,
+      "passed": true,
+      "value": 1.0153991679006302
+    },
+    "refresh_cpu_share": {
+      "budget": 0.5,
+      "passed": true,
+      "value": 0.001865735075145553
+    }
+  },
+  "environment": {
+    "commit": "0d18c6442760444c6b2e5a6cea353c6a18f2ef14",
+    "images": {
+      "absent": "postgres:18.6-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc",
+      "active": "pg_trickle_e2e:latest",
+      "installed": "pg_trickle_e2e:latest"
+    },
+    "postgres_settings": "logical|on|10|128",
+    "postgres_version": "180006"
+  },
+  "medians": {
+    "active_p99_latency_ratio": 1.5878342044696878,
+    "installed_no_st_tps_ratio": 1.0153991679006302,
+    "refresh_cpu_share": 0.001865735075145553
+  },
+  "passed": true,
+  "per_repetition": [
+    {
+      "active_p99_latency_ratio": 1.654318487934995,
+      "installed_no_st_tps_ratio": 0.9997193323907617,
+      "refresh_cpu_share": 0.0020037014153612477
+    },
+    {
+      "active_p99_latency_ratio": 1.3395852384062703,
+      "installed_no_st_tps_ratio": 1.0684482268740465,
+      "refresh_cpu_share": 0.001865735075145553
+    },
+    {
+      "active_p99_latency_ratio": 1.5878342044696878,
+      "installed_no_st_tps_ratio": 1.0153991679006302,
+      "refresh_cpu_share": 0.0017478367897971077
+    }
+  ],
+  "raw_repetitions": [
+    {
+      "commit": "0d18c6442760444c6b2e5a6cea353c6a18f2ef14",
+      "config": "absent",
+      "correct": true,
+      "cpu": {
+        "container_cpu_us": 100371663,
+        "supported": true,
+        "worker_jiffies": 0,
+        "worker_share": 0.0
+      },
+      "image": "postgres:18.6-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc",
+      "latency_sample_count": 22958,
+      "postgres_settings": "logical|on|10|128",
+      "postgres_version": "180006",
+      "refresh": {
+        "count": 0,
+        "duration_ms": 0.0
+      },
+      "repetition": 0,
+      "tps": 7674.629808,
+      "transaction_latency_ms": {
+        "p50": 0.932,
+        "p95": 1.552,
+        "p99": 2.2718600000000007
+      }
+    },
+    {
+      "commit": "0d18c6442760444c6b2e5a6cea353c6a18f2ef14",
+      "config": "installed",
+      "correct": true,
+      "cpu": {
+        "container_cpu_us": 101106295,
+        "supported": true,
+        "worker_jiffies": 2,
+        "worker_share": 0.0001978116199391937
+      },
+      "image": "pg_trickle_e2e:latest",
+      "latency_sample_count": 22957,
+      "postgres_settings": "logical|on|10|128",
+      "postgres_version": "180006",
+      "refresh": {
+        "count": 0,
+        "duration_ms": 0.0
+      },
+      "repetition": 0,
+      "tps": 7672.475788,
+      "transaction_latency_ms": {
+        "p50": 0.933,
+        "p95": 1.558,
+        "p99": 2.356879999999997
+      }
+    },
+    {
+      "commit": "0d18c6442760444c6b2e5a6cea353c6a18f2ef14",
+      "config": "active",
+      "correct": true,
+      "cpu": {
+        "container_cpu_us": 89833744,
+        "supported": true,
+        "worker_jiffies": 18,
+        "worker_share": 0.0020037014153612477
+      },
+      "image": "pg_trickle_e2e:latest",
+      "latency_sample_count": 14963,
+      "postgres_settings": "logical|on|10|128",
+      "postgres_version": "180006",
+      "refresh": {
+        "count": 3,
+        "duration_ms": 7204.891
+      },
+      "repetition": 0,
+      "tps": 5088.293355,
+      "transaction_latency_ms": {
+        "p50": 1.384,
+        "p95": 2.4539,
+        "p99": 3.758379999999999
+      }
+    },
+    {
+      "commit": "0d18c6442760444c6b2e5a6cea353c6a18f2ef14",
+      "config": "absent",
+      "correct": true,
+      "cpu": {
+        "container_cpu_us": 98194217,
+        "supported": true,
+        "worker_jiffies": 0,
+        "worker_share": 0.0
+      },
+      "image": "postgres:18.6-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc",
+      "latency_sample_count": 20721,
+      "postgres_settings": "logical|on|10|128",
+      "postgres_version": "180006",
+      "refresh": {
+        "count": 0,
+        "duration_ms": 0.0
+      },
+      "repetition": 1,
+      "tps": 6937.614204,
+      "transaction_latency_ms": {
+        "p50": 1.011,
+        "p95": 1.838,
+        "p99": 3.062
+      }
+    },
+    {
+      "commit": "0d18c6442760444c6b2e5a6cea353c6a18f2ef14",
+      "config": "installed",
+      "correct": true,
+      "cpu": {
+        "container_cpu_us": 101256566,
+        "supported": true,
+        "worker_jiffies": 1,
+        "worker_share": 9.875902763678555e-05
+      },
+      "image": "pg_trickle_e2e:latest",
+      "latency_sample_count": 22408,
+      "postgres_settings": "logical|on|10|128",
+      "postgres_version": "180006",
+      "refresh": {
+        "count": 0,
+        "duration_ms": 0.0
+      },
+      "repetition": 1,
+      "tps": 7412.481595,
+      "transaction_latency_ms": {
+        "p50": 0.97,
+        "p95": 1.634,
+        "p99": 2.423
+      }
+    },
+    {
+      "commit": "0d18c6442760444c6b2e5a6cea353c6a18f2ef14",
+      "config": "active",
+      "correct": true,
+      "cpu": {
+        "container_cpu_us": 91116902,
+        "supported": true,
+        "worker_jiffies": 17,
+        "worker_share": 0.001865735075145553
+      },
+      "image": "pg_trickle_e2e:latest",
+      "latency_sample_count": 15120,
+      "postgres_settings": "logical|on|10|128",
+      "postgres_version": "180006",
+      "refresh": {
+        "count": 7,
+        "duration_ms": 7598.619
+      },
+      "repetition": 1,
+      "tps": 4997.064326,
+      "transaction_latency_ms": {
+        "p50": 1.4184999999999999,
+        "p95": 2.540199999999997,
+        "p99": 4.1018099999999995
+      }
+    },
+    {
+      "commit": "0d18c6442760444c6b2e5a6cea353c6a18f2ef14",
+      "config": "installed",
+      "correct": true,
+      "cpu": {
+        "container_cpu_us": 101508499,
+        "supported": true,
+        "worker_jiffies": 1,
+        "worker_share": 9.85139185242016e-05
+      },
+      "image": "pg_trickle_e2e:latest",
+      "latency_sample_count": 23523,
+      "postgres_settings": "logical|on|10|128",
+      "postgres_version": "180006",
+      "refresh": {
+        "count": 0,
+        "duration_ms": 0.0
+      },
+      "repetition": 2,
+      "tps": 7772.808541,
+      "transaction_latency_ms": {
+        "p50": 0.922,
+        "p95": 1.55,
+        "p99": 2.34801999999999
+      }
+    },
+    {
+      "commit": "0d18c6442760444c6b2e5a6cea353c6a18f2ef14",
+      "config": "active",
+      "correct": true,
+      "cpu": {
+        "container_cpu_us": 91541728,
+        "supported": true,
+        "worker_jiffies": 16,
+        "worker_share": 0.0017478367897971077
+      },
+      "image": "pg_trickle_e2e:latest",
+      "latency_sample_count": 15301,
+      "postgres_settings": "logical|on|10|128",
+      "postgres_version": "180006",
+      "refresh": {
+        "count": 6,
+        "duration_ms": 7462.735
+      },
+      "repetition": 2,
+      "tps": 5123.549327,
+      "transaction_latency_ms": {
+        "p50": 1.39,
+        "p95": 2.444,
+        "p99": 3.691
+      }
+    },
+    {
+      "commit": "0d18c6442760444c6b2e5a6cea353c6a18f2ef14",
+      "config": "absent",
+      "correct": true,
+      "cpu": {
+        "container_cpu_us": 101604194,
+        "supported": true,
+        "worker_jiffies": 0,
+        "worker_share": 0.0
+      },
+      "image": "postgres:18.6-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc",
+      "latency_sample_count": 22850,
+      "postgres_settings": "logical|on|10|128",
+      "postgres_version": "180006",
+      "refresh": {
+        "count": 0,
+        "duration_ms": 0.0
+      },
+      "repetition": 2,
+      "tps": 7654.929004,
+      "transaction_latency_ms": {
+        "p50": 0.938,
+        "p95": 1.573,
+        "p99": 2.324549999999992
+      }
+    }
+  ],
+  "schema_version": 2,
+  "version": "0.87.0"
+}

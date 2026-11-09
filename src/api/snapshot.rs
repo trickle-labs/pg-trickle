@@ -1266,6 +1266,11 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
         return Err(e);
     }
 
+    if let Err(e) = StreamTableMeta::advance_ann_refresh_epoch(meta.pgt_id) {
+        subtxn.rollback();
+        return Err(e);
+    }
+
     subtxn.commit();
 
     // Signal the DAG to pick up the frontier change

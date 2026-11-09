@@ -1,0 +1,3289 @@
+{
+  "ann": [
+    {
+      "ann_plan": [
+        {
+          "Execution Time": 0.471,
+          "Plan": {
+            "Actual Loops": 1,
+            "Actual Rows": 6.0,
+            "Actual Startup Time": 0.437,
+            "Actual Total Time": 0.457,
+            "Async Capable": false,
+            "Disabled": false,
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Node Type": "Limit",
+            "Parallel Aware": false,
+            "Plan Rows": 10,
+            "Plan Width": 16,
+            "Plans": [
+              {
+                "Actual Loops": 1,
+                "Actual Rows": 6.0,
+                "Actual Startup Time": 0.436,
+                "Actual Total Time": 0.456,
+                "Alias": "vector_bench_corpus",
+                "Async Capable": false,
+                "Disabled": false,
+                "Filter": "(tenant = 1)",
+                "Index Name": "vector_bench_ann",
+                "Index Searches": 1,
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Node Type": "Index Scan",
+                "Order By": "(embedding <=> '[0.6307782,0.7418352,-0.25474188,0.90722996,0.68893176,0.21534416,0.32438603,-0.051452488,0.13676932,0.8433941,0.36623815,-0.8535406,0.63112444,-0.99212,-0.9653021,-0.9664983,-0.81714827,-0.039868608,-0.84276265,0.8977057,-0.13546902,-0.30044773,0.3308283,-0.41390577,0.8485096,-0.6916953,0.46156824,0.01949774,-0.27507868,0.14579378,0.40583923,0.71787107,-0.38309297,-0.6723212,-0.013993247,0.46297598,-0.77452123,-0.38095576,-0.087756515,0.2959734,-0.020826636,0.2605691,0.23515388,0.78731143,0.52745193,0.8842075,-0.7336059,0.61199176,-0.49818256,-0.31355974,-0.7427956,-0.8935276,0.68240404,-0.8373646,-0.3724875,-0.104830354,-0.9531453,-0.023745267,0.8516017,-0.07818735,-0.7942767,-0.3898102,0.4979276,-0.93946284,0.4756915,0.45173442,0.76044697,0.27399227,-0.22304711,-0.41471618,0.54990435,0.52132905,-0.6755981,0.26865315,-0.90694404,0.894582,-0.46509516,-0.20778269,0.33387968,0.89067346,-0.66611195,0.712776,-0.43315065,0.09033732,0.8843229,0.9249437,0.6492094,-0.2458997,0.9012024,-0.6195021,0.7848348,-0.8845388,0.22386274,0.8395731,0.23893178,-0.5771045,-0.60034794,-0.55676156,0.73405886,0.77583015,0.34966546,0.023275943,0.15103728,0.18469818,-0.66316295,0.019062499,-0.044338908,-0.845884,0.12181451,0.09967291,0.073626354,0.67017174,0.65793514,-0.6969726,0.7416222,-0.35693517,-0.8501142,0.4632634,-0.39796966,-0.81808597,0.3762096,0.102402195,0.39463824,0.8015087,-0.34119138,0.236263,0.9708466,0.7256889,-0.33279595,-0.57506853,-0.80140036,0.9813246,0.07826322,0.8501108,0.5153868,-0.1040584,-0.41639134,-0.73905456,-0.30150288,0.0550451,0.42787004,0.087905064,0.5580554,0.39254925,-0.7601457,-0.17801557,-0.3474419,-0.9472143,-0.5019369,-0.35562396,0.26632243,-0.15832978,0.16978683,-0.08718919,0.18992703,0.6222457,-0.6726873,0.63548386,-0.5481479,0.1344,0.78388244,-0.6199973,0.40560687,-0.36237174,0.06478123,0.99198085,0.28465283,0.877081,0.34528983,0.82637656,0.7441647,0.88209873,0.20093304,0.32120472,0.086518876,-0.6248682,-0.19927646,0.07297185,0.6343796,-0.010820167,0.8529213,0.42060927,0.16834198,-0.77434695,-0.5851029,-0.23798631,0.212819,-0.5520285,0.4996812,0.067021966,0.8382142,-0.42620498,-0.45015824,-0.04068221,0.34232622,0.18056144,-0.61188424,-0.6021935,0.8948018,-0.47276354,0.75945234,-0.9180138,0.60381114,0.6490306,-0.1690839,0.52270323,-0.46488684,0.32321534,0.34180224,-0.5308566,0.8061787,-0.38486245,0.6283809,0.039253645,0.76900244,0.8561969,-0.19537178,-0.7451869,-0.0047647557,-0.92028254,-0.50200754,-0.59527516,-0.68103915,0.2713657,0.95977265,-0.11988754,-0.90944636,-0.36086878,-0.083999306,0.7649934,0.5214349,-0.12274696,-0.73194164,-0.7504108,0.16207777,0.32547596,0.76146436,-0.65839314,-0.9869615,0.4957394,-0.58697605,0.1273775,-0.61390895,0.75398594,0.3997029,-0.44917005,0.033374898,0.45636514,0.99761504,-0.7197591,0.39024875,0.31755486,0.65336555,-0.73793644,0.9319697,0.52934444,0.31797826,-0.74100864,0.9722581,-0.9552087,-0.12106006,0.9944291,0.43112636,0.0064028394,0.63513887,0.4415858,0.6654387,0.084966466,-0.25453976,-0.8121299,0.615401,0.06604202,0.31082687,0.90517884,-0.9423435,0.10362121,0.7804375,-0.3310496,-0.3475423,0.010478872,0.8418053,0.3536576,-0.4067864,0.18541016,-0.5778279,0.09587619,0.9451371,0.28315204,-0.47282207,-0.09109008,-0.95007175,0.74026585,0.63398594,-0.6620969,0.99167,0.74756026,0.7046731,0.30260783,0.09005585,0.7655533,-0.82169116,-0.6538403,-0.3235542,0.13072075,0.5236079,0.5230445,-0.28644294,-0.6987797,0.32113138,0.20048727,-0.10059643,0.040695734,-0.72070277,0.7100315,-0.97487867,-0.26576424,-0.3022383,-0.40002182,0.9097254,0.5578338,-0.91197443,-0.30642205,0.22249179,0.8667958,0.73996544,-0.638415,-0.52881444,-0.02077969,0.09965874,-0.6885506,0.9969722,0.26297414,0.8082033,0.67800826,-0.9267773,0.16975103,-0.40171844,-0.47592914,0.48673916,-0.89057416,-0.20246418,-0.9944553,-0.01863706,0.83612865,-0.6273705,-0.11358119,0.37721515,0.50618494,0.66897106,0.92722034,0.28135118,-0.46444723,-0.5137447,0.28254792,-0.31809768,-0.5421322,0.5466714,0.040983275,-0.58418703,-0.77207285,-0.1528763,-0.19332191,-0.40393195,-0.9437193,-0.7984598,0.4663764,-0.090509325,0.8226708,-0.36207962,0.5816646,-0.36555386,0.2646794,0.66505396,-0.39448246,0.76018673,-0.17373972,-0.23263001,0.120037295,-0.6860152,0.38696352,0.11403412,-0.8024409,-0.75456935,-0.9853668]'::vector)",
+                "Parallel Aware": false,
+                "Parent Relationship": "Outer",
+                "Plan Rows": 100,
+                "Plan Width": 16,
+                "Relation Name": "vector_bench_corpus",
+                "Rows Removed by Filter": 34,
+                "Scan Direction": "Forward",
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 822,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Startup Cost": 410.74,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 1824.25,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 0,
+                "WAL FPI": 0,
+                "WAL Records": 0
+              }
+            ],
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 822,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Startup Cost": 410.74,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Total Cost": 552.09,
+            "WAL Buffers Full": 0,
+            "WAL Bytes": 0,
+            "WAL FPI": 0,
+            "WAL Records": 0
+          },
+          "Planning": {
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 39,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          },
+          "Planning Time": 0.119,
+          "Triggers": []
+        }
+      ],
+      "corpus_total_bytes_including_indexes": 3784704,
+      "hnsw_ef_search": "40",
+      "index_bytes": 2056192,
+      "ivfflat_probes": "1",
+      "k": 10,
+      "method": "hnsw",
+      "metric": "cosine",
+      "recall_at_k": [
+        0.6
+      ],
+      "retrieval_ms": {
+        "p50": 0.768708,
+        "p95": 0.768708,
+        "p99": 0.768708,
+        "samples": [
+          0.768708
+        ]
+      },
+      "tenant_fraction": 0.1
+    },
+    {
+      "ann_plan": [
+        {
+          "Execution Time": 0.123,
+          "Plan": {
+            "Actual Loops": 1,
+            "Actual Rows": 7.0,
+            "Actual Startup Time": 0.043,
+            "Actual Total Time": 0.102,
+            "Async Capable": false,
+            "Disabled": false,
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Node Type": "Limit",
+            "Parallel Aware": false,
+            "Plan Rows": 10,
+            "Plan Width": 16,
+            "Plans": [
+              {
+                "Actual Loops": 1,
+                "Actual Rows": 7.0,
+                "Actual Startup Time": 0.042,
+                "Actual Total Time": 0.101,
+                "Alias": "vector_bench_corpus",
+                "Async Capable": false,
+                "Disabled": false,
+                "Filter": "(tenant = 1)",
+                "Index Name": "vector_bench_ann",
+                "Index Searches": 1,
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Node Type": "Index Scan",
+                "Order By": "(embedding <=> '[0.6307782,0.7418352,-0.25474188,0.90722996,0.68893176,0.21534416,0.32438603,-0.051452488,0.13676932,0.8433941,0.36623815,-0.8535406,0.63112444,-0.99212,-0.9653021,-0.9664983,-0.81714827,-0.039868608,-0.84276265,0.8977057,-0.13546902,-0.30044773,0.3308283,-0.41390577,0.8485096,-0.6916953,0.46156824,0.01949774,-0.27507868,0.14579378,0.40583923,0.71787107,-0.38309297,-0.6723212,-0.013993247,0.46297598,-0.77452123,-0.38095576,-0.087756515,0.2959734,-0.020826636,0.2605691,0.23515388,0.78731143,0.52745193,0.8842075,-0.7336059,0.61199176,-0.49818256,-0.31355974,-0.7427956,-0.8935276,0.68240404,-0.8373646,-0.3724875,-0.104830354,-0.9531453,-0.023745267,0.8516017,-0.07818735,-0.7942767,-0.3898102,0.4979276,-0.93946284,0.4756915,0.45173442,0.76044697,0.27399227,-0.22304711,-0.41471618,0.54990435,0.52132905,-0.6755981,0.26865315,-0.90694404,0.894582,-0.46509516,-0.20778269,0.33387968,0.89067346,-0.66611195,0.712776,-0.43315065,0.09033732,0.8843229,0.9249437,0.6492094,-0.2458997,0.9012024,-0.6195021,0.7848348,-0.8845388,0.22386274,0.8395731,0.23893178,-0.5771045,-0.60034794,-0.55676156,0.73405886,0.77583015,0.34966546,0.023275943,0.15103728,0.18469818,-0.66316295,0.019062499,-0.044338908,-0.845884,0.12181451,0.09967291,0.073626354,0.67017174,0.65793514,-0.6969726,0.7416222,-0.35693517,-0.8501142,0.4632634,-0.39796966,-0.81808597,0.3762096,0.102402195,0.39463824,0.8015087,-0.34119138,0.236263,0.9708466,0.7256889,-0.33279595,-0.57506853,-0.80140036,0.9813246,0.07826322,0.8501108,0.5153868,-0.1040584,-0.41639134,-0.73905456,-0.30150288,0.0550451,0.42787004,0.087905064,0.5580554,0.39254925,-0.7601457,-0.17801557,-0.3474419,-0.9472143,-0.5019369,-0.35562396,0.26632243,-0.15832978,0.16978683,-0.08718919,0.18992703,0.6222457,-0.6726873,0.63548386,-0.5481479,0.1344,0.78388244,-0.6199973,0.40560687,-0.36237174,0.06478123,0.99198085,0.28465283,0.877081,0.34528983,0.82637656,0.7441647,0.88209873,0.20093304,0.32120472,0.086518876,-0.6248682,-0.19927646,0.07297185,0.6343796,-0.010820167,0.8529213,0.42060927,0.16834198,-0.77434695,-0.5851029,-0.23798631,0.212819,-0.5520285,0.4996812,0.067021966,0.8382142,-0.42620498,-0.45015824,-0.04068221,0.34232622,0.18056144,-0.61188424,-0.6021935,0.8948018,-0.47276354,0.75945234,-0.9180138,0.60381114,0.6490306,-0.1690839,0.52270323,-0.46488684,0.32321534,0.34180224,-0.5308566,0.8061787,-0.38486245,0.6283809,0.039253645,0.76900244,0.8561969,-0.19537178,-0.7451869,-0.0047647557,-0.92028254,-0.50200754,-0.59527516,-0.68103915,0.2713657,0.95977265,-0.11988754,-0.90944636,-0.36086878,-0.083999306,0.7649934,0.5214349,-0.12274696,-0.73194164,-0.7504108,0.16207777,0.32547596,0.76146436,-0.65839314,-0.9869615,0.4957394,-0.58697605,0.1273775,-0.61390895,0.75398594,0.3997029,-0.44917005,0.033374898,0.45636514,0.99761504,-0.7197591,0.39024875,0.31755486,0.65336555,-0.73793644,0.9319697,0.52934444,0.31797826,-0.74100864,0.9722581,-0.9552087,-0.12106006,0.9944291,0.43112636,0.0064028394,0.63513887,0.4415858,0.6654387,0.084966466,-0.25453976,-0.8121299,0.615401,0.06604202,0.31082687,0.90517884,-0.9423435,0.10362121,0.7804375,-0.3310496,-0.3475423,0.010478872,0.8418053,0.3536576,-0.4067864,0.18541016,-0.5778279,0.09587619,0.9451371,0.28315204,-0.47282207,-0.09109008,-0.95007175,0.74026585,0.63398594,-0.6620969,0.99167,0.74756026,0.7046731,0.30260783,0.09005585,0.7655533,-0.82169116,-0.6538403,-0.3235542,0.13072075,0.5236079,0.5230445,-0.28644294,-0.6987797,0.32113138,0.20048727,-0.10059643,0.040695734,-0.72070277,0.7100315,-0.97487867,-0.26576424,-0.3022383,-0.40002182,0.9097254,0.5578338,-0.91197443,-0.30642205,0.22249179,0.8667958,0.73996544,-0.638415,-0.52881444,-0.02077969,0.09965874,-0.6885506,0.9969722,0.26297414,0.8082033,0.67800826,-0.9267773,0.16975103,-0.40171844,-0.47592914,0.48673916,-0.89057416,-0.20246418,-0.9944553,-0.01863706,0.83612865,-0.6273705,-0.11358119,0.37721515,0.50618494,0.66897106,0.92722034,0.28135118,-0.46444723,-0.5137447,0.28254792,-0.31809768,-0.5421322,0.5466714,0.040983275,-0.58418703,-0.77207285,-0.1528763,-0.19332191,-0.40393195,-0.9437193,-0.7984598,0.4663764,-0.090509325,0.8226708,-0.36207962,0.5816646,-0.36555386,0.2646794,0.66505396,-0.39448246,0.76018673,-0.17373972,-0.23263001,0.120037295,-0.6860152,0.38696352,0.11403412,-0.8024409,-0.75456935,-0.9853668]'::vector)",
+                "Parallel Aware": false,
+                "Parent Relationship": "Outer",
+                "Plan Rows": 100,
+                "Plan Width": 16,
+                "Relation Name": "vector_bench_corpus",
+                "Rows Removed by Filter": 91,
+                "Scan Direction": "Forward",
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 120,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Startup Cost": 52.25,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 1335.25,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 0,
+                "WAL FPI": 0,
+                "WAL Records": 0
+              }
+            ],
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 120,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Startup Cost": 52.25,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Total Cost": 180.55,
+            "WAL Buffers Full": 0,
+            "WAL Bytes": 0,
+            "WAL FPI": 0,
+            "WAL Records": 0
+          },
+          "Planning": {
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 36,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          },
+          "Planning Time": 0.174,
+          "Triggers": []
+        }
+      ],
+      "corpus_total_bytes_including_indexes": 3416064,
+      "hnsw_ef_search": "40",
+      "index_bytes": 1687552,
+      "ivfflat_probes": "1",
+      "k": 10,
+      "method": "ivfflat",
+      "metric": "cosine",
+      "recall_at_k": [
+        0.4
+      ],
+      "retrieval_ms": {
+        "p50": 0.751458,
+        "p95": 0.751458,
+        "p99": 0.751458,
+        "samples": [
+          0.751458
+        ]
+      },
+      "tenant_fraction": 0.1
+    }
+  ],
+  "centroid_baseline": [
+    {
+      "affected_group_rows": 9,
+      "changed_rows": 1,
+      "group_shape": "small",
+      "refresh": [
+        {
+          "actual_strategy": "merge",
+          "auxiliary_state_logical_bytes": 0,
+          "elapsed_ms": 17.619,
+          "max_absolute_component_error": 0.0,
+          "mode": "DIFFERENTIAL",
+          "refresh_plan": [
+            {
+              "Execution Time": 13.295,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 13.292,
+                "Actual Total Time": 13.293,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 1,
+                "Local Hit Blocks": 2,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 1,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 2,
+                "Shared Hit Blocks": 1755,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 2,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 33069,
+                "WAL FPI": 0,
+                "WAL Records": 248
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.003,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 900,
+          "storage_bytes_including_indexes": 237568,
+          "strategy": "group_rescan",
+          "wal_bytes_cluster_wide": 43280.0
+        },
+        {
+          "actual_strategy": "centroid_algebraic",
+          "auxiliary_state_logical_bytes": 933300,
+          "elapsed_ms": 25.943,
+          "max_absolute_component_error": 0.0,
+          "mode": "DIFFERENTIAL",
+          "refresh_plan": [
+            {
+              "Execution Time": 21.977,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 21.97,
+                "Actual Total Time": 21.97,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 11,
+                "Local Hit Blocks": 76,
+                "Local Read Blocks": 2,
+                "Local Written Blocks": 9,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 8,
+                "Shared Hit Blocks": 3685,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 8,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 121041,
+                "WAL FPI": 0,
+                "WAL Records": 1051
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.015,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "storage_bytes_including_indexes": 237568,
+          "strategy": "algebraic",
+          "wal_bytes_cluster_wide": 157232.0
+        },
+        {
+          "actual_strategy": "FULL",
+          "auxiliary_state_logical_bytes": 0,
+          "elapsed_ms": 15.434916999999999,
+          "max_absolute_component_error": 0.0,
+          "mode": "FULL",
+          "refresh_plan": [
+            {
+              "Execution Time": 11.754,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 11.749,
+                "Actual Total Time": 11.749,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 23,
+                "Shared Hit Blocks": 1087,
+                "Shared Read Blocks": 1,
+                "Shared Written Blocks": 24,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 185702,
+                "WAL FPI": 3,
+                "WAL Records": 271
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.011,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 900,
+          "storage_bytes_including_indexes": 212992,
+          "strategy": "full",
+          "wal_bytes_cluster_wide": 187344.0
+        }
+      ],
+      "representative_group_query_plan": [
+        {
+          "Execution Time": 0.047,
+          "Plan": {
+            "Actual Loops": 1,
+            "Actual Rows": 1.0,
+            "Actual Startup Time": 0.039,
+            "Actual Total Time": 0.039,
+            "Async Capable": false,
+            "Disabled": false,
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Node Type": "Aggregate",
+            "Parallel Aware": false,
+            "Partial Mode": "Simple",
+            "Plan Rows": 1,
+            "Plan Width": 32,
+            "Plans": [
+              {
+                "Actual Loops": 1,
+                "Actual Rows": 9.0,
+                "Actual Startup Time": 0.006,
+                "Actual Total Time": 0.011,
+                "Alias": "vector_centroid_source",
+                "Async Capable": false,
+                "Disabled": false,
+                "Exact Heap Blocks": 10,
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Lossy Heap Blocks": 0,
+                "Node Type": "Bitmap Heap Scan",
+                "Parallel Aware": false,
+                "Parent Relationship": "Outer",
+                "Plan Rows": 9,
+                "Plan Width": 1544,
+                "Plans": [
+                  {
+                    "Actual Loops": 1,
+                    "Actual Rows": 10.0,
+                    "Actual Startup Time": 0.003,
+                    "Actual Total Time": 0.003,
+                    "Async Capable": false,
+                    "Disabled": false,
+                    "Index Cond": "(small_group = 99)",
+                    "Index Name": "vector_centroid_small_group",
+                    "Index Searches": 1,
+                    "Local Dirtied Blocks": 0,
+                    "Local Hit Blocks": 0,
+                    "Local Read Blocks": 0,
+                    "Local Written Blocks": 0,
+                    "Node Type": "Bitmap Index Scan",
+                    "Parallel Aware": false,
+                    "Parent Relationship": "Outer",
+                    "Plan Rows": 9,
+                    "Plan Width": 0,
+                    "Shared Dirtied Blocks": 0,
+                    "Shared Hit Blocks": 2,
+                    "Shared Read Blocks": 0,
+                    "Shared Written Blocks": 0,
+                    "Startup Cost": 0.0,
+                    "Temp Read Blocks": 0,
+                    "Temp Written Blocks": 0,
+                    "Total Cost": 4.34
+                  }
+                ],
+                "Recheck Cond": "(small_group = 99)",
+                "Relation Name": "vector_centroid_source",
+                "Rows Removed by Index Recheck": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 12,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Startup Cost": 4.34,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 34.44
+              }
+            ],
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 12,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Startup Cost": 34.46,
+            "Strategy": "Plain",
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Total Cost": 34.47
+          },
+          "Planning": {
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          },
+          "Planning Time": 0.024,
+          "Triggers": []
+        }
+      ]
+    },
+    {
+      "affected_group_rows": 450,
+      "changed_rows": 1,
+      "group_shape": "large",
+      "refresh": [
+        {
+          "actual_strategy": "merge",
+          "auxiliary_state_logical_bytes": 0,
+          "elapsed_ms": 18.194458,
+          "max_absolute_component_error": 0.0,
+          "mode": "DIFFERENTIAL",
+          "refresh_plan": [
+            {
+              "Execution Time": 14.993,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 14.99,
+                "Actual Total Time": 14.991,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 1,
+                "Local Hit Blocks": 3,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 1,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 1,
+                "Shared Hit Blocks": 1293,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 1,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 30641,
+                "WAL FPI": 0,
+                "WAL Records": 239
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.013,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 900,
+          "storage_bytes_including_indexes": 49152,
+          "strategy": "group_rescan",
+          "wal_bytes_cluster_wide": 40920.0
+        },
+        {
+          "actual_strategy": "centroid_algebraic",
+          "auxiliary_state_logical_bytes": 18666,
+          "elapsed_ms": 23.197833000000003,
+          "max_absolute_component_error": 0.0,
+          "mode": "DIFFERENTIAL",
+          "refresh_plan": [
+            {
+              "Execution Time": 19.304,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 19.301,
+                "Actual Total Time": 19.301,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 11,
+                "Local Hit Blocks": 78,
+                "Local Read Blocks": 2,
+                "Local Written Blocks": 9,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 5,
+                "Shared Hit Blocks": 3318,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 5,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 117930,
+                "WAL FPI": 0,
+                "WAL Records": 1037
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.008,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "storage_bytes_including_indexes": 49152,
+          "strategy": "algebraic",
+          "wal_bytes_cluster_wide": 155064.0
+        },
+        {
+          "actual_strategy": "FULL",
+          "auxiliary_state_logical_bytes": 0,
+          "elapsed_ms": 14.913499999999999,
+          "max_absolute_component_error": 0.0,
+          "mode": "FULL",
+          "refresh_plan": [
+            {
+              "Execution Time": 10.703,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 10.699,
+                "Actual Total Time": 10.7,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 3,
+                "Shared Hit Blocks": 911,
+                "Shared Read Blocks": 1,
+                "Shared Written Blocks": 2,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 11713,
+                "WAL FPI": 2,
+                "WAL Records": 76
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.004,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 900,
+          "storage_bytes_including_indexes": 32768,
+          "strategy": "full",
+          "wal_bytes_cluster_wide": 12400.0
+        }
+      ],
+      "representative_group_query_plan": [
+        {
+          "Execution Time": 1.578,
+          "Plan": {
+            "Actual Loops": 1,
+            "Actual Rows": 1.0,
+            "Actual Startup Time": 1.567,
+            "Actual Total Time": 1.567,
+            "Async Capable": false,
+            "Disabled": false,
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Node Type": "Aggregate",
+            "Parallel Aware": false,
+            "Partial Mode": "Simple",
+            "Plan Rows": 1,
+            "Plan Width": 32,
+            "Plans": [
+              {
+                "Actual Loops": 1,
+                "Actual Rows": 450.0,
+                "Actual Startup Time": 0.007,
+                "Actual Total Time": 0.36,
+                "Alias": "vector_centroid_source",
+                "Async Capable": false,
+                "Disabled": false,
+                "Filter": "(large_group = 1)",
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Node Type": "Seq Scan",
+                "Parallel Aware": false,
+                "Parent Relationship": "Outer",
+                "Plan Rows": 452,
+                "Plan Width": 1544,
+                "Relation Name": "vector_centroid_source",
+                "Rows Removed by Filter": 450,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 181,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 192.31
+              }
+            ],
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 181,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Startup Cost": 193.44,
+            "Strategy": "Plain",
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Total Cost": 193.45
+          },
+          "Planning": {
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          },
+          "Planning Time": 0.054,
+          "Triggers": []
+        }
+      ]
+    }
+  ],
+  "centroid_notes": "Each refresh is executed under EXPLAIN ANALYZE; SPI work may not be individually visible in the plan. Source tuple counters cover same-transaction sequential returns and index fetches, including repeated visits, during the refresh. Group rescan, algebraic and FULL run in that order. WAL excludes the source mutation; auxiliary bytes are logical payload estimates.",
+  "centroid_repeated": {
+    "changed_rows_per_round": 1,
+    "notes": "Each round changes the configured number of source vectors; group and strategy order rotate. All affected groups are checked against native AVG. Times cover the refresh call without EXPLAIN, mutation or validation. No warmup, concurrent load, or repeated rebase measurements.",
+    "observations": [
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 17.900209,
+        "group_shape": "small",
+        "round": 0,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.489250000000002,
+        "group_shape": "small",
+        "round": 0,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.595666,
+        "group_shape": "small",
+        "round": 0,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.216417,
+        "group_shape": "large",
+        "round": 0,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.715458,
+        "group_shape": "large",
+        "round": 0,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.579374999999999,
+        "group_shape": "large",
+        "round": 0,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.912291,
+        "group_shape": "large",
+        "round": 1,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 10.822667,
+        "group_shape": "large",
+        "round": 1,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.161375,
+        "group_shape": "large",
+        "round": 1,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.563666,
+        "group_shape": "small",
+        "round": 1,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.128833,
+        "group_shape": "small",
+        "round": 1,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.018334,
+        "group_shape": "small",
+        "round": 1,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.486209,
+        "group_shape": "small",
+        "round": 2,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.152333,
+        "group_shape": "small",
+        "round": 2,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.402957999999998,
+        "group_shape": "small",
+        "round": 2,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 10.886292000000001,
+        "group_shape": "large",
+        "round": 2,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 15.046040999999999,
+        "group_shape": "large",
+        "round": 2,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.333291,
+        "group_shape": "large",
+        "round": 2,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.177916,
+        "group_shape": "large",
+        "round": 3,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.963083,
+        "group_shape": "large",
+        "round": 3,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.5875,
+        "group_shape": "large",
+        "round": 3,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.738333,
+        "group_shape": "small",
+        "round": 3,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.052125,
+        "group_shape": "small",
+        "round": 3,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.749165999999999,
+        "group_shape": "small",
+        "round": 3,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.707084000000002,
+        "group_shape": "small",
+        "round": 4,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.708625,
+        "group_shape": "small",
+        "round": 4,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.945165999999999,
+        "group_shape": "small",
+        "round": 4,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.87625,
+        "group_shape": "large",
+        "round": 4,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.331041,
+        "group_shape": "large",
+        "round": 4,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.895583,
+        "group_shape": "large",
+        "round": 4,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.939207999999999,
+        "group_shape": "large",
+        "round": 5,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.21175,
+        "group_shape": "large",
+        "round": 5,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.002665999999998,
+        "group_shape": "large",
+        "round": 5,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.071083,
+        "group_shape": "small",
+        "round": 5,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.993375,
+        "group_shape": "small",
+        "round": 5,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.641083000000002,
+        "group_shape": "small",
+        "round": 5,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.157166,
+        "group_shape": "small",
+        "round": 6,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.684833,
+        "group_shape": "small",
+        "round": 6,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.156333,
+        "group_shape": "small",
+        "round": 6,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.62125,
+        "group_shape": "large",
+        "round": 6,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.048292,
+        "group_shape": "large",
+        "round": 6,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.679749999999999,
+        "group_shape": "large",
+        "round": 6,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.176167,
+        "group_shape": "large",
+        "round": 7,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.091,
+        "group_shape": "large",
+        "round": 7,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.359874999999999,
+        "group_shape": "large",
+        "round": 7,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.365167,
+        "group_shape": "small",
+        "round": 7,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 13.697167,
+        "group_shape": "small",
+        "round": 7,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.399167,
+        "group_shape": "small",
+        "round": 7,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.802916,
+        "group_shape": "small",
+        "round": 8,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.406708,
+        "group_shape": "small",
+        "round": 8,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.470958,
+        "group_shape": "small",
+        "round": 8,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 10.944,
+        "group_shape": "large",
+        "round": 8,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.956792,
+        "group_shape": "large",
+        "round": 8,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.406,
+        "group_shape": "large",
+        "round": 8,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.818875,
+        "group_shape": "large",
+        "round": 9,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.654583,
+        "group_shape": "large",
+        "round": 9,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.4205,
+        "group_shape": "large",
+        "round": 9,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.605083,
+        "group_shape": "small",
+        "round": 9,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.708416,
+        "group_shape": "small",
+        "round": 9,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.711083,
+        "group_shape": "small",
+        "round": 9,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.674875,
+        "group_shape": "small",
+        "round": 10,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.412666,
+        "group_shape": "small",
+        "round": 10,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.408333,
+        "group_shape": "small",
+        "round": 10,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.992792,
+        "group_shape": "large",
+        "round": 10,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.136958,
+        "group_shape": "large",
+        "round": 10,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.32325,
+        "group_shape": "large",
+        "round": 10,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.686708000000001,
+        "group_shape": "large",
+        "round": 11,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.735667,
+        "group_shape": "large",
+        "round": 11,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.748292,
+        "group_shape": "large",
+        "round": 11,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.21675,
+        "group_shape": "small",
+        "round": 11,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.039,
+        "group_shape": "small",
+        "round": 11,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 39.159333,
+        "group_shape": "small",
+        "round": 11,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.940667,
+        "group_shape": "small",
+        "round": 12,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.213041,
+        "group_shape": "small",
+        "round": 12,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.610042,
+        "group_shape": "small",
+        "round": 12,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.864916999999998,
+        "group_shape": "large",
+        "round": 12,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.047084,
+        "group_shape": "large",
+        "round": 12,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.905208,
+        "group_shape": "large",
+        "round": 12,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.422417,
+        "group_shape": "large",
+        "round": 13,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.334208,
+        "group_shape": "large",
+        "round": 13,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.273833,
+        "group_shape": "large",
+        "round": 13,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.482709,
+        "group_shape": "small",
+        "round": 13,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.788708,
+        "group_shape": "small",
+        "round": 13,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.091083999999999,
+        "group_shape": "small",
+        "round": 13,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.999832999999999,
+        "group_shape": "small",
+        "round": 14,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.966208,
+        "group_shape": "small",
+        "round": 14,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.194917,
+        "group_shape": "small",
+        "round": 14,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 10.760917,
+        "group_shape": "large",
+        "round": 14,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.764332999999999,
+        "group_shape": "large",
+        "round": 14,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.532542,
+        "group_shape": "large",
+        "round": 14,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.637958000000001,
+        "group_shape": "large",
+        "round": 15,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.989667,
+        "group_shape": "large",
+        "round": 15,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.299083999999999,
+        "group_shape": "large",
+        "round": 15,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.406709,
+        "group_shape": "small",
+        "round": 15,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.239375,
+        "group_shape": "small",
+        "round": 15,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.71925,
+        "group_shape": "small",
+        "round": 15,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.899208,
+        "group_shape": "small",
+        "round": 16,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.556541,
+        "group_shape": "small",
+        "round": 16,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.056833,
+        "group_shape": "small",
+        "round": 16,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.23025,
+        "group_shape": "large",
+        "round": 16,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.909208,
+        "group_shape": "large",
+        "round": 16,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.178583,
+        "group_shape": "large",
+        "round": 16,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.147374999999998,
+        "group_shape": "large",
+        "round": 17,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.663334,
+        "group_shape": "large",
+        "round": 17,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.066209,
+        "group_shape": "large",
+        "round": 17,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.119292,
+        "group_shape": "small",
+        "round": 17,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.446291,
+        "group_shape": "small",
+        "round": 17,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.6345,
+        "group_shape": "small",
+        "round": 17,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.356375,
+        "group_shape": "small",
+        "round": 18,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.789915999999998,
+        "group_shape": "small",
+        "round": 18,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.849792,
+        "group_shape": "small",
+        "round": 18,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.41325,
+        "group_shape": "large",
+        "round": 18,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.906167,
+        "group_shape": "large",
+        "round": 18,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.474666999999998,
+        "group_shape": "large",
+        "round": 18,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.669208,
+        "group_shape": "large",
+        "round": 19,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.952625000000001,
+        "group_shape": "large",
+        "round": 19,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.224832999999999,
+        "group_shape": "large",
+        "round": 19,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.346709,
+        "group_shape": "small",
+        "round": 19,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.074166,
+        "group_shape": "small",
+        "round": 19,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.214625,
+        "group_shape": "small",
+        "round": 19,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.526459000000001,
+        "group_shape": "small",
+        "round": 20,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.838709,
+        "group_shape": "small",
+        "round": 20,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.0775,
+        "group_shape": "small",
+        "round": 20,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.807291,
+        "group_shape": "large",
+        "round": 20,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 16.556749999999997,
+        "group_shape": "large",
+        "round": 20,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.42275,
+        "group_shape": "large",
+        "round": 20,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.835040999999999,
+        "group_shape": "large",
+        "round": 21,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.761333,
+        "group_shape": "large",
+        "round": 21,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.009374999999999,
+        "group_shape": "large",
+        "round": 21,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.044333,
+        "group_shape": "small",
+        "round": 21,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.757709,
+        "group_shape": "small",
+        "round": 21,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.100292,
+        "group_shape": "small",
+        "round": 21,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.881291,
+        "group_shape": "small",
+        "round": 22,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.722625,
+        "group_shape": "small",
+        "round": 22,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.77475,
+        "group_shape": "small",
+        "round": 22,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.726166,
+        "group_shape": "large",
+        "round": 22,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 13.837292,
+        "group_shape": "large",
+        "round": 22,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.050082999999999,
+        "group_shape": "large",
+        "round": 22,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.161542,
+        "group_shape": "large",
+        "round": 23,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.115834000000001,
+        "group_shape": "large",
+        "round": 23,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.157167,
+        "group_shape": "large",
+        "round": 23,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.345292,
+        "group_shape": "small",
+        "round": 23,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.451584,
+        "group_shape": "small",
+        "round": 23,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.744416,
+        "group_shape": "small",
+        "round": 23,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.981207999999999,
+        "group_shape": "small",
+        "round": 24,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.647458,
+        "group_shape": "small",
+        "round": 24,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.722333,
+        "group_shape": "small",
+        "round": 24,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.598333,
+        "group_shape": "large",
+        "round": 24,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.861874999999998,
+        "group_shape": "large",
+        "round": 24,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.126083,
+        "group_shape": "large",
+        "round": 24,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.502375,
+        "group_shape": "large",
+        "round": 25,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.650708,
+        "group_shape": "large",
+        "round": 25,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.176209,
+        "group_shape": "large",
+        "round": 25,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.950875,
+        "group_shape": "small",
+        "round": 25,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.974749999999998,
+        "group_shape": "small",
+        "round": 25,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.084166,
+        "group_shape": "small",
+        "round": 25,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.867459,
+        "group_shape": "small",
+        "round": 26,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 15.657667,
+        "group_shape": "small",
+        "round": 26,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.421292,
+        "group_shape": "small",
+        "round": 26,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.523292,
+        "group_shape": "large",
+        "round": 26,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.241542,
+        "group_shape": "large",
+        "round": 26,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 18.867667,
+        "group_shape": "large",
+        "round": 26,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.686541,
+        "group_shape": "large",
+        "round": 27,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.936291,
+        "group_shape": "large",
+        "round": 27,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.684791,
+        "group_shape": "large",
+        "round": 27,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 15.00625,
+        "group_shape": "small",
+        "round": 27,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.583625,
+        "group_shape": "small",
+        "round": 27,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 13.950166999999999,
+        "group_shape": "small",
+        "round": 27,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.791791999999997,
+        "group_shape": "small",
+        "round": 28,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.898667000000001,
+        "group_shape": "small",
+        "round": 28,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.342042,
+        "group_shape": "small",
+        "round": 28,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.023334,
+        "group_shape": "large",
+        "round": 28,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.802417,
+        "group_shape": "large",
+        "round": 28,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.919292,
+        "group_shape": "large",
+        "round": 28,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.847708,
+        "group_shape": "large",
+        "round": 29,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.68,
+        "group_shape": "large",
+        "round": 29,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.583541,
+        "group_shape": "large",
+        "round": 29,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.298959,
+        "group_shape": "small",
+        "round": 29,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.043875,
+        "group_shape": "small",
+        "round": 29,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.418667000000003,
+        "group_shape": "small",
+        "round": 29,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.494583,
+        "group_shape": "small",
+        "round": 30,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.035625,
+        "group_shape": "small",
+        "round": 30,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.958792,
+        "group_shape": "small",
+        "round": 30,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.58325,
+        "group_shape": "large",
+        "round": 30,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.992625,
+        "group_shape": "large",
+        "round": 30,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 10.93525,
+        "group_shape": "large",
+        "round": 30,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.639374999999998,
+        "group_shape": "large",
+        "round": 31,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.288084,
+        "group_shape": "large",
+        "round": 31,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.325,
+        "group_shape": "large",
+        "round": 31,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.863875,
+        "group_shape": "small",
+        "round": 31,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.716375,
+        "group_shape": "small",
+        "round": 31,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.031459,
+        "group_shape": "small",
+        "round": 31,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.617292,
+        "group_shape": "small",
+        "round": 32,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.742125000000001,
+        "group_shape": "small",
+        "round": 32,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.769875,
+        "group_shape": "small",
+        "round": 32,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.503167,
+        "group_shape": "large",
+        "round": 32,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.575417,
+        "group_shape": "large",
+        "round": 32,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.355209,
+        "group_shape": "large",
+        "round": 32,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.101208,
+        "group_shape": "large",
+        "round": 33,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.504958,
+        "group_shape": "large",
+        "round": 33,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.259,
+        "group_shape": "large",
+        "round": 33,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.815625,
+        "group_shape": "small",
+        "round": 33,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.866041000000003,
+        "group_shape": "small",
+        "round": 33,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.068999999999999,
+        "group_shape": "small",
+        "round": 33,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.521,
+        "group_shape": "small",
+        "round": 34,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.8785,
+        "group_shape": "small",
+        "round": 34,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.311499999999999,
+        "group_shape": "small",
+        "round": 34,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.663625,
+        "group_shape": "large",
+        "round": 34,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.262291000000001,
+        "group_shape": "large",
+        "round": 34,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 16.401875,
+        "group_shape": "large",
+        "round": 34,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.685208000000001,
+        "group_shape": "large",
+        "round": 35,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.620541,
+        "group_shape": "large",
+        "round": 35,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.469625,
+        "group_shape": "large",
+        "round": 35,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.324583,
+        "group_shape": "small",
+        "round": 35,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.204792,
+        "group_shape": "small",
+        "round": 35,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.058166,
+        "group_shape": "small",
+        "round": 35,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.430542,
+        "group_shape": "small",
+        "round": 36,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.499958,
+        "group_shape": "small",
+        "round": 36,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.096959,
+        "group_shape": "small",
+        "round": 36,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.678500000000001,
+        "group_shape": "large",
+        "round": 36,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.601333,
+        "group_shape": "large",
+        "round": 36,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.291792000000001,
+        "group_shape": "large",
+        "round": 36,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.8735,
+        "group_shape": "large",
+        "round": 37,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.251125,
+        "group_shape": "large",
+        "round": 37,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.714125000000001,
+        "group_shape": "large",
+        "round": 37,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.9775,
+        "group_shape": "small",
+        "round": 37,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.398583,
+        "group_shape": "small",
+        "round": 37,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.787208,
+        "group_shape": "small",
+        "round": 37,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.362125,
+        "group_shape": "small",
+        "round": 38,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.314,
+        "group_shape": "small",
+        "round": 38,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.479625000000002,
+        "group_shape": "small",
+        "round": 38,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.619167,
+        "group_shape": "large",
+        "round": 38,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.926875,
+        "group_shape": "large",
+        "round": 38,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.182416,
+        "group_shape": "large",
+        "round": 38,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.950292,
+        "group_shape": "large",
+        "round": 39,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.297709,
+        "group_shape": "large",
+        "round": 39,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.872542,
+        "group_shape": "large",
+        "round": 39,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.26675,
+        "group_shape": "small",
+        "round": 39,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.185166,
+        "group_shape": "small",
+        "round": 39,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 13.303208,
+        "group_shape": "small",
+        "round": 39,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 36.17125,
+        "group_shape": "small",
+        "round": 40,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 13.07625,
+        "group_shape": "small",
+        "round": 40,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.2655,
+        "group_shape": "small",
+        "round": 40,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.617957999999998,
+        "group_shape": "large",
+        "round": 40,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.383166,
+        "group_shape": "large",
+        "round": 40,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.487666,
+        "group_shape": "large",
+        "round": 40,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.202458,
+        "group_shape": "large",
+        "round": 41,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.883958999999999,
+        "group_shape": "large",
+        "round": 41,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.431666,
+        "group_shape": "large",
+        "round": 41,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.140042,
+        "group_shape": "small",
+        "round": 41,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.050958,
+        "group_shape": "small",
+        "round": 41,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.694208,
+        "group_shape": "small",
+        "round": 41,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.962167,
+        "group_shape": "small",
+        "round": 42,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.005,
+        "group_shape": "small",
+        "round": 42,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 15.074250000000001,
+        "group_shape": "small",
+        "round": 42,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.051667,
+        "group_shape": "large",
+        "round": 42,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.256209000000002,
+        "group_shape": "large",
+        "round": 42,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.47625,
+        "group_shape": "large",
+        "round": 42,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.604666,
+        "group_shape": "large",
+        "round": 43,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.879084,
+        "group_shape": "large",
+        "round": 43,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.502416,
+        "group_shape": "large",
+        "round": 43,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.988958,
+        "group_shape": "small",
+        "round": 43,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.213042,
+        "group_shape": "small",
+        "round": 43,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.279667,
+        "group_shape": "small",
+        "round": 43,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.881124999999999,
+        "group_shape": "small",
+        "round": 44,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.714459,
+        "group_shape": "small",
+        "round": 44,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.881083,
+        "group_shape": "small",
+        "round": 44,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 10.938167,
+        "group_shape": "large",
+        "round": 44,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.6935,
+        "group_shape": "large",
+        "round": 44,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.787084,
+        "group_shape": "large",
+        "round": 44,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.666708,
+        "group_shape": "large",
+        "round": 45,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.045958,
+        "group_shape": "large",
+        "round": 45,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.339083,
+        "group_shape": "large",
+        "round": 45,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.873166,
+        "group_shape": "small",
+        "round": 45,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.721917,
+        "group_shape": "small",
+        "round": 45,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.353917000000001,
+        "group_shape": "small",
+        "round": 45,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.284582999999998,
+        "group_shape": "small",
+        "round": 46,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.648334,
+        "group_shape": "small",
+        "round": 46,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.04275,
+        "group_shape": "small",
+        "round": 46,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.349042,
+        "group_shape": "large",
+        "round": 46,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.70525,
+        "group_shape": "large",
+        "round": 46,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.026083,
+        "group_shape": "large",
+        "round": 46,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.013959,
+        "group_shape": "large",
+        "round": 47,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.783416,
+        "group_shape": "large",
+        "round": 47,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.104375,
+        "group_shape": "large",
+        "round": 47,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.405292,
+        "group_shape": "small",
+        "round": 47,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.25175,
+        "group_shape": "small",
+        "round": 47,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 23.519792000000002,
+        "group_shape": "small",
+        "round": 47,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.730917,
+        "group_shape": "small",
+        "round": 48,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.651666,
+        "group_shape": "small",
+        "round": 48,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 14.053458,
+        "group_shape": "small",
+        "round": 48,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 16.094334,
+        "group_shape": "large",
+        "round": 48,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.81075,
+        "group_shape": "large",
+        "round": 48,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 11.337417,
+        "group_shape": "large",
+        "round": 48,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 19.514875,
+        "group_shape": "large",
+        "round": 49,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.864916000000001,
+        "group_shape": "large",
+        "round": 49,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.429708,
+        "group_shape": "large",
+        "round": 49,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.706625000000003,
+        "group_shape": "small",
+        "round": 49,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 12.139333,
+        "group_shape": "small",
+        "round": 49,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 12.574708000000001,
+        "group_shape": "small",
+        "round": 49,
+        "strategy": "differential"
+      }
+    ],
+    "rounds": 50,
+    "summary": [
+      {
+        "group_shape": "small",
+        "refresh_ms": {
+          "p50": 12.993375,
+          "p95": 15.00625,
+          "p99": 17.900209,
+          "samples": [
+            12.043875,
+            12.056833,
+            12.214625,
+            12.311499999999999,
+            12.314,
+            12.342042,
+            12.406708,
+            12.406709,
+            12.408333,
+            12.451584,
+            12.494583,
+            12.574708000000001,
+            12.714459,
+            12.730917,
+            12.77475,
+            12.787208,
+            12.815625,
+            12.838709,
+            12.873166,
+            12.940667,
+            12.945165999999999,
+            12.962167,
+            12.966208,
+            12.981207999999999,
+            12.993375,
+            13.018334,
+            13.031459,
+            13.039,
+            13.04275,
+            13.044333,
+            13.050958,
+            13.084166,
+            13.091083999999999,
+            13.152333,
+            13.204792,
+            13.25175,
+            13.2655,
+            13.26675,
+            13.279667,
+            13.356375,
+            13.399167,
+            13.430542,
+            13.446291,
+            13.605083,
+            13.738333,
+            13.742125000000001,
+            14.157166,
+            15.00625,
+            15.657667,
+            17.900209
+          ]
+        },
+        "strategy": "differential"
+      },
+      {
+        "group_shape": "small",
+        "refresh_ms": {
+          "p50": 20.6345,
+          "p95": 23.519792000000002,
+          "p99": 39.159333,
+          "samples": [
+            19.239375,
+            19.346709,
+            19.470958,
+            19.694208,
+            19.744416,
+            19.791791999999997,
+            19.863875,
+            19.866041000000003,
+            19.881083,
+            19.899208,
+            19.9775,
+            20.005,
+            20.058166,
+            20.0775,
+            20.194917,
+            20.213041,
+            20.365167,
+            20.402957999999998,
+            20.418667000000003,
+            20.479625000000002,
+            20.489250000000002,
+            20.521,
+            20.563666,
+            20.583625,
+            20.6345,
+            20.641083000000002,
+            20.647458,
+            20.674875,
+            20.684833,
+            20.707084000000002,
+            20.708416,
+            20.757709,
+            20.769875,
+            20.789915999999998,
+            20.881291,
+            20.950875,
+            20.988958,
+            21.035625,
+            21.052125,
+            21.284582999999998,
+            21.421292,
+            21.482709,
+            21.651666,
+            21.721917,
+            22.185166,
+            22.499958,
+            22.706625000000003,
+            23.519792000000002,
+            36.17125,
+            39.159333
+          ]
+        },
+        "strategy": "algebraic"
+      },
+      {
+        "group_shape": "small",
+        "refresh_ms": {
+          "p50": 12.213042,
+          "p95": 13.950166999999999,
+          "p99": 15.074250000000001,
+          "samples": [
+            11.298959,
+            11.556541,
+            11.708625,
+            11.711083,
+            11.716375,
+            11.71925,
+            11.722625,
+            11.788708,
+            11.802916,
+            11.867459,
+            11.8785,
+            11.881124999999999,
+            11.974749999999998,
+            11.999832999999999,
+            12.068999999999999,
+            12.071083,
+            12.074166,
+            12.096959,
+            12.100292,
+            12.119292,
+            12.128833,
+            12.139333,
+            12.140042,
+            12.156333,
+            12.213042,
+            12.21675,
+            12.324583,
+            12.345292,
+            12.353917000000001,
+            12.362125,
+            12.398583,
+            12.405292,
+            12.412666,
+            12.486209,
+            12.526459000000001,
+            12.595666,
+            12.610042,
+            12.617292,
+            12.648334,
+            12.722333,
+            12.749165999999999,
+            12.849792,
+            12.898667000000001,
+            12.958792,
+            13.07625,
+            13.303208,
+            13.697167,
+            13.950166999999999,
+            14.053458,
+            15.074250000000001
+          ]
+        },
+        "strategy": "full"
+      },
+      {
+        "group_shape": "large",
+        "refresh_ms": {
+          "p50": 14.051667,
+          "p95": 16.094334,
+          "p99": 16.556749999999997,
+          "samples": [
+            13.176209,
+            13.241542,
+            13.41325,
+            13.487666,
+            13.575417,
+            13.58325,
+            13.620541,
+            13.637958000000001,
+            13.68,
+            13.686541,
+            13.6935,
+            13.714125000000001,
+            13.735667,
+            13.818875,
+            13.835040999999999,
+            13.864916999999998,
+            13.883958999999999,
+            13.895583,
+            13.919292,
+            13.926875,
+            13.950292,
+            13.956792,
+            14.026083,
+            14.050082999999999,
+            14.051667,
+            14.101208,
+            14.115834000000001,
+            14.161375,
+            14.177916,
+            14.178583,
+            14.21175,
+            14.216417,
+            14.224832999999999,
+            14.273833,
+            14.32325,
+            14.325,
+            14.359874999999999,
+            14.429708,
+            14.502416,
+            14.598333,
+            14.62125,
+            14.663334,
+            14.666708,
+            14.678500000000001,
+            14.764332999999999,
+            14.783416,
+            15.046040999999999,
+            16.094334,
+            16.401875,
+            16.556749999999997
+          ]
+        },
+        "strategy": "differential"
+      },
+      {
+        "group_shape": "large",
+        "refresh_ms": {
+          "p50": 20.422417,
+          "p95": 21.639374999999998,
+          "p99": 22.023334,
+          "samples": [
+            18.867667,
+            19.514875,
+            19.654583,
+            19.663625,
+            19.715458,
+            19.726166,
+            19.748292,
+            19.8735,
+            19.906167,
+            19.912291,
+            19.963083,
+            19.989667,
+            20.002665999999998,
+            20.045958,
+            20.048292,
+            20.066209,
+            20.157167,
+            20.176167,
+            20.23025,
+            20.256209000000002,
+            20.297709,
+            20.349042,
+            20.355209,
+            20.406,
+            20.422417,
+            20.42275,
+            20.431666,
+            20.469625,
+            20.502375,
+            20.504958,
+            20.532542,
+            20.583541,
+            20.601333,
+            20.604666,
+            20.669208,
+            20.787084,
+            20.81075,
+            20.861874999999998,
+            20.87625,
+            20.936291,
+            20.992625,
+            20.992792,
+            21.047084,
+            21.104375,
+            21.182416,
+            21.333291,
+            21.617957999999998,
+            21.639374999999998,
+            21.761333,
+            22.023334
+          ]
+        },
+        "strategy": "algebraic"
+      },
+      {
+        "group_shape": "large",
+        "refresh_ms": {
+          "p50": 11.474666999999998,
+          "p95": 12.864916000000001,
+          "p99": 13.837292,
+          "samples": [
+            10.760917,
+            10.822667,
+            10.886292000000001,
+            10.93525,
+            10.938167,
+            10.944,
+            11.013959,
+            11.091,
+            11.126083,
+            11.136958,
+            11.147374999999998,
+            11.161542,
+            11.202458,
+            11.251125,
+            11.259,
+            11.262291000000001,
+            11.291792000000001,
+            11.299083999999999,
+            11.331041,
+            11.334208,
+            11.337417,
+            11.339083,
+            11.383166,
+            11.4205,
+            11.474666999999998,
+            11.503167,
+            11.579374999999999,
+            11.5875,
+            11.619167,
+            11.650708,
+            11.679749999999999,
+            11.684791,
+            11.685208000000001,
+            11.686708000000001,
+            11.70525,
+            11.802417,
+            11.807291,
+            11.847708,
+            11.872542,
+            11.879084,
+            11.905208,
+            11.909208,
+            11.939207999999999,
+            12.009374999999999,
+            12.288084,
+            12.47625,
+            12.523292,
+            12.864916000000001,
+            12.952625000000001,
+            13.837292
+          ]
+        },
+        "strategy": "full"
+      }
+    ]
+  },
+  "data": "md5(id:dimension), seedless deterministic",
+  "dimensions": 384,
+  "host_arch": "aarch64",
+  "pg_trickle": "0.110.0",
+  "pgvector": "0.8.7",
+  "postgres": "PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit",
+  "refresh": {
+    "changed_rows": [
+      1,
+      100,
+      100
+    ],
+    "elapsed_ms": [
+      18.658041,
+      78.68024999999999,
+      15.588208
+    ],
+    "full_elapsed_ms": [
+      1932.7632919999999,
+      1786.213417,
+      1719.524416
+    ],
+    "full_wal_bytes_cluster_wide": [
+      5279152.0,
+      5002440.0,
+      4777352.0
+    ],
+    "notes": "Separate equivalent HNSW indexes; differential always runs first; WAL is cluster-wide between LSN reads and excludes source mutations",
+    "operations": [
+      "update embedding",
+      "update embedding",
+      "delete"
+    ],
+    "wal_bytes_cluster_wide": [
+      68968.0,
+      273688.0,
+      54528.0
+    ]
+  },
+  "rows": 1000,
+  "schema": 1
+}

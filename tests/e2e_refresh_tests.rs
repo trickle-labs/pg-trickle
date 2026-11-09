@@ -12,6 +12,97 @@ use e2e::E2eDb;
 // ── Basic DML Refresh ──────────────────────────────────────────────────
 
 #[tokio::test]
+async fn test_refresh_cost_evidence_reports_empty_filtered_output() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE rf_cost_filter_src (id INT PRIMARY KEY, active BOOLEAN, val INT)",
+        "INSERT INTO rf_cost_filter_src VALUES (1, true, 10), (2, false, 20)",
+        "SELECT pgtrickle.create_stream_table('rf_cost_filter_st', 'SELECT id, val FROM rf_cost_filter_src WHERE active', '1h', 'DIFFERENTIAL')",
+        "UPDATE rf_cost_filter_src SET val = 21 WHERE id = 2",
+        "SELECT pgtrickle.refresh_stream_table('rf_cost_filter_st')",
+    ]).await;
+    let detail: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'rf_cost_filter_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    let evidence: serde_json::Value = serde_json::from_str(&detail).expect("parse cost evidence");
+    assert_eq!(evidence["input_delta_rows"], 2);
+    assert_eq!(evidence["output_rows_changed"], 0);
+    db.assert_st_matches_query(
+        "rf_cost_filter_st",
+        "SELECT id, val FROM rf_cost_filter_src WHERE active",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_refresh_cost_evidence_marks_unaccounted_stream_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "CREATE TABLE rf_cost_chain_src (id INT PRIMARY KEY)",
+        "INSERT INTO rf_cost_chain_src VALUES (1)",
+        "SELECT pgtrickle.create_stream_table('rf_cost_chain_parent', 'SELECT id FROM rf_cost_chain_src', '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.create_stream_table('rf_cost_chain_child', 'SELECT id FROM rf_cost_chain_parent', '1h', 'DIFFERENTIAL')",
+        "INSERT INTO rf_cost_chain_src VALUES (2)",
+    ]).await;
+    db.refresh_st_until_converged("rf_cost_chain_parent").await;
+    db.refresh_st_until_converged("rf_cost_chain_child").await;
+    let detail: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'rf_cost_chain_child'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    let evidence: serde_json::Value = serde_json::from_str(&detail).expect("parse cost evidence");
+    assert_eq!(evidence["input_delta_rows"], 0);
+    assert_eq!(evidence["input_delta_rows_may_be_incomplete"], true);
+    db.assert_st_matches_query("rf_cost_chain_child", "SELECT id FROM rf_cost_chain_src")
+        .await;
+}
+
+#[tokio::test]
+async fn test_refresh_rejects_unreadable_change_buffer_without_advancing_frontier() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE rf_broken_buffer (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO rf_broken_buffer VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "rf_broken_buffer_st",
+        "SELECT id, val FROM rf_broken_buffer",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let before: String = db
+        .query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_broken_buffer_st'")
+        .await;
+    db.execute("UPDATE rf_broken_buffer SET val = 20 WHERE id = 1")
+        .await;
+    let buffer: String = db.query_scalar("SELECT format('%I.%I', 'pgtrickle_changes', 'changes_' || COALESCE(source_stable_name, source_relid::text)) FROM pgtrickle.pgt_change_tracking WHERE source_relid = 'rf_broken_buffer'::regclass::oid").await;
+    db.execute(&format!(
+        "ALTER TABLE {buffer} RENAME COLUMN lsn TO hidden_lsn"
+    ))
+    .await;
+
+    let error = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('rf_broken_buffer_st')")
+        .await
+        .expect_err("an unreadable buffer must not look empty");
+    assert!(
+        error.to_string().contains("lsn"),
+        "unexpected error: {error}"
+    );
+    let after: String = db
+        .query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_broken_buffer_st'")
+        .await;
+    assert_eq!(after, before);
+    let value: i32 = db.query_scalar("SELECT val FROM rf_broken_buffer_st").await;
+    assert_eq!(value, 10);
+    db.execute(&format!(
+        "ALTER TABLE {buffer} RENAME COLUMN hidden_lsn TO lsn"
+    ))
+    .await;
+    db.refresh_st_until_converged("rf_broken_buffer_st").await;
+    let value: i32 = db.query_scalar("SELECT val FROM rf_broken_buffer_st").await;
+    assert_eq!(value, 20);
+}
+
+#[tokio::test]
 async fn test_refresh_picks_up_inserts() {
     let db = E2eDb::new().await.with_extension().await;
 

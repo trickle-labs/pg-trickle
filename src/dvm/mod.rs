@@ -50,6 +50,7 @@
 //! let oids = result.source_oids;
 //! ```
 
+pub(crate) mod centroid_numerics;
 pub mod diff;
 pub mod operators;
 pub mod parser;
@@ -75,6 +76,40 @@ pub use parser::{
 
 use crate::error::PgTrickleError;
 use crate::version::Frontier;
+
+/// Resolve pgvector's own strict binary-send functions for intermediate payloads.
+#[cfg(any(not(test), feature = "pg_test"))]
+pub(crate) fn pgvector_binary_senders()
+-> Result<std::collections::HashMap<u32, String>, PgTrickleError> {
+    use pgrx::prelude::*;
+    Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT t.oid::bigint, n.nspname::text, p.proname::text \
+             FROM pg_catalog.pg_type t \
+             JOIN pg_catalog.pg_depend td ON td.classid = 'pg_catalog.pg_type'::regclass AND td.objid = t.oid AND td.deptype = 'e' \
+             JOIN pg_catalog.pg_extension e ON e.oid = td.refobjid AND e.extname = 'vector' \
+             JOIN pg_catalog.pg_proc p ON p.oid = t.typsend AND p.proisstrict AND p.prorettype = 'pg_catalog.bytea'::regtype \
+             JOIN pg_catalog.pg_depend pd ON pd.classid = 'pg_catalog.pg_proc'::regclass AND pd.objid = p.oid AND pd.refobjid = e.oid AND pd.deptype = 'e' \
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+             WHERE t.typname IN ('vector', 'halfvec', 'sparsevec')",
+            None, &[],
+        )?;
+        let mut senders = std::collections::HashMap::new();
+        for row in rows {
+            if let (Some(oid), Some(schema), Some(name)) = (row.get::<i64>(1)?, row.get::<String>(2)?, row.get::<String>(3)?)
+                && let Ok(oid) = u32::try_from(oid) {
+                senders.insert(oid, crate::sql_builder::qualified(&schema, &name));
+            }
+        }
+        Ok::<_, pgrx::spi::Error>(senders)
+    }).map_err(|error| PgTrickleError::SpiError(error.to_string()))
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+pub(crate) fn pgvector_binary_senders()
+-> Result<std::collections::HashMap<u32, String>, PgTrickleError> {
+    Ok(std::collections::HashMap::new())
+}
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -575,7 +610,7 @@ fn is_scan_chain_tree(tree: &parser::OpTree) -> bool {
 }
 
 /// Whether one scan feeds only row-wise operators, with no grouping or joins.
-fn is_rowwise_scan_tree(tree: &parser::OpTree) -> bool {
+pub(crate) fn is_rowwise_scan_tree(tree: &parser::OpTree) -> bool {
     match tree {
         parser::OpTree::Scan { .. } => true,
         parser::OpTree::Filter { child, .. }
@@ -633,6 +668,8 @@ pub fn generate_delta_query(
         None,
         None,
         None,
+        None,
+        false,
         defining_query,
         prev_frontier,
         new_frontier,
@@ -654,6 +691,8 @@ pub(crate) fn generate_delta_query_staged(
         Some(pgt_id),
         None,
         stream_owner,
+        None,
+        false,
         defining_query,
         prev_frontier,
         new_frontier,
@@ -679,6 +718,8 @@ pub(crate) fn generate_delta_query_staged_with_window_state(
         Some(pgt_id),
         Some(row_relation),
         stream_owner,
+        None,
+        false,
         defining_query,
         prev_frontier,
         new_frontier,
@@ -687,11 +728,52 @@ pub(crate) fn generate_delta_query_staged_with_window_state(
     )
 }
 
+pub(crate) fn generate_centroid_delta_query(
+    st: &crate::catalog::StreamTableMeta,
+    prev_frontier: &Frontier,
+    new_frontier: &Frontier,
+) -> Result<DeltaQueryResult, PgTrickleError> {
+    generate_delta_query_impl(
+        None,
+        None,
+        Some(st),
+        None,
+        true,
+        &st.defining_query,
+        prev_frontier,
+        new_frontier,
+        &st.pgt_schema,
+        &st.pgt_name,
+    )
+}
+
+pub(crate) fn generate_centroid_delta_query_staged(
+    st: &crate::catalog::StreamTableMeta,
+    prev_frontier: &Frontier,
+    new_frontier: &Frontier,
+    source_tables: &HashMap<u32, String>,
+) -> Result<DeltaQueryResult, PgTrickleError> {
+    generate_delta_query_impl(
+        None,
+        None,
+        Some(st),
+        Some(source_tables),
+        true,
+        &st.defining_query,
+        prev_frontier,
+        new_frontier,
+        &st.pgt_schema,
+        &st.pgt_name,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_delta_query_impl(
     stage_pgt_id: Option<i64>,
     window_state_row_relation: Option<&str>,
     stream_owner: Option<&crate::catalog::StreamTableMeta>,
+    source_stage_tables: Option<&HashMap<u32, String>>,
+    centroid_delta: bool,
     defining_query: &str,
     prev_frontier: &Frontier,
     new_frontier: &Frontier,
@@ -701,26 +783,34 @@ fn generate_delta_query_impl(
     // Step 1: Parse the defining query into an operator tree + CTE registry.
     // This now handles recursive CTEs via OpTree::RecursiveCte, so no
     // early bypass is needed.
-    let parse_query = || parse_defining_query_full(defining_query);
-    let mut result = match stream_owner {
+    let parse_query = || {
+        let mut result = parse_defining_query_full(defining_query)?;
+        parser::enrich_vector_aggregates(defining_query, &mut result, false)?;
+        Ok(result)
+    };
+    let result = match stream_owner {
         Some(st) => crate::refresh::with_stream_owner(st, parse_query)?,
         None => parse_query()?,
     };
+    if centroid_delta {
+        let admitted = match stream_owner {
+            Some(st) => crate::refresh::with_stream_owner(st, || {
+                Ok(centroid_numerics::centroid_staging_sql(defining_query)?.is_some())
+            })?,
+            None => centroid_numerics::centroid_staging_sql(defining_query)?.is_some(),
+        };
+        if !admitted {
+            return Err(PgTrickleError::UnsupportedOperator(
+                "centroid differential query is not admitted".into(),
+            ));
+        }
+    }
 
     // Extract source OIDs before moving cte_registry.
     let mut source_oids: Vec<u32> = result.tree.source_oids();
     source_oids.extend(result.cte_registry.source_oids());
     source_oids.sort_unstable();
     source_oids.dedup();
-
-    // F4 (v0.37.0): Reclassify avg/sum on vector-typed columns to VectorAvg/VectorSum
-    // so the DVM uses the group-rescan strategy. Only active when enable_vector_agg = on.
-    if crate::config::pg_trickle_enable_vector_agg() {
-        let vector_cols = resolve_vector_columns_for_sources(&source_oids);
-        if !vector_cols.is_empty() {
-            reclassify_vector_aggregates(&mut result.tree, &vector_cols);
-        }
-    }
 
     // Step 2: Check DVM support (validates CTE bodies + main tree)
     check_ivm_support_with_registry(&result)?;
@@ -797,7 +887,9 @@ fn generate_delta_query_impl(
     // CITUS-4: Pre-resolve stable buffer names so the scan generator
     // does not need to call SPI during SQL generation.
     ctx.set_source_buffer_names(resolve_buffer_names_for_sources(&source_oids));
-    if let Some(pgt_id) = stage_pgt_id {
+    if let Some(tables) = source_stage_tables {
+        ctx.set_source_stage_tables(tables.clone());
+    } else if let Some(pgt_id) = stage_pgt_id {
         ctx.set_source_stage_tables(
             source_oids
                 .iter()
@@ -832,8 +924,27 @@ fn generate_delta_query_impl(
     // exceeds max_delta_fraction use EXCEPT ALL instead of NOT EXISTS.
     ctx.set_fallback_leaf_oids(crate::refresh::get_fallback_leaf_oids());
 
-    let (delta_sql, output_columns, diff_dedup, diff_has_key_changed) =
-        ctx.differentiate_with_columns(&result.tree)?;
+    let (delta_sql, output_columns, diff_dedup, diff_has_key_changed) = if centroid_delta {
+        let parser::OpTree::Aggregate { child, .. } = &result.tree else {
+            return Err(PgTrickleError::UnsupportedOperator(
+                "centroid aggregate is missing".into(),
+            ));
+        };
+        let child_delta = ctx.diff_node_in_intermediate(child)?;
+        let child_sql = ctx.build_with_query(&child_delta.cte_name);
+        let (sql, mut columns) = operators::aggregate::centroid_signed_delta_sql(
+            &result.tree,
+            &child_sql,
+            &child_delta.columns,
+        )
+        .ok_or_else(|| {
+            PgTrickleError::UnsupportedOperator("centroid delta shape is unsupported".into())
+        })?;
+        columns.extend(["__pgt_group_delta".into(), "__pgt_centroid_delta".into()]);
+        (sql, columns, true, false)
+    } else {
+        ctx.differentiate_with_columns(&result.tree)?
+    };
     ctx.record_changed_leaf_bucket(&source_oids);
 
     if let Some(trace) = ctx.take_decision_trace()
@@ -1058,10 +1169,11 @@ pub fn generate_delta_query_cached(
     // must retain the extension caller's rights.
     let parse_query = || {
         let parse_start = std::time::Instant::now();
-        let result = parse_defining_query_full(defining_query)?;
+        let mut result = parse_defining_query_full(defining_query)?;
+        parser::enrich_vector_aggregates(defining_query, &mut result, false)?;
         Ok((result, parse_start.elapsed().as_millis() as u64))
     };
-    let (mut result, parse_elapsed_ms) = match stream_owner {
+    let (result, parse_elapsed_ms) = match stream_owner {
         Some(st) => crate::refresh::with_stream_owner(st, parse_query)?,
         None => parse_query()?,
     };
@@ -1072,14 +1184,6 @@ pub fn generate_delta_query_cached(
         source_oids.extend(result.cte_registry.source_oids());
         source_oids.sort_unstable();
         source_oids.dedup();
-
-        // F4 (v0.37.0): Reclassify avg/sum on vector-typed columns.
-        if crate::config::pg_trickle_enable_vector_agg() {
-            let vector_cols = resolve_vector_columns_for_sources(&source_oids);
-            if !vector_cols.is_empty() {
-                reclassify_vector_aggregates(&mut result.tree, &vector_cols);
-            }
-        }
 
         check_ivm_support_with_registry(&result)?;
         row_id::verify_plan_row_id_schema(&result.tree).map_err(|e| {
@@ -1359,62 +1463,6 @@ fn resolve_buffer_names_for_sources(source_oids: &[u32]) -> HashMap<u32, String>
 
 // ── F4 (v0.37.0): pgVectorMV — reclassify avg/sum on vector columns ─────────
 
-/// F4: Query SPI for columns of vector type (`vector`, `halfvec`, `sparsevec`)
-/// across the given source OIDs.
-///
-/// Returns a map `oid → set_of_column_names` for columns that are vector-typed.
-/// Called from `generate_delta_query` when `enable_vector_agg` is on.
-/// Non-fatal: if SPI is unavailable (e.g. unit-test context), returns empty map.
-#[cfg(feature = "pg18")]
-pub(crate) fn resolve_vector_columns_for_sources(
-    source_oids: &[u32],
-) -> HashMap<u32, std::collections::HashSet<String>> {
-    use pgrx::prelude::*;
-    let mut map: HashMap<u32, std::collections::HashSet<String>> = HashMap::new();
-    if source_oids.is_empty() {
-        return map;
-    }
-    let oid_list = source_oids
-        .iter()
-        .map(|o| o.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT a.attrelid::bigint, a.attname::text \
-         FROM pg_catalog.pg_attribute a \
-         JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
-         WHERE a.attrelid IN ({oid_list}) \
-           AND a.attnum > 0 \
-           AND NOT a.attisdropped \
-           AND t.typname IN ('vector', 'halfvec', 'sparsevec')"
-    );
-    let rows = Spi::connect(|client| -> Vec<(u32, String)> {
-        let mut rows = Vec::new();
-        let Ok(tup) = client.select(&sql, None, &[]) else {
-            return rows;
-        };
-        for row in tup {
-            let relid: Option<i64> = row.get::<i64>(1).ok().flatten();
-            let attname: Option<String> = row.get::<String>(2).ok().flatten();
-            if let (Some(r), Some(n)) = (relid, attname) {
-                rows.push((r as u32, n));
-            }
-        }
-        rows
-    });
-    for (oid, col) in rows {
-        map.entry(oid).or_default().insert(col);
-    }
-    map
-}
-
-#[cfg(not(feature = "pg18"))]
-pub(crate) fn resolve_vector_columns_for_sources(
-    _source_oids: &[u32],
-) -> HashMap<u32, std::collections::HashSet<String>> {
-    HashMap::new()
-}
-
 /// F4: Walk the OpTree recursively and reclassify `AggFunc::Avg` / `AggFunc::Sum`
 /// on vector-typed columns to `AggFunc::VectorAvg` / `AggFunc::VectorSum`.
 ///
@@ -1424,232 +1472,127 @@ pub(crate) fn resolve_vector_columns_for_sources(
 /// strategy (which generates `COALESCE(st.col, 0) + delta` — invalid for vectors).
 pub(crate) fn reclassify_vector_aggregates(
     tree: &mut parser::OpTree,
-    vector_cols: &HashMap<u32, std::collections::HashSet<String>>,
+    vector_cols: &HashMap<i32, parser::AnalyzedAggregateArgument>,
+    found: &mut bool,
 ) {
-    use parser::{AggFunc, Expr, OpTree};
-
-    // Helper: extract a simple column name from an aggregate argument.
-    fn agg_col_name(arg: &Option<Expr>) -> Option<&str> {
-        match arg {
-            Some(Expr::ColumnRef { column_name, .. }) => Some(column_name.as_str()),
-            _ => None,
-        }
-    }
-
-    // Helper: check if any source in the child tree has this column as vector type.
-    fn is_vector_col(
-        child_oids: &[u32],
-        col_name: &str,
-        vector_cols: &HashMap<u32, std::collections::HashSet<String>>,
-    ) -> bool {
-        child_oids
-            .iter()
-            .any(|oid| vector_cols.get(oid).is_some_and(|s| s.contains(col_name)))
-    }
-
+    use parser::{AggFunc, OpTree};
     match tree {
         OpTree::Aggregate {
             aggregates, child, ..
         } => {
-            reclassify_vector_aggregates(child, vector_cols);
-            let child_oids = child.source_oids();
+            reclassify_vector_aggregates(child, vector_cols, found);
             for agg in aggregates.iter_mut() {
-                let col_name = agg_col_name(&agg.argument).map(str::to_string);
-                let new_func = match agg.function {
-                    AggFunc::Avg => col_name.as_deref().and_then(|c| {
-                        if is_vector_col(&child_oids, c, vector_cols) {
-                            Some(AggFunc::VectorAvg)
-                        } else {
-                            None
-                        }
-                    }),
-                    AggFunc::Sum => col_name.as_deref().and_then(|c| {
-                        if is_vector_col(&child_oids, c, vector_cols) {
-                            Some(AggFunc::VectorSum)
-                        } else {
-                            None
-                        }
-                    }),
-                    _ => None,
+                let Some(location) = agg.analyzed_argument.as_ref().map(|arg| arg.location) else {
+                    continue;
                 };
-                if let Some(f) = new_func {
-                    agg.function = f;
-                }
+                let Some(metadata) = vector_cols.get(&location) else {
+                    continue;
+                };
+                *found = true;
+                agg.analyzed_argument = Some(metadata.clone());
+                agg.function = match agg.function {
+                    AggFunc::Avg => AggFunc::VectorAvg,
+                    AggFunc::Sum => AggFunc::VectorSum,
+                    _ => continue,
+                };
             }
         }
-        OpTree::Filter { child, .. } => reclassify_vector_aggregates(child, vector_cols),
-        OpTree::Project { child, .. } => reclassify_vector_aggregates(child, vector_cols),
+        OpTree::Filter { child, .. } => reclassify_vector_aggregates(child, vector_cols, found),
+        OpTree::Project { child, .. } => reclassify_vector_aggregates(child, vector_cols, found),
         OpTree::InnerJoin { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols);
-            reclassify_vector_aggregates(right, vector_cols);
+            reclassify_vector_aggregates(left, vector_cols, found);
+            reclassify_vector_aggregates(right, vector_cols, found);
         }
         OpTree::LeftJoin { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols);
-            reclassify_vector_aggregates(right, vector_cols);
+            reclassify_vector_aggregates(left, vector_cols, found);
+            reclassify_vector_aggregates(right, vector_cols, found);
         }
         OpTree::FullJoin { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols);
-            reclassify_vector_aggregates(right, vector_cols);
+            reclassify_vector_aggregates(left, vector_cols, found);
+            reclassify_vector_aggregates(right, vector_cols, found);
         }
         OpTree::SemiJoin { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols);
-            reclassify_vector_aggregates(right, vector_cols);
+            reclassify_vector_aggregates(left, vector_cols, found);
+            reclassify_vector_aggregates(right, vector_cols, found);
         }
         OpTree::AntiJoin { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols);
-            reclassify_vector_aggregates(right, vector_cols);
+            reclassify_vector_aggregates(left, vector_cols, found);
+            reclassify_vector_aggregates(right, vector_cols, found);
         }
-        OpTree::Window { child, .. } => reclassify_vector_aggregates(child, vector_cols),
-        OpTree::Distinct { child, .. } => reclassify_vector_aggregates(child, vector_cols),
-        OpTree::Subquery { child, .. } => reclassify_vector_aggregates(child, vector_cols),
-        OpTree::LateralFunction { child, .. } => reclassify_vector_aggregates(child, vector_cols),
-        OpTree::LateralSubquery { child, .. } => reclassify_vector_aggregates(child, vector_cols),
-        OpTree::ScalarSubquery { child, .. } => reclassify_vector_aggregates(child, vector_cols),
+        OpTree::Window { child, .. } => reclassify_vector_aggregates(child, vector_cols, found),
+        OpTree::Distinct { child, .. } => reclassify_vector_aggregates(child, vector_cols, found),
+        OpTree::Subquery { child, .. } => reclassify_vector_aggregates(child, vector_cols, found),
+        OpTree::LateralFunction { child, .. } => {
+            reclassify_vector_aggregates(child, vector_cols, found)
+        }
+        OpTree::LateralSubquery { child, .. } => {
+            reclassify_vector_aggregates(child, vector_cols, found)
+        }
+        OpTree::ScalarSubquery { child, .. } => {
+            reclassify_vector_aggregates(child, vector_cols, found)
+        }
         OpTree::UnionAll { children, .. } => {
             for c in children.iter_mut() {
-                reclassify_vector_aggregates(c, vector_cols);
+                reclassify_vector_aggregates(c, vector_cols, found);
             }
         }
         OpTree::Intersect { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols);
-            reclassify_vector_aggregates(right, vector_cols);
+            reclassify_vector_aggregates(left, vector_cols, found);
+            reclassify_vector_aggregates(right, vector_cols, found);
         }
         OpTree::Except { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols);
-            reclassify_vector_aggregates(right, vector_cols);
+            reclassify_vector_aggregates(left, vector_cols, found);
+            reclassify_vector_aggregates(right, vector_cols, found);
         }
         OpTree::CteScan { body, .. } => {
             if let Some(b) = body.as_mut() {
-                reclassify_vector_aggregates(b, vector_cols);
+                reclassify_vector_aggregates(b, vector_cols, found);
             }
         }
         OpTree::RecursiveCte {
             base, recursive, ..
         } => {
-            reclassify_vector_aggregates(base, vector_cols);
-            reclassify_vector_aggregates(recursive, vector_cols);
+            reclassify_vector_aggregates(base, vector_cols, found);
+            reclassify_vector_aggregates(recursive, vector_cols, found);
         }
         // Leaf nodes (Scan, RecursiveSelfRef, ConstantSelect, Values, etc.)
         _ => {}
     }
 }
 
-/// F4: Walk an OpTree and return `(output_alias, dimension, typename)` for every
-/// `VectorAvg` / `VectorSum` aggregate whose source column has an explicit
-/// `vector(N)` / `halfvec(N)` / `sparsevec(N)` dimension in `pg_attribute`.
-///
-/// This is used after stream-table creation to `ALTER COLUMN … TYPE <type>(N)`
-/// so that HNSW / IVFFlat indexes (which require explicit dimensions) can be
-/// built on the centroid column.  The returned typename is one of `vector`,
-/// `halfvec`, or `sparsevec` — callers must use the correct type expression.
-///
-/// VH-1 (v0.48.0): returns typename so halfvec/sparsevec output columns are
-/// correctly typed (previously always used `vector(N)`).
+/// Return dimensions only for aggregates directly exposed by the output tree.
+/// Nested expressions and aliases need lineage proof before narrowing a type.
 #[cfg(feature = "pg18")]
 pub(crate) fn extract_vector_agg_output_dims(tree: &parser::OpTree) -> Vec<(String, i32, String)> {
-    use parser::{AggFunc, Expr, OpTree};
-    use pgrx::prelude::*;
-
-    /// Returns `(atttypmod, typname)` for the first matching vector-typed column.
-    fn lookup_typmod_and_name(source_oids: &[u32], col_name: &str) -> (i32, String) {
-        if source_oids.is_empty() {
-            return (-1, "vector".to_string());
-        }
-        let oid_list = source_oids
-            .iter()
-            .map(|o| o.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        // Only consider vector/halfvec/sparsevec columns — others return defaults.
-        let sql = format!(
-            "SELECT a.atttypmod, t.typname::text \
-             FROM pg_catalog.pg_attribute a \
-             JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
-             WHERE a.attrelid IN ({oid_list}) \
-               AND a.attname = $1 \
-               AND t.typname IN ('vector', 'halfvec', 'sparsevec') \
-               AND a.attnum > 0 \
-               AND NOT a.attisdropped \
-             LIMIT 1",
-        );
-        // Execute via SPI and parse two columns.
-        Spi::connect(|client| {
-            let mut tup = client.select(&sql, None, &[col_name.into()])?;
-            if let Some(row) = tup.next() {
-                let typmod = row.get::<i32>(1).unwrap_or(None).unwrap_or(-1);
-                let typname = row
-                    .get::<String>(2)
-                    .unwrap_or(None)
-                    .unwrap_or_else(|| "vector".to_string());
-                return Ok::<_, pgrx::spi::Error>((typmod, typname));
+    use parser::{AggFunc, OpTree};
+    let mut current = tree;
+    while let OpTree::Filter { child, .. } = current {
+        current = child;
+    }
+    let OpTree::Aggregate { aggregates, .. } = current else {
+        return Vec::new();
+    };
+    aggregates
+        .iter()
+        .filter_map(|agg| {
+            if !matches!(agg.function, AggFunc::VectorAvg | AggFunc::VectorSum) {
+                return None;
             }
-            Ok((-1, "vector".to_string()))
+            let arg = agg.analyzed_argument.as_ref()?;
+            if arg.typmod <= 0 || arg.type_schema.is_empty() {
+                return None;
+            }
+            Some((
+                agg.alias.clone(),
+                arg.typmod,
+                format!(
+                    "{}.{}",
+                    crate::dvm::diff::quote_ident(&arg.type_schema),
+                    crate::dvm::diff::quote_ident(&arg.type_name)
+                ),
+            ))
         })
-        .unwrap_or((-1, "vector".to_string()))
-    }
-
-    fn walk(tree: &OpTree, result: &mut Vec<(String, i32, String)>) {
-        match tree {
-            OpTree::Aggregate {
-                aggregates, child, ..
-            } => {
-                walk(child, result);
-                let child_oids = child.source_oids();
-                for agg in aggregates {
-                    if !matches!(agg.function, AggFunc::VectorAvg | AggFunc::VectorSum) {
-                        continue;
-                    }
-                    let col_name = match &agg.argument {
-                        Some(Expr::ColumnRef { column_name, .. }) => column_name.as_str(),
-                        _ => continue,
-                    };
-                    let (typmod, typname) = lookup_typmod_and_name(&child_oids, col_name);
-                    if typmod > 0 {
-                        result.push((agg.alias.clone(), typmod, typname));
-                    }
-                }
-            }
-            OpTree::Filter { child, .. }
-            | OpTree::Project { child, .. }
-            | OpTree::Subquery { child, .. }
-            | OpTree::Window { child, .. }
-            | OpTree::Distinct { child }
-            | OpTree::LateralFunction { child, .. }
-            | OpTree::LateralSubquery { child, .. }
-            | OpTree::ScalarSubquery { child, .. } => walk(child, result),
-            OpTree::InnerJoin { left, right, .. }
-            | OpTree::LeftJoin { left, right, .. }
-            | OpTree::FullJoin { left, right, .. }
-            | OpTree::SemiJoin { left, right, .. }
-            | OpTree::AntiJoin { left, right, .. }
-            | OpTree::Intersect { left, right, .. }
-            | OpTree::Except { left, right, .. } => {
-                walk(left, result);
-                walk(right, result);
-            }
-            OpTree::UnionAll { children, .. } => {
-                for c in children {
-                    walk(c, result);
-                }
-            }
-            OpTree::RecursiveCte {
-                base, recursive, ..
-            } => {
-                walk(base, result);
-                walk(recursive, result);
-            }
-            OpTree::CteScan { body, .. } => {
-                if let Some(b) = body.as_ref() {
-                    walk(b, result);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut result = Vec::new();
-    walk(tree, &mut result);
-    result
+        .collect()
 }
 
 #[cfg(not(feature = "pg18"))]
@@ -1667,10 +1610,21 @@ pub fn query_needs_pgt_count(defining_query: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Extract AVG auxiliary column definitions from a defining query.
-///
-/// Returns `(sum_col_name, count_col_name, arg_sql)` tuples for each
-/// non-DISTINCT AVG aggregate, or an empty vec if none.
+/// Resolve aggregate auxiliary columns under the defining query's owner context.
+type AggregateAuxColumns = (Vec<(String, String, String)>, Vec<(String, String)>);
+
+pub(crate) fn query_aggregate_aux_columns(
+    defining_query: &str,
+) -> Result<AggregateAuxColumns, PgTrickleError> {
+    let mut result = parse_defining_query_full(defining_query)?;
+    parser::enrich_vector_aggregates(defining_query, &mut result, false)?;
+    Ok((
+        result.tree.avg_aux_columns(),
+        result.tree.nonnull_aux_columns(),
+    ))
+}
+
+/// Extract AVG auxiliary column definitions without requiring a backend.
 pub fn query_avg_aux_columns(defining_query: &str) -> Vec<(String, String, String)> {
     parse_defining_query(defining_query)
         .map(|tree| tree.avg_aux_columns())
@@ -1701,10 +1655,7 @@ pub fn query_statistical_aux_types(defining_query: &str) -> Vec<(String, String)
         .unwrap_or_default()
 }
 
-/// Returns `(nonnull_col_name, arg_sql)` tuples for each non-DISTINCT SUM
-/// aggregate above a FULL JOIN child that needs an auxiliary nonnull-count
-/// column (`__pgt_aux_nonnull_*`) for P2-2 NULL-transition correction.
-/// Empty if no such aggregates exist.
+/// Extract SUM nonnull auxiliary columns without requiring a backend.
 pub fn query_nonnull_aux_columns(defining_query: &str) -> Vec<(String, String)> {
     parse_defining_query(defining_query)
         .map(|tree| tree.nonnull_aux_columns())

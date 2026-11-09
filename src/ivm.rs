@@ -632,17 +632,17 @@ pub fn cleanup_ivm_triggers(source_relid: pg_sys::Oid, pgt_id: i64) -> Result<()
 fn run_immediate_phantom_cleanup(
     st: &crate::catalog::StreamTableMeta,
     st_qualified: &str,
-) -> Result<(), PgTrickleError> {
+) -> Result<i64, PgTrickleError> {
     let query_has_join = crate::dvm::query_has_join(&st.defining_query).unwrap_or(true);
     if !query_has_join || st.st_partition_key.is_some() {
-        return Ok(());
+        return Ok(0);
     }
     // Do NOT run the full-query reconciliation for recursive CTEs. The
     // ivm_recursive_max_depth guard intentionally limits how many rows
     // the delta engine materialises.  Running the full query here would
     // bypass the guard and insert the suppressed rows back.
     if crate::dvm::query_has_recursive_cte(&st.defining_query).unwrap_or(false) {
-        return Ok(());
+        return Ok(0);
     }
 
     let cleanup_result = crate::refresh::with_stream_owner(st, || {
@@ -673,7 +673,7 @@ fn run_immediate_phantom_cleanup(
         }
     }
 
-    Ok(())
+    Ok(phantom_cleanup_count)
 }
 
 fn apply_ivm_owner_delta(
@@ -682,7 +682,7 @@ fn apply_ivm_owner_delta(
     user_columns: &[String],
     delta_table: &str,
     is_deduplicated: bool,
-) -> Result<i64, PgTrickleError> {
+) -> Result<(i64, Option<i64>), PgTrickleError> {
     let st_qualified = format!(
         "\"{}\".\"{}\"",
         st.pgt_schema.replace('"', "\"\""),
@@ -724,6 +724,7 @@ fn apply_ivm_owner_delta(
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap_or(0);
 
+        let mut operations = Some(0_i64);
         if delta_count > 0 {
             if let Some(basename) = &pre_table {
                 let pre_table = format!("pg_temp.{}", quote_identifier(basename));
@@ -739,43 +740,49 @@ fn apply_ivm_owner_delta(
                 })?;
             }
 
-            Spi::run(&build_ivm_delete_sql(
-                &st_qualified,
-                delta_table,
-                st.has_keyless_source,
-            ))
-            .map_err(|e| PgTrickleError::SpiError(format!("IVM delta DELETE failed: {e}")))?;
+            let mut apply = |sql: String, action: &str| -> Result<(), PgTrickleError> {
+                let affected = Spi::connect_mut(|client| {
+                    client.update(&sql, None, &[]).map(|rows| rows.len())
+                })
+                .map_err(|e| PgTrickleError::SpiError(format!("IVM delta {action} failed: {e}")))?;
+                operations = operations
+                    .zip(i64::try_from(affected).ok())
+                    .and_then(|(total, count)| total.checked_add(count));
+                Ok(())
+            };
+            apply(
+                build_ivm_delete_sql(&st_qualified, delta_table, st.has_keyless_source),
+                "DELETE",
+            )?;
             if st.has_keyless_source && is_deduplicated {
-                Spi::run(&build_ivm_update_sql(
-                    &st_qualified,
-                    delta_table,
-                    user_columns,
-                ))
-                .map_err(|e| PgTrickleError::SpiError(format!("IVM delta UPDATE failed: {e}")))?;
-                Spi::run(&build_ivm_insert_sql_no_conflict(
-                    &st_qualified,
-                    delta_table,
-                    user_columns,
-                ))
-                .map_err(|e| PgTrickleError::SpiError(format!("IVM delta INSERT failed: {e}")))?;
+                apply(
+                    build_ivm_update_sql(&st_qualified, delta_table, user_columns),
+                    "UPDATE",
+                )?;
+                apply(
+                    build_ivm_insert_sql_no_conflict(&st_qualified, delta_table, user_columns),
+                    "INSERT",
+                )?;
             } else {
-                Spi::run(&build_ivm_insert_sql(
-                    &st_qualified,
-                    delta_table,
-                    user_columns,
-                    st.has_keyless_source,
-                ))
-                .map_err(|e| PgTrickleError::SpiError(format!("IVM delta INSERT failed: {e}")))?;
+                apply(
+                    build_ivm_insert_sql(
+                        &st_qualified,
+                        delta_table,
+                        user_columns,
+                        st.has_keyless_source,
+                    ),
+                    "INSERT",
+                )?;
             }
         }
 
-        Ok(delta_count)
+        Ok((delta_count, operations))
     });
-    let result = result.and_then(|delta_count| {
+    let result = result.and_then(|(delta_count, operations)| {
         if delta_count > 0 && !capture_columns.is_empty() {
             crate::refresh::capture_incremental_diff_to_st_buffer(st, &capture_columns)?;
         }
-        Ok(delta_count)
+        Ok((delta_count, operations))
     });
     if let Some(basename) = pre_table {
         crate::refresh::drop_owner_temp_table(st, &basename);
@@ -918,7 +925,7 @@ fn pgt_ivm_apply_delta(
     );
 
     let delta_table = format!("__pgt_delta_{pgt_id}");
-    let delta_count = apply_ivm_owner_delta(
+    let (delta_count, operations) = apply_ivm_owner_delta(
         &st,
         &delta_sql,
         &user_columns,
@@ -931,15 +938,22 @@ fn pgt_ivm_apply_delta(
     // Run unconditionally — even when this trigger invocation produced an
     // empty delta, a prior invocation in the same statement (or a prior
     // statement) may have left orphans for non-monotone predicates.
-    run_immediate_phantom_cleanup(&st, &st_qualified)?;
+    let phantom_cleanup_count = run_immediate_phantom_cleanup(&st, &st_qualified)?;
 
     // Update data_timestamp so downstream stream tables that compare
     // upstream timestamps (ST-on-ST) detect the change.
-    if delta_count > 0 {
+    if delta_count > 0 || phantom_cleanup_count > 0 {
         let now = Spi::get_one::<pgrx::datum::TimestampWithTimeZone>("SELECT now()")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .ok_or_else(|| PgTrickleError::InternalError("now() returned NULL".into()))?;
-        StreamTableMeta::update_after_refresh(pgt_id, now, delta_count)?;
+        let operations = if st.st_partition_key.is_some()
+            || !matches!(crate::cdc::has_user_triggers(st.pgt_relid), Ok(false))
+        {
+            None
+        } else {
+            operations.and_then(|count| count.checked_add(phantom_cleanup_count))
+        };
+        StreamTableMeta::update_after_refresh(pgt_id, now, operations)?;
     }
 
     pgrx::debug1!(
@@ -1183,6 +1197,7 @@ fn apply_topk_micro_refresh(st: &crate::catalog::StreamTableMeta) -> Result<(), 
     }
     result?;
 
+    crate::catalog::StreamTableMeta::advance_ann_refresh_epoch(st.pgt_id)?;
     pgrx::debug1!(
         "[pg_trickle] TopK micro-refresh applied for pgt_id={}",
         st.pgt_id,
@@ -1241,7 +1256,12 @@ fn get_or_compute_ivm_delta(
     }
 
     // Cache miss — parse, differentiate, and cache.
-    let result = parse_defining_query_full(defining_query).map_err(|e| {
+    let result = crate::refresh::with_stream_owner(st, || {
+        let mut result = parse_defining_query_full(defining_query)?;
+        crate::dvm::parser::enrich_vector_aggregates(defining_query, &mut result, false)?;
+        Ok(result)
+    })
+    .map_err(|e| {
         PgTrickleError::InternalError(format!("Failed to parse defining query for IVM: {e}"))
     })?;
     let op_tree = result.tree;
@@ -1382,7 +1402,9 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
     } else {
         st.defining_query.clone()
     };
-    let avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
+    let (avg_aux, nonnull_aux) = crate::refresh::with_stream_owner(&st, || {
+        crate::dvm::query_aggregate_aux_columns(&st.defining_query)
+    })?;
     if !avg_aux.is_empty() {
         effective_query = crate::api::inject_avg_aux(&effective_query, &avg_aux);
     }
@@ -1398,7 +1420,6 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
         let typed = crate::api::typed_statistical_aux_columns(&covar_aux, &types);
         effective_query = crate::api::inject_covar_aux_typed(&effective_query, &typed);
     }
-    let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
     if !nonnull_aux.is_empty() {
         effective_query = crate::api::inject_nonnull_aux(&effective_query, &nonnull_aux);
     }
@@ -1464,6 +1485,7 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
         })?;
     }
 
+    StreamTableMeta::advance_ann_refresh_epoch(pgt_id)?;
     pgrx::log!("[pg_trickle] IVM TRUNCATE handled for pgt_id={}", pgt_id,);
 
     Ok(())

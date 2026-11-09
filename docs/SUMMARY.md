@@ -113,6 +113,7 @@
 
 - [Hybrid Search Patterns](tutorials/HYBRID_SEARCH_PATTERNS.md)
 - [pgvector RAG Cookbook](tutorials/PGVECTOR_RAG_COOKBOOK.md)
+- [Revision-safe asynchronous embeddings](tutorials/REVISION_SAFE_EMBEDDINGS.md)
 - [pgVector Embedding Pipelines](tutorials/PGVECTOR_EMBEDDING_PIPELINES.md)
 - [Vector RAG Starter](tutorials/VECTOR_RAG_STARTER.md)
 

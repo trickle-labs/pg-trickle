@@ -2193,11 +2193,12 @@ pub(super) fn clear_caches() -> i64 {
     l2_count
 }
 
-/// VP-3 (v0.47.0): Vector status view — embedding lag, ANN age, drift percentage.
+/// VP-3 (v0.47.0): Refresh timestamp age and changed-row estimates.
 ///
 /// Returns one row per stream table that has a `post_refresh_action` other than
-/// 'none', or that has any ANN-relevant index on its storage table. Operators
-/// can use this to monitor the health of vector/embedding stream tables.
+/// 'none'. `embedding_lag` is the age of `data_timestamp`, not embedding
+/// generation freshness; `drift_pct` is changed rows divided by the estimated
+/// row count, not measured ANN quality or recall.
 #[pg_extern(schema = "pgtrickle", name = "vector_status")]
 #[allow(clippy::type_complexity)]
 pub(super) fn vector_status() -> TableIterator<
@@ -2276,6 +2277,141 @@ pub(super) fn vector_status() -> TableIterator<
     });
 
     TableIterator::new(rows)
+}
+
+/// Catalog-only vector column status. Generation freshness requires application metadata.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+pub(super) fn vector_stream_status_v2()
+-> Result<SetOfIterator<'static, pgrx::JsonB>, PgTrickleError> {
+    let caller =
+        security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?;
+    let rows = Spi::connect(|client| {
+        let result = client.select(
+            r#"SELECT jsonb_build_object(
+                'stream_id', s.pgt_id, 'table_oid', s.pgt_relid,
+                'schema', s.pgt_schema, 'table', s.pgt_name,
+                'column', a.attname, 'type', pg_catalog.format_type(a.atttypid, a.atttypmod),
+                'dimensions', CASE WHEN a.atttypmod > 0 THEN a.atttypmod END,
+                'requested_refresh_mode', s.requested_refresh_mode,
+                'effective_refresh_mode', s.effective_refresh_mode,
+                'status', s.status, 'last_refresh_at', s.last_refresh_at,
+                'data_timestamp', s.data_timestamp, 'frontier', s.frontier,
+                'post_refresh_action', s.post_refresh_action,
+                'embedding_freshness', NULL, 'embedding_freshness_reason', 'application revision and model metadata unavailable',
+                'backlog', NULL, 'backlog_reason', 'not measured by this catalog inspection',
+                'maintenance_pending', CASE WHEN q.can_view THEN q.pending END,
+                'maintenance_failed', CASE WHEN q.can_view THEN q.failed END,
+                'maintenance_stale', CASE WHEN q.can_view THEN q.stale END,
+                'maintenance_error', CASE WHEN q.can_view THEN q.last_error END,
+                'maintenance_reason', CASE WHEN NOT q.can_view THEN 'MAINTAIN on storage leaves and access to stale requests required' END,
+                'requested_index_state', NULL, 'requested_index_reason', 'requested ANN index intent is not recorded')
+              FROM pgtrickle.pgt_stream_tables s
+              JOIN pg_catalog.pg_class sc ON sc.oid = s.pgt_relid
+              JOIN pg_catalog.pg_attribute a ON a.attrelid = s.pgt_relid AND a.attnum > 0 AND NOT a.attisdropped
+              JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+              JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e'
+              JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid AND e.extname = 'vector'
+              CROSS JOIN LATERAL (
+                WITH RECURSIVE storage(relid) AS (
+                  SELECT s.pgt_relid UNION ALL
+                  SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN storage p ON h.inhparent = p.relid
+                ), access AS (
+                  SELECT COALESCE(bool_and(pg_catalog.has_schema_privilege($1, c.relnamespace, 'USAGE')
+                    AND pg_catalog.has_table_privilege($1, c.oid, 'MAINTAIN')), false) AS allowed
+                  FROM storage JOIN pg_catalog.pg_class c ON c.oid = storage.relid
+                )
+                SELECT access.allowed AND NOT EXISTS (
+                    SELECT 1 FROM pgtrickle.pgt_ann_maintenance_requests r
+                    LEFT JOIN pg_catalog.pg_class leaf ON leaf.oid = r.leaf_relid
+                    WHERE r.pgt_id = s.pgt_id AND
+                      CASE WHEN leaf.oid IS NULL THEN NOT pg_catalog.pg_has_role($1, sc.relowner, 'USAGE')
+                        ELSE NOT EXISTS (SELECT 1 FROM storage WHERE relid = leaf.oid)
+                          OR NOT pg_catalog.has_schema_privilege($1, leaf.relnamespace, 'USAGE')
+                          OR NOT pg_catalog.has_table_privilege($1, leaf.oid, 'MAINTAIN') END
+                  ) AS can_view,
+                  COALESCE(bool_or(r.state IN ('REQUESTED', 'RUNNING')), false) AS pending,
+                  COALESCE(bool_or(r.state = 'FAILED'), false) AS failed,
+                  COALESCE(bool_or((r.state IN ('REQUESTED', 'FAILED') OR
+                    (r.state = 'RUNNING' AND NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.pg_stat_activity a
+                      WHERE a.pid = r.claim_pid AND a.backend_start = r.claim_backend_start)))
+                    AND (r.root_relid <> s.pgt_relid
+                      OR r.database_oid <> (SELECT oid FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database())
+                      OR r.system_identifier <> (SELECT system_identifier::text FROM pg_catalog.pg_control_system())
+                      OR NOT EXISTS (SELECT 1 FROM storage WHERE relid = r.leaf_relid)
+                      OR NOT EXISTS (
+                        SELECT 1 FROM pg_catalog.pg_index i
+                        JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid
+                        JOIN pg_catalog.pg_am am ON am.oid = idx.relam
+                        WHERE idx.oid = r.index_relid AND i.indrelid = r.leaf_relid
+                          AND idx.relkind = 'i' AND am.amname IN ('hnsw', 'ivfflat')
+                          AND i.indisvalid AND i.indisready AND i.indislive
+                          AND pg_catalog.pg_relation_filenode(idx.oid) = r.index_filenode
+                          AND pg_catalog.pg_get_indexdef(idx.oid) = r.index_definition))), false) AS stale,
+                  (array_agg(r.last_error ORDER BY r.completed_at DESC NULLS LAST)
+                    FILTER (WHERE r.state = 'FAILED'))[1] AS last_error
+                FROM access LEFT JOIN pgtrickle.pgt_ann_maintenance_requests r ON r.pgt_id = s.pgt_id
+                GROUP BY access.allowed
+              ) q
+              WHERE t.typname IN ('vector', 'halfvec', 'sparsevec')
+                AND pg_catalog.has_table_privilege($1, s.pgt_relid, 'SELECT')
+                AND pg_catalog.has_schema_privilege($1, sc.relnamespace, 'USAGE')
+              ORDER BY s.pgt_id, a.attnum"#,
+            None, &[caller.role_oid.into()],
+        )?;
+        result.into_iter().map(|row| row.get::<pgrx::JsonB>(1)).collect::<Result<Vec<_>, _>>()
+    }).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Ok(SetOfIterator::new(rows.into_iter().flatten()))
+}
+
+/// Catalog-only status of each ANN index key, including partition leaves.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+pub(super) fn ann_index_status_v2() -> Result<SetOfIterator<'static, pgrx::JsonB>, PgTrickleError> {
+    let caller =
+        security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?;
+    let rows = Spi::connect(|client| {
+        let result = client.select(
+            r#"WITH RECURSIVE relations AS (
+                SELECT s.pgt_id, s.pgt_relid AS root_oid, s.pgt_relid AS relid
+                FROM pgtrickle.pgt_stream_tables s JOIN pg_catalog.pg_class sc ON sc.oid = s.pgt_relid
+                WHERE pg_catalog.has_table_privilege($1, s.pgt_relid, 'SELECT')
+                  AND pg_catalog.has_schema_privilege($1, sc.relnamespace, 'USAGE')
+                UNION ALL
+                SELECT r.pgt_id, r.root_oid, i.inhrelid
+                FROM relations r JOIN pg_catalog.pg_inherits i ON i.inhparent = r.relid
+              )
+              SELECT jsonb_build_object(
+                'stream_id', r.pgt_id, 'stream_table_oid', r.root_oid,
+                'table_oid', r.relid, 'table_schema', tn.nspname, 'table', tbl.relname,
+                'index_oid', idx.oid, 'index_schema', ns.nspname, 'index', idx.relname,
+                'access_method', am.amname, 'key_number', k.n,
+                'expression', pg_catalog.pg_get_indexdef(idx.oid, k.n, true),
+                'predicate', pg_catalog.pg_get_expr(ix.indpred, ix.indrelid),
+                'opclass', op.opcname, 'opclass_schema', opns.nspname,
+                'dimensions', CASE WHEN a.atttypmod > 0 THEN a.atttypmod END,
+                'valid', ix.indisvalid, 'ready', ix.indisready,
+                'size_bytes', pg_catalog.pg_relation_size(idx.oid), 'options', idx.reloptions)
+              FROM relations r
+              JOIN pg_catalog.pg_class tbl ON tbl.oid = r.relid
+              JOIN pg_catalog.pg_namespace tn ON tn.oid = tbl.relnamespace
+              JOIN pg_catalog.pg_index ix ON ix.indrelid = r.relid
+              JOIN pg_catalog.pg_class idx ON idx.oid = ix.indexrelid AND idx.relkind = 'i'
+              JOIN pg_catalog.pg_namespace ns ON ns.oid = idx.relnamespace
+              JOIN pg_catalog.pg_am am ON am.oid = idx.relam AND am.amname IN ('hnsw', 'ivfflat')
+              CROSS JOIN LATERAL pg_catalog.generate_series(1, ix.indnkeyatts) k(n)
+              JOIN pg_catalog.pg_opclass op ON op.oid = ix.indclass[k.n - 1]
+              JOIN pg_catalog.pg_namespace opns ON opns.oid = op.opcnamespace
+              LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = idx.oid AND a.attnum = k.n
+              WHERE pg_catalog.has_table_privilege($1, tbl.oid, 'SELECT')
+                AND pg_catalog.has_schema_privilege($1, tbl.relnamespace, 'USAGE')
+              ORDER BY r.pgt_id, idx.oid, k.n"#,
+            None, &[caller.role_oid.into()],
+        )?;
+        result.into_iter().map(|row| row.get::<pgrx::JsonB>(1)).collect::<Result<Vec<_>, _>>()
+    }).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Ok(SetOfIterator::new(rows.into_iter().flatten()))
 }
 
 // ── TEST-7 (v0.24.0): Unit tests for diagnostics pure-logic helpers ─────

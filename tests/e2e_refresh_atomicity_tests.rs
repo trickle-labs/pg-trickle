@@ -190,14 +190,25 @@ async fn run_scheduler_pause_drain_case(immediate: bool) {
     db.create_st("pause_drain_control", query, "1h", "DIFFERENTIAL")
         .await;
     let id = pgt_id(&db, stream).await;
-    // A due update must precede the tick's change-cache snapshot.
     assert!(db.query_scalar::<bool>("SELECT pgtrickle.drain(30)").await);
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['pause_drain_st'])")
+        .await;
+    db.execute("INSERT INTO pause_drain_source VALUES(2,'pending-inline')")
+        .await;
+    // Confirm the safe frontier includes the change before blocking the target.
+    make_scheduler_due(&db, &["pause_drain_control"]).await;
+    assert!(
+        db.query_scalar::<bool>("SELECT pgtrickle.resume_after_drain()")
+            .await
+    );
+    assert!(wait_for_control_rows(&db, 2, Duration::from_secs(90)).await);
+    assert!(db.query_scalar::<bool>("SELECT pgtrickle.drain(30)").await);
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['pause_drain_st'])")
+        .await;
     let before = progress(&db, id).await;
     let phase = "input_boundary";
     set_chaos(&db, stream, phase).await;
     let (mut barrier, blocker) = hold_barrier(&db, id, phase).await;
-    db.execute("INSERT INTO pause_drain_source VALUES(2,'pending-inline')")
-        .await;
     make_scheduler_due(&db, &[stream]).await;
     assert!(
         db.query_scalar::<bool>("SELECT pgtrickle.resume_after_drain()")
@@ -272,15 +283,27 @@ async fn run_scheduler_pause_drain_case(immediate: bool) {
     );
     clear_chaos(&db).await;
     release_barrier(&mut barrier, id, phase).await;
-    assert!(
-        db.wait_for_condition(
+    if !db
+        .wait_for_condition(
             "admitted inline refresh finishes after pause timeout",
             "SELECT count(*)=2 FROM pause_drain_st",
             Duration::from_secs(30),
-            Duration::from_millis(25)
+            Duration::from_millis(25),
         )
         .await
-    );
+    {
+        let state: String = db.query_scalar(&format!("SELECT jsonb_build_object('stream',(SELECT to_jsonb(s) FROM pgtrickle.pgt_stream_tables s WHERE pgt_id={id}),'history',(SELECT jsonb_agg(to_jsonb(h)) FROM pgtrickle.pgt_refresh_history h WHERE pgt_id={id}),'activity',(SELECT jsonb_agg(to_jsonb(a)) FROM pg_stat_activity a WHERE datname=current_database()))::text")).await;
+        let logs = tokio::process::Command::new("docker")
+            .args(["logs", "--tail", "200", db.container_id()])
+            .output()
+            .await
+            .expect("read container logs");
+        panic!(
+            "inline refresh did not publish: {state}\n{}{}",
+            String::from_utf8_lossy(&logs.stdout),
+            String::from_utf8_lossy(&logs.stderr)
+        );
+    }
     db.assert_st_matches_query(stream, query).await;
     assert!(db.query_scalar::<bool>("SELECT pgtrickle.drain(30)").await);
     db.execute("INSERT INTO pause_drain_source VALUES(3,'pending-paused')")
@@ -291,14 +314,7 @@ async fn run_scheduler_pause_drain_case(immediate: bool) {
             .await
     );
     let paused = progress(&db, id).await;
-    let control_dispatched = db
-        .wait_for_condition(
-            "control witnesses another scheduler dispatch while target is paused",
-            "SELECT count(*)=3 FROM pause_drain_control",
-            Duration::from_secs(30),
-            Duration::from_millis(25),
-        )
-        .await;
+    let control_dispatched = wait_for_control_rows(&db, 3, Duration::from_secs(30)).await;
     observation["control_dispatch_observed"] = control_dispatched.into();
     observation["scheduler_state"] = serde_json::from_str::<serde_json::Value>(&db.query_scalar::<String>(
         "SELECT jsonb_build_object('metadata',(SELECT jsonb_agg(to_jsonb(s)) FROM pgtrickle.pgt_stream_tables s),'controller',(SELECT jsonb_agg(to_jsonb(c)) FROM pgtrickle.pgt_freshness_controller_state c),'history',(SELECT jsonb_agg(to_jsonb(h)) FROM pgtrickle.pgt_refresh_history h))::text"
@@ -359,6 +375,21 @@ async fn make_scheduler_due(db: &E2eDb, names: &[&str]) {
     sqlx::query("UPDATE pgtrickle.pgt_freshness_controller_state SET next_due_at=clock_timestamp()-interval '1 second' WHERE pgt_id IN (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name=ANY($1::text[]))")
         .bind(&names).execute(&mut *transaction).await.unwrap();
     transaction.commit().await.unwrap();
+}
+
+async fn wait_for_control_rows(db: &E2eDb, expected: i64, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if db.count("pause_drain_control").await == expected {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        // A holdback can defer the change past a scheduled no-data refresh.
+        make_scheduler_due(db, &["pause_drain_control"]).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 #[tokio::test]

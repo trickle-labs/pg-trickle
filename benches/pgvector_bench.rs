@@ -25,6 +25,7 @@ fn make_col(name: &str) -> Column {
 
 fn build_vector_avg_tree() -> OpTree {
     let agg = AggExpr {
+        analyzed_argument: None,
         function: AggFunc::VectorAvg,
         argument: Some(Expr::ColumnRef {
             table_alias: Some("t".to_string()),
@@ -56,6 +57,7 @@ fn build_vector_avg_tree() -> OpTree {
 
 fn build_vector_sum_tree() -> OpTree {
     let agg = AggExpr {
+        analyzed_argument: None,
         function: AggFunc::VectorSum,
         argument: Some(Expr::ColumnRef {
             table_alias: Some("emb".to_string()),

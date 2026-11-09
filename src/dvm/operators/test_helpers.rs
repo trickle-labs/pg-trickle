@@ -331,6 +331,7 @@ fn float8_statistical_support() -> Option<StatisticalAggSupport> {
 /// Build a COUNT(*) aggregate.
 pub fn count_star(alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::CountStar,
         argument: None,
         alias: alias.to_string(),
@@ -345,6 +346,7 @@ pub fn count_star(alias: &str) -> AggExpr {
 /// Build a SUM(col) aggregate.
 pub fn sum_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Sum,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -359,6 +361,7 @@ pub fn sum_col(col: &str, alias: &str) -> AggExpr {
 /// Build a COUNT(col) aggregate.
 pub fn count_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Count,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -373,6 +376,7 @@ pub fn count_col(col: &str, alias: &str) -> AggExpr {
 /// Build an AVG(col) aggregate.
 pub fn avg_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Avg,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -387,6 +391,7 @@ pub fn avg_col(col: &str, alias: &str) -> AggExpr {
 /// Build a MIN(col) aggregate.
 pub fn min_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Min,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -401,6 +406,7 @@ pub fn min_col(col: &str, alias: &str) -> AggExpr {
 /// Build a MAX(col) aggregate.
 pub fn max_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Max,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -415,6 +421,7 @@ pub fn max_col(col: &str, alias: &str) -> AggExpr {
 /// Build a BOOL_AND(col) aggregate.
 pub fn bool_and_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::BoolAnd,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -429,6 +436,7 @@ pub fn bool_and_col(col: &str, alias: &str) -> AggExpr {
 /// Build a BOOL_OR(col) aggregate.
 pub fn bool_or_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::BoolOr,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -443,6 +451,7 @@ pub fn bool_or_col(col: &str, alias: &str) -> AggExpr {
 /// Build a STRING_AGG(col, sep) aggregate.
 pub fn string_agg_col(col: &str, sep: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::StringAgg,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -457,6 +466,7 @@ pub fn string_agg_col(col: &str, sep: &str, alias: &str) -> AggExpr {
 /// Build an ARRAY_AGG(col) aggregate.
 pub fn array_agg_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::ArrayAgg,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -477,6 +487,7 @@ pub fn with_filter(mut agg: AggExpr, filter: Expr) -> AggExpr {
 /// Build a BIT_AND(col) aggregate.
 pub fn bit_and_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::BitAnd,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -491,6 +502,7 @@ pub fn bit_and_col(col: &str, alias: &str) -> AggExpr {
 /// Build a BIT_OR(col) aggregate.
 pub fn bit_or_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::BitOr,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -505,6 +517,7 @@ pub fn bit_or_col(col: &str, alias: &str) -> AggExpr {
 /// Build a BIT_XOR(col) aggregate.
 pub fn bit_xor_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::BitXor,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -519,6 +532,7 @@ pub fn bit_xor_col(col: &str, alias: &str) -> AggExpr {
 /// Build a JSON_OBJECT_AGG(key, value) aggregate.
 pub fn json_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::JsonObjectAgg,
         argument: Some(colref(key_col)),
         alias: alias.to_string(),
@@ -533,6 +547,7 @@ pub fn json_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr
 /// Build a JSONB_OBJECT_AGG(key, value) aggregate.
 pub fn jsonb_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::JsonbObjectAgg,
         argument: Some(colref(key_col)),
         alias: alias.to_string(),
@@ -547,6 +562,7 @@ pub fn jsonb_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExp
 /// Build a STDDEV_POP(col) aggregate.
 pub fn stddev_pop_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::StddevPop,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -561,6 +577,7 @@ pub fn stddev_pop_col(col: &str, alias: &str) -> AggExpr {
 /// Build a STDDEV_SAMP(col) aggregate (also used for STDDEV alias).
 pub fn stddev_samp_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::StddevSamp,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -575,6 +592,7 @@ pub fn stddev_samp_col(col: &str, alias: &str) -> AggExpr {
 /// Build a VAR_POP(col) aggregate.
 pub fn var_pop_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::VarPop,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -589,6 +607,7 @@ pub fn var_pop_col(col: &str, alias: &str) -> AggExpr {
 /// Build a VAR_SAMP(col) aggregate (also used for VARIANCE alias).
 pub fn var_samp_col(col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::VarSamp,
         argument: Some(colref(col)),
         alias: alias.to_string(),
@@ -603,6 +622,7 @@ pub fn var_samp_col(col: &str, alias: &str) -> AggExpr {
 /// Build a MODE() WITHIN GROUP (ORDER BY col) aggregate.
 pub fn mode_col(order_col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Mode,
         argument: None,
         alias: alias.to_string(),
@@ -621,6 +641,7 @@ pub fn mode_col(order_col: &str, alias: &str) -> AggExpr {
 /// Build a PERCENTILE_CONT(fraction) WITHIN GROUP (ORDER BY col) aggregate.
 pub fn percentile_cont_col(fraction: &str, order_col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::PercentileCont,
         argument: Some(lit(fraction)),
         alias: alias.to_string(),
@@ -639,6 +660,7 @@ pub fn percentile_cont_col(fraction: &str, order_col: &str, alias: &str) -> AggE
 /// Build a PERCENTILE_DISC(fraction) WITHIN GROUP (ORDER BY col) aggregate.
 pub fn percentile_disc_col(fraction: &str, order_col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::PercentileDisc,
         argument: Some(lit(fraction)),
         alias: alias.to_string(),
@@ -661,6 +683,7 @@ pub fn percentile_disc_col(fraction: &str, order_col: &str, alias: &str) -> AggE
 /// REGR_SXY, REGR_SYY.
 pub fn regression_agg(func: AggFunc, y_col: &str, x_col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: func,
         argument: Some(colref(y_col)),
         alias: alias.to_string(),

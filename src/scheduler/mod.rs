@@ -124,7 +124,7 @@ pub use tier::RefreshTier;
 ///
 /// Automatically rolls back on drop if neither [`commit()`](SubTransaction::commit)
 /// nor [`rollback()`](SubTransaction::rollback) was called (panic safety).
-struct SubTransaction {
+pub(crate) struct SubTransaction {
     old_cxt: pg_sys::MemoryContext,
     old_owner: pg_sys::ResourceOwner,
     finished: bool,
@@ -132,7 +132,7 @@ struct SubTransaction {
 
 impl SubTransaction {
     /// Begin a new sub-transaction within the current worker transaction.
-    fn begin() -> Self {
+    pub(crate) fn begin() -> Self {
         // SAFETY: Called within a PostgreSQL worker transaction. The current
         // memory context and resource owner are valid.
         let old_cxt = unsafe { pg_sys::CurrentMemoryContext };
@@ -148,7 +148,7 @@ impl SubTransaction {
     }
 
     /// Commit the sub-transaction and restore the outer context.
-    fn commit(mut self) {
+    pub(crate) fn commit(mut self) {
         // SAFETY: Commits the sub-transaction, restores context.
         unsafe {
             pg_sys::ReleaseCurrentSubTransaction();
@@ -159,7 +159,7 @@ impl SubTransaction {
     }
 
     /// Roll back the sub-transaction and restore the outer context.
-    fn rollback(mut self) {
+    pub(crate) fn rollback(mut self) {
         // SAFETY: Rolls back the sub-transaction, restores context.
         unsafe {
             pg_sys::RollbackAndReleaseCurrentSubTransaction();
@@ -755,6 +755,11 @@ fn try_fused_chain_refresh(
         if is_external_orchestration(&st) {
             continue;
         }
+        // Fused execution has no per-node before images for distance alerts.
+        // Check after taking the row lock so registration cannot race this choice.
+        if crate::api::has_distance_subscriptions(&st) {
+            return Ok(vec![]);
+        }
         let prev_frontier = match &st.frontier {
             Some(f) if !f.is_empty() => f.clone(),
             _ => continue,
@@ -1093,6 +1098,16 @@ fn try_fused_chain_refresh(
             rows_inserted,
             rows_updated,
             rows_deleted,
+            ann_churn_operations: matches!(
+                crate::cdc::has_user_triggers(nd.st.pgt_relid),
+                Ok(false)
+            )
+            .then(|| {
+                rows_inserted
+                    .checked_add(rows_updated)
+                    .and_then(|count| count.checked_add(rows_deleted))
+            })
+            .flatten(),
             data_changed: rows_inserted > 0 || rows_updated > 0 || rows_deleted > 0,
             full_reason: None,
             downstream_capture_complete: true,
@@ -2000,20 +2015,55 @@ fn is_falling_behind(elapsed_ms: i64, schedule_ms: i64, threshold: f64) -> Optio
 /// VP-1/VP-2 (v0.47.0): Execute the post-refresh action for a stream table
 /// after a successful refresh that produced changed rows.
 ///
-/// Runs outside the refresh transaction (fire-and-forget after commit).
-/// Errors are logged but never propagated — post-refresh actions must not
-/// interrupt the refresh pipeline.
+/// The caller is still in the refresh transaction. Isolate PostgreSQL errors
+/// so a maintenance failure cannot abort the refresh.
 pub(crate) fn execute_post_refresh_action(st: &StreamTableMeta, rows_changed: i64) {
     let action = st.post_refresh_action.as_str();
 
     // Increment the drift counter first (regardless of action type).
     if action == "reindex_if_drift" || action == "reindex" || action == "analyze" {
-        let _ = crate::catalog::StreamTableMeta::increment_rows_changed_for_reindex(
-            st.pgt_id,
-            rows_changed,
-        );
+        isolate_post_refresh_action(st, || {
+            crate::catalog::StreamTableMeta::increment_rows_changed_for_reindex(
+                st.pgt_id,
+                rows_changed,
+            )
+        });
     }
 
+    if action != "none" {
+        isolate_post_refresh_action(st, || {
+            execute_post_refresh_action_inner(st, rows_changed);
+            Ok(())
+        });
+    }
+}
+
+fn isolate_post_refresh_action(
+    st: &StreamTableMeta,
+    f: impl FnOnce() -> Result<(), PgTrickleError>,
+) {
+    let subtxn = SubTransaction::begin();
+    let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        f().map_err(|error| error.to_string())
+    }))
+    .catch_others(|error| Err(format!("{error:?}")))
+    .execute();
+    match result {
+        Ok(()) => subtxn.commit(),
+        Err(error) => {
+            subtxn.rollback();
+            pgrx::warning!(
+                "pg_trickle: post-refresh action failed for {}.{}: {}",
+                st.pgt_schema,
+                st.pgt_name,
+                error
+            );
+        }
+    }
+}
+
+fn execute_post_refresh_action_inner(st: &StreamTableMeta, rows_changed: i64) {
+    let action = st.post_refresh_action.as_str();
     match action {
         "none" => {
             // No post-refresh action requested.
@@ -3256,6 +3306,7 @@ fn refresh_single_st(
                 &st.defining_query,
                 st.refresh_mode,
                 crate::api::security_context::stream_execution_context(&st)?.owner_oid,
+                false,
             )
         })
     {
@@ -4359,6 +4410,7 @@ fn execute_scheduled_refresh(
                 rows_inserted,
                 rows_updated,
                 rows_deleted,
+                ann_churn_operations: refresh::take_last_ann_churn_operations(),
                 data_changed: effective_action != RefreshAction::NoData
                     && (rows_inserted > 0 || rows_updated > 0 || rows_deleted > 0),
                 full_reason,

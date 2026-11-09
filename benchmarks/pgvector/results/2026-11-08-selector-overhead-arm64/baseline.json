@@ -1,0 +1,1849 @@
+{
+  "ann": [
+    {
+      "ann_plan": [
+        {
+          "Execution Time": 1.334,
+          "Plan": {
+            "Actual Loops": 1,
+            "Actual Rows": 6.0,
+            "Actual Startup Time": 1.271,
+            "Actual Total Time": 1.311,
+            "Async Capable": false,
+            "Disabled": false,
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Node Type": "Limit",
+            "Parallel Aware": false,
+            "Plan Rows": 10,
+            "Plan Width": 16,
+            "Plans": [
+              {
+                "Actual Loops": 1,
+                "Actual Rows": 6.0,
+                "Actual Startup Time": 1.27,
+                "Actual Total Time": 1.31,
+                "Alias": "vector_bench_corpus",
+                "Async Capable": false,
+                "Disabled": false,
+                "Filter": "(tenant = 1)",
+                "Index Name": "vector_bench_ann",
+                "Index Searches": 1,
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Node Type": "Index Scan",
+                "Order By": "(embedding <=> '[0.6307782,0.7418352,-0.25474188,0.90722996,0.68893176,0.21534416,0.32438603,-0.051452488,0.13676932,0.8433941,0.36623815,-0.8535406,0.63112444,-0.99212,-0.9653021,-0.9664983,-0.81714827,-0.039868608,-0.84276265,0.8977057,-0.13546902,-0.30044773,0.3308283,-0.41390577,0.8485096,-0.6916953,0.46156824,0.01949774,-0.27507868,0.14579378,0.40583923,0.71787107,-0.38309297,-0.6723212,-0.013993247,0.46297598,-0.77452123,-0.38095576,-0.087756515,0.2959734,-0.020826636,0.2605691,0.23515388,0.78731143,0.52745193,0.8842075,-0.7336059,0.61199176,-0.49818256,-0.31355974,-0.7427956,-0.8935276,0.68240404,-0.8373646,-0.3724875,-0.104830354,-0.9531453,-0.023745267,0.8516017,-0.07818735,-0.7942767,-0.3898102,0.4979276,-0.93946284,0.4756915,0.45173442,0.76044697,0.27399227,-0.22304711,-0.41471618,0.54990435,0.52132905,-0.6755981,0.26865315,-0.90694404,0.894582,-0.46509516,-0.20778269,0.33387968,0.89067346,-0.66611195,0.712776,-0.43315065,0.09033732,0.8843229,0.9249437,0.6492094,-0.2458997,0.9012024,-0.6195021,0.7848348,-0.8845388,0.22386274,0.8395731,0.23893178,-0.5771045,-0.60034794,-0.55676156,0.73405886,0.77583015,0.34966546,0.023275943,0.15103728,0.18469818,-0.66316295,0.019062499,-0.044338908,-0.845884,0.12181451,0.09967291,0.073626354,0.67017174,0.65793514,-0.6969726,0.7416222,-0.35693517,-0.8501142,0.4632634,-0.39796966,-0.81808597,0.3762096,0.102402195,0.39463824,0.8015087,-0.34119138,0.236263,0.9708466,0.7256889,-0.33279595,-0.57506853,-0.80140036,0.9813246,0.07826322,0.8501108,0.5153868,-0.1040584,-0.41639134,-0.73905456,-0.30150288,0.0550451,0.42787004,0.087905064,0.5580554,0.39254925,-0.7601457,-0.17801557,-0.3474419,-0.9472143,-0.5019369,-0.35562396,0.26632243,-0.15832978,0.16978683,-0.08718919,0.18992703,0.6222457,-0.6726873,0.63548386,-0.5481479,0.1344,0.78388244,-0.6199973,0.40560687,-0.36237174,0.06478123,0.99198085,0.28465283,0.877081,0.34528983,0.82637656,0.7441647,0.88209873,0.20093304,0.32120472,0.086518876,-0.6248682,-0.19927646,0.07297185,0.6343796,-0.010820167,0.8529213,0.42060927,0.16834198,-0.77434695,-0.5851029,-0.23798631,0.212819,-0.5520285,0.4996812,0.067021966,0.8382142,-0.42620498,-0.45015824,-0.04068221,0.34232622,0.18056144,-0.61188424,-0.6021935,0.8948018,-0.47276354,0.75945234,-0.9180138,0.60381114,0.6490306,-0.1690839,0.52270323,-0.46488684,0.32321534,0.34180224,-0.5308566,0.8061787,-0.38486245,0.6283809,0.039253645,0.76900244,0.8561969,-0.19537178,-0.7451869,-0.0047647557,-0.92028254,-0.50200754,-0.59527516,-0.68103915,0.2713657,0.95977265,-0.11988754,-0.90944636,-0.36086878,-0.083999306,0.7649934,0.5214349,-0.12274696,-0.73194164,-0.7504108,0.16207777,0.32547596,0.76146436,-0.65839314,-0.9869615,0.4957394,-0.58697605,0.1273775,-0.61390895,0.75398594,0.3997029,-0.44917005,0.033374898,0.45636514,0.99761504,-0.7197591,0.39024875,0.31755486,0.65336555,-0.73793644,0.9319697,0.52934444,0.31797826,-0.74100864,0.9722581,-0.9552087,-0.12106006,0.9944291,0.43112636,0.0064028394,0.63513887,0.4415858,0.6654387,0.084966466,-0.25453976,-0.8121299,0.615401,0.06604202,0.31082687,0.90517884,-0.9423435,0.10362121,0.7804375,-0.3310496,-0.3475423,0.010478872,0.8418053,0.3536576,-0.4067864,0.18541016,-0.5778279,0.09587619,0.9451371,0.28315204,-0.47282207,-0.09109008,-0.95007175,0.74026585,0.63398594,-0.6620969,0.99167,0.74756026,0.7046731,0.30260783,0.09005585,0.7655533,-0.82169116,-0.6538403,-0.3235542,0.13072075,0.5236079,0.5230445,-0.28644294,-0.6987797,0.32113138,0.20048727,-0.10059643,0.040695734,-0.72070277,0.7100315,-0.97487867,-0.26576424,-0.3022383,-0.40002182,0.9097254,0.5578338,-0.91197443,-0.30642205,0.22249179,0.8667958,0.73996544,-0.638415,-0.52881444,-0.02077969,0.09965874,-0.6885506,0.9969722,0.26297414,0.8082033,0.67800826,-0.9267773,0.16975103,-0.40171844,-0.47592914,0.48673916,-0.89057416,-0.20246418,-0.9944553,-0.01863706,0.83612865,-0.6273705,-0.11358119,0.37721515,0.50618494,0.66897106,0.92722034,0.28135118,-0.46444723,-0.5137447,0.28254792,-0.31809768,-0.5421322,0.5466714,0.040983275,-0.58418703,-0.77207285,-0.1528763,-0.19332191,-0.40393195,-0.9437193,-0.7984598,0.4663764,-0.090509325,0.8226708,-0.36207962,0.5816646,-0.36555386,0.2646794,0.66505396,-0.39448246,0.76018673,-0.17373972,-0.23263001,0.120037295,-0.6860152,0.38696352,0.11403412,-0.8024409,-0.75456935,-0.9853668]'::vector)",
+                "Parallel Aware": false,
+                "Parent Relationship": "Outer",
+                "Plan Rows": 500,
+                "Plan Width": 16,
+                "Relation Name": "vector_bench_corpus",
+                "Rows Removed by Filter": 34,
+                "Scan Direction": "Forward",
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 1274,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Startup Cost": 513.45,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 9105.25,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 0,
+                "WAL FPI": 0,
+                "WAL Records": 0
+              }
+            ],
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 1274,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Startup Cost": 513.45,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Total Cost": 685.29,
+            "WAL Buffers Full": 0,
+            "WAL Bytes": 0,
+            "WAL FPI": 0,
+            "WAL Records": 0
+          },
+          "Planning": {
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 39,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          },
+          "Planning Time": 0.159,
+          "Triggers": []
+        }
+      ],
+      "corpus_total_bytes_including_indexes": 18694144,
+      "hnsw_ef_search": "40",
+      "index_bytes": 10248192,
+      "ivfflat_probes": "1",
+      "k": 10,
+      "method": "hnsw",
+      "metric": "cosine",
+      "recall_at_k": [
+        0.6
+      ],
+      "retrieval_ms": {
+        "p50": 1.4105,
+        "p95": 1.4105,
+        "p99": 1.4105,
+        "samples": [
+          1.4105
+        ]
+      },
+      "tenant_fraction": 0.1
+    },
+    {
+      "ann_plan": [
+        {
+          "Execution Time": 0.246,
+          "Plan": {
+            "Actual Loops": 1,
+            "Actual Rows": 10.0,
+            "Actual Startup Time": 0.158,
+            "Actual Total Time": 0.228,
+            "Async Capable": false,
+            "Disabled": false,
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Node Type": "Limit",
+            "Parallel Aware": false,
+            "Plan Rows": 10,
+            "Plan Width": 16,
+            "Plans": [
+              {
+                "Actual Loops": 1,
+                "Actual Rows": 10.0,
+                "Actual Startup Time": 0.157,
+                "Actual Total Time": 0.227,
+                "Alias": "vector_bench_corpus",
+                "Async Capable": false,
+                "Disabled": false,
+                "Filter": "(tenant = 1)",
+                "Index Name": "vector_bench_ann",
+                "Index Searches": 1,
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Node Type": "Index Scan",
+                "Order By": "(embedding <=> '[0.6307782,0.7418352,-0.25474188,0.90722996,0.68893176,0.21534416,0.32438603,-0.051452488,0.13676932,0.8433941,0.36623815,-0.8535406,0.63112444,-0.99212,-0.9653021,-0.9664983,-0.81714827,-0.039868608,-0.84276265,0.8977057,-0.13546902,-0.30044773,0.3308283,-0.41390577,0.8485096,-0.6916953,0.46156824,0.01949774,-0.27507868,0.14579378,0.40583923,0.71787107,-0.38309297,-0.6723212,-0.013993247,0.46297598,-0.77452123,-0.38095576,-0.087756515,0.2959734,-0.020826636,0.2605691,0.23515388,0.78731143,0.52745193,0.8842075,-0.7336059,0.61199176,-0.49818256,-0.31355974,-0.7427956,-0.8935276,0.68240404,-0.8373646,-0.3724875,-0.104830354,-0.9531453,-0.023745267,0.8516017,-0.07818735,-0.7942767,-0.3898102,0.4979276,-0.93946284,0.4756915,0.45173442,0.76044697,0.27399227,-0.22304711,-0.41471618,0.54990435,0.52132905,-0.6755981,0.26865315,-0.90694404,0.894582,-0.46509516,-0.20778269,0.33387968,0.89067346,-0.66611195,0.712776,-0.43315065,0.09033732,0.8843229,0.9249437,0.6492094,-0.2458997,0.9012024,-0.6195021,0.7848348,-0.8845388,0.22386274,0.8395731,0.23893178,-0.5771045,-0.60034794,-0.55676156,0.73405886,0.77583015,0.34966546,0.023275943,0.15103728,0.18469818,-0.66316295,0.019062499,-0.044338908,-0.845884,0.12181451,0.09967291,0.073626354,0.67017174,0.65793514,-0.6969726,0.7416222,-0.35693517,-0.8501142,0.4632634,-0.39796966,-0.81808597,0.3762096,0.102402195,0.39463824,0.8015087,-0.34119138,0.236263,0.9708466,0.7256889,-0.33279595,-0.57506853,-0.80140036,0.9813246,0.07826322,0.8501108,0.5153868,-0.1040584,-0.41639134,-0.73905456,-0.30150288,0.0550451,0.42787004,0.087905064,0.5580554,0.39254925,-0.7601457,-0.17801557,-0.3474419,-0.9472143,-0.5019369,-0.35562396,0.26632243,-0.15832978,0.16978683,-0.08718919,0.18992703,0.6222457,-0.6726873,0.63548386,-0.5481479,0.1344,0.78388244,-0.6199973,0.40560687,-0.36237174,0.06478123,0.99198085,0.28465283,0.877081,0.34528983,0.82637656,0.7441647,0.88209873,0.20093304,0.32120472,0.086518876,-0.6248682,-0.19927646,0.07297185,0.6343796,-0.010820167,0.8529213,0.42060927,0.16834198,-0.77434695,-0.5851029,-0.23798631,0.212819,-0.5520285,0.4996812,0.067021966,0.8382142,-0.42620498,-0.45015824,-0.04068221,0.34232622,0.18056144,-0.61188424,-0.6021935,0.8948018,-0.47276354,0.75945234,-0.9180138,0.60381114,0.6490306,-0.1690839,0.52270323,-0.46488684,0.32321534,0.34180224,-0.5308566,0.8061787,-0.38486245,0.6283809,0.039253645,0.76900244,0.8561969,-0.19537178,-0.7451869,-0.0047647557,-0.92028254,-0.50200754,-0.59527516,-0.68103915,0.2713657,0.95977265,-0.11988754,-0.90944636,-0.36086878,-0.083999306,0.7649934,0.5214349,-0.12274696,-0.73194164,-0.7504108,0.16207777,0.32547596,0.76146436,-0.65839314,-0.9869615,0.4957394,-0.58697605,0.1273775,-0.61390895,0.75398594,0.3997029,-0.44917005,0.033374898,0.45636514,0.99761504,-0.7197591,0.39024875,0.31755486,0.65336555,-0.73793644,0.9319697,0.52934444,0.31797826,-0.74100864,0.9722581,-0.9552087,-0.12106006,0.9944291,0.43112636,0.0064028394,0.63513887,0.4415858,0.6654387,0.084966466,-0.25453976,-0.8121299,0.615401,0.06604202,0.31082687,0.90517884,-0.9423435,0.10362121,0.7804375,-0.3310496,-0.3475423,0.010478872,0.8418053,0.3536576,-0.4067864,0.18541016,-0.5778279,0.09587619,0.9451371,0.28315204,-0.47282207,-0.09109008,-0.95007175,0.74026585,0.63398594,-0.6620969,0.99167,0.74756026,0.7046731,0.30260783,0.09005585,0.7655533,-0.82169116,-0.6538403,-0.3235542,0.13072075,0.5236079,0.5230445,-0.28644294,-0.6987797,0.32113138,0.20048727,-0.10059643,0.040695734,-0.72070277,0.7100315,-0.97487867,-0.26576424,-0.3022383,-0.40002182,0.9097254,0.5578338,-0.91197443,-0.30642205,0.22249179,0.8667958,0.73996544,-0.638415,-0.52881444,-0.02077969,0.09965874,-0.6885506,0.9969722,0.26297414,0.8082033,0.67800826,-0.9267773,0.16975103,-0.40171844,-0.47592914,0.48673916,-0.89057416,-0.20246418,-0.9944553,-0.01863706,0.83612865,-0.6273705,-0.11358119,0.37721515,0.50618494,0.66897106,0.92722034,0.28135118,-0.46444723,-0.5137447,0.28254792,-0.31809768,-0.5421322,0.5466714,0.040983275,-0.58418703,-0.77207285,-0.1528763,-0.19332191,-0.40393195,-0.9437193,-0.7984598,0.4663764,-0.090509325,0.8226708,-0.36207962,0.5816646,-0.36555386,0.2646794,0.66505396,-0.39448246,0.76018673,-0.17373972,-0.23263001,0.120037295,-0.6860152,0.38696352,0.11403412,-0.8024409,-0.75456935,-0.9853668]'::vector)",
+                "Parallel Aware": false,
+                "Parent Relationship": "Outer",
+                "Plan Rows": 500,
+                "Plan Width": 16,
+                "Relation Name": "vector_bench_corpus",
+                "Rows Removed by Filter": 71,
+                "Scan Direction": "Forward",
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 181,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Startup Cost": 255.5,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 6618.75,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 0,
+                "WAL FPI": 0,
+                "WAL Records": 0
+              }
+            ],
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 181,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Startup Cost": 255.5,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Total Cost": 382.76,
+            "WAL Buffers Full": 0,
+            "WAL Bytes": 0,
+            "WAL FPI": 0,
+            "WAL Records": 0
+          },
+          "Planning": {
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 36,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          },
+          "Planning Time": 0.135,
+          "Triggers": []
+        }
+      ],
+      "corpus_total_bytes_including_indexes": 16695296,
+      "hnsw_ef_search": "40",
+      "index_bytes": 8249344,
+      "ivfflat_probes": "1",
+      "k": 10,
+      "method": "ivfflat",
+      "metric": "cosine",
+      "recall_at_k": [
+        0.4
+      ],
+      "retrieval_ms": {
+        "p50": 0.733625,
+        "p95": 0.733625,
+        "p99": 0.733625,
+        "samples": [
+          0.733625
+        ]
+      },
+      "tenant_fraction": 0.1
+    }
+  ],
+  "centroid_baseline": [
+    {
+      "affected_group_rows": 45,
+      "changed_rows": 1,
+      "group_shape": "small",
+      "refresh": [
+        {
+          "actual_strategy": "merge",
+          "auxiliary_state_logical_bytes": 0,
+          "elapsed_ms": 19.145791999999997,
+          "max_absolute_component_error": 0.0,
+          "mode": "DIFFERENTIAL",
+          "refresh_plan": [
+            {
+              "Execution Time": 15.179,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 15.176,
+                "Actual Total Time": 15.176,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 1,
+                "Local Hit Blocks": 2,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 1,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 2,
+                "Shared Hit Blocks": 2771,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 2,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 33887,
+                "WAL FPI": 0,
+                "WAL Records": 248
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.005,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 4500,
+          "storage_bytes_including_indexes": 237568,
+          "strategy": "group_rescan",
+          "wal_bytes_cluster_wide": 44088.0
+        },
+        {
+          "actual_strategy": "centroid_algebraic",
+          "auxiliary_state_logical_bytes": 933300,
+          "elapsed_ms": 25.94175,
+          "max_absolute_component_error": 0.0,
+          "mode": "DIFFERENTIAL",
+          "refresh_plan": [
+            {
+              "Execution Time": 20.694,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 20.689,
+                "Actual Total Time": 20.689,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 11,
+                "Local Hit Blocks": 78,
+                "Local Read Blocks": 2,
+                "Local Written Blocks": 9,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 8,
+                "Shared Hit Blocks": 4005,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 8,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 123120,
+                "WAL FPI": 0,
+                "WAL Records": 1060
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.007,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "storage_bytes_including_indexes": 237568,
+          "strategy": "algebraic",
+          "wal_bytes_cluster_wide": 159304.0
+        },
+        {
+          "actual_strategy": "FULL",
+          "auxiliary_state_logical_bytes": 0,
+          "elapsed_ms": 25.089208000000003,
+          "max_absolute_component_error": 0.0,
+          "mode": "FULL",
+          "refresh_plan": [
+            {
+              "Execution Time": 21.295,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 21.288,
+                "Actual Total Time": 21.289,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 23,
+                "Shared Hit Blocks": 1849,
+                "Shared Read Blocks": 1,
+                "Shared Written Blocks": 24,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 185988,
+                "WAL FPI": 3,
+                "WAL Records": 271
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.012,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 4500,
+          "storage_bytes_including_indexes": 212992,
+          "strategy": "full",
+          "wal_bytes_cluster_wide": 187624.0
+        }
+      ],
+      "representative_group_query_plan": [
+        {
+          "Execution Time": 0.163,
+          "Plan": {
+            "Actual Loops": 1,
+            "Actual Rows": 1.0,
+            "Actual Startup Time": 0.154,
+            "Actual Total Time": 0.155,
+            "Async Capable": false,
+            "Disabled": false,
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Node Type": "Aggregate",
+            "Parallel Aware": false,
+            "Partial Mode": "Simple",
+            "Plan Rows": 1,
+            "Plan Width": 32,
+            "Plans": [
+              {
+                "Actual Loops": 1,
+                "Actual Rows": 45.0,
+                "Actual Startup Time": 0.01,
+                "Actual Total Time": 0.031,
+                "Alias": "vector_centroid_source",
+                "Async Capable": false,
+                "Disabled": false,
+                "Exact Heap Blocks": 46,
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Lossy Heap Blocks": 0,
+                "Node Type": "Bitmap Heap Scan",
+                "Parallel Aware": false,
+                "Parent Relationship": "Outer",
+                "Plan Rows": 45,
+                "Plan Width": 1544,
+                "Plans": [
+                  {
+                    "Actual Loops": 1,
+                    "Actual Rows": 46.0,
+                    "Actual Startup Time": 0.004,
+                    "Actual Total Time": 0.004,
+                    "Async Capable": false,
+                    "Disabled": false,
+                    "Index Cond": "(small_group = 99)",
+                    "Index Name": "vector_centroid_small_group",
+                    "Index Searches": 1,
+                    "Local Dirtied Blocks": 0,
+                    "Local Hit Blocks": 0,
+                    "Local Read Blocks": 0,
+                    "Local Written Blocks": 0,
+                    "Node Type": "Bitmap Index Scan",
+                    "Parallel Aware": false,
+                    "Parent Relationship": "Outer",
+                    "Plan Rows": 45,
+                    "Plan Width": 0,
+                    "Shared Dirtied Blocks": 0,
+                    "Shared Hit Blocks": 2,
+                    "Shared Read Blocks": 0,
+                    "Shared Written Blocks": 0,
+                    "Startup Cost": 0.0,
+                    "Temp Read Blocks": 0,
+                    "Temp Written Blocks": 0,
+                    "Total Cost": 4.62
+                  }
+                ],
+                "Recheck Cond": "(small_group = 99)",
+                "Relation Name": "vector_centroid_source",
+                "Rows Removed by Index Recheck": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 48,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Startup Cost": 4.63,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 152.02
+              }
+            ],
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 48,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Startup Cost": 152.14,
+            "Strategy": "Plain",
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Total Cost": 152.15
+          },
+          "Planning": {
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          },
+          "Planning Time": 0.027,
+          "Triggers": []
+        }
+      ]
+    },
+    {
+      "affected_group_rows": 2250,
+      "changed_rows": 1,
+      "group_shape": "large",
+      "refresh": [
+        {
+          "actual_strategy": "merge",
+          "auxiliary_state_logical_bytes": 0,
+          "elapsed_ms": 23.90175,
+          "max_absolute_component_error": 0.0,
+          "mode": "DIFFERENTIAL",
+          "refresh_plan": [
+            {
+              "Execution Time": 20.026,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 20.022,
+                "Actual Total Time": 20.023,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 1,
+                "Local Hit Blocks": 3,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 1,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 2,
+                "Shared Hit Blocks": 2054,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 2,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 31287,
+                "WAL FPI": 0,
+                "WAL Records": 245
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.014,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 4500,
+          "storage_bytes_including_indexes": 49152,
+          "strategy": "group_rescan",
+          "wal_bytes_cluster_wide": 41432.0
+        },
+        {
+          "actual_strategy": "centroid_algebraic",
+          "auxiliary_state_logical_bytes": 18666,
+          "elapsed_ms": 23.62475,
+          "max_absolute_component_error": 0.0,
+          "mode": "DIFFERENTIAL",
+          "refresh_plan": [
+            {
+              "Execution Time": 19.731,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 19.724,
+                "Actual Total Time": 19.727,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 11,
+                "Local Hit Blocks": 78,
+                "Local Read Blocks": 2,
+                "Local Written Blocks": 9,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 8,
+                "Shared Hit Blocks": 3309,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 10,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 127876,
+                "WAL FPI": 1,
+                "WAL Records": 1044
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.007,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "storage_bytes_including_indexes": 49152,
+          "strategy": "algebraic",
+          "wal_bytes_cluster_wide": 165456.0
+        },
+        {
+          "actual_strategy": "FULL",
+          "auxiliary_state_logical_bytes": 0,
+          "elapsed_ms": 24.014958999999998,
+          "max_absolute_component_error": 0.0,
+          "mode": "FULL",
+          "refresh_plan": [
+            {
+              "Execution Time": 20.482,
+              "Plan": {
+                "Actual Loops": 1,
+                "Actual Rows": 1.0,
+                "Actual Startup Time": 20.477,
+                "Actual Total Time": 20.478,
+                "Async Capable": false,
+                "Disabled": false,
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Shared Dirtied Blocks": 3,
+                "Shared Hit Blocks": 1590,
+                "Shared Read Blocks": 1,
+                "Shared Written Blocks": 2,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 0.01,
+                "WAL Buffers Full": 0,
+                "WAL Bytes": 11601,
+                "WAL FPI": 2,
+                "WAL Records": 75
+              },
+              "Planning": {
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.007,
+              "Triggers": []
+            }
+          ],
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 4500,
+          "storage_bytes_including_indexes": 32768,
+          "strategy": "full",
+          "wal_bytes_cluster_wide": 12216.0
+        }
+      ],
+      "representative_group_query_plan": [
+        {
+          "Execution Time": 6.844,
+          "Plan": {
+            "Actual Loops": 1,
+            "Actual Rows": 1.0,
+            "Actual Startup Time": 6.83,
+            "Actual Total Time": 6.83,
+            "Async Capable": false,
+            "Disabled": false,
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Node Type": "Aggregate",
+            "Parallel Aware": false,
+            "Partial Mode": "Simple",
+            "Plan Rows": 1,
+            "Plan Width": 32,
+            "Plans": [
+              {
+                "Actual Loops": 1,
+                "Actual Rows": 2250.0,
+                "Actual Startup Time": 0.006,
+                "Actual Total Time": 0.943,
+                "Alias": "vector_centroid_source",
+                "Async Capable": false,
+                "Disabled": false,
+                "Filter": "(large_group = 1)",
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Node Type": "Seq Scan",
+                "Parallel Aware": false,
+                "Parent Relationship": "Outer",
+                "Plan Rows": 2252,
+                "Plan Width": 1544,
+                "Relation Name": "vector_centroid_source",
+                "Rows Removed by Filter": 2250,
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 901,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Startup Cost": 0.0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 957.31
+              }
+            ],
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 901,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Startup Cost": 962.95,
+            "Strategy": "Plain",
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Total Cost": 962.96
+          },
+          "Planning": {
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          },
+          "Planning Time": 0.038,
+          "Triggers": []
+        }
+      ]
+    }
+  ],
+  "centroid_notes": "Each refresh is executed under EXPLAIN ANALYZE; SPI work may not be individually visible in the plan. Source tuple counters cover same-transaction sequential returns and index fetches, including repeated visits, during the refresh. Group rescan, algebraic and FULL run in that order. WAL excludes the source mutation; auxiliary bytes are logical payload estimates.",
+  "centroid_repeated": {
+    "changed_rows_per_round": 2,
+    "notes": "Each round changes the configured number of source vectors; group and strategy order rotate. All affected groups are checked against native AVG. Times cover the refresh call without EXPLAIN, mutation or validation. No warmup, concurrent load, or repeated rebase measurements.",
+    "observations": [
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 20.543540999999998,
+        "group_shape": "small",
+        "round": 0,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 23.18925,
+        "group_shape": "small",
+        "round": 0,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.532459000000003,
+        "group_shape": "small",
+        "round": 0,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 26.545666999999998,
+        "group_shape": "large",
+        "round": 0,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.322875,
+        "group_shape": "large",
+        "round": 0,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.668375,
+        "group_shape": "large",
+        "round": 0,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.939291,
+        "group_shape": "large",
+        "round": 1,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.463542,
+        "group_shape": "large",
+        "round": 1,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.760708,
+        "group_shape": "large",
+        "round": 1,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.255708,
+        "group_shape": "small",
+        "round": 1,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.514959,
+        "group_shape": "small",
+        "round": 1,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.41825,
+        "group_shape": "small",
+        "round": 1,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.917625,
+        "group_shape": "small",
+        "round": 2,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.111291999999999,
+        "group_shape": "small",
+        "round": 2,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.110792,
+        "group_shape": "small",
+        "round": 2,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.392459,
+        "group_shape": "large",
+        "round": 2,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.613792,
+        "group_shape": "large",
+        "round": 2,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.967084,
+        "group_shape": "large",
+        "round": 2,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.130416999999998,
+        "group_shape": "large",
+        "round": 3,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.451292,
+        "group_shape": "large",
+        "round": 3,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.729541,
+        "group_shape": "large",
+        "round": 3,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.504625,
+        "group_shape": "small",
+        "round": 3,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.989666,
+        "group_shape": "small",
+        "round": 3,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.989208,
+        "group_shape": "small",
+        "round": 3,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.671833000000003,
+        "group_shape": "small",
+        "round": 4,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.332583,
+        "group_shape": "small",
+        "round": 4,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.70525,
+        "group_shape": "small",
+        "round": 4,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.501707999999997,
+        "group_shape": "large",
+        "round": 4,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.149708,
+        "group_shape": "large",
+        "round": 4,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.60225,
+        "group_shape": "large",
+        "round": 4,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.077875,
+        "group_shape": "large",
+        "round": 5,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.266292,
+        "group_shape": "large",
+        "round": 5,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.115459,
+        "group_shape": "large",
+        "round": 5,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.094167000000002,
+        "group_shape": "small",
+        "round": 5,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.297583000000001,
+        "group_shape": "small",
+        "round": 5,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.073166,
+        "group_shape": "small",
+        "round": 5,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.495249999999999,
+        "group_shape": "small",
+        "round": 6,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.754834000000002,
+        "group_shape": "small",
+        "round": 6,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.394375,
+        "group_shape": "small",
+        "round": 6,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.078625,
+        "group_shape": "large",
+        "round": 6,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.317415999999998,
+        "group_shape": "large",
+        "round": 6,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.166166999999998,
+        "group_shape": "large",
+        "round": 6,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.952917,
+        "group_shape": "large",
+        "round": 7,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.104917,
+        "group_shape": "large",
+        "round": 7,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.261166000000003,
+        "group_shape": "large",
+        "round": 7,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.518542,
+        "group_shape": "small",
+        "round": 7,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.098916,
+        "group_shape": "small",
+        "round": 7,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.84625,
+        "group_shape": "small",
+        "round": 7,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.349833,
+        "group_shape": "small",
+        "round": 8,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.218209,
+        "group_shape": "small",
+        "round": 8,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.276,
+        "group_shape": "small",
+        "round": 8,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.052708,
+        "group_shape": "large",
+        "round": 8,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.439957999999997,
+        "group_shape": "large",
+        "round": 8,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.938333,
+        "group_shape": "large",
+        "round": 8,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.06,
+        "group_shape": "large",
+        "round": 9,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.787292,
+        "group_shape": "large",
+        "round": 9,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.447125,
+        "group_shape": "large",
+        "round": 9,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.503833,
+        "group_shape": "small",
+        "round": 9,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 38.768459,
+        "group_shape": "small",
+        "round": 9,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.173499999999997,
+        "group_shape": "small",
+        "round": 9,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.891000000000002,
+        "group_shape": "small",
+        "round": 10,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.916,
+        "group_shape": "small",
+        "round": 10,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.676708,
+        "group_shape": "small",
+        "round": 10,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.938959,
+        "group_shape": "large",
+        "round": 10,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.773500000000002,
+        "group_shape": "large",
+        "round": 10,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 26.810750000000002,
+        "group_shape": "large",
+        "round": 10,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.694374999999997,
+        "group_shape": "large",
+        "round": 11,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.967875000000003,
+        "group_shape": "large",
+        "round": 11,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.951042,
+        "group_shape": "large",
+        "round": 11,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.7525,
+        "group_shape": "small",
+        "round": 11,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.263667,
+        "group_shape": "small",
+        "round": 11,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.595792,
+        "group_shape": "small",
+        "round": 11,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.352167000000001,
+        "group_shape": "small",
+        "round": 12,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.912875,
+        "group_shape": "small",
+        "round": 12,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.929792,
+        "group_shape": "small",
+        "round": 12,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 26.010333,
+        "group_shape": "large",
+        "round": 12,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.360833,
+        "group_shape": "large",
+        "round": 12,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.001291,
+        "group_shape": "large",
+        "round": 12,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.335542,
+        "group_shape": "large",
+        "round": 13,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 20.8665,
+        "group_shape": "large",
+        "round": 13,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.766541,
+        "group_shape": "large",
+        "round": 13,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.957375000000003,
+        "group_shape": "small",
+        "round": 13,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.033333,
+        "group_shape": "small",
+        "round": 13,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.410291,
+        "group_shape": "small",
+        "round": 13,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.294292,
+        "group_shape": "small",
+        "round": 14,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 15.216709,
+        "group_shape": "small",
+        "round": 14,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.964541999999998,
+        "group_shape": "small",
+        "round": 14,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.174125,
+        "group_shape": "large",
+        "round": 14,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 26.059959,
+        "group_shape": "large",
+        "round": 14,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 20.952208,
+        "group_shape": "large",
+        "round": 14,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.396334,
+        "group_shape": "large",
+        "round": 15,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.309666999999997,
+        "group_shape": "large",
+        "round": 15,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.179167,
+        "group_shape": "large",
+        "round": 15,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 15.460666,
+        "group_shape": "small",
+        "round": 15,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.189708,
+        "group_shape": "small",
+        "round": 15,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.219708,
+        "group_shape": "small",
+        "round": 15,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.868208,
+        "group_shape": "small",
+        "round": 16,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.991417,
+        "group_shape": "small",
+        "round": 16,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.426875,
+        "group_shape": "small",
+        "round": 16,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.428208,
+        "group_shape": "large",
+        "round": 16,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 20.840291,
+        "group_shape": "large",
+        "round": 16,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.887542,
+        "group_shape": "large",
+        "round": 16,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.259500000000003,
+        "group_shape": "large",
+        "round": 17,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.705167,
+        "group_shape": "large",
+        "round": 17,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.110834,
+        "group_shape": "large",
+        "round": 17,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.988041,
+        "group_shape": "small",
+        "round": 17,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.079292,
+        "group_shape": "small",
+        "round": 17,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.742166,
+        "group_shape": "small",
+        "round": 17,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 13.925583,
+        "group_shape": "small",
+        "round": 18,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.015791999999998,
+        "group_shape": "small",
+        "round": 18,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.019833,
+        "group_shape": "small",
+        "round": 18,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.231165999999998,
+        "group_shape": "large",
+        "round": 18,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.590125,
+        "group_shape": "large",
+        "round": 18,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 21.660167,
+        "group_shape": "large",
+        "round": 18,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 21.405832999999998,
+        "group_shape": "large",
+        "round": 19,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 20.847958,
+        "group_shape": "large",
+        "round": 19,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 25.49775,
+        "group_shape": "large",
+        "round": 19,
+        "strategy": "differential"
+      },
+      {
+        "actual_strategy": "centroid_algebraic",
+        "elapsed_ms": 22.0285,
+        "group_shape": "small",
+        "round": 19,
+        "strategy": "algebraic"
+      },
+      {
+        "actual_strategy": "FULL",
+        "elapsed_ms": 22.521124999999998,
+        "group_shape": "small",
+        "round": 19,
+        "strategy": "full"
+      },
+      {
+        "actual_strategy": "merge",
+        "elapsed_ms": 14.884875000000001,
+        "group_shape": "small",
+        "round": 19,
+        "strategy": "differential"
+      }
+    ],
+    "rounds": 20,
+    "summary": [
+      {
+        "group_shape": "small",
+        "refresh_ms": {
+          "p50": 14.41825,
+          "p95": 15.460666,
+          "p99": 20.543540999999998,
+          "samples": [
+            13.84625,
+            13.925583,
+            14.079292,
+            14.111291999999999,
+            14.218209,
+            14.263667,
+            14.297583000000001,
+            14.352167000000001,
+            14.410291,
+            14.41825,
+            14.426875,
+            14.495249999999999,
+            14.503833,
+            14.504625,
+            14.676708,
+            14.70525,
+            14.884875000000001,
+            15.216709,
+            15.460666,
+            20.543540999999998
+          ]
+        },
+        "strategy": "differential"
+      },
+      {
+        "group_shape": "small",
+        "refresh_ms": {
+          "p50": 21.912875,
+          "p95": 23.18925,
+          "p99": 38.768459,
+          "samples": [
+            20.964541999999998,
+            21.276,
+            21.518542,
+            21.595792,
+            21.671833000000003,
+            21.742166,
+            21.754834000000002,
+            21.868208,
+            21.891000000000002,
+            21.912875,
+            21.957375000000003,
+            21.989666,
+            22.015791999999998,
+            22.0285,
+            22.073166,
+            22.110792,
+            22.189708,
+            22.255708,
+            23.18925,
+            38.768459
+          ]
+        },
+        "strategy": "algebraic"
+      },
+      {
+        "group_shape": "small",
+        "refresh_ms": {
+          "p50": 22.033333,
+          "p95": 22.521124999999998,
+          "p99": 22.532459000000003,
+          "samples": [
+            21.394375,
+            21.7525,
+            21.916,
+            21.917625,
+            21.929792,
+            21.988041,
+            21.989208,
+            21.991417,
+            22.019833,
+            22.033333,
+            22.094167000000002,
+            22.098916,
+            22.173499999999997,
+            22.219708,
+            22.294292,
+            22.332583,
+            22.349833,
+            22.514959,
+            22.521124999999998,
+            22.532459000000003
+          ]
+        },
+        "strategy": "full"
+      },
+      {
+        "group_shape": "large",
+        "refresh_ms": {
+          "p50": 25.60225,
+          "p95": 26.545666999999998,
+          "p99": 26.810750000000002,
+          "samples": [
+            25.06,
+            25.078625,
+            25.130416999999998,
+            25.231165999999998,
+            25.261166000000003,
+            25.266292,
+            25.396334,
+            25.439957999999997,
+            25.49775,
+            25.60225,
+            25.613792,
+            25.705167,
+            25.760708,
+            25.766541,
+            25.887542,
+            25.967875000000003,
+            26.010333,
+            26.059959,
+            26.545666999999998,
+            26.810750000000002
+          ]
+        },
+        "strategy": "differential"
+      },
+      {
+        "group_shape": "large",
+        "refresh_ms": {
+          "p50": 21.938959,
+          "p95": 22.360833,
+          "p99": 22.501707999999997,
+          "samples": [
+            20.951042,
+            20.952208,
+            21.335542,
+            21.405832999999998,
+            21.428208,
+            21.451292,
+            21.590125,
+            21.787292,
+            21.938333,
+            21.938959,
+            21.939291,
+            21.952917,
+            21.967084,
+            22.110834,
+            22.115459,
+            22.309666999999997,
+            22.317415999999998,
+            22.322875,
+            22.360833,
+            22.501707999999997
+          ]
+        },
+        "strategy": "algebraic"
+      },
+      {
+        "group_shape": "large",
+        "refresh_ms": {
+          "p50": 21.174125,
+          "p95": 21.773500000000002,
+          "p99": 22.259500000000003,
+          "samples": [
+            20.840291,
+            20.847958,
+            20.8665,
+            21.001291,
+            21.052708,
+            21.077875,
+            21.104917,
+            21.149708,
+            21.166166999999998,
+            21.174125,
+            21.179167,
+            21.392459,
+            21.447125,
+            21.463542,
+            21.660167,
+            21.668375,
+            21.694374999999997,
+            21.729541,
+            21.773500000000002,
+            22.259500000000003
+          ]
+        },
+        "strategy": "full"
+      }
+    ]
+  },
+  "data": "md5(id:dimension), seedless deterministic",
+  "dimensions": 384,
+  "host_arch": "aarch64",
+  "pg_trickle": "0.110.0",
+  "pgvector": "0.8.7",
+  "postgres": "PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit",
+  "refresh": {
+    "changed_rows": [
+      1,
+      500,
+      500
+    ],
+    "elapsed_ms": [
+      18.093999999999998,
+      305.49262500000003,
+      41.435167
+    ],
+    "full_elapsed_ms": [
+      14439.109541,
+      12999.395833999999,
+      12744.401208
+    ],
+    "full_wal_bytes_cluster_wide": [
+      25834968.0,
+      24567464.0,
+      23615384.0
+    ],
+    "notes": "Separate equivalent HNSW indexes; differential always runs first; WAL is cluster-wide between LSN reads and excludes source mutations",
+    "operations": [
+      "update embedding",
+      "update embedding",
+      "delete"
+    ],
+    "wal_bytes_cluster_wide": [
+      68864.0,
+      1255976.0,
+      131088.0
+    ]
+  },
+  "rows": 5000,
+  "schema": 1
+}

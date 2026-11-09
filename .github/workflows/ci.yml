@@ -447,6 +447,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check pgbench result validation
+        run: |
+          python3 benchmarks/pgbench-v0.87/test_parse_pgbench.py
+          python3 benchmarks/pgbench-v0.87/test_compare.py
+
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
@@ -472,6 +477,7 @@ jobs:
           exit 1
 
       - name: Upload v0.87 pgbench result
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: pgbench-v0.87
@@ -1050,7 +1056,9 @@ jobs:
         run: python3 scripts/gen_sql_reference.py
 
       - name: Validate saved vector aggregate benchmark evidence
-        run: python3 scripts/check_vector_aggregate_benchmark.py
+        run: |
+          python3 scripts/check_vector_aggregate_benchmark.py
+          python3 scripts/generate_pgvector_evidence_matrix.py --check
 
       - name: Generate test schema (TEST-005)
         run: mkdir -p tests/generated && python3 scripts/gen_test_schema.py > tests/generated/schema.rs

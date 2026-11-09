@@ -350,6 +350,7 @@ pub(crate) fn execute_manual_refresh(
                 &st.defining_query,
                 st.refresh_mode,
                 crate::api::security_context::stream_execution_context(st)?.owner_oid,
+                false,
             )
         })?;
     }
@@ -433,8 +434,14 @@ pub(crate) fn execute_manual_refresh(
         } else {
             st.clone()
         };
-        let full_result =
-            execute_manual_full_refresh_target(&refresh_st, schema, table_name, source_oids, true)?;
+        let full_result = execute_manual_full_refresh_target(
+            &refresh_st,
+            schema,
+            table_name,
+            source_oids,
+            true,
+            false,
+        )?;
 
         // Replace the inlined query and all query-derived state only after the
         // target was rebuilt from the current source definitions.
@@ -494,6 +501,7 @@ pub(crate) fn execute_manual_refresh(
                 rows_inserted: *rows_inserted,
                 rows_updated,
                 rows_deleted: *rows_deleted,
+                ann_churn_operations: refresh::take_last_ann_churn_operations(),
                 data_changed: effective_action != RefreshAction::NoData
                     && (*rows_inserted > 0 || rows_updated > 0 || *rows_deleted > 0),
                 full_reason: if refresh::is_full_fallback(requested_action, effective_action) {
@@ -601,7 +609,19 @@ pub(crate) fn execute_manual_full_refresh(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<(i64, i64), PgTrickleError> {
-    let result = execute_manual_full_refresh_target(st, schema, table_name, source_oids, true)?;
+    let result =
+        execute_manual_full_refresh_target(st, schema, table_name, source_oids, true, false)?;
+    finalize_manual_full_refresh(st, result)
+}
+
+pub(crate) fn execute_manual_full_refresh_with_distance_snapshot(
+    st: &StreamTableMeta,
+    schema: &str,
+    table_name: &str,
+    source_oids: &[pg_sys::Oid],
+) -> Result<(i64, i64), PgTrickleError> {
+    let result =
+        execute_manual_full_refresh_target(st, schema, table_name, source_oids, true, true)?;
     finalize_manual_full_refresh(st, result)
 }
 
@@ -611,7 +631,8 @@ pub(crate) fn execute_manual_full_refresh_without_source_locks(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<(i64, i64), PgTrickleError> {
-    let result = execute_manual_full_refresh_target(st, schema, table_name, source_oids, false)?;
+    let result =
+        execute_manual_full_refresh_target(st, schema, table_name, source_oids, false, false)?;
     finalize_manual_full_refresh(st, result)
 }
 
@@ -636,6 +657,7 @@ fn execute_manual_full_refresh_target(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
     lock_sources: bool,
+    distance_snapshot_prepared: bool,
 ) -> Result<(i64, i64), PgTrickleError> {
     refresh::ensure_full_policy(st, "manual refresh")?;
     refresh::set_effective_mode("FULL");
@@ -647,6 +669,9 @@ fn execute_manual_full_refresh_target(
     if lock_sources {
         crate::cdc::lock_source_relations(source_oids)?;
         crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
+    }
+    if !distance_snapshot_prepared && schema == st.pgt_schema && table_name == st.pgt_name {
+        crate::api::prepare_distance_snapshot(st);
     }
     // Persist polling deltas before this FULL reads the foreign source. The
     // baseline frontier can then skip those rows while other ST frontiers keep them.
@@ -786,6 +811,13 @@ fn execute_manual_full_refresh_target(
         st_source_lsn_snapshot.push((upstream_pgt_id, lsn));
     }
 
+    let centroid_insert = if schema == st.pgt_schema && table_name == st.pgt_name {
+        crate::api::centroid_stage::prepare_for_full_refresh(st)?
+            .map(|staged| crate::api::centroid_stage::staged_insert_sql(st, &staged))
+            .transpose()?
+    } else {
+        None
+    };
     let truncate_sql = format!("TRUNCATE {quoted_table}");
     refresh::with_stream_owner(st, || {
         Spi::run(&truncate_sql) // nosemgrep: rust.spi.run.dynamic-format — buffer name is catalog-derived.
@@ -801,7 +833,8 @@ fn execute_manual_full_refresh_target(
         {
             let mut eq = inject_pgt_count(&st.defining_query);
             // Also inject AVG auxiliary columns for algebraic AVG maintenance.
-            let avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
+            let (avg_aux, nonnull_aux) =
+                crate::dvm::query_aggregate_aux_columns(&st.defining_query)?;
             if !avg_aux.is_empty() {
                 eq = inject_avg_aux(&eq, &avg_aux);
             }
@@ -820,7 +853,6 @@ fn execute_manual_full_refresh_target(
                 eq = inject_covar_aux_typed(&eq, &typed);
             }
             // Also inject nonnull-count columns for SUM NULL-transition correction (P2-2).
-            let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
             if !nonnull_aux.is_empty() {
                 eq = inject_nonnull_aux(&eq, &nonnull_aux);
             }
@@ -837,7 +869,9 @@ fn execute_manual_full_refresh_target(
     // For UNION ALL, decompose into per-branch subqueries with
     // child-prefixed row IDs matching diff_union_all's formula.
     let insert_body = refresh::with_stream_owner(st, || {
-        if needs_dual_count {
+        if let Some(insert) = &centroid_insert {
+            Ok(insert.clone())
+        } else if needs_dual_count {
             Ok(crate::dvm::direct_full_refresh_insert_body(
                 &st.defining_query,
                 &effective_query,
@@ -864,7 +898,7 @@ fn execute_manual_full_refresh_target(
         }
     })?;
 
-    let insert_sql = if st.refresh_mode.is_immediate() {
+    let insert_sql = if st.refresh_mode.is_immediate() || centroid_insert.is_some() {
         format!("INSERT INTO {quoted_table} {insert_body}")
     } else {
         let mut target_columns = vec!["__pgt_row_id".to_string()];
@@ -876,9 +910,7 @@ fn execute_manual_full_refresh_target(
         if st.refresh_mode == RefreshMode::Differential && !needs_dual_count {
             target_columns.extend(
                 refresh::with_stream_owner(st, || {
-                    Ok(crate::api::helpers::differential_storage_auxiliary_columns(
-                        &st.defining_query,
-                    ))
+                    crate::api::helpers::differential_storage_auxiliary_columns(&st.defining_query)
                 })?
                 .into_iter()
                 .map(|(name, _)| name),
@@ -991,12 +1023,12 @@ fn execute_manual_full_refresh_target(
         .any(|(oid, lsn)| prev_frontier.get_lsn(*oid) != *lsn);
 
     if has_upstream_st_change || has_wal_change || prev_frontier.is_empty() {
-        StreamTableMeta::store_frontier_and_complete_refresh(st.pgt_id, &frontier, 0)?;
+        StreamTableMeta::store_frontier_and_complete_refresh(st.pgt_id, &frontier, 0, false)?;
         pgrx::info!("Stream table {}.{} refreshed (FULL)", schema, table_name);
     } else {
         // No upstream changes — store frontier but preserve data_timestamp.
         StreamTableMeta::store_frontier(st.pgt_id, &frontier)?;
-        StreamTableMeta::update_after_no_data_refresh(st.pgt_id)?;
+        StreamTableMeta::update_after_no_data_refresh(st.pgt_id, true)?;
         crate::refresh::set_effective_mode("NO_DATA");
         pgrx::info!(
             "Stream table {}.{} refreshed (FULL, no-op — data_timestamp preserved)",
@@ -1009,6 +1041,11 @@ fn execute_manual_full_refresh_target(
         || st.row_probe_version != Some(crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16)
     {
         crate::catalog::StreamTableMeta::mark_row_identity_reinitialized(st.pgt_id)?;
+    }
+
+    if centroid_insert.is_some() && lock_sources {
+        crate::api::centroid_stage::mark_materialized(st.pgt_id)?;
+        crate::api::centroid_stage::bind_materialized_frontier(st, &frontier)?;
     }
 
     Ok((rows_inserted as i64, 0i64))
@@ -1200,12 +1237,13 @@ fn execute_manual_differential_refresh(
             st.pgt_id,
             &new_frontier,
             rows_inserted,
+            true,
         )?;
     } else {
         // No rows changed — store frontier to advance past processed WAL range,
         // but preserve data_timestamp to avoid spurious downstream wakeups.
         StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)?;
-        StreamTableMeta::update_after_no_data_refresh(st.pgt_id)?;
+        StreamTableMeta::update_after_no_data_refresh(st.pgt_id, false)?;
     }
 
     pgrx::info!(

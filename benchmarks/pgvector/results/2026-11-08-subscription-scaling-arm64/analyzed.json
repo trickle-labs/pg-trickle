@@ -1,0 +1,375 @@
+{
+  "dimensions": 3,
+  "measurements": [
+    {
+      "initial_rows": 1000,
+      "samples": [
+        {
+          "affected_identities": null,
+          "merge_strategy": "delete_insert",
+          "refresh_ms": 19.546958,
+          "round": 0,
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 1000
+        },
+        {
+          "affected_identities": null,
+          "merge_strategy": "delete_insert",
+          "refresh_ms": 14.457167,
+          "round": 1,
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 1000
+        },
+        {
+          "affected_identities": null,
+          "merge_strategy": "delete_insert",
+          "refresh_ms": 12.385959,
+          "round": 2,
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 1000
+        },
+        {
+          "affected_identities": null,
+          "merge_strategy": "delete_insert",
+          "refresh_ms": 11.799292,
+          "round": 3,
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 1000
+        },
+        {
+          "affected_identities": null,
+          "merge_strategy": "delete_insert",
+          "refresh_ms": 11.8555,
+          "round": 4,
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 1000
+        }
+      ],
+      "subscriptions": 0
+    },
+    {
+      "initial_rows": 1000,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 14.480958000000001,
+          "round": 0,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 14.39475,
+          "round": 1,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 13.857,
+          "round": 2,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 13.124375,
+          "round": 3,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 13.279416000000001,
+          "round": 4,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 1
+    },
+    {
+      "initial_rows": 1000,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 18.302834,
+          "round": 0,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 17.875625,
+          "round": 1,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 18.057125,
+          "round": 2,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 17.109416999999997,
+          "round": 3,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 18.941416999999998,
+          "round": 4,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 10
+    },
+    {
+      "initial_rows": 10000,
+      "samples": [
+        {
+          "affected_identities": null,
+          "merge_strategy": "delete_insert",
+          "refresh_ms": 12.419583,
+          "round": 0,
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": null,
+          "merge_strategy": "delete_insert",
+          "refresh_ms": 12.446833,
+          "round": 1,
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": null,
+          "merge_strategy": "delete_insert",
+          "refresh_ms": 11.409834,
+          "round": 2,
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": null,
+          "merge_strategy": "delete_insert",
+          "refresh_ms": 11.644125,
+          "round": 3,
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": null,
+          "merge_strategy": "delete_insert",
+          "refresh_ms": 11.423375,
+          "round": 4,
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 0
+    },
+    {
+      "initial_rows": 10000,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 14.135125,
+          "round": 0,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 15.388499999999999,
+          "round": 1,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 14.125333,
+          "round": 2,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 14.597333,
+          "round": 3,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 13.984667,
+          "round": 4,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 1
+    },
+    {
+      "initial_rows": 10000,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 18.297125,
+          "round": 0,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 18.667333000000003,
+          "round": 1,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 17.68875,
+          "round": 2,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 17.168167,
+          "round": 3,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "merge_strategy": "explicit_dml",
+          "refresh_ms": 17.400167,
+          "round": 4,
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 10
+    }
+  ],
+  "notes": "One row alternates across the threshold; each subscription emits its expected event. Refresh call excludes mutation, commit, listener delivery and validation. Tuple counters include repeated visits, not distinct rows. No controlled concurrency.",
+  "pg_trickle": "0.110.0",
+  "pgvector": "0.8.7",
+  "postgres": "PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit"
+}

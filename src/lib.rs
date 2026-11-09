@@ -259,6 +259,11 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
                      CHECK (reindex_drift_threshold IS NULL OR (reindex_drift_threshold > 0 AND reindex_drift_threshold <= 1.0)),
     rows_changed_since_last_reindex BIGINT NOT NULL DEFAULT 0,
     last_reindex_at TIMESTAMPTZ,
+    -- A conservative completion watermark, independent of the resettable churn counter.
+    -- NULL means the counter overflowed and must not be used for coverage claims.
+    ann_refresh_epoch BIGINT DEFAULT 0 CHECK (ann_refresh_epoch IS NULL OR ann_refresh_epoch >= 0),
+    ann_churn_generation BIGINT DEFAULT 0 CHECK (ann_churn_generation IS NULL OR ann_churn_generation >= 0),
+    ann_churn_operations BIGINT DEFAULT 0 CHECK (ann_churn_operations IS NULL OR ann_churn_operations >= 0),
     -- v0.36.0: column lineage metadata (F12)
     column_lineage  JSONB,
     -- v0.59.0 PERF-2: hash of defining_query to skip recomputation on every refresh
@@ -368,6 +373,37 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_set_operation_states (
 );
 
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_set_operation_states', '');
+
+-- Derived centroid state is discarded on logical restore and rebuilt.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_centroid_states (
+    pgt_id BIGINT PRIMARY KEY REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
+    stream_relid OID NOT NULL,
+    defining_query TEXT NOT NULL,
+    contract_generation BIGINT NOT NULL,
+    schema_version SMALLINT NOT NULL,
+    materialized_xid XID8,
+    baseline_frontier JSONB,
+    last_change_limit_rebase BOOLEAN NOT NULL DEFAULT FALSE,
+    cost_rescan_active BOOLEAN NOT NULL DEFAULT FALSE,
+    cost_rescan_xid XID8,
+    status TEXT NOT NULL CHECK (status IN ('BUILDING', 'READY'))
+);
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_centroid_groups (
+    pgt_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_centroid_states(pgt_id) ON DELETE CASCADE,
+    row_id BYTEA NOT NULL,
+    group_count BIGINT NOT NULL CHECK (group_count >= 0),
+    state DOUBLE PRECISION[] NOT NULL,
+    state_checksum TEXT NOT NULL,
+    PRIMARY KEY (pgt_id, row_id),
+    CHECK (array_ndims(state) = 1 AND array_lower(state, 1) = 1
+           AND cardinality(state) BETWEEN 5 AND 32003
+           AND (cardinality(state) - 3) % 2 = 0
+           AND array_position(state, NULL::double precision) IS NULL
+           AND state[1] >= 0 AND state[1] <= group_count AND state[1] = trunc(state[1]))
+);
+REVOKE ALL ON TABLE pgtrickle.pgt_centroid_states, pgtrickle.pgt_centroid_groups FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_centroid_states', 'WHERE false');
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_centroid_groups', 'WHERE false');
 
 -- v0.89.0: Durable private registry for incremental window state. The
 -- relations referenced here are permanent LOGGED extension members; their
@@ -865,6 +901,57 @@ SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_change_buffers', '');
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_source_gates', '');
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_watermarks', '');
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_watermark_groups', '');
+
+-- Explicit ANN maintenance intents. OIDs are database-local, so requests are
+-- deliberately not restored across a logical dump/restore.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ann_maintenance_requests (
+    request_id BIGSERIAL PRIMARY KEY,
+    pgt_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
+    database_oid OID NOT NULL,
+    system_identifier TEXT NOT NULL,
+    root_relid OID NOT NULL,
+    leaf_relid OID NOT NULL,
+    index_relid OID NOT NULL,
+    index_filenode OID NOT NULL,
+    index_definition TEXT NOT NULL,
+    first_observed_epoch BIGINT,
+    last_observed_epoch BIGINT,
+    state TEXT NOT NULL DEFAULT 'REQUESTED' CHECK (state IN ('REQUESTED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
+    claim_pid INTEGER,
+    claim_backend_start TIMESTAMPTZ,
+    claim_role OID,
+    claim_epoch BIGINT,
+    claim_churn_generation BIGINT,
+    claim_churn_operations BIGINT,
+    pending_during_run BOOLEAN NOT NULL DEFAULT FALSE,
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    last_error TEXT,
+    completed_at TIMESTAMPTZ,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    last_requested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (pgt_id, index_relid, index_filenode)
+);
+REVOKE ALL ON TABLE pgtrickle.pgt_ann_maintenance_requests FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_ann_maintenance_requests', 'WHERE false');
+
+-- Serialize claims for the same leaf and index definition across REINDEX swaps.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ann_maintenance_claims (
+    pgt_id BIGINT NOT NULL REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
+    leaf_relid OID NOT NULL,
+    index_key BYTEA NOT NULL,
+    request_id BIGINT REFERENCES pgtrickle.pgt_ann_maintenance_requests(request_id) ON DELETE CASCADE,
+    claim_pid INTEGER,
+    claim_backend_start TIMESTAMPTZ,
+    next_eligible_at TIMESTAMPTZ,
+    reported_covered_epoch BIGINT CHECK (reported_covered_epoch IS NULL OR reported_covered_epoch >= 0),
+    reported_churn_generation BIGINT,
+    reported_churn_operations BIGINT,
+    reported_covered_at TIMESTAMPTZ,
+    consecutive_failures SMALLINT NOT NULL DEFAULT 0 CHECK (consecutive_failures BETWEEN 0 AND 6),
+    PRIMARY KEY (pgt_id, leaf_relid, index_key)
+);
+REVOKE ALL ON TABLE pgtrickle.pgt_ann_maintenance_claims FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_ann_maintenance_claims', 'WHERE false');
 
 -- CIT-2: Cross-node advisory lock table for distributed stream table refresh.
 -- Uses INSERT … ON CONFLICT DO NOTHING for atomic acquisition; timestamp-based
@@ -2110,27 +2197,29 @@ COMMENT ON TABLE pgtrickle.pgt_outbox_config IS
 extension_sql!(
     r#"
 -- VH-2 (v0.48.0): Distance-predicate subscription catalog.
--- Stores per-(stream_table, channel) vector distance subscriptions.
--- After each non-empty refresh the background worker evaluates the predicate
--- and emits pg_notify(channel, payload) when matched_rows > 0.
+-- Stores per-(stream table, channel) distance subscriptions. The optional
+-- legacy name is retained so unresolved upgraded subscriptions are not lost.
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_distance_subscriptions (
     stream_table    TEXT NOT NULL,
+    pgt_id          BIGINT REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
     channel         TEXT NOT NULL,
     vector_column   TEXT NOT NULL,
     query_vector    TEXT NOT NULL,
     op              TEXT NOT NULL
-        CHECK (op IN ('<->', '<=>', '<#>', '<+>', '<<->>', '<<%>>')),
-    threshold       DOUBLE PRECISION NOT NULL CHECK (threshold > 0),
+        CHECK (op IN ('<->', '<=>', '<#>', '<+>', '<~>', '<%>')),
+    threshold       DOUBLE PRECISION NOT NULL CHECK (threshold NOT IN ('NaN'::float8, 'Infinity'::float8, '-Infinity'::float8)),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (stream_table, channel)
+    UNIQUE (pgt_id, channel)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS pgt_distance_subscriptions_legacy_name_channel_idx
+    ON pgtrickle.pgt_distance_subscriptions (stream_table, channel) WHERE pgt_id IS NULL;
 
 COMMENT ON TABLE pgtrickle.pgt_distance_subscriptions IS
     'VH-2 (v0.48.0): Distance-predicate NOTIFY subscriptions per stream table. '
     'Populated via pgtrickle.subscribe_distance() / pgtrickle.unsubscribe_distance().';
 "#,
     name = "pg_trickle_distance_subscriptions_catalog",
-    requires = [],
+    requires = ["pg_trickle_catalog"],
 );
 
 // ── v0.87.13: pg_tide outbox boundary security attributes ──────────────
@@ -2201,6 +2290,12 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_apply_delta_enr(bigint, integer, bo
 REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_handle_truncate(bigint) FROM PUBLIC;
 
 -- owner_lifecycle
+REVOKE EXECUTE ON FUNCTION pgtrickle.ann_maintenance_request(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.cancel_ann_maintenance(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.claim_ann_maintenance(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.finish_ann_maintenance(bigint, boolean, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.request_ann_maintenance(oid, oid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.request_ann_maintenance_if_needed(oid, oid, bigint, bigint, bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.alter_stream_table(text, text, text, text, text, text, text, text, boolean, boolean, text, text, bigint, integer, text, integer, double precision, text, double precision, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.attach_embedding_outbox(text, text, integer, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.attach_outbox(text, integer, integer) FROM PUBLIC;
@@ -2222,6 +2317,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.drop_snapshot(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.drop_stream_table(text, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.drop_stream_table_publication(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.embedding_stream_table(text, text, text, text, text, text, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.embedding_stream_table_v2(text, text, text, text, jsonb, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.exec_stream_ddl(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.pause_stream_table(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.refresh_efficiency() FROM PUBLIC;
@@ -2246,6 +2342,8 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.unsubscribe_distance(text, text) FROM PUBLI
 REVOKE EXECUTE ON FUNCTION pgtrickle.stat_reset(bigint) FROM PUBLIC;
 
 -- public_read
+GRANT EXECUTE ON FUNCTION pgtrickle.ann_index_status_v2() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.vector_stream_status_v2() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.bootstrap_gate_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.cache_stats() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.cdc_pause_status() TO PUBLIC;
@@ -2337,6 +2435,12 @@ GRANT EXECUTE ON FUNCTION pgtrickle.worker_pool_status() TO PUBLIC;
 -- trigger_entry
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_ddl_end() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_sql_drop() FROM PUBLIC;
+
+-- Pure arithmetic used while staging under the stream owner's role.
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_delta_step(double precision[], real[], smallint) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_delta(real[], smallint) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_init_raw(double precision[], integer) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_init(double precision[], integer) TO PUBLIC;
 
 SELECT pgtrickle._signal_launcher_rescan();
 

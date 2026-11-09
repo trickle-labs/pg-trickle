@@ -606,6 +606,9 @@ pub static PGS_TEMPORAL_STREAM_TABLES: GucSetting<bool> = GucSetting::<bool>::ne
 /// Default: `false`.
 pub static PGS_ENABLE_VECTOR_AGG: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Enable experimental algebraic maintenance for supported vector averages.
+pub static PGS_ENABLE_CENTROID_STATE: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 /// Register all DVM-related GUC variables.
 pub fn register_dvm_gucs() {
     // C4: Consolidated planner aggressiveness switch (v0.14.0).
@@ -1149,6 +1152,15 @@ pub fn register_dvm_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.enable_centroid_state",
+        c"Enable experimental algebraic vector centroid maintenance.",
+        c"Opt in to algebraic state for eligible fixed-dimension vector averages; unsupported cases retain group rescans.",
+        &PGS_ENABLE_CENTROID_STATE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     // ── v0.81.0 GUCs ─────────────────────────────────────────────────────
 
     // QW-5: Bounded L0/L1 thread-local template cache.
@@ -1468,6 +1480,11 @@ pub fn pg_trickle_temporal_stream_tables() -> bool {
 /// F4 (v0.37.0): Returns whether pgVectorMV vector aggregate support is enabled.
 pub fn pg_trickle_enable_vector_agg() -> bool {
     PGS_ENABLE_VECTOR_AGG.get()
+}
+
+/// Returns whether experimental centroid state is enabled.
+pub fn pg_trickle_enable_centroid_state() -> bool {
+    PGS_ENABLE_CENTROID_STATE.get()
 }
 
 /// Returns the maximum recursion depth for WITH RECURSIVE in IMMEDIATE mode.

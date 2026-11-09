@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**170 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**179 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -18,6 +18,8 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.active_profile()` | `pgtrickle` | `SetOf row` | Report detected constraints and the values pg_trickle selected from them. |
 | `pgtrickle.advance_watermark()` | `pgtrickle` | `void` | - **Monotonic:** rejects watermarks that go backward. |
 | `pgtrickle.alter_stream_table()` | `pgtrickle` | `` | Alter properties of an existing stream table. |
+| `pgtrickle.ann_index_status_v2()` | `pgtrickle` | `SetOf jsonb` | Catalog-only status of each ANN index key, including partition leaves. |
+| `pgtrickle.ann_maintenance_request()` | `pgtrickle` | `jsonb` | Inspect a request while rechecking the caller's current privileges. |
 | `pgtrickle.attach_embedding_outbox()` | `pgtrickle` | `` | The `vector_column` parameter documents which column carries the embedding — it is stored in the outbox headers so consumers can identify the embedding field without inspecting the payload. |
 | `pgtrickle.attach_outbox()` | `pgtrickle` | `` | Requires `pg_tide` to be installed. |
 | `pgtrickle.begin_output_delta_resnapshot()` | `pgtrickle` | `SetOf row` | Begin a transaction-scoped full baseline for a consumer. |
@@ -26,10 +28,12 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.bulk_create()` | `pgtrickle` | `jsonb` | On any error, the entire transaction is rolled back (standard PostgreSQL transactional semantics). |
 | `pgtrickle.bulk_drop_stream_tables()` | `pgtrickle` | `integer` | # Example ```sql SELECT pgtrickle.bulk_drop_stream_tables(     ARRAY['public.orders_summary', 'public.stale_view'] ); ```. |
 | `pgtrickle.cache_stats()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.cache_stats()`. |
+| `pgtrickle.cancel_ann_maintenance()` | `pgtrickle` | `jsonb` | Cancel queued work or request cancellation of an active claim. |
 | `pgtrickle.capture_instance_status()` | `pgtrickle` | `text` | Return the current capture-instance identity and quarantine state. |
 | `pgtrickle.cdc_pause_status()` | `pgtrickle` | `SetOf row` | Returns a table with one row containing: - `paused` — `true` when `cdc_paused = on` - `capture_mode` — `'discard'` or `'hold'` - `note` — human-readable explanation of the current state. |
 | `pgtrickle.change_buffer_sizes()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.change_buffer_sizes()`. |
 | `pgtrickle.check_cdc_health()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.check_cdc_health()`. |
+| `pgtrickle.claim_ann_maintenance()` | `pgtrickle` | `jsonb` | Claim an intent for execution by this PostgreSQL session. |
 | `pgtrickle.clear_caches()` | `pgtrickle` | `bigint` | Use during debugging, emergency migration rollback, or after a query definition change that was not captured by the normal DDL invalidation path. |
 | `pgtrickle.cluster_worker_summary()` | `pgtrickle` | `SetOf row` | Reads from `pg_stat_activity` (shared catalog) so the calling role needs `pg_monitor` or superuser privilege. |
 | `pgtrickle.commit_latency_stats()` | `pgtrickle` | `SetOf row` | Returns rows only for stream tables that have at least one completed refresh in the history table. |
@@ -56,6 +60,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.drop_stream_table_publication()` | `pgtrickle` | `` | CDC-PUB-2: Drop the logical replication publication for a stream table. |
 | `pgtrickle.drop_watermark_group()` | `pgtrickle` | `void` | Drop a watermark group by name. |
 | `pgtrickle.embedding_stream_table()` | `pgtrickle` | `` | # Returns A single-column table with one row per action taken (or SQL line for dry_run). |
+| `pgtrickle.embedding_stream_table_v2()` | `pgtrickle` | `` | `metric` is `l2`, `cosine`, or `inner_product`. |
 | `pgtrickle.encode_row_id_v2()` | `pgtrickle` | `Vec<u8>` | Encode a PostgreSQL record into exact V2 identity bytes. |
 | `pgtrickle.encode_row_id_v3()` | `pgtrickle` | `Vec<u8>` | Encode a PostgreSQL record into corrected V3 identity bytes. |
 | `pgtrickle.error_catalog()` | `pgtrickle` | `SetOf row` | Stable operational error identifiers and their PostgreSQL SQLSTATEs. |
@@ -72,6 +77,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.explain_st()` | `pgtrickle` | `` | PERF-3: When `with_analyze` is true, the defining query is EXPLAINed with ANALYZE to show actual row counts, timings, and buffer usage. |
 | `pgtrickle.explain_stream_table()` | `pgtrickle` | `text` | v0.39.0 extends the output to include: - Explicit DIFF/FULL fallback reason from the stream table catalog - Whether `force_full_refresh` GUC is overriding the mode - The effective refresh mode from the last completed refresh cycle - Whether the backpressure or CDC-pause state is active. |
 | `pgtrickle.export_definition()` | `pgtrickle` | `text` | Returns a `DROP STREAM TABLE IF EXISTS` + `CREATE STREAM TABLE . |
+| `pgtrickle.finish_ann_maintenance()` | `pgtrickle` | `` | Record the outcome reported by the session that claimed an intent. |
 | `pgtrickle.freshness()` | `pgtrickle` | `SetOf row` | v0.90.0: Return bounded exact freshness summaries for interval-targeted stream tables. |
 | `pgtrickle.fuse_status()` | `pgtrickle` | `SetOf row` | Returns one row per stream table with fuse configuration and state. |
 | `pgtrickle.gate_source()` | `pgtrickle` | `void` | `source` is the source table name, optionally schema-qualified. |
@@ -86,7 +92,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.is_drained()` | `pgtrickle` | `boolean (nullable)` | A scheduler is considered drained when `DRAIN_COMPLETED >= DRAIN_REQUESTED` in shared memory. |
 | `pgtrickle.lifecycle_preflight()` | `pgtrickle` | `text` | This read-only upgrade and operations preflight is intentionally superuser-only: it reports the exact missing grants without changing catalog state. |
 | `pgtrickle.list_auxiliary_columns()` | `pgtrickle` | `SetOf row` | # SQL usage ```sql SELECT * FROM pgtrickle.list_auxiliary_columns('my_stream_table'); ```. |
-| `pgtrickle.list_distance_subscriptions()` | `pgtrickle` | `` | When `p_stream_table` is provided (e.g. |
+| `pgtrickle.list_distance_subscriptions()` | `pgtrickle` | `` | Lists only subscriptions for stream tables owned by the caller (or all subscriptions for a superuser). |
 | `pgtrickle.list_snapshots()` | `pgtrickle` | `SetOf row` | Returns one row per snapshot ordered by creation time descending. |
 | `pgtrickle.list_sources()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.list_sources(name)`. |
 | `pgtrickle.list_subscriptions()` | `pgtrickle` | `SetOf row` | Returns a table with columns (stream_table TEXT, channel TEXT, created_at TIMESTAMPTZ). |
@@ -127,6 +133,8 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.reinitialize_stream_table()` | `pgtrickle` | `text` | Reinitialize a stream table after a source schema change. |
 | `pgtrickle.reliability_counters()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.reliability_counters()`. |
 | `pgtrickle.repair_stream_table()` | `pgtrickle` | `text` | Steps performed (actions taken are summarized in the return text): 1. |
+| `pgtrickle.request_ann_maintenance()` | `pgtrickle` | `bigint` | Record one explicit ANN maintenance intent without executing a rebuild. |
+| `pgtrickle.request_ann_maintenance_if_needed()` | `pgtrickle` | `jsonb` | Request a rebuild only when a watermark-bound estimate crosses the threshold. |
 | `pgtrickle.request_output_delta_resnapshot()` | `pgtrickle` | `SetOf row` | Require a fresh baseline without deleting the durable log or cursor. |
 | `pgtrickle.reset_fuse()` | `pgtrickle` | `` | Returns nothing on success; raises an ERROR if the stream table does not exist or the fuse is not blown. |
 | `pgtrickle.restore_from_snapshot()` | `pgtrickle` | `` | The stream table must already be registered. |
@@ -170,7 +178,8 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.validate_output_delta_consumer()` | `pgtrickle` | `SetOf row` | Validate a consumer and persist any recoverable integrity failure. |
 | `pgtrickle.validate_query()` | `pgtrickle` | `SetOf row` | # SQL usage ```sql SELECT * FROM pgtrickle.validate_query(   'SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id' ); ```. |
 | `pgtrickle.validate_recovery()` | `pgtrickle` | `text` | Validate capture ownership, source infrastructure, and persisted frontiers. |
-| `pgtrickle.vector_status()` | `pgtrickle` | `SetOf row` | Returns one row per stream table that has a `post_refresh_action` other than 'none', or that has any ANN-relevant index on its storage table. |
+| `pgtrickle.vector_status()` | `pgtrickle` | `SetOf row` | Returns one row per stream table that has a `post_refresh_action` other than 'none'. |
+| `pgtrickle.vector_stream_status_v2()` | `pgtrickle` | `SetOf jsonb` | Catalog-only vector column status. |
 | `pgtrickle.version()` | `pgtrickle` | `text` |  |
 | `pgtrickle.version_check()` | `pgtrickle` | `text` | Returns a JSON string with library_version, extension_version, pg_version, and a boolean `version_match`. |
 | `pgtrickle.view_evolution_status()` | `pgtrickle` | `SetOf row` | During a zero-downtime schema evolution (ALTER STREAM TABLE), pg_trickle builds the new definition in a shadow table. |

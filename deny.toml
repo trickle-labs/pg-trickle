@@ -31,6 +31,14 @@ ignore = [
   # only unmaintained. Use of ciborium is the upstream recommendation but we
   # have no direct control over this dep.
   "RUSTSEC-2021-0127",
+  # Owner: geir-gronmo
+  # Added: 2026-11-08
+  # Review-By: 2026-12-08
+  # Upstream: https://github.com/testcontainers/testcontainers-rs
+  # Remove-When: testcontainers replaces astral-tokio-tar
+  # Unmaintained advisory for a test-only transitive dependency; no patched
+  # release is available. Vulnerability advisories remain enabled.
+  "RUSTSEC-2026-0440",
 ]
 
 [bans]

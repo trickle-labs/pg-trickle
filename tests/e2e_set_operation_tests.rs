@@ -59,6 +59,36 @@ async fn refresh_st_differential(db: &E2eDb, name: &str) {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+async fn test_full_set_operation_legacy_index_excludes_variable_width_columns() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE wide_set_left (id int PRIMARY KEY, payload text)")
+        .await;
+    db.execute("CREATE TABLE wide_set_right (id int PRIMARY KEY, payload text)")
+        .await;
+    db.execute("INSERT INTO wide_set_left VALUES (1, 'small')")
+        .await;
+    let query = "SELECT payload FROM wide_set_left EXCEPT SELECT payload FROM wide_set_right";
+    db.create_st("wide_set_stream", query, "1h", "FULL").await;
+    db.execute("DROP INDEX wide_set_stream_row_id_idx").await;
+    db.execute("CREATE UNIQUE INDEX wide_set_legacy_idx ON wide_set_stream (__pgt_row_id)")
+        .await;
+    db.execute("UPDATE wide_set_left SET payload = (SELECT string_agg(md5(n::text), '') FROM generate_series(1, 20) n)")
+        .await;
+    db.refresh_st("wide_set_stream").await;
+    db.assert_st_matches_query("wide_set_stream", query).await;
+    let safe_index: bool = db
+        .query_scalar(
+            "SELECT bool_or(NOT indisunique AND indnatts = indnkeyatts) \
+        FROM pg_index WHERE indrelid = 'wide_set_stream'::regclass",
+        )
+        .await;
+    assert!(
+        safe_index,
+        "legacy index should be replaced without wide includes"
+    );
+}
+
+#[tokio::test]
 async fn test_intersect_basic_full() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE isect_a (id SERIAL PRIMARY KEY, val INT)")

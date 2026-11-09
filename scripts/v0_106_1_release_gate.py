@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 from pathlib import Path
 
 
@@ -38,6 +39,18 @@ CANDIDATE = "a" * 40
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(f"v{VERSION} release gate failed: {message}")
+
+
+def check_metadata_version(meta_version: str, package_version: str, gate_version: str) -> None:
+    require(meta_version == package_version, "META.json version drift")
+    try:
+        package_parts = tuple(map(int, package_version.split(".")))
+        gate_parts = tuple(map(int, gate_version.split(".")))
+    except ValueError:
+        require(False, "invalid release version")
+        return
+    require(len(package_parts) == 3 and len(gate_parts) == 3 and package_parts >= gate_parts,
+            "release gate is newer than the package")
 
 
 def job_block(workflow: str, name: str) -> str:
@@ -373,7 +386,8 @@ def check_negative_controls() -> None:
 
 def main() -> None:
     cargo = json.loads((ROOT / "META.json").read_text(encoding="utf-8"))
-    require(cargo.get("version") == VERSION, "META.json version drift")
+    package_version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+    check_metadata_version(cargo.get("version"), package_version, VERSION)
     contract = json.loads(QUALIFICATION.read_text(encoding="utf-8"))
     require(contract.get("release_version") == VERSION, "qualification version drift")
     require(

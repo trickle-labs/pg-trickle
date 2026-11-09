@@ -359,6 +359,13 @@
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
     },
+    "pgtrickle.embedding_stream_table_v2(text, text, text, text, jsonb, boolean)": {
+      "schema": "pgtrickle",
+      "name": "embedding_stream_table_v2",
+      "identity_arguments": "text, text, text, text, jsonb, boolean",
+      "class": "owner_lifecycle",
+      "execution_policy": "invoker_delegating"
+    },
     "pgtrickle.encode_row_id_v2(text, anyelement)": {
       "schema": "pgtrickle",
       "name": "encode_row_id_v2",
@@ -1085,7 +1092,7 @@
       "name": "subscribe_distance",
       "identity_arguments": "text, text, text, text, text, double precision",
       "class": "owner_lifecycle",
-      "execution_policy": "invoker_delegating"
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.teardown_self_monitoring()": {
       "schema": "pgtrickle",
@@ -1127,7 +1134,7 @@
       "name": "unsubscribe_distance",
       "identity_arguments": "text, text",
       "class": "owner_lifecycle",
-      "execution_policy": "invoker_delegating"
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.validate_query(text)": {
       "schema": "pgtrickle",
@@ -1139,6 +1146,20 @@
     "pgtrickle.validate_recovery()": {
       "schema": "pgtrickle",
       "name": "validate_recovery",
+      "identity_arguments": "",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.ann_index_status_v2()": {
+      "schema": "pgtrickle",
+      "name": "ann_index_status_v2",
+      "identity_arguments": "",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.vector_stream_status_v2()": {
+      "schema": "pgtrickle",
+      "name": "vector_stream_status_v2",
       "identity_arguments": "",
       "class": "public_read",
       "execution_policy": "capability_specific"
@@ -1225,6 +1246,48 @@
       "name": "_reject_output_delta_contract_change",
       "identity_arguments": "",
       "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.ann_maintenance_request(bigint)": {
+      "schema": "pgtrickle",
+      "name": "ann_maintenance_request",
+      "identity_arguments": "bigint",
+      "class": "owner_lifecycle",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.cancel_ann_maintenance(bigint)": {
+      "schema": "pgtrickle",
+      "name": "cancel_ann_maintenance",
+      "identity_arguments": "bigint",
+      "class": "owner_lifecycle",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.claim_ann_maintenance(bigint)": {
+      "schema": "pgtrickle",
+      "name": "claim_ann_maintenance",
+      "identity_arguments": "bigint",
+      "class": "owner_lifecycle",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.finish_ann_maintenance(bigint, boolean, text)": {
+      "schema": "pgtrickle",
+      "name": "finish_ann_maintenance",
+      "identity_arguments": "bigint, boolean, text",
+      "class": "owner_lifecycle",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.request_ann_maintenance(oid, oid)": {
+      "schema": "pgtrickle",
+      "name": "request_ann_maintenance",
+      "identity_arguments": "oid, oid",
+      "class": "owner_lifecycle",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.request_ann_maintenance_if_needed(oid, oid, bigint, bigint, bigint)": {
+      "schema": "pgtrickle",
+      "name": "request_ann_maintenance_if_needed",
+      "identity_arguments": "oid, oid, bigint, bigint, bigint",
+      "class": "owner_lifecycle",
       "execution_policy": "capability_specific"
     },
     "pgtrickle.register_output_delta_consumer(oid, text, bytea, text)": {

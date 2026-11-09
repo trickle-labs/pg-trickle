@@ -1275,9 +1275,12 @@ When enabled, the following indexes are created automatically:
    a composite index on all output columns is created.
 
 3. **Covering `__pgt_row_id` index** — for stream tables with ≤ 8 output
-   columns, the `__pgt_row_id` index includes all user columns via `INCLUDE`,
-   enabling index-only scans during MERGE (20–50% faster for small deltas
-   against large targets).
+   columns, the index includes all user columns when their combined size with
+   the identity is conservatively bounded. Variable-width or otherwise
+   unbounded values, including pgvector embeddings, omit the `INCLUDE` clause
+   to avoid exceeding PostgreSQL's B-tree tuple limit. The row-identity index
+   remains available for refreshes. Existing indexes are not rewritten on
+   upgrade; this rule applies when the index is created or rebuilt.
 
 The `__pgt_row_id` index itself is always created regardless of this setting
 (it is required for correctness).
@@ -2713,9 +2716,12 @@ SELECT pg_reload_conf();
 
 ### pg_trickle.enable_vector_agg
 
-When `true`, `avg(vector_col)` and `sum(vector_col)` in stream table defining
-queries are handled by the DVM engine using incremental aggregate operators for
-`vector`, `halfvec`, and `sparsevec` types. Requires the `pgvector` extension.
+When `true`, supported pgvector `avg` and `sum` aggregates use group rescans
+for affected groups during differential refresh. The installed pgvector
+version must provide the aggregate for the argument type; sparse vector
+storage does not imply a sparse aggregate. Known argument dimensions are
+preserved for direct aggregate outputs, while expressions whose dimensions
+cannot be established remain unconstrained. Requires the `pgvector` extension.
 
 | Property | Value |
 |---|---|
@@ -2728,6 +2734,74 @@ queries are handled by the DVM engine using incremental aggregate operators for
 ALTER SYSTEM SET pg_trickle.enable_vector_agg = true;
 SELECT pg_reload_conf();
 ```
+
+---
+
+### pg_trickle.enable_centroid_state
+
+Opt in to experimental algebraic state for eligible fixed-dimension `avg(vector)`
+stream tables. The setting is independent of `enable_vector_agg`, which must
+also be enabled. Unsupported query shapes and refresh modes retain their
+existing refresh strategy. A protected FULL refresh establishes private state.
+The current admission requires group keys to appear under their original column
+names; renamed group-key outputs retain the existing strategy.
+Eligible refreshes take shared locks on their source tables until the refresh
+transaction ends, so concurrent source writes can wait. Tables with downstream
+consumers, output-delta consumers, subscriptions, outboxes, or user triggers
+retain their existing strategy. Rejected state falls back to a group rescan.
+After a detected state error or missing state, pg_trickle may scan all source groups to rebuild
+private state; it binds the result only when the locked source snapshot and
+visible rows match exactly. Refresh history reports this as
+`centroid_rebase_group_rescan`. Cost evidence records the trigger and whether
+the rebuild bound state; an unsuccessful attempt may scan all source groups.
+For eligible refreshes that use the fallback, cost evidence also records a
+`centroid_fallback` reason such as `SOURCE_AHEAD_OF_FRONTIER` or `STATE_UNBOUND`.
+If it cannot rebuild, state stays unbound without automatically retrying; a protected FULL refresh can
+establish it again.
+To avoid repeated whole-state rebuilds under sustained rewrites, a change-limit
+rebase immediately following another data-changing rebase is suppressed. The
+group rescan remains active, the state becomes unbound, and cost evidence records
+`suppressed_consecutive_change_limit`; a protected FULL refresh can reestablish it.
+With `refresh_strategy = 'auto'`, the general refresh cost model can select a
+FULL refresh based on historical timings; a successful protected FULL refresh
+can rebind centroid state for later algebraic maintenance.
+
+For a batch with at least three captured input rows, a bounded cost policy can
+select group rescan when recent comparable observations favor it by more than
+20%. It requires at least three completed samples of each strategy among the
+64 most recent history records, with the same query identity, contract generation,
+input count, and source-row estimate. Incomplete input counts are excluded.
+Estimates and timing history can be stale. In `auto` mode, after three
+comparable algebraic samples, a batch of at least three captured records can
+start an explicitly reported group-rescan sample if fewer than three
+comparable rescan samples exist. Forced `differential` mode does not start
+sampling. Without enough comparable evidence, a bound state otherwise
+continues algebraic maintenance.
+A cost-unbound state continues
+rescan until a qualifying rebase or protected FULL refresh; once the bounded
+history window fills without a decision, it attempts a reported rebase after the
+cooldown so it can collect fresh algebraic samples. The policy does not infer a
+universal group-size threshold.
+
+A sampled rescan reports `COST_MODEL_SAMPLE_RESCAN`; a cost-selected rescan
+reports `COST_MODEL_RESCAN`. Both leave private state
+unbound; later rescans report `COST_MODEL_RESCAN_ACTIVE`. If the evidence later
+favors algebraic maintenance, the policy waits for eight recorded data-changing
+refreshes, then attempts a protected whole-state rebase after the rescan. A
+one-row change with a complete input count (at most two captured records) also
+triggers that explicitly reported rebase instead of remaining on the
+cost-selected rescan path. History reports the
+attempt as `COST_MODEL_REBIND`, including whether it bound state. A failed
+attempt stays unbound without automatic retries; a protected FULL refresh can
+reestablish it. State size and rebase cost are not separately predicted, so
+this experimental policy can still select a slower path.
+
+| Property | Value |
+|---|---|
+| Type | `boolean` |
+| Default | `false` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
 
 ---
 

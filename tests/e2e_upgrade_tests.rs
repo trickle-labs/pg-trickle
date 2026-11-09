@@ -35,6 +35,9 @@ async fn test_upgrade_catalog_schema_stability() {
 
     // Expected columns in pgt_stream_tables (alphabetical)
     let expected_columns = vec![
+        ("ann_churn_generation", "bigint"),
+        ("ann_churn_operations", "bigint"),
+        ("ann_refresh_epoch", "bigint"),
         ("auto_threshold", "double precision"),
         ("blow_reason", "text"),
         ("blown_at", "timestamp with time zone"),
@@ -522,6 +525,472 @@ async fn test_upgrade_v090_catalog_additions() {
 /// Used to skip tests gracefully when image isn't built.
 fn upgrade_image_available() -> bool {
     matches!(std::env::var("PGS_UPGRADE_FROM"), Ok(v) if !v.is_empty())
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_embedding_helpers_from_0109() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        return;
+    }
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+        .await;
+    db.execute("CREATE TABLE upgrade_epoch_storage (__pgt_row_id bytea, id int)")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_stream_tables \
+        (pgt_relid, pgt_name, pgt_schema, defining_query, original_query, refresh_mode, \
+         requested_refresh_mode, status, is_populated, defining_search_path) \
+        VALUES ('upgrade_epoch_storage'::regclass, 'upgrade_epoch_storage', 'public', \
+         'SELECT 1 AS id', 'SELECT 1 AS id', 'FULL', 'FULL', 'ACTIVE', true, 'public, pg_catalog')",
+    )
+    .await;
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+        .await;
+    let guard_upgraded: bool = db.query_scalar("SELECT pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[1.0]::float8[], ARRAY[1.0]::float8[]) IS NULL AND pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[[1.0]]::float8[], ARRAY[1.0]::float8[]) = 'INVALID_STATE'").await;
+    assert!(guard_upgraded, "upgrade must install the centroid guard");
+    let marker_upgraded: bool = db.query_scalar("SELECT a.attnotnull AND pg_catalog.pg_get_expr(d.adbin, d.adrelid) = 'false' FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid = 'pgtrickle.pgt_centroid_states'::regclass AND a.attname = 'last_change_limit_rebase' AND NOT a.attisdropped").await;
+    assert!(
+        marker_upgraded,
+        "upgrade must install the durable rebase marker"
+    );
+    let cost_markers: bool = db.query_scalar("SELECT count(*) = 2 FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid = 'pgtrickle.pgt_centroid_states'::regclass AND NOT a.attisdropped AND ((a.attname = 'cost_rescan_active' AND a.atttypid = 'boolean'::regtype AND a.attnotnull AND pg_catalog.pg_get_expr(d.adbin, d.adrelid) = 'false') OR (a.attname = 'cost_rescan_xid' AND a.atttypid = 'xid8'::regtype AND NOT a.attnotnull AND d.adbin IS NULL))").await;
+    assert!(
+        cost_markers,
+        "upgrade must install the transactional cost markers"
+    );
+    let delta: Vec<f64> = db.query_scalar("SELECT pgtrickle._centroid_delta(v, sign) FROM (VALUES (ARRAY[1]::real[], 1::smallint), (ARRAY[2]::real[], -1::smallint)) AS input(v, sign)").await;
+    assert_eq!(delta, vec![0.0, 2.0, -1.0, 3.0]);
+    let merged: Vec<f64> = db
+        .query_scalar(
+            "SELECT pgtrickle._centroid_merge(ARRAY[]::float8[], ARRAY[0,2,-1,3]::float8[], 1, true)",
+        )
+        .await;
+    assert_eq!(merged, vec![0.0, 4.0, 2.0, -1.0, 3.0]);
+    let initialized: Vec<f64> = db
+        .query_scalar("SELECT pgtrickle._centroid_init(ARRAY[2,2,2,2]::float8[], 1)")
+        .await;
+    assert_eq!(initialized, vec![2.0, 2.0, 0.0, 2.0, 2.0]);
+    let finalized: Vec<f32> = db
+        .query_scalar("SELECT pgtrickle._centroid_finalize(ARRAY[2,2,0,2,2]::float8[], 1)")
+        .await;
+    assert_eq!(finalized, vec![1.0]);
+    let epoch: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'upgrade_epoch_storage'").await;
+    assert_eq!(epoch, 0, "existing stream tables receive an initial epoch");
+    db.execute("CREATE TABLE upgrade_vectors (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO upgrade_vectors VALUES (1, '[1,0,0]')")
+        .await;
+    let init_sql: Option<String> = sqlx::query_scalar("SELECT pgtrickle._centroid_initialization_sql('SELECT avg(embedding) AS centroid FROM upgrade_vectors')")
+        .fetch_one(&db.pool).await.expect("generate upgraded centroid initialization query");
+    let init_sql = init_sql.expect("upgrade must install initialization query generation");
+    let sql = format!(
+        "SELECT centroid::real[], __pgt_group_count, __pgt_centroid_state FROM ({init_sql}) AS initialized"
+    );
+    let initialized: (Vec<f32>, i64, Vec<f64>) = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_one(&db.pool)
+        .await
+        .expect("execute upgraded centroid initialization");
+    assert_eq!(
+        initialized,
+        (
+            vec![1.0, 0.0, 0.0],
+            1,
+            vec![1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        )
+    );
+    let staged: Option<String> = db.query_scalar("SELECT pgtrickle._centroid_staging_sql('SELECT avg(embedding) AS centroid FROM upgrade_vectors')").await;
+    assert!(
+        staged.is_some(),
+        "upgrade must install centroid staging generation"
+    );
+    db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", "SELECT pgtrickle.create_stream_table('upgrade_centroid', $$SELECT avg(embedding) AS centroid FROM upgrade_vectors$$, '1h', 'DIFFERENTIAL')"]).await;
+    db.execute_seq(&[
+        "CREATE ROLE upgraded_centroid_owner NOLOGIN",
+        "GRANT USAGE ON SCHEMA pgtrickle TO upgraded_centroid_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_stage_state(oid) TO upgraded_centroid_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_prepare_state(oid) TO upgraded_centroid_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_candidate_sql(oid, text, text) TO upgraded_centroid_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_stage_delta(oid, text, text) TO upgraded_centroid_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle._centroid_stage_candidates(oid, text, text) TO upgraded_centroid_owner",
+        "GRANT SELECT ON upgrade_vectors TO upgraded_centroid_owner",
+        "ALTER TABLE upgrade_centroid OWNER TO upgraded_centroid_owner",
+    ])
+    .await;
+    let frontier: String = db.query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'upgrade_centroid'::regclass").await;
+    let mut staging_tx = db.pool.begin().await.expect("begin upgraded staging");
+    sqlx::query("SET LOCAL ROLE upgraded_centroid_owner")
+        .execute(&mut *staging_tx)
+        .await
+        .expect("set upgraded stream owner role");
+    let staged: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_stage_state('upgrade_centroid'::regclass::oid)",
+    )
+    .fetch_one(&mut *staging_tx)
+    .await
+    .expect("stage upgraded centroid");
+    let sql = format!("SELECT count(*)::bigint FROM {staged}");
+    let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_one(&mut *staging_tx)
+        .await
+        .expect("read upgraded stage");
+    assert_eq!(count, 1);
+    let prepared: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_prepare_state('upgrade_centroid'::regclass::oid)",
+    )
+    .fetch_one(&mut *staging_tx)
+    .await
+    .expect("prepare upgraded centroid state");
+    let sql = format!("SELECT count(*)::bigint FROM {prepared}");
+    let groups: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_one(&mut *staging_tx)
+        .await
+        .expect("read prepared upgraded centroid snapshot");
+    assert_eq!(groups, 1);
+    let candidate_sql: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_candidate_sql('upgrade_centroid'::regclass::oid, $1, $1)",
+    )
+    .bind(&frontier)
+    .fetch_one(&mut *staging_tx)
+    .await
+    .expect("generate upgraded centroid candidates");
+    assert!(candidate_sql.contains("_centroid_check_count"));
+    let delta_stage: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_stage_delta('upgrade_centroid'::regclass::oid, $1, $1)",
+    )
+    .bind(&frontier)
+    .fetch_one(&mut *staging_tx)
+    .await
+    .expect("stage upgraded centroid delta");
+    let sql = format!("SELECT count(*)::bigint FROM {delta_stage}");
+    let delta_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_one(&mut *staging_tx)
+        .await
+        .expect("read upgraded centroid delta");
+    assert_eq!(delta_count, 0);
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle._centroid_stage_candidates('upgrade_centroid'::regclass::oid, $1, $1)",
+    )
+    .bind(&frontier)
+    .fetch_one(&mut *staging_tx)
+    .await
+    .expect_err("unbound upgraded centroid state must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("not bound to the current frontier")
+    );
+    staging_tx
+        .rollback()
+        .await
+        .expect("rollback upgraded stage");
+    let delta_sql: String = db.query_scalar("SELECT pgtrickle._centroid_delta_sql('upgrade_centroid'::regclass::oid, frontier::text, frontier::text) FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'upgrade_centroid'::regclass").await;
+    assert!(
+        delta_sql.contains("__pgt_centroid_delta"),
+        "upgrade must install signed centroid delta generation"
+    );
+    let state_count: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.pgt_centroid_states")
+        .await;
+    assert_eq!(
+        state_count, 0,
+        "upgraded state must roll back with the transaction"
+    );
+    db.execute("SELECT * FROM pgtrickle.embedding_stream_table('upgrade_l2', 'upgrade_vectors', 'embedding', NULL, '1m', 'hnsw', false)").await;
+    db.execute("SELECT * FROM pgtrickle.embedding_stream_table_v2('upgrade_cosine', 'upgrade_vectors', 'embedding', 'cosine')").await;
+    let valid: i64 = db.query_scalar("SELECT count(*) FROM pg_index i JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid IN ('upgrade_l2'::regclass, 'upgrade_cosine'::regclass) AND i.indisready AND i.indisvalid AND op.opcname IN ('vector_l2_ops','vector_cosine_ops')").await;
+    assert_eq!(valid, 2);
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('upgrade_cosine'::regclass::oid, \
+        (SELECT i.indexrelid FROM pg_index i JOIN pg_opclass op ON op.oid = i.indclass[0] \
+         WHERE i.indrelid = 'upgrade_cosine'::regclass AND op.opcname = 'vector_cosine_ops' LIMIT 1))").await;
+    assert!(request > 0);
+    let mut worker = db.pool.acquire().await.expect("upgraded worker session");
+    sqlx::query("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("claim on upgraded catalog");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, false, 'test failure')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("release upgraded claim");
+    let failed: bool = db.query_scalar("SELECT (v->>'maintenance_failed')::boolean AND v->>'maintenance_stale' = 'false' AND v->>'maintenance_error' = 'test failure' FROM pgtrickle.vector_stream_status_v2() v WHERE v->>'table' = 'upgrade_cosine' LIMIT 1").await;
+    assert!(failed, "upgraded diagnostics report failed maintenance");
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.cancel_ann_maintenance($1)")
+            .bind(request)
+            .fetch_one(&mut *worker)
+            .await
+            .expect("cancel on upgraded catalog");
+    assert_eq!(status["state"], "CANCELLED");
+    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    let reopened: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('upgrade_cosine'::regclass::oid, \
+        (SELECT i.indexrelid FROM pg_index i JOIN pg_opclass op ON op.oid = i.indclass[0] \
+         WHERE i.indrelid = 'upgrade_cosine'::regclass AND op.opcname = 'vector_cosine_ops' LIMIT 1))").await;
+    assert_eq!(request, reopened);
+    let claim: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.claim_ann_maintenance($1)")
+        .bind(request)
+        .fetch_one(&mut *worker)
+        .await
+        .expect("claim upgraded request");
+    let reindex: String = db.query_scalar("SELECT format('REINDEX INDEX CONCURRENTLY %I.%I', n.nspname, c.relname) \
+        FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace \
+        JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid='upgrade_cosine'::regclass AND op.opcname='vector_cosine_ops' LIMIT 1").await;
+    // The statement uses catalog identifiers quoted by PostgreSQL's format(%I).
+    sqlx::query(sqlx::AssertSqlSafe(reindex.as_str()))
+        .execute(&mut *worker)
+        .await
+        .expect("rebuild upgraded index");
+    sqlx::query("SELECT pgtrickle.finish_ann_maintenance($1, true, '')")
+        .bind(request)
+        .execute(&mut *worker)
+        .await
+        .expect("report upgraded coverage");
+    let covered: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect upgraded coverage");
+    assert_eq!(covered["reported_covered_epoch"], claim["claim_epoch"]);
+    assert!(covered["reported_covered_epoch"].is_number());
+    let replacement: i64 = db.query_scalar("SELECT i.indexrelid::bigint FROM pg_index i JOIN pg_opclass op ON op.oid=i.indclass[0] WHERE i.indrelid='upgrade_cosine'::regclass AND op.opcname='vector_cosine_ops' LIMIT 1").await;
+    let (generation, operations): (i64, i64) = sqlx::query_as("SELECT ann_churn_generation, ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_cosine'")
+        .fetch_one(&db.pool).await.expect("read upgraded estimate watermark");
+    let decision: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.request_ann_maintenance_if_needed('upgrade_cosine'::regclass::oid, $1::bigint::oid, 10, $2, $3)")
+        .bind(replacement).bind(generation).bind(operations).fetch_one(&db.pool).await.expect("check upgraded threshold");
+    assert_eq!(decision["decision"], "cooldown");
+    db.execute("CREATE ROLE upgrade_ann_unprivileged NOLOGIN")
+        .await;
+    let private: bool = db.query_scalar("SELECT NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.request_ann_maintenance(oid,oid)', 'EXECUTE') \
+        AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.request_ann_maintenance_if_needed(oid,oid,bigint,bigint,bigint)', 'EXECUTE') \
+        AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.ann_maintenance_request(bigint)', 'EXECUTE') \
+        AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.cancel_ann_maintenance(bigint)', 'EXECUTE') \
+        AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.claim_ann_maintenance(bigint)', 'EXECUTE') \
+        AND NOT has_function_privilege('upgrade_ann_unprivileged', 'pgtrickle.finish_ann_maintenance(bigint,boolean,text)', 'EXECUTE')").await;
+    assert!(
+        private,
+        "upgrade must revoke PUBLIC access to the intent APIs"
+    );
+    let diagnostics: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE v->>'table' IN ('upgrade_l2', 'upgrade_cosine') AND v->>'valid' = 'true'").await;
+    assert_eq!(diagnostics, 2);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_preserves_existing_vector_expression_index() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        return;
+    }
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+        .await;
+    db.execute("CREATE TABLE upgrade_index_src (id int PRIMARY KEY, embedding vector(3))")
+        .await;
+    db.execute("INSERT INTO upgrade_index_src VALUES (1, '[1,0,0]'), (2, '[0,1,0]')")
+        .await;
+    db.create_st(
+        "upgrade_index_st",
+        "SELECT id, embedding FROM upgrade_index_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX upgrade_existing_ann ON upgrade_index_st USING hnsw ((embedding::vector(3)) vector_l2_ops)").await;
+    let before: (i64, i64, String) = sqlx::query_as("SELECT c.oid::bigint, pg_relation_filenode(c.oid)::bigint, format_type(a.atttypid, a.atttypmod) FROM pg_class c JOIN pg_attribute a ON a.attrelid='upgrade_index_st'::regclass AND a.attname='embedding' WHERE c.oid='upgrade_existing_ann'::regclass")
+        .fetch_one(&db.pool).await.expect("inspect pre-upgrade index and type");
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+        .await;
+    db.execute("UPDATE upgrade_index_src SET embedding='[0,0,1]' WHERE id=2")
+        .await;
+    let previous: i64 = db.query_scalar("SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='upgrade_index_st'").await;
+    db.execute_seq(&[
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SET pg_trickle.differential_max_change_ratio = 0",
+        "SELECT pgtrickle.refresh_stream_table('upgrade_index_st')",
+    ])
+    .await;
+    let differential: bool = sqlx::query_scalar("SELECT h.refresh_id > $1 AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name='upgrade_index_st' ORDER BY h.refresh_id DESC LIMIT 1")
+        .bind(previous).fetch_one(&db.pool).await.expect("inspect upgraded refresh");
+    assert!(differential, "upgraded stream must refresh differentially");
+    let after: (i64, i64, String, bool) = sqlx::query_as("SELECT c.oid::bigint, pg_relation_filenode(c.oid)::bigint, format_type(a.atttypid, a.atttypmod), i.indisvalid AND i.indisready FROM pg_class c JOIN pg_index i ON i.indexrelid=c.oid JOIN pg_attribute a ON a.attrelid='upgrade_index_st'::regclass AND a.attname='embedding' WHERE c.oid='upgrade_existing_ann'::regclass")
+        .fetch_one(&db.pool).await.expect("inspect post-upgrade index and type");
+    assert_eq!((after.0, after.1, after.2), before);
+    assert!(
+        after.3,
+        "pre-existing ANN index must remain valid and ready"
+    );
+    let equal: bool = db.query_scalar("SELECT NOT EXISTS ((SELECT id, embedding FROM upgrade_index_st EXCEPT ALL SELECT id, embedding FROM upgrade_index_src) UNION ALL (SELECT id, embedding FROM upgrade_index_src EXCEPT ALL SELECT id, embedding FROM upgrade_index_st))").await;
+    assert!(equal, "upgraded stream must match the source");
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin upgraded index plan check");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("force index eligibility");
+    let plan: serde_json::Value = sqlx::query_scalar("EXPLAIN (FORMAT JSON) SELECT id FROM upgrade_index_st ORDER BY (embedding::vector(3)) <-> '[1,0,0]'::vector LIMIT 1")
+        .fetch_one(&mut *tx).await.expect("explain upgraded vector search");
+    assert!(
+        plan.to_string().contains("upgrade_existing_ann"),
+        "upgraded index must remain eligible: {plan}"
+    );
+    tx.rollback().await.expect("end upgraded plan check");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_distance_subscriptions_preserves_legacy_rows() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        return;
+    }
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+        .await;
+    db.execute(
+        "CREATE TABLE upgrade_alert_src (id int PRIMARY KEY, embedding vector(3), bits bit(3))",
+    )
+    .await;
+    db.create_st(
+        "upgrade_alert_st",
+        "SELECT id, embedding, bits FROM upgrade_alert_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("INSERT INTO pgtrickle.pgt_distance_subscriptions(stream_table,channel,vector_column,query_vector,op,threshold) VALUES ('public.upgrade_alert_st','known','embedding','[1,0,0]','<->',0.5), ('missing.legacy','unresolved','embedding','[1,0,0]','<->',0.5), ('public.upgrade_alert_st','legacy_bits','bits','101','<<->>',1)").await;
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+        .await;
+    let bound: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_distance_subscriptions WHERE pgt_id=(SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_alert_st')").await;
+    let unresolved: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_distance_subscriptions WHERE stream_table='missing.legacy' AND pgt_id IS NULL").await;
+    assert_eq!(bound, 0);
+    assert_eq!(unresolved, 1);
+    db.execute("SELECT pgtrickle.subscribe_distance('upgrade_alert_st','known','embedding','[1,0,0]','<->',0.5)").await;
+    db.execute("SELECT pgtrickle.subscribe_distance('upgrade_alert_st','legacy_bits','bits','101','<~>',1)").await;
+    let op: String = db
+        .query_scalar(
+            "SELECT op FROM pgtrickle.pgt_distance_subscriptions WHERE channel='legacy_bits'",
+        )
+        .await;
+    assert_eq!(op, "<~>");
+    db.drop_st("upgrade_alert_st").await;
+    let remaining: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_distance_subscriptions WHERE channel IN ('known','legacy_bits')").await;
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_ann_epoch_handles_old_catalog_and_rollback() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.109.0")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        return;
+    }
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.109.0' CASCADE")
+        .await;
+    db.execute("CREATE TABLE upgrade_epoch_source (id int PRIMARY KEY)")
+        .await;
+    db.create_st(
+        "upgrade_epoch_stream",
+        "SELECT id FROM upgrade_epoch_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE TABLE upgrade_epoch_immediate_source (id int PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO upgrade_epoch_immediate_source VALUES (1)")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table('upgrade_epoch_immediate', 'SELECT id FROM upgrade_epoch_immediate_source', NULL, 'IMMEDIATE')").await;
+    let mut conn = db.pool.acquire().await.expect("acquire upgrade connection");
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin upgrade");
+    sqlx::query("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+        .execute(&mut *conn)
+        .await
+        .expect("upgrade in transaction");
+    sqlx::query("INSERT INTO upgrade_epoch_source VALUES (1)")
+        .execute(&mut *conn)
+        .await
+        .expect("insert during upgrade");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('upgrade_epoch_stream')")
+        .execute(&mut *conn)
+        .await
+        .expect("refresh during upgrade");
+    let epoch: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_stream'").fetch_one(&mut *conn).await.expect("read upgraded epoch");
+    assert!(epoch > 0);
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("roll back upgrade");
+    sqlx::query("INSERT INTO upgrade_epoch_immediate_source VALUES (2)")
+        .execute(&mut *conn)
+        .await
+        .expect("immediate mutation works with the old catalog after rollback");
+    sqlx::query("TRUNCATE upgrade_epoch_immediate_source")
+        .execute(&mut *conn)
+        .await
+        .expect("immediate truncate works with the old catalog after rollback");
+    sqlx::query("INSERT INTO upgrade_epoch_source VALUES (2)")
+        .execute(&mut *conn)
+        .await
+        .expect("insert after rollback");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('upgrade_epoch_stream')")
+        .execute(&mut *conn)
+        .await
+        .expect("old catalog still refreshes in same backend");
+    sqlx::query("ALTER EXTENSION pg_trickle UPDATE TO '0.110.0'")
+        .execute(&mut *conn)
+        .await
+        .expect("commit upgrade");
+    sqlx::query("INSERT INTO upgrade_epoch_source VALUES (3)")
+        .execute(&mut *conn)
+        .await
+        .expect("insert after upgrade");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('upgrade_epoch_stream')")
+        .execute(&mut *conn)
+        .await
+        .expect("refresh after upgrade");
+    let epoch: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_stream'").fetch_one(&mut *conn).await.expect("read final epoch");
+    assert!(epoch > 0);
+    let operations: i64 = sqlx::query_scalar("SELECT ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_stream'")
+        .fetch_one(&mut *conn).await.expect("read upgraded churn");
+    assert!(operations > 0);
+    sqlx::query("INSERT INTO upgrade_epoch_immediate_source VALUES (2)")
+        .execute(&mut *conn)
+        .await
+        .expect("insert after upgrade");
+    let immediate_churn: (i64, i64) = sqlx::query_as("SELECT ann_churn_generation, ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_immediate'")
+        .fetch_one(&mut *conn).await.expect("read immediate churn after upgrade");
+    assert!(immediate_churn.1 > 0);
+    let before: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_immediate'")
+        .fetch_one(&mut *conn).await.expect("read immediate epoch");
+    sqlx::query("TRUNCATE upgrade_epoch_immediate_source")
+        .execute(&mut *conn)
+        .await
+        .expect("truncate after upgrade");
+    let after: i64 = sqlx::query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_immediate'")
+        .fetch_one(&mut *conn).await.expect("read epoch after truncate");
+    assert!(after > before);
+    let after_truncate: (i64, i64) = sqlx::query_as("SELECT ann_churn_generation, ann_churn_operations FROM pgtrickle.pgt_stream_tables WHERE pgt_name='upgrade_epoch_immediate'")
+        .fetch_one(&mut *conn).await.expect("read churn after truncate");
+    assert!(after_truncate.0 > immediate_churn.0);
 }
 
 /// A tracked source for an IMMEDIATE stream table has no CDC buffer, while a

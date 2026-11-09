@@ -171,10 +171,12 @@ pub(super) fn install_dml_guard_trigger(
         quote_identifier(schema),
         quote_identifier(table_name),
     );
+    let digest = crate::integration_contract::sha256_hex(table_name.as_bytes());
+    let guard_name = format!("_pgt_guard_{}", &digest[..32]);
     let trigger_func_name = format!(
-        "{}._pgt_guard_{}",
+        "{}.{}",
         quote_identifier(schema),
-        table_name.replace('"', ""),
+        quote_identifier(&guard_name),
     );
 
     // Create the guard trigger function
@@ -1541,6 +1543,34 @@ fn analyze_query_tree(query: &str) -> Result<*mut pg_sys::Query, PgTrickleError>
     }
 }
 
+/// Validate helper output names without executing the defining query.
+pub(super) fn validate_helper_projection(query: &str) -> Result<(), PgTrickleError> {
+    use pgrx::PgList;
+    use std::collections::HashSet;
+    use std::ffi::CStr;
+
+    let query_node = analyze_query_tree(query)?;
+    let mut names = HashSet::new();
+    // SAFETY: analyze_query_tree returns a PostgreSQL Query in the current memory context.
+    unsafe {
+        let target_list = PgList::<pg_sys::TargetEntry>::from_pg((*query_node).targetList);
+        for target in target_list.iter_ptr() {
+            if target.is_null() || (*target).resjunk || (*target).resname.is_null() {
+                continue;
+            }
+            let name = CStr::from_ptr((*target).resname)
+                .to_string_lossy()
+                .into_owned();
+            if name == "__pgt_row_id" || !names.insert(name.clone()) {
+                return Err(PgTrickleError::InvalidArgument(format!(
+                    "duplicate or reserved output column: {name}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Inspect resolved expression volatility without executing the defining query.
 pub(crate) fn defining_query_volatility(query: &str) -> Result<char, PgTrickleError> {
     analyzed_query_volatility(analyze_query_tree(query)?, false)
@@ -2810,7 +2840,7 @@ pub(super) fn build_create_table_sql(
 /// Get the OID of a table by schema and name.
 pub(super) fn get_table_oid(schema: &str, name: &str) -> Result<pg_sys::Oid, PgTrickleError> {
     let oid = Spi::get_one_with_args::<pg_sys::Oid>(
-        "SELECT ($1 || '.' || $2)::regclass::oid",
+        "SELECT pg_catalog.format('%I.%I', $1::text, $2::text)::regclass::oid",
         &[schema.into(), name.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
@@ -2894,25 +2924,29 @@ pub(crate) fn normalize_full_set_operation_storage(
 
     if rebuild_index {
         let user_columns = crate::cdc::resolve_st_output_columns(pgt_relid)?;
-        let identity_bounded = user_columns.iter().all(|(column, type_name)| {
-            Spi::get_one_with_args::<pg_sys::Oid>(
-                "SELECT $1::regtype::oid",
-                &[type_name.as_str().into()],
-            )
-            .ok()
-            .flatten()
-            .is_some_and(|type_oid| {
-                row_identity_is_bounded(&[ColumnDef {
+        let column_defs: Option<Vec<ColumnDef>> = user_columns
+            .iter()
+            .map(|(column, type_name)| {
+                let type_oid = Spi::get_one_with_args::<pg_sys::Oid>(
+                    "SELECT $1::regtype::oid",
+                    &[type_name.as_str().into()],
+                )
+                .ok()
+                .flatten()?;
+                Some(ColumnDef {
                     name: column.clone(),
                     type_oid: type_oid.into(),
                     typmod: -1,
-                }])
+                })
             })
-        });
+            .collect();
+        let identity_bounded = column_defs.as_deref().is_some_and(row_identity_is_bounded);
         let include_clause = if crate::config::pg_trickle_auto_index()
             && !user_columns.is_empty()
             && user_columns.len() <= 8
-        {
+            && column_defs.as_ref().is_some_and(|columns| {
+                row_identity_is_bounded(&[columns.as_slice(), columns.as_slice()].concat())
+            }) {
             let columns = user_columns
                 .iter()
                 .map(|(column, _)| quote_identifier(column))
@@ -3146,7 +3180,7 @@ pub(super) fn initialize_st(
     for (upstream_pgt_id, lsn) in st_source_lsn_snapshot {
         frontier.set_st_source(upstream_pgt_id, lsn, data_ts.clone());
     }
-    StreamTableMeta::store_frontier_and_complete_refresh(pgt_id, &frontier, 0)?;
+    StreamTableMeta::store_frontier_and_complete_refresh(pgt_id, &frontier, 0, false)?;
 
     // Record the initial population in pgt_refresh_history so that monitoring
     // tools and tests can observe the initial fill event.  Errors here are
@@ -3183,10 +3217,12 @@ pub(crate) fn quote_identifier(ident: &str) -> String {
 }
 
 /// Differential materializations keep these auxiliary columns in query-output order.
-pub(crate) fn differential_storage_auxiliary_columns(query: &str) -> Vec<(String, String)> {
-    let Ok(tree) = crate::dvm::parse_defining_query(query) else {
-        return Vec::new();
-    };
+pub(crate) fn differential_storage_auxiliary_columns(
+    query: &str,
+) -> Result<Vec<(String, String)>, PgTrickleError> {
+    let mut parsed = crate::dvm::parse_defining_query_full(query)?;
+    crate::dvm::parser::enrich_vector_aggregates(query, &mut parsed, false)?;
+    let tree = parsed.tree;
     let mut columns = Vec::new();
     if tree.needs_dual_count() {
         columns.extend([
@@ -3222,7 +3258,7 @@ pub(crate) fn differential_storage_auxiliary_columns(query: &str) -> Vec<(String
         };
         columns.push((column, definition.into()));
     }
-    columns
+    Ok(columns)
 }
 
 pub(crate) fn ensure_differential_storage_auxiliary_columns(
@@ -3235,7 +3271,7 @@ pub(crate) fn ensure_differential_storage_auxiliary_columns(
         quote_identifier(schema),
         quote_identifier(table_name)
     );
-    for (column, definition) in differential_storage_auxiliary_columns(query) {
+    for (column, definition) in differential_storage_auxiliary_columns(query)? {
         Spi::run(&format!(
             "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {} {definition}",
             quote_identifier(&column),

@@ -1335,6 +1335,7 @@ fn scan_orders() -> OpTree {
 
 fn count_star(alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::CountStar,
         argument: None,
         alias: alias.to_string(),
@@ -1348,6 +1349,7 @@ fn count_star(alias: &str) -> AggExpr {
 
 fn sum_col(column: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Sum,
         argument: Some(colref(column)),
         alias: alias.to_string(),
@@ -1361,6 +1363,7 @@ fn sum_col(column: &str, alias: &str) -> AggExpr {
 
 fn avg_col(column: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Avg,
         argument: Some(colref(column)),
         alias: alias.to_string(),
@@ -1374,6 +1377,7 @@ fn avg_col(column: &str, alias: &str) -> AggExpr {
 
 fn min_col(column: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Min,
         argument: Some(colref(column)),
         alias: alias.to_string(),
@@ -1387,6 +1391,7 @@ fn min_col(column: &str, alias: &str) -> AggExpr {
 
 fn max_col(column: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Max,
         argument: Some(colref(column)),
         alias: alias.to_string(),
@@ -1400,6 +1405,7 @@ fn max_col(column: &str, alias: &str) -> AggExpr {
 
 fn string_agg_col(column: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::StringAgg,
         argument: Some(colref(column)),
         alias: alias.to_string(),
@@ -1413,6 +1419,7 @@ fn string_agg_col(column: &str, alias: &str) -> AggExpr {
 
 fn mode_col(column: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Mode,
         argument: None,
         alias: alias.to_string(),
@@ -1426,6 +1433,7 @@ fn mode_col(column: &str, alias: &str) -> AggExpr {
 
 fn json_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::JsonObjectAgg,
         argument: Some(colref(key_col)),
         alias: alias.to_string(),
@@ -1439,6 +1447,7 @@ fn json_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr {
 
 fn jsonb_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::JsonbObjectAgg,
         argument: Some(colref(key_col)),
         alias: alias.to_string(),
@@ -1452,6 +1461,7 @@ fn jsonb_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr {
 
 fn percentile_cont_col(fraction: &str, order_col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::PercentileCont,
         argument: Some(lit(fraction)),
         alias: alias.to_string(),
@@ -1465,6 +1475,7 @@ fn percentile_cont_col(fraction: &str, order_col: &str, alias: &str) -> AggExpr 
 
 fn percentile_disc_col(fraction: &str, order_col: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::PercentileDisc,
         argument: Some(lit(fraction)),
         alias: alias.to_string(),
@@ -1478,6 +1489,7 @@ fn percentile_disc_col(fraction: &str, order_col: &str, alias: &str) -> AggExpr 
 
 fn filtered_count_col(column: &str, alias: &str, filter: Expr) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::Count,
         argument: Some(colref(column)),
         alias: alias.to_string(),
@@ -2210,6 +2222,7 @@ async fn test_diff_aggregate_executes_percentile_disc_rescan_update() {
 
 fn jsonb_agg_col(argument: &str, alias: &str) -> AggExpr {
     AggExpr {
+        analyzed_argument: None,
         function: AggFunc::JsonbAgg,
         argument: Some(colref(argument)),
         alias: alias.to_string(),

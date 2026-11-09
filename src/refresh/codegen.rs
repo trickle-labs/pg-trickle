@@ -1324,11 +1324,39 @@ pub(crate) fn capture_diff_to_table(
         .collect::<Vec<_>>()
         .join(", ");
 
+    // Preserve pgvector's binary value, including signed zero, for downstream expressions.
+    let vector_senders = Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT a.attname::text, n.nspname::text, p.proname::text \
+             FROM pg_catalog.pg_attribute a \
+             JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
+             JOIN pg_catalog.pg_depend td ON td.classid = 'pg_catalog.pg_type'::regclass \
+               AND td.objid = a.atttypid AND td.deptype = 'e' \
+             JOIN pg_catalog.pg_extension e ON e.oid = td.refobjid AND e.extname = 'vector' \
+             JOIN pg_catalog.pg_proc p ON p.oid = t.typsend AND p.proisstrict AND p.prorettype = 'pg_catalog.bytea'::regtype \
+             JOIN pg_catalog.pg_depend pd ON pd.classid = 'pg_catalog.pg_proc'::regclass \
+               AND pd.objid = p.oid AND pd.refobjid = e.oid AND pd.deptype = 'e' \
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+             WHERE t.typname IN ('vector', 'halfvec', 'sparsevec') AND a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped",
+            None, &[st.pgt_relid.into()],
+        )?;
+        let mut result = HashMap::new();
+        for row in rows {
+            if let (Some(column), Some(schema), Some(name)) = (row.get::<String>(1)?, row.get::<String>(2)?, row.get::<String>(3)?) {
+                result.insert(column, crate::sql_builder::qualified(&schema, &name));
+            }
+        }
+        Ok::<_, pgrx::spi::Error>(result)
+    }).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     let is_distinct_pairs: String = user_cols
         .iter()
         .map(|c| {
             let qc = format!("\"{}\"", c.replace('"', "\"\""));
-            format!("pre.{qc} IS DISTINCT FROM post.{qc}")
+            if let Some(sender) = vector_senders.get(c) {
+                format!("{sender}(pre.{qc}) IS DISTINCT FROM {sender}(post.{qc})")
+            } else {
+                format!("pre.{qc} IS DISTINCT FROM post.{qc}")
+            }
         })
         .collect::<Vec<_>>()
         .join(" OR ");

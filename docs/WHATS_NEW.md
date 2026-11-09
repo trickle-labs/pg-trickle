@@ -136,7 +136,7 @@ from O(N) to O(1) (combined with the v0.62 fan-out optimisation).
 
 ## v0.50–0.57 — Embedding programme, pg_tide extraction & operational hardening
 
-- **pgvector incremental aggregates**: `vector_avg` and `halfvec_avg`
+- **pgvector incremental aggregates**: `avg(vector)` and `avg(halfvec)`
   maintained differentially; ANN index rebuild after refresh
 - **Hybrid search**: `pgtrickle.vector_status()` and per-tenant ANN
   indexing patterns
@@ -178,7 +178,7 @@ from O(N) to O(1) (combined with the v0.62 fan-out optimisation).
 
 ## v0.37 — pgVector incremental aggregates + distributed trace propagation
 
-- `vector_avg` / `halfvec_avg` aggregate functions maintained
+- pgvector `avg(vector)` / `avg(halfvec)` aggregates maintained
   incrementally
 - OpenTelemetry trace propagation: set `pg_trickle.trace_id` in a
   session and every refresh span is linked to your application trace

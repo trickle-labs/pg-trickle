@@ -44,10 +44,16 @@ versioned product budgets are in
 [`benchmarks/pgbench-v0.87/budgets.json`](../benchmarks/pgbench-v0.87/budgets.json).
 The gate fails closed for missing repetitions, malformed/non-finite values,
 missing latency samples, unavailable Linux CPU samples, failed correctness,
-or a budget regression. The initial v0.87 product floor preserves the
+fewer than the configured minimum of three paired repetitions, or a budget
+regression. The initial v0.87 product floor preserves the
 roadmap requirement of at least 99% installed/no-stream TPS; active p99 and
 refresh CPU share are separately budgeted so CI noise cannot silently change
 the product contract.
+
+A [native ARM investigation](../benchmarks/pgbench-v0.87/results/2026-11-07-native-arm/README.md)
+records a candidate and main run, including the limitations of the comparison.
+An [alternating follow-up](../benchmarks/pgbench-v0.87/results/2026-11-07-interleaved-arm/README.md)
+retains three paired observations per image.
 
 ## v0.88 vector aggregate gate
 

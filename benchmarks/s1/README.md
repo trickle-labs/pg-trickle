@@ -437,7 +437,7 @@ remains a failure, with no complete throughput or paired speedup score.
 
 The old runnable joint-stack images were removed during host cleanup. The pinned
 React source admits only pg-trickle 0.108.0, so the Dockerfile replaces that
-exact patch-version pin with the candidate version (currently 0.109.0) in the
+exact patch-version pin with the candidate version (currently 0.110.0) in the
 0.46.0/0.46.1 install SQL. The qualification checks admission against the
 candidate package default and retains both the upstream MDM pin and the adapted
 fixture hash. Isolation, trigger CDC, scheduler settings, change-ratio and
