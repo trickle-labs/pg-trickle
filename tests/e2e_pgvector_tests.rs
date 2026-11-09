@@ -10260,19 +10260,19 @@ async fn test_distance_subscription_duplicate_predicates_with_user_trigger() {
 
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
-    db.execute("CREATE TABLE duplicate_alert_src (id int PRIMARY KEY, embedding vector(2))")
+    db.execute("CREATE TABLE duplicate_alert_src (id int PRIMARY KEY, image vector(2))")
         .await;
-    db.execute("INSERT INTO duplicate_alert_src VALUES (1, '[1,0]')")
+    db.execute("INSERT INTO duplicate_alert_src VALUES (1, '[1,0]'), (2, '[1,0]'), (3, '[1,0]')")
         .await;
     db.create_st(
         "duplicate_alert_st",
-        "SELECT id, embedding FROM duplicate_alert_src",
+        "SELECT id, image FROM duplicate_alert_src",
         "1h",
         "DIFFERENTIAL",
     )
     .await;
-    db.execute("CREATE FUNCTION duplicate_alert_noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$").await;
-    db.execute("CREATE TRIGGER duplicate_alert_trigger AFTER INSERT OR UPDATE OR DELETE ON duplicate_alert_st FOR EACH ROW EXECUTE FUNCTION duplicate_alert_noop()").await;
+    db.execute("CREATE FUNCTION duplicate_alert_noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id = 1 THEN UPDATE duplicate_alert_st SET image='[0,1]' WHERE id=2; END IF; RETURN NULL; END $$").await;
+    db.execute("CREATE TRIGGER duplicate_alert_trigger AFTER INSERT OR UPDATE ON duplicate_alert_st FOR EACH ROW EXECUTE FUNCTION duplicate_alert_noop()").await;
 
     let mut listener = PgListener::connect_with(&db.pool)
         .await
@@ -10285,17 +10285,17 @@ async fn test_distance_subscription_duplicate_predicates_with_user_trigger() {
     ] {
         listener.listen(channel).await.expect("listen for alert");
     }
-    db.execute("SELECT pgtrickle.subscribe_distance('duplicate_alert_st', 'duplicate_alert_wide', 'embedding', '[1,0]', '<->', 2.0)").await;
+    db.execute("SELECT pgtrickle.subscribe_distance('duplicate_alert_st', 'duplicate_alert_wide', 'image', '[1,0]', '<->', 2.0)").await;
     for (channel, pivot) in [
         ("duplicate_alert_a", "[1,0]"),
         ("duplicate_alert_b", "[1,0]"),
         ("duplicate_alert_other", "[0,1]"),
     ] {
-        sqlx::query("SELECT pgtrickle.subscribe_distance('duplicate_alert_st', $1, 'embedding', $2, '<->', 0.5)")
+        sqlx::query("SELECT pgtrickle.subscribe_distance('duplicate_alert_st', $1, 'image', $2, '<->', 0.5)")
             .bind(channel).bind(pivot).execute(&db.pool).await.expect("subscribe");
     }
     let mut tx = db.pool.begin().await.expect("begin refresh");
-    sqlx::query("UPDATE duplicate_alert_src SET embedding='[0,1]' WHERE id=1")
+    sqlx::query("UPDATE duplicate_alert_src SET image='[0,1]' WHERE id=1")
         .execute(&mut *tx)
         .await
         .expect("write crossing");
@@ -10306,6 +10306,25 @@ async fn test_distance_subscription_duplicate_predicates_with_user_trigger() {
     let bounded: bool = sqlx::query_scalar("SELECT to_regclass('pg_temp.__pgt_distance_ids_' || pgt_id) IS NOT NULL FROM pgtrickle.pgt_stream_tables WHERE pgt_relid='duplicate_alert_st'::regclass")
         .fetch_one(&mut *tx).await.expect("inspect snapshot path");
     assert!(!bounded, "user trigger must use the full snapshot path");
+    let pgt_id: i64 = sqlx::query_scalar("SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid='duplicate_alert_st'::regclass")
+        .fetch_one(&mut *tx).await.expect("inspect stream id");
+    let before: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM pg_temp.\"__pgt_distance_changed_before_{pgt_id}_0\""
+    )))
+    .fetch_one(&mut *tx)
+    .await
+    .expect("inspect changed before rows");
+    let after: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM pg_temp.\"__pgt_distance_changed_after_{pgt_id}_0\""
+    )))
+    .fetch_one(&mut *tx)
+    .await
+    .expect("inspect changed after rows");
+    assert_eq!(
+        (before, after),
+        (2, 2),
+        "trigger changes must be included and unchanged rows excluded"
+    );
     tx.commit().await.expect("commit crossing");
     let mut received = std::collections::HashMap::new();
     for _ in 0..3 {
@@ -10324,11 +10343,11 @@ async fn test_distance_subscription_duplicate_predicates_with_user_trigger() {
                 .is_none()
         );
     }
-    assert_eq!(received.get("duplicate_alert_a"), Some(&(Some(0), Some(1))));
-    assert_eq!(received.get("duplicate_alert_b"), Some(&(Some(0), Some(1))));
+    assert_eq!(received.get("duplicate_alert_a"), Some(&(Some(0), Some(2))));
+    assert_eq!(received.get("duplicate_alert_b"), Some(&(Some(0), Some(2))));
     assert_eq!(
         received.get("duplicate_alert_other"),
-        Some(&(Some(1), Some(0)))
+        Some(&(Some(2), Some(0)))
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(300), listener.recv())
@@ -10339,16 +10358,25 @@ async fn test_distance_subscription_duplicate_predicates_with_user_trigger() {
 
 #[tokio::test]
 async fn test_distance_subscription_concurrent_commit_and_rollback() {
-    exercise_concurrent_distance_notifications(100, 10).await;
+    exercise_concurrent_distance_notifications(100, 10, false).await;
+}
+
+#[tokio::test]
+async fn test_distance_subscription_trigger_concurrent_commit_and_rollback() {
+    exercise_concurrent_distance_notifications(100, 10, true).await;
 }
 
 #[tokio::test]
 #[ignore = "larger subscription qualification; run explicitly"]
 async fn test_distance_subscription_concurrent_scale() {
-    exercise_concurrent_distance_notifications(10_000, 100).await;
+    exercise_concurrent_distance_notifications(10_000, 100, false).await;
 }
 
-async fn exercise_concurrent_distance_notifications(rows: i32, subscriptions: i32) {
+async fn exercise_concurrent_distance_notifications(
+    rows: i32,
+    subscriptions: i32,
+    user_trigger: bool,
+) {
     use sqlx::postgres::PgListener;
     use std::collections::BTreeSet;
     use std::time::{Duration, Instant};
@@ -10413,6 +10441,10 @@ async fn exercise_concurrent_distance_notifications(rows: i32, subscriptions: i3
         "DIFFERENTIAL",
     )
     .await;
+    if user_trigger {
+        db.execute("CREATE FUNCTION distance_scale_noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$").await;
+        db.execute("CREATE TRIGGER distance_scale_trigger AFTER INSERT OR UPDATE OR DELETE ON distance_scale_st FOR EACH ROW EXECUTE FUNCTION distance_scale_noop()").await;
+    }
     db.execute("ANALYZE distance_scale_st").await;
     let mut listener = PgListener::connect_with(&db.pool)
         .await
@@ -10435,6 +10467,14 @@ async fn exercise_concurrent_distance_notifications(rows: i32, subscriptions: i3
         .execute(&mut *refresh)
         .await
         .expect("refresh first crossing");
+    if user_trigger {
+        let compacted: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_class WHERE relnamespace=pg_my_temp_schema() AND relname LIKE '__pgt_distance_changed_before_%'")
+            .fetch_one(&mut *refresh).await.expect("inspect concurrent compaction");
+        assert_eq!(
+            compacted, 1,
+            "trigger path must compact the changed vector column"
+        );
+    }
     assert!(
         tokio::time::timeout(Duration::from_millis(300), listener.recv())
             .await
@@ -11088,6 +11128,8 @@ async fn test_distance_subscription_typed_predicates_and_authorization() {
         "DIFFERENTIAL",
     )
     .await;
+    db.execute("CREATE FUNCTION alert_typed_noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$").await;
+    db.execute("CREATE TRIGGER alert_typed_trigger AFTER INSERT OR UPDATE OR DELETE ON alert_typed_st FOR EACH ROW EXECUTE FUNCTION alert_typed_noop()").await;
     let mut listener = PgListener::connect_with(&db.pool)
         .await
         .expect("connect listener");
@@ -11095,9 +11137,11 @@ async fn test_distance_subscription_typed_predicates_and_authorization() {
         "typed_dense",
         "typed_cosine",
         "typed_half",
+        "typed_half_wide",
         "typed_bits",
         "typed_jaccard",
         "typed_sparse",
+        "typed_sparse_wide",
     ] {
         listener.listen(channel).await.expect("listen");
     }
@@ -11105,9 +11149,11 @@ async fn test_distance_subscription_typed_predicates_and_authorization() {
         "SELECT pgtrickle.subscribe_distance('alert_typed_st','typed_dense','dense','[1,0,0]','<#>',-0.5)",
         "SELECT pgtrickle.subscribe_distance('alert_typed_st','typed_cosine','dense','[1,0,0]','<=>',0.1)",
         "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','typed_half','half','[1,0,0]','<->',0.5)",
+        "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','typed_half_wide','half','[1,0,0]','<->',2)",
         "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','typed_bits','bits','101','<~>',1)",
         "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','typed_jaccard','bits','101','<%>',0.5)",
         "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','typed_sparse','sparse','{1:1}/3','<->',0.5)",
+        "SELECT pgtrickle.subscribe_distance('public.alert_typed_st','typed_sparse_wide','sparse','{1:1}/3','<->',2)",
     ] {
         db.execute(sql).await;
     }
@@ -11144,9 +11190,20 @@ async fn test_distance_subscription_typed_predicates_and_authorization() {
     );
     db.execute("INSERT INTO alert_typed_src VALUES (1,'[1,0,0]','[1,0,0]','101','{1:1}/3')")
         .await;
-    db.refresh_st("alert_typed_st").await;
+    let mut refresh = db.pool.begin().await.expect("begin typed refresh");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('alert_typed_st')")
+        .execute(&mut *refresh)
+        .await
+        .expect("refresh typed stream");
+    let compacted: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_class WHERE relnamespace = pg_my_temp_schema() AND relname LIKE '__pgt_distance_changed_before_%'")
+        .fetch_one(&mut *refresh).await.expect("inspect typed compacted snapshots");
+    assert_eq!(
+        compacted, 3,
+        "vector, halfvec and sparsevec should compact; bit should use the full snapshot"
+    );
+    refresh.commit().await.expect("commit typed refresh");
     let mut channels = HashSet::new();
-    for _ in 0..6 {
+    for _ in 0..8 {
         let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
             .await
             .expect("typed alert")
@@ -11155,7 +11212,7 @@ async fn test_distance_subscription_typed_predicates_and_authorization() {
         assert_eq!(payload["entered"], 1);
         channels.insert(event.channel().to_owned());
     }
-    assert_eq!(channels.len(), 6);
+    assert_eq!(channels.len(), 8);
 
     db.execute("CREATE ROLE alert_intruder NOLOGIN").await;
     db.execute("GRANT USAGE ON SCHEMA pgtrickle, public TO alert_intruder")
@@ -11201,8 +11258,77 @@ async fn test_distance_subscription_typed_predicates_and_authorization() {
     .fetch_one(&mut *tx)
     .await
     .expect("list owner subscriptions");
-    assert_eq!(visible, 7);
+    assert_eq!(visible, 9);
     tx.rollback().await.expect("end owner transaction");
+    db.execute("GRANT SELECT ON alert_typed_src TO alert_owner")
+        .await;
+    db.execute("UPDATE alert_typed_src SET dense='[0,1,0]' WHERE id=1")
+        .await;
+    let mut owned_refresh = db.pool.begin().await.expect("begin owner-context refresh");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('alert_typed_st')")
+        .execute(&mut *owned_refresh)
+        .await
+        .expect("refresh under stream owner");
+    let owner_compacted: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_class WHERE relnamespace = pg_my_temp_schema() AND relname LIKE '__pgt_distance_changed_before_%'")
+        .fetch_one(&mut *owned_refresh).await.expect("inspect owner-context compaction");
+    assert_eq!(
+        owner_compacted, 3,
+        "stream owner must be able to compact supported types"
+    );
+    owned_refresh
+        .commit()
+        .await
+        .expect("commit owner-context refresh");
+    let mut owner_crossings = HashSet::new();
+    for _ in 0..2 {
+        let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+            .await
+            .expect("owner-context notification")
+            .expect("receive owner-context notification");
+        let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+        assert_eq!(payload["exited"], 1);
+        owner_crossings.insert(event.channel().to_owned());
+    }
+    assert_eq!(
+        owner_crossings,
+        HashSet::from(["typed_dense".to_string(), "typed_cosine".to_string()])
+    );
+    db.execute("UPDATE alert_typed_src SET dense='[1,0,0]' WHERE id=1")
+        .await;
+    let mut fallback = db
+        .pool
+        .begin()
+        .await
+        .expect("begin compaction fallback refresh");
+    let pgt_id: i64 = sqlx::query_scalar(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid='alert_typed_st'::regclass",
+    )
+    .fetch_one(&mut *fallback)
+    .await
+    .expect("inspect typed stream id");
+    for index in 0..4 {
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TEMP TABLE \"__pgt_distance_changed_before_{pgt_id}_{index}\" (blocked int) ON COMMIT DROP")))
+            .execute(&mut *fallback).await.expect("create owner-inaccessible scratch table");
+    }
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('alert_typed_st')")
+        .execute(&mut *fallback)
+        .await
+        .expect("refresh after compaction preparation failure");
+    fallback.commit().await.expect("commit fallback refresh");
+    let mut fallback_crossings = HashSet::new();
+    for _ in 0..2 {
+        let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+            .await
+            .expect("fallback notification")
+            .expect("receive fallback notification");
+        let payload: serde_json::Value = serde_json::from_str(event.payload()).expect("valid JSON");
+        assert_eq!(payload["entered"], 1);
+        fallback_crossings.insert(event.channel().to_owned());
+    }
+    assert_eq!(
+        fallback_crossings,
+        HashSet::from(["typed_dense".to_string(), "typed_cosine".to_string()])
+    );
 }
 
 #[tokio::test]
@@ -11222,16 +11348,35 @@ async fn test_distance_subscription_key_delete_and_null_transitions() {
         "DIFFERENTIAL",
     )
     .await;
+    db.execute("CREATE FUNCTION alert_key_noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$").await;
+    db.execute("CREATE TRIGGER alert_key_trigger AFTER INSERT OR UPDATE OR DELETE ON alert_key_st FOR EACH ROW EXECUTE FUNCTION alert_key_noop()").await;
     let mut listener = PgListener::connect_with(&db.pool)
         .await
         .expect("connect listener");
     listener.listen("key_alert").await.expect("listen");
     db.execute("SELECT pgtrickle.subscribe_distance('alert_key_st','key_alert','embedding','[1,0,0]','<->',0.5)").await;
+    db.execute("SELECT pgtrickle.subscribe_distance('alert_key_st','key_control','embedding','[1,0,0]','<->',0.6)").await;
     assert!(
         tokio::time::timeout(Duration::from_millis(300), listener.recv())
             .await
             .is_err(),
         "registration establishes a baseline"
+    );
+    let mut rolled_back = db.pool.begin().await.expect("begin rolled-back crossing");
+    sqlx::query("UPDATE alert_key_src SET embedding='[0,1,0]' WHERE id=1")
+        .execute(&mut *rolled_back)
+        .await
+        .expect("write rolled-back crossing");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('alert_key_st')")
+        .execute(&mut *rolled_back)
+        .await
+        .expect("refresh rolled-back crossing");
+    rolled_back.rollback().await.expect("roll back crossing");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), listener.recv())
+            .await
+            .is_err(),
+        "rolled-back refresh must not notify"
     );
     for (mutation, entered, exited) in [
         ("UPDATE alert_key_src SET id=2 WHERE id=1", 1, 1),
@@ -11273,6 +11418,7 @@ async fn test_distance_subscription_full_refresh_and_edit_baseline() {
         .expect("connect listener");
     listener.listen("full_alert").await.expect("listen");
     db.execute("SELECT pgtrickle.subscribe_distance('alert_full_st','full_alert','embedding','[1,0,0]','<->',0.5)").await;
+    db.execute("SELECT pgtrickle.subscribe_distance('alert_full_st','full_control','embedding','[1,0,0]','<->',0.6)").await;
     db.execute("UPDATE alert_full_src SET embedding='[0,1,0]' WHERE id=1")
         .await;
     db.refresh_st("alert_full_st").await;

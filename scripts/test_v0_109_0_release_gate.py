@@ -77,6 +77,7 @@ class RetirementContractTests(unittest.TestCase):
         for version in ("0.8.1", "0.8.7"):
             for case in (
                 "test_distance_subscription_concurrent_commit_and_rollback",
+                "test_distance_subscription_trigger_concurrent_commit_and_rollback",
                 "test_distance_subscription_duplicate_predicates_with_user_trigger",
                 "test_ann_worker_retries_after_restart_during_concurrent_reindex",
                 "test_ann_supervisor_reconnects_after_database_restart",

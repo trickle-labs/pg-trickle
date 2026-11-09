@@ -51,6 +51,7 @@ PGVECTOR_CASES = {
         "test_distance_subscription_notifies_only_membership_crossings",
         "test_distance_subscription_duplicate_predicates_with_user_trigger",
         "test_distance_subscription_concurrent_commit_and_rollback",
+        "test_distance_subscription_trigger_concurrent_commit_and_rollback",
         "test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
         "test_ann_worker_records_lock_timeout_and_can_retry",
         "test_ann_worker_retries_after_restart_during_concurrent_reindex",
