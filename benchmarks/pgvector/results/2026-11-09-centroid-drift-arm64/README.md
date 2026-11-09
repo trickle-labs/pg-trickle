@@ -23,6 +23,14 @@ the pg_trickle shared library SHA-256 was
 The extension sources match the test commit, but the image is not a release
 artifact.
 
+The same seeded 2,000-call test also passed in [hosted run
+42589900529](https://github.com/trickle-labs/pg-trickle/actions/runs/42589900529)
+on Linux amd64 at commit `365acea5f93f245ce3656a818fde38e2a8f57b57`.
+Its [checkpoint report](hosted-amd64.json) likewise recorded zero component
+error at output precision and 1,962 algebraic history observations. Host
+details and package-file hashes are included alongside it. This independently
+built development image is not the final release artifact.
+
 This single seed and small three-dimensional dataset do not establish safety
 for extreme inputs, higher dimensions, joins, restart/recovery, concurrency,
 or long-term drift on other workloads. They do not calibrate the cost selector
