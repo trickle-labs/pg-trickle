@@ -1,0 +1,40 @@
+BENCH_QUICK=1: using sample-size=100, measurement-time=5s, warm-up-time=1s
+Building libpg_stub.dylib ...
+Compiling benchmarks ...
+   Compiling serde_json v1.0.152
+   Compiling pgrx-pg-config v0.18.0
+   Compiling pgrx-bindgen v0.18.0
+   Compiling sqlx-core v0.9.0
+   Compiling pgrx-pg-sys v0.18.0
+   Compiling sqlx-postgres v0.9.0
+   Compiling bollard-stubs v1.52.1-rc.29.1.3
+   Compiling pg_trickle v0.108.3 (/private/tmp/pg-trickle-midpoint-perf)
+   Compiling bollard v0.20.2
+   Compiling pgrx v0.18.0
+   Compiling docker_credential v1.3.2
+   Compiling cargo_metadata v0.18.1
+   Compiling croner v4.0.1
+   Compiling sqlx-macros-core v0.9.0
+   Compiling testcontainers v0.27.3
+   Compiling sqlx-macros v0.9.0
+   Compiling clap-cargo v0.14.1
+   Compiling tinytemplate v1.2.1
+   Compiling pgrx-tests v0.18.0
+   Compiling criterion v0.5.1
+   Compiling sqlx v0.9.0
+   Compiling testcontainers-modules v0.15.0
+    Finished `bench` profile [optimized] target(s) in 3m 20s
+  Executable benches/diff_operators.rs (/private/tmp/pg-trickle-task-1399/target/release/deps/diff_operators-80819f28ad30a6c5)
+
+Running: diff_operators-80819f28ad30a6c5 (with libpg_stub.dylib)
+Gnuplot not found, using plotters backend
+Benchmarking diff_aggregate/count_star_1group
+Benchmarking diff_aggregate/count_star_1group: Warming up for 1.0000 s
+Benchmarking diff_aggregate/count_star_1group: Collecting 100 samples in estimated 5.0115 s (1.1M iterations)
+Benchmarking diff_aggregate/count_star_1group: Analyzing
+diff_aggregate/count_star_1group
+                        time:   [4.3504 µs 4.3632 µs 4.3786 µs]
+Found 21 outliers among 100 measurements (21.00%)
+  17 (17.00%) high mild
+  4 (4.00%) high severe
+
