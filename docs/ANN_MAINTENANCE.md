@@ -2,7 +2,7 @@
 
 The supervisor runs the existing one-request worker on eligible requests. It
 does not create requests or infer recall from churn. A deployment needs Python
-3, `psql`, the two scripts in this repository and a direct PostgreSQL
+3, `psql`, the two scripts in the release archive and a direct PostgreSQL
 connection. Each supervisor runs one request at a time; the worker's four
 session advisory-lock slots limit cooperating reference workers per database.
 Custom clients can bypass that limit.
@@ -46,8 +46,14 @@ the worker; its identity recheck and DDL are separate commands.
 PGSERVICE=ann_maintenance python3 scripts/ann_maintenance_supervisor.py
 ```
 
-For example, install the checkout at `/opt/pg-trickle`, run as a dedicated OS
-user, and configure a systemd service:
+For example, extract the Linux release archive at `/opt/pg-trickle`:
+
+```sh
+mkdir -p /opt/pg-trickle
+tar -xzf "$PG_TRICKLE_RELEASE_ARCHIVE" --strip-components=1 -C /opt/pg-trickle
+```
+
+Run as a dedicated OS user and configure a systemd service:
 
 ```ini
 [Service]

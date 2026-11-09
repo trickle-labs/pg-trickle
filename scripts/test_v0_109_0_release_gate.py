@@ -1,6 +1,9 @@
 import copy
 import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import run_release_pgvector_suite as pgvector_suite
@@ -8,6 +11,14 @@ import v0_109_0_release_gate as gate
 
 
 class RetirementContractTests(unittest.TestCase):
+    def test_release_workflow_requires_ann_payload_verification_and_files(self):
+        workflow = (gate.prior.ROOT / ".github/workflows/release.yml").read_text()
+        gate.check_ann_packaging_workflow(workflow)
+        with self.assertRaises(SystemExit):
+            gate.check_ann_packaging_workflow(workflow.replace("run: python scripts/check_ann_release_payload.py", "run: true"))
+        with self.assertRaises(SystemExit):
+            gate.check_ann_packaging_workflow(workflow.replace("ann_maintenance_worker.sql", "omitted.sql", 1))
+
     def test_published_vector_upgrade_checks_cannot_be_removed(self):
         script = (gate.prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text()
         gate.check_pgvector_upgrade_script(script)
@@ -26,6 +37,21 @@ class RetirementContractTests(unittest.TestCase):
             self.assertIn(binary, command)
             self.assertIn(f"test({name})", command[-1])
         self.assertEqual(run.call_args.kwargs["env"]["PGVECTOR_EXPECTED_VERSION"], "0.8.7")
+
+    def test_release_pgvector_runner_requires_and_uses_packaged_worker(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "PGT_RELEASE_CANDIDATE_COMMIT": "a" * 40,
+            "PGT_EXTENSION_DIR": directory,
+        }), patch("sys.argv", ["runner", "0.8.7"]), patch.object(pgvector_suite.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            with self.assertRaises(ValueError):
+                pgvector_suite.main()
+            scripts = Path(directory) / "scripts"
+            scripts.mkdir()
+            for name in ("ann_maintenance_supervisor.py", "ann_maintenance_worker.sql"):
+                (scripts / name).write_text("test", encoding="utf-8")
+            self.assertEqual(pgvector_suite.main(), 0)
+            self.assertEqual(run.call_args.kwargs["env"]["PGT_ANN_OPERATOR_ROOT"], directory)
 
     def test_pgvector_contract_rejects_missing_cases_and_wrong_image(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
