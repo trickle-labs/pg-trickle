@@ -157,7 +157,10 @@ async fn test_ann_supervisor_processes_authorized_request() {
         .expect("port");
     let supervisor_script = ann_operator_root().join("scripts/ann_maintenance_supervisor.py");
     let spawn_supervisor = || {
-        tokio::process::Command::new("python3")
+        let mut command = tokio::process::Command::new("python3");
+        #[cfg(unix)]
+        command.process_group(0);
+        command
             .arg(&supervisor_script)
             .env_remove("PGSERVICE")
             .env("PGHOST", "127.0.0.1")
@@ -512,6 +515,72 @@ async fn test_ann_supervisor_processes_authorized_request() {
         parent_death_valid,
         "index must remain valid after supervisor death"
     );
+
+    #[cfg(unix)]
+    {
+        db.execute("CREATE INDEX ann_supervisor_group_death_idx ON ann_supervisor_stream USING hnsw (embedding vector_l2_ops)").await;
+        let mut blocker = db.pool.begin().await.expect("begin process-group barrier");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("inspect barrier backend");
+        sqlx::query("LOCK TABLE ann_supervisor_stream IN ROW EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .expect("hold process-group barrier");
+        let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_supervisor_stream'::regclass::oid, 'ann_supervisor_group_death_idx'::regclass::oid)").await;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)) AND query LIKE 'REINDEX INDEX CONCURRENTLY%')")
+                    .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect blocked process-group worker");
+                if blocked { break; }
+                assert!(child.try_wait().expect("inspect supervisor").is_none());
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }).await.expect("process-group worker did not reach barrier");
+        let group = format!("-{}", child.id().expect("supervisor PID"));
+        let killed = tokio::process::Command::new("kill")
+            .args(["-KILL", "--", &group])
+            .status()
+            .await
+            .expect("kill supervisor process group");
+        assert!(killed.success());
+        child.wait().await.expect("wait for killed supervisor");
+        let interrupted = wait_for_ann_worker_exit(&db, request).await;
+        assert_eq!(interrupted["state"], "INTERRUPTED");
+        assert!(interrupted["next_eligible_at"].is_string());
+        blocker
+            .rollback()
+            .await
+            .expect("release process-group barrier");
+        sqlx::query("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE request_id = $1")
+            .bind(request).execute(&db.pool).await.expect("expire cooldown for process-group retry");
+        child = spawn_supervisor();
+        tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                let status: serde_json::Value =
+                    sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                        .bind(request)
+                        .fetch_one(&db.pool)
+                        .await
+                        .expect("inspect process-group retry");
+                if status["state"] == "SUCCEEDED" {
+                    break;
+                }
+                assert!(
+                    child
+                        .try_wait()
+                        .expect("inspect restarted supervisor")
+                        .is_none()
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("supervisor did not retry after process-group death");
+        let valid: bool = db.query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_supervisor_group_death_idx'::regclass").await;
+        assert!(valid, "index must be valid after process-group recovery");
+    }
 
     let signal = tokio::process::Command::new("kill")
         .args(["-TERM", &child.id().expect("supervisor PID").to_string()])
