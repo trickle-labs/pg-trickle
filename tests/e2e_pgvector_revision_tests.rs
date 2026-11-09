@@ -225,15 +225,20 @@ async fn test_live_rag_mixed_benchmark_guards_churn_before_refresh() {
 
 #[tokio::test]
 async fn test_live_rag_converges_after_writes_during_maintenance() {
-    exercise_live_rag_concurrent_write(false).await;
+    exercise_live_rag_concurrent_write(false, false).await;
 }
 
 #[tokio::test]
 async fn test_live_rag_converges_after_writes_during_active_maintenance() {
-    exercise_live_rag_concurrent_write(true).await;
+    exercise_live_rag_concurrent_write(true, false).await;
 }
 
-async fn exercise_live_rag_concurrent_write(active_maintenance: bool) {
+#[tokio::test]
+async fn test_live_rag_recovers_after_maintenance_cancellation() {
+    exercise_live_rag_concurrent_write(true, true).await;
+}
+
+async fn exercise_live_rag_concurrent_write(active_maintenance: bool, cancel: bool) {
     use std::time::Duration;
 
     let db = E2eDb::new().await.with_extension().await;
@@ -278,6 +283,11 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool) {
         db.execute("SELECT live_rag.recompute_full()").await;
         db.execute("SELECT pgtrickle.refresh_stream_table('live_rag.differential')")
             .await;
+        let before_cancel: Option<String> = if cancel {
+            Some(db.query_scalar(&format!("SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY id), '[]'::jsonb)::text FROM live_rag.{table} c")).await)
+        } else {
+            None
+        };
         db.execute("UPDATE live_rag.access SET visible=false WHERE document_id=1")
             .await;
 
@@ -309,11 +319,11 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool) {
                 .await?;
             sqlx::query(maintenance).execute(&mut *conn).await
         });
-        tokio::time::timeout(Duration::from_secs(20), async {
+        let maintenance_pid = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
-                let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_blocking_pids(pid)))")
-                    .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect blocked maintenance");
-                if blocked { break; }
+                let blocked: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_blocking_pids(pid)) LIMIT 1")
+                    .bind(blocker_pid).fetch_optional(&db.pool).await.expect("inspect blocked maintenance");
+                if let Some(pid) = blocked { break pid; }
                 assert!(!task.is_finished(), "{table} maintenance finished before the barrier");
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -324,14 +334,48 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool) {
         )
         .await
         .expect("source write did not commit during maintenance");
-        blocker.commit().await.expect("release maintenance barrier");
-        tokio::time::timeout(Duration::from_secs(30), task)
-            .await
-            .expect("maintenance timed out")
-            .expect("join maintenance")
-            .expect("complete maintenance");
+        let recovery_started = std::time::Instant::now();
+        let result = if cancel {
+            let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+                .bind(maintenance_pid)
+                .fetch_one(&db.pool)
+                .await
+                .expect("cancel maintenance");
+            assert!(cancelled, "maintenance backend disappeared");
+            let result = tokio::time::timeout(Duration::from_secs(30), task)
+                .await
+                .expect("maintenance cancellation timed out")
+                .expect("join maintenance");
+            blocker
+                .rollback()
+                .await
+                .expect("release cancellation barrier");
+            result
+        } else {
+            blocker.commit().await.expect("release maintenance barrier");
+            tokio::time::timeout(Duration::from_secs(30), task)
+                .await
+                .expect("maintenance timed out")
+                .expect("join maintenance")
+        };
+        if cancel {
+            let error = result.expect_err("cancelled maintenance unexpectedly committed");
+            assert_eq!(
+                error.as_database_error().and_then(|e| e.code()).as_deref(),
+                Some("57014"),
+                "{error}"
+            );
+            let after: String = db.query_scalar(&format!("SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY id), '[]'::jsonb)::text FROM live_rag.{table} c")).await;
+            assert_eq!(
+                Some(after),
+                before_cancel,
+                "cancelled {table} maintenance changed the corpus"
+            );
+        } else {
+            result.expect("complete maintenance");
+        }
 
-        if table == "differential" {
+        if table == "differential" && !cancel {
             let incremental: bool = db.query_scalar("SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1").await;
             assert!(incremental, "maintenance must remain differential");
         }
@@ -358,8 +402,23 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool) {
         db.execute("SELECT live_rag.sync_application(ARRAY[1,2,3]::bigint[])")
             .await;
         db.execute("SELECT live_rag.recompute_full()").await;
-        db.execute("SELECT pgtrickle.refresh_stream_table('live_rag.differential')")
-            .await;
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy = 'differential'",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+            ],
+            "SELECT pgtrickle.refresh_stream_table('live_rag.differential')",
+        )
+        .await
+        .expect("retry differential maintenance");
+        let retried: bool = db.query_scalar("SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1").await;
+        assert!(retried, "reconciliation must remain differential");
+        if cancel {
+            eprintln!(
+                "{table} cancellation to completed reconciliation: {:.3}s",
+                recovery_started.elapsed().as_secs_f64()
+            );
+        }
         for corpus in ["application", "periodic_full", "differential"] {
             db.assert_st_matches_query(
                 &format!("live_rag.{corpus}"),
