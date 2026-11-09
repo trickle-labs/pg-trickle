@@ -1350,6 +1350,78 @@ async fn test_tpch_full_correctness() {
 
 #[tokio::test]
 #[ignore]
+async fn test_tpch_00_q04_full_vs_differential() {
+    let db = E2eDb::new_bench().await.with_extension().await;
+    load_schema(&db).await;
+    load_data(&db).await;
+
+    let sql = include_str!("tpch/queries/q04.sql");
+    for (st_name, mode) in [("tpch_q04_full", "FULL"), ("tpch_q04_diff", "DIFFERENTIAL")] {
+        if let Err(error) = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, '24h', '{mode}')"
+            ))
+            .await
+        {
+            panic!("failed to create {mode} q04 stream table {st_name}: {error}");
+        }
+    }
+
+    for cycle in 1..=3 {
+        let next_ok = max_orderkey(&db).await + 1;
+        apply_rf1(&db, next_ok).await;
+        apply_rf2(&db).await;
+        apply_rf3(&db).await;
+        db.execute("ANALYZE orders").await;
+        db.execute("ANALYZE lineitem").await;
+        db.execute("ANALYZE customer").await;
+
+        for st_name in ["tpch_q04_full", "tpch_q04_diff"] {
+            try_refresh_st(&db, st_name)
+                .await
+                .unwrap_or_else(|error| panic!("q04 cycle {cycle}, {st_name}: {error}"));
+        }
+
+        let full_rows: Vec<(String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(
+            "SELECT o_orderpriority, order_count FROM public.tpch_q04_full ORDER BY 1".to_string(),
+        ))
+        .fetch_all(&db.pool)
+        .await
+        .expect("read FULL q04 rows");
+        let diff_rows: Vec<(String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(
+            "SELECT o_orderpriority, order_count FROM public.tpch_q04_diff ORDER BY 1".to_string(),
+        ))
+        .fetch_all(&db.pool)
+        .await
+        .expect("read DIFFERENTIAL q04 rows");
+        let oracle_rows: Vec<(String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT o_orderpriority, order_count FROM ({sql}) AS q04 ORDER BY 1"
+        )))
+        .fetch_all(&db.pool)
+        .await
+        .expect("read q04 defining-query rows");
+        assert_eq!(
+            full_rows, oracle_rows,
+            "q04 FULL differs from the defining query at cycle {cycle}: FULL={full_rows:?}, oracle={oracle_rows:?}"
+        );
+        assert_eq!(
+            diff_rows, oracle_rows,
+            "q04 DIFF differs from the defining query at cycle {cycle}: DIFF={diff_rows:?}, oracle={oracle_rows:?}"
+        );
+
+        db.execute("CHECKPOINT").await;
+        db.execute("VACUUM ANALYZE").await;
+    }
+
+    for st_name in ["tpch_q04_full", "tpch_q04_diff"] {
+        let _ = db
+            .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
+            .await;
+    }
+}
+
+#[tokio::test]
+#[ignore]
 async fn test_tpch_full_vs_differential() {
     let sf = scale_factor();
     let n_cycles = cycles();
