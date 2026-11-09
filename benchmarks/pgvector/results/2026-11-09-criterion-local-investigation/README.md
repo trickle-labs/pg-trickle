@@ -18,6 +18,12 @@ The versions use their respective PostgreSQL stub sources; these pure-Rust
 benchmarks do not intentionally call the stubbed functions. Builds and runs
 were sequential, not randomized or isolated from host activity.
 
+Ten-second macOS samples of the published binary and the uncommitted
+allocation experiment are retained as compressed profiles. Both include
+aggregate SQL generation, formatting and allocation in their sampled stacks.
+The candidate profile includes the reverted experiment, and these samples do
+not isolate the cause of the release-to-release difference.
+
 The hosted release qualification still reports 41 gated regressions on retry;
 see the [qualification failure evidence](../2026-11-09-c138-qualification-failures/README.md).
 No release budget has been waived, and the regression cause remains open.
