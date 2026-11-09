@@ -783,7 +783,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_scheduler_jobs (
                       'SERIALIZATION', 'OUT_OF_MEMORY', 'CANCELLED',
                       'PERMANENT', 'UNKNOWN_RETRYABLE')),
     outcome_sqlstate TEXT,
-    worker_slot_generation BIGINT
+    worker_slot_generation BIGINT,
+    member_failure_recorded BOOLEAN NOT NULL DEFAULT false
 );
 
 CREATE INDEX IF NOT EXISTS idx_sched_jobs_status_enqueued
