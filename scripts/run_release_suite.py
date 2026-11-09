@@ -154,6 +154,8 @@ def package_directory(artifact: Path, destination: Path) -> Path:
     result = destination / "candidate"
     shutil.copytree(package / "extension", result / "usr/share/postgresql/18/extension")
     shutil.copytree(package / "lib", result / "usr/lib/postgresql/18/lib")
+    if (package / "scripts").is_dir():
+        shutil.copytree(package / "scripts", result / "scripts")
     if not (result / "usr/share/postgresql/18/extension/pg_trickle.control").is_file():
         raise ValueError("release package is missing pg_trickle.control")
     if not list((result / "usr/lib/postgresql/18/lib").glob("pg_trickle.*")):

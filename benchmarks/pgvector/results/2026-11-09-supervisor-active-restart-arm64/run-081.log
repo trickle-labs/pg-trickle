@@ -1,0 +1,65 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.39s
+     Running tests/e2e_pgvector_tests.rs (/private/tmp/pg-trickle-task-1399/target/debug/deps/e2e_pgvector_tests-0b480014c9ba917b)
+
+running 1 test
+SET
+REINDEX
+ finish_ann_maintenance 
+------------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+SET
+psql:/private/tmp/pg-trickle-task-1399/target/qualification-1e-payload/archive/pg_trickle-0.109.0-pg18-linux-arm64/scripts/ann_maintenance_worker.sql:70: FATAL:  terminating connection due to administrator command
+psql:/private/tmp/pg-trickle-task-1399/target/qualification-1e-payload/archive/pg_trickle-0.109.0-pg18-linux-arm64/scripts/ann_maintenance_worker.sql:70: server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+psql:/private/tmp/pg-trickle-task-1399/target/qualification-1e-payload/archive/pg_trickle-0.109.0-pg18-linux-arm64/scripts/ann_maintenance_worker.sql:70: error: connection to server was lost
+ANN request 2 failed; inspect its status
+psql: error: connection to server at "127.0.0.1", port 55032 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+ANN supervisor: request listing failed; retrying after poll interval
+psql: error: connection to server at "127.0.0.1", port 55032 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+ANN supervisor: request listing failed; retrying after poll interval
+psql: error: connection to server at "127.0.0.1", port 55032 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+ANN supervisor: request listing failed; retrying after poll interval
+E2E connect attempt 1/30: error communicating with database: Connection reset by peer (os error 54)
+psql: error: connection to server at "127.0.0.1", port 55032 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+ANN supervisor: request listing failed; retrying after poll interval
+SET
+REINDEX
+ finish_ann_maintenance 
+------------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+SET
+REINDEX
+ finish_ann_maintenance 
+------------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+test test_ann_supervisor_reconnects_after_database_restart ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 23.64s
+

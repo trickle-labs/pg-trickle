@@ -41,6 +41,996 @@ async fn wait_for_ann_worker_exit(db: &E2eDb, id: i64) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn test_ann_request_listing_filters_privileges_and_pages() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    for suffix in ["a", "b"] {
+        db.execute(&format!(
+            "CREATE TABLE ann_list_src_{suffix} (id int PRIMARY KEY, embedding vector(3))"
+        ))
+        .await;
+        db.create_st(
+            &format!("ann_list_st_{suffix}"),
+            &format!("SELECT id, embedding FROM ann_list_src_{suffix}"),
+            "1h",
+            "DIFFERENTIAL",
+        )
+        .await;
+        db.execute(&format!("CREATE INDEX ann_list_idx_{suffix} ON ann_list_st_{suffix} USING hnsw (embedding vector_l2_ops)")).await;
+    }
+    let first: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_list_st_a'::regclass::oid, 'ann_list_idx_a'::regclass::oid)").await;
+    let second: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_list_st_b'::regclass::oid, 'ann_list_idx_b'::regclass::oid)").await;
+    assert!(first < second);
+    let first_page: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT * FROM pgtrickle.list_ann_maintenance_requests(0, 1)")
+            .fetch_all(&db.pool)
+            .await
+            .expect("first page");
+    assert_eq!(first_page.len(), 1);
+    assert_eq!(first_page[0]["request_id"], first);
+    let second_page: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT * FROM pgtrickle.list_ann_maintenance_requests($1, 1)")
+            .bind(first)
+            .fetch_all(&db.pool)
+            .await
+            .expect("second page");
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page[0]["request_id"], second);
+    assert!(
+        db.try_execute("SELECT * FROM pgtrickle.list_ann_maintenance_requests(-1, 1)")
+            .await
+            .is_err()
+    );
+    assert!(
+        db.try_execute("SELECT * FROM pgtrickle.list_ann_maintenance_requests(0, 1001)")
+            .await
+            .is_err()
+    );
+    db.execute_seq(&[
+        "CREATE ROLE ann_list_reader NOLOGIN",
+        "GRANT USAGE ON SCHEMA pgtrickle, public TO ann_list_reader",
+        "GRANT SELECT, MAINTAIN ON ann_list_st_a TO ann_list_reader",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer) TO ann_list_reader",
+    ]).await;
+    let mut conn = db.pool.acquire().await.expect("listing role session");
+    sqlx::query("SET ROLE ann_list_reader")
+        .execute(&mut *conn)
+        .await
+        .expect("assume listing role");
+    let visible: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT * FROM pgtrickle.list_ann_maintenance_requests(0, 10)")
+            .fetch_all(&mut *conn)
+            .await
+            .expect("list authorized requests");
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0]["request_id"], first);
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("reset role");
+    let public_access: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_proc p, LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a WHERE p.oid='pgtrickle.list_ann_maintenance_requests(bigint,integer)'::regprocedure AND a.grantee=0 AND a.privilege_type='EXECUTE')").await;
+    assert!(!public_access);
+}
+
+#[tokio::test]
+async fn test_ann_supervisor_processes_authorized_request() {
+    exercise_ann_supervisor_recovery(false).await;
+}
+
+#[tokio::test]
+#[ignore = "waits for the actual ANN worker cooldown"]
+async fn test_ann_supervisor_waits_for_natural_worker_cooldown() {
+    exercise_ann_supervisor_recovery(true).await;
+}
+
+async fn exercise_ann_supervisor_recovery(natural_cooldown: bool) {
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute_seq(&[
+        "CREATE TABLE ann_supervisor_source (id int PRIMARY KEY, embedding vector(3))",
+        "INSERT INTO ann_supervisor_source VALUES (1, '[1,0,0]')",
+    ])
+    .await;
+    db.create_st(
+        "ann_supervisor_stream",
+        "SELECT id, embedding FROM ann_supervisor_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_supervisor_idx ON ann_supervisor_stream USING hnsw (embedding vector_l2_ops)").await;
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_supervisor_stream'::regclass::oid, 'ann_supervisor_idx'::regclass::oid)").await;
+    db.execute_seq(&[
+        "CREATE ROLE ann_supervisor_operator LOGIN PASSWORD 'ann-test-only'",
+        "GRANT USAGE ON SCHEMA pgtrickle, public TO ann_supervisor_operator",
+        "GRANT SELECT ON ann_supervisor_stream TO ann_supervisor_operator",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer), pgtrickle.ann_maintenance_request(bigint), pgtrickle.claim_ann_maintenance(bigint), pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO ann_supervisor_operator",
+    ]).await;
+    let private: bool = db.query_scalar("SELECT NOT has_table_privilege('ann_supervisor_operator', 'pgtrickle.pgt_ann_maintenance_requests', 'SELECT')").await;
+    assert!(
+        private,
+        "the supervisor must not require direct queue access"
+    );
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let port = db
+        .connection_string()
+        .split('@')
+        .nth(1)
+        .expect("connection authority")
+        .split('/')
+        .next()
+        .expect("host and port")
+        .rsplit(':')
+        .next()
+        .expect("port");
+    let supervisor_script = ann_operator_root().join("scripts/ann_maintenance_supervisor.py");
+    let spawn_supervisor = || {
+        let mut command = tokio::process::Command::new("python3");
+        #[cfg(unix)]
+        command.process_group(0);
+        command
+            .arg(&supervisor_script)
+            .env_remove("PGSERVICE")
+            .env("PGHOST", "127.0.0.1")
+            .env("PGPORT", port)
+            .env("PGDATABASE", &database)
+            .env("PGUSER", "ann_supervisor_operator")
+            .env("PGPASSWORD", "ann-test-only")
+            .env("PGSSLMODE", "disable")
+            .env("PGS_ANN_POLL_SECONDS", "1")
+            .env("PGS_ANN_LOCK_TIMEOUT", "30s")
+            .env("PGS_ANN_STATEMENT_TIMEOUT", "10s")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("start ANN supervisor")
+    };
+    let mut child = spawn_supervisor();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        child
+            .try_wait()
+            .expect("inspect supervisor process")
+            .is_none()
+    );
+    let before_grant: String =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)->>'state'")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect unauthorized request");
+    assert_eq!(
+        before_grant, "REQUESTED",
+        "worker must not claim without MAINTAIN"
+    );
+    db.execute("GRANT MAINTAIN ON ann_supervisor_stream TO ann_supervisor_operator")
+        .await;
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let state: String =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)->>'state'")
+                    .bind(request)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect supervisor request");
+            if state == "SUCCEEDED" {
+                break;
+            }
+            assert_ne!(state, "FAILED", "supervisor failed the request");
+            assert!(
+                child
+                    .try_wait()
+                    .expect("inspect supervisor process")
+                    .is_none(),
+                "supervisor exited early"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not complete the request");
+    db.execute("CREATE INDEX ann_supervisor_recovery_idx ON ann_supervisor_stream USING hnsw (embedding vector_l2_ops)").await;
+    let original_filenode: i64 = db
+        .query_scalar("SELECT pg_relation_filenode('ann_supervisor_idx'::regclass)::bigint")
+        .await;
+    let mut blocker = db.pool.begin().await.expect("begin reindex barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("inspect barrier backend");
+    sqlx::query("LOCK TABLE ann_supervisor_stream IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold reindex barrier");
+    let recovery: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_supervisor_stream'::regclass::oid, 'ann_supervisor_recovery_idx'::regclass::oid)").await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(recovery)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect recovery request");
+            if status["state"] == "RUNNING" {
+                break;
+            }
+            assert!(
+                child.try_wait().expect("inspect supervisor").is_none(),
+                "supervisor exited before recovery claim"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not claim recovery request");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)) AND query LIKE 'REINDEX INDEX CONCURRENTLY%')")
+                .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect blocked reindex");
+            if blocked { break; }
+            assert!(child.try_wait().expect("inspect supervisor").is_none(), "supervisor exited before reindex blocked");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.expect("reindex did not reach barrier");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        db.execute("INSERT INTO ann_supervisor_source VALUES (2, '[0,1,0]')")
+            .await;
+        db.execute("SELECT pgtrickle.refresh_stream_table('ann_supervisor_stream')")
+            .await;
+        let visible: i64 = db
+            .query_scalar("SELECT count(*) FROM ann_supervisor_stream WHERE id = 2")
+            .await;
+        assert_eq!(visible, 1, "refresh must remain visible during reindex");
+    })
+    .await
+    .expect("write and refresh stalled during concurrent reindex");
+    let pid = child.id().expect("supervisor PID");
+    let signal = tokio::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .await
+        .expect("signal supervisor");
+    assert!(signal.success(), "signal supervisor");
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("supervisor did not stop")
+        .expect("wait for supervisor");
+    assert!(status.success(), "supervisor did not shut down cleanly");
+    let interrupted = wait_for_ann_worker_exit(&db, recovery).await;
+    let stopped_state = interrupted["state"]
+        .as_str()
+        .expect("interrupted request state")
+        .to_owned();
+    assert!(
+        stopped_state == "FAILED" || stopped_state == "INTERRUPTED",
+        "canceled reindex must not succeed: {interrupted}"
+    );
+    assert!(
+        interrupted["next_eligible_at"].is_string(),
+        "interrupted request must retain cooldown"
+    );
+    blocker.rollback().await.expect("release reindex barrier");
+    db.execute("REVOKE MAINTAIN ON ann_supervisor_stream FROM ann_supervisor_operator")
+        .await;
+    sqlx::query("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE request_id = $1")
+        .bind(recovery).execute(&db.pool).await.expect("expire recovery cooldown for test");
+    let mut child = spawn_supervisor();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let withheld: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(recovery)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect revoked request");
+    assert_eq!(
+        withheld["state"], stopped_state,
+        "revoked supervisor must not reclaim the request"
+    );
+    db.execute("GRANT MAINTAIN ON ann_supervisor_stream TO ann_supervisor_operator")
+        .await;
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(recovery)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect resumed request");
+            if status["state"] == "SUCCEEDED" {
+                break;
+            }
+            assert!(
+                child
+                    .try_wait()
+                    .expect("inspect resumed supervisor")
+                    .is_none(),
+                "resumed supervisor exited early"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not resume interrupted request");
+    db.execute("CREATE INDEX ann_supervisor_death_idx ON ann_supervisor_stream USING hnsw (embedding vector_l2_ops)").await;
+    let mut blocker = db.pool.begin().await.expect("begin worker death barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("inspect death barrier backend");
+    sqlx::query("LOCK TABLE ann_supervisor_stream IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold worker death barrier");
+    let death: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_supervisor_stream'::regclass::oid, 'ann_supervisor_death_idx'::regclass::oid)").await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)) AND query LIKE 'REINDEX INDEX CONCURRENTLY%')")
+                .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect blocked worker");
+            if blocked { break; }
+            assert!(child.try_wait().expect("inspect supervisor").is_none(), "supervisor exited before worker death");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.expect("worker did not reach death barrier");
+    let output = tokio::process::Command::new("pgrep")
+        .args(["-P", &child.id().expect("supervisor PID").to_string()])
+        .output()
+        .await
+        .expect("find psql child");
+    assert!(output.status.success(), "worker process was not found");
+    let worker_pids = String::from_utf8(output.stdout).expect("worker PIDs");
+    let worker_pids: Vec<&str> = worker_pids.lines().collect();
+    assert_eq!(worker_pids.len(), 1, "expected one active psql child");
+    let killed = tokio::process::Command::new("kill")
+        .args(["-KILL", worker_pids[0]])
+        .status()
+        .await
+        .expect("kill active psql child");
+    assert!(killed.success());
+    let lost = wait_for_ann_worker_exit(&db, death).await;
+    assert_eq!(
+        lost["state"], "INTERRUPTED",
+        "lost worker must remain observable"
+    );
+    assert!(
+        lost["next_eligible_at"].is_string(),
+        "lost worker must retain cooldown"
+    );
+    assert!(
+        child.try_wait().expect("inspect supervisor").is_none(),
+        "supervisor must survive worker death"
+    );
+    blocker
+        .rollback()
+        .await
+        .expect("release worker death barrier");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let cooling: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(death)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect interrupted cooldown");
+    assert_eq!(
+        cooling["state"], "INTERRUPTED",
+        "supervisor must not rapidly retry"
+    );
+    let deadline: Option<String> = if natural_cooldown {
+        Some(sqlx::query_scalar("SELECT next_eligible_at::text FROM pgtrickle.pgt_ann_maintenance_claims WHERE request_id = $1")
+            .bind(death).fetch_one(&db.pool).await.expect("read natural cooldown deadline"))
+    } else {
+        sqlx::query("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE request_id = $1")
+            .bind(death).execute(&db.pool).await.expect("expire interrupted cooldown for test");
+        None
+    };
+    let mut observed_cooldown = false;
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let (before_deadline, status): (bool, serde_json::Value) = sqlx::query_as(
+                "SELECT COALESCE(clock_timestamp() < $2::text::timestamptz - interval '1 second', false), pgtrickle.ann_maintenance_request($1)",
+            ).bind(death).bind(deadline.as_deref()).fetch_one(&db.pool).await.expect("inspect worker death retry");
+            if before_deadline {
+                observed_cooldown = true;
+                assert_eq!(status["state"], "INTERRUPTED", "supervisor retried before the cooldown deadline");
+            }
+            if status["state"] == "SUCCEEDED" {
+                break;
+            }
+            assert!(
+                child.try_wait().expect("inspect supervisor").is_none(),
+                "supervisor exited during retry"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not retry lost worker");
+    if let Some(deadline) = deadline {
+        assert!(
+            observed_cooldown,
+            "must observe a live cooldown before retry"
+        );
+        let after_deadline: bool = sqlx::query_scalar("SELECT completed_at >= $2::text::timestamptz FROM pgtrickle.pgt_ann_maintenance_requests WHERE request_id = $1")
+            .bind(death).bind(&deadline).fetch_one(&db.pool).await.expect("check natural retry completion");
+        assert!(
+            after_deadline,
+            "retry completed before the original cooldown deadline"
+        );
+    }
+    let death_valid: bool = db.query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_supervisor_death_idx'::regclass").await;
+    assert!(
+        death_valid,
+        "index must be valid after worker death recovery"
+    );
+
+    db.execute("CREATE INDEX ann_supervisor_parent_death_idx ON ann_supervisor_stream USING hnsw (embedding vector_l2_ops)").await;
+    let mut blocker = db
+        .pool
+        .begin()
+        .await
+        .expect("begin supervisor death barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("inspect supervisor death barrier");
+    sqlx::query("LOCK TABLE ann_supervisor_stream IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold supervisor death barrier");
+    let parent_death: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_supervisor_stream'::regclass::oid, 'ann_supervisor_parent_death_idx'::regclass::oid)").await;
+    let claim_epoch = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let status: serde_json::Value = sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                .bind(parent_death).fetch_one(&db.pool).await.expect("inspect parent death request");
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)) AND query LIKE 'REINDEX INDEX CONCURRENTLY%')")
+                .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect parent death worker");
+            if status["state"] == "RUNNING" && blocked {
+                break status["claim_epoch"].as_i64().expect("claim epoch");
+            }
+            assert!(child.try_wait().expect("inspect supervisor").is_none());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.expect("supervisor death worker did not reach barrier");
+    child
+        .kill()
+        .await
+        .expect("kill supervisor without signaling its worker");
+    let mut child = spawn_supervisor();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        child
+            .try_wait()
+            .expect("inspect replacement supervisor")
+            .is_none()
+    );
+    let blocked_workers: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)) AND query LIKE 'REINDEX INDEX CONCURRENTLY%'")
+        .bind(blocker_pid).fetch_one(&db.pool).await.expect("count active workers");
+    assert_eq!(
+        blocked_workers, 1,
+        "replacement must not start a duplicate worker"
+    );
+    blocker
+        .rollback()
+        .await
+        .expect("release supervisor death barrier");
+    let completed = tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(parent_death)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect parent death completion");
+            if status["state"] == "SUCCEEDED" {
+                break status;
+            }
+            assert!(
+                child
+                    .try_wait()
+                    .expect("inspect replacement supervisor")
+                    .is_none()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("orphaned worker did not finish");
+    assert_eq!(
+        completed["claim_epoch"].as_i64(),
+        Some(claim_epoch),
+        "replacement must not reclaim an active worker's request"
+    );
+    let parent_death_valid: bool = db.query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_supervisor_parent_death_idx'::regclass").await;
+    assert!(
+        parent_death_valid,
+        "index must remain valid after supervisor death"
+    );
+
+    #[cfg(unix)]
+    {
+        db.execute("CREATE INDEX ann_supervisor_group_death_idx ON ann_supervisor_stream USING hnsw (embedding vector_l2_ops)").await;
+        let mut blocker = db.pool.begin().await.expect("begin process-group barrier");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("inspect barrier backend");
+        sqlx::query("LOCK TABLE ann_supervisor_stream IN ROW EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .expect("hold process-group barrier");
+        let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_supervisor_stream'::regclass::oid, 'ann_supervisor_group_death_idx'::regclass::oid)").await;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)) AND query LIKE 'REINDEX INDEX CONCURRENTLY%')")
+                    .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect blocked process-group worker");
+                if blocked { break; }
+                assert!(child.try_wait().expect("inspect supervisor").is_none());
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }).await.expect("process-group worker did not reach barrier");
+        let group = format!("-{}", child.id().expect("supervisor PID"));
+        let killed = tokio::process::Command::new("kill")
+            .args(["-KILL", "--", &group])
+            .status()
+            .await
+            .expect("kill supervisor process group");
+        assert!(killed.success());
+        child.wait().await.expect("wait for killed supervisor");
+        let interrupted = wait_for_ann_worker_exit(&db, request).await;
+        assert_eq!(interrupted["state"], "INTERRUPTED");
+        assert!(interrupted["next_eligible_at"].is_string());
+        blocker
+            .rollback()
+            .await
+            .expect("release process-group barrier");
+        sqlx::query("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE request_id = $1")
+            .bind(request).execute(&db.pool).await.expect("expire cooldown for process-group retry");
+        child = spawn_supervisor();
+        tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                let status: serde_json::Value =
+                    sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                        .bind(request)
+                        .fetch_one(&db.pool)
+                        .await
+                        .expect("inspect process-group retry");
+                if status["state"] == "SUCCEEDED" {
+                    break;
+                }
+                assert!(
+                    child
+                        .try_wait()
+                        .expect("inspect restarted supervisor")
+                        .is_none()
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("supervisor did not retry after process-group death");
+        let valid: bool = db.query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_supervisor_group_death_idx'::regclass").await;
+        assert!(valid, "index must be valid after process-group recovery");
+    }
+
+    let signal = tokio::process::Command::new("kill")
+        .args(["-TERM", &child.id().expect("supervisor PID").to_string()])
+        .status()
+        .await
+        .expect("signal resumed supervisor");
+    assert!(signal.success());
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("resumed supervisor did not stop")
+        .expect("wait for resumed supervisor");
+    assert!(status.success());
+    let (original_after, valid): (i64, bool) = sqlx::query_as("SELECT pg_relation_filenode('ann_supervisor_idx'::regclass)::bigint, (SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_supervisor_recovery_idx'::regclass)")
+        .fetch_one(&db.pool).await.expect("inspect recovery indexes");
+    assert_eq!(
+        original_filenode, original_after,
+        "recovery must not rebuild the unrelated index"
+    );
+    assert!(valid, "recovered index must be valid and ready");
+    db.assert_st_matches_query(
+        "ann_supervisor_stream",
+        "SELECT id, embedding FROM ann_supervisor_source",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_ann_supervisor_bounds_repeated_failures() {
+    exercise_ann_supervisor_repeated_failures(false).await;
+}
+
+#[tokio::test]
+#[ignore = "waits for both natural repeated-failure cooldowns"]
+async fn test_ann_supervisor_natural_repeated_failure_backoff() {
+    exercise_ann_supervisor_repeated_failures(true).await;
+}
+
+async fn exercise_ann_supervisor_repeated_failures(natural_cooldown: bool) {
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_retry_src (id int PRIMARY KEY, v vector(3))")
+        .await;
+    db.create_st(
+        "ann_retry_st",
+        "SELECT id, v FROM ann_retry_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute_seq(&[
+        "CREATE INDEX ann_retry_bad_idx ON ann_retry_st USING hnsw (v vector_l2_ops)",
+        "CREATE ROLE ann_retry_operator LOGIN PASSWORD 'ann-test-only'",
+        "GRANT USAGE ON SCHEMA pgtrickle, public TO ann_retry_operator",
+        "GRANT SELECT, MAINTAIN ON ann_retry_st TO ann_retry_operator",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer), pgtrickle.ann_maintenance_request(bigint), pgtrickle.claim_ann_maintenance(bigint), pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO ann_retry_operator",
+    ])
+    .await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let port = db
+        .connection_string()
+        .split('@')
+        .nth(1)
+        .expect("authority")
+        .split('/')
+        .next()
+        .expect("host and port")
+        .rsplit(':')
+        .next()
+        .expect("port");
+    let mut blocker = db.pool.begin().await.expect("begin reindex barrier");
+    sqlx::query("LOCK TABLE ann_retry_st IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold reindex barrier");
+    let failed: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_retry_st'::regclass::oid, 'ann_retry_bad_idx'::regclass::oid)").await;
+    let mut child = tokio::process::Command::new("python3")
+        .arg(ann_operator_root().join("scripts/ann_maintenance_supervisor.py"))
+        .env_remove("PGSERVICE")
+        .env("PGHOST", "127.0.0.1")
+        .env("PGPORT", port)
+        .env("PGDATABASE", &database)
+        .env("PGUSER", "ann_retry_operator")
+        .env("PGPASSWORD", "ann-test-only")
+        .env("PGSSLMODE", "disable")
+        .env("PGS_ANN_POLL_SECONDS", "1")
+        .env("PGS_ANN_LOCK_TIMEOUT", "250ms")
+        .env("PGS_ANN_STATEMENT_TIMEOUT", "10s")
+        .env("PGS_ANN_MAX_FAILURES", "2")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start supervisor");
+
+    for failures in 1..=2 {
+        let status = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let status: serde_json::Value =
+                    sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                        .bind(failed)
+                        .fetch_one(&db.pool)
+                        .await
+                        .expect("inspect failed request");
+                if status["state"] == "FAILED" && status["consecutive_failures"] == failures {
+                    break status;
+                }
+                assert!(
+                    child.try_wait().expect("inspect supervisor").is_none(),
+                    "supervisor exited: {status}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("supervisor did not record failure");
+        assert!(
+            status["last_error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Concurrent reindex failed"),
+            "{status}"
+        );
+        let remaining: f64 = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (pgtrickle.ann_maintenance_request($1)->>'next_eligible_at')::timestamptz - clock_timestamp())::float8")
+            .bind(failed).fetch_one(&db.pool).await.expect("inspect cooldown");
+        let expected = if failures == 1 { 30.0 } else { 60.0 };
+        assert!(
+            remaining > expected - 10.0 && remaining <= expected,
+            "failure {failures}: {remaining}s"
+        );
+        if failures == 1 {
+            if natural_cooldown {
+                loop {
+                    let (state, remaining): (String, f64) = sqlx::query_as("SELECT s->>'state', EXTRACT(EPOCH FROM (s->>'next_eligible_at')::timestamptz - clock_timestamp())::float8 FROM (SELECT pgtrickle.ann_maintenance_request($1) AS s) q")
+                        .bind(failed).fetch_one(&db.pool).await.expect("inspect natural cooldown");
+                    if remaining <= 0.0 {
+                        break;
+                    }
+                    assert_eq!(state, "FAILED", "request retried before its deadline");
+                    assert!(child.try_wait().expect("inspect supervisor").is_none());
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            } else {
+                db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+            }
+        }
+    }
+    blocker.rollback().await.expect("release barrier");
+    if !natural_cooldown {
+        db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    }
+    db.execute("INSERT INTO ann_retry_src VALUES (1, '[1,0,0]')")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('ann_retry_st')")
+        .await;
+    db.execute("CREATE INDEX ann_retry_good_idx ON ann_retry_st USING hnsw (v vector_l2_ops)")
+        .await;
+    let good: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_retry_st'::regclass::oid, 'ann_retry_good_idx'::regclass::oid)").await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(good)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect unrelated request");
+            if status["state"] == "SUCCEEDED" {
+                break;
+            }
+            assert_ne!(
+                status["state"], "FAILED",
+                "unrelated request failed: {status}"
+            );
+            assert!(child.try_wait().expect("inspect supervisor").is_none());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("unrelated request did not complete");
+    if natural_cooldown {
+        tokio::time::sleep(Duration::from_secs(65)).await;
+    } else {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    let status: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(failed)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect capped request");
+    assert_eq!(status["state"], "FAILED", "{status}");
+    assert_eq!(status["consecutive_failures"], 2, "{status}");
+    db.assert_st_matches_query("ann_retry_st", "SELECT id, v FROM ann_retry_src")
+        .await;
+    child.start_kill().expect("stop supervisor");
+    child.wait().await.expect("reap supervisor");
+}
+
+#[tokio::test]
+async fn test_ann_supervisor_reconnects_after_database_restart() {
+    use std::time::Duration;
+
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_reconnect_src (id int PRIMARY KEY, v vector(3))")
+        .await;
+    db.create_st(
+        "ann_reconnect_st",
+        "SELECT id, v FROM ann_reconnect_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_reconnect_idx ON ann_reconnect_st USING hnsw (v vector_l2_ops)")
+        .await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let port = db
+        .connection_string()
+        .split('@')
+        .nth(1)
+        .expect("connection authority")
+        .split('/')
+        .next()
+        .expect("host and port")
+        .rsplit(':')
+        .next()
+        .expect("port");
+    let service =
+        std::env::temp_dir().join(format!("pgt-ann-reconnect-{}.conf", std::process::id()));
+    let write_service = |port: &str| {
+        std::fs::write(
+            &service,
+            format!(
+                "[ann-reconnect]\nhost=127.0.0.1\nport={port}\ndbname={database}\nuser=postgres\n"
+            ),
+        )
+    };
+    write_service(port).expect("write initial connection service");
+    db.execute(
+        "CREATE INDEX ann_reconnect_before_idx ON ann_reconnect_st USING hnsw (v vector_l2_ops)",
+    )
+    .await;
+    let before: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_reconnect_st'::regclass::oid, 'ann_reconnect_before_idx'::regclass::oid)").await;
+    let mut child = tokio::process::Command::new("python3")
+        .arg(ann_operator_root().join("scripts/ann_maintenance_supervisor.py"))
+        .env_remove("PGHOST")
+        .env_remove("PGPORT")
+        .env_remove("PGDATABASE")
+        .env_remove("PGUSER")
+        .env("PGSERVICEFILE", &service)
+        .env("PGSERVICE", "ann-reconnect")
+        .env("PGPASSWORD", "postgres")
+        .env("PGSSLMODE", "disable")
+        .env("PGS_ANN_POLL_SECONDS", "1")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start reconnect supervisor");
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(before)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect request before restart");
+            if status["state"] == "SUCCEEDED" {
+                break;
+            }
+            assert_ne!(
+                status["state"], "FAILED",
+                "supervisor failed before restart: {status}"
+            );
+            assert!(child.try_wait().expect("inspect supervisor").is_none());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not process a request before restart");
+    db.execute(
+        "CREATE INDEX ann_reconnect_active_idx ON ann_reconnect_st USING hnsw (v vector_l2_ops)",
+    )
+    .await;
+    let mut blocker = db.pool.begin().await.expect("begin restart barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("inspect restart barrier");
+    sqlx::query("LOCK TABLE ann_reconnect_st IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold restart barrier");
+    let active: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_reconnect_st'::regclass::oid, 'ann_reconnect_active_idx'::regclass::oid)").await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)) AND query LIKE 'REINDEX INDEX CONCURRENTLY%')")
+                .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect blocked rebuild before restart");
+            if blocked { break; }
+            assert!(child.try_wait().expect("inspect supervisor").is_none());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.expect("supervisor rebuild did not reach restart barrier");
+    let stopped = tokio::process::Command::new("docker")
+        .args(["stop", "--time", "0", db.container_id()])
+        .output()
+        .await
+        .expect("stop database");
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    drop(blocker);
+    db.pool.close().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        child
+            .try_wait()
+            .expect("inspect disconnected supervisor")
+            .is_none()
+    );
+    let started = tokio::process::Command::new("docker")
+        .args(["start", db.container_id()])
+        .output()
+        .await
+        .expect("start database");
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    db.pool = db.reconnect_after_restart().await;
+    let mapping = tokio::process::Command::new("docker")
+        .args(["port", db.container_id(), "5432/tcp"])
+        .output()
+        .await
+        .expect("inspect restarted database port");
+    assert!(mapping.status.success());
+    let mapping = String::from_utf8(mapping.stdout).expect("port mapping");
+    let port = mapping
+        .lines()
+        .next()
+        .expect("port mapping line")
+        .rsplit(':')
+        .next()
+        .expect("port");
+    write_service(port).expect("update connection service after Docker remaps port");
+    let interrupted: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(active)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect interrupted request after restart");
+    assert_eq!(interrupted["state"], "INTERRUPTED");
+    assert!(interrupted["next_eligible_at"].is_string());
+    sqlx::query("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE request_id = $1")
+        .bind(active).execute(&db.pool).await.expect("expire restart retry cooldown");
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(active)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect automatic restart retry");
+            if status["state"] == "SUCCEEDED" {
+                break;
+            }
+            assert!(
+                child
+                    .try_wait()
+                    .expect("inspect supervisor after restart")
+                    .is_none()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not retry interrupted request after restart");
+    let active_valid: bool = db.query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_reconnect_active_idx'::regclass").await;
+    assert!(active_valid, "retried index must be valid");
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_reconnect_st'::regclass::oid, 'ann_reconnect_idx'::regclass::oid)").await;
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(request)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect request after restart");
+            if status["state"] == "SUCCEEDED" {
+                break;
+            }
+            assert_ne!(
+                status["state"], "FAILED",
+                "supervisor failed after restart: {status}"
+            );
+            assert!(child.try_wait().expect("inspect supervisor").is_none());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not reconnect and process the request");
+    let valid: bool = db.query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_reconnect_idx'::regclass").await;
+    assert!(valid);
+    let status = tokio::process::Command::new("kill")
+        .args(["-TERM", &child.id().expect("supervisor PID").to_string()])
+        .status()
+        .await
+        .expect("signal supervisor");
+    assert!(status.success());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .expect("supervisor did not exit")
+            .expect("wait for supervisor")
+            .success()
+    );
+    std::fs::remove_file(service).expect("remove connection service");
+}
+
+#[tokio::test]
 async fn test_vector_aggregate_mode_change_uses_saved_path_and_admission_setting() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
@@ -3166,6 +4156,12 @@ async fn test_centroid_full_refresh_does_not_bind_ahead_buffer() {
     );
 }
 
+fn ann_operator_root() -> std::path::PathBuf {
+    std::env::var_os("PGT_ANN_OPERATOR_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
 fn ann_worker_command(
     db: &E2eDb,
     database: &str,
@@ -3175,11 +4171,9 @@ fn ann_worker_command(
 ) -> tokio::process::Command {
     use std::process::Stdio;
 
-    let script = std::fs::File::open(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/scripts/ann_maintenance_worker.sql"
-    ))
-    .expect("open ANN worker script");
+    let script =
+        std::fs::File::open(ann_operator_root().join("scripts/ann_maintenance_worker.sql"))
+            .expect("open ANN worker script");
     let mut command = tokio::process::Command::new("docker");
     command
         .args([
@@ -3216,11 +4210,8 @@ fn ann_threshold_command(
     lock_timeout: &str,
 ) -> tokio::process::Command {
     use std::process::Stdio;
-    let script = std::fs::File::open(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/scripts/ann_threshold_request.sql"
-    ))
-    .expect("open threshold request script");
+    let script = std::fs::File::open(ann_operator_root().join("scripts/ann_threshold_request.sql"))
+        .expect("open threshold request script");
     let mut command = tokio::process::Command::new("docker");
     command
         .args([
@@ -4555,6 +5546,33 @@ async fn test_ann_maintenance_coverage_rolls_back_and_keeps_unknown_unknown() {
 
 #[tokio::test]
 async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
+    for method in ["hnsw", "ivfflat"] {
+        assert_ann_worker_allows_reads_and_refresh(method, 5, false, false).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "sustained concurrent ANN maintenance qualification"]
+async fn test_ann_worker_sustains_reads_and_refresh_during_concurrent_reindex() {
+    for method in ["hnsw", "ivfflat"] {
+        assert_ann_worker_allows_reads_and_refresh(method, 120, true, false).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "sustained supervisor qualification"]
+async fn test_ann_supervisor_sustains_reads_and_refresh_during_concurrent_reindex() {
+    for method in ["hnsw", "ivfflat"] {
+        assert_ann_worker_allows_reads_and_refresh(method, 120, true, true).await;
+    }
+}
+
+async fn assert_ann_worker_allows_reads_and_refresh(
+    method: &str,
+    writes: i32,
+    paced: bool,
+    supervised: bool,
+) {
     use std::time::Duration;
 
     let db = E2eDb::new().await.with_extension().await;
@@ -4570,7 +5588,12 @@ async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
         "DIFFERENTIAL",
     )
     .await;
-    db.execute("CREATE INDEX ann_live_idx ON ann_live_stream USING hnsw (embedding vector_l2_ops)")
+    let options = if method == "ivfflat" {
+        " WITH (lists=1)"
+    } else {
+        ""
+    };
+    db.execute(&format!("CREATE INDEX ann_live_idx ON ann_live_stream USING {method} (embedding vector_l2_ops){options}"))
         .await;
     let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_live_stream'::regclass::oid, 'ann_live_idx'::regclass::oid)").await;
 
@@ -4584,7 +5607,35 @@ async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
         .await
         .expect("establish old snapshot");
     let database: String = db.query_scalar("SELECT current_database()::text").await;
-    let mut command = ann_worker_command(&db, &database, "postgres", request, "30s");
+    let mut command = if supervised {
+        let port = db
+            .connection_string()
+            .split('@')
+            .nth(1)
+            .expect("connection authority")
+            .split('/')
+            .next()
+            .expect("host and port")
+            .rsplit(':')
+            .next()
+            .expect("port");
+        let mut command = tokio::process::Command::new("python3");
+        command
+            .arg(ann_operator_root().join("scripts/ann_maintenance_supervisor.py"))
+            .env_remove("PGSERVICE")
+            .env("PGHOST", "127.0.0.1")
+            .env("PGPORT", port)
+            .env("PGDATABASE", &database)
+            .env("PGUSER", "postgres")
+            .env("PGPASSWORD", "postgres")
+            .env("PGSSLMODE", "disable")
+            .env("PGAPPNAME", "pgtrickle_ann_worker")
+            .env("PGS_ANN_POLL_SECONDS", "1")
+            .env("PGS_ANN_LOCK_TIMEOUT", "120s");
+        command
+    } else {
+        ann_worker_command(&db, &database, "postgres", request, "120s")
+    };
     command.kill_on_drop(true);
     let mut worker = command.spawn().expect("start worker");
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -4599,27 +5650,70 @@ async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
         }
     }).await.expect("worker did not reach concurrent reindex snapshot wait");
 
-    tokio::time::timeout(Duration::from_secs(5), async {
-        db.execute("INSERT INTO ann_live_source VALUES (2, '[0,1,0]')")
-            .await;
-        db.refresh_st("ann_live_stream").await;
-        assert_eq!(db.count("ann_live_stream").await, 2);
-        let mut reader = db.pool.begin().await.expect("begin reader");
-        sqlx::query("SET LOCAL enable_seqscan = off")
-            .execute(&mut *reader)
-            .await
-            .expect("enable index plan");
-        let plan: Vec<String> = sqlx::query_scalar("EXPLAIN (COSTS OFF) SELECT id FROM ann_live_stream ORDER BY embedding <-> '[0,1,0]'::vector LIMIT 1")
-            .fetch_all(&mut *reader).await.expect("explain nearest-neighbor read");
-        assert!(plan.iter().any(|line| line.contains("ann_live_idx")), "expected ANN index in {plan:?}");
-        let nearest: i32 = sqlx::query_scalar("SELECT id FROM ann_live_stream ORDER BY embedding <-> '[0,1,0]'::vector LIMIT 1")
-            .fetch_one(&mut *reader).await.expect("read nearest neighbor");
-        assert_eq!(nearest, 2);
-        reader.commit().await.expect("finish reader");
+    let started = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(90), async {
+        for id in 2..=(writes + 1) {
+            if paced {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let embedding = format!("[0,{id},0]");
+            sqlx::query("INSERT INTO ann_live_source VALUES ($1, $2::text::vector)")
+                .bind(id).bind(&embedding).execute(&db.pool).await.expect("commit source write");
+            db.refresh_st("ann_live_stream").await;
+            assert_eq!(db.count("ann_live_stream").await, i64::from(id));
+            let mut reader = db.pool.begin().await.expect("begin reader");
+            sqlx::query("SET LOCAL enable_seqscan = off")
+                .execute(&mut *reader).await.expect("enable index plan");
+            let plan: Vec<String> = sqlx::query_scalar("EXPLAIN (COSTS OFF) SELECT id FROM ann_live_stream ORDER BY embedding <-> $1::text::vector LIMIT 1")
+                .bind(&embedding).fetch_all(&mut *reader).await.expect("explain nearest-neighbor read");
+            assert!(plan.iter().any(|line| line.contains("ann_live_idx")), "expected {method} index in {plan:?}");
+            let nearest: i32 = sqlx::query_scalar("SELECT id FROM ann_live_stream ORDER BY embedding <-> $1::text::vector LIMIT 1")
+                .bind(&embedding).fetch_one(&mut *reader).await.expect("read nearest neighbor");
+            assert_eq!(nearest, id);
+            reader.commit().await.expect("finish reader");
+        }
     })
     .await
     .expect("reads or refresh writes blocked during concurrent reindex");
+    if paced {
+        assert!(started.elapsed() >= Duration::from_secs(30));
+        eprintln!(
+            "{method}: {writes} committed writes, refreshes and indexed reads in {:?}",
+            started.elapsed()
+        );
+    }
     old_snapshot.commit().await.expect("release old snapshot");
+    if supervised {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let state: String =
+                    sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)->>'state'")
+                        .bind(request)
+                        .fetch_one(&db.pool)
+                        .await
+                        .expect("inspect supervised request");
+                if state == "SUCCEEDED" {
+                    break;
+                }
+                assert_ne!(state, "FAILED", "supervised rebuild failed");
+                assert!(
+                    worker.try_wait().expect("inspect supervisor").is_none(),
+                    "supervisor exited early"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("supervisor did not complete the rebuild");
+        let pid = worker.id().expect("supervisor pid").to_string();
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-TERM", &pid])
+                .status()
+                .expect("stop supervisor")
+                .success()
+        );
+    }
     let output = tokio::time::timeout(Duration::from_secs(30), worker.wait_with_output())
         .await
         .expect("worker did not finish")
@@ -4636,7 +5730,12 @@ async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
             .await
             .expect("inspect result");
     assert_eq!(status["state"], "SUCCEEDED");
-    assert_eq!(db.count("ann_live_stream").await, 2);
+    assert_eq!(db.count("ann_live_stream").await, i64::from(writes + 1));
+    db.assert_st_matches_query(
+        "ann_live_stream",
+        "SELECT id, embedding FROM ann_live_source",
+    )
+    .await;
 }
 
 #[tokio::test]

@@ -4415,6 +4415,22 @@ is a point-in-time observation and does not prevent later DDL. An unchanged
 epoch does not rule out an in-flight refresh. Execution is revoked from
 `PUBLIC`; an administrator must grant it explicitly.
 
+### pgtrickle.list_ann_maintenance_requests
+
+```sql
+pgtrickle.list_ann_maintenance_requests(after_request_id bigint, max_results integer) → setof jsonb
+```
+
+Lists up to 1,000 requests after the nonnegative ID cursor in ascending ID
+order. Each result has the same fields and authorization checks as
+`ann_maintenance_request`; callers see only requests for streams they may
+inspect and maintain. For a removed leaf, only the stream owner may inspect
+its stale request. A concurrent privilege or catalog change can make a page
+fail, so retry the listing rather than assuming it was complete. Results are
+observations, not claims: workers must revalidate and claim each request.
+Execution is revoked from `PUBLIC` and must be granted explicitly. The
+function does not require SELECT on the private request catalog.
+
 ### pgtrickle.claim_ann_maintenance
 
 ```sql
@@ -4506,7 +4522,9 @@ move commands between backends and is incompatible with session-bound claims.
 Do not use psql's `--single-transaction` option or wrap the script in a
 transaction; concurrent reindex must run at the top level.
 The worker handles one request and exits; a supervisor must choose requests
-and retries. Reference workers admit at most four concurrent executions per
+and retries. The repository's [supervisor and runbook](ANN_MAINTENANCE.md)
+provide an unattended reference using bounded, authorized queue discovery.
+Reference workers admit at most four concurrent executions per
 database using session advisory locks; a worker that cannot obtain a slot
 exits without claiming its request. Custom clients are not subject to this
 limit. Run the script as a one-shot psql process so unexpected errors release
