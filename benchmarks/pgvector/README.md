@@ -20,6 +20,10 @@ PGS_E2E_IMAGE=pg_trickle_e2e_pgvector:0.8.7 PGVECTOR_EXPECTED_VERSION=0.8.7 \
   -E 'test(test_centroid_long_running_drift_matches_native_avg)'
 ```
 
+Use `test_centroid_high_dimensional_drift_matches_native_avg` in the same
+command to run the 1,536-dimensional variant. It uses the same seed and a
+small corpus, so it does not establish a general numerical operating envelope.
+
 ### Controlled distance-subscription measurements
 
 The opt-in subscription workload accepts comma-separated `PGVECTOR_SUB_ROWS`
