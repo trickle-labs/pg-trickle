@@ -217,6 +217,14 @@ async fn test_pgvector_subscription_scaling_workload() {
         (1..=100).contains(&rounds),
         "PGVECTOR_SUB_ROUNDS must be between 1 and 100"
     );
+    let pivots: usize = std::env::var("PGVECTOR_SUB_PIVOTS")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
+        .expect("PGVECTOR_SUB_PIVOTS must be an integer");
+    assert!(
+        (1..=1000).contains(&pivots),
+        "PGVECTOR_SUB_PIVOTS must be between 1 and 1000"
+    );
     let statistics = std::env::var("PGVECTOR_SUB_STATISTICS").unwrap_or_else(|_| "analyzed".into());
     let analyze_cases: &[bool] = match statistics.as_str() {
         "analyzed" => &[true],
@@ -303,7 +311,10 @@ async fn test_pgvector_subscription_scaling_workload() {
                         .listen(&channel)
                         .await
                         .expect("listen for measured transitions");
-                    db.execute(&format!("SELECT pgtrickle.subscribe_distance('{stream}', '{channel}', 'embedding', '{first}', '<->', 0.5)")).await;
+                    let mut values = vec!["0".to_string(); dimensions];
+                    values[0] = format!("{:.4}", 1.0 + (index % pivots) as f64 / 10_000.0);
+                    let pivot = format!("[{}]", values.join(","));
+                    db.execute(&format!("SELECT pgtrickle.subscribe_distance('{stream}', '{channel}', 'embedding', '{pivot}', '<->', 0.5)")).await;
                 }
                 let pgt_id: i64 = sqlx::query_scalar(
                 "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid=$1::text::regclass",
@@ -495,7 +506,7 @@ async fn test_pgvector_subscription_scaling_workload() {
     }
     println!(
         "PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON={}",
-        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"dimensions":dimensions,"force_explicit_with_noop_trigger":force_explicit,"nested_plan_capture":plan_log.is_some(),"measurements":measurements,"notes":"One row alternates across the threshold; each subscription emits its expected event. Refresh, commit, and post-commit listener wait are timed separately; notification delivery can begin before the listener wait. Tuple counters include repeated visits, not distinct rows. Plan instrumentation adds overhead. No controlled concurrency is recorded."})
+        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"dimensions":dimensions,"distinct_pivots":pivots,"force_explicit_with_noop_trigger":force_explicit,"nested_plan_capture":plan_log.is_some(),"measurements":measurements,"notes":"One row alternates across the threshold; each subscription emits its expected event. Refresh, commit, and post-commit listener wait are timed separately; notification delivery can begin before the listener wait. Tuple counters include repeated visits, not distinct rows. Plan instrumentation adds overhead. No controlled concurrency is recorded."})
     );
 }
 

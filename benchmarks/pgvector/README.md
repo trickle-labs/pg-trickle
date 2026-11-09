@@ -5,6 +5,8 @@
 The opt-in subscription workload accepts comma-separated `PGVECTOR_SUB_ROWS`
 (1–1,000,000) and `PGVECTOR_SUB_COUNTS` (0–1,000), plus
 `PGVECTOR_SUB_DIM` (2–1,536) and `PGVECTOR_SUB_ROUNDS` (1–100).
+`PGVECTOR_SUB_PIVOTS` selects 1–1,000 distinct nearby pivot vectors (default 1);
+all remain on the same side of each measured threshold transition.
 `PGVECTOR_SUB_STATISTICS=both` runs separate unanalyzed and analyzed streams;
 the harness disables autovacuum on each and rejects an unanalyzed control if
 statistics were already collected. `PGVECTOR_SUB_FORCE_EXPLICIT=1` adds the
