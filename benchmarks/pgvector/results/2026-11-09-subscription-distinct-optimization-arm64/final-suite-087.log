@@ -29,4 +29,3 @@ test test_distance_subscription_unsubscribe ... ok
 test test_distance_subscription_waits_for_refresh_catalog_lock ... ok
 
 test result: ok. 21 passed; 0 failed; 1 ignored; 0 measured; 119 filtered out; finished in 126.28s
-

@@ -7,4 +7,3 @@ PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON={"dimensions":768,"distinct_pivots":1000,"f
 test pgvector_workload::test_pgvector_subscription_scaling_workload ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out; finished in 28.88s
-
