@@ -1,9 +1,11 @@
 \set ON_ERROR_STOP on
 BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT current_setting('enable_nestloop') AS live_rag_saved_nestloop \gset
 SET LOCAL enable_seqscan = on;
 SET LOCAL enable_indexscan = off;
 SET LOCAL enable_indexonlyscan = off;
 SET LOCAL enable_bitmapscan = off;
+SET LOCAL enable_nestloop = off;
 \echo LIVE_RAG_EXACT_PLAN_BEGIN
 EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
 SELECT id, embedding::vector(3) <=> :'query_vector'::vector AS distance
@@ -18,6 +20,7 @@ ORDER BY embedding::vector(3) <=> :'query_vector'::vector LIMIT :'k'::integer;
 SET LOCAL enable_indexscan = on;
 SET LOCAL enable_indexonlyscan = on;
 SET LOCAL enable_bitmapscan = on;
+SELECT set_config('enable_nestloop', :'live_rag_saved_nestloop', true) AS live_rag_restored_nestloop \gset
 SET LOCAL hnsw.iterative_scan = :'iterative_scan';
 CREATE TEMP TABLE live_rag_candidate ON COMMIT DROP AS
 SELECT id, embedding::vector(3) <=> :'query_vector'::vector AS distance
@@ -43,6 +46,7 @@ SET LOCAL enable_seqscan = on;
 SET LOCAL enable_indexscan = off;
 SET LOCAL enable_indexonlyscan = off;
 SET LOCAL enable_bitmapscan = off;
+SET LOCAL enable_nestloop = off;
 \echo LIVE_RAG_HYBRID_EXACT_PLAN_BEGIN
 EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
 {{HYBRID_QUERY}};
@@ -52,6 +56,7 @@ CREATE TEMP TABLE live_rag_hybrid_exact ON COMMIT DROP AS
 SET LOCAL enable_indexscan = on;
 SET LOCAL enable_indexonlyscan = on;
 SET LOCAL enable_bitmapscan = on;
+SELECT set_config('enable_nestloop', :'live_rag_saved_nestloop', true) AS live_rag_restored_nestloop \gset
 \echo LIVE_RAG_HYBRID_PLANNER_PLAN_BEGIN
 EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
 {{HYBRID_QUERY}};
