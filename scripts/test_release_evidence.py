@@ -20,13 +20,19 @@ from scripts.release_evidence import (
     validate_installation,
 )
 from scripts.stage_release_assets import stage_release_assets
-from scripts.run_release_suite import machine_case_attempts
+from scripts.run_release_suite import attempt_records, machine_case_attempts
 
 
 CASE = "e2e_example_tests::test_required_case"
 
 
 class ReleaseEvidenceTests(unittest.TestCase):
+    def test_failed_command_attempt_cannot_be_reported_as_passed(self) -> None:
+        cases = [[{"id": CASE, "status": "passed"}]]
+        self.assertEqual(attempt_records([], 1, {})[0]["status"], "failed")
+        self.assertEqual(attempt_records(cases, 1, {})[0]["status"], "failed")
+        self.assertEqual(attempt_records(cases, 0, {})[0]["status"], "passed")
+
     def test_installation_attestation_fails_on_mismatch_and_keeps_evidence(self) -> None:
         expected = [{"path": "extension", "bytes": 1, "sha256": "expected"}]
         mismatch = [{"path": "extension", "bytes": 1, "sha256": "different"}]

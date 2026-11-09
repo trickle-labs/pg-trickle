@@ -57,6 +57,12 @@ class RetirementContractTests(unittest.TestCase):
         for section, identity in [("required_shards", "failure-recovery"), ("required_suites", "recovery")]:
             selected = next(item for item in contract[section] if item["id"] == identity)
             self.assertTrue(gate.PAUSE_CASES <= set(selected["required_cases"]))
+        recovery = next(item for item in contract["required_suites"] if item["id"] == "recovery")
+        selector_index = recovery["command_argv"].index("-E") + 1
+        name = "test_scheduler_pause_drain_protects_transitive_immediate_descendant"
+        recovery["command_argv"][selector_index] = recovery["command_argv"][selector_index].replace(name + "|", "")
+        with self.assertRaises(SystemExit):
+            gate.check_retirement_contract(contract)
 
     def test_requires_runtime_cases_and_published_predecessor(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())

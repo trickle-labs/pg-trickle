@@ -2,6 +2,7 @@
 """Retain the prior release gates and require local WAL retirement qualification."""
 
 import json
+import re
 
 import v0_108_3_release_gate as prior
 
@@ -107,11 +108,13 @@ def check_retirement_contract(contract: dict) -> None:
         "release qualification must invoke the current retirement gate",
     )
     suite = next(item for item in contract["required_suites"] if item["id"] == "wal-retirement")
+    names = sorted(case.split("::", 1)[1] for case in CASES)
+    selector = "test(/^(" + "|".join(names) + ")$/)"
     prior.shared.require(
         set(suite["required_cases"]) == CASES and len(suite["required_cases"]) == len(CASES)
         and suite["command_argv"] == [
-            "bash", "scripts/run_light_e2e_tests.sh", "--no-capture", "--test",
-            "e2e_wal_receipt_recovery_tests",
+            "bash", "scripts/run_e2e_tests.sh", "--test-threads", "1", "--test",
+            "e2e_wal_receipt_recovery_tests", "-E", selector,
         ]
         and suite["e2e_image"] == "pg_trickle_release_candidate:local",
         "retirement qualification must execute all named cases against the release candidate",
@@ -120,6 +123,21 @@ def check_retirement_contract(contract: dict) -> None:
     prior.shared.require(
         upgrade["command_argv"] == ["bash", "scripts/qualify_live_package_upgrade.sh", "0.108.3", "0.109.0"],
         "retirement upgrade must start from the actual published predecessor package",
+    )
+    recovery = next(item for item in contract["required_suites"] if item["id"] == "recovery")
+    args = recovery["command_argv"]
+    binaries = {args[index + 1] for index, arg in enumerate(args[:-1]) if arg == "--test"}
+    prior.shared.require(
+        {case.split("::", 1)[0] for case in recovery["required_cases"]} <= binaries,
+        "recovery suite must select every required test binary",
+    )
+    prior.shared.require("-E" in args and args.index("-E") + 1 < len(args), "recovery suite must select its required cases")
+    expression = args[args.index("-E") + 1]
+    prior.shared.require(expression.startswith("test(/") and expression.endswith("/)"), "recovery selector must be a test regex")
+    pattern = re.compile(expression[6:-2])
+    prior.shared.require(
+        all(re.fullmatch(pattern, case.split("::", 1)[1]) for case in recovery["required_cases"]),
+        "recovery selector must include every required case",
     )
 
 
