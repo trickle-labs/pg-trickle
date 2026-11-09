@@ -1,0 +1,75 @@
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-1397-evidence)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.59s
+     Running tests/e2e_pgvector_tests.rs (/private/tmp/pg-trickle-task-1399/target/debug/deps/e2e_pgvector_tests-0b480014c9ba917b)
+
+running 1 test
+SET
+REINDEX
+ finish_ann_maintenance 
+------------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+SET
+Cancel request sent
+psql:/private/tmp/pg-trickle-task-1399/target/qualification-1e-payload/archive/pg_trickle-0.109.0-pg18-linux-arm64/scripts/ann_maintenance_worker.sql:70: ERROR:  canceling statement due to user request
+SET
+REINDEX
+ finish_ann_maintenance 
+------------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+SET
+ANN request 3 failed; inspect its status
+SET
+REINDEX
+ finish_ann_maintenance 
+------------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+SET
+REINDEX
+ finish_ann_maintenance 
+------------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+SET
+SET
+REINDEX
+ finish_ann_maintenance 
+------------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+test test_ann_supervisor_processes_authorized_request ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 53.03s
+
