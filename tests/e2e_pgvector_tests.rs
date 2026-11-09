@@ -9330,6 +9330,197 @@ async fn test_pgvector_halfvec_avg_values_correct() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+async fn test_distance_subscription_concurrent_commit_and_rollback() {
+    exercise_concurrent_distance_notifications(100, 10).await;
+}
+
+#[tokio::test]
+#[ignore = "larger subscription qualification; run explicitly"]
+async fn test_distance_subscription_concurrent_scale() {
+    exercise_concurrent_distance_notifications(10_000, 100).await;
+}
+
+async fn exercise_concurrent_distance_notifications(rows: i32, subscriptions: i32) {
+    use sqlx::postgres::PgListener;
+    use std::collections::BTreeSet;
+    use std::time::{Duration, Instant};
+
+    async fn receive_all(
+        listener: &mut PgListener,
+        subscriptions: i32,
+        entered: i64,
+        exited: i64,
+    ) -> f64 {
+        let started = Instant::now();
+        let mut channels = BTreeSet::new();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for _ in 0..subscriptions {
+                let message = listener
+                    .recv()
+                    .await
+                    .expect("receive distance notification");
+                assert!(
+                    message.payload().len() < 8000,
+                    "notification payload must be bounded"
+                );
+                let payload: serde_json::Value =
+                    serde_json::from_str(message.payload()).expect("parse distance notification");
+                assert_eq!(payload["entered"], entered);
+                assert_eq!(payload["exited"], exited);
+                assert!(
+                    channels.insert(message.channel().to_owned()),
+                    "duplicate notification channel"
+                );
+            }
+        })
+        .await
+        .expect("receive every subscription notification");
+        assert_eq!(channels.len(), subscriptions as usize);
+        for id in 1..=subscriptions {
+            assert!(
+                channels.contains(&format!("distance_scale_{id}")),
+                "missing subscription channel {id}"
+            );
+        }
+        started.elapsed().as_secs_f64() * 1000.0
+    }
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute(
+        "CREATE TABLE distance_scale_source (id int PRIMARY KEY, note text, embedding vector(3))",
+    )
+    .await;
+    let versions: (String, String, String) = sqlx::query_as("SELECT current_setting('server_version'), (SELECT extversion FROM pg_extension WHERE extname='vector'), (SELECT extversion FROM pg_extension WHERE extname='pg_trickle')")
+        .fetch_one(&db.pool).await.expect("inspect subscription test versions");
+    if let Ok(expected) = std::env::var("PGVECTOR_EXPECTED_VERSION") {
+        assert_eq!(versions.1, expected, "unexpected pgvector version");
+    }
+    sqlx::query("INSERT INTO distance_scale_source SELECT i, 'seed', '[0,1,0]'::vector FROM generate_series(1, $1) i")
+        .bind(rows).execute(&db.pool).await.expect("seed scale corpus");
+    db.create_st(
+        "distance_scale_st",
+        "SELECT id, note, embedding FROM distance_scale_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("ANALYZE distance_scale_st").await;
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect scale listener");
+    for id in 1..=subscriptions {
+        listener
+            .listen(&format!("distance_scale_{id}"))
+            .await
+            .expect("listen on subscription channel");
+    }
+    sqlx::query("SELECT pgtrickle.subscribe_distance('public.distance_scale_st', 'distance_scale_' || i, 'embedding', '[1,0,0]', '<->', CASE WHEN i % 2 = 0 THEN 0.5 ELSE 1.0 END::float8) FROM generate_series(1, $1) i")
+        .bind(subscriptions).execute(&db.pool).await.expect("register scale subscriptions");
+
+    let mut refresh = db.pool.begin().await.expect("begin uncommitted refresh");
+    sqlx::query("UPDATE distance_scale_source SET embedding='[1,0,0]' WHERE id=1")
+        .execute(&mut *refresh)
+        .await
+        .expect("write first crossing");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('distance_scale_st')")
+        .execute(&mut *refresh)
+        .await
+        .expect("refresh first crossing");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), listener.recv())
+            .await
+            .is_err(),
+        "uncommitted refresh must not notify"
+    );
+    let before: String = db
+        .query_scalar("SELECT embedding::text FROM distance_scale_st WHERE id=1")
+        .await;
+    assert_eq!(
+        before, "[0,1,0]",
+        "other readers must not see an uncommitted refresh"
+    );
+
+    let mut concurrent = db
+        .pool
+        .begin()
+        .await
+        .expect("begin concurrent source writer");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        sqlx::query("UPDATE distance_scale_source SET embedding='[1,0,0]' WHERE id=2")
+            .execute(&mut *concurrent),
+    )
+    .await
+    .expect("concurrent source write stalled")
+    .expect("write second crossing");
+    refresh.commit().await.expect("commit first crossing");
+    let first_ms = receive_all(&mut listener, subscriptions, 1, 0).await;
+    concurrent
+        .commit()
+        .await
+        .expect("commit concurrent source writer");
+    db.refresh_st("distance_scale_st").await;
+    let second_ms = receive_all(&mut listener, subscriptions, 1, 0).await;
+
+    db.execute("UPDATE distance_scale_source SET note='unchanged membership' WHERE id=1")
+        .await;
+    db.refresh_st("distance_scale_st").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), listener.recv())
+            .await
+            .is_err(),
+        "no-op membership change must not notify"
+    );
+    let mut rolled_back = db.pool.begin().await.expect("begin rolled-back crossing");
+    sqlx::query("UPDATE distance_scale_source SET embedding='[0,1,0]' WHERE id=1")
+        .execute(&mut *rolled_back)
+        .await
+        .expect("write rolled-back exit");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('distance_scale_st')")
+        .execute(&mut *rolled_back)
+        .await
+        .expect("refresh rolled-back exit");
+    rolled_back.rollback().await.expect("roll back exit");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), listener.recv())
+            .await
+            .is_err(),
+        "rolled-back crossing must not notify"
+    );
+    let restored: bool = db.query_scalar("SELECT (SELECT embedding::text FROM distance_scale_source WHERE id=1) = '[1,0,0]' AND (SELECT embedding::text FROM distance_scale_st WHERE id=1) = '[1,0,0]'").await;
+    assert!(
+        restored,
+        "rollback must preserve both committed source and stream membership"
+    );
+    db.execute("DELETE FROM distance_scale_source WHERE id IN (1,2)")
+        .await;
+    db.refresh_st("distance_scale_st").await;
+    let exit_ms = receive_all(&mut listener, subscriptions, 0, 2).await;
+    let remaining: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM distance_scale_st WHERE embedding <-> '[1,0,0]'::vector < 1.0",
+        )
+        .await;
+    assert_eq!(remaining, 0, "the last matching rows must have exited");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), listener.recv())
+            .await
+            .is_err(),
+        "unexpected duplicate notification"
+    );
+    db.assert_st_matches_query(
+        "distance_scale_st",
+        "SELECT id, note, embedding FROM distance_scale_source",
+    )
+    .await;
+    println!(
+        "DISTANCE_CONCURRENCY_JSON={}",
+        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"rows":rows,"subscriptions":subscriptions,"dimensions":3,"listener_connections":1,"first_post_commit_drain_ms":first_ms,"second_post_commit_drain_ms":second_ms,"exit_post_commit_drain_ms":exit_ms})
+    );
+}
+
+#[tokio::test]
 async fn test_distance_subscription_notifies_only_membership_crossings() {
     use sqlx::postgres::PgListener;
     use std::time::Duration;

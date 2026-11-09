@@ -40,6 +40,15 @@ class RetirementContractTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             gate.check_pgvector_contract(broken)
 
+    def test_subscription_concurrency_case_is_required_for_both_versions(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        for version in ("0.8.1", "0.8.7"):
+            broken = copy.deepcopy(contract)
+            cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
+            cases.remove("e2e_pgvector_tests::test_distance_subscription_concurrent_commit_and_rollback")
+            with self.assertRaises(SystemExit):
+                gate.check_pgvector_contract(broken)
+
     def test_metadata_tracks_package_and_never_precedes_gate(self):
         check = gate.prior.shared.check_metadata_version
         check("0.110.0", "0.110.0", "0.109.0")
