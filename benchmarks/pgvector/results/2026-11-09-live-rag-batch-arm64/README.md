@@ -48,3 +48,10 @@ hash instead of the repeated-vector formula, and refresh reason and merge
 strategy were added to subsequent reports. The four-row smoke test passed
 with pgvector [0.8.1](hash-smoke-081.log) and [0.8.7](hash-smoke-087.log).
 The 10,000-row results above use the earlier seed and report format.
+
+The later mixed-churn mode passed its two-cycle, eight-row guarded-availability
+test on pgvector [0.8.1](mixed-smoke-081.log) and [0.8.7](mixed-smoke-087.log).
+Each four-slot batch covers an update, visibility change, deletion and
+insertion. The test checks that the affected rows are withheld before the
+new embeddings and refresh, and that each maintained corpus matches its
+defining SQL afterward. This is functional evidence, not a scale result.

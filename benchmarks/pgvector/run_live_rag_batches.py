@@ -35,11 +35,43 @@ WHERE id IN (""" + CHANGED_IDS + """);
 COMMIT;
 """
 
+MIXED_TARGETS = "SELECT 1 + :'cycle'::bigint * :'batch'::bigint + i AS id, i FROM generate_series(0, :'batch'::integer - 1) i"
+MIXED_INSERTS = "SELECT :'rows'::bigint + :'cycle'::bigint * :'batch'::bigint + i + 1 AS id FROM generate_series(0, :'batch'::integer - 1) i WHERE i % 4 = 3"
+MIXED_IDS = "SELECT id FROM (" + MIXED_TARGETS + ") target WHERE i % 4 <> 3 UNION ALL " + MIXED_INSERTS
+MIXED_CHANGE = """
+BEGIN;
+UPDATE embedding_demo.documents SET body = body || ' update ' || :'cycle'
+WHERE id IN (SELECT id FROM (""" + MIXED_TARGETS + """) target WHERE i % 4 = 0);
+UPDATE live_rag.access SET visible = NOT visible
+WHERE document_id IN (SELECT id FROM (""" + MIXED_TARGETS + """) target WHERE i % 4 = 1);
+DELETE FROM embedding_demo.documents
+WHERE id IN (SELECT id FROM (""" + MIXED_TARGETS + """) target WHERE i % 4 = 2);
+INSERT INTO embedding_demo.documents(id, body)
+SELECT id, 'new document ' || id FROM (""" + MIXED_INSERTS + """) inserted;
+INSERT INTO live_rag.access(document_id, tenant_id)
+SELECT id, CASE WHEN id % 10 < 8 THEN 1 ELSE 2 + id % 19 END FROM (""" + MIXED_INSERTS + """) inserted;
+SELECT embedding_demo.enqueue(id, 'model-v1') FROM embedding_demo.documents
+WHERE id IN (SELECT id FROM (""" + MIXED_TARGETS + """) target WHERE i % 4 = 0 UNION ALL """ + MIXED_INSERTS + """);
+COMMIT;
+"""
+
 MAINTENANCE = {
-    "application": "SELECT live_rag.sync_application(ARRAY(" + CHANGED_IDS + ")::bigint[]);",
+    "application": "SELECT live_rag.sync_application(ARRAY({changed_ids})::bigint[]);",
     "periodic_full": "SELECT live_rag.recompute_full();",
     "differential": "SELECT pgtrickle.refresh_stream_table('live_rag.differential');",
 }
+
+
+def availability_sql(changed_ids: str) -> str:
+    return """
+WITH changed AS MATERIALIZED (""" + changed_ids + """)
+SELECT json_build_object(
+ 'eligible', (SELECT count(*) FROM live_rag.truth WHERE id IN (SELECT id FROM changed)),
+ 'application', (SELECT count(*) FROM live_rag.application_current WHERE id IN (SELECT id FROM changed)),
+ 'periodic_full', (SELECT count(*) FROM live_rag.periodic_full_current WHERE id IN (SELECT id FROM changed)),
+ 'differential', (SELECT count(*) FROM live_rag.differential_current WHERE id IN (SELECT id FROM changed))
+)::text;
+"""
 
 EXACT = """
 SELECT json_build_object(
@@ -99,23 +131,31 @@ SELECT json_build_object('postgres', current_setting('server_version'),
         raise ValueError(f"initial corpora differ from truth: {initial_exact}")
 
     samples = []
+    changed_ids = MIXED_IDS if args.workload == "mixed" else CHANGED_IDS
+    change = MIXED_CHANGE if args.workload == "mixed" else CHANGE
+    availability_query = availability_sql(changed_ids)
     for cycle in range(args.cycles):
         variables["cycle"] = str(cycle)
         start = time.monotonic()
-        worker.psql(CHANGE, **variables)
+        worker.psql(change, **variables)
         committed = time.monotonic()
+        after_commit = json_result(worker.psql(availability_query, **variables))
+        generation_start = time.monotonic()
         generation = worker.drain("model-v1", 3600, args.delay_seconds, args.batch, False, args.dimensions)
         eligible = time.monotonic()
-        if generation["accepted"] != args.batch or generation["stale"]:
+        expected_jobs = (args.batch + 3) // 4 + args.batch // 4 if args.workload == "mixed" else args.batch
+        if generation["accepted"] != expected_jobs or generation["stale"]:
             raise ValueError(f"unexpected embedding generation result: {generation}")
+        after_generation = json_result(worker.psql(availability_query, **variables))
         names = list(MAINTENANCE)
         names = names[cycle % len(names):] + names[:cycle % len(names)]
         maintenance = {}
         for name in names:
-            sql = "CREATE TEMP TABLE bench_wal AS SELECT pg_current_wal_insert_lsn() AS start_lsn;\n" + MAINTENANCE[name] + "\nSELECT json_build_object('cluster_wal_bytes', pg_wal_lsn_diff(pg_current_wal_insert_lsn(), start_lsn))::text FROM bench_wal;"
+            sql = "CREATE TEMP TABLE bench_wal AS SELECT pg_current_wal_insert_lsn() AS start_lsn;\n" + MAINTENANCE[name].replace("{changed_ids}", changed_ids) + "\nSELECT json_build_object('cluster_wal_bytes', pg_wal_lsn_diff(pg_current_wal_insert_lsn(), start_lsn))::text FROM bench_wal;"
             output, seconds = timed(sql, **variables)
             maintenance[name] = {"duration_seconds": seconds, "eligible_to_searchable_seconds": time.monotonic() - eligible,
                                  **json_result(output)}
+            maintenance[name]["availability"] = json_result(worker.psql(availability_query, **variables))
         exact = json_result(worker.psql(EXACT))
         if not all(exact.values()):
             raise ValueError(f"corpora differ from truth after cycle {cycle}: {exact}")
@@ -134,7 +174,9 @@ SELECT row_to_json(h)::text FROM (
 ) h;
 """))
         samples.append({"cycle": cycle, "order": names, "source_transaction_seconds": committed - start,
-                        "commit_to_eligible_seconds": eligible - committed, "generation": generation,
+                        "commit_to_eligible_seconds": eligible - committed, "generation_seconds": eligible - generation_start,
+                        "generation": generation,
+                        "availability_after_commit": after_commit, "availability_after_generation": after_generation,
                         "maintenance": maintenance, "differential_refresh": refresh, "corpora_exact": exact,
                         "retrieval": retrieval})
 
@@ -145,12 +187,13 @@ SELECT json_build_object('application', pg_total_relation_size('live_rag.applica
 """))
     return {"metadata": metadata, "candidate_commit": args.candidate_commit, "package_sha256": args.package_sha256,
             "identity_source": "operator-declared; installed payload not attested", "rows": args.rows,
-            "dimensions": args.dimensions, "batch": args.batch, "cycles": args.cycles,
+            "dimensions": args.dimensions, "batch": args.batch, "cycles": args.cycles, "workload": args.workload,
             "delay_seconds_per_job": args.delay_seconds, "retrieval_tenant": args.tenant, "initial_setup_seconds": initial_seconds,
             "initial_corpora_exact": initial_exact, "samples": samples, "relation_bytes_including_indexes": sizes,
             "batch_latency_seconds": {"commit_to_eligible": summary([s["commit_to_eligible_seconds"] for s in samples]),
+              "generation": summary([s["generation_seconds"] for s in samples]),
               **{name: summary([s["maintenance"][name]["duration_seconds"] for s in samples]) for name in MAINTENANCE}},
-            "notes": "Deterministic hash-derived synthetic initial backfill bypasses claims; measured updates use the fake worker. Timings include psql startup. Approaches run serially in rotating order; eligible-to-searchable includes preceding approaches. WAL is cluster-wide insert-LSN movement around maintenance; other activity can contaminate it. Retrieval uses administrative current views after all approaches converge, not restricted-role latency. This measures update batches only; no concurrent load or embedding-delay distribution."}
+            "notes": "Deterministic hash-derived synthetic initial backfill bypasses claims; changed revisions use the fake worker. Timings include psql startup; commit-to-eligible also includes the post-commit availability check. Approaches run serially in rotating order; eligible-to-searchable includes preceding approaches and availability checks. WAL is cluster-wide insert-LSN movement around maintenance; other activity can contaminate it. Retrieval uses administrative current views after all approaches converge, not restricted-role latency. No concurrent load or embedding-delay distribution."}
 
 
 def main() -> None:
@@ -161,6 +204,7 @@ def main() -> None:
     parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument("--delay-seconds", type=float, default=0)
     parser.add_argument("--tenant", type=int, default=1)
+    parser.add_argument("--workload", choices=("updates", "mixed"), default="updates")
     parser.add_argument("--candidate-commit", required=True)
     parser.add_argument("--package-sha256", required=True)
     args = parser.parse_args()
@@ -168,6 +212,8 @@ def main() -> None:
         parser.error("rows, batch, cycles, delay or tenant is outside the supported range")
     if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_commit) or not re.fullmatch(r"[0-9a-f]{64}", args.package_sha256):
         parser.error("candidate commit and package SHA-256 must be lowercase hexadecimal")
+    if args.workload == "mixed" and (args.batch < 4 or args.batch * args.cycles > args.rows):
+        parser.error("mixed workload requires batch >= 4 and rows >= batch * cycles so deleted IDs are not reused")
     try:
         print(json.dumps(run(args), sort_keys=True))
     except (ValueError, KeyError, json.JSONDecodeError) as error:

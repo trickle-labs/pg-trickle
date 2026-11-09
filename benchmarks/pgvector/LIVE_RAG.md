@@ -123,22 +123,30 @@ python3 benchmarks/pgvector/run_live_rag_batches.py \
 
 `--rows` supports up to one million, and `--dimensions` accepts 384, 768 or
 1536. The deterministic initial backfill bypasses the job worker; subsequent
-updates enqueue generation transactionally and use the fake worker. Every
-cycle gives all three approaches the same updated IDs, rotates their serial
+updates enqueue generation transactionally and use the fake worker. Add
+`--workload mixed` to apply an update, a visibility toggle, a deletion and an
+insertion in each group of four batch slots. Mixed batches must contain at
+least four slots and `rows >= batch * cycles`; each cycle targets fresh IDs so
+the runner does not silently reuse deleted rows. Every cycle gives all three
+approaches the same changed IDs, rotates their serial
 execution order, checks each entire corpus against the defining SQL, records
 the effective differential refresh state, and runs vector and hybrid recall
 measurements. The report includes individual batch and maintenance times,
 nearest-rank p50/p95/p99 across batches, index-inclusive relation sizes and
 cluster-wide WAL insert-LSN movement. Startup of each `psql` process is
-included. Eligible-to-searchable time includes earlier approaches in that
-cycle; use the individual maintenance duration for a less order-dependent
-comparison. Other cluster activity contaminates WAL measurements. Retrieval
+included. Changed-row eligible and searchable counts are sampled immediately
+after commit, after generation and after each maintenance step. Generation
+duration is recorded separately; commit-to-eligible also includes the
+post-commit availability query. Eligible-to-searchable time includes earlier
+approaches and availability queries in that cycle; use the individual
+maintenance duration for a less order-dependent comparison. Other cluster
+activity contaminates WAL measurements. Retrieval
 uses administrative current views after all approaches converge, and the
 EXPLAIN plans contain per-query timing and buffer information.
 
-This runner measures updates only and a fixed per-job delay (`--delay-seconds`),
-not concurrent writes, insert/delete/visibility churn, a delay distribution,
-or per-document freshness percentiles. It does not attest the package, collect
+This runner uses a fixed per-job delay (`--delay-seconds`), not concurrent
+writes, a delay distribution, or per-document freshness percentiles. It does
+not attest the package, collect
 CPU or lock metrics, or provide a representative decision table. Record the
 environment and run repeated, isolated scenarios before drawing conclusions.
 

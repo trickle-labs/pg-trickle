@@ -170,6 +170,50 @@ async fn test_live_rag_batched_benchmark_compares_equivalent_corpora() {
 }
 
 #[tokio::test]
+async fn test_live_rag_mixed_benchmark_guards_churn_before_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE EXTENSION vector").await;
+    let args = [
+        "--rows",
+        "8",
+        "--dimensions",
+        "384",
+        "--batch",
+        "4",
+        "--cycles",
+        "2",
+        "--workload",
+        "mixed",
+        "--candidate-commit",
+        "0000000000000000000000000000000000000000",
+        "--package-sha256",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ];
+    let output = run_live_rag_script(&db, "run_live_rag_batches.py", &args).await;
+    assert!(
+        output.status.success(),
+        "mixed benchmark failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse mixed report");
+    assert_eq!(report["workload"], "mixed");
+    let samples = report["samples"].as_array().expect("mixed samples");
+    assert_eq!(samples.len(), 2);
+    for sample in samples {
+        assert_eq!(sample["generation"]["accepted"], 2);
+        assert_eq!(sample["availability_after_commit"]["eligible"], 0);
+        assert_eq!(sample["availability_after_generation"]["eligible"], 2);
+        for name in ["application", "periodic_full", "differential"] {
+            assert_eq!(sample["availability_after_commit"][name], 0);
+            assert_eq!(sample["availability_after_generation"][name], 0);
+            assert_eq!(sample["maintenance"][name]["availability"][name], 2);
+            assert_eq!(sample["corpora_exact"][name], true);
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_live_rag_baselines_recheck_revisions_and_converge() {
     let db = E2eDb::new().await.with_extension().await;
     let database: String = db.query_scalar("SELECT current_database()::text").await;
