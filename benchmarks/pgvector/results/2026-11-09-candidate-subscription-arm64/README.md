@@ -43,8 +43,42 @@ evaluation query over both the snapshot and the current 100,000-row stream.
 The unanalyzed transaction returned 10,200,000 sequential stream tuples per
 refresh. The analyzed plan instead used a stream index scan for the evaluation;
 sequential tuple counters alone therefore understate its visits. This expensive
-trigger path and a safe targeted remediation remain open; the measurements do
-not justify weakening trigger or event semantics.
+trigger path does not justify weakening trigger or event semantics.
+
+## Repeated identical predicates
+
+A targeted development change later committed at
+`f2ce6935e729f0fe000e994921a279b9753a5d91` reuses each identical
+column/vector/operator/threshold result within a refresh and still sends a
+separate notification to every channel. It retains the full snapshot for user
+triggers. The [modified-image samples](optimized.json) repeat the 100,000-row
+forced-trigger cases with the same 0, 1, 10 and 100 identical predicates,
+both statistics states and two rounds. At 100 subscriptions, the captured
+unanalyzed first round executed the membership query 100 times before the
+change and once afterward. Sequential stream tuple returns fell from
+10,200,000 to 300,000 per refresh. The modified-image means were 579.6 ms
+unanalyzed and 614.1 ms analyzed. These are instrumented samples on different
+PostgreSQL base images: the packaged baseline used Debian pgdg13, while the
+development image used pgdg12. They show the query-count change, not a
+controlled general speedup.
+
+The modified ARM64 image was built from source later committed at `f2ce6935`,
+using pg_trickle library SHA-256
+`564930aa0cec232ea21a5b6acd084a467c92cdae2bde7946443d35b57f0bd8ee`
+and pgvector 0.8.7 image ID
+`sha256:0fa00f6d9c9951be4ea6e975c86993c1e129a7718ac6365bd4bf5d09383f08f0`.
+It is a development image, not a final v0.109.0 release archive. The
+[representative plans](optimized-plans.json) retain one plan for each
+100,000-row zero- and 100-subscription statistics case; the complete local log
+has SHA-256 `20ce22aaf1909fac479c927967ed92735c39b7448f1ecff11ed30f3c7ef11079`.
+
+On this modified library, the duplicate-predicate/user-trigger, concurrent
+commit and rollback, membership crossing, and typed-predicate authorization
+tests passed on both [pgvector 0.8.1](optimized-tests-081.log) and
+[0.8.7](optimized-tests-087.log). The new test checks separate notifications
+for duplicate predicates, a different pivot, and no event for a wider threshold.
+Distinct predicates still require separate evaluation; full snapshots and
+scans can remain expensive, and broader mixed-pivot workloads are outstanding.
 
 Without the trigger, subscribed cases used a bounded one-row identity snapshot;
 their [plans](bounded-plans.json) show index probes for the affected row. The
