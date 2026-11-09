@@ -639,6 +639,16 @@ async fn exercise_ann_supervisor_recovery(natural_cooldown: bool) {
 
 #[tokio::test]
 async fn test_ann_supervisor_bounds_repeated_failures() {
+    exercise_ann_supervisor_repeated_failures(false).await;
+}
+
+#[tokio::test]
+#[ignore = "waits for both natural repeated-failure cooldowns"]
+async fn test_ann_supervisor_natural_repeated_failure_backoff() {
+    exercise_ann_supervisor_repeated_failures(true).await;
+}
+
+async fn exercise_ann_supervisor_repeated_failures(natural_cooldown: bool) {
     use std::time::Duration;
 
     let db = E2eDb::new().await.with_extension().await;
@@ -731,12 +741,26 @@ async fn test_ann_supervisor_bounds_repeated_failures() {
             "failure {failures}: {remaining}s"
         );
         if failures == 1 {
-            // Advance only the first deadline to exercise the second failure quickly.
-            db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+            if natural_cooldown {
+                loop {
+                    let (state, remaining): (String, f64) = sqlx::query_as("SELECT s->>'state', EXTRACT(EPOCH FROM (s->>'next_eligible_at')::timestamptz - clock_timestamp())::float8 FROM (SELECT pgtrickle.ann_maintenance_request($1) AS s) q")
+                        .bind(failed).fetch_one(&db.pool).await.expect("inspect natural cooldown");
+                    if remaining <= 0.0 {
+                        break;
+                    }
+                    assert_eq!(state, "FAILED", "request retried before its deadline");
+                    assert!(child.try_wait().expect("inspect supervisor").is_none());
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            } else {
+                db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+            }
         }
     }
     blocker.rollback().await.expect("release barrier");
-    db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    if !natural_cooldown {
+        db.execute("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second'").await;
+    }
     db.execute("INSERT INTO ann_retry_src VALUES (1, '[1,0,0]')")
         .await;
     db.execute("SELECT pgtrickle.refresh_stream_table('ann_retry_st')")
@@ -765,7 +789,11 @@ async fn test_ann_supervisor_bounds_repeated_failures() {
     })
     .await
     .expect("unrelated request did not complete");
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    if natural_cooldown {
+        tokio::time::sleep(Duration::from_secs(65)).await;
+    } else {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
     let status: serde_json::Value =
         sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
             .bind(failed)
