@@ -130,8 +130,21 @@ corpus comparison in one local run.
 python3 benchmarks/pgvector/run_live_rag_batches.py \
   --rows 10000 --dimensions 384 --batch 10 --cycles 3 --tenant 1 \
   --candidate-commit "$CANDIDATE_COMMIT" --package-sha256 "$PACKAGE_SHA256" \
+  --candidate-archive "$CANDIDATE_ARCHIVE" --attest-container "$CONTAINER" \
   > batch-results.json
 ```
+
+For Docker runs, `--candidate-archive` and `--attest-container` together check
+the archive digest and candidate manifest, the installed extension files, and
+that the benchmark connection reaches the same PostgreSQL instance as the
+container. The checks run before and after the benchmark; a mismatch or restart
+fails the run. This requires Docker access and permission to read PostgreSQL's
+control-system identity. It verifies files on disk, not which library bytes a
+previously started backend mapped. Omit both options for other environments;
+the report then explicitly labels the package identity as operator-declared.
+Use a direct connection: the endpoint checks do not prove that a load balancer
+routed every intermediate query to the same instance. The manifest is not a
+signature; verify the archive digest and provenance independently.
 
 `--rows` supports up to one million, and `--dimensions` accepts 384, 768 or
 1536. The deterministic initial backfill bypasses the job worker; subsequent
@@ -158,7 +171,7 @@ EXPLAIN plans contain per-query timing and buffer information.
 
 This runner uses a fixed per-job delay (`--delay-seconds`), not concurrent
 writes, a delay distribution, or per-document freshness percentiles. It does
-not attest the package, collect
+not collect
 CPU or lock metrics, or provide a representative decision table. Record the
 environment and run repeated, isolated scenarios before drawing conclusions.
 

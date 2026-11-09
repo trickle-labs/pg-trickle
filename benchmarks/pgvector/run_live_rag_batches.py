@@ -5,9 +5,11 @@ import argparse
 import json
 import math
 import re
+import tarfile
 import time
 
 import fake_embedding_worker as worker
+import live_rag_attestation as attestation
 import measure_live_rag_recall as recall
 import setup_live_rag
 
@@ -117,6 +119,13 @@ SELECT json_build_object('postgres', current_setting('server_version'),
     if metadata["pg_trickle"] != "0.109.0" or metadata["pgvector"] not in ("0.8.1", "0.8.7") or not re.match(r"^18(?:\.|$)", metadata["postgres"]):
         raise ValueError("expected pg_trickle 0.109.0, PostgreSQL 18 and pgvector 0.8.1 or 0.8.7")
 
+    def attest():
+        identity = json_result(worker.psql(attestation.IDENTITY_SQL))
+        return attestation.attest(args.attest_container, args.candidate_archive,
+                                  args.package_sha256, args.candidate_commit, identity)
+
+    initial_attestation = attest() if args.attest_container else None
+
     start = time.monotonic()
     worker.psql(setup_live_rag.setup_sql(args.dimensions))
     worker.psql(SEED, rows=str(args.rows), dimensions=str(args.dimensions))
@@ -185,8 +194,12 @@ SELECT json_build_object('application', pg_total_relation_size('live_rag.applica
  'periodic_full', pg_total_relation_size('live_rag.periodic_full'),
  'differential', pg_total_relation_size('live_rag.differential'))::text;
 """))
+    final_attestation = attest() if initial_attestation else None
+    if initial_attestation and initial_attestation != final_attestation:
+        raise ValueError("candidate or PostgreSQL instance changed during the benchmark")
     return {"metadata": metadata, "candidate_commit": args.candidate_commit, "package_sha256": args.package_sha256,
-            "identity_source": "operator-declared; installed payload not attested", "rows": args.rows,
+            "identity_source": "archive manifest and installed files checked before and after run" if initial_attestation else "operator-declared; installed payload not attested",
+            "attestation": initial_attestation, "rows": args.rows,
             "dimensions": args.dimensions, "batch": args.batch, "cycles": args.cycles, "workload": args.workload,
             "delay_seconds_per_job": args.delay_seconds, "retrieval_tenant": args.tenant, "initial_setup_seconds": initial_seconds,
             "initial_corpora_exact": initial_exact, "samples": samples, "relation_bytes_including_indexes": sizes,
@@ -207,7 +220,11 @@ def main() -> None:
     parser.add_argument("--workload", choices=("updates", "mixed"), default="updates")
     parser.add_argument("--candidate-commit", required=True)
     parser.add_argument("--package-sha256", required=True)
+    parser.add_argument("--candidate-archive", help="candidate release archive for Docker payload attestation")
+    parser.add_argument("--attest-container", help="Docker container running the benchmark database")
     args = parser.parse_args()
+    if bool(args.candidate_archive) != bool(args.attest_container):
+        parser.error("--candidate-archive and --attest-container must be supplied together")
     if not 1 <= args.rows <= 1_000_000 or not 1 <= args.batch <= min(args.rows, 1000) or not 1 <= args.cycles <= 1000 or not 0 <= args.delay_seconds <= 10 or not math.isfinite(args.delay_seconds) or not 1 <= args.tenant <= 20:
         parser.error("rows, batch, cycles, delay or tenant is outside the supported range")
     if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_commit) or not re.fullmatch(r"[0-9a-f]{64}", args.package_sha256):
@@ -216,7 +233,7 @@ def main() -> None:
         parser.error("mixed workload requires batch >= 4 and rows >= batch * cycles so deleted IDs are not reused")
     try:
         print(json.dumps(run(args), sort_keys=True))
-    except (ValueError, KeyError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, KeyError, tarfile.TarError, json.JSONDecodeError) as error:
         parser.error(str(error))
 
 
