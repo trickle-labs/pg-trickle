@@ -69,11 +69,12 @@ class RetirementContractTests(unittest.TestCase):
     def test_ann_restart_case_is_required_for_both_versions(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
         for version in ("0.8.1", "0.8.7"):
-            broken = copy.deepcopy(contract)
-            cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
-            cases.remove("e2e_pgvector_tests::test_ann_worker_retries_after_restart_during_concurrent_reindex")
-            with self.assertRaises(SystemExit):
-                gate.check_pgvector_contract(broken)
+            for case in ("test_ann_worker_retries_after_restart_during_concurrent_reindex", "test_ann_supervisor_reconnects_after_database_restart"):
+                broken = copy.deepcopy(contract)
+                cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
+                cases.remove(f"e2e_pgvector_tests::{case}")
+                with self.assertRaises(SystemExit):
+                    gate.check_pgvector_contract(broken)
 
     def test_metadata_tracks_package_and_never_precedes_gate(self):
         check = gate.prior.shared.check_metadata_version

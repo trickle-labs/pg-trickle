@@ -539,6 +539,170 @@ async fn test_ann_supervisor_processes_authorized_request() {
 }
 
 #[tokio::test]
+async fn test_ann_supervisor_reconnects_after_database_restart() {
+    use std::time::Duration;
+
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE ann_reconnect_src (id int PRIMARY KEY, v vector(3))")
+        .await;
+    db.create_st(
+        "ann_reconnect_st",
+        "SELECT id, v FROM ann_reconnect_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE INDEX ann_reconnect_idx ON ann_reconnect_st USING hnsw (v vector_l2_ops)")
+        .await;
+    let database: String = db.query_scalar("SELECT current_database()::text").await;
+    let port = db
+        .connection_string()
+        .split('@')
+        .nth(1)
+        .expect("connection authority")
+        .split('/')
+        .next()
+        .expect("host and port")
+        .rsplit(':')
+        .next()
+        .expect("port");
+    let service =
+        std::env::temp_dir().join(format!("pgt-ann-reconnect-{}.conf", std::process::id()));
+    let write_service = |port: &str| {
+        std::fs::write(
+            &service,
+            format!(
+                "[ann-reconnect]\nhost=127.0.0.1\nport={port}\ndbname={database}\nuser=postgres\n"
+            ),
+        )
+    };
+    write_service(port).expect("write initial connection service");
+    db.execute(
+        "CREATE INDEX ann_reconnect_before_idx ON ann_reconnect_st USING hnsw (v vector_l2_ops)",
+    )
+    .await;
+    let before: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_reconnect_st'::regclass::oid, 'ann_reconnect_before_idx'::regclass::oid)").await;
+    let mut child = tokio::process::Command::new("python3")
+        .arg(ann_operator_root().join("scripts/ann_maintenance_supervisor.py"))
+        .env_remove("PGHOST")
+        .env_remove("PGPORT")
+        .env_remove("PGDATABASE")
+        .env_remove("PGUSER")
+        .env("PGSERVICEFILE", &service)
+        .env("PGSERVICE", "ann-reconnect")
+        .env("PGPASSWORD", "postgres")
+        .env("PGSSLMODE", "disable")
+        .env("PGS_ANN_POLL_SECONDS", "1")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start reconnect supervisor");
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(before)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect request before restart");
+            if status["state"] == "SUCCEEDED" {
+                break;
+            }
+            assert_ne!(
+                status["state"], "FAILED",
+                "supervisor failed before restart: {status}"
+            );
+            assert!(child.try_wait().expect("inspect supervisor").is_none());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not process a request before restart");
+    db.pool.close().await;
+    let stopped = tokio::process::Command::new("docker")
+        .args(["stop", "--time", "0", db.container_id()])
+        .output()
+        .await
+        .expect("stop database");
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        child
+            .try_wait()
+            .expect("inspect disconnected supervisor")
+            .is_none()
+    );
+    let started = tokio::process::Command::new("docker")
+        .args(["start", db.container_id()])
+        .output()
+        .await
+        .expect("start database");
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    db.pool = db.reconnect_after_restart().await;
+    let mapping = tokio::process::Command::new("docker")
+        .args(["port", db.container_id(), "5432/tcp"])
+        .output()
+        .await
+        .expect("inspect restarted database port");
+    assert!(mapping.status.success());
+    let mapping = String::from_utf8(mapping.stdout).expect("port mapping");
+    let port = mapping
+        .lines()
+        .next()
+        .expect("port mapping line")
+        .rsplit(':')
+        .next()
+        .expect("port");
+    write_service(port).expect("update connection service after Docker remaps port");
+    let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_reconnect_st'::regclass::oid, 'ann_reconnect_idx'::regclass::oid)").await;
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(request)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect request after restart");
+            if status["state"] == "SUCCEEDED" {
+                break;
+            }
+            assert_ne!(
+                status["state"], "FAILED",
+                "supervisor failed after restart: {status}"
+            );
+            assert!(child.try_wait().expect("inspect supervisor").is_none());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not reconnect and process the request");
+    let valid: bool = db.query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_reconnect_idx'::regclass").await;
+    assert!(valid);
+    let status = tokio::process::Command::new("kill")
+        .args(["-TERM", &child.id().expect("supervisor PID").to_string()])
+        .status()
+        .await
+        .expect("signal supervisor");
+    assert!(status.success());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .expect("supervisor did not exit")
+            .expect("wait for supervisor")
+            .success()
+    );
+    std::fs::remove_file(service).expect("remove connection service");
+}
+
+#[tokio::test]
 async fn test_vector_aggregate_mode_change_uses_saved_path_and_admission_setting() {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
