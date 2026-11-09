@@ -104,8 +104,13 @@ for the shared fusion query against the same query with exact vector candidates
 and index paths disabled. Both hybrid queries use up to 20 vector and 20 lexical
 candidates; `--k` changes only the vector-only measurement. Their exact and
 normal-planner plans are included, with ANN index use reported separately.
-The forced plan is diagnostic and is not used to compute recall. The candidate
-and plan queries execute separately in the same repeatable-read snapshot.
+The `forced_*` metrics separately report recall and underfill with sequential
+scans discouraged. Treat these as ANN measurements only when
+`forced_plan_used_ann_index` is true; another index or a sequential scan can
+still be selected. The candidate and plan queries execute separately in the
+same repeatable-read snapshot. The forced path is diagnostic and does not
+represent the normal planner's choice. The overall measurement-command duration
+includes this extra diagnostic query and is not an individual ANN latency.
 Exact-baseline queries disable index scans and discourage nested loops to avoid
 repeatedly scanning the corpus; the original nested-loop setting is restored before the
 normal-planner and forced-index queries.
