@@ -69,8 +69,8 @@ fn rf_count() -> usize {
 //
 // DIFFERENTIAL: q17 can exceed the 16 GB temp-file limit even at SF-1;
 //               q15/q17 are pre-skipped at SF≥10.
-// IMMEDIATE:    a subset cannot be created (IVM restriction). Populate by
-//               running with the guard disabled, then hardening the set.
+// IMMEDIATE:    a subset cannot be created (IVM restriction), and q17 can
+//               exceed the 16 GB temp-file limit during RF1 at SF-1.
 //
 // To update: comment out the `assert!` at the end of the test, run, collect
 // the output, and add the skipped query names here with a comment explaining
@@ -111,6 +111,8 @@ const LARGE_SCALE_DIFFERENTIAL_SKIP: &[&str] = &["q15", "q17"];
 /// this list is skipped, catching silent regressions as the DVM evolves.
 #[rustfmt::skip]
 const IMMEDIATE_SKIP_ALLOWLIST: &[&str] = &[
+    // q17's correlated AVG refresh exceeds the 16 GB temp-file limit at SF-1.
+    "q17",
 ];
 
 // ── P3.15: TPCH_STRICT mode ───────────────────────────────────────────
