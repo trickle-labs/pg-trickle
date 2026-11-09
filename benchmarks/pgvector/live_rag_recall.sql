@@ -39,6 +39,10 @@ SELECT id, embedding::vector(3) <=> :'query_vector'::vector AS distance
 FROM live_rag.:"corpus" WHERE tenant_id = :'tenant'::bigint
 ORDER BY embedding::vector(3) <=> :'query_vector'::vector LIMIT :'k'::integer;
 \echo LIVE_RAG_ELIGIBILITY_PLAN_END
+CREATE TEMP TABLE live_rag_forced_candidate ON COMMIT DROP AS
+SELECT id, embedding::vector(3) <=> :'query_vector'::vector AS distance
+FROM live_rag.:"corpus" WHERE tenant_id = :'tenant'::bigint
+ORDER BY embedding::vector(3) <=> :'query_vector'::vector LIMIT :'k'::integer;
 
 -- Compare the same fusion query with exact vector candidates and with the
 -- planner's ordinary index choices, in the same repeatable-read snapshot.
@@ -73,6 +77,12 @@ SELECT 'LIVE_RAG_METRICS=' || jsonb_build_object(
         ELSE (SELECT count(*)::float8 FROM live_rag_candidate c JOIN live_rag_exact e USING (id))
              / (SELECT count(*) FROM live_rag_exact) END,
     'underfill', GREATEST(0, :'k'::integer - (SELECT count(*) FROM live_rag_candidate)),
+    'forced_candidate_count', (SELECT count(*) FROM live_rag_forced_candidate),
+    'forced_matched', (SELECT count(*) FROM live_rag_forced_candidate c JOIN live_rag_exact e USING (id)),
+    'forced_recall_at_k', CASE WHEN (SELECT count(*) FROM live_rag_exact) = 0 THEN NULL
+        ELSE (SELECT count(*)::float8 FROM live_rag_forced_candidate c JOIN live_rag_exact e USING (id))
+             / (SELECT count(*) FROM live_rag_exact) END,
+    'forced_underfill', GREATEST(0, :'k'::integer - (SELECT count(*) FROM live_rag_forced_candidate)),
     'hybrid_exact_count', (SELECT count(*) FROM live_rag_hybrid_exact),
     'hybrid_candidate_count', (SELECT count(*) FROM live_rag_hybrid_candidate),
     'hybrid_matched', (SELECT count(*) FROM live_rag_hybrid_candidate c JOIN live_rag_hybrid_exact e USING (id)),

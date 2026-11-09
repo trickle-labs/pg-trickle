@@ -9,7 +9,7 @@ def output(exact, planner, eligibility):
     for name, plan in (("EXACT", exact), ("PLANNER", planner), ("ELIGIBILITY", eligibility),
                        ("HYBRID_EXACT", exact), ("HYBRID_PLANNER", planner)):
         sections.append(f"LIVE_RAG_{name}_PLAN_BEGIN\n{json.dumps(plan)}\nLIVE_RAG_{name}_PLAN_END")
-    sections.append('LIVE_RAG_METRICS={"recall_at_k":0.5}')
+    sections.append('LIVE_RAG_METRICS={"recall_at_k":0.5,"forced_candidate_count":1,"forced_matched":1,"forced_recall_at_k":0.5,"forced_underfill":9}')
     return "\n".join(sections) + "\n"
 
 
@@ -33,6 +33,10 @@ class RecallTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["recall_at_k"], 0.5)
         self.assertFalse(result["planner_used_ann_index"])
         self.assertTrue(result["forced_plan_used_ann_index"])
+        self.assertEqual(result["metrics"]["forced_recall_at_k"], 0.5)
+        self.assertEqual(result["metrics"]["forced_underfill"], 9)
+        with self.assertRaisesRegex(ValueError, "missing forced-path"):
+            measure.parse_output(output(exact, exact, index).replace('"forced_underfill":9', '"other":9'), "application_current")
         with self.assertRaisesRegex(ValueError, "exact baseline"):
             measure.parse_output(output(index, exact, index), "application_current")
         hybrid_index = output(exact, exact, index).replace(

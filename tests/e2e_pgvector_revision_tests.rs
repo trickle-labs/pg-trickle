@@ -379,6 +379,10 @@ async fn test_live_rag_baselines_recheck_revisions_and_converge() {
         assert_eq!(report["metrics"]["candidate_count"], 1);
         assert_eq!(report["metrics"]["recall_at_k"], 1.0);
         assert_eq!(report["metrics"]["underfill"], 1);
+        assert_eq!(report["metrics"]["forced_candidate_count"], 1);
+        assert_eq!(report["metrics"]["forced_matched"], 1);
+        assert_eq!(report["metrics"]["forced_recall_at_k"], 1.0);
+        assert_eq!(report["metrics"]["forced_underfill"], 1);
         assert_eq!(report["metrics"]["hybrid_exact_count"], 1);
         assert_eq!(report["metrics"]["hybrid_candidate_count"], 1);
         assert_eq!(report["metrics"]["hybrid_recall_at_10"], 1.0);

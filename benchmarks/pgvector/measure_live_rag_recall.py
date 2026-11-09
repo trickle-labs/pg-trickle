@@ -63,6 +63,8 @@ def parse_output(output: str, corpus: str) -> dict:
     if len(lines) != 1:
         raise ValueError("missing or duplicate recall metrics")
     metrics = json.loads(lines[0])
+    if not {"forced_candidate_count", "forced_matched", "forced_recall_at_k", "forced_underfill"} <= metrics.keys():
+        raise ValueError("missing forced-path recall metrics")
     if uses_index(plans["exact"]) or uses_index(plans["hybrid_exact"]):
         raise ValueError("exact baseline used an index scan")
     index = CORPORA[corpus]
@@ -113,7 +115,7 @@ def main() -> None:
         report.update({"corpus": args.corpus, "dimensions": args.dimensions,
                        "candidate_commit": args.candidate_commit, "package_sha256": args.package_sha256,
                        "identity_source": "operator-declared; installed payload not attested by this script",
-                       "notes": "Plans run separately from candidate materialization in the same snapshot. Hybrid recall compares the fixed top-10 fusion of 20 vector and 20 lexical candidates against the same fusion with exact vector candidates. Boundary ties make ID-based recall ambiguous. Guard joins and planner choice affect timings."})
+                       "notes": "Plans run separately from candidate materialization in the same snapshot. Forced-path recall uses enable_seqscan=off and is ANN recall only when forced_plan_used_ann_index is true. Hybrid recall compares the fixed top-10 fusion of 20 vector and 20 lexical candidates against the same fusion with exact vector candidates. Boundary ties make ID-based recall ambiguous. Guard joins and planner choice affect timings."})
         print(json.dumps(report, sort_keys=True))
     except (ValueError, KeyError, json.JSONDecodeError) as error:
         parser.error(str(error))
