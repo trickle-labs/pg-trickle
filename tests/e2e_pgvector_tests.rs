@@ -687,7 +687,29 @@ async fn test_ann_supervisor_reconnects_after_database_restart() {
     })
     .await
     .expect("supervisor did not process a request before restart");
-    db.pool.close().await;
+    db.execute(
+        "CREATE INDEX ann_reconnect_active_idx ON ann_reconnect_st USING hnsw (v vector_l2_ops)",
+    )
+    .await;
+    let mut blocker = db.pool.begin().await.expect("begin restart barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("inspect restart barrier");
+    sqlx::query("LOCK TABLE ann_reconnect_st IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold restart barrier");
+    let active: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_reconnect_st'::regclass::oid, 'ann_reconnect_active_idx'::regclass::oid)").await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_catalog.pg_blocking_pids(pid)) AND query LIKE 'REINDEX INDEX CONCURRENTLY%')")
+                .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect blocked rebuild before restart");
+            if blocked { break; }
+            assert!(child.try_wait().expect("inspect supervisor").is_none());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.expect("supervisor rebuild did not reach restart barrier");
     let stopped = tokio::process::Command::new("docker")
         .args(["stop", "--time", "0", db.container_id()])
         .output()
@@ -698,6 +720,8 @@ async fn test_ann_supervisor_reconnects_after_database_restart() {
         "{}",
         String::from_utf8_lossy(&stopped.stderr)
     );
+    drop(blocker);
+    db.pool.close().await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
         child
@@ -731,6 +755,40 @@ async fn test_ann_supervisor_reconnects_after_database_restart() {
         .next()
         .expect("port");
     write_service(port).expect("update connection service after Docker remaps port");
+    let interrupted: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+            .bind(active)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect interrupted request after restart");
+    assert_eq!(interrupted["state"], "INTERRUPTED");
+    assert!(interrupted["next_eligible_at"].is_string());
+    sqlx::query("UPDATE pgtrickle.pgt_ann_maintenance_claims SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE request_id = $1")
+        .bind(active).execute(&db.pool).await.expect("expire restart retry cooldown");
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let status: serde_json::Value =
+                sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)")
+                    .bind(active)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect automatic restart retry");
+            if status["state"] == "SUCCEEDED" {
+                break;
+            }
+            assert!(
+                child
+                    .try_wait()
+                    .expect("inspect supervisor after restart")
+                    .is_none()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("supervisor did not retry interrupted request after restart");
+    let active_valid: bool = db.query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='ann_reconnect_active_idx'::regclass").await;
+    assert!(active_valid, "retried index must be valid");
     let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_reconnect_st'::regclass::oid, 'ann_reconnect_idx'::regclass::oid)").await;
     tokio::time::timeout(Duration::from_secs(45), async {
         loop {
