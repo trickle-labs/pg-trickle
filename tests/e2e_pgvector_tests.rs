@@ -123,7 +123,12 @@ async fn test_ann_supervisor_processes_authorized_request() {
     .await;
     db.execute("CREATE INDEX ann_supervisor_idx ON ann_supervisor_stream USING hnsw (embedding vector_l2_ops)").await;
     let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_supervisor_stream'::regclass::oid, 'ann_supervisor_idx'::regclass::oid)").await;
-    db.execute("CREATE ROLE ann_supervisor_operator LOGIN PASSWORD 'ann-test-only'; GRANT USAGE ON SCHEMA pgtrickle, public TO ann_supervisor_operator; GRANT SELECT, MAINTAIN ON ann_supervisor_stream TO ann_supervisor_operator; GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer), pgtrickle.ann_maintenance_request(bigint), pgtrickle.claim_ann_maintenance(bigint), pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO ann_supervisor_operator").await;
+    db.execute("CREATE ROLE ann_supervisor_operator LOGIN PASSWORD 'ann-test-only'; GRANT USAGE ON SCHEMA pgtrickle, public TO ann_supervisor_operator; GRANT SELECT ON ann_supervisor_stream TO ann_supervisor_operator; GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer), pgtrickle.ann_maintenance_request(bigint), pgtrickle.claim_ann_maintenance(bigint), pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO ann_supervisor_operator").await;
+    let private: bool = db.query_scalar("SELECT NOT has_table_privilege('ann_supervisor_operator', 'pgtrickle.pgt_ann_maintenance_requests', 'SELECT')").await;
+    assert!(
+        private,
+        "the supervisor must not require direct queue access"
+    );
     let database: String = db.query_scalar("SELECT current_database()::text").await;
     let port = db
         .connection_string()
@@ -152,6 +157,25 @@ async fn test_ann_supervisor_processes_authorized_request() {
         .kill_on_drop(true)
         .spawn()
         .expect("start ANN supervisor");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        child
+            .try_wait()
+            .expect("inspect supervisor process")
+            .is_none()
+    );
+    let before_grant: String =
+        sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)->>'state'")
+            .bind(request)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect unauthorized request");
+    assert_eq!(
+        before_grant, "REQUESTED",
+        "worker must not claim without MAINTAIN"
+    );
+    db.execute("GRANT MAINTAIN ON ann_supervisor_stream TO ann_supervisor_operator")
+        .await;
     tokio::time::timeout(Duration::from_secs(45), async {
         loop {
             let state: String =
@@ -176,7 +200,18 @@ async fn test_ann_supervisor_processes_authorized_request() {
     })
     .await
     .expect("supervisor did not complete the request");
-    child.kill().await.expect("stop supervisor");
+    let pid = child.id().expect("supervisor PID");
+    let signal = tokio::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .await
+        .expect("signal supervisor");
+    assert!(signal.success(), "signal supervisor");
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("supervisor did not stop")
+        .expect("wait for supervisor");
+    assert!(status.success(), "supervisor did not shut down cleanly");
     db.assert_st_matches_query(
         "ann_supervisor_stream",
         "SELECT id, embedding FROM ann_supervisor_source",
