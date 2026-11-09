@@ -1821,9 +1821,24 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
 
 #[tokio::test]
 async fn test_centroid_randomized_refresh_churn_matches_native_avg() {
+    run_centroid_randomized_refresh_churn(160).await;
+}
+
+#[tokio::test]
+#[ignore = "long-running numerical qualification; run explicitly"]
+async fn test_centroid_long_running_drift_matches_native_avg() {
+    run_centroid_randomized_refresh_churn(2000).await;
+}
+
+async fn run_centroid_randomized_refresh_churn(steps: usize) {
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
     let mut conn = db.pool.acquire().await.expect("acquire churn session");
+    let versions: (String, String, String) = sqlx::query_as("SELECT version(), (SELECT extversion FROM pg_extension WHERE extname = 'vector'), (SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle')")
+        .fetch_one(&mut *conn).await.expect("inspect centroid test versions");
+    if let Ok(expected) = std::env::var("PGVECTOR_EXPECTED_VERSION") {
+        assert_eq!(versions.1, expected, "unexpected pgvector version");
+    }
     for sql in [
         "SET pg_trickle.enable_vector_agg = on",
         "SET pg_trickle.enable_centroid_state = on",
@@ -1846,7 +1861,10 @@ async fn test_centroid_randomized_refresh_churn_matches_native_avg() {
 
     let mut seed = 0x7a13_9465_u64;
     let mut algebraic = 0;
-    for step in 0..160 {
+    let mut max_error: f64 = 0.0;
+    let mut max_bound_fraction: f64 = 0.0;
+    let mut checkpoints = Vec::new();
+    for step in 0..steps {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         let id = if step == 0 {
             999
@@ -1885,6 +1903,19 @@ async fn test_centroid_randomized_refresh_churn_matches_native_avg() {
                  WHERE abs(n.v[i]::float8 - a.v[i]::float8) > 1e-5 + 1e-6 * abs(n.v[i]::float8)))"
         ).fetch_one(&mut *conn).await.expect("compare churn with native AVG");
         assert!(matches, "centroid diverged from native AVG at step {step}");
+        let (error, bound_fraction): (f64, f64) = sqlx::query_as(
+            "WITH native AS (SELECT grp, avg(v)::real[] AS v FROM centroid_churn_src GROUP BY grp), \
+             actual AS (SELECT grp, centroid::real[] AS v FROM centroid_churn_st), \
+             components AS (SELECT abs(n.v[i]::float8 - a.v[i]::float8) AS error, \
+             1e-5 + 1e-6 * abs(n.v[i]::float8) AS bound FROM native n JOIN actual a USING (grp) \
+             CROSS JOIN generate_series(1, 3) i WHERE n.v IS NOT NULL AND a.v IS NOT NULL) \
+             SELECT COALESCE(max(error), 0)::float8, COALESCE(max(error / bound), 0)::float8 FROM components"
+        ).fetch_one(&mut *conn).await.expect("measure centroid drift");
+        max_error = max_error.max(error);
+        max_bound_fraction = max_bound_fraction.max(bound_fraction);
+        if (step + 1) % 100 == 0 || step + 1 == steps {
+            checkpoints.push(serde_json::json!({"refreshes": step + 1, "max_absolute_error": max_error, "max_bound_fraction": max_bound_fraction}));
+        }
         let used_algebraic: bool = sqlx::query_scalar("SELECT merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
             .fetch_one(&mut *conn).await.expect("inspect churn strategy");
         let bound: bool = sqlx::query_scalar("SELECT COALESCE(c.baseline_frontier = t.frontier, false) FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass")
@@ -1898,6 +1929,10 @@ async fn test_centroid_randomized_refresh_churn_matches_native_avg() {
     assert!(
         algebraic >= 100,
         "only {algebraic} refreshes used algebraic state"
+    );
+    println!(
+        "CENTROID_DRIFT_JSON={}",
+        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"seed":"0x7a139465","refresh_calls":steps,"latest_history_algebraic_observations":algebraic,"absolute_tolerance":1e-5,"relative_tolerance":1e-6,"checkpoints":checkpoints})
     );
 }
 

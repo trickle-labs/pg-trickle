@@ -1,0 +1,45 @@
+name: Centroid numerical drift
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-pgrx
+      - name: Build candidate image
+        run: |
+          ./tests/build_e2e_image.sh
+          ./tests/build_e2e_pgvector_image.sh 0.8.7
+      - name: Run seeded centroid churn
+        env:
+          PGS_E2E_IMAGE: pg_trickle_e2e_pgvector:0.8.7
+          PGVECTOR_EXPECTED_VERSION: "0.8.7"
+        run: |
+          mkdir -p target/centroid-drift
+          git rev-parse HEAD > target/centroid-drift/environment.txt
+          uname -a >> target/centroid-drift/environment.txt
+          lscpu >> target/centroid-drift/environment.txt
+          docker version >> target/centroid-drift/environment.txt
+          docker image inspect "$PGS_E2E_IMAGE" --format '{{.Id}} {{.Os}}/{{.Architecture}}' >> target/centroid-drift/environment.txt
+          docker run --rm --entrypoint sh "$PGS_E2E_IMAGE" -c 'sha256sum /usr/lib/postgresql/18/lib/pg_trickle.so /usr/share/postgresql/18/extension/pg_trickle*' > target/centroid-drift/package-files.sha256
+          ./scripts/run_e2e_tests.sh --retries 0 --test e2e_pgvector_tests \
+            --run-ignored ignored-only --no-capture \
+            -E 'test(test_centroid_long_running_drift_matches_native_avg)' \
+            2>&1 | tee target/centroid-drift/output.txt
+          sed -n 's/^CENTROID_DRIFT_JSON=//p' target/centroid-drift/output.txt > target/centroid-drift/drift.json
+          test -s target/centroid-drift/drift.json
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: centroid-drift
+          retention-days: 90
+          if-no-files-found: error
+          path: target/centroid-drift/
