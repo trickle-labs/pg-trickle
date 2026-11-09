@@ -9337,6 +9337,90 @@ async fn test_pgvector_halfvec_avg_values_correct() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+async fn test_distance_subscription_duplicate_predicates_with_user_trigger() {
+    use sqlx::postgres::PgListener;
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    setup_pgvector(&db).await;
+    db.execute("CREATE TABLE duplicate_alert_src (id int PRIMARY KEY, embedding vector(2))")
+        .await;
+    db.execute("INSERT INTO duplicate_alert_src VALUES (1, '[1,0]')")
+        .await;
+    db.create_st(
+        "duplicate_alert_st",
+        "SELECT id, embedding FROM duplicate_alert_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE FUNCTION duplicate_alert_noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$").await;
+    db.execute("CREATE TRIGGER duplicate_alert_trigger AFTER INSERT OR UPDATE OR DELETE ON duplicate_alert_st FOR EACH ROW EXECUTE FUNCTION duplicate_alert_noop()").await;
+
+    let mut listener = PgListener::connect_with(&db.pool)
+        .await
+        .expect("connect listener");
+    for channel in [
+        "duplicate_alert_a",
+        "duplicate_alert_b",
+        "duplicate_alert_other",
+        "duplicate_alert_wide",
+    ] {
+        listener.listen(channel).await.expect("listen for alert");
+    }
+    db.execute("SELECT pgtrickle.subscribe_distance('duplicate_alert_st', 'duplicate_alert_wide', 'embedding', '[1,0]', '<->', 2.0)").await;
+    for (channel, pivot) in [
+        ("duplicate_alert_a", "[1,0]"),
+        ("duplicate_alert_b", "[1,0]"),
+        ("duplicate_alert_other", "[0,1]"),
+    ] {
+        sqlx::query("SELECT pgtrickle.subscribe_distance('duplicate_alert_st', $1, 'embedding', $2, '<->', 0.5)")
+            .bind(channel).bind(pivot).execute(&db.pool).await.expect("subscribe");
+    }
+    let mut tx = db.pool.begin().await.expect("begin refresh");
+    sqlx::query("UPDATE duplicate_alert_src SET embedding='[0,1]' WHERE id=1")
+        .execute(&mut *tx)
+        .await
+        .expect("write crossing");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('duplicate_alert_st')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh crossing");
+    let bounded: bool = sqlx::query_scalar("SELECT to_regclass('pg_temp.__pgt_distance_ids_' || pgt_id) IS NOT NULL FROM pgtrickle.pgt_stream_tables WHERE pgt_relid='duplicate_alert_st'::regclass")
+        .fetch_one(&mut *tx).await.expect("inspect snapshot path");
+    assert!(!bounded, "user trigger must use the full snapshot path");
+    tx.commit().await.expect("commit crossing");
+    let mut received = std::collections::HashMap::new();
+    for _ in 0..3 {
+        let event = tokio::time::timeout(Duration::from_secs(10), listener.recv())
+            .await
+            .expect("notification timeout")
+            .expect("receive notification");
+        let payload: serde_json::Value =
+            serde_json::from_str(event.payload()).expect("parse notification");
+        assert!(
+            received
+                .insert(
+                    event.channel().to_string(),
+                    (payload["entered"].as_i64(), payload["exited"].as_i64())
+                )
+                .is_none()
+        );
+    }
+    assert_eq!(received.get("duplicate_alert_a"), Some(&(Some(0), Some(1))));
+    assert_eq!(received.get("duplicate_alert_b"), Some(&(Some(0), Some(1))));
+    assert_eq!(
+        received.get("duplicate_alert_other"),
+        Some(&(Some(1), Some(0)))
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), listener.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn test_distance_subscription_concurrent_commit_and_rollback() {
     exercise_concurrent_distance_notifications(100, 10).await;
 }
