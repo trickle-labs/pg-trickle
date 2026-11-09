@@ -25,8 +25,8 @@ tenant and planner settings with a different synthetic query vector, showed
 the no-index exact baseline repeatedly scanning the application corpus. It is
 a diagnostic plan, not a completed latency sample.
 
-The updated benchmark temporarily disables nested loops only for exact
-baselines, then restores the caller's setting for normal and forced-index
+The updated benchmark sets `enable_nestloop=off` only for exact baselines,
+then restores the caller's setting for normal and forced-index
 plans. On the populated 100,000-row database, the revised query completed
 with [nested loops initially enabled](hash-join-check.json.gz) and
 [initially disabled](hash-join-original-off.json.gz). Both exact and hybrid

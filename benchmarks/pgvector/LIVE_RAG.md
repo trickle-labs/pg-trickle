@@ -106,8 +106,8 @@ candidates; `--k` changes only the vector-only measurement. Their exact and
 normal-planner plans are included, with ANN index use reported separately.
 The forced plan is diagnostic and is not used to compute recall. The candidate
 and plan queries execute separately in the same repeatable-read snapshot.
-Exact-baseline queries disable index scans and nested loops to avoid repeatedly
-scanning the corpus; the original nested-loop setting is restored before the
+Exact-baseline queries disable index scans and discourage nested loops to avoid
+repeatedly scanning the corpus; the original nested-loop setting is restored before the
 normal-planner and forced-index queries.
 Boundary ties can make ID-based recall ambiguous.
 The supplied commit and digest are declarations: this script does not attest
