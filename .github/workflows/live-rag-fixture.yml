@@ -1,0 +1,39 @@
+name: Live RAG fixture
+
+on:
+  pull_request:
+    paths:
+      - 'benchmarks/pgvector/**'
+      - 'tests/e2e_pgvector_revision_tests.rs'
+      - 'tests/fixtures/pgvector_revision_pipeline.sql'
+      - '.github/workflows/live-rag-fixture.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixture:
+    name: Live RAG fixture (${{ matrix.dimension }} dimensions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        dimension: [384, 1536]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-pgrx
+      - name: Check fake provider
+        run: python3 -m unittest discover -s benchmarks/pgvector -p 'test_*.py'
+      - name: Build packaged pgvector image
+        run: |
+          ./tests/build_e2e_image.sh
+          ./tests/build_e2e_pgvector_image.sh 0.8.7
+      - name: Check corpus convergence and stale-result exclusion
+        env:
+          PGS_E2E_IMAGE: pg_trickle_e2e_pgvector:0.8.7
+          LIVE_RAG_TEST_DIM: ${{ matrix.dimension }}
+        run: |
+          ./scripts/run_e2e_tests.sh --retries 0 --test e2e_pgvector_revision_tests \
+            -E 'test(test_live_rag_baselines_recheck_revisions_and_converge) | test(test_live_rag_wide_setup_and_worker_match) | test(test_live_rag_authorized_views_enforce_tenant_and_visibility)'
