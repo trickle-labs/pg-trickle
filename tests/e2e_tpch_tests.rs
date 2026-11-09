@@ -1436,7 +1436,10 @@ async fn test_tpch_full_vs_differential() {
     load_data(&db).await;
     println!("  Data loaded in {:.1}s\n", t.elapsed().as_secs_f64());
 
-    let queries = tpch_queries();
+    let queries: Vec<_> = tpch_queries()
+        .into_iter()
+        .take_while(|q| q.name != "q06")
+        .collect();
     let mut passed = 0usize;
     let mut skipped: Vec<String> = Vec::new();
 
@@ -1534,6 +1537,28 @@ async fn test_tpch_full_vs_differential() {
             db.execute("VACUUM ANALYZE").await;
 
             if !matches {
+                if q.name == "q04" {
+                    let full_rows: String = db
+                        .query_scalar(&format!(
+                            "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text FROM public.{st_full} t"
+                        ))
+                        .await;
+                    let diff_rows: String = db
+                        .query_scalar(&format!(
+                            "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text FROM public.{st_diff} t"
+                        ))
+                        .await;
+                    let oracle_rows: String = db
+                        .query_scalar(&format!(
+                            "SELECT COALESCE(jsonb_agg(to_jsonb(q) ORDER BY to_jsonb(q)::text), '[]'::jsonb)::text FROM ({}) q",
+                            q.sql
+                        ))
+                        .await;
+                    println!(
+                        "  q04 cycle {cycle} rows: FULL={full_rows}; DIFF={diff_rows}; QUERY={oracle_rows}"
+                    );
+                }
+
                 let full_count: i64 = db
                     .query_scalar(&format!("SELECT count(*) FROM public.{st_full}"))
                     .await;

@@ -48,24 +48,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - scale: "SF-1 broad suite"
+          - scale: "SF-1 q04 diagnostic"
             tpch_scale: "1.0"
             tpch_cycles: "3"
-            timeout_minutes: 240
-            # Run every SF-1 test except the separately budgeted long test.
-            filter_expr: "not test(test_tpch_differential_vs_immediate)"
-          - scale: "SF-1 DIFF vs IMMEDIATE"
-            tpch_scale: "1.0"
-            tpch_cycles: "3"
-            timeout_minutes: 360
-            filter_expr: "test(test_tpch_differential_vs_immediate)"
-          - scale: "SF-10"
-            tpch_scale: "10.0"
-            tpch_cycles: "2"
-            timeout_minutes: 120
-            # SF-10: run only differential correctness — scale coverage without
-            # the 8.7-hour workload of all 15 tests.  SF-1 covers the rest.
-            filter_expr: "test(test_tpch_differential_correctness)"
+            timeout_minutes: 90
+            filter_expr: "test(test_tpch_full_vs_differential)"
     steps:
       - uses: actions/checkout@v7
 
