@@ -831,7 +831,8 @@
         "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
         "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components",
         "e2e_pgvector_tests::test_ann_request_listing_filters_privileges_and_pages",
-        "e2e_pgvector_tests::test_ann_supervisor_processes_authorized_request"
+        "e2e_pgvector_tests::test_ann_supervisor_processes_authorized_request",
+        "e2e_pgvector_tests::test_ann_supervisor_reconnects_after_database_restart"
       ],
       "workload": "candidate package with pgvector 0.8.1: corpus, index plans, notifications, authorization, revision safety and concurrent maintenance"
     },
@@ -875,7 +876,8 @@
         "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
         "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components",
         "e2e_pgvector_tests::test_ann_request_listing_filters_privileges_and_pages",
-        "e2e_pgvector_tests::test_ann_supervisor_processes_authorized_request"
+        "e2e_pgvector_tests::test_ann_supervisor_processes_authorized_request",
+        "e2e_pgvector_tests::test_ann_supervisor_reconnects_after_database_restart"
       ],
       "workload": "candidate package with pgvector 0.8.7: corpus, index plans, notifications, authorization, revision safety and concurrent maintenance"
     },

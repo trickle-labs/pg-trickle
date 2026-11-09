@@ -79,6 +79,7 @@ class RetirementContractTests(unittest.TestCase):
                 "test_distance_subscription_concurrent_commit_and_rollback",
                 "test_distance_subscription_duplicate_predicates_with_user_trigger",
                 "test_ann_worker_retries_after_restart_during_concurrent_reindex",
+                "test_ann_supervisor_reconnects_after_database_restart",
             ):
                 broken = copy.deepcopy(contract)
                 cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
