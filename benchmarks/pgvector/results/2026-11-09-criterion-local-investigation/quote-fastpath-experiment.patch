@@ -1,0 +1,18 @@
+diff --git a/src/dvm/diff.rs b/src/dvm/diff.rs
+index f63e428b..e2fad94b 100644
+--- a/src/dvm/diff.rs
++++ b/src/dvm/diff.rs
+@@ -1265,6 +1265,13 @@ impl DiffContext {
+ 
+ /// Helper: quote a SQL identifier.
+ pub fn quote_ident(name: &str) -> String {
++    if !name.as_bytes().contains(&b'"') {
++        let mut out = String::with_capacity(name.len() + 2);
++        out.push('"');
++        out.push_str(name);
++        out.push('"');
++        return out;
++    }
+     let mut out =
+         String::with_capacity(name.len() + 2 + name.bytes().filter(|&byte| byte == b'"').count());
+     push_quoted_ident(&mut out, name);
