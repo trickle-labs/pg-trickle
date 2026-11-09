@@ -225,6 +225,15 @@ async fn test_live_rag_mixed_benchmark_guards_churn_before_refresh() {
 
 #[tokio::test]
 async fn test_live_rag_converges_after_writes_during_maintenance() {
+    exercise_live_rag_concurrent_write(false).await;
+}
+
+#[tokio::test]
+async fn test_live_rag_converges_after_writes_during_active_maintenance() {
+    exercise_live_rag_concurrent_write(true).await;
+}
+
+async fn exercise_live_rag_concurrent_write(active_maintenance: bool) {
     use std::time::Duration;
 
     let db = E2eDb::new().await.with_extension().await;
@@ -238,22 +247,29 @@ async fn test_live_rag_converges_after_writes_during_maintenance() {
         "INSERT INTO embedding_demo.documents(id, body) VALUES (1, 'A'), (2, 'B'), (3, 'C')",
         "INSERT INTO live_rag.access(document_id, tenant_id) VALUES (1, 10), (2, 10), (3, 10)",
         "INSERT INTO embedding_demo.results(document_id, incarnation, revision, chunk_version, model_version, embedding) SELECT id, incarnation, revision, chunk_version, 'model-v1', '[1,0,0]'::vector FROM embedding_demo.documents",
+        "CREATE FUNCTION live_rag.test_maintenance_barrier() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(13961396); IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$",
     ]).await;
-    for (table, maintenance, lock) in [
+    for (table, maintenance, lock, create_trigger, drop_trigger) in [
         (
             "application",
             "SELECT live_rag.sync_application(ARRAY[1,2,3]::bigint[])",
             "LOCK TABLE live_rag.application IN ACCESS EXCLUSIVE MODE",
+            "CREATE TRIGGER rag_barrier BEFORE INSERT OR UPDATE OR DELETE ON live_rag.application FOR EACH ROW EXECUTE FUNCTION live_rag.test_maintenance_barrier()",
+            "DROP TRIGGER rag_barrier ON live_rag.application",
         ),
         (
             "periodic_full",
             "SELECT live_rag.recompute_full()",
             "LOCK TABLE live_rag.periodic_full IN ACCESS EXCLUSIVE MODE",
+            "CREATE TRIGGER rag_barrier BEFORE INSERT OR UPDATE OR DELETE ON live_rag.periodic_full FOR EACH ROW EXECUTE FUNCTION live_rag.test_maintenance_barrier()",
+            "DROP TRIGGER rag_barrier ON live_rag.periodic_full",
         ),
         (
             "differential",
             "SELECT pgtrickle.refresh_stream_table('live_rag.differential')",
             "LOCK TABLE live_rag.differential IN ACCESS EXCLUSIVE MODE",
+            "CREATE TRIGGER rag_barrier BEFORE INSERT OR UPDATE OR DELETE ON live_rag.differential FOR EACH ROW EXECUTE FUNCTION live_rag.test_maintenance_barrier()",
+            "DROP TRIGGER rag_barrier ON live_rag.differential",
         ),
     ] {
         db.execute("UPDATE live_rag.access SET visible=true").await;
@@ -265,17 +281,34 @@ async fn test_live_rag_converges_after_writes_during_maintenance() {
         db.execute("UPDATE live_rag.access SET visible=false WHERE document_id=1")
             .await;
 
+        if active_maintenance {
+            db.execute(create_trigger).await;
+        }
+
         let mut blocker = db.pool.begin().await.expect("begin maintenance barrier");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
             .await
             .expect("inspect barrier");
-        sqlx::query(lock)
-            .execute(&mut *blocker)
-            .await
-            .expect("hold maintenance barrier");
+        sqlx::query(if active_maintenance {
+            "SELECT pg_advisory_xact_lock(13961396)"
+        } else {
+            lock
+        })
+        .execute(&mut *blocker)
+        .await
+        .expect("hold maintenance barrier");
         let pool = db.pool.clone();
-        let task = tokio::spawn(async move { sqlx::query(maintenance).execute(&pool).await });
+        let task = tokio::spawn(async move {
+            let mut conn = pool.acquire().await?;
+            sqlx::query("SET pg_trickle.refresh_strategy = 'differential'")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query("SET pg_trickle.differential_max_change_ratio = 0")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(maintenance).execute(&mut *conn).await
+        });
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_blocking_pids(pid)))")
@@ -297,6 +330,15 @@ async fn test_live_rag_converges_after_writes_during_maintenance() {
             .expect("maintenance timed out")
             .expect("join maintenance")
             .expect("complete maintenance");
+
+        if table == "differential" {
+            let incremental: bool = db.query_scalar("SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1").await;
+            assert!(incremental, "maintenance must remain differential");
+        }
+
+        if active_maintenance {
+            db.execute(drop_trigger).await;
+        }
 
         for view in [
             "application_current",

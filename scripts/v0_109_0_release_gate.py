@@ -65,6 +65,7 @@ PGVECTOR_CASES = {
     "e2e_pgvector_hybrid_tests::test_tenant_tutorial_sql_runs_with_isolated_reader",
     "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
     "e2e_pgvector_revision_tests::test_live_rag_converges_after_writes_during_maintenance",
+    "e2e_pgvector_revision_tests::test_live_rag_converges_after_writes_during_active_maintenance",
 }
 
 PGVECTOR_UPGRADE_CASES = {
