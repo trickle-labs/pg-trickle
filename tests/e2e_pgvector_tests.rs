@@ -5456,7 +5456,7 @@ async fn test_ann_maintenance_coverage_rolls_back_and_keeps_unknown_unknown() {
 #[tokio::test]
 async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
     for method in ["hnsw", "ivfflat"] {
-        assert_ann_worker_allows_reads_and_refresh(method, 5, false).await;
+        assert_ann_worker_allows_reads_and_refresh(method, 5, false, false).await;
     }
 }
 
@@ -5464,11 +5464,24 @@ async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
 #[ignore = "sustained concurrent ANN maintenance qualification"]
 async fn test_ann_worker_sustains_reads_and_refresh_during_concurrent_reindex() {
     for method in ["hnsw", "ivfflat"] {
-        assert_ann_worker_allows_reads_and_refresh(method, 120, true).await;
+        assert_ann_worker_allows_reads_and_refresh(method, 120, true, false).await;
     }
 }
 
-async fn assert_ann_worker_allows_reads_and_refresh(method: &str, writes: i32, paced: bool) {
+#[tokio::test]
+#[ignore = "sustained supervisor qualification"]
+async fn test_ann_supervisor_sustains_reads_and_refresh_during_concurrent_reindex() {
+    for method in ["hnsw", "ivfflat"] {
+        assert_ann_worker_allows_reads_and_refresh(method, 120, true, true).await;
+    }
+}
+
+async fn assert_ann_worker_allows_reads_and_refresh(
+    method: &str,
+    writes: i32,
+    paced: bool,
+    supervised: bool,
+) {
     use std::time::Duration;
 
     let db = E2eDb::new().await.with_extension().await;
@@ -5503,7 +5516,35 @@ async fn assert_ann_worker_allows_reads_and_refresh(method: &str, writes: i32, p
         .await
         .expect("establish old snapshot");
     let database: String = db.query_scalar("SELECT current_database()::text").await;
-    let mut command = ann_worker_command(&db, &database, "postgres", request, "120s");
+    let mut command = if supervised {
+        let port = db
+            .connection_string()
+            .split('@')
+            .nth(1)
+            .expect("connection authority")
+            .split('/')
+            .next()
+            .expect("host and port")
+            .rsplit(':')
+            .next()
+            .expect("port");
+        let mut command = tokio::process::Command::new("python3");
+        command
+            .arg(ann_operator_root().join("scripts/ann_maintenance_supervisor.py"))
+            .env_remove("PGSERVICE")
+            .env("PGHOST", "127.0.0.1")
+            .env("PGPORT", port)
+            .env("PGDATABASE", &database)
+            .env("PGUSER", "postgres")
+            .env("PGPASSWORD", "postgres")
+            .env("PGSSLMODE", "disable")
+            .env("PGAPPNAME", "pgtrickle_ann_worker")
+            .env("PGS_ANN_POLL_SECONDS", "1")
+            .env("PGS_ANN_LOCK_TIMEOUT", "120s");
+        command
+    } else {
+        ann_worker_command(&db, &database, "postgres", request, "120s")
+    };
     command.kill_on_drop(true);
     let mut worker = command.spawn().expect("start worker");
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -5551,6 +5592,37 @@ async fn assert_ann_worker_allows_reads_and_refresh(method: &str, writes: i32, p
         );
     }
     old_snapshot.commit().await.expect("release old snapshot");
+    if supervised {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let state: String =
+                    sqlx::query_scalar("SELECT pgtrickle.ann_maintenance_request($1)->>'state'")
+                        .bind(request)
+                        .fetch_one(&db.pool)
+                        .await
+                        .expect("inspect supervised request");
+                if state == "SUCCEEDED" {
+                    break;
+                }
+                assert_ne!(state, "FAILED", "supervised rebuild failed");
+                assert!(
+                    worker.try_wait().expect("inspect supervisor").is_none(),
+                    "supervisor exited early"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("supervisor did not complete the rebuild");
+        let pid = worker.id().expect("supervisor pid").to_string();
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-TERM", &pid])
+                .status()
+                .expect("stop supervisor")
+                .success()
+        );
+    }
     let output = tokio::time::timeout(Duration::from_secs(30), worker.wait_with_output())
         .await
         .expect("worker did not finish")
