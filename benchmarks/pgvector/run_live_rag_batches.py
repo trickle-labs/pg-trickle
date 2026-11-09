@@ -195,7 +195,8 @@ SELECT json_build_object('postgres', current_setting('server_version'),
             else:
                 output, seconds = timed(sql, **variables)
                 reads = []
-            maintenance[name] = {"duration_seconds": seconds, "eligible_to_searchable_seconds": time.monotonic() - eligible,
+            searchable_at = client_window[1] if args.concurrent_readers else time.monotonic()
+            maintenance[name] = {"duration_seconds": seconds, "eligible_to_searchable_seconds": searchable_at - eligible,
                                  **json_result(output)}
             if args.concurrent_readers:
                 begin, end = maintenance[name]["server_started"], maintenance[name]["server_finished"]

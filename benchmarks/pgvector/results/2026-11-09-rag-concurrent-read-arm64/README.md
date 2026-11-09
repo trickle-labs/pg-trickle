@@ -41,6 +41,7 @@ writers, not a capacity or general speedup claim. They use administrative
 views and an earlier package, not the final release candidate. Attestation
 checks on-disk files and endpoint identity, not already mapped library bytes.
 The run used an uncommitted harness based on `dde2adcf`; afterward, timeout
-cleanup was tightened and the same summary calculation was factored into a
-unit-tested helper. The final helper was tested separately, but this result
-was not rerun after those source-only changes.
+cleanup was tightened, the summary calculation was factored into a unit-tested
+helper, and the eligible-to-searchable endpoint was corrected to exclude
+reader-drain time. Do not use that interval from this run. The maintenance
+durations and reported read intervals above do not include that drain time.
