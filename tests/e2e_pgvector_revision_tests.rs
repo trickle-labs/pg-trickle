@@ -224,6 +224,111 @@ async fn test_live_rag_mixed_benchmark_guards_churn_before_refresh() {
 }
 
 #[tokio::test]
+async fn test_live_rag_converges_after_writes_during_maintenance() {
+    use std::time::Duration;
+
+    let db = E2eDb::new().await.with_extension().await;
+    let setup = run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", "3"]).await;
+    assert!(
+        setup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    db.execute_seq(&[
+        "INSERT INTO embedding_demo.documents(id, body) VALUES (1, 'A'), (2, 'B'), (3, 'C')",
+        "INSERT INTO live_rag.access(document_id, tenant_id) VALUES (1, 10), (2, 10), (3, 10)",
+        "INSERT INTO embedding_demo.results(document_id, incarnation, revision, chunk_version, model_version, embedding) SELECT id, incarnation, revision, chunk_version, 'model-v1', '[1,0,0]'::vector FROM embedding_demo.documents",
+    ]).await;
+    for (table, maintenance, lock) in [
+        (
+            "application",
+            "SELECT live_rag.sync_application(ARRAY[1,2,3]::bigint[])",
+            "LOCK TABLE live_rag.application IN ACCESS EXCLUSIVE MODE",
+        ),
+        (
+            "periodic_full",
+            "SELECT live_rag.recompute_full()",
+            "LOCK TABLE live_rag.periodic_full IN ACCESS EXCLUSIVE MODE",
+        ),
+        (
+            "differential",
+            "SELECT pgtrickle.refresh_stream_table('live_rag.differential')",
+            "LOCK TABLE live_rag.differential IN ACCESS EXCLUSIVE MODE",
+        ),
+    ] {
+        db.execute("UPDATE live_rag.access SET visible=true").await;
+        db.execute("SELECT live_rag.sync_application(ARRAY[1,2,3]::bigint[])")
+            .await;
+        db.execute("SELECT live_rag.recompute_full()").await;
+        db.execute("SELECT pgtrickle.refresh_stream_table('live_rag.differential')")
+            .await;
+        db.execute("UPDATE live_rag.access SET visible=false WHERE document_id=1")
+            .await;
+
+        let mut blocker = db.pool.begin().await.expect("begin maintenance barrier");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("inspect barrier");
+        sqlx::query(lock)
+            .execute(&mut *blocker)
+            .await
+            .expect("hold maintenance barrier");
+        let pool = db.pool.clone();
+        let task = tokio::spawn(async move { sqlx::query(maintenance).execute(&pool).await });
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_blocking_pids(pid)))")
+                    .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect blocked maintenance");
+                if blocked { break; }
+                assert!(!task.is_finished(), "{table} maintenance finished before the barrier");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }).await.expect("maintenance did not reach the barrier");
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            db.execute("UPDATE live_rag.access SET visible=false WHERE document_id=2"),
+        )
+        .await
+        .expect("source write did not commit during maintenance");
+        blocker.commit().await.expect("release maintenance barrier");
+        tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("maintenance timed out")
+            .expect("join maintenance")
+            .expect("complete maintenance");
+
+        for view in [
+            "application_current",
+            "periodic_full_current",
+            "differential_current",
+        ] {
+            let leaked: i64 = db
+                .query_scalar(&format!(
+                    "SELECT count(*) FROM live_rag.{view} WHERE id IN (1,2)"
+                ))
+                .await;
+            assert_eq!(
+                leaked, 0,
+                "{view} exposed a hidden document during {table} maintenance"
+            );
+        }
+        db.execute("SELECT live_rag.sync_application(ARRAY[1,2,3]::bigint[])")
+            .await;
+        db.execute("SELECT live_rag.recompute_full()").await;
+        db.execute("SELECT pgtrickle.refresh_stream_table('live_rag.differential')")
+            .await;
+        for corpus in ["application", "periodic_full", "differential"] {
+            db.assert_st_matches_query(
+                &format!("live_rag.{corpus}"),
+                "SELECT * FROM live_rag.truth",
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_live_rag_baselines_recheck_revisions_and_converge() {
     let db = E2eDb::new().await.with_extension().await;
     let database: String = db.query_scalar("SELECT current_database()::text").await;
