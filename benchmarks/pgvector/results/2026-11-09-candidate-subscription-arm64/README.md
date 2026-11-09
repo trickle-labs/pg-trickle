@@ -77,8 +77,20 @@ commit and rollback, membership crossing, and typed-predicate authorization
 tests passed on both [pgvector 0.8.1](optimized-tests-081.log) and
 [0.8.7](optimized-tests-087.log). The new test checks separate notifications
 for duplicate predicates, a different pivot, and no event for a wider threshold.
-Distinct predicates still require separate evaluation; full snapshots and
-scans can remain expensive, and broader mixed-pivot workloads are outstanding.
+Distinct predicates still require separate evaluation. A further
+[mixed-pivot run](mixed-pivots.json), using benchmark source later committed as
+`7b8d26465c3819651e4fc77257bc27ef22337e64`, passed 12 cases with 10,000 and
+100,000 rows, 1, 10 and 100 subscriptions, up to 100 nearby distinct pivots,
+both statistics states and two rounds. With 100,000 rows and 100 distinct
+pivots, the first unanalyzed round executed 100 membership queries and returned
+10,200,000 sequential stream tuples. Mean refresh times were 24.7 seconds
+unanalyzed and 32.3 seconds analyzed. The run overlapped a development-image
+build; these instrumented timings are not controlled performance estimates.
+[Representative plans](mixed-pivots-plans.json) are retained, and the complete
+local nested-plan log has SHA-256
+`666ed890f65813c3160eaf12f25b3ab2d22d8c870583eeee54b2a48ec2c8e645`.
+Full snapshots and scans remain expensive for distinct predicates; broader
+mixed-pivot workloads remain outstanding.
 
 Without the trigger, subscribed cases used a bounded one-row identity snapshot;
 their [plans](bounded-plans.json) show index probes for the affected row. The
