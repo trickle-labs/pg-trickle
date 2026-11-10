@@ -225,23 +225,34 @@ async fn test_live_rag_mixed_benchmark_guards_churn_before_refresh() {
 
 #[tokio::test]
 async fn test_live_rag_converges_after_writes_during_maintenance() {
-    exercise_live_rag_concurrent_write(false, false).await;
+    exercise_live_rag_concurrent_write(false, false, false).await;
 }
 
 #[tokio::test]
 async fn test_live_rag_converges_after_writes_during_active_maintenance() {
-    exercise_live_rag_concurrent_write(true, false).await;
+    exercise_live_rag_concurrent_write(true, false, false).await;
 }
 
 #[tokio::test]
 async fn test_live_rag_recovers_after_maintenance_cancellation() {
-    exercise_live_rag_concurrent_write(true, true).await;
+    exercise_live_rag_concurrent_write(true, true, false).await;
 }
 
-async fn exercise_live_rag_concurrent_write(active_maintenance: bool, cancel: bool) {
+#[tokio::test]
+async fn test_live_rag_recovers_after_database_crash_during_maintenance() {
+    exercise_live_rag_concurrent_write(true, false, true).await;
+}
+
+async fn exercise_live_rag_concurrent_write(active_maintenance: bool, cancel: bool, restart: bool) {
     use std::time::Duration;
 
-    let db = E2eDb::new().await.with_extension().await;
+    let mut db = if restart {
+        E2eDb::new_dedicated().await
+    } else {
+        E2eDb::new().await
+    }
+    .with_extension()
+    .await;
     let setup = run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", "3"]).await;
     assert!(
         setup.status.success(),
@@ -283,7 +294,7 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool, cancel: bo
         db.execute("SELECT live_rag.recompute_full()").await;
         db.execute("SELECT pgtrickle.refresh_stream_table('live_rag.differential')")
             .await;
-        let before_cancel: Option<String> = if cancel {
+        let before_cancel: Option<String> = if cancel || restart {
             Some(db.query_scalar(&format!("SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY id), '[]'::jsonb)::text FROM live_rag.{table} c")).await)
         } else {
             None
@@ -335,7 +346,41 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool, cancel: bo
         .await
         .expect("source write did not commit during maintenance");
         let recovery_started = std::time::Instant::now();
-        let result = if cancel {
+        let result = if restart {
+            let killed = tokio::process::Command::new("docker")
+                .args(["kill", "--signal", "KILL", db.container_id()])
+                .output()
+                .await
+                .expect("kill PostgreSQL container");
+            assert!(
+                killed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&killed.stderr)
+            );
+            let result = tokio::time::timeout(Duration::from_secs(30), task)
+                .await
+                .expect("crashed maintenance did not stop")
+                .expect("join crashed maintenance");
+            drop(blocker);
+            db.pool.close().await;
+            let started = tokio::process::Command::new("docker")
+                .args(["start", db.container_id()])
+                .output()
+                .await
+                .expect("restart PostgreSQL container");
+            assert!(
+                started.status.success(),
+                "{}",
+                String::from_utf8_lossy(&started.stderr)
+            );
+            db.pool = db.reconnect_after_restart().await;
+            let hidden: i64 = db.query_scalar("SELECT count(*) FROM live_rag.access WHERE document_id IN (1,2) AND NOT visible").await;
+            assert_eq!(
+                hidden, 2,
+                "committed visibility changes must survive restart"
+            );
+            result
+        } else if cancel {
             let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
                 .bind(maintenance_pid)
                 .fetch_one(&db.pool)
@@ -358,13 +403,15 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool, cancel: bo
                 .expect("maintenance timed out")
                 .expect("join maintenance")
         };
-        if cancel {
-            let error = result.expect_err("cancelled maintenance unexpectedly committed");
-            assert_eq!(
-                error.as_database_error().and_then(|e| e.code()).as_deref(),
-                Some("57014"),
-                "{error}"
-            );
+        if cancel || restart {
+            let error = result.expect_err("interrupted maintenance unexpectedly committed");
+            if cancel {
+                assert_eq!(
+                    error.as_database_error().and_then(|e| e.code()).as_deref(),
+                    Some("57014"),
+                    "{error}"
+                );
+            }
             let after: String = db.query_scalar(&format!("SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY id), '[]'::jsonb)::text FROM live_rag.{table} c")).await;
             assert_eq!(
                 Some(after),
@@ -375,7 +422,7 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool, cancel: bo
             result.expect("complete maintenance");
         }
 
-        if table == "differential" && !cancel {
+        if table == "differential" && !cancel && !restart {
             let incremental: bool = db.query_scalar("SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1").await;
             assert!(incremental, "maintenance must remain differential");
         }
@@ -413,9 +460,9 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool, cancel: bo
         .expect("retry differential maintenance");
         let retried: bool = db.query_scalar("SELECT h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1").await;
         assert!(retried, "reconciliation must remain differential");
-        if cancel {
+        if cancel || restart {
             eprintln!(
-                "{table} cancellation to completed reconciliation: {:.3}s",
+                "{table} interruption to completed reconciliation: {:.3}s",
                 recovery_started.elapsed().as_secs_f64()
             );
         }

@@ -67,6 +67,7 @@ PGVECTOR_CASES = {
     "e2e_pgvector_revision_tests::test_live_rag_converges_after_writes_during_maintenance",
     "e2e_pgvector_revision_tests::test_live_rag_converges_after_writes_during_active_maintenance",
     "e2e_pgvector_revision_tests::test_live_rag_recovers_after_maintenance_cancellation",
+    "e2e_pgvector_revision_tests::test_live_rag_recovers_after_database_crash_during_maintenance",
 }
 
 PGVECTOR_UPGRADE_CASES = {
