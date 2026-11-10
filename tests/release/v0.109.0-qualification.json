@@ -492,7 +492,7 @@
         "scripts/run_release_criterion.py"
       ],
       "measurement_file": "qualification-logs/raw/criterion.json",
-      "workload": "same-runner v0.108.0 and candidate Criterion microbenchmarks"
+      "workload": "same-runner v0.108.3 and candidate Criterion microbenchmarks"
     },
     {
       "id": "database-workloads",
