@@ -595,12 +595,41 @@ async fn test_live_rag_paced_writes_and_tenant_reads_during_refresh() {
 #[tokio::test]
 #[ignore = "measures unblocked concurrent workload overlap"]
 async fn test_live_rag_unblocked_writes_and_reads_during_refresh() {
+    let rows: i64 = std::env::var("PGT_RAG_LOAD_ROWS")
+        .unwrap_or_else(|_| "1000".into())
+        .parse()
+        .expect("PGT_RAG_LOAD_ROWS must be an integer");
+    let dimensions: i32 = std::env::var("PGT_RAG_LOAD_DIMENSIONS")
+        .unwrap_or_else(|_| "384".into())
+        .parse()
+        .expect("PGT_RAG_LOAD_DIMENSIONS must be an integer");
+    let changes: i64 = std::env::var("PGT_RAG_LOAD_CHANGES")
+        .unwrap_or_else(|_| "100".into())
+        .parse()
+        .expect("PGT_RAG_LOAD_CHANGES must be an integer");
+    assert!(
+        (1000..=1_000_000).contains(&rows),
+        "rows must be between 1000 and 1000000"
+    );
+    assert!(
+        [384, 768, 1536].contains(&dimensions),
+        "dimensions must be 384, 768 or 1536"
+    );
+    assert!(
+        (1..=1000).contains(&changes) && changes < rows * 9 / 10,
+        "changes must be 1–1000 and stay within tenant 10"
+    );
     for approach in ["application", "periodic_full", "differential"] {
-        exercise_live_rag_unblocked_workload(approach).await;
+        exercise_live_rag_unblocked_workload(approach, rows, dimensions, changes).await;
     }
 }
 
-async fn exercise_live_rag_unblocked_workload(approach: &'static str) {
+async fn exercise_live_rag_unblocked_workload(
+    approach: &'static str,
+    rows: i64,
+    dimensions: i32,
+    changes: i64,
+) {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicI64, Ordering},
@@ -629,7 +658,10 @@ async fn exercise_live_rag_unblocked_workload(approach: &'static str) {
         _ => panic!("unknown test approach"),
     };
     let db = E2eDb::new().await.with_extension().await;
-    let setup = run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", "384"]).await;
+    let setup_started = std::time::Instant::now();
+    let dimension_arg = dimensions.to_string();
+    let setup =
+        run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", &dimension_arg]).await;
     assert!(
         setup.status.success(),
         "{}",
@@ -647,11 +679,12 @@ async fn exercise_live_rag_unblocked_workload(approach: &'static str) {
         .query_scalar("SELECT count(*) FROM pgtrickle.pgt_stream_tables")
         .await;
     assert_eq!(stream_count, i64::from(approach == "differential"));
-    db.execute_seq(&[
-        "INSERT INTO embedding_demo.documents(id, body) SELECT n, 'document ' || n FROM generate_series(1,1000) n",
-        "INSERT INTO live_rag.access(document_id, tenant_id) SELECT id, CASE WHEN id <= 900 THEN 10 ELSE 20 END FROM embedding_demo.documents",
-        "INSERT INTO embedding_demo.results(document_id, incarnation, revision, chunk_version, model_version, embedding) SELECT id, incarnation, revision, chunk_version, 'model-v1', array_fill(0.5::real, ARRAY[384])::vector FROM embedding_demo.documents",
-    ]).await;
+    sqlx::query("INSERT INTO embedding_demo.documents(id, body) SELECT n, 'document ' || n FROM generate_series(1,$1::bigint) n")
+        .bind(rows).execute(&db.pool).await.expect("seed documents");
+    sqlx::query("INSERT INTO live_rag.access(document_id, tenant_id) SELECT id, CASE WHEN id <= $1::bigint * 9 / 10 THEN 10 ELSE 20 END FROM embedding_demo.documents")
+        .bind(rows).execute(&db.pool).await.expect("seed tenants");
+    sqlx::query("INSERT INTO embedding_demo.results(document_id, incarnation, revision, chunk_version, model_version, embedding) SELECT d.id, d.incarnation, d.revision, d.chunk_version, 'model-v1', ARRAY(SELECT ((((pg_catalog.hashint8(d.id * 8191 + i::bigint * 104729)::bigint & 2147483647) % 2001) - 1000)::real / 1000) FROM generate_series(1,$1::integer) i ORDER BY i)::vector FROM embedding_demo.documents d")
+        .bind(dimensions).execute(&db.pool).await.expect("seed varied embeddings");
     db.execute(initial).await;
     db.execute_seq(&[
         "VACUUM (ANALYZE) embedding_demo.documents",
@@ -682,6 +715,7 @@ async fn exercise_live_rag_unblocked_workload(approach: &'static str) {
     db.execute(&format!("CREATE FUNCTION live_rag.measure_refresh() RETURNS TABLE(started float8, finished float8) LANGUAGE plpgsql AS $$ BEGIN started := extract(epoch FROM clock_timestamp()); PERFORM {maintenance}; finished := extract(epoch FROM clock_timestamp()); RETURN NEXT; END $$")).await;
     db.execute("UPDATE live_rag.access SET visible=false WHERE document_id=1")
         .await;
+    let setup_elapsed = setup_started.elapsed();
 
     let workload_started = std::time::Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
@@ -691,7 +725,7 @@ async fn exercise_live_rag_unblocked_workload(approach: &'static str) {
     let writer = tokio::spawn(async move {
         let mut samples = Vec::new();
         let mut client_samples = Vec::new();
-        for id in 2_i64..=101 {
+        for id in 2_i64..=changes + 1 {
             let client_start = workload_started.elapsed().as_secs_f64();
             let mut tx = writer_pool.begin().await.expect("begin visibility change");
             let interval: (f64, f64) = sqlx::query_as("UPDATE live_rag.access SET visible=false WHERE document_id=$1 RETURNING extract(epoch FROM statement_timestamp())::float8, extract(epoch FROM clock_timestamp())::float8")
@@ -731,7 +765,7 @@ async fn exercise_live_rag_unblocked_workload(approach: &'static str) {
             client_guards.push((guard_start, workload_started.elapsed().as_secs_f64()));
             guards.push((guard.0, guard.1));
             let read_start = workload_started.elapsed().as_secs_f64();
-            let sample: (f64, f64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!("WITH candidates AS MATERIALIZED (SELECT id FROM live_rag.{view} ORDER BY embedding::vector(384) <=> array_fill(0.5::real, ARRAY[384])::vector LIMIT 10) SELECT extract(epoch FROM statement_timestamp())::float8, extract(epoch FROM clock_timestamp())::float8, count(*) FROM candidates")))
+            let sample: (f64, f64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!("WITH candidates AS MATERIALIZED (SELECT id FROM live_rag.{view} ORDER BY embedding::vector({dimensions}) <=> array_fill(0.5::real, ARRAY[{dimensions}])::vector LIMIT 10) SELECT extract(epoch FROM statement_timestamp())::float8, extract(epoch FROM clock_timestamp())::float8, count(*) FROM candidates")))
                 .fetch_one(&mut *conn).await.expect("run tenant vector read");
             assert!(sample.2 <= 10);
             client_samples.push((read_start, workload_started.elapsed().as_secs_f64()));
@@ -828,7 +862,8 @@ async fn exercise_live_rag_unblocked_workload(approach: &'static str) {
     )
     .await;
     eprintln!(
-        "{approach} unblocked workload: {} writes ({} overlapping), {} guards ({} overlapping), {} reads ({} overlapping), {} maintenance calls, {:.3}s",
+        "{approach} unblocked workload: rows={rows} dimensions={dimensions} setup={:.3}s, {} writes ({} overlapping), {} guards ({} overlapping), {} reads ({} overlapping), {} maintenance calls, {:.3}s",
+        setup_elapsed.as_secs_f64(),
         writes.len(),
         overlapping_writes,
         guards.len(),
@@ -869,7 +904,7 @@ async fn exercise_live_rag_unblocked_workload(approach: &'static str) {
     }
     eprintln!(
         "unblocked_samples={}",
-        serde_json::json!({"approach": approach, "writes": writes, "guards": guards, "reads": reads, "refreshes": refreshes, "client_writes": client_writes, "client_guards": client_guards, "client_reads": client_reads, "client_refreshes": client_refreshes})
+        serde_json::json!({"approach": approach, "rows": rows, "dimensions": dimensions, "changes": changes, "writes": writes, "guards": guards, "reads": reads, "refreshes": refreshes, "client_writes": client_writes, "client_guards": client_guards, "client_reads": client_reads, "client_refreshes": client_refreshes})
     );
 }
 
