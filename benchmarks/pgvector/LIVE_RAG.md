@@ -187,6 +187,27 @@ not collect
 CPU or lock metrics, or provide a representative decision table. Record the
 environment and run repeated, isolated scenarios before drawing conclusions.
 
+For an opt-in concurrent three-approach exercise, run the ignored
+`test_live_rag_unblocked_writes_and_reads_during_refresh` E2E test. It uses
+fresh databases, one paced visibility writer, a restricted tenant reader and
+a 200 ms target maintenance cadence. `PGT_RAG_LOAD_ROWS` selects 1,000 to
+1,000,000 documents (default 1,000), `PGT_RAG_LOAD_DIMENSIONS` selects 384,
+768 or 1536 (default 384), and `PGT_RAG_LOAD_CHANGES` selects 1 to 1,000
+ordered changes (default 100), subject to the test's tenant-size bound.
+For example, after preparing the E2E image and Docker environment:
+
+```sh
+PGT_RAG_LOAD_ROWS=10000 PGT_RAG_LOAD_DIMENSIONS=384 \
+  cargo test --features pg18 --test e2e_pgvector_revision_tests \
+  test_live_rag_unblocked_writes_and_reads_during_refresh -- --ignored --nocapture
+```
+
+The input uses deterministic varied vectors and ordered visibility changes.
+Application batching uses a watermark valid for that ordered trace only.
+The test records client and server intervals, not ANN recall or full RAG
+freshness, and runs the three databases serially. Larger sizes require suitable
+memory, disk and execution time; the accepted limit is not a measured capacity.
+
 This is a functional fixture, not the finished #1396 benchmark. The measurement
 script substitutes the configured vector dimensions into the hybrid query;
 the standalone SQL example above remains three-dimensional. It does not yet
