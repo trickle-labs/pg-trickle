@@ -477,6 +477,122 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool, cancel: bo
 }
 
 #[tokio::test]
+async fn test_live_rag_paced_writes_and_tenant_reads_during_refresh() {
+    use std::time::{Duration, Instant};
+
+    let db = E2eDb::new().await.with_extension().await;
+    let setup = run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", "384"]).await;
+    assert!(
+        setup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    db.execute_seq(&[
+        "INSERT INTO embedding_demo.documents(id, body) SELECT n, 'document ' || n FROM generate_series(1,1000) n",
+        "INSERT INTO live_rag.access(document_id, tenant_id) SELECT id, CASE WHEN id <= 900 THEN 10 ELSE 20 END FROM embedding_demo.documents",
+        "INSERT INTO embedding_demo.results(document_id, incarnation, revision, chunk_version, model_version, embedding) SELECT id, incarnation, revision, chunk_version, 'model-v1', array_fill(0.5::real, ARRAY[384])::vector FROM embedding_demo.documents",
+        "SELECT pgtrickle.refresh_stream_table('live_rag.differential')",
+        "CREATE ROLE live_rag_load_reader NOLOGIN",
+        "INSERT INTO live_rag.tenant_readers SELECT oid, 10 FROM pg_roles WHERE rolname='live_rag_load_reader'",
+        "GRANT USAGE ON SCHEMA live_rag TO live_rag_load_reader",
+        "GRANT SELECT ON live_rag.differential_authorized TO live_rag_load_reader",
+        "CREATE FUNCTION live_rag.load_barrier() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(13961397); IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$",
+        "CREATE TRIGGER rag_load_barrier BEFORE INSERT OR UPDATE OR DELETE ON live_rag.differential FOR EACH ROW EXECUTE FUNCTION live_rag.load_barrier()",
+        "UPDATE live_rag.access SET visible=false WHERE document_id=1",
+    ]).await;
+    let mut blocker = db.pool.begin().await.expect("begin refresh barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("inspect barrier");
+    sqlx::query("SELECT pg_advisory_xact_lock(13961397)")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold barrier");
+    let pool = db.pool.clone();
+    let refresh = tokio::spawn(async move {
+        let mut conn = pool.acquire().await?;
+        sqlx::query("SET pg_trickle.refresh_strategy='differential'")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("SET pg_trickle.differential_max_change_ratio=0")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('live_rag.differential')")
+            .execute(&mut *conn)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1 = ANY(pg_blocking_pids(pid)))")
+                .bind(blocker_pid).fetch_one(&db.pool).await.expect("inspect refresh barrier");
+            if blocked { break; }
+            assert!(!refresh.is_finished(), "refresh finished before row barrier");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.expect("refresh did not reach row barrier");
+
+    let mut reader = db.pool.acquire().await.expect("acquire tenant reader");
+    sqlx::query("SET ROLE live_rag_load_reader")
+        .execute(&mut *reader)
+        .await
+        .expect("assume reader role");
+    let started = Instant::now();
+    for id in 2_i64..=101 {
+        let updated = sqlx::query("UPDATE live_rag.access SET visible=false WHERE document_id=$1")
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .expect("commit visibility change");
+        assert_eq!(updated.rows_affected(), 1);
+        let leaked: i64 = sqlx::query_scalar("SELECT count(*) FROM live_rag.differential_authorized WHERE tenant_id <> 10 OR id <= $1")
+            .bind(id).fetch_one(&mut *reader).await.expect("check tenant and visibility");
+        assert_eq!(leaked, 0, "hidden or foreign document became visible");
+        let _: Vec<i64> = sqlx::query_scalar("SELECT id FROM live_rag.differential_authorized ORDER BY embedding::vector(384) <=> array_fill(0.5::real, ARRAY[384])::vector LIMIT 10")
+            .fetch_all(&mut *reader).await.expect("run tenant vector read");
+        assert!(
+            !refresh.is_finished(),
+            "refresh must remain at the barrier during load"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_secs(5));
+    sqlx::query("RESET ROLE")
+        .execute(&mut *reader)
+        .await
+        .expect("reset reader role");
+    drop(reader);
+    blocker.commit().await.expect("release refresh barrier");
+    tokio::time::timeout(Duration::from_secs(30), refresh)
+        .await
+        .expect("refresh timed out")
+        .expect("join refresh")
+        .expect("complete refresh");
+    let incremental: bool = db.query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert!(incremental, "loaded refresh must remain differential");
+    db.execute("DROP TRIGGER rag_load_barrier ON live_rag.differential")
+        .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy='differential'",
+            "SET pg_trickle.differential_max_change_ratio=0",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('live_rag.differential')",
+    )
+    .await
+    .expect("reconcile concurrent writes");
+    let retried: bool = db.query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert!(retried, "reconciliation must remain differential");
+    db.assert_st_matches_query("live_rag.differential", "SELECT * FROM live_rag.truth")
+        .await;
+    eprintln!(
+        "100 committed visibility changes and tenant reads during refresh: {:.3}s",
+        elapsed.as_secs_f64()
+    );
+}
+
+#[tokio::test]
 async fn test_live_rag_baselines_recheck_revisions_and_converge() {
     let db = E2eDb::new().await.with_extension().await;
     let database: String = db.query_scalar("SELECT current_database()::text").await;
