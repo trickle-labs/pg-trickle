@@ -2951,7 +2951,12 @@ async fn test_centroid_cost_based_full_fallback_rebinds_state() {
     }
     let fell_back: bool = sqlx::query_scalar("SELECT h.action = 'FULL' AND h.was_full_fallback AND h.refresh_reason = 'COST_MODEL_PREFERRED_FULL' AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_cost_st'::regclass")
         .fetch_one(&mut *conn).await.expect("inspect cost-based fallback");
-    assert!(fell_back, "cost-based FULL must bind refreshed state");
+    let details: String = sqlx::query_scalar("SELECT jsonb_build_object('history', to_jsonb(h), 'centroid_state', to_jsonb(c), 'frontier', t.frontier, 'cost_summary', (SELECT to_jsonb(s) FROM pgtrickle.pgt_cost_model_summary s WHERE s.pgt_id = t.pgt_id))::text FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_cost_st'::regclass")
+        .fetch_one(&mut *conn).await.expect("inspect cost-based fallback details");
+    assert!(
+        fell_back,
+        "cost-based FULL must bind refreshed state: {details}"
+    );
     for statement in [
         "SET pg_trickle.refresh_strategy = 'differential'",
         "UPDATE centroid_cost_src SET v = '[7,8]' WHERE id = 1",
