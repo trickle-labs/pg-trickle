@@ -595,12 +595,39 @@ async fn test_live_rag_paced_writes_and_tenant_reads_during_refresh() {
 #[tokio::test]
 #[ignore = "measures unblocked concurrent workload overlap"]
 async fn test_live_rag_unblocked_writes_and_reads_during_refresh() {
+    for approach in ["application", "periodic_full", "differential"] {
+        exercise_live_rag_unblocked_workload(approach).await;
+    }
+}
+
+async fn exercise_live_rag_unblocked_workload(approach: &'static str) {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicI64, Ordering},
     };
     use std::time::Duration;
 
+    let (initial, maintenance, view, role) = match approach {
+        "application" => (
+            "SELECT live_rag.sync_application(ARRAY(SELECT id FROM live_rag.truth)::bigint[])",
+            "live_rag.test_app_maintenance()",
+            "application_authorized",
+            "live_rag_stream_reader_app",
+        ),
+        "periodic_full" => (
+            "SELECT live_rag.recompute_full()",
+            "live_rag.recompute_full()",
+            "periodic_full_authorized",
+            "live_rag_stream_reader_full",
+        ),
+        "differential" => (
+            "SELECT pgtrickle.refresh_stream_table('live_rag.differential')",
+            "pgtrickle.refresh_stream_table('live_rag.differential')",
+            "differential_authorized",
+            "live_rag_stream_reader_diff",
+        ),
+        _ => panic!("unknown test approach"),
+    };
     let db = E2eDb::new().await.with_extension().await;
     let setup = run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", "384"]).await;
     assert!(
@@ -608,18 +635,53 @@ async fn test_live_rag_unblocked_writes_and_reads_during_refresh() {
         "{}",
         String::from_utf8_lossy(&setup.stderr)
     );
+    db.execute("SELECT pgtrickle.drop_stream_table('embedding_demo.corpus_v1', true)")
+        .await;
+    db.execute("SELECT pgtrickle.drop_stream_table('embedding_demo.corpus_v2', true)")
+        .await;
+    if approach != "differential" {
+        db.execute("SELECT pgtrickle.drop_stream_table('live_rag.differential', true)")
+            .await;
+    }
+    let stream_count: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.pgt_stream_tables")
+        .await;
+    assert_eq!(stream_count, i64::from(approach == "differential"));
     db.execute_seq(&[
         "INSERT INTO embedding_demo.documents(id, body) SELECT n, 'document ' || n FROM generate_series(1,1000) n",
         "INSERT INTO live_rag.access(document_id, tenant_id) SELECT id, CASE WHEN id <= 900 THEN 10 ELSE 20 END FROM embedding_demo.documents",
         "INSERT INTO embedding_demo.results(document_id, incarnation, revision, chunk_version, model_version, embedding) SELECT id, incarnation, revision, chunk_version, 'model-v1', array_fill(0.5::real, ARRAY[384])::vector FROM embedding_demo.documents",
-        "SELECT pgtrickle.refresh_stream_table('live_rag.differential')",
-        "CREATE ROLE live_rag_stream_reader NOLOGIN",
-        "INSERT INTO live_rag.tenant_readers SELECT oid, 10 FROM pg_roles WHERE rolname='live_rag_stream_reader'",
-        "GRANT USAGE ON SCHEMA live_rag TO live_rag_stream_reader",
-        "GRANT SELECT ON live_rag.differential_authorized TO live_rag_stream_reader",
-        "CREATE FUNCTION live_rag.measure_refresh() RETURNS TABLE(started float8, finished float8) LANGUAGE plpgsql AS $$ BEGIN started := extract(epoch FROM clock_timestamp()); PERFORM pgtrickle.refresh_stream_table('live_rag.differential'); finished := extract(epoch FROM clock_timestamp()); RETURN NEXT; END $$",
-        "UPDATE live_rag.access SET visible=false WHERE document_id=1",
     ]).await;
+    db.execute(initial).await;
+    db.execute_seq(&[
+        "VACUUM (ANALYZE) embedding_demo.documents",
+        "VACUUM (ANALYZE) embedding_demo.results",
+        "VACUUM (ANALYZE) live_rag.access",
+    ])
+    .await;
+    db.execute(&format!("VACUUM (ANALYZE) live_rag.{approach}"))
+        .await;
+    if approach == "application" {
+        // This watermark is safe only for the ordered single-writer trace below.
+        db.execute_seq(&[
+            "CREATE TABLE live_rag.test_app_progress(last_id bigint NOT NULL)",
+            "INSERT INTO live_rag.test_app_progress VALUES (0)",
+            "CREATE FUNCTION live_rag.test_app_maintenance() RETURNS void LANGUAGE plpgsql AS $$ DECLARE prior bigint; newest bigint; BEGIN SELECT last_id INTO prior FROM live_rag.test_app_progress FOR UPDATE; SELECT COALESCE(max(document_id), prior) INTO newest FROM live_rag.access WHERE NOT visible AND document_id > prior; PERFORM live_rag.sync_application(ARRAY(SELECT document_id FROM live_rag.access WHERE NOT visible AND document_id > prior AND document_id <= newest)::bigint[]); UPDATE live_rag.test_app_progress SET last_id=newest; END $$",
+        ]).await;
+    }
+    // The approach, role, view and maintenance SQL are selected from the fixed test cases above.
+    db.execute(&format!("CREATE ROLE {role} NOLOGIN")).await;
+    db.execute(&format!(
+        "INSERT INTO live_rag.tenant_readers SELECT oid, 10 FROM pg_roles WHERE rolname='{role}'"
+    ))
+    .await;
+    db.execute(&format!("GRANT USAGE ON SCHEMA live_rag TO {role}"))
+        .await;
+    db.execute(&format!("GRANT SELECT ON live_rag.{view} TO {role}"))
+        .await;
+    db.execute(&format!("CREATE FUNCTION live_rag.measure_refresh() RETURNS TABLE(started float8, finished float8) LANGUAGE plpgsql AS $$ BEGIN started := extract(epoch FROM clock_timestamp()); PERFORM {maintenance}; finished := extract(epoch FROM clock_timestamp()); RETURN NEXT; END $$")).await;
+    db.execute("UPDATE live_rag.access SET visible=false WHERE document_id=1")
+        .await;
 
     let workload_started = std::time::Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
@@ -628,35 +690,51 @@ async fn test_live_rag_unblocked_writes_and_reads_during_refresh() {
     let writer_progress = committed.clone();
     let writer = tokio::spawn(async move {
         let mut samples = Vec::new();
+        let mut client_samples = Vec::new();
         for id in 2_i64..=101 {
+            let client_start = workload_started.elapsed().as_secs_f64();
             let mut tx = writer_pool.begin().await.expect("begin visibility change");
             let interval: (f64, f64) = sqlx::query_as("UPDATE live_rag.access SET visible=false WHERE document_id=$1 RETURNING extract(epoch FROM statement_timestamp())::float8, extract(epoch FROM clock_timestamp())::float8")
                 .bind(id).fetch_one(&mut *tx).await.expect("update visibility");
             tx.commit().await.expect("commit visibility change");
+            client_samples.push((client_start, workload_started.elapsed().as_secs_f64()));
             samples.push(interval);
             writer_progress.store(id, Ordering::Release);
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        samples
+        (samples, client_samples)
     });
     let reader_pool = db.pool.clone();
     let reader_stop = stop.clone();
     let reader_progress = committed.clone();
     let reader = tokio::spawn(async move {
         let mut conn = reader_pool.acquire().await.expect("acquire tenant reader");
-        sqlx::query("SET ROLE live_rag_stream_reader")
+        sqlx::query(sqlx::AssertSqlSafe(format!("SET ROLE {role}")))
             .execute(&mut *conn)
             .await
             .expect("assume reader role");
         let mut samples = Vec::new();
+        let mut guards = Vec::new();
+        let mut client_samples = Vec::new();
+        let mut client_guards = Vec::new();
         while !reader_stop.load(Ordering::Acquire) {
             let hidden_through = reader_progress.load(Ordering::Acquire);
-            let leaked: i64 = sqlx::query_scalar("SELECT count(*) FROM live_rag.differential_authorized WHERE tenant_id <> 10 OR id <= $1")
-                .bind(hidden_through).fetch_one(&mut *conn).await.expect("check tenant and visibility");
-            assert_eq!(leaked, 0, "hidden or foreign document became visible");
-            let sample: (f64, f64, i64) = sqlx::query_as("WITH candidates AS MATERIALIZED (SELECT id FROM live_rag.differential_authorized ORDER BY embedding::vector(384) <=> array_fill(0.5::real, ARRAY[384])::vector LIMIT 10) SELECT extract(epoch FROM statement_timestamp())::float8, extract(epoch FROM clock_timestamp())::float8, count(*) FROM candidates")
+            let guard_start = workload_started.elapsed().as_secs_f64();
+            let guard: (f64, f64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT extract(epoch FROM statement_timestamp())::float8, extract(epoch FROM clock_timestamp())::float8, count(*) FROM live_rag.{view} WHERE tenant_id <> 10 OR id <= $1"
+            )))
+            .bind(hidden_through)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("check tenant and visibility");
+            assert_eq!(guard.2, 0, "hidden or foreign document became visible");
+            client_guards.push((guard_start, workload_started.elapsed().as_secs_f64()));
+            guards.push((guard.0, guard.1));
+            let read_start = workload_started.elapsed().as_secs_f64();
+            let sample: (f64, f64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!("WITH candidates AS MATERIALIZED (SELECT id FROM live_rag.{view} ORDER BY embedding::vector(384) <=> array_fill(0.5::real, ARRAY[384])::vector LIMIT 10) SELECT extract(epoch FROM statement_timestamp())::float8, extract(epoch FROM clock_timestamp())::float8, count(*) FROM candidates")))
                 .fetch_one(&mut *conn).await.expect("run tenant vector read");
             assert!(sample.2 <= 10);
+            client_samples.push((read_start, workload_started.elapsed().as_secs_f64()));
             samples.push((sample.0, sample.1));
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -664,7 +742,7 @@ async fn test_live_rag_unblocked_writes_and_reads_during_refresh() {
             .execute(&mut *conn)
             .await
             .expect("reset reader role");
-        samples
+        (guards, client_guards, samples, client_samples)
     });
 
     let mut conn = db.pool.acquire().await.expect("acquire refresh connection");
@@ -677,26 +755,36 @@ async fn test_live_rag_unblocked_writes_and_reads_during_refresh() {
         .await
         .expect("disable fallback ratio");
     let mut refreshes: Vec<(f64, f64)> = Vec::new();
-    while !writer.is_finished() && refreshes.len() < 200 {
+    let mut client_refreshes: Vec<(f64, f64)> = Vec::new();
+    let mut cadence = tokio::time::interval(Duration::from_millis(200));
+    cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    while !writer.is_finished() && refreshes.len() < 1000 {
+        cadence.tick().await;
+        if writer.is_finished() {
+            break;
+        }
+        let client_start = workload_started.elapsed().as_secs_f64();
         let interval: (f64, f64) =
             sqlx::query_as("SELECT started, finished FROM live_rag.measure_refresh()")
                 .fetch_one(&mut *conn)
                 .await
                 .expect("run unblocked refresh");
-        let incremental: bool = sqlx::query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1")
-            .fetch_one(&mut *conn).await.expect("inspect refresh history");
-        assert!(incremental, "refresh must remain differential");
+        client_refreshes.push((client_start, workload_started.elapsed().as_secs_f64()));
+        if approach == "differential" {
+            let incremental: bool = sqlx::query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1")
+                .fetch_one(&mut *conn).await.expect("inspect refresh history");
+            assert!(incremental, "refresh must remain differential");
+        }
         refreshes.push(interval);
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
         writer.is_finished(),
         "refresh safety limit reached before writer finished"
     );
-    let writes = writer.await.expect("join writer");
+    let (writes, client_writes) = writer.await.expect("join writer");
     let workload_elapsed = workload_started.elapsed();
     stop.store(true, Ordering::Release);
-    let reads = reader.await.expect("join reader");
+    let (guards, client_guards, reads, client_reads) = reader.await.expect("join reader");
     let overlaps = |samples: &[(f64, f64)]| {
         samples
             .iter()
@@ -709,36 +797,62 @@ async fn test_live_rag_unblocked_writes_and_reads_during_refresh() {
     };
     let overlapping_writes = overlaps(&writes);
     let overlapping_reads = overlaps(&reads);
+    let overlapping_guards = overlaps(&guards);
+    let client_overlaps = |samples: &[(f64, f64)]| {
+        samples
+            .iter()
+            .filter(|(start, end)| {
+                client_refreshes
+                    .iter()
+                    .any(|(begin, finish)| start < finish && end > begin)
+            })
+            .count()
+    };
     assert!(
-        overlapping_writes > 0 && overlapping_reads > 0,
-        "no measured server-time overlap: {} writes, {} reads, {} refreshes",
-        writes.len(),
-        reads.len(),
-        refreshes.len()
+        !writes.is_empty() && !reads.is_empty() && !refreshes.is_empty(),
+        "workload produced no samples"
     );
-    sqlx::query("SELECT pgtrickle.refresh_stream_table('live_rag.differential')")
+    sqlx::query(sqlx::AssertSqlSafe(format!("SELECT {maintenance}")))
         .execute(&mut *conn)
         .await
         .expect("reconcile remaining writes");
-    let reconciled: bool = sqlx::query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1")
-        .fetch_one(&mut *conn).await.expect("inspect reconciliation");
-    assert!(reconciled, "final reconciliation must remain differential");
+    if approach == "differential" {
+        let reconciled: bool = sqlx::query_scalar("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_schema='live_rag' AND s.pgt_name='differential' ORDER BY h.refresh_id DESC LIMIT 1")
+            .fetch_one(&mut *conn).await.expect("inspect reconciliation");
+        assert!(reconciled, "final reconciliation must remain differential");
+    }
     drop(conn);
-    db.assert_st_matches_query("live_rag.differential", "SELECT * FROM live_rag.truth")
-        .await;
+    db.assert_st_matches_query(
+        &format!("live_rag.{approach}"),
+        "SELECT * FROM live_rag.truth",
+    )
+    .await;
     eprintln!(
-        "unblocked workload: {} writes ({} overlapping), {} reads ({} overlapping), {} differential refreshes, {:.3}s",
+        "{approach} unblocked workload: {} writes ({} overlapping), {} guards ({} overlapping), {} reads ({} overlapping), {} maintenance calls, {:.3}s",
         writes.len(),
         overlapping_writes,
+        guards.len(),
+        overlapping_guards,
         reads.len(),
         overlapping_reads,
         refreshes.len(),
         workload_elapsed.as_secs_f64()
     );
+    eprintln!(
+        "{approach} client-window overlaps: {} writes, {} guards, {} reads",
+        client_overlaps(&client_writes),
+        client_overlaps(&client_guards),
+        client_overlaps(&client_reads)
+    );
     for (name, intervals) in [
         ("write statement", &writes),
+        ("guard read", &guards),
         ("vector read", &reads),
         ("refresh call", &refreshes),
+        ("write client", &client_writes),
+        ("guard client", &client_guards),
+        ("vector client", &client_reads),
+        ("maintenance client", &client_refreshes),
     ] {
         let mut durations: Vec<f64> = intervals
             .iter()
@@ -747,7 +861,7 @@ async fn test_live_rag_unblocked_writes_and_reads_during_refresh() {
         durations.sort_by(f64::total_cmp);
         let percentile = |n: usize| durations[(durations.len() * n).div_ceil(100) - 1];
         eprintln!(
-            "{name} server milliseconds: p50={:.3} p95={:.3} p99={:.3}",
+            "{name} milliseconds: p50={:.3} p95={:.3} p99={:.3}",
             percentile(50),
             percentile(95),
             percentile(99)
@@ -755,7 +869,7 @@ async fn test_live_rag_unblocked_writes_and_reads_during_refresh() {
     }
     eprintln!(
         "unblocked_samples={}",
-        serde_json::json!({"writes": writes, "reads": reads, "refreshes": refreshes})
+        serde_json::json!({"approach": approach, "writes": writes, "guards": guards, "reads": reads, "refreshes": refreshes, "client_writes": client_writes, "client_guards": client_guards, "client_reads": client_reads, "client_refreshes": client_refreshes})
     );
 }
 
