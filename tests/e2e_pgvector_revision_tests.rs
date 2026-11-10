@@ -667,6 +667,15 @@ async fn exercise_live_rag_unblocked_workload(
         "{}",
         String::from_utf8_lossy(&setup.stderr)
     );
+    let versions: (String, String, String) = sqlx::query_as("SELECT current_setting('server_version'), (SELECT extversion FROM pg_extension WHERE extname='vector'), (SELECT extversion FROM pg_extension WHERE extname='pg_trickle')")
+        .fetch_one(&db.pool).await.expect("inspect workload versions");
+    if let Ok(expected) = std::env::var("PGVECTOR_EXPECTED_VERSION") {
+        assert_eq!(versions.1, expected, "unexpected pgvector version");
+    }
+    eprintln!(
+        "{approach} versions: PostgreSQL {}, pgvector {}, pg_trickle {}",
+        versions.0, versions.1, versions.2
+    );
     db.execute("SELECT pgtrickle.drop_stream_table('embedding_demo.corpus_v1', true)")
         .await;
     db.execute("SELECT pgtrickle.drop_stream_table('embedding_demo.corpus_v2', true)")
@@ -686,6 +695,11 @@ async fn exercise_live_rag_unblocked_workload(
     sqlx::query("INSERT INTO embedding_demo.results(document_id, incarnation, revision, chunk_version, model_version, embedding) SELECT d.id, d.incarnation, d.revision, d.chunk_version, 'model-v1', ARRAY(SELECT ((((pg_catalog.hashint8(d.id * 8191 + i::bigint * 104729)::bigint & 2147483647) % 2001) - 1000)::real / 1000) FROM generate_series(1,$1::integer) i ORDER BY i)::vector FROM embedding_demo.documents d")
         .bind(dimensions).execute(&db.pool).await.expect("seed varied embeddings");
     db.execute(initial).await;
+    db.assert_st_matches_query(
+        &format!("live_rag.{approach}"),
+        "SELECT * FROM live_rag.truth",
+    )
+    .await;
     db.execute_seq(&[
         "VACUUM (ANALYZE) embedding_demo.documents",
         "VACUUM (ANALYZE) embedding_demo.results",
