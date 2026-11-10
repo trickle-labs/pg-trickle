@@ -1,0 +1,53 @@
+import json
+import unittest
+
+import measure_live_rag_recall as measure
+
+
+def output(exact, planner, eligibility):
+    sections = []
+    for name, plan in (("EXACT", exact), ("PLANNER", planner), ("ELIGIBILITY", eligibility),
+                       ("HYBRID_EXACT", exact), ("HYBRID_PLANNER", planner)):
+        sections.append(f"LIVE_RAG_{name}_PLAN_BEGIN\n{json.dumps(plan)}\nLIVE_RAG_{name}_PLAN_END")
+    sections.append('LIVE_RAG_METRICS={"recall_at_k":0.5,"forced_candidate_count":1,"forced_matched":1,"forced_recall_at_k":0.5,"forced_underfill":9}')
+    return "\n".join(sections) + "\n"
+
+
+class RecallTests(unittest.TestCase):
+    def test_vector_validation(self):
+        self.assertEqual(measure.vector_arg("[1,0,0]", 3), "[1,0,0]")
+        for value in ("[0,0,0]", "[1,2]", "[1,NaN,2]", "[true,1,2]", "[1e999,1,2]"):
+            with self.assertRaises(ValueError):
+                measure.vector_arg(value, 3)
+
+    def test_hybrid_query_uses_requested_dimensions(self):
+        sql = measure.measurement_sql(768)
+        self.assertNotIn("{{HYBRID_QUERY}}", sql)
+        self.assertNotIn("vector(3)", sql)
+        self.assertIn("vector(768)", sql)
+
+    def test_reports_planner_choice_separately_from_eligibility(self):
+        exact = [{"Plan": {"Node Type": "Seq Scan"}}]
+        index = [{"Plan": {"Node Type": "Index Scan", "Index Name": "application_ann"}}]
+        result = measure.parse_output(output(exact, exact, index), "application_current")
+        self.assertEqual(result["metrics"]["recall_at_k"], 0.5)
+        self.assertFalse(result["planner_used_ann_index"])
+        self.assertTrue(result["forced_plan_used_ann_index"])
+        self.assertEqual(result["metrics"]["forced_recall_at_k"], 0.5)
+        self.assertEqual(result["metrics"]["forced_underfill"], 9)
+        with self.assertRaisesRegex(ValueError, "missing forced-path"):
+            measure.parse_output(output(exact, exact, index).replace('"forced_underfill":9', '"other":9'), "application_current")
+        with self.assertRaisesRegex(ValueError, "exact baseline"):
+            measure.parse_output(output(index, exact, index), "application_current")
+        hybrid_index = output(exact, exact, index).replace(
+            f"LIVE_RAG_HYBRID_EXACT_PLAN_BEGIN\n{json.dumps(exact)}",
+            f"LIVE_RAG_HYBRID_EXACT_PLAN_BEGIN\n{json.dumps(index)}",
+        )
+        with self.assertRaisesRegex(ValueError, "exact baseline"):
+            measure.parse_output(hybrid_index, "application_current")
+        with self.assertRaises(ValueError):
+            measure.parse_output("missing", "application_current")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -48,6 +48,11 @@ PGVECTOR_CASES = {
     "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components",
     "e2e_pgvector_hybrid_tests::test_tenant_tutorial_sql_runs_with_isolated_reader",
     "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
+    "e2e_pgvector_revision_tests::test_live_rag_converges_after_writes_during_maintenance",
+    "e2e_pgvector_revision_tests::test_live_rag_converges_after_writes_during_active_maintenance",
+    "e2e_pgvector_revision_tests::test_live_rag_recovers_after_maintenance_cancellation",
+    "e2e_pgvector_revision_tests::test_live_rag_recovers_after_database_crash_during_maintenance",
+    "e2e_pgvector_revision_tests::test_live_rag_paced_writes_and_tenant_reads_during_refresh",
 }
 
 PGVECTOR_UPGRADE_CASES = {

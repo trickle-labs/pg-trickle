@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "/private/tmp/pgt_rag_timeout_check.py", line 22, in <module>
+    result, reads, _ = live_rag_load.measure_during(hold_lock, "SELECT json_build_object('server_started',extract(epoch from statement_timestamp()), 'server_finished',extract(epoch from clock_timestamp()), 'rows',count(*))::text FROM public.rag_timeout_probe", {}, 1)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/pgt-rag-old-reader/live_rag_load.py", line 52, in measure_during
+    result = operation()
+             ^^^^^^^^^^^
+  File "/private/tmp/pgt_rag_timeout_check.py", line 17, in hold_lock
+    assert count <= 1 and overdue == 0, active
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 2|1

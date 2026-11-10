@@ -1,0 +1,1 @@
+2026-11-09 13:56:32.809871+00: pgtrickle.pause_scheduler returned OK for embedding_demo.corpus_v1, embedding_demo.corpus_v2, and live_rag.differential during the first cycle's retrieval checks. This prevents hourly background refreshes during the long serial run; the harness continues to request manual refreshes. The original initial load ran with these schedulers active.

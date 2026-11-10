@@ -1,0 +1,13 @@
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-task-1399)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.84s
+     Running tests/e2e_pgvector_revision_tests.rs (target/debug/deps/e2e_pgvector_revision_tests-7ac7530d67ba7c77)
+
+running 5 tests
+test test_live_rag_authorized_views_enforce_tenant_and_visibility ... ok
+test test_live_rag_baselines_recheck_revisions_and_converge ... ok
+test test_live_rag_batched_benchmark_compares_equivalent_corpora ... ok
+test test_live_rag_mixed_benchmark_guards_churn_before_refresh ... ok
+test test_live_rag_wide_setup_and_worker_match ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 31.21s
+

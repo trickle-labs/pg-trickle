@@ -1,0 +1,1 @@
+During the final resumed batch's exact-corpus check, PostgreSQL reported an active autovacuum VACUUM ANALYZE on live_rag.periodic_full. Background database activity was not fully controlled and may affect timings and cluster-wide WAL measurements.

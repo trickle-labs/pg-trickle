@@ -1,0 +1,23 @@
+Full E2E run id: full-e2e-67938-1794234332
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+────────────
+ Nextest run ID b32a89fe-e838-4f36-80a0-7d3311bfa0e5 with nextest profile: default
+    Starting 2 tests across 1 binary (10 tests skipped)
+       START [         ] (1/2) pg_trickle::e2e_pgvector_revision_tests test_live_rag_authorized_views_enforce_tenant_and_visibility
+
+running 1 test
+test test_live_rag_authorized_views_enforce_tenant_and_visibility ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 2.33s
+
+        PASS [   2.568s] (1/2) pg_trickle::e2e_pgvector_revision_tests test_live_rag_authorized_views_enforce_tenant_and_visibility
+       START [         ] (2/2) pg_trickle::e2e_pgvector_revision_tests test_live_rag_baselines_recheck_revisions_and_converge
+
+running 1 test
+test test_live_rag_baselines_recheck_revisions_and_converge ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 2.53s
+
+        PASS [   2.767s] (2/2) pg_trickle::e2e_pgvector_revision_tests test_live_rag_baselines_recheck_revisions_and_converge
+────────────
+     Summary [   5.336s] 2 tests run: 2 passed, 10 skipped
