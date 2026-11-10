@@ -41,7 +41,7 @@ class RetirementContractTests(unittest.TestCase):
             gate.check_pgvector_contract(broken)
 
         for version in ("0.8.1", "0.8.7"):
-            for case in ("test_live_rag_converges_after_writes_during_maintenance", "test_live_rag_converges_after_writes_during_active_maintenance", "test_live_rag_recovers_after_maintenance_cancellation"):
+            for case in ("test_live_rag_converges_after_writes_during_maintenance", "test_live_rag_converges_after_writes_during_active_maintenance", "test_live_rag_recovers_after_maintenance_cancellation", "test_live_rag_recovers_after_database_crash_during_maintenance"):
                 broken = copy.deepcopy(contract)
                 cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
                 cases.remove(f"e2e_pgvector_revision_tests::{case}")
