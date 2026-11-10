@@ -1,0 +1,31 @@
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-1399-evidence)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.00s
+     Running tests/e2e_pgvector_tests.rs (/private/tmp/pg-trickle-task-1399/target/debug/deps/e2e_pgvector_tests-0b480014c9ba917b)
+
+running 22 tests
+test test_distance_subscription_alter_query_notifies_parent_and_downstream ... ok
+test test_distance_subscription_alter_query_reports_committed_crossings ... ok
+test test_distance_subscription_catalog_insert ... ok
+test test_distance_subscription_concurrent_commit_and_rollback ... DISTANCE_CONCURRENCY_JSON={"dimensions":3,"exit_post_commit_drain_ms":0.12345800000000001,"first_post_commit_drain_ms":0.154458,"listener_connections":1,"pg_trickle":"0.109.0","pgvector":"0.8.7","postgres":"18.6 (Debian 18.6-1.pgdg12+2)","rows":100,"second_post_commit_drain_ms":0.131917,"subscriptions":10}
+ok
+test test_distance_subscription_concurrent_scale ... ignored, larger subscription qualification; run explicitly
+test test_distance_subscription_duplicate_predicates_with_user_trigger ... ok
+test test_distance_subscription_failed_alter_retry_restores_snapshot_context ... ok
+test test_distance_subscription_full_refresh_and_edit_baseline ... ok
+test test_distance_subscription_fused_chain_scheduler_emits_crossing ... ok
+test test_distance_subscription_invalid_stored_value_does_not_abort_refresh ... ok
+test test_distance_subscription_key_delete_and_null_transitions ... ok
+test test_distance_subscription_list ... ok
+test test_distance_subscription_mode_change_reports_crossings ... ok
+test test_distance_subscription_notifies_only_membership_crossings ... ok
+test test_distance_subscription_partition_rebuild_reports_crossings ... ok
+test test_distance_subscription_quoted_names_and_extension_schema ... ok
+test test_distance_subscription_rejects_unsupported_notification_modes ... ok
+test test_distance_subscription_small_delta_snapshots_only_affected_rows ... ok
+test test_distance_subscription_trigger_concurrent_commit_and_rollback ... DISTANCE_CONCURRENCY_JSON={"dimensions":3,"exit_post_commit_drain_ms":0.362917,"first_post_commit_drain_ms":0.133334,"listener_connections":1,"pg_trickle":"0.109.0","pgvector":"0.8.7","postgres":"18.6 (Debian 18.6-1.pgdg12+2)","rows":100,"second_post_commit_drain_ms":0.131667,"subscriptions":10}
+ok
+test test_distance_subscription_typed_predicates_and_authorization ... ok
+test test_distance_subscription_unsubscribe ... ok
+test test_distance_subscription_waits_for_refresh_catalog_lock ... ok
+
+test result: ok. 21 passed; 0 failed; 1 ignored; 0 measured; 119 filtered out; finished in 126.28s

@@ -1,0 +1,299 @@
+{
+  "dimensions": 384,
+  "force_explicit_with_noop_trigger": false,
+  "measurements": [
+    {
+      "analyzed": false,
+      "estimated_rows": -1.0,
+      "initial_rows": 1000,
+      "last_analyze": null,
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": null,
+          "commit_ms": 1.07325,
+          "merge_strategy": "delete_insert",
+          "notification_wait_ms": null,
+          "refresh_ms": 24.757917,
+          "round": 0,
+          "snapshot_kind": "none",
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 2000
+        }
+      ],
+      "subscriptions": 0
+    },
+    {
+      "analyzed": false,
+      "estimated_rows": -1.0,
+      "initial_rows": 1000,
+      "last_analyze": null,
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "commit_ms": 1.312125,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 0.072958,
+          "refresh_ms": 23.613416,
+          "round": 0,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 1000
+        }
+      ],
+      "subscriptions": 1
+    },
+    {
+      "analyzed": false,
+      "estimated_rows": -1.0,
+      "initial_rows": 1000,
+      "last_analyze": null,
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "commit_ms": 1.4311250000000002,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 0.193041,
+          "refresh_ms": 33.267875000000004,
+          "round": 0,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 1000
+        }
+      ],
+      "subscriptions": 10
+    },
+    {
+      "analyzed": false,
+      "estimated_rows": -1.0,
+      "initial_rows": 10000,
+      "last_analyze": null,
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": null,
+          "commit_ms": 1.048167,
+          "merge_strategy": "delete_insert",
+          "notification_wait_ms": null,
+          "refresh_ms": 21.155375,
+          "round": 0,
+          "snapshot_kind": "none",
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 10000
+        }
+      ],
+      "subscriptions": 0
+    },
+    {
+      "analyzed": false,
+      "estimated_rows": -1.0,
+      "initial_rows": 10000,
+      "last_analyze": null,
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "commit_ms": 1.371,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 0.141542,
+          "refresh_ms": 23.69125,
+          "round": 0,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 10000
+        }
+      ],
+      "subscriptions": 1
+    },
+    {
+      "analyzed": false,
+      "estimated_rows": -1.0,
+      "initial_rows": 10000,
+      "last_analyze": null,
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "commit_ms": 1.27575,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 0.441334,
+          "refresh_ms": 30.711083,
+          "round": 0,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 10000
+        }
+      ],
+      "subscriptions": 10
+    },
+    {
+      "analyzed": true,
+      "estimated_rows": 1000.0,
+      "initial_rows": 1000,
+      "last_analyze": "2026-11-09 08:45:37.582115+00",
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": null,
+          "commit_ms": 1.0161250000000002,
+          "merge_strategy": "delete_insert",
+          "notification_wait_ms": null,
+          "refresh_ms": 18.582542,
+          "round": 0,
+          "snapshot_kind": "none",
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 1000
+        }
+      ],
+      "subscriptions": 0
+    },
+    {
+      "analyzed": true,
+      "estimated_rows": 1000.0,
+      "initial_rows": 1000,
+      "last_analyze": "2026-11-09 08:45:37.645785+00",
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "commit_ms": 1.274292,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 0.159209,
+          "refresh_ms": 21.519208000000003,
+          "round": 0,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 1
+    },
+    {
+      "analyzed": true,
+      "estimated_rows": 1000.0,
+      "initial_rows": 1000,
+      "last_analyze": "2026-11-09 08:45:37.735233+00",
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "commit_ms": 1.383041,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 0.44412500000000005,
+          "refresh_ms": 28.526417,
+          "round": 0,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 10
+    },
+    {
+      "analyzed": true,
+      "estimated_rows": 10000.0,
+      "initial_rows": 10000,
+      "last_analyze": "2026-11-09 08:45:37.958419+00",
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": null,
+          "commit_ms": 0.9866659999999999,
+          "merge_strategy": "delete_insert",
+          "notification_wait_ms": null,
+          "refresh_ms": 18.333792000000003,
+          "round": 0,
+          "snapshot_kind": "none",
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 0
+    },
+    {
+      "analyzed": true,
+      "estimated_rows": 10000.0,
+      "initial_rows": 10000,
+      "last_analyze": "2026-11-09 08:45:38.150244+00",
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "commit_ms": 1.414,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 0.133917,
+          "refresh_ms": 21.679417,
+          "round": 0,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 1
+    },
+    {
+      "analyzed": true,
+      "estimated_rows": 10000.0,
+      "initial_rows": 10000,
+      "last_analyze": "2026-11-09 08:45:38.348757+00",
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "commit_ms": 1.366792,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 0.27125,
+          "refresh_ms": 28.307333,
+          "round": 0,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 10
+    }
+  ],
+  "nested_plan_capture": true,
+  "notes": "One row alternates across the threshold; each subscription emits its expected event. Refresh, commit, and post-commit listener wait are timed separately; notification delivery can begin before the listener wait. Tuple counters include repeated visits, not distinct rows. Plan instrumentation adds overhead. No controlled concurrency is recorded.",
+  "pg_trickle": "0.109.0",
+  "pgvector": "0.8.7",
+  "postgres": "PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit"
+}

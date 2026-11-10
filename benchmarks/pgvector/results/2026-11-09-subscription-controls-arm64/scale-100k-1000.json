@@ -1,0 +1,167 @@
+{
+  "dimensions": 384,
+  "force_explicit_with_noop_trigger": false,
+  "measurements": [
+    {
+      "analyzed": true,
+      "estimated_rows": 100000.0,
+      "initial_rows": 100000,
+      "last_analyze": "2026-11-09 09:22:03.245803+00",
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": null,
+          "commit_ms": 4.618167000000001,
+          "merge_strategy": "delete_insert",
+          "notification_wait_ms": null,
+          "refresh_ms": 30.90325,
+          "round": 0,
+          "snapshot_kind": "none",
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": null,
+          "commit_ms": 4.1852089999999995,
+          "merge_strategy": "delete_insert",
+          "notification_wait_ms": null,
+          "refresh_ms": 31.022625,
+          "round": 1,
+          "snapshot_kind": "none",
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": null,
+          "commit_ms": 7.883375,
+          "merge_strategy": "delete_insert",
+          "notification_wait_ms": null,
+          "refresh_ms": 20.709124999999997,
+          "round": 2,
+          "snapshot_kind": "none",
+          "snapshot_rows": null,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 0
+    },
+    {
+      "analyzed": true,
+      "estimated_rows": 100000.0,
+      "initial_rows": 100000,
+      "last_analyze": "2026-11-09 09:22:06.928218+00",
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "commit_ms": 3.244875,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 0.817125,
+          "refresh_ms": 73.250833,
+          "round": 0,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "commit_ms": 6.572666,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 0.829041,
+          "refresh_ms": 88.11149999999999,
+          "round": 1,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "commit_ms": 14.92175,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 2.568458,
+          "refresh_ms": 73.6455,
+          "round": 2,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 100
+    },
+    {
+      "analyzed": true,
+      "estimated_rows": 100000.0,
+      "initial_rows": 100000,
+      "last_analyze": "2026-11-09 09:22:11.887795+00",
+      "last_autoanalyze": null,
+      "samples": [
+        {
+          "affected_identities": 1,
+          "commit_ms": 9.497916,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 9.361708,
+          "refresh_ms": 501.766917,
+          "round": 0,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "commit_ms": 3.776084,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 7.697125,
+          "refresh_ms": 540.118708,
+          "round": 1,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        },
+        {
+          "affected_identities": 1,
+          "commit_ms": 2.351167,
+          "merge_strategy": "explicit_dml",
+          "notification_wait_ms": 7.552459,
+          "refresh_ms": 462.31624999999997,
+          "round": 2,
+          "snapshot_kind": "bounded",
+          "snapshot_rows": 1,
+          "source_index_tuples_fetched": 0,
+          "source_sequential_tuples_returned": 0,
+          "stream_index_tuples_fetched": 0,
+          "stream_sequential_tuples_returned": 0
+        }
+      ],
+      "subscriptions": 1000
+    }
+  ],
+  "nested_plan_capture": false,
+  "notes": "One row alternates across the threshold; each subscription emits its expected event. Refresh, commit, and post-commit listener wait are timed separately; notification delivery can begin before the listener wait. Tuple counters include repeated visits, not distinct rows. Plan instrumentation adds overhead. No controlled concurrency is recorded.",
+  "pg_trickle": "0.109.0",
+  "pgvector": "0.8.7",
+  "postgres": "PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit"
+}
