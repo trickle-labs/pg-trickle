@@ -1,0 +1,98 @@
+name: Issue 1411 integration and release notes
+
+on:
+  push:
+    branches: [work/issue-1411-recursive-validation]
+    paths: [.github/workflows/issue-1411-completion.yml]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  NEXTEST_PROFILE: ci
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Complete release notes and strategy documentation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              assert old in s, (path, old)
+              p.write_text(s.replace(old, new, 1))
+          replace('CHANGELOG.md', '## [Unreleased]\n\n### Fixes\n\n', '''## [Unreleased]
+
+          ### Fixes
+
+          - Recursive `UNION` reachability now removes rows after deletions in
+            recursive sources, preserves alternate paths, and handles cycle-closing
+            inserts in IMMEDIATE mode without type or duplicate-upsert errors (#1411).
+            Mixed DELETE/UPDATE batches recompute the fixed point and apply its delta;
+            insert-only batches remain incremental. Existing divergent stream tables
+            should be fully refreshed or rebuilt once after installing the fix.
+          - The recursive depth guard now applies only to `UNION ALL` propagation.
+            `UNION` retains PostgreSQL set semantics, including finite cyclic and
+            deep graphs. Definitions producing infinitely many distinct tuples still
+            require a termination predicate or PostgreSQL `statement_timeout`.
+
+          ''')
+          replace('docs/FAQ.md', 'INSERT-only changes to the base case', 'INSERT-only changes to seed or recursive sources')
+          replace('docs/FAQ.md', 'Iteratively evaluates new derivations from the inserted rows without touching existing rows. Fastest path.', 'Propagates inserted rows and preserves UNION set identity; already-stored tuples are excluded from the insertion delta.')
+          replace('docs/FAQ.md', '| **Delete-and-Rederive (DRed)** | Mixed changes (INSERT + DELETE/UPDATE) |', '| **Delete-and-Rederive (DRed)** | Eligible `UNION ALL` with DELETE/UPDATE |')
+          replace('docs/FAQ.md', '| **Recomputation fallback** | Column mismatch or non-monotone recursive terms |', '| **Recomputation fallback** | Set-valued `UNION` DELETE/UPDATE, column mismatch, or non-monotone recursive terms |')
+          replace('docs/FAQ.md', '- **DRed** handles deletions and updates correctly', '- **DRed** handles eligible `UNION ALL` deletions and updates')
+          replace('docs/FAQ.md', '- **Recomputation** is the safe fallback that re-executes the entire recursive CTE. Used when the recursive term\'s structure is too complex for incremental processing.', '- **Recomputation** re-evaluates the least fixed point and applies its difference from storage. It handles set-valued `UNION` deletions and shapes that cannot safely use the incremental paths; it does not change the stream table to FULL mode.')
+          replace('docs/FAQ.md', '3. **Mixed DML with non-monotone terms** — DELETE or UPDATE changes combined with non-monotone recursive terms always trigger recomputation.', '3. **Set-valued `UNION` with DELETE/UPDATE** — changes in either the seed or recursive sources trigger recomputation-and-diff, including mixed batches and disconnected cycles.')
+          replace('docs/LIMITATIONS.md', '  YES → Supported with bounded semi-naive / DRed maintenance; tune pg_trickle.ivm_recursive_max_depth.', '  YES → Semi-naive inserts; UNION deletions recompute and diff; eligible UNION ALL uses DRed. The depth GUC applies only to UNION ALL.')
+          replace('README.md', 'Both `FULL` and `DIFFERENTIAL` modes (semi-naive + DRed)', '`FULL`, `DIFFERENTIAL`, and `IMMEDIATE` (semi-naive, eligible DRed, or recomputation/diff)')
+          PY
+          python3 scripts/gen_catalogs.py --check
+          python3 scripts/check_pg_extern_docs.py
+          python3 scripts/check_error_identifiers.py
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add CHANGELOG.md docs/FAQ.md docs/LIMITATIONS.md README.md
+          git commit -m 'docs: record recursive UNION fixes and refresh recovery guidance'
+          git push origin HEAD:work/issue-1411-recursive-validation
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+      - name: Install just
+        uses: taiki-e/install-action@just
+      - name: Testcontainers integration suite
+        id: integration
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/issue-1411-integration
+          git rev-parse HEAD > /tmp/issue-1411-integration/commit.txt
+          git rev-parse HEAD:src/dvm/operators/recursive_cte.rs > /tmp/issue-1411-integration/recursive-source-blob.txt
+          just test-integration 2>&1 | tee /tmp/issue-1411-integration/integration.log
+      - name: Execution-backed DVM component suite
+        id: dvm
+        continue-on-error: true
+        run: bash scripts/run_dvm_integration_tests.sh pg18 2>&1 | tee /tmp/issue-1411-integration/dvm.log
+      - name: Require both integration tiers
+        if: always()
+        run: |
+          test '${{ steps.integration.outcome }}' = success
+          test '${{ steps.dvm.outcome }}' = success
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: issue-1411-integration-evidence
+          path: /tmp/issue-1411-integration
+          retention-days: 7
