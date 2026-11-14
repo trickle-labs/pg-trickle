@@ -16,8 +16,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      - name: Archive source for isolated editing
-        run: git archive --format=tar.gz HEAD > /tmp/issue-1411-source.tar.gz
+      - name: Archive source and test harness for isolated editing
+        run: git ls-files -z | tar -czf /tmp/issue-1411-source.tar.gz --null -T -
       - uses: actions/upload-artifact@v7
         with:
           name: issue-1411-source
