@@ -1554,13 +1554,18 @@ SET pg_trickle.ivm_topk_max_limit = 5000;
 
 ### pg_trickle.ivm_recursive_max_depth
 
-Maximum recursion depth for `WITH RECURSIVE` queries in **IMMEDIATE** mode.
-The semi-naive evaluation injects a `__pgt_depth` counter column into the
-recursive SQL; iteration stops when the counter reaches this limit. Protects
-against infinite recursion in pathological graphs.
+Maximum propagation depth for recursive `UNION ALL` delta queries in
+**DIFFERENTIAL** and **IMMEDIATE** modes. A hidden `__pgt_depth` counter bounds
+semi-naive propagation. Set to `0` to disable this guard.
+
+Recursive `UNION` uses PostgreSQL's set fixed-point semantics without a hidden
+depth column. Adding depth would make repeated tuples distinct and break cycle
+elimination. Finite reachability queries are not truncated at this limit.
+Definitions that generate infinitely many distinct tuples still need an explicit
+termination predicate or PostgreSQL `statement_timeout`.
 
 **Default:** `100`  
-**Range:** `1` – `10000`
+**Range:** `0` – `100000`
 
 ```sql
 -- Allow deeper recursion for large hierarchies
