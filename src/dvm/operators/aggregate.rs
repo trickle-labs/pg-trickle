@@ -2933,10 +2933,12 @@ END AS __pgt_meta_action"#
     // these SQL strings must be compared in FULL's exact canonical form.
     let expected_full_identity =
         crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys);
+        // An unknown FULL identity (e.g. execution-harness state or legacy
+        // targets) must not assume that a GROUP_KEY probe will find the row.
     let can_probe_row_identity = ctx
         .st_full_row_identity_expr
         .as_ref()
-        .is_none_or(|full_expr| full_expr == &expected_full_identity);
+        .is_some_and(|full_expr| full_expr == &expected_full_identity);
 
     // PostgreSQL 18 cannot use a B-tree/hash join for a composite
     // IS NOT DISTINCT FROM predicate; it scanned the stream table for every
@@ -4150,6 +4152,8 @@ mod tests {
     #[test]
     fn test_diff_aggregate_standard_path_when_child_is_filter() {
         let mut ctx = test_ctx_with_st("public", "st");
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(sub.\"region\"))".into());
         let child = filter(
             binop(">", colref("amount"), lit("0")),
             scan(1, "t", "public", "t", &["id", "region", "amount"]),
@@ -7271,17 +7275,16 @@ mod tests {
                 && sql.contains("m.\"__pgt_group_1\" AS \"source_record_id\""),
             "{sql}"
         );
-        // The row identity preserves positional group keys (including
-        // duplicate source column names) without looking up ST columns.
+        // Without a verified FULL identity, a projected/renamed aggregate
+        // must keep the null-safe key lookup (including its alias mapping).
         assert!(
-            sql.contains("pgtrickle.row_probe_v1(st.__pgt_row_id)")
-                && sql.contains("ROW((d.\"__pgt_group_0\"), (d.\"__pgt_group_1\"),"),
+            sql.contains("st.\"left_source_record_id\" IS NOT DISTINCT FROM d.\"__pgt_group_0\"")
+                && sql.contains(
+                    "st.\"right_source_record_id\" IS NOT DISTINCT FROM d.\"__pgt_group_1\""
+                ),
             "{sql}"
         );
-        assert!(
-            !sql.contains("st.\"left_source_record_id\" IS NOT DISTINCT FROM"),
-            "{sql}"
-        );
+        assert!(!sql.contains("pgtrickle.row_probe_v1(st.__pgt_row_id)"), "{sql}");
         assert!(!sql.contains("m.\"source_record_id\""), "{sql}");
     }
 
