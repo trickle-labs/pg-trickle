@@ -54,17 +54,13 @@ fn is_independent_union_all(tree: &dvm::parser::OpTree) -> bool {
 
     fn is_branch(tree: &OpTree) -> bool {
         match tree {
-            OpTree::UnionAll { children } => {
-                children.len() >= 2 && children.iter().all(is_branch)
-            }
+            OpTree::UnionAll { children } => children.len() >= 2 && children.iter().all(is_branch),
             _ => is_scan_branch(tree),
         }
     }
 
     match tree {
-        OpTree::UnionAll { children } => {
-            children.len() >= 2 && children.iter().all(is_branch)
-        }
+        OpTree::UnionAll { children } => children.len() >= 2 && children.iter().all(is_branch),
         OpTree::Project { child, .. }
         | OpTree::Filter { child, .. }
         | OpTree::Subquery { child, .. } => is_independent_union_all(child),
@@ -1703,8 +1699,7 @@ pub fn execute_differential_refresh_with_tuning(
         && with_stream_owner(st, || {
             Ok(dvm::parse_defining_query(&effective_defining_query)
                 .is_ok_and(|tree| is_independent_union_all(&tree)))
-        })?
-    {
+        })? {
         let oids = catalog_source_oids
             .iter()
             .map(|oid| format!("{oid}::oid"))
@@ -4774,12 +4769,18 @@ mod tests {
 
     #[test]
     fn test_independent_union_all_changes_use_combined_denominator() {
-        use crate::dvm::operators::test_helpers::{colref, filter, inner_join, project, scan, union_all};
+        use crate::dvm::operators::test_helpers::{
+            colref, filter, inner_join, project, scan, union_all,
+        };
 
         let large = scan(1, "large_source", "public", "a", &["id", "value"]);
         let small = scan(2, "small_source", "public", "b", &["id", "value"]);
         let union = union_all(vec![
-            project(vec![colref("id"), colref("value")], vec!["id", "value"], large.clone()),
+            project(
+                vec![colref("id"), colref("value")],
+                vec!["id", "value"],
+                large.clone(),
+            ),
             filter(colref("value"), small.clone()),
         ]);
         assert!(is_independent_union_all(&union));
