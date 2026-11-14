@@ -225,6 +225,9 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ### Fixes
 
+- Prevent sustained application load from indefinitely deferring scheduled
+  refreshes. Due work resumes at the capped polling backoff while writers are
+  still active, in both parallel and sequential scheduling modes (#1412).
 - Keep scheduled refreshes progressing under concurrent writes when PostgreSQL
   reports an active transaction without a start time. Missing age diagnostics
   no longer block refreshes; uncommitted changes remain protected (#1412).

@@ -34,17 +34,30 @@ use std::time::Duration;
 /// #1412: require repeated scheduled progress before the write load stops.
 #[tokio::test]
 async fn test_holdback_concurrent_writers_make_progress() {
-    concurrent_writers_make_progress(false).await;
+    concurrent_writers_make_progress(false, None).await;
 }
 
 /// A missing activity timestamp is a deterministic witness for the otherwise
 /// timing-dependent PGPROC/activity-status race under concurrent writes.
 #[tokio::test]
 async fn test_holdback_concurrent_writers_without_activity_timestamps_make_progress() {
-    concurrent_writers_make_progress(true).await;
+    concurrent_writers_make_progress(true, None).await;
 }
 
-async fn concurrent_writers_make_progress(disable_activity_tracking: bool) {
+#[tokio::test]
+async fn test_holdback_sustained_load_pressure_parallel_makes_progress() {
+    concurrent_writers_make_progress(false, Some("on")).await;
+}
+
+#[tokio::test]
+async fn test_holdback_sustained_load_pressure_sequential_makes_progress() {
+    concurrent_writers_make_progress(false, Some("off")).await;
+}
+
+async fn concurrent_writers_make_progress(
+    disable_activity_tracking: bool,
+    pressure_mode: Option<&str>,
+) {
     use std::collections::VecDeque;
     use std::sync::{
         Arc,
@@ -66,6 +79,16 @@ async fn concurrent_writers_make_progress(disable_activity_tracking: bool) {
     db.create_st("busy_revenue", query, "1s", "DIFFERENTIAL")
         .await;
     db.assert_st_matches_query("busy_revenue", query).await;
+
+    if let Some(mode) = pressure_mode {
+        db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", mode, mode)
+            .await;
+        // The scheduler harness normally disables load shedding. Force a
+        // pressure threshold below the connection-pressure floor so this
+        // witness is independent of the runner's CPU count or query timing.
+        db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0.01", "0.01")
+            .await;
+    }
 
     // Eight open writers plus one handoff connection. Begin the replacement
     // before committing its predecessor so the probe never gets an accidental
@@ -98,6 +121,15 @@ async fn concurrent_writers_make_progress(disable_activity_tracking: bool) {
             .await
             .unwrap();
         open.push_back(txn);
+    }
+    if pressure_mode.is_some() {
+        let overloaded: bool = db.query_scalar(
+            "SELECT count(*)::float8 / current_setting('max_connections')::float8 >= 0.01 FROM pg_stat_activity WHERE backend_type = 'client backend'"
+        ).await;
+        assert!(
+            overloaded,
+            "fixture must force sustained connection pressure"
+        );
     }
     if disable_activity_tracking {
         let missing: i64 = db.query_scalar(
