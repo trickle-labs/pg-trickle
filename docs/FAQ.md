@@ -775,7 +775,7 @@ IMMEDIATE mode supports **all** constructs that DIFFERENTIAL supports, with two 
 
 | Feature | Status | Notes |
 |---|---|---|
-| `WITH RECURSIVE` | ✅ Supported (IM1) | Semi-naive evaluation inside the trigger. A depth counter guards against infinite loops (`pg_trickle.ivm_recursive_max_depth`, default 100). A warning is emitted at create time for very deep hierarchies. |
+| `WITH RECURSIVE` | ✅ Supported (IM1) | Semi-naive inserts; set-valued `UNION` deletions recompute and diff the fixed point. The depth counter (`pg_trickle.ivm_recursive_max_depth`, default 100) applies only to `UNION ALL` delta propagation. |
 | TopK (`ORDER BY … LIMIT N [OFFSET M]`) | ✅ Supported (IM2) | Micro-refresh: recomputes the top-N rows on every DML statement. Gated by `pg_trickle.ivm_topk_max_limit` to prevent unbounded scans. |
 | Materialized views as sources | ❌ Rejected | Stale-snapshot prevents trigger-based capture — use the underlying query instead. |
 | Foreign tables as sources | ❌ Rejected | No triggers on foreign tables — use FULL mode instead. |

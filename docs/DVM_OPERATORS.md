@@ -669,18 +669,30 @@ SELECT pgtrickle.pg_trickle_hash(...) AS __pgt_row_id, 'I' AS __pgt_action, cols
 FROM __pgt_rec_delta
 ```
 
-The cost is proportional to the number of *new* rows produced by the change, not the full result set.
+For recursive `UNION`, the delta uses `UNION` on the original user columns,
+without a hidden depth column, and subtracts tuples already in storage before
+applying insertions. Alternate paths and cycle-closing edges must not produce
+multiple copies of a reachable node. `UNION ALL` retains bag semantics.
+
+The propagation work depends on the affected derivations, which can include
+already-reachable tuples; it is not necessarily proportional to the final delta.
 
 ##### Strategy 2: Delete-and-Rederive / DRed (mixed INSERT/DELETE/UPDATE changes)
 
-When the change buffer contains DELETE or UPDATE changes, simple propagation is insufficient — a deleted base row may have transitively derived many recursive rows, some of which may still be derivable from alternative paths. DRed handles this in four phases:
+For eligible `UNION ALL` queries, when either the seed or recursive source contains DELETE or UPDATE changes, simple propagation is insufficient — a deleted base row may have transitively derived many recursive rows, some of which may still be derivable from alternative paths. DRed handles this in four phases:
 
 1. **Insert propagation** — semi-naive evaluation for the INSERT portion (same as Strategy 1)
 2. **Over-deletion cascade** — propagate base-case deletions through the recursive term against ST storage to find all transitively-derived rows that *might* be invalidated
 3. **Rederivation** — re-execute the recursive CTE from the remaining (non-deleted) base rows to restore any over-deleted rows that have alternative derivations
 4. **Combine** — final delta = inserts + (over-deletions − rederived rows)
 
-This avoids full recomputation while correctly handling deletions with alternative derivation paths.
+For set-valued `UNION`, DELETE and UPDATE batches instead recompute the least
+fixed point and diff it against storage. The stored set does not retain enough
+provenance to remove disconnected cycles or reconstruct missing edge columns
+safely through the storage-based cascade. This also prevents a mixed batch from
+expanding new edges out of a node that has just become unreachable. Only the net
+INSERT/DELETE delta is applied; the stream table does not switch to FULL mode.
+This correctness path can evaluate the entire recursive query.
 
 #### IMMEDIATE Mode
 
@@ -688,10 +700,11 @@ Recursive CTEs with `refresh_mode = 'IMMEDIATE'` use the same semi-naive and
 Delete-and-Rederive machinery as DIFFERENTIAL mode, but the base changes come
 from PostgreSQL statement transition tables instead of the background change
 buffer. This keeps the stream table transactionally up to date within the same
-statement. To guard against cyclic data or unexpectedly deep recursion, the
-semi-naive SQL injects a depth counter capped by
-`pg_trickle.ivm_recursive_max_depth` (default `100`; set to `0` to disable the
-guard).
+statement. Set-valued DELETE/UPDATE uses the same recomputation-and-diff path.
+Only recursive `UNION ALL` semi-naive SQL carries a depth counter capped by
+`pg_trickle.ivm_recursive_max_depth` (default `100`; set to `0` to disable it).
+`UNION` preserves equality on the query's tuples, allowing finite cyclic
+reachability to converge without a depth-dependent change to its result.
 
 ##### Strategy 3: Recomputation Fallback
 

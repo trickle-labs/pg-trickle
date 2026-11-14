@@ -31,7 +31,7 @@ successfully, but every refresh performs a full table recomputation:
 
 | Construct | Support | Notes |
 |-----------|---------|-------|
-| `WITH RECURSIVE` | ✅ Supported | DIFFERENTIAL and IMMEDIATE mode use bounded semi-naive evaluation for monotone insert-only changes, DRed for mixed changes, and full recomputation fallback when needed. Guarded by `pg_trickle.ivm_recursive_max_depth`. |
+| `WITH RECURSIVE` | ✅ Supported | DIFFERENTIAL and IMMEDIATE use semi-naive insert propagation. Set-valued `UNION` deletions recompute and diff the fixed point; eligible `UNION ALL` uses DRed. `pg_trickle.ivm_recursive_max_depth` bounds only `UNION ALL` delta propagation. |
 | Window functions in output | ✅ Differential partition recomputation | Supported window queries recompute affected partitions; an unpartitioned window can require recomputing all rows. Other unsupported query constructs may still require FULL. See the [support matrix](DVM_SUPPORT_MATRIX.md#window-functions). |
 
 ### Not supported at all (any mode)
