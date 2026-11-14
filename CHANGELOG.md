@@ -231,6 +231,16 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 - Keep scheduled refreshes progressing under concurrent writes when PostgreSQL
   reports an active transaction without a start time. Missing age diagnostics
   no longer block refreshes; uncommitted changes remain protected (#1412).
+- Recursive `UNION` reachability now removes rows after deletions in
+  recursive sources, preserves alternate paths, and handles cycle-closing
+  inserts in IMMEDIATE mode without type or duplicate-upsert errors (#1411).
+  Mixed DELETE/UPDATE batches recompute the fixed point and apply its delta;
+  insert-only batches remain incremental. Existing divergent stream tables
+  should be fully refreshed or rebuilt once after installing the fix.
+- The recursive depth guard now applies only to `UNION ALL` propagation.
+  `UNION` retains PostgreSQL set semantics, including finite cyclic and
+  deep graphs. Definitions producing infinitely many distinct tuples still
+  require a termination predicate or PostgreSQL `statement_timeout`.
 - Keep stream tables active after `REPLICA IDENTITY FULL` or an empty partition
   attach when auto CDC is still using triggers.
 - Switching a FULL stream table to DIFFERENTIAL or AUTO now initializes the
