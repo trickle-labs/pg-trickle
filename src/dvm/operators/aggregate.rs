@@ -2933,8 +2933,8 @@ END AS __pgt_meta_action"#
     // these SQL strings must be compared in FULL's exact canonical form.
     let expected_full_identity =
         crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys);
-        // An unknown FULL identity (e.g. execution-harness state or legacy
-        // targets) must not assume that a GROUP_KEY probe will find the row.
+    // An unknown FULL identity (e.g. execution-harness state or legacy
+    // targets) must not assume that a GROUP_KEY probe will find the row.
     let can_probe_row_identity = ctx
         .st_full_row_identity_expr
         .as_ref()
@@ -7284,7 +7284,10 @@ mod tests {
                 ),
             "{sql}"
         );
-        assert!(!sql.contains("pgtrickle.row_probe_v1(st.__pgt_row_id)"), "{sql}");
+        assert!(
+            !sql.contains("pgtrickle.row_probe_v1(st.__pgt_row_id)"),
+            "{sql}"
+        );
         assert!(!sql.contains("m.\"source_record_id\""), "{sql}");
     }
 
