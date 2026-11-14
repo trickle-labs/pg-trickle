@@ -31,6 +31,135 @@ mod e2e;
 use e2e::E2eDb;
 use std::time::Duration;
 
+/// #1412: require repeated scheduled progress before the write load stops.
+#[tokio::test]
+async fn test_holdback_concurrent_writers_make_progress() {
+    concurrent_writers_make_progress(false).await;
+}
+
+/// A missing activity timestamp is a deterministic witness for the otherwise
+/// timing-dependent PGPROC/activity-status race under concurrent writes.
+#[tokio::test]
+async fn test_holdback_concurrent_writers_without_activity_timestamps_make_progress() {
+    concurrent_writers_make_progress(true).await;
+}
+
+async fn concurrent_writers_make_progress(disable_activity_tracking: bool) {
+    use std::collections::VecDeque;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    // Exercise the incremental frontier, not a source-locking FULL fallback.
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "'differential'",
+        "differential",
+    )
+    .await;
+    db.execute("CREATE TABLE busy_orders (id SERIAL PRIMARY KEY, region TEXT NOT NULL, amount NUMERIC NOT NULL)").await;
+    db.execute("INSERT INTO busy_orders (region, amount) VALUES ('US',100),('EU',200),('US',300),('APAC',50)").await;
+    let query = "SELECT region, SUM(amount) AS total, COUNT(*) AS order_count FROM busy_orders GROUP BY region";
+    db.create_st("busy_revenue", query, "1s", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("busy_revenue", query).await;
+
+    // Eight open writers plus one handoff connection. Begin the replacement
+    // before committing its predecessor so the probe never gets an accidental
+    // writer-free interval. Every individual transaction remains short-lived.
+    let writers = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(9)
+        .after_connect(move |conn, _| {
+            Box::pin(async move {
+                sqlx::query(if disable_activity_tracking {
+                    "SET track_activities = off"
+                } else {
+                    "SET track_activities = on"
+                })
+                .execute(&mut *conn)
+                .await?;
+                sqlx::query("SET statement_timeout = '10s'")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(db.connection_string())
+        .await
+        .unwrap();
+    let mut open = VecDeque::new();
+    for _ in 0..8 {
+        let mut txn = writers.begin().await.unwrap();
+        sqlx::query("INSERT INTO busy_orders (region, amount) VALUES ('US',999)")
+            .execute(&mut *txn)
+            .await
+            .unwrap();
+        open.push_back(txn);
+    }
+    if disable_activity_tracking {
+        let missing: i64 = db.query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_xid IS NOT NULL AND xact_start IS NULL"
+        ).await;
+        assert!(
+            missing >= 8,
+            "fixture must expose active XIDs with NULL ages"
+        );
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_stop = stop.clone();
+    let load = tokio::spawn(async move {
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let mut committed = 0_i64;
+        while !writer_stop.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            let mut next = writers.begin().await.unwrap();
+            sqlx::query("INSERT INTO busy_orders (region, amount) VALUES ('US',999)")
+                .execute(&mut *next)
+                .await
+                .unwrap();
+            open.pop_front().unwrap().commit().await.unwrap();
+            committed += 1;
+            open.push_back(next);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        for txn in open {
+            txn.commit().await.unwrap();
+            committed += 1;
+        }
+        writers.close().await;
+        committed
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut last_count = 2_i64;
+    let mut advances = 0;
+    while std::time::Instant::now() < deadline && !load.is_finished() && advances < 3 {
+        let count: i64 = db
+            .query_scalar("SELECT order_count FROM busy_revenue WHERE region = 'US'")
+            .await;
+        if count > last_count {
+            advances += 1;
+            last_count = count;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let progressed_during_load = advances >= 3 && !load.is_finished();
+    stop.store(true, Ordering::Relaxed);
+    let committed = load.await.expect("writer task must succeed");
+    assert!(
+        progressed_during_load,
+        "scheduled SUM/COUNT must advance repeatedly while writers remain active; advances={advances}, last_count={last_count}, committed={committed}"
+    );
+    assert!(db.wait_for_condition(
+        "all concurrent inserts consumed",
+        "SELECT (SELECT SUM(order_count) FROM busy_revenue) = (SELECT COUNT(*) FROM busy_orders)",
+        Duration::from_secs(60), Duration::from_millis(100),
+    ).await, "scheduler must consume every committed insert");
+    db.assert_st_matches_query("busy_revenue", query).await;
+}
+
 // ── Shared setup helper ────────────────────────────────────────────────────
 
 /// Set up a fast scheduler (100 ms tick, 1 s minimum schedule) and wait for
@@ -94,6 +223,15 @@ async fn test_holdback_gucs_registered() {
 /// 5. Assert the stream table contains the inserted row.
 #[tokio::test]
 async fn test_holdback_read_committed_long_txn() {
+    read_committed_long_txn(false).await;
+}
+
+#[tokio::test]
+async fn test_holdback_unknown_age_writer_preserves_late_commit() {
+    read_committed_long_txn(true).await;
+}
+
+async fn read_committed_long_txn(disable_activity_tracking: bool) {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
     configure_fast_scheduler(&db).await;
 
@@ -133,6 +271,12 @@ async fn test_holdback_read_committed_long_txn() {
     // --- Phase 1: begin transaction, insert row (do NOT commit yet) ---
     let pool = db.pool.clone();
     let mut long_txn_conn = pool.acquire().await.expect("acquire long-txn connection");
+    if disable_activity_tracking {
+        sqlx::query("SET track_activities = off")
+            .execute(&mut *long_txn_conn)
+            .await
+            .unwrap();
+    }
     sqlx::query("BEGIN")
         .execute(&mut *long_txn_conn)
         .await

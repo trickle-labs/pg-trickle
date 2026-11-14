@@ -225,6 +225,9 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ### Fixes
 
+- Keep scheduled refreshes progressing under concurrent writes when PostgreSQL
+  reports an active transaction without a start time. Missing age diagnostics
+  no longer block refreshes; uncommitted changes remain protected (#1412).
 - Keep stream tables active after `REPLICA IDENTITY FULL` or an empty partition
   attach when auto CDC is still using triggers.
 - Switching a FULL stream table to DIFFERENTIAL or AUTO now initializes the

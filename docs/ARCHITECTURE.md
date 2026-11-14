@@ -245,7 +245,13 @@ Writer fences hold the frontier until every potentially invisible buffer write
 has a proven bound. Permission or malformed-result failures hold dispatch
 closed; no holdback mode can bypass this proof.
 
-The holdback algorithm (`cdc::classify_holdback`) is purely functional and unit-tested independently of the backend.
+Transaction ages are best-effort diagnostics. PostgreSQL samples activity
+timestamps separately from transaction IDs, so a live writer may have a NULL
+start time during transaction turnover or when `track_activities` is disabled.
+Missing or negative ages report zero seconds but still retain the writer's
+fence; they must not reject the entire probe and starve refresh under load.
+
+The holdback algorithm (`cdc::transition_writer_fences`) is purely functional and unit-tested independently of the backend.
 
 **Configuration:**
 - `pg_trickle.frontier_holdback_mode` — `'xmin'` (default), `'none'` (no additional margin), `'lsn:<N>'` (an additional cap). All modes retain the mandatory probe.
