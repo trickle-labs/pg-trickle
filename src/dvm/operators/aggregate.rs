@@ -2929,9 +2929,10 @@ END AS __pgt_meta_action"#
         })
         .collect();
     let expected_full_identity = build_hash_expr_for_domain("GROUP_KEY", &stored_group_keys);
-    let can_probe_row_identity = ctx.defining_query.as_ref().is_none_or(|query| {
-        crate::dvm::row_id_expr_for_query(query) == expected_full_identity
-    });
+    let can_probe_row_identity = ctx
+        .defining_query
+        .as_ref()
+        .is_none_or(|query| crate::dvm::row_id_expr_for_query(query) == expected_full_identity);
 
     // PostgreSQL 18 cannot use a B-tree/hash join for a composite
     // IS NOT DISTINCT FROM predicate; it scanned the stream table for every
