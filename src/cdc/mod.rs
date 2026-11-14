@@ -3557,6 +3557,15 @@ thread_local! {
         std::cell::RefCell::new(FrontierProbeState::default());
 }
 
+/// Transaction age is diagnostic, not part of the writer visibility proof.
+/// PostgreSQL copies activity timestamps separately from PGPROC transaction
+/// IDs, so an active XID can have no reported start time (also when
+/// track_activities is off). Clock adjustments can produce a negative age.
+/// Neither condition may discard the blocker or fail the entire probe.
+fn frontier_transaction_age(age_secs: Option<i64>) -> u64 {
+    age_secs.unwrap_or(0).max(0) as u64
+}
+
 /// Probe the cluster for the current write LSN and the oldest in-progress
 /// transaction xmin, then compute the safe frontier upper bound.
 ///
@@ -3574,7 +3583,7 @@ thread_local! {
 /// - `current_oldest_xmin`: value to persist via
 ///   `shmem::set_last_tick_holdback_state()` for the next tick.
 /// - `oldest_txn_age_secs`: age of the oldest in-progress txn in seconds
-///   (0 when no holdback is active, for the warning threshold check).
+///   (0 when no age is known, for the warning threshold check).
 pub fn compute_safe_upper_bound(
     prev_watermark_lsn: Option<&str>,
     _prev_oldest_xmin: u64,
@@ -3587,23 +3596,23 @@ pub fn compute_safe_upper_bound(
                     SELECT pg_current_wal_lsn()::text AS lsn
                  ), active AS (
                     SELECT backend_xid::text::bigint AS xid,
-                           EXTRACT(EPOCH FROM (now() - xact_start))::bigint AS age_secs
+                           EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
                     FROM pg_stat_activity
                     WHERE datname = current_database()
                       AND pid <> pg_backend_pid() AND backend_xid IS NOT NULL
                     UNION ALL
                     SELECT backend_xmin::text::bigint AS xid,
-                           EXTRACT(EPOCH FROM (now() - xact_start))::bigint AS age_secs
+                           EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
                     FROM pg_stat_activity
                     WHERE datname = current_database()
                       AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL
                     UNION ALL
                     SELECT \"transaction\"::text::bigint AS xid,
-                           EXTRACT(EPOCH FROM (now() - prepared))::bigint AS age_secs
+                           EXTRACT(EPOCH FROM (clock_timestamp() - prepared))::bigint AS age_secs
                     FROM pg_prepared_xacts
                     WHERE database = current_database()
                  )
-                 SELECT candidate.lsn, active.xid::text, active.age_secs::text
+                 SELECT candidate.lsn, active.xid::text, active.age_secs
                  FROM candidate LEFT JOIN active ON TRUE",
                 None,
                 &[],
@@ -3649,22 +3658,13 @@ pub fn compute_safe_upper_bound(
                             reason: format!("malformed transaction ID '{xid}': {e}"),
                         })?;
                 active_xids.insert(xid);
-                let age = row
-                    .get::<String>(3)
-                    .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                        context: "frontier probe transaction age".to_string(),
-                        reason: e.to_string(),
-                    })?
-                    .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
-                        context: "frontier probe transaction age".to_string(),
-                        reason: "transaction age was NULL".to_string(),
-                    })?
-                    .parse::<u64>()
-                    .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                        context: "frontier probe transaction age".to_string(),
-                        reason: e.to_string(),
-                    })?;
-                oldest_age_secs = oldest_age_secs.max(age);
+                let age =
+                    row.get::<i64>(3)
+                        .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                            context: "frontier probe transaction age".to_string(),
+                            reason: e.to_string(),
+                        })?;
+                oldest_age_secs = oldest_age_secs.max(frontier_transaction_age(age));
             }
         }
 
@@ -3727,6 +3727,16 @@ fn is_valid_lsn(lsn: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frontier_transaction_age_accepts_missing_and_negative_diagnostics() {
+        assert_eq!(frontier_transaction_age(None), 0);
+        assert_eq!(frontier_transaction_age(Some(-1)), 0);
+        assert_eq!(frontier_transaction_age(Some(i64::MIN)), 0);
+        assert_eq!(frontier_transaction_age(Some(0)), 0);
+        assert_eq!(frontier_transaction_age(Some(120)), 120);
+        assert_eq!(frontier_transaction_age(Some(i64::MAX)), i64::MAX as u64);
+    }
 
     fn probe(candidate_lsn: &str, xids: &[u64]) -> FrontierProbe {
         FrontierProbe {
