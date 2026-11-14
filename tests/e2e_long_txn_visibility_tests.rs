@@ -289,7 +289,14 @@ async fn read_committed_long_txn(disable_activity_tracking: bool) {
     // --- Phase 2: wait for 3+ scheduler ticks while the txn is open ---
     // With frontier_holdback_mode = 'xmin', the scheduler must NOT advance
     // the frontier past the row's LSN.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(if disable_activity_tracking {
+        // Span multiple scheduled refreshes, not just coordinator probes, so
+        // dropping this unknown-age blocker would lose its late commit.
+        Duration::from_secs(3)
+    } else {
+        Duration::from_millis(500)
+    })
+    .await;
 
     // Stream table should still have only 1 row (txn not committed).
     let count_before_commit: i64 = db.count("public.ltv_rc_st").await;

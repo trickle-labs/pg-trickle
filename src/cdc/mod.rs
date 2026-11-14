@@ -3532,7 +3532,7 @@ fn frontier_transaction_age(age_secs: Option<i64>) -> u64 {
 /// - `current_oldest_xmin`: value to persist via
 ///   `shmem::set_last_tick_holdback_state()` for the next tick.
 /// - `oldest_txn_age_secs`: age of the oldest in-progress txn in seconds
-///   (0 when no holdback is active, for the warning threshold check).
+///   (0 when no age is known, for the warning threshold check).
 pub fn compute_safe_upper_bound(
     prev_watermark_lsn: Option<&str>,
     _prev_oldest_xmin: u64,
