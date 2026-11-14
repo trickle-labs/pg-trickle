@@ -32,6 +32,42 @@ pub(crate) use delete::*;
 pub use insert::execute_topk_refresh;
 pub(crate) use update::*;
 
+/// A UNION ALL of independent source scans has additive, rather than
+/// join-amplified, changes. For this shape the adaptive FULL threshold must
+/// use the combined source size: one small, busy branch must not force a
+/// recomputation of a much larger, unchanged branch (#1405).
+///
+/// Be conservative: joins, aggregates and opaque CTEs retain the existing
+/// per-source safeguard. The historical cost model can still prefer FULL.
+fn is_independent_union_all(tree: &dvm::parser::OpTree) -> bool {
+    use dvm::parser::OpTree;
+
+    fn is_scan_branch(tree: &OpTree) -> bool {
+        match tree {
+            OpTree::Scan { .. } => true,
+            OpTree::Project { child, .. }
+            | OpTree::Filter { child, .. }
+            | OpTree::Subquery { child, .. } => is_scan_branch(child),
+            _ => false,
+        }
+    }
+
+    fn is_branch(tree: &OpTree) -> bool {
+        match tree {
+            OpTree::UnionAll { children } => children.len() >= 2 && children.iter().all(is_branch),
+            _ => is_scan_branch(tree),
+        }
+    }
+
+    match tree {
+        OpTree::UnionAll { children } => children.len() >= 2 && children.iter().all(is_branch),
+        OpTree::Project { child, .. }
+        | OpTree::Filter { child, .. }
+        | OpTree::Subquery { child, .. } => is_independent_union_all(child),
+        _ => false,
+    }
+}
+
 pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
     crate::refresh::ensure_full_policy(st, "differential strategy fallback")?;
     let result = execute_full_refresh_target(st)?;
@@ -1656,6 +1692,32 @@ pub fn execute_differential_refresh_with_tuning(
         None
     };
     let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential;
+    // Only additive UNION ALL scans can safely use one combined denominator.
+    // In a join, a tiny changed dimension could affect most of the output,
+    // so its independent per-source threshold must remain in force.
+    let union_total_source_rows = if catalog_source_oids.len() >= 2
+        && with_stream_owner(st, || {
+            Ok(dvm::parse_defining_query(&effective_defining_query)
+                .is_ok_and(|tree| is_independent_union_all(&tree)))
+        })? {
+        let oids = catalog_source_oids
+            .iter()
+            .map(|oid| format!("{oid}::oid"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // OIDs are catalog-derived u32 values, rendered as numeric literals;
+        // there are no user-controlled strings or identifiers in this SQL.
+        // nosemgrep: rust.spi.query.dynamic-format
+        Spi::get_one::<i64>(&format!(
+            "SELECT SUM(GREATEST(reltuples::bigint, 1000))::bigint \
+             FROM pg_class WHERE oid IN ({oids})"
+        ))
+        .ok()
+        .flatten()
+        .filter(|rows| *rows > 0)
+    } else {
+        None
+    };
     let mut total_change_count: i64 = 0;
     let mut _total_table_size: i64 = 0;
     let mut input_delta_rows_may_be_incomplete = !st_source_pgt_ids.is_empty();
@@ -1675,11 +1737,17 @@ pub fn execute_differential_refresh_with_tuning(
         } else {
             "0".to_string()
         };
+        // Cap counts at the combined UNION threshold, not at each small
+        // source's individual threshold. Capping earlier would undercount
+        // changes and could make the combined-ratio decision incorrect.
+        let ratio_base = union_total_source_rows
+            .map(|rows| rows.to_string())
+            .unwrap_or_else(|| "sz.table_size".to_string());
 
         let sql = format!(
             "SELECT sz.table_size, cnt.change_count, \
                     ({max_ratio_lit} > 0 AND cnt.change_count >= \
-                       (sz.table_size::double precision * {max_ratio_lit})::bigint + 1) \
+                       ({ratio_base}::double precision * {max_ratio_lit})::bigint + 1) \
              FROM (SELECT GREATEST(reltuples::bigint, 1000) AS table_size \
                    FROM pg_class WHERE oid = {oid}::oid) sz, \
              LATERAL (SELECT count(*)::bigint AS change_count FROM (\
@@ -1687,7 +1755,7 @@ pub fn execute_differential_refresh_with_tuning(
                 WHERE lsn > '{prev_lsn}'::pg_lsn \
                 AND lsn <= '{new_lsn}'::pg_lsn \
                 LIMIT CASE WHEN {max_ratio_lit} > 0 \
-                      THEN (sz.table_size::double precision * {max_ratio_lit})::bigint + 1 \
+                      THEN ({ratio_base}::double precision * {max_ratio_lit})::bigint + 1 \
                       ELSE 9223372036854775807 END\
              ) __pgt_capped) cnt",
         );
@@ -1735,7 +1803,10 @@ pub fn execute_differential_refresh_with_tuning(
             zero_change_oids.insert(*oid);
         }
 
-        if fallback_reason.is_none() && change_count > threshold_rows {
+        if union_total_source_rows.is_none()
+            && fallback_reason.is_none()
+            && change_count > threshold_rows
+        {
             // B-4: When refresh_strategy = 'differential', skip the ratio
             // check — the user explicitly wants DIFFERENTIAL regardless of
             // change volume. The BUF-LIMIT safety check still applies below.
@@ -1748,6 +1819,26 @@ pub fn execute_differential_refresh_with_tuning(
                 ));
                 break; // No need to check remaining sources
             }
+        }
+    }
+
+    // For independent UNION ALL branches, compare the combined (capped)
+    // change volume to the combined input size. A busy 683-row branch alone
+    // must not trigger FULL of an otherwise unchanged 11.6M-row branch.
+    if let Some(total_rows) = union_total_source_rows {
+        let threshold_rows = (total_rows as f64 * max_ratio).ceil() as i64;
+        if fallback_reason.is_none()
+            && !skip_ratio_check
+            && max_ratio > 0.0
+            && total_change_count > threshold_rows
+        {
+            fallback_reason = Some(crate::refresh::FullRefreshReason::new(
+                crate::refresh::FullRefreshReasonCode::DeltaRatioExceeded,
+                format!(
+                    "{total_change_count} changes exceed the {threshold_rows}-row combined \
+                     UNION ALL source threshold."
+                ),
+            ));
         }
     }
 
@@ -4678,6 +4769,43 @@ fn build_exact_invariant_sql(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_independent_union_all_changes_use_combined_denominator() {
+        use crate::dvm::operators::test_helpers::{
+            colref, filter, inner_join, project, scan, union_all,
+        };
+
+        let large = scan(1, "large_source", "public", "a", &["id", "value"]);
+        let small = scan(2, "small_source", "public", "b", &["id", "value"]);
+        let union = union_all(vec![
+            project(
+                vec![colref("id"), colref("value")],
+                vec!["id", "value"],
+                large.clone(),
+            ),
+            filter(colref("value"), small.clone()),
+        ]);
+        assert!(is_independent_union_all(&union));
+        assert!(is_independent_union_all(&project(
+            vec![colref("id")],
+            vec!["id"],
+            union.clone(),
+        )));
+
+        // At 15%, 400 changes exceed the 1000-row small-source floor
+        // (150 changes), but are below the 11k combined-source threshold.
+        assert!(400 > (1000.0_f64 * 0.15).ceil() as i64);
+        assert!(400 <= (11_000.0_f64 * 0.15).ceil() as i64);
+
+        // A UNION branch containing a join is not additive; keep the
+        // per-source safeguard rather than hiding its amplification.
+        let joined = inner_join(colref("id"), large, small);
+        assert!(!is_independent_union_all(&union_all(vec![
+            joined,
+            scan(3, "other", "public", "c", &["id", "value"]),
+        ])));
+    }
 
     // ── delta_fraction_exceeds_threshold ────────────────────────────
 

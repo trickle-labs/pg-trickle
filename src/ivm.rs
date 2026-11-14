@@ -1289,12 +1289,14 @@ fn get_or_compute_ivm_delta(
     let dummy_frontier = Frontier::default();
     let st_user_cols = op_tree.output_columns();
     let has_pgt_count = op_tree.needs_pgt_count();
+    let full_identity_expr = crate::dvm::row_id_expr_for_tree(defining_query, Some(&op_tree));
     let mut ctx = DiffContext::new(dummy_frontier.clone(), dummy_frontier)
         .with_delta_source(DeltaSource::TransitionTable { tables })
         .with_pgt_name(&st.pgt_schema, &st.pgt_name)
         .with_cte_registry(cte_registry)
         .with_defining_query(defining_query);
     ctx.st_user_columns = Some(st_user_cols);
+    ctx.st_full_row_identity_expr = Some(full_identity_expr);
     ctx.st_has_pgt_count = has_pgt_count;
 
     // Differentiate the operator tree to get delta SQL.
