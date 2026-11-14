@@ -87,7 +87,7 @@ SELECT
            'iron','frosted','polished','burnished','plated'])[1 + (i * 3) % 10]
     AS p_name,
     'Manufacturer#' || (1 + i % 5) AS p_mfgr,
-    'Brand#' || (1 + i % 5) || (1 + (i * 3) % 5) AS p_brand,
+    'Brand#' || (1 + (i - 1) % 5) || (1 + ((i - 1) / 5) % 5) AS p_brand,
     (ARRAY['ECONOMY ANODIZED STEEL','ECONOMY BRUSHED COPPER','ECONOMY BURNISHED BRASS',
            'ECONOMY PLATED TIN','ECONOMY POLISHED NICKEL',
            'STANDARD ANODIZED STEEL','STANDARD BRUSHED COPPER','STANDARD BURNISHED BRASS',
@@ -104,7 +104,7 @@ SELECT
            'LG CASE','LG BOX','LG PACK','LG PKG','LG BAG','LG CAN','LG DRUM','LG JAR',
            'WRAP CASE','WRAP BOX','WRAP PACK','WRAP PKG','WRAP BAG','WRAP CAN','WRAP DRUM','WRAP JAR',
            'JUMBO CASE','JUMBO BOX','JUMBO PACK','JUMBO PKG','JUMBO BAG','JUMBO CAN','JUMBO DRUM','JUMBO JAR'
-          ])[1 + i % 40] AS p_container,
+          ])[1 + ((i - 1) / 25) % 40] AS p_container,
     round((90000 + (i % 2001) * 100 + (i / 10))::numeric / 100, 2) AS p_retailprice,
     'comment ' || i AS p_comment
 FROM generate_series(1, __SF_PARTS__) AS s(i);
@@ -189,6 +189,9 @@ FROM generate_series(1, __SF_ORDERS__) AS orders(o),
      generate_series(1, 1 + (o % 7)) AS lines(ln);
 
 -- ── ANALYZE all tables for stable query plans ──────────────────────
+
+-- Q17 has a correlated lookup by part key
+CREATE INDEX IF NOT EXISTS lineitem_l_partkey_idx ON lineitem (l_partkey);
 
 ANALYZE region;
 ANALYZE nation;
