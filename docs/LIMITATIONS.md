@@ -199,7 +199,7 @@ Does your query use ORDER BY without LIMIT?
   NO  ↓
 
 Does your query use WITH RECURSIVE?
-  YES → Supported with bounded semi-naive / DRed maintenance; tune pg_trickle.ivm_recursive_max_depth.
+  YES → Semi-naive inserts; UNION deletions recompute and diff; eligible UNION ALL uses DRed. The depth GUC applies only to UNION ALL.
   NO  ↓
 
 Do all join keys use equi-join conditions (= not BETWEEN / >=)?

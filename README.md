@@ -180,7 +180,7 @@ reason. `FULL` mode re-runs the entire query on each refresh.
 | **Subqueries** | Scalar subquery in `SELECT` | ✅ Full | `(SELECT max(x) FROM t)` in target list |
 | **Subqueries** | Scalar subquery in `WHERE` | ✅ Full | Auto-rewritten to `CROSS JOIN` |
 | **CTEs** | Non-recursive `WITH` | ✅ Full | Single & multi-reference; shared delta computation |
-| **CTEs** | Recursive `WITH RECURSIVE` | ✅ Full | Both `FULL` and `DIFFERENTIAL` modes (semi-naive + DRed) |
+| **CTEs** | Recursive `WITH RECURSIVE` | ✅ Full | `FULL`, `DIFFERENTIAL`, and `IMMEDIATE` (semi-naive, eligible DRed, or recomputation/diff) |
 | **Window functions** | `ROW_NUMBER`, `RANK`, `SUM OVER`, etc. | ✅ Full | Partition-based recomputation |
 | **Window functions** | Window frame clauses | ✅ Full | `ROWS`, `RANGE`, `GROUPS` with `BETWEEN` bounds and `EXCLUDE` |
 | **Window functions** | Named `WINDOW` clauses | ✅ Full | `WINDOW w AS (...)` resolved from query-level window definitions |

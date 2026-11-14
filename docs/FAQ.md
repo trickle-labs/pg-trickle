@@ -1013,9 +1013,9 @@ and when each is used.
 
 | Strategy | When used | How it works |
 |---|---|---|
-| **Semi-naive evaluation** | INSERT-only changes to the base case | Iteratively evaluates new derivations from the inserted rows without touching existing rows. Fastest path. |
-| **Delete-and-Rederive (DRed)** | Mixed changes (INSERT + DELETE/UPDATE) | Deletes potentially affected derived rows, then rederives them from scratch to determine the true delta. |
-| **Recomputation fallback** | Column mismatch or non-monotone recursive terms | Falls back to full recomputation of the recursive CTE. Used when the recursive term contains EXCEPT, Aggregate, Window, DISTINCT, AntiJoin, or INTERSECT SET operators. |
+| **Semi-naive evaluation** | INSERT-only changes to seed or recursive sources | Propagates inserted rows and preserves UNION set identity; already-stored tuples are excluded from the insertion delta. |
+| **Delete-and-Rederive (DRed)** | Eligible `UNION ALL` with DELETE/UPDATE | Deletes potentially affected derived rows, then rederives them from scratch to determine the true delta. |
+| **Recomputation fallback** | Set-valued `UNION` DELETE/UPDATE, column mismatch, or non-monotone recursive terms | Falls back to full recomputation of the recursive CTE. Used when the recursive term contains EXCEPT, Aggregate, Window, DISTINCT, AntiJoin, or INTERSECT SET operators. |
 
 The strategy is selected automatically based on the type of changes and the recursive term's structure.
 
@@ -1024,8 +1024,8 @@ The strategy is selected automatically based on the type of changes and the recu
 See the table above. In brief:
 
 - **Semi-naive** is the fast path for append-only workloads (e.g., adding nodes to a tree). It's O(new derivations) — much cheaper than a full re-evaluation.
-- **DRed** handles deletions and updates correctly by first removing potentially invalidated rows and then rederiving them. More expensive than semi-naive, but still incremental.
-- **Recomputation** is the safe fallback that re-executes the entire recursive CTE. Used when the recursive term's structure is too complex for incremental processing.
+- **DRed** handles eligible `UNION ALL` deletions and updates by first removing potentially invalidated rows and then rederiving them. More expensive than semi-naive, but still incremental.
+- **Recomputation** re-evaluates the least fixed point and applies its difference from storage. It handles set-valued `UNION` deletions and shapes that cannot safely use the incremental paths; it does not change the stream table to FULL mode.
 
 ### What triggers a fallback from semi-naive to recomputation?
 
@@ -1033,7 +1033,7 @@ A recomputation fallback is triggered when:
 
 1. **The recursive term contains non-monotone operators** — `EXCEPT`, `Aggregate`, `Window`, `DISTINCT`, `AntiJoin`, or `INTERSECT SET`. These operators can "un-derive" rows when inputs change, which semi-naive evaluation cannot handle.
 2. **Column mismatch** — the CTE's output columns don't match the stream table's storage schema (e.g., after a schema change).
-3. **Mixed DML with non-monotone terms** — DELETE or UPDATE changes combined with non-monotone recursive terms always trigger recomputation.
+3. **Set-valued `UNION` with DELETE/UPDATE** — changes in either the seed or recursive sources trigger recomputation-and-diff, including mixed batches and disconnected cycles.
 
 Check which strategy was used in the refresh history:
 
