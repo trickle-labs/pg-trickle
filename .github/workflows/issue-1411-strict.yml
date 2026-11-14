@@ -1,0 +1,133 @@
+name: Issue 1411 strict final validation
+
+on:
+  push:
+    branches: [work/issue-1411-recursive-validation]
+    paths: [.github/workflows/issue-1411-strict.yml]
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  NEXTEST_PROFILE: ci
+  PGT_DISABLE_NEXTEST: '1'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Merge current main and fix pre-existing strict-Clippy blocker
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/issue-1411-strict
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git merge --no-edit cd8e16a8035a8cf07e8fa12d5921c8b8511c1d9f
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/wal_decoder.rs')
+          s = p.read_text()
+          old = '''    let identity = cdc::get_replica_identity_mode(dep.source_relid)?;
+              if identity != "full" {
+                  return Ok(false);
+              }
+
+              Ok(true)
+          '''
+          new = '''    let identity = cdc::get_replica_identity_mode(dep.source_relid)?;
+              Ok(identity == "full")
+          '''
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check
+          git add src/wal_decoder.rs
+          git commit -m 'fix: simplify WAL identity eligibility guard for strict Clippy'
+          git push origin HEAD:work/issue-1411-recursive-validation
+          git rev-parse HEAD > /tmp/issue-1411-strict/tested-commit.txt
+          for path in src/wal_decoder.rs src/dvm/operators/recursive_cte.rs src/config/dvm.rs tests/e2e_cte_tests.rs; do
+            echo "$path $(git rev-parse HEAD:$path)" >> /tmp/issue-1411-strict/tested-blobs.txt
+          done
+          git diff 154df1a765321b2efdf4c32576abc79ed113193a -- src/wal_decoder.rs > /tmp/issue-1411-strict/wal-lint.patch
+      - name: Setup pgrx
+        uses: ./.github/actions/setup-pgrx
+      - uses: taiki-e/install-action@just
+      - name: Strict lint
+        id: lint
+        continue-on-error: true
+        run: just lint 2>&1 | tee /tmp/issue-1411-strict/lint.log
+      - name: Unit tests
+        id: unit
+        continue-on-error: true
+        run: just test-unit 2>&1 | tee /tmp/issue-1411-strict/unit.log
+      - name: Package extension
+        id: package
+        run: bash scripts/run_light_e2e_tests.sh --package-only 2>&1 | tee /tmp/issue-1411-strict/package.log
+      - name: Issue regressions
+        id: regression
+        continue-on-error: true
+        run: |
+          bash scripts/run_light_e2e_tests.sh --test e2e_cte_tests --filter test_issue_1411_ --no-capture 2>&1 | tee /tmp/issue-1411-strict/regression.log
+          grep -F '14 passed; 0 failed;' /tmp/issue-1411-strict/regression.log
+      - name: Full CTE suite
+        id: cte
+        continue-on-error: true
+        run: |
+          bash scripts/run_light_e2e_tests.sh --test e2e_cte_tests 2>&1 | tee /tmp/issue-1411-strict/cte.log
+          grep -F '100 passed; 0 failed;' /tmp/issue-1411-strict/cte.log
+      - name: Full IMMEDIATE suite
+        id: ivm
+        continue-on-error: true
+        run: |
+          bash scripts/run_light_e2e_tests.sh --test e2e_ivm_tests 2>&1 | tee /tmp/issue-1411-strict/ivm.log
+          grep -F '41 passed; 0 failed;' /tmp/issue-1411-strict/ivm.log
+      - name: Full differential-equivalence suite
+        id: equivalence
+        continue-on-error: true
+        run: |
+          bash scripts/run_light_e2e_tests.sh --test e2e_diff_full_equivalence_tests 2>&1 | tee /tmp/issue-1411-strict/equivalence.log
+          grep -F '29 passed; 0 failed;' /tmp/issue-1411-strict/equivalence.log
+      - name: Testcontainers integration
+        id: integration
+        continue-on-error: true
+        run: just test-integration 2>&1 | tee /tmp/issue-1411-strict/integration.log
+      - name: DVM execution suite
+        id: dvm
+        continue-on-error: true
+        run: bash scripts/run_dvm_integration_tests.sh pg18 2>&1 | tee /tmp/issue-1411-strict/dvm.log
+      - name: Require every validation tier
+        if: always()
+        env:
+          LINT: ${{ steps.lint.outcome }}
+          UNIT: ${{ steps.unit.outcome }}
+          PACKAGE: ${{ steps.package.outcome }}
+          REGRESSION: ${{ steps.regression.outcome }}
+          CTE: ${{ steps.cte.outcome }}
+          IVM: ${{ steps.ivm.outcome }}
+          EQUIVALENCE: ${{ steps.equivalence.outcome }}
+          INTEGRATION: ${{ steps.integration.outcome }}
+          DVM: ${{ steps.dvm.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          results = {k: os.environ[k] for k in ['LINT', 'UNIT', 'PACKAGE', 'REGRESSION', 'CTE', 'IVM', 'EQUIVALENCE', 'INTEGRATION', 'DVM']}
+          Path('/tmp/issue-1411-strict/results.json').write_text(json.dumps(results, indent=2))
+          print(json.dumps(results, indent=2))
+          assert all(v == 'success' for v in results.values()), results
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: issue-1411-strict-final-evidence
+          path: /tmp/issue-1411-strict
+          retention-days: 7
