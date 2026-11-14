@@ -269,6 +269,11 @@ operations.
   affected rows, and reuse work already done during the refresh. These changes
   reduce avoidable processing in the workloads they cover.
 
+- **Live vector search support.** Maintain pgvector corpora with metric-aware
+  ANN index helpers, distance subscriptions, and durable external maintenance
+  requests. Algebraic centroid maintenance remains experimental and opt-in.
+  Existing L2 helper behavior is preserved.
+
 ### Stronger checks behind the scenes
 
 This release expands tests for overlapping transactions, duplicate rows,
@@ -290,6 +295,8 @@ ALTER EXTENSION pg_trickle UPDATE TO '0.109.0';
 **Some existing results need attention.** Installing the fixes does not
 automatically repair every result produced by an earlier version.
 
+- Inspect and re-register legacy distance subscriptions; their saved thresholds
+  may be incorrect and the upgrade retains them inactive.
 - If you use trigger-based change capture, rebuild the existing capture
   triggers so they recognize the corrected update rules.
 - Review tables with complex aggregates, counts of composite values containing

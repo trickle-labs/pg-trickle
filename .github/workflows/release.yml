@@ -158,7 +158,7 @@ jobs:
           - os: ubuntu-24.04-arm
             artifact_suffix: linux-arm64
             archive_ext: tar.gz
-          - os: macos-14
+          - os: macos-15
             artifact_suffix: macos-arm64
             archive_ext: tar.gz
           - os: windows-2022
@@ -166,6 +166,10 @@ jobs:
             archive_ext: zip
     steps:
       - uses: actions/checkout@v7
+
+      - name: Verify macOS ARM64 runner
+        if: matrix.artifact_suffix == 'macos-arm64'
+        run: test "$(uname -m)" = arm64
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -473,6 +477,8 @@ jobs:
           test -f candidate/lib/pg_trickle.so
           docker build -t pg_trickle_release_candidate:local \
             -f tests/Dockerfile.release-e2e .
+          PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_pgvector_image.sh 0.8.1
+          PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_pgvector_image.sh 0.8.7
 
       - name: Run contract suites against the exact Linux package
         id: qualify

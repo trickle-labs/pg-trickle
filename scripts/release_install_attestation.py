@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -150,7 +151,7 @@ def main() -> int:
     server = server_observation(args.container)
     observed = installed_files(args.container, files)
     if observed != files:
-        print("ERROR: installed PostgreSQL payload differs from the candidate payload", flush=True)
+        print("ERROR: installed PostgreSQL payload differs from the candidate payload", file=sys.stderr, flush=True)
     append_observation(
         args.output.resolve(),
         {
@@ -167,7 +168,7 @@ def main() -> int:
             "server": server,
         },
     )
-    return 0
+    return int(observed != files)
 
 
 if __name__ == "__main__":

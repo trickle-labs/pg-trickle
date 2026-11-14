@@ -390,6 +390,10 @@ jobs:
           test -s target/pgvector-bench/results.json
       - name: Measure distance subscription scaling
         if: matrix.dimensions == 384
+        env:
+          PGVECTOR_SUB_DIM: "384"
+          PGVECTOR_SUB_STATISTICS: both
+          PGVECTOR_SUB_FORCE_EXPLICIT: "1"
         run: |
           ./scripts/run_e2e_tests.sh --retries 0 --test e2e_bench_tests \
             --run-ignored ignored-only --no-capture \

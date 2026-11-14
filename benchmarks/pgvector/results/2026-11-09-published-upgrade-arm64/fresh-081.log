@@ -1,0 +1,96 @@
+Full E2E run id: full-e2e-74142-1794217323
+warning: ignoring --test-threads because --no-capture is specified
+    Finished `test` profile [unoptimized] target(s) in 0.22s
+────────────
+ Nextest run ID 0c6f35ce-145e-4d4d-a8f5-9fdfc57802a5 with nextest profile: default
+    Starting 11 tests across 4 binaries (185 tests skipped)
+       START [         ] ( 1/11) pg_trickle::e2e_bench_tests pgvector_workload::centroid_benchmark_oracle_rejects_missing_components
+
+running 1 test
+test pgvector_workload::centroid_benchmark_oracle_rejects_missing_components ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 14.97s
+
+        PASS [  15.228s] ( 1/11) pg_trickle::e2e_bench_tests pgvector_workload::centroid_benchmark_oracle_rejects_missing_components
+       START [         ] ( 2/11) pg_trickle::e2e_pgvector_hybrid_tests test_tenant_tutorial_sql_runs_with_isolated_reader
+
+running 1 test
+test test_tenant_tutorial_sql_runs_with_isolated_reader ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 15.04s
+
+        PASS [  15.312s] ( 2/11) pg_trickle::e2e_pgvector_hybrid_tests test_tenant_tutorial_sql_runs_with_isolated_reader
+       START [         ] ( 3/11) pg_trickle::e2e_pgvector_revision_tests test_revision_safe_generation_and_model_rollover
+
+running 1 test
+test test_revision_safe_generation_and_model_rollover ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 14.96s
+
+        PASS [  15.191s] ( 3/11) pg_trickle::e2e_pgvector_revision_tests test_revision_safe_generation_and_model_rollover
+       START [         ] ( 4/11) pg_trickle::e2e_pgvector_tests test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex
+
+running 1 test
+test test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 14.28s
+
+        PASS [  14.528s] ( 4/11) pg_trickle::e2e_pgvector_tests test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex
+       START [         ] ( 5/11) pg_trickle::e2e_pgvector_tests test_ann_worker_records_lock_timeout_and_can_retry
+
+running 1 test
+test test_ann_worker_records_lock_timeout_and_can_retry ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 14.61s
+
+        PASS [  14.873s] ( 5/11) pg_trickle::e2e_pgvector_tests test_ann_worker_records_lock_timeout_and_can_retry
+       START [         ] ( 6/11) pg_trickle::e2e_pgvector_tests test_distance_subscription_notifies_only_membership_crossings
+
+running 1 test
+test test_distance_subscription_notifies_only_membership_crossings ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 15.87s
+
+        PASS [  16.154s] ( 6/11) pg_trickle::e2e_pgvector_tests test_distance_subscription_notifies_only_membership_crossings
+       START [         ] ( 7/11) pg_trickle::e2e_pgvector_tests test_distance_subscription_typed_predicates_and_authorization
+
+running 1 test
+test test_distance_subscription_typed_predicates_and_authorization ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 14.56s
+
+        PASS [  14.813s] ( 7/11) pg_trickle::e2e_pgvector_tests test_distance_subscription_typed_predicates_and_authorization
+       START [         ] ( 8/11) pg_trickle::e2e_pgvector_tests test_embedding_stream_table_halfvec_and_sparsevec_indexes
+
+running 1 test
+test test_embedding_stream_table_halfvec_and_sparsevec_indexes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 14.39s
+
+        PASS [  14.643s] ( 8/11) pg_trickle::e2e_pgvector_tests test_embedding_stream_table_halfvec_and_sparsevec_indexes
+       START [         ] ( 9/11) pg_trickle::e2e_pgvector_tests test_embedding_stream_table_v2_metrics_and_options
+
+running 1 test
+test test_embedding_stream_table_v2_metrics_and_options ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 17.29s
+
+        PASS [  17.747s] ( 9/11) pg_trickle::e2e_pgvector_tests test_embedding_stream_table_v2_metrics_and_options
+       START [         ] (10/11) pg_trickle::e2e_pgvector_tests test_pgvector_compat_installed_version
+
+running 1 test
+test test_pgvector_compat_installed_version ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 18.90s
+
+        PASS [  19.160s] (10/11) pg_trickle::e2e_pgvector_tests test_pgvector_compat_installed_version
+       START [         ] (11/11) pg_trickle::e2e_pgvector_tests test_pgvector_distance_types_and_functions_differential
+
+running 1 test
+test test_pgvector_distance_types_and_functions_differential ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 14.63s
+
+        PASS [  14.872s] (11/11) pg_trickle::e2e_pgvector_tests test_pgvector_distance_types_and_functions_differential
+────────────
+     Summary [ 172.522s] 11 tests run: 11 passed, 185 skipped

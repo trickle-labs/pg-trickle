@@ -1,0 +1,639 @@
+{
+  "description": "Cases above both thresholds in all three retry measurements; comparison is observational, not causal.",
+  "qualification_directories": [
+    "2026-11-09-c138-qualification-failures",
+    "2026-11-09-b7-qualification-failures",
+    "2026-11-09-976d-qualification-failures"
+  ],
+  "candidate_commits": [
+    "c138e4fe10cb07774129eba1d05a54b6634805b1",
+    "b7b6c0ca4dc2dd9cdff61a91afa000a045f45e4f",
+    "976d04b1436ae0924f6d500983e4a0d0d6b2493c"
+  ],
+  "cases": [
+    {
+      "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/10",
+      "measurements": [
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/10",
+          "baseline_ns": 8487.662834653538,
+          "candidate_ns": 13536.56100390571,
+          "delta_ns": 5048.898169252172,
+          "regression_pct": 59.485140581202955
+        },
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/10",
+          "baseline_ns": 6820.489917078779,
+          "candidate_ns": 11481.20057544879,
+          "delta_ns": 4660.71065837001,
+          "regression_pct": 68.33395716485708
+        },
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/10",
+          "baseline_ns": 8423.296791328712,
+          "candidate_ns": 14070.003834854771,
+          "delta_ns": 5646.707043526059,
+          "regression_pct": 67.03678124388317
+        }
+      ]
+    },
+    {
+      "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/20",
+      "measurements": [
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/20",
+          "baseline_ns": 8440.633162757937,
+          "candidate_ns": 13747.17746455198,
+          "delta_ns": 5306.544301794043,
+          "regression_pct": 62.869031261869864
+        },
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/20",
+          "baseline_ns": 6614.785118200878,
+          "candidate_ns": 11243.928330073966,
+          "delta_ns": 4629.143211873088,
+          "regression_pct": 69.98176250859296
+        },
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/20",
+          "baseline_ns": 8153.131043118814,
+          "candidate_ns": 14112.327326058039,
+          "delta_ns": 5959.196282939225,
+          "regression_pct": 73.09089295171756
+        }
+      ]
+    },
+    {
+      "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/4",
+      "measurements": [
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/4",
+          "baseline_ns": 8222.469659336059,
+          "candidate_ns": 13492.127733819121,
+          "delta_ns": 5269.658074483063,
+          "regression_pct": 64.0885073805012
+        },
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/4",
+          "baseline_ns": 6608.02010075798,
+          "candidate_ns": 11637.008258932487,
+          "delta_ns": 5028.988158174507,
+          "regression_pct": 76.10431084490273
+        },
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/4",
+          "baseline_ns": 8208.940283265676,
+          "candidate_ns": 13495.94735692566,
+          "delta_ns": 5287.007073659985,
+          "regression_pct": 64.40547611776157
+        }
+      ]
+    },
+    {
+      "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/50",
+      "measurements": [
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/50",
+          "baseline_ns": 7987.855017974941,
+          "candidate_ns": 14343.608966105341,
+          "delta_ns": 6355.7539481304,
+          "regression_pct": 79.567717914611
+        },
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/50",
+          "baseline_ns": 6830.577387815504,
+          "candidate_ns": 11032.283953255133,
+          "delta_ns": 4201.706565439629,
+          "regression_pct": 61.51319759490175
+        },
+        {
+          "label": "a44_11_di_delta_scan/p5_agg_delta_ncols/50",
+          "baseline_ns": 8043.763031516257,
+          "candidate_ns": 14332.172219401062,
+          "delta_ns": 6288.409187884805,
+          "regression_pct": 78.17745454765632
+        }
+      ]
+    },
+    {
+      "label": "a44_7_scan_agg_delta/n_groups/1",
+      "measurements": [
+        {
+          "label": "a44_7_scan_agg_delta/n_groups/1",
+          "baseline_ns": 8198.139914853798,
+          "candidate_ns": 13486.282061322094,
+          "delta_ns": 5288.142146468295,
+          "regression_pct": 64.50417047514614
+        },
+        {
+          "label": "a44_7_scan_agg_delta/n_groups/1",
+          "baseline_ns": 7010.772764591152,
+          "candidate_ns": 10750.315163227473,
+          "delta_ns": 3739.542398636321,
+          "regression_pct": 53.339945883332305
+        },
+        {
+          "label": "a44_7_scan_agg_delta/n_groups/1",
+          "baseline_ns": 8408.291126258091,
+          "candidate_ns": 13389.14825087296,
+          "delta_ns": 4980.8571246148695,
+          "regression_pct": 59.23744848772239
+        }
+      ]
+    },
+    {
+      "label": "a44_7_scan_agg_delta/n_groups/3",
+      "measurements": [
+        {
+          "label": "a44_7_scan_agg_delta/n_groups/3",
+          "baseline_ns": 10209.09219990843,
+          "candidate_ns": 17047.7859914222,
+          "delta_ns": 6838.69379151377,
+          "regression_pct": 66.98630649623392
+        },
+        {
+          "label": "a44_7_scan_agg_delta/n_groups/3",
+          "baseline_ns": 8983.031939241077,
+          "candidate_ns": 13523.825117422892,
+          "delta_ns": 4540.793178181815,
+          "regression_pct": 50.54855875938742
+        },
+        {
+          "label": "a44_7_scan_agg_delta/n_groups/3",
+          "baseline_ns": 10968.309062859169,
+          "candidate_ns": 17090.332730769667,
+          "delta_ns": 6122.023667910498,
+          "regression_pct": 55.81556494100683
+        }
+      ]
+    },
+    {
+      "label": "a44_7_scan_agg_delta/n_groups/5",
+      "measurements": [
+        {
+          "label": "a44_7_scan_agg_delta/n_groups/5",
+          "baseline_ns": 12208.253253610548,
+          "candidate_ns": 19968.114342960034,
+          "delta_ns": 7759.861089349486,
+          "regression_pct": 63.56241903037632
+        },
+        {
+          "label": "a44_7_scan_agg_delta/n_groups/5",
+          "baseline_ns": 10710.541953447053,
+          "candidate_ns": 16140.11634450247,
+          "delta_ns": 5429.574391055417,
+          "regression_pct": 50.69374093911259
+        },
+        {
+          "label": "a44_7_scan_agg_delta/n_groups/5",
+          "baseline_ns": 12531.215423506192,
+          "candidate_ns": 19685.837989856118,
+          "delta_ns": 7154.622566349926,
+          "regression_pct": 57.094402454603134
+        }
+      ]
+    },
+    {
+      "label": "diff_aggregate/count_star_1group",
+      "measurements": [
+        {
+          "label": "diff_aggregate/count_star_1group",
+          "baseline_ns": 6368.50742154788,
+          "candidate_ns": 7875.636761293241,
+          "delta_ns": 1507.129339745361,
+          "regression_pct": 23.665346367438957
+        },
+        {
+          "label": "diff_aggregate/count_star_1group",
+          "baseline_ns": 5379.378126575175,
+          "candidate_ns": 6545.210276769519,
+          "delta_ns": 1165.8321501943437,
+          "regression_pct": 21.672247660652566
+        },
+        {
+          "label": "diff_aggregate/count_star_1group",
+          "baseline_ns": 6141.448780382652,
+          "candidate_ns": 7749.836094935668,
+          "delta_ns": 1608.387314553016,
+          "regression_pct": 26.18905362673729
+        }
+      ]
+    },
+    {
+      "label": "diff_aggregate/sum_count_avg_2groups",
+      "measurements": [
+        {
+          "label": "diff_aggregate/sum_count_avg_2groups",
+          "baseline_ns": 20007.6404771949,
+          "candidate_ns": 30482.21941529974,
+          "delta_ns": 10474.578938104842,
+          "regression_pct": 52.35289463564668
+        },
+        {
+          "label": "diff_aggregate/sum_count_avg_2groups",
+          "baseline_ns": 17732.247650386984,
+          "candidate_ns": 24508.795621938716,
+          "delta_ns": 6776.547971551732,
+          "regression_pct": 38.21595606580559
+        },
+        {
+          "label": "diff_aggregate/sum_count_avg_2groups",
+          "baseline_ns": 20208.463993621084,
+          "candidate_ns": 30528.326670500835,
+          "delta_ns": 10319.862676879751,
+          "regression_pct": 51.067031517770346
+        }
+      ]
+    },
+    {
+      "label": "diff_aggregate_scaled/10keys",
+      "measurements": [
+        {
+          "label": "diff_aggregate_scaled/10keys",
+          "baseline_ns": 36521.19923006208,
+          "candidate_ns": 51266.35509817549,
+          "delta_ns": 14745.155868113412,
+          "regression_pct": 40.37423791926329
+        },
+        {
+          "label": "diff_aggregate_scaled/10keys",
+          "baseline_ns": 34179.11197790908,
+          "candidate_ns": 44074.65111609307,
+          "delta_ns": 9895.539138183987,
+          "regression_pct": 28.952007719158267
+        },
+        {
+          "label": "diff_aggregate_scaled/10keys",
+          "baseline_ns": 36233.23435362176,
+          "candidate_ns": 49459.898472427754,
+          "delta_ns": 13226.664118805995,
+          "regression_pct": 36.50423252232766
+        }
+      ]
+    },
+    {
+      "label": "diff_aggregate_scaled/1keys",
+      "measurements": [
+        {
+          "label": "diff_aggregate_scaled/1keys",
+          "baseline_ns": 17625.99402462713,
+          "candidate_ns": 27919.543440399444,
+          "delta_ns": 10293.549415772315,
+          "regression_pct": 58.39982358663072
+        },
+        {
+          "label": "diff_aggregate_scaled/1keys",
+          "baseline_ns": 15097.685022874866,
+          "candidate_ns": 22702.48427063583,
+          "delta_ns": 7604.799247760962,
+          "regression_pct": 50.370631234118
+        },
+        {
+          "label": "diff_aggregate_scaled/1keys",
+          "baseline_ns": 17381.335976502964,
+          "candidate_ns": 27529.391780833375,
+          "delta_ns": 10148.055804330412,
+          "regression_pct": 58.38478594539054
+        }
+      ]
+    },
+    {
+      "label": "diff_aggregate_scaled/20keys",
+      "measurements": [
+        {
+          "label": "diff_aggregate_scaled/20keys",
+          "baseline_ns": 55325.87010474738,
+          "candidate_ns": 79151.75825064369,
+          "delta_ns": 23825.888145896308,
+          "regression_pct": 43.06464245530568
+        },
+        {
+          "label": "diff_aggregate_scaled/20keys",
+          "baseline_ns": 52456.19214243589,
+          "candidate_ns": 70183.69124427167,
+          "delta_ns": 17727.499101835783,
+          "regression_pct": 33.79486458662453
+        },
+        {
+          "label": "diff_aggregate_scaled/20keys",
+          "baseline_ns": 55566.25515968598,
+          "candidate_ns": 79264.4131734102,
+          "delta_ns": 23698.15801372422,
+          "regression_pct": 42.64847063315782
+        }
+      ]
+    },
+    {
+      "label": "diff_aggregate_scaled/5keys",
+      "measurements": [
+        {
+          "label": "diff_aggregate_scaled/5keys",
+          "baseline_ns": 25339.712089757068,
+          "candidate_ns": 38106.37602661273,
+          "delta_ns": 12766.66393685566,
+          "regression_pct": 50.382040220639524
+        },
+        {
+          "label": "diff_aggregate_scaled/5keys",
+          "baseline_ns": 22043.441407837367,
+          "candidate_ns": 31072.34100074071,
+          "delta_ns": 9028.899592903344,
+          "regression_pct": 40.95957353416328
+        },
+        {
+          "label": "diff_aggregate_scaled/5keys",
+          "baseline_ns": 24705.100228350057,
+          "candidate_ns": 37275.354921304686,
+          "delta_ns": 12570.25469295463,
+          "regression_pct": 50.88121309675877
+        }
+      ]
+    },
+    {
+      "label": "diff_filter",
+      "measurements": [
+        {
+          "label": "diff_filter",
+          "baseline_ns": 5715.298069539964,
+          "candidate_ns": 6718.338416584897,
+          "delta_ns": 1003.0403470449328,
+          "regression_pct": 17.550096860051777
+        },
+        {
+          "label": "diff_filter",
+          "baseline_ns": 4991.47040841671,
+          "candidate_ns": 5998.943019272646,
+          "delta_ns": 1007.4726108559362,
+          "regression_pct": 20.183884275004772
+        },
+        {
+          "label": "diff_filter",
+          "baseline_ns": 5641.851651456208,
+          "candidate_ns": 6447.695336842249,
+          "delta_ns": 805.8436853860412,
+          "regression_pct": 14.283319292488784
+        }
+      ]
+    },
+    {
+      "label": "diff_join_aggregate",
+      "measurements": [
+        {
+          "label": "diff_join_aggregate",
+          "baseline_ns": 29842.495903618197,
+          "candidate_ns": 38488.55435149007,
+          "delta_ns": 8646.058447871874,
+          "regression_pct": 28.972303375012267
+        },
+        {
+          "label": "diff_join_aggregate",
+          "baseline_ns": 26764.520777853835,
+          "candidate_ns": 32888.485427446576,
+          "delta_ns": 6123.964649592741,
+          "regression_pct": 22.88090528659861
+        },
+        {
+          "label": "diff_join_aggregate",
+          "baseline_ns": 29704.217790641138,
+          "candidate_ns": 38604.85972144375,
+          "delta_ns": 8900.641930802609,
+          "regression_pct": 29.964236033870307
+        }
+      ]
+    },
+    {
+      "label": "diff_scan/3cols",
+      "measurements": [
+        {
+          "label": "diff_scan/3cols",
+          "baseline_ns": 4027.7312625739282,
+          "candidate_ns": 5113.376170227504,
+          "delta_ns": 1085.644907653576,
+          "regression_pct": 26.954253818805984
+        },
+        {
+          "label": "diff_scan/3cols",
+          "baseline_ns": 3572.9108907923737,
+          "candidate_ns": 4148.158640525287,
+          "delta_ns": 575.2477497329137,
+          "regression_pct": 16.100254591161644
+        },
+        {
+          "label": "diff_scan/3cols",
+          "baseline_ns": 3962.810469119265,
+          "candidate_ns": 5064.999474738673,
+          "delta_ns": 1102.189005619408,
+          "regression_pct": 27.81331618578189
+        }
+      ]
+    },
+    {
+      "label": "diff_topk/10keys",
+      "measurements": [
+        {
+          "label": "diff_topk/10keys",
+          "baseline_ns": 21579.112926129674,
+          "candidate_ns": 35468.80855035998,
+          "delta_ns": 13889.695624230306,
+          "regression_pct": 64.36638833013187
+        },
+        {
+          "label": "diff_topk/10keys",
+          "baseline_ns": 19596.628838109773,
+          "candidate_ns": 29849.979808496963,
+          "delta_ns": 10253.35097038719,
+          "regression_pct": 52.322014439786656
+        },
+        {
+          "label": "diff_topk/10keys",
+          "baseline_ns": 21655.17644866315,
+          "candidate_ns": 32318.34024307178,
+          "delta_ns": 10663.163794408629,
+          "regression_pct": 49.24071535361192
+        }
+      ]
+    },
+    {
+      "label": "diff_topk/1keys",
+      "measurements": [
+        {
+          "label": "diff_topk/1keys",
+          "baseline_ns": 10802.675367430982,
+          "candidate_ns": 17315.795441259554,
+          "delta_ns": 6513.120073828572,
+          "regression_pct": 60.291731930267915
+        },
+        {
+          "label": "diff_topk/1keys",
+          "baseline_ns": 10199.500440959726,
+          "candidate_ns": 13898.605785783779,
+          "delta_ns": 3699.1053448240527,
+          "regression_pct": 36.26751492621128
+        },
+        {
+          "label": "diff_topk/1keys",
+          "baseline_ns": 10800.426869281717,
+          "candidate_ns": 16934.340128832424,
+          "delta_ns": 6133.913259550707,
+          "regression_pct": 56.79324839462243
+        }
+      ]
+    },
+    {
+      "label": "diff_topk/3keys",
+      "measurements": [
+        {
+          "label": "diff_topk/3keys",
+          "baseline_ns": 13657.520987085189,
+          "candidate_ns": 20590.041382806972,
+          "delta_ns": 6932.520395721784,
+          "regression_pct": 50.759727202889216
+        },
+        {
+          "label": "diff_topk/3keys",
+          "baseline_ns": 12139.41632717892,
+          "candidate_ns": 17039.161504845713,
+          "delta_ns": 4899.745177666793,
+          "regression_pct": 40.362279747311746
+        },
+        {
+          "label": "diff_topk/3keys",
+          "baseline_ns": 13804.87168163914,
+          "candidate_ns": 20275.87248694146,
+          "delta_ns": 6471.0008053023175,
+          "regression_pct": 46.87476243556053
+        }
+      ]
+    },
+    {
+      "label": "diff_topk/5keys",
+      "measurements": [
+        {
+          "label": "diff_topk/5keys",
+          "baseline_ns": 15942.515168464935,
+          "candidate_ns": 24808.9167934129,
+          "delta_ns": 8866.401624947965,
+          "regression_pct": 55.6148232023397
+        },
+        {
+          "label": "diff_topk/5keys",
+          "baseline_ns": 14794.65343279501,
+          "candidate_ns": 20781.123348069166,
+          "delta_ns": 5986.469915274156,
+          "regression_pct": 40.463738758517096
+        },
+        {
+          "label": "diff_topk/5keys",
+          "baseline_ns": 16239.005464743554,
+          "candidate_ns": 24030.908035059038,
+          "delta_ns": 7791.902570315484,
+          "regression_pct": 47.98263407960823
+        }
+      ]
+    },
+    {
+      "label": "diff_tpch_q01",
+      "measurements": [
+        {
+          "label": "diff_tpch_q01",
+          "baseline_ns": 51737.27419995311,
+          "candidate_ns": 72065.54638823762,
+          "delta_ns": 20328.272188284507,
+          "regression_pct": 39.291347491018236
+        },
+        {
+          "label": "diff_tpch_q01",
+          "baseline_ns": 48783.7460132361,
+          "candidate_ns": 62844.29451712871,
+          "delta_ns": 14060.548503892605,
+          "regression_pct": 28.822199304001117
+        },
+        {
+          "label": "diff_tpch_q01",
+          "baseline_ns": 52812.329064849255,
+          "candidate_ns": 71226.80771531096,
+          "delta_ns": 18414.478650461708,
+          "regression_pct": 34.86776473699962
+        }
+      ]
+    },
+    {
+      "label": "diff_union_all/10_children",
+      "measurements": [
+        {
+          "label": "diff_union_all/10_children",
+          "baseline_ns": 42667.12848075653,
+          "candidate_ns": 51558.69458725463,
+          "delta_ns": 8891.566106498096,
+          "regression_pct": 20.83938250146906
+        },
+        {
+          "label": "diff_union_all/10_children",
+          "baseline_ns": 39797.54232105943,
+          "candidate_ns": 45611.63334622295,
+          "delta_ns": 5814.091025163521,
+          "regression_pct": 14.609171034380463
+        },
+        {
+          "label": "diff_union_all/10_children",
+          "baseline_ns": 43530.831636020055,
+          "candidate_ns": 50992.9812275967,
+          "delta_ns": 7462.149591576643,
+          "regression_pct": 17.142216932520093
+        }
+      ]
+    },
+    {
+      "label": "diff_vector_avg/vector_avg_sum_count_mixed",
+      "measurements": [
+        {
+          "label": "diff_vector_avg/vector_avg_sum_count_mixed",
+          "baseline_ns": 17755.42785524614,
+          "candidate_ns": 20529.62151247932,
+          "delta_ns": 2774.1936572331797,
+          "regression_pct": 15.624482157513864
+        },
+        {
+          "label": "diff_vector_avg/vector_avg_sum_count_mixed",
+          "baseline_ns": 15482.653462253442,
+          "candidate_ns": 17905.024081220086,
+          "delta_ns": 2422.3706189666445,
+          "regression_pct": 15.645707144917775
+        },
+        {
+          "label": "diff_vector_avg/vector_avg_sum_count_mixed",
+          "baseline_ns": 17907.64803070801,
+          "candidate_ns": 21315.666133468603,
+          "delta_ns": 3408.018102760594,
+          "regression_pct": 19.031075978914313
+        }
+      ]
+    },
+    {
+      "label": "diff_vector_avg/vector_sum_1group",
+      "measurements": [
+        {
+          "label": "diff_vector_avg/vector_sum_1group",
+          "baseline_ns": 12581.978850802141,
+          "candidate_ns": 15836.531727291485,
+          "delta_ns": 3254.5528764893443,
+          "regression_pct": 25.866780695485403
+        },
+        {
+          "label": "diff_vector_avg/vector_sum_1group",
+          "baseline_ns": 11021.261399258696,
+          "candidate_ns": 12855.644769267488,
+          "delta_ns": 1834.3833700087926,
+          "regression_pct": 16.64404194362159
+        },
+        {
+          "label": "diff_vector_avg/vector_sum_1group",
+          "baseline_ns": 12874.125795073924,
+          "candidate_ns": 15999.920799301008,
+          "delta_ns": 3125.795004227084,
+          "regression_pct": 24.27966802548347
+        }
+      ]
+    }
+  ]
+}

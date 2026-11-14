@@ -6,6 +6,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+const CENTROID_COMPONENT_WITHIN_BOUND: &str = "x.actual IS NOT NULL AND x.expected IS NOT NULL AND abs(x.actual::float8 - x.expected::float8) <= 1e-5 + 1e-6 * abs(x.expected::float8)";
+
 fn percentiles(mut values: Vec<f64>) -> serde_json::Value {
     values.sort_by(f64::total_cmp);
     let at = |fraction: f64| values[((values.len() as f64 * fraction).ceil() as usize) - 1];
@@ -32,6 +34,60 @@ fn has_source_seq_scan(value: &serde_json::Value, relation: &str) -> bool {
         }
         serde_json::Value::Array(items) => items.iter().any(|v| has_source_seq_scan(v, relation)),
         _ => false,
+    }
+}
+
+fn subscription_counts(value: &str, max: usize, allow_zero: bool) -> Result<Vec<usize>, String> {
+    let counts: Vec<usize> = value
+        .split(',')
+        .map(|item| {
+            let count = item
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| format!("invalid count: {item}"))?;
+            if count > max || (!allow_zero && count == 0) {
+                return Err(format!("count outside allowed range: {count}"));
+            }
+            Ok(count)
+        })
+        .collect::<Result<_, _>>()?;
+    if counts.iter().copied().collect::<HashSet<_>>().len() != counts.len() {
+        return Err("duplicate count".into());
+    }
+    Ok(counts)
+}
+
+#[test]
+fn subscription_benchmark_count_validation() {
+    assert_eq!(
+        subscription_counts("0, 10,1000", 1000, true).unwrap(),
+        vec![0, 10, 1000]
+    );
+    assert!(subscription_counts("", 1000, true).is_err());
+    assert!(subscription_counts("0", 1000, false).is_err());
+    assert!(subscription_counts("1001", 1000, true).is_err());
+    assert!(subscription_counts("1,1", 1000, true).is_err());
+}
+
+#[tokio::test]
+async fn centroid_benchmark_oracle_rejects_missing_components() {
+    let db = E2eDb::new().await.with_extension().await;
+    let comparison = format!(
+        "SELECT COALESCE(bool_and({CENTROID_COMPONENT_WITHIN_BOUND}), false) FROM unnest($1::real[], $2::real[]) AS x(actual, expected)"
+    );
+    for (actual, expected, valid) in [
+        (vec![1.0_f32, 2.0], vec![1.0_f32, 2.0], true),
+        (vec![1.0_f32], vec![1.0_f32, 2.0], false),
+        (vec![1.0_f32, 2.0], vec![1.0_f32], false),
+        (vec![1.0_f32, 2.1], vec![1.0_f32, 2.0], false),
+    ] {
+        let matched: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(comparison.as_str()))
+            .bind(actual)
+            .bind(expected)
+            .fetch_one(&db.pool)
+            .await
+            .expect("evaluate centroid component oracle");
+        assert_eq!(matched, valid);
     }
 }
 
@@ -69,159 +125,257 @@ async fn test_pgvector_subscription_scaling_workload() {
     .fetch_one(&db.pool)
     .await
     .expect("inspect benchmark versions");
+    let row_counts = subscription_counts(
+        &std::env::var("PGVECTOR_SUB_ROWS").unwrap_or_else(|_| "1000,10000".into()),
+        1_000_000,
+        false,
+    )
+    .expect("PGVECTOR_SUB_ROWS must contain row counts from 1 to 1000000");
+    let subscription_counts = subscription_counts(
+        &std::env::var("PGVECTOR_SUB_COUNTS").unwrap_or_else(|_| "0,1,10".into()),
+        1000,
+        true,
+    )
+    .expect("PGVECTOR_SUB_COUNTS must contain counts from 0 to 1000");
+    let dimensions: usize = std::env::var("PGVECTOR_SUB_DIM")
+        .unwrap_or_else(|_| "3".into())
+        .parse()
+        .expect("PGVECTOR_SUB_DIM must be an integer");
+    assert!(
+        (2..=1536).contains(&dimensions),
+        "PGVECTOR_SUB_DIM must be between 2 and 1536"
+    );
+    let rounds: usize = std::env::var("PGVECTOR_SUB_ROUNDS")
+        .unwrap_or_else(|_| "5".into())
+        .parse()
+        .expect("PGVECTOR_SUB_ROUNDS must be an integer");
+    assert!(
+        (1..=100).contains(&rounds),
+        "PGVECTOR_SUB_ROUNDS must be between 1 and 100"
+    );
+    let statistics = std::env::var("PGVECTOR_SUB_STATISTICS").unwrap_or_else(|_| "analyzed".into());
+    let analyze_cases: &[bool] = match statistics.as_str() {
+        "analyzed" => &[true],
+        "unanalyzed" => &[false],
+        "both" => &[false, true],
+        _ => panic!("PGVECTOR_SUB_STATISTICS must be analyzed, unanalyzed, or both"),
+    };
+    let force_explicit =
+        std::env::var("PGVECTOR_SUB_FORCE_EXPLICIT").unwrap_or_else(|_| "0".into());
+    assert!(
+        force_explicit == "0" || force_explicit == "1",
+        "PGVECTOR_SUB_FORCE_EXPLICIT must be 0 or 1"
+    );
+    let force_explicit = force_explicit == "1";
+    let vector = |position: usize| {
+        format!(
+            "[{}]",
+            (0..dimensions)
+                .map(|i| if i == position { "1" } else { "0" })
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    let first = vector(0);
+    let second = vector(1);
+    if force_explicit {
+        db.execute("CREATE FUNCTION public.subscription_bench_noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$").await;
+    }
     let mut measurements = Vec::new();
-    for rows in [1_000, 10_000] {
-        for subscriptions in [0, 1, 10] {
-            let source = format!("alert_measure_src_{rows}_{subscriptions}");
-            let stream = format!("alert_measure_st_{rows}_{subscriptions}");
-            db.execute(&format!(
-                "CREATE TABLE {source} (id int PRIMARY KEY, embedding vector(3))"
+    for &analyzed in analyze_cases {
+        for &rows in &row_counts {
+            for &subscriptions in &subscription_counts {
+                let source = format!(
+                    "alert_measure_src_{rows}_{subscriptions}_{}",
+                    u8::from(analyzed)
+                );
+                let stream = format!(
+                    "alert_measure_st_{rows}_{subscriptions}_{}",
+                    u8::from(analyzed)
+                );
+                db.execute(&format!(
+                    "CREATE TABLE {source} (id int PRIMARY KEY, embedding vector({dimensions}))"
+                ))
+                .await;
+                db.execute(&format!(
+                "INSERT INTO {source} SELECT i, '{first}'::vector FROM generate_series(1,{rows}) i"
             ))
             .await;
-            db.execute(&format!(
-                "INSERT INTO {source} SELECT i, '[1,0,0]'::vector FROM generate_series(1,{rows}) i"
-            ))
-            .await;
-            db.create_st(
-                &stream,
-                &format!("SELECT id, embedding FROM {source}"),
-                "1h",
-                "DIFFERENTIAL",
-            )
-            .await;
-            db.execute(&format!(
-                "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
-            ))
-            .await;
-            db.execute(&format!("ANALYZE {stream}")).await;
-            let mut listener = sqlx::postgres::PgListener::connect_with(&db.pool)
-                .await
-                .expect("connect subscription benchmark listener");
-            for index in 0..subscriptions {
-                let channel = format!("alert_measure_{index}");
-                listener
-                    .listen(&channel)
+                db.create_st(
+                    &stream,
+                    &format!("SELECT id, embedding FROM {source}"),
+                    "1h",
+                    "DIFFERENTIAL",
+                )
+                .await;
+                db.execute(&format!(
+                    "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
+                ))
+                .await;
+                db.execute(&format!(
+                    "ALTER TABLE {stream} SET (autovacuum_enabled = false)"
+                ))
+                .await;
+                if force_explicit {
+                    db.execute(&format!("CREATE TRIGGER subscription_bench_noop AFTER INSERT OR UPDATE OR DELETE ON {stream} FOR EACH ROW EXECUTE FUNCTION public.subscription_bench_noop()" )).await;
+                }
+                if analyzed {
+                    db.execute(&format!("ANALYZE {stream}")).await;
+                }
+                let (estimated_rows, last_analyze, last_autoanalyze): (f32, Option<String>, Option<String>) = sqlx::query_as("SELECT c.reltuples, st.last_analyze::text, st.last_autoanalyze::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_stat_all_tables st ON st.relid=c.oid WHERE c.oid=$1::text::regclass")
+                .bind(&stream).fetch_one(&db.pool).await.expect("inspect stream statistics");
+                if !analyzed {
+                    assert!(
+                        last_analyze.is_none() && last_autoanalyze.is_none(),
+                        "control stream was analyzed before measurement"
+                    );
+                }
+                let mut listener = sqlx::postgres::PgListener::connect_with(&db.pool)
                     .await
-                    .expect("listen for measured transitions");
-                db.execute(&format!("SELECT pgtrickle.subscribe_distance('{stream}', '{channel}', 'embedding', '[1,0,0]', '<->', 0.5)")).await;
-            }
-            let pgt_id: i64 = sqlx::query_scalar(
+                    .expect("connect subscription benchmark listener");
+                for index in 0..subscriptions {
+                    let channel = format!("alert_measure_{index}");
+                    listener
+                        .listen(&channel)
+                        .await
+                        .expect("listen for measured transitions");
+                    db.execute(&format!("SELECT pgtrickle.subscribe_distance('{stream}', '{channel}', 'embedding', '{first}', '<->', 0.5)")).await;
+                }
+                let pgt_id: i64 = sqlx::query_scalar(
                 "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid=$1::text::regclass",
             )
             .bind(&stream)
             .fetch_one(&db.pool)
             .await
             .expect("inspect subscription stream");
-            let mut samples = Vec::new();
-            for round in 0..5 {
-                let vector = if round % 2 == 0 { "[0,1,0]" } else { "[1,0,0]" };
-                db.execute(&format!(
-                    "UPDATE {source} SET embedding='{vector}' WHERE id=1"
-                ))
-                .await;
-                let mut tx = db
-                    .pool
-                    .begin()
-                    .await
-                    .expect("begin subscription measurement");
-                sqlx::query("SET LOCAL pg_trickle.refresh_strategy = 'differential'")
-                    .execute(&mut *tx)
-                    .await
-                    .expect("force differential refresh");
-                sqlx::query("SET LOCAL pg_trickle.differential_max_change_ratio = 0")
-                    .execute(&mut *tx)
-                    .await
-                    .expect("disable ratio fallback");
-                let counters = "SELECT pg_stat_get_xact_tuples_returned($1::text::regclass)::bigint, \
+                let mut samples = Vec::new();
+                for round in 0..rounds {
+                    let vector = if round % 2 == 0 { &second } else { &first };
+                    db.execute(&format!(
+                        "UPDATE {source} SET embedding='{vector}' WHERE id=1"
+                    ))
+                    .await;
+                    let mut tx = db
+                        .pool
+                        .begin()
+                        .await
+                        .expect("begin subscription measurement");
+                    sqlx::query("SET LOCAL pg_trickle.refresh_strategy = 'differential'")
+                        .execute(&mut *tx)
+                        .await
+                        .expect("force differential refresh");
+                    sqlx::query("SET LOCAL pg_trickle.differential_max_change_ratio = 0")
+                        .execute(&mut *tx)
+                        .await
+                        .expect("disable ratio fallback");
+                    if force_explicit {
+                        sqlx::query("SET LOCAL pg_trickle.user_triggers = 'auto'")
+                            .execute(&mut *tx)
+                            .await
+                            .expect("enable control trigger");
+                    }
+                    let counters = "SELECT pg_stat_get_xact_tuples_returned($1::text::regclass)::bigint, \
                     pg_stat_get_xact_tuples_fetched($1::text::regclass)::bigint, \
                     pg_stat_get_xact_tuples_returned($2::text::regclass)::bigint, \
                     pg_stat_get_xact_tuples_fetched($2::text::regclass)::bigint";
-                let before: (i64, i64, i64, i64) = sqlx::query_as(counters)
-                    .bind(&stream)
-                    .bind(&source)
-                    .fetch_one(&mut *tx)
-                    .await
-                    .expect("read initial tuple counters");
-                let start = Instant::now();
-                sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
-                    .bind(&stream)
-                    .execute(&mut *tx)
-                    .await
-                    .expect("refresh subscription stream");
-                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                let after: (i64, i64, i64, i64) = sqlx::query_as(counters)
-                    .bind(&stream)
-                    .bind(&source)
-                    .fetch_one(&mut *tx)
-                    .await
-                    .expect("read final tuple counters");
-                let (snapshot, ids) = if subscriptions == 0 {
-                    (None, None)
-                } else {
-                    let snapshot: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                        "SELECT count(*) FROM pg_temp.__pgt_distance_pre_{pgt_id}"
-                    )))
-                    .fetch_one(&mut *tx)
-                    .await
-                    .expect("inspect affected snapshot");
-                    let ids: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                        "SELECT count(*) FROM pg_temp.__pgt_distance_ids_{pgt_id}"
-                    )))
-                    .fetch_one(&mut *tx)
-                    .await
-                    .expect("inspect affected identities");
-                    assert_eq!(
-                        (snapshot, ids),
-                        (1, 1),
-                        "one changed row must use the bounded snapshot"
-                    );
-                    (Some(snapshot), Some(ids))
-                };
-                let (differential, strategy, refresh_id): (bool, String, i64) = sqlx::query_as("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback, h.merge_strategy_used, h.refresh_id FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id=$1 ORDER BY h.refresh_id DESC LIMIT 1")
-                    .bind(pgt_id).fetch_one(&mut *tx).await.expect("inspect measured strategy");
-                assert!(differential, "measurement must use differential refresh");
-                tx.commit().await.expect("commit measured refresh");
-                let mut channels = HashSet::new();
-                for _ in 0..subscriptions {
-                    let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+                    let before: (i64, i64, i64, i64) = sqlx::query_as(counters)
+                        .bind(&stream)
+                        .bind(&source)
+                        .fetch_one(&mut *tx)
                         .await
-                        .expect("wait for measured transition")
-                        .expect("receive measured transition");
-                    assert!(
-                        channels.insert(event.channel().to_string()),
-                        "duplicate subscription event"
-                    );
-                    let payload: serde_json::Value =
-                        serde_json::from_str(event.payload()).expect("parse transition payload");
-                    assert_eq!(payload["refresh_id"], refresh_id);
-                    assert_eq!(payload["entered"], if round % 2 == 0 { 0 } else { 1 });
-                    assert_eq!(payload["exited"], if round % 2 == 0 { 1 } else { 0 });
-                }
-                assert_eq!(channels.len(), subscriptions as usize);
-                let correct: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT s.embedding::text = d.embedding::text FROM {stream} s JOIN {source} d USING(id) WHERE s.id=1")))
+                        .expect("read initial tuple counters");
+                    let start = Instant::now();
+                    sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
+                        .bind(&stream)
+                        .execute(&mut *tx)
+                        .await
+                        .expect("refresh subscription stream");
+                    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    let after: (i64, i64, i64, i64) = sqlx::query_as(counters)
+                        .bind(&stream)
+                        .bind(&source)
+                        .fetch_one(&mut *tx)
+                        .await
+                        .expect("read final tuple counters");
+                    let (snapshot, ids) = if subscriptions == 0 {
+                        (None, None)
+                    } else {
+                        let snapshot: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                            "SELECT count(*) FROM pg_temp.__pgt_distance_pre_{pgt_id}"
+                        )))
+                        .fetch_one(&mut *tx)
+                        .await
+                        .expect("inspect affected snapshot");
+                        let ids: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                            "SELECT count(*) FROM pg_temp.__pgt_distance_ids_{pgt_id}"
+                        )))
+                        .fetch_one(&mut *tx)
+                        .await
+                        .expect("inspect affected identities");
+                        assert_eq!(
+                            (snapshot, ids),
+                            (1, 1),
+                            "one changed row must use the bounded snapshot"
+                        );
+                        (Some(snapshot), Some(ids))
+                    };
+                    let (differential, strategy, refresh_id): (bool, String, i64) = sqlx::query_as("SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback, h.merge_strategy_used, h.refresh_id FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id=$1 ORDER BY h.refresh_id DESC LIMIT 1")
+                    .bind(pgt_id).fetch_one(&mut *tx).await.expect("inspect measured strategy");
+                    assert!(differential, "measurement must use differential refresh");
+                    if force_explicit {
+                        assert_eq!(
+                            strategy, "explicit_dml",
+                            "all control cases must use the same merge path"
+                        );
+                    }
+                    let commit_start = Instant::now();
+                    tx.commit().await.expect("commit measured refresh");
+                    let commit_ms = commit_start.elapsed().as_secs_f64() * 1000.0;
+                    let delivery_start = Instant::now();
+                    let mut channels = HashSet::new();
+                    for _ in 0..subscriptions {
+                        let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+                            .await
+                            .expect("wait for measured transition")
+                            .expect("receive measured transition");
+                        assert!(
+                            channels.insert(event.channel().to_string()),
+                            "duplicate subscription event"
+                        );
+                        let payload: serde_json::Value = serde_json::from_str(event.payload())
+                            .expect("parse transition payload");
+                        assert_eq!(payload["refresh_id"], refresh_id);
+                        assert_eq!(payload["entered"], if round % 2 == 0 { 0 } else { 1 });
+                        assert_eq!(payload["exited"], if round % 2 == 0 { 1 } else { 0 });
+                    }
+                    assert_eq!(channels.len(), subscriptions);
+                    let delivery_ms = (subscriptions > 0)
+                        .then(|| delivery_start.elapsed().as_secs_f64() * 1000.0);
+                    let correct: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT s.embedding::text = d.embedding::text FROM {stream} s JOIN {source} d USING(id) WHERE s.id=1")))
                     .fetch_one(&db.pool).await.expect("check changed result");
-                assert!(
-                    correct,
-                    "measured refresh must propagate the changed vector"
-                );
-                let tuple_delta = [
-                    after.0 - before.0,
-                    after.1 - before.1,
-                    after.2 - before.2,
-                    after.3 - before.3,
-                ];
-                assert!(tuple_delta.iter().all(|value| *value >= 0));
-                samples.push(serde_json::json!({"round":round,"refresh_ms":elapsed_ms,"merge_strategy":strategy,
+                    assert!(
+                        correct,
+                        "measured refresh must propagate the changed vector"
+                    );
+                    let tuple_delta = [
+                        after.0 - before.0,
+                        after.1 - before.1,
+                        after.2 - before.2,
+                        after.3 - before.3,
+                    ];
+                    assert!(tuple_delta.iter().all(|value| *value >= 0));
+                    samples.push(serde_json::json!({"round":round,"refresh_ms":elapsed_ms,"commit_ms":commit_ms,"notification_wait_ms":delivery_ms,"merge_strategy":strategy,
                     "stream_sequential_tuples_returned":tuple_delta[0],"stream_index_tuples_fetched":tuple_delta[1],
                     "source_sequential_tuples_returned":tuple_delta[2],"source_index_tuples_fetched":tuple_delta[3],
                     "snapshot_rows":snapshot,"affected_identities":ids}));
+                }
+                measurements.push(serde_json::json!({"initial_rows":rows,"subscriptions":subscriptions,"analyzed":analyzed,"estimated_rows":estimated_rows,"last_analyze":last_analyze,"last_autoanalyze":last_autoanalyze,"samples":samples}));
             }
-            measurements.push(serde_json::json!({"initial_rows":rows,"subscriptions":subscriptions,"samples":samples}));
         }
     }
     println!(
         "PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON={}",
-        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"dimensions":3,"measurements":measurements,"notes":"One row alternates across the threshold; each subscription emits its expected event. Refresh call excludes mutation, commit, listener delivery and validation. Tuple counters include repeated visits, not distinct rows. No controlled concurrency."})
+        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"dimensions":dimensions,"force_explicit_with_noop_trigger":force_explicit,"measurements":measurements,"notes":"One row alternates across the threshold; each subscription emits its expected event. Refresh, commit, and post-commit listener wait are timed separately; notification delivery can begin before the listener wait. Tuple counters include repeated visits, not distinct rows. No controlled concurrency or internal execution plans are recorded."})
     );
 }
 
@@ -680,14 +834,17 @@ async fn test_pgvector_filtered_ann_workload() {
                 );
             }
             let numerical = format!(
-                "WITH native AS (SELECT {group}_group, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group}_group) SELECT COALESCE(max(abs(x.actual::float8 - x.expected::float8)), 0)::float8, COALESCE(bool_and(abs(x.actual::float8 - x.expected::float8) <= 1e-5 + 1e-6 * abs(x.expected::float8)), true) AND (SELECT count(*) FROM {stream}) = (SELECT count(*) FROM native) AND count(DISTINCT s.{group}_group) = (SELECT count(*) FROM native) FROM {stream} s JOIN native n USING ({group}_group) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid::real[]) AS x(actual, expected)"
+                "WITH native AS (SELECT {group}_group, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group}_group) SELECT COALESCE(max(abs(x.actual::float8 - x.expected::float8)), 0)::float8, COALESCE(bool_and({CENTROID_COMPONENT_WITHIN_BOUND}), false) AND count(*) = (SELECT count(*) FROM native) * {dim} AND (SELECT count(*) FROM {stream}) = (SELECT count(*) FROM native) AND count(DISTINCT s.{group}_group) = (SELECT count(*) FROM native) FROM {stream} s JOIN native n USING ({group}_group) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid::real[]) AS x(actual, expected)"
             );
             let (max_error, within_bound): (f64, bool) =
                 sqlx::query_as(sqlx::AssertSqlSafe(numerical.as_str()))
                     .fetch_one(&db.pool)
                     .await
                     .expect("compare centroid numerical error");
-            assert!(within_bound, "centroid output exceeded its numerical bound");
+            assert!(
+                within_bound,
+                "{group} {label}: centroid output exceeded its numerical bound or has missing components (max error {max_error})"
+            );
             if !algebraic {
                 let centroid_expr = if mode == "FULL" {
                     "avg(embedding)".to_string()
@@ -796,7 +953,7 @@ async fn test_pgvector_filtered_ann_workload() {
                      native AS (SELECT {group}_group, avg(embedding)::real[] AS centroid FROM vector_centroid_source WHERE {group}_group IN (SELECT {group}_group FROM affected) GROUP BY {group}_group) \
                      SELECT count(*)::bigint, (SELECT count(*) FROM native)::bigint, count(DISTINCT s.{group}_group)::bigint, \
                        COALESCE(max(abs(x.actual::float8 - x.expected::float8)), 0)::float8, \
-                       COALESCE(bool_and(abs(x.actual::float8 - x.expected::float8) <= 1e-5 + 1e-6 * abs(x.expected::float8)), false) \
+                       COALESCE(bool_and({CENTROID_COMPONENT_WITHIN_BOUND}), false) \
                      FROM {stream} s JOIN native n USING ({group}_group) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid) x(actual, expected)"
                 );
                 let (components, expected_groups, actual_groups, max_error, within_bound): (
@@ -816,7 +973,7 @@ async fn test_pgvector_filtered_ann_workload() {
                     "round {round} {group} {variant}: components={components}, expected_groups={expected_groups}, actual_groups={actual_groups}, max_error={max_error}"
                 );
                 timings[group_idx][variant_idx].push(elapsed_ms);
-                repeated.push(serde_json::json!({"round": round, "group_shape": group, "strategy": variant, "actual_strategy": history.2, "elapsed_ms": elapsed_ms}));
+                repeated.push(serde_json::json!({"round": round, "group_shape": group, "strategy": variant, "actual_strategy": history.2, "elapsed_ms": elapsed_ms, "max_absolute_component_error": max_error}));
             }
         }
     }

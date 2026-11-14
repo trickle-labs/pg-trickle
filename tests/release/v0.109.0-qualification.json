@@ -237,7 +237,7 @@
       "requires_postgresql": true,
       "suite_version": "0.109.0",
       "nextest_retries": 0,
-      "command": "bash scripts/run_e2e_tests.sh --test-threads 1 --test e2e_failure_recovery_tests --test e2e_dvm_failpoint_tests --test e2e_refresh_atomicity_tests -E test(/^(test_lock_timeout_during_refresh|test_statement_timeout_during_refresh_recovers|test_cancel_backend_during_refresh_recovers|test_dvm_failpoint_preserves_last_committed_result_and_recovers|test_refresh_after_apply_failure_rolls_back|test_refresh_finalization_failure_rolls_back|test_refresh_caller_rollback_preserves_committed_state|test_refresh_savepoint_rollback_preserves_outer_transaction|test_refresh_two_callers_publish_one_consistent_result|test_refresh_concurrent_writer_preserves_next_batch|test_refresh_auxiliary_state_failure_rolls_back|test_refresh_partial_finalization_control_is_detected|test_refresh_early_progress_control_is_detected)$/)",
+      "command": "bash scripts/run_e2e_tests.sh --test-threads 1 --test e2e_failure_recovery_tests --test e2e_dvm_failpoint_tests --test e2e_refresh_atomicity_tests -E 'test(/^(test_cancel_backend_during_refresh_recovers|test_dvm_failpoint_preserves_last_committed_result_and_recovers|test_lock_timeout_during_refresh|test_refresh_after_apply_failure_rolls_back|test_refresh_auxiliary_state_failure_rolls_back|test_refresh_caller_rollback_preserves_committed_state|test_refresh_concurrent_writer_preserves_next_batch|test_refresh_early_progress_control_is_detected|test_refresh_finalization_failure_rolls_back|test_refresh_partial_finalization_control_is_detected|test_refresh_savepoint_rollback_preserves_outer_transaction|test_refresh_two_callers_publish_one_consistent_result|test_scheduler_pause_drain_protects_transitive_immediate_descendant|test_scheduler_pause_drain_waits_for_witnessed_inline_refresh|test_scheduler_pause_rejects_dispatch_queued_after_pause_returns|test_scheduler_repeatable_read_job_rechecks_pause_before_refresh|test_statement_timeout_during_refresh_recovers)$/)'",
       "command_argv": [
         "bash",
         "scripts/run_e2e_tests.sh",
@@ -250,7 +250,7 @@
         "--test",
         "e2e_refresh_atomicity_tests",
         "-E",
-        "test(/^(test_lock_timeout_during_refresh|test_statement_timeout_during_refresh_recovers|test_cancel_backend_during_refresh_recovers|test_dvm_failpoint_preserves_last_committed_result_and_recovers|test_refresh_after_apply_failure_rolls_back|test_refresh_finalization_failure_rolls_back|test_refresh_caller_rollback_preserves_committed_state|test_refresh_savepoint_rollback_preserves_outer_transaction|test_refresh_two_callers_publish_one_consistent_result|test_refresh_concurrent_writer_preserves_next_batch|test_refresh_auxiliary_state_failure_rolls_back|test_refresh_partial_finalization_control_is_detected|test_refresh_early_progress_control_is_detected)$/)"
+        "test(/^(test_cancel_backend_during_refresh_recovers|test_dvm_failpoint_preserves_last_committed_result_and_recovers|test_lock_timeout_during_refresh|test_refresh_after_apply_failure_rolls_back|test_refresh_auxiliary_state_failure_rolls_back|test_refresh_caller_rollback_preserves_committed_state|test_refresh_concurrent_writer_preserves_next_batch|test_refresh_early_progress_control_is_detected|test_refresh_finalization_failure_rolls_back|test_refresh_partial_finalization_control_is_detected|test_refresh_savepoint_rollback_preserves_outer_transaction|test_refresh_two_callers_publish_one_consistent_result|test_scheduler_pause_drain_protects_transitive_immediate_descendant|test_scheduler_pause_drain_waits_for_witnessed_inline_refresh|test_scheduler_pause_rejects_dispatch_queued_after_pause_returns|test_scheduler_repeatable_read_job_rechecks_pause_before_refresh|test_statement_timeout_during_refresh_recovers)$/)"
       ],
       "e2e_image": "pg_trickle_release_candidate:local",
       "shard": {
@@ -492,7 +492,7 @@
         "scripts/run_release_criterion.py"
       ],
       "measurement_file": "qualification-logs/raw/criterion.json",
-      "workload": "same-runner v0.108.0 and candidate Criterion microbenchmarks"
+      "workload": "same-runner v0.108.3 and candidate Criterion microbenchmarks"
     },
     {
       "id": "database-workloads",
@@ -747,13 +747,16 @@
       "upgrade": false,
       "requires_postgresql": true,
       "suite_version": "0.109.0",
-      "command": "bash scripts/run_light_e2e_tests.sh --no-capture --test e2e_wal_receipt_recovery_tests",
+      "command": "bash scripts/run_e2e_tests.sh --test-threads 1 --test e2e_wal_receipt_recovery_tests -E 'test(/^(test_deferred_consumer_registration_rollback_preserves_wal_slot|test_dropped_wal_source_retains_retirement_until_last_consumer_commits|test_last_wal_consumer_drop_rollback_preserves_slot_and_frontier|test_replacement_source_cannot_reassign_pending_slot_retirement|test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash|test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash|test_slot_retirement_keeps_active_stale_and_mismatched_slots|test_slot_retirement_keeps_null_named_reference_across_source_oids)$/)'",
       "command_argv": [
         "bash",
-        "scripts/run_light_e2e_tests.sh",
-        "--no-capture",
+        "scripts/run_e2e_tests.sh",
+        "--test-threads",
+        "1",
         "--test",
-        "e2e_wal_receipt_recovery_tests"
+        "e2e_wal_receipt_recovery_tests",
+        "-E",
+        "test(/^(test_deferred_consumer_registration_rollback_preserves_wal_slot|test_dropped_wal_source_retains_retirement_until_last_consumer_commits|test_last_wal_consumer_drop_rollback_preserves_slot_and_frontier|test_replacement_source_cannot_reassign_pending_slot_retirement|test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash|test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash|test_slot_retirement_keeps_active_stale_and_mismatched_slots|test_slot_retirement_keeps_null_named_reference_across_source_oids)$/)"
       ],
       "e2e_image": "pg_trickle_release_candidate:local",
       "shard": {
@@ -790,6 +793,93 @@
         "0.109.0"
       ],
       "workload": "published v0.108.3 binary and live WAL slot upgraded to v0.109.0: preserve rows/frontier, private logged queue, rollback and committed retirement"
+    },
+    {
+      "id": "pgvector-0.8.1",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.109.0",
+      "command": "python3 scripts/run_release_pgvector_suite.py 0.8.1",
+      "command_argv": [
+        "python3",
+        "scripts/run_release_pgvector_suite.py",
+        "0.8.1"
+      ],
+      "e2e_image": "pg_trickle_e2e_pgvector:0.8.1",
+      "nextest_retries": 0,
+      "required_cases": [
+        "e2e_pgvector_tests::test_pgvector_compat_installed_version",
+        "e2e_pgvector_tests::test_pgvector_distance_types_and_functions_differential",
+        "e2e_pgvector_tests::test_embedding_stream_table_v2_metrics_and_options",
+        "e2e_pgvector_tests::test_embedding_stream_table_halfvec_and_sparsevec_indexes",
+        "e2e_pgvector_tests::test_distance_subscription_typed_predicates_and_authorization",
+        "e2e_pgvector_tests::test_distance_subscription_notifies_only_membership_crossings",
+        "e2e_pgvector_tests::test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
+        "e2e_pgvector_tests::test_ann_worker_records_lock_timeout_and_can_retry",
+        "e2e_pgvector_hybrid_tests::test_tenant_tutorial_sql_runs_with_isolated_reader",
+        "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
+        "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components"
+      ],
+      "workload": "candidate package with pgvector 0.8.1: corpus, index plans, notifications, authorization, revision safety and concurrent maintenance"
+    },
+    {
+      "id": "pgvector-0.8.7",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.109.0",
+      "command": "python3 scripts/run_release_pgvector_suite.py 0.8.7",
+      "command_argv": [
+        "python3",
+        "scripts/run_release_pgvector_suite.py",
+        "0.8.7"
+      ],
+      "e2e_image": "pg_trickle_e2e_pgvector:0.8.7",
+      "nextest_retries": 0,
+      "required_cases": [
+        "e2e_pgvector_tests::test_pgvector_compat_installed_version",
+        "e2e_pgvector_tests::test_pgvector_distance_types_and_functions_differential",
+        "e2e_pgvector_tests::test_embedding_stream_table_v2_metrics_and_options",
+        "e2e_pgvector_tests::test_embedding_stream_table_halfvec_and_sparsevec_indexes",
+        "e2e_pgvector_tests::test_distance_subscription_typed_predicates_and_authorization",
+        "e2e_pgvector_tests::test_distance_subscription_notifies_only_membership_crossings",
+        "e2e_pgvector_tests::test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
+        "e2e_pgvector_tests::test_ann_worker_records_lock_timeout_and_can_retry",
+        "e2e_pgvector_hybrid_tests::test_tenant_tutorial_sql_runs_with_isolated_reader",
+        "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
+        "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components"
+      ],
+      "workload": "candidate package with pgvector 0.8.7: corpus, index plans, notifications, authorization, revision safety and concurrent maintenance"
+    },
+    {
+      "id": "pgvector-catalog-upgrade",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": true,
+      "requires_postgresql": true,
+      "suite_version": "0.109.0",
+      "command": "bash scripts/run_release_pgvector_upgrade.sh",
+      "command_argv": [
+        "bash",
+        "scripts/run_release_pgvector_upgrade.sh"
+      ],
+      "nextest_retries": 0,
+      "required_cases": [
+        "e2e_upgrade_tests::test_upgrade_embedding_helpers_from_01083",
+        "e2e_upgrade_tests::test_upgrade_preserves_existing_vector_expression_index",
+        "e2e_upgrade_tests::test_upgrade_distance_subscriptions_preserves_legacy_rows",
+        "e2e_upgrade_tests::test_upgrade_ann_epoch_handles_old_catalog_and_rollback"
+      ],
+      "workload": "v0.108.3 catalog snapshot on candidate binary: vector helpers, legacy subscriptions, index identity and transactional rollback"
     }
   ],
   "artifacts": [

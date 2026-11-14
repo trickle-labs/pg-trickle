@@ -1,5 +1,37 @@
 # Filtered pgvector workload
 
+### Controlled distance-subscription measurements
+
+The opt-in subscription workload accepts comma-separated `PGVECTOR_SUB_ROWS`
+(1–1,000,000) and `PGVECTOR_SUB_COUNTS` (0–1,000), plus
+`PGVECTOR_SUB_DIM` (2–1,536) and `PGVECTOR_SUB_ROUNDS` (1–100).
+`PGVECTOR_SUB_STATISTICS=both` runs separate unanalyzed and analyzed streams;
+the harness disables autovacuum on each and rejects an unanalyzed control if
+statistics were already collected. `PGVECTOR_SUB_FORCE_EXPLICIT=1` adds the
+same no-op row trigger to every stream, including the zero-subscription
+control, and requires the recorded merge path to be `explicit_dml` throughout.
+Trigger overhead is part of every control measurement, so these timings do not
+represent trigger-free production workloads.
+
+For a bounded control run on a packaged candidate image:
+
+```sh
+PGS_E2E_IMAGE=pg_trickle_e2e_pgvector:0.8.7 \
+PGVECTOR_SUB_ROWS=1000,10000 PGVECTOR_SUB_COUNTS=0,1,10 \
+PGVECTOR_SUB_DIM=384 PGVECTOR_SUB_STATISTICS=both PGVECTOR_SUB_FORCE_EXPLICIT=1 \
+  ./scripts/run_e2e_tests.sh --retries 0 --test e2e_bench_tests \
+  --run-ignored ignored-only --no-capture \
+  -E 'test(test_pgvector_subscription_scaling_workload)'
+```
+
+The report separates refresh, commit, and post-commit listener wait; listener
+wait is not commit-to-delivery latency because delivery may begin earlier.
+Same-transaction tuple counters and table statistics do not identify the
+internal SQL plan. This harness does not yet capture internal EXPLAIN plans,
+controlled concurrent load, WAL, or CPU, and a run alone does not establish a
+general scaling limit. Record the candidate artifact digest and host details
+alongside results. Larger cases are deliberately opt-in.
+
 ## Version conformance
 
 The PR compatibility workflow packages pg_trickle for PostgreSQL 18.6 and
@@ -69,8 +101,10 @@ strategy in the order listed; EXPLAIN overhead and cache order affect timings.
 The workload also performs five repeated one-row changes by default, rotating
 the group and strategy order. Set `PGVECTOR_CENTROID_REWRITE_ROWS` to update
 more rows per round, up to the surviving source rows less two fixed inputs.
-It checks each selected strategy and all affected groups against native AVG,
-and records individual refresh times and percentiles without EXPLAIN. Set
+It checks each selected strategy and all affected groups against native AVG
+with an absolute bound of `1e-5` plus a relative bound of `1e-6`, rejects
+missing components, and records each round's maximum absolute component error,
+refresh time and percentiles without EXPLAIN. Set
 `PGVECTOR_CENTROID_SAMPLES` from 1 to 50 to change the number of rounds; a
 small sample cannot establish tail latency. The algebraic measurement asserts
 that every round uses algebraic state, so batches that trigger a rebase fail
@@ -80,11 +114,12 @@ more repetitions before drawing performance conclusions.
 
 The scheduled run also measures distance subscriptions separately with 1,000
 and 10,000 rows and zero, one, or ten subscriptions. Five one-row changes per
-case alternate across the threshold. It verifies the affected-row snapshot and
-differential strategy, and records refresh-call time plus same-transaction
-source and stream tuple counters. The stream is analyzed before measurement;
-the counters include repeated visits and are not distinct row counts. A listener
-verifies each event after commit; those timings exclude client delivery. The
+case alternate across the threshold using 384-dimensional vectors. It runs
+analyzed and unanalyzed controls, forces the same explicit-DML path with a
+no-op row trigger, verifies the affected-row snapshot and differential strategy,
+and records refresh, commit, listener-wait and same-transaction source and
+stream tuple counters. The counters include repeated visits and are not distinct
+row counts. A listener verifies each event after commit. The
 [local report](results/2026-11-08-subscription-scaling-arm64/README.md) also
 records an unanalysed control and its limitations.
 

@@ -2,13 +2,6 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
-## 0.109.0 to 0.110.0
-
-Install the v0.110.0 library and extension files, then run
-`ALTER EXTENSION pg_trickle UPDATE TO '0.110.0';`. This adds the
-metric-aware embedding helper. Existing helper calls remain L2 and existing
-stream tables, index definitions, and maintenance policies are retained.
-
 ## 0.108.3 to 0.109.0
 
 Install the v0.109.0 library and extension files, then apply the upgrade:
@@ -16,6 +9,12 @@ Install the v0.109.0 library and extension files, then apply the upgrade:
 ```sql
 ALTER EXTENSION pg_trickle UPDATE TO '0.109.0';
 ```
+
+The upgrade adds the metric-aware embedding helper and durable ANN maintenance.
+Existing L2 helper calls and index definitions are retained. Legacy distance
+subscriptions remain inactive because their saved thresholds may be incorrect;
+inspect and re-register them. Experimental centroid state remains disabled by
+default.
 
 The migration adds an internal durable reservation table for local WAL-slot
 retirement. It preserves rollback and restart recovery while a slot is being

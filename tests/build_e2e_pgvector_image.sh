@@ -13,5 +13,6 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 platform="${DOCKER_PLATFORM:-${DOCKER_DEFAULT_PLATFORM:-linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')}}"
 docker build --platform "$platform" \
     --build-arg "PGVECTOR_IMAGE=$image" \
+    --build-arg "PGS_E2E_BASE_IMAGE=${PGS_E2E_BASE_IMAGE:-pg_trickle_e2e:latest}" \
     -t "pg_trickle_e2e_pgvector:${version}" \
     -f "$root/tests/Dockerfile.e2e-pgvector" "$root"

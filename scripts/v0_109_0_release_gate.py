@@ -2,6 +2,7 @@
 """Retain the prior release gates and require local WAL retirement qualification."""
 
 import json
+import re
 
 import v0_108_3_release_gate as prior
 
@@ -31,6 +32,74 @@ PAUSE_CASES = {
     )
 }
 
+PGVECTOR_CASES = {
+    "e2e_pgvector_tests::" + name
+    for name in (
+        "test_pgvector_compat_installed_version",
+        "test_pgvector_distance_types_and_functions_differential",
+        "test_embedding_stream_table_v2_metrics_and_options",
+        "test_embedding_stream_table_halfvec_and_sparsevec_indexes",
+        "test_distance_subscription_typed_predicates_and_authorization",
+        "test_distance_subscription_notifies_only_membership_crossings",
+        "test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
+        "test_ann_worker_records_lock_timeout_and_can_retry",
+    )
+} | {
+    "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components",
+    "e2e_pgvector_hybrid_tests::test_tenant_tutorial_sql_runs_with_isolated_reader",
+    "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
+}
+
+PGVECTOR_UPGRADE_CASES = {
+    "e2e_upgrade_tests::" + name for name in (
+        "test_upgrade_embedding_helpers_from_01083",
+        "test_upgrade_preserves_existing_vector_expression_index",
+        "test_upgrade_distance_subscriptions_preserves_legacy_rows",
+        "test_upgrade_ann_epoch_handles_old_catalog_and_rollback",
+    )
+}
+
+
+def check_pgvector_contract(contract: dict) -> None:
+    suites = {suite["id"]: suite for suite in contract["required_suites"]}
+    workflow = (prior.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    for version in ("0.8.1", "0.8.7"):
+        suite = suites[f"pgvector-{version}"]
+        cases = suite.get("required_cases", [])
+        prior.shared.require(
+            set(cases) == PGVECTOR_CASES and len(cases) == len(PGVECTOR_CASES)
+            and suite.get("command_argv") == ["python3", "scripts/run_release_pgvector_suite.py", version]
+            and suite.get("e2e_image") == f"pg_trickle_e2e_pgvector:{version}"
+            and suite.get("runtime") is True and suite.get("requires_postgresql") is True
+            and suite.get("nextest_retries") == 0,
+            f"pgvector {version} must run every required case against the candidate package",
+        )
+        prior.shared.require(
+            f"PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_pgvector_image.sh {version}" in workflow,
+            f"pgvector {version} image must derive from the candidate package",
+        )
+    upgrade = suites["pgvector-catalog-upgrade"]
+    cases = upgrade.get("required_cases", [])
+    prior.shared.require(
+        set(cases) == PGVECTOR_UPGRADE_CASES and len(cases) == len(PGVECTOR_UPGRADE_CASES)
+        and upgrade.get("command_argv") == ["bash", "scripts/run_release_pgvector_upgrade.sh"]
+        and upgrade.get("runtime") is True and upgrade.get("upgrade") is True
+        and upgrade.get("requires_postgresql") is True and upgrade.get("nextest_retries") == 0,
+        "pgvector catalog upgrade must run every required case against the candidate package",
+    )
+
+
+def check_pgvector_upgrade_script(script: str) -> None:
+    for marker in (
+        "pgvector/pgvector:0.8.7-pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47",
+        "pgtrickle.embedding_stream_table('upgrade_vector_st'",
+        '"$VECTOR_AFTER" == "$VECTOR_BEFORE"',
+        "bool_and(pgt_id IS NULL)",
+        "SHOW pg_trickle.enable_centroid_state",
+        "upgrade_vector_st_embedding_idx",
+    ):
+        prior.shared.require(marker in script, f"published vector upgrade check is missing {marker}")
+
 
 def check_retirement_contract(contract: dict) -> None:
     release_gate = next(item for item in contract["required_suites"] if item["id"] == "release-gate")
@@ -39,11 +108,13 @@ def check_retirement_contract(contract: dict) -> None:
         "release qualification must invoke the current retirement gate",
     )
     suite = next(item for item in contract["required_suites"] if item["id"] == "wal-retirement")
+    names = sorted(case.split("::", 1)[1] for case in CASES)
+    selector = "test(/^(" + "|".join(names) + ")$/)"
     prior.shared.require(
         set(suite["required_cases"]) == CASES and len(suite["required_cases"]) == len(CASES)
         and suite["command_argv"] == [
-            "bash", "scripts/run_light_e2e_tests.sh", "--no-capture", "--test",
-            "e2e_wal_receipt_recovery_tests",
+            "bash", "scripts/run_e2e_tests.sh", "--test-threads", "1", "--test",
+            "e2e_wal_receipt_recovery_tests", "-E", selector,
         ]
         and suite["e2e_image"] == "pg_trickle_release_candidate:local",
         "retirement qualification must execute all named cases against the release candidate",
@@ -52,6 +123,21 @@ def check_retirement_contract(contract: dict) -> None:
     prior.shared.require(
         upgrade["command_argv"] == ["bash", "scripts/qualify_live_package_upgrade.sh", "0.108.3", "0.109.0"],
         "retirement upgrade must start from the actual published predecessor package",
+    )
+    recovery = next(item for item in contract["required_suites"] if item["id"] == "recovery")
+    args = recovery["command_argv"]
+    binaries = {args[index + 1] for index, arg in enumerate(args[:-1]) if arg == "--test"}
+    prior.shared.require(
+        {case.split("::", 1)[0] for case in recovery["required_cases"]} <= binaries,
+        "recovery suite must select every required test binary",
+    )
+    prior.shared.require("-E" in args and args.index("-E") + 1 < len(args), "recovery suite must select its required cases")
+    expression = args[args.index("-E") + 1]
+    prior.shared.require(expression.startswith("test(/") and expression.endswith("/)"), "recovery selector must be a test regex")
+    pattern = re.compile(expression[6:-2])
+    prior.shared.require(
+        all(re.fullmatch(pattern, case.split("::", 1)[1]) for case in recovery["required_cases"]),
+        "recovery selector must include every required case",
     )
 
 
@@ -62,9 +148,13 @@ def main() -> None:
     prior.GATE_SCRIPT = "v0_109_0_release_gate.py"
     prior.REQUIRED_CASES = prior.REQUIRED_CASES | CASES | PAUSE_CASES
     prior.REQUIRED_SHARDS = prior.REQUIRED_SHARDS | {"wal-retirement"}
-    prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {"wal-retirement", "wal-retirement-upgrade"}
+    prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {
+        "wal-retirement", "wal-retirement-upgrade", "pgvector-0.8.1", "pgvector-0.8.7", "pgvector-catalog-upgrade",
+    }
     contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
     check_retirement_contract(contract)
+    check_pgvector_contract(contract)
+    check_pgvector_upgrade_script((prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8"))
     prior.main()
 
 
