@@ -2928,7 +2928,10 @@ END AS __pgt_meta_action"#
             format!("sub.{}", quote_ident(&storage_name))
         })
         .collect();
-    let expected_full_identity = build_hash_expr_for_domain("GROUP_KEY", &stored_group_keys);
+    // FULL encoding does not parenthesize composite ROW elements; delta
+    // encoding does. The parentheses do not change values or types, but
+    // these SQL strings must be compared in FULL's exact canonical form.
+    let expected_full_identity = crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys);
     let can_probe_row_identity = ctx
         .defining_query
         .as_ref()
@@ -4182,7 +4185,7 @@ mod tests {
         );
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
-        let identity = "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(d.\"region\", d.\"day\"))";
+        let identity = "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW((d.\"region\"), (d.\"day\")))";
         assert!(
             sql.contains(&format!("pgtrickle.row_probe_v1({identity})")),
             "{sql}"
@@ -4192,6 +4195,23 @@ mod tests {
             "{sql}"
         );
         assert!(!sql.contains("st.\"region\" IS NOT DISTINCT FROM"), "{sql}");
+    }
+
+    #[test]
+    fn test_grouped_aggregate_preserves_key_join_for_incompatible_full_identity() {
+        // Simulate a target whose FULL refresh used another identity domain.
+        // The storage lookup must preserve null-safe group matching instead
+        // of using a GROUP_KEY that would miss existing rows.
+        let mut ctx = test_ctx_with_st("public", "st").with_defining_query("SELECT 1");
+        let tree = aggregate(
+            vec![colref("region")],
+            vec![count_star("cnt")],
+            scan(1, "t", "public", "t", &["id", "region"]),
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(&sql, "st.\"region\" IS NOT DISTINCT FROM d.\"region\"");
+        assert_sql_not_contains(&sql, "pgtrickle.row_probe_v1(st.__pgt_row_id)");
     }
 
     #[test]
@@ -7247,7 +7267,7 @@ mod tests {
         // duplicate source column names) without looking up ST columns.
         assert!(
             sql.contains("pgtrickle.row_probe_v1(st.__pgt_row_id)")
-                && sql.contains("ROW(d.\"__pgt_group_0\", d.\"__pgt_group_1\","),
+                && sql.contains("ROW((d.\"__pgt_group_0\"), (d.\"__pgt_group_1\"),"),
             "{sql}"
         );
         assert!(
