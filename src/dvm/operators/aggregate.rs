@@ -4144,8 +4144,14 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
         let identity = "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(d.\"region\", d.\"day\"))";
-        assert!(sql.contains(&format!("pgtrickle.row_probe_v1({identity})")), "{sql}");
-        assert!(sql.contains(&format!("st.__pgt_row_id = {identity}")), "{sql}");
+        assert!(
+            sql.contains(&format!("pgtrickle.row_probe_v1({identity})")),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!("st.__pgt_row_id = {identity}")),
+            "{sql}"
+        );
         assert!(!sql.contains("st.\"region\" IS NOT DISTINCT FROM"), "{sql}");
     }
 
