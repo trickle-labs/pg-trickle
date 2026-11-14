@@ -2907,22 +2907,60 @@ END AS __pgt_meta_action"#
     };
     merge_selects.push(action_case);
 
-    // Look up existing groups using the same typed GROUP_KEY identity that
-    // FULL refresh stores and the delta emits. PostgreSQL 18 cannot use a
-    // B-tree/hash join for a composite IS NOT DISTINCT FROM predicate: a
-    // large stream table was scanned once per changed group (#1405).
-    //
-    // row_probe_v1 is only an index accelerator (it can have collisions).
-    // Always recheck the complete bytea identity for correctness. V3 group
-    // identities encode NULLs and types, so nullable group keys are safe.
+    // The indexed identity lookup is valid only when the FULL refresh used
+    // exactly the same ordered GROUP_KEY encoding as this delta. Unusual
+    // projections, type fallbacks, or legacy row-identity paths can store a
+    // different identity: preserve the original key-based join for those.
+    let stored_group_keys: Vec<String> = group_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let internal = format!("__pgt_group_{index}");
+            let storage_name = if column.starts_with("__pgt_group_") {
+                ctx.st_column_alias_map
+                    .as_ref()
+                    .and_then(|map| map.get(&internal))
+                    .cloned()
+                    .unwrap_or_else(|| st_col_name(column))
+            } else {
+                st_col_name(column)
+            };
+            format!("sub.{}", quote_ident(&storage_name))
+        })
+        .collect();
+    let expected_full_identity = build_hash_expr_for_domain("GROUP_KEY", &stored_group_keys);
+    let can_probe_row_identity = ctx.defining_query.as_ref().is_none_or(|query| {
+        crate::dvm::row_id_expr_for_query(query) == expected_full_identity
+    });
+
+    // PostgreSQL 18 cannot use a B-tree/hash join for a composite
+    // IS NOT DISTINCT FROM predicate; it scanned the stream table for every
+    // changed group (#1405). For matching V3 GROUP_KEY identities, use the
+    // row-probe expression index. The probe can collide, so always compare
+    // the complete bytea identity too. Typed encoding preserves NULL keys.
     let join_cond = if group_columns.is_empty() {
         // Scalar aggregates have a single persistent row.
         "TRUE".to_string()
-    } else {
+    } else if can_probe_row_identity {
         format!(
             "pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1({row_id_expr}) \
              AND st.__pgt_row_id = {row_id_expr}"
         )
+    } else {
+        // FULL refresh did not use the delta's group identity. A key-based
+        // fallback is necessary for correctness, even though it is slower.
+        group_columns
+            .iter()
+            .zip(&stored_group_keys)
+            .map(|(column, stored)| {
+                let storage_ref = stored.replacen("sub.", "st.", 1);
+                format!(
+                    "{storage_ref} IS NOT DISTINCT FROM d.{}",
+                    quote_ident(column)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ")
     };
 
     // Optional LEFT JOIN to the rescan CTE for group-rescan aggregates
