@@ -275,22 +275,34 @@ fn is_insert_only_table(source_oid: pg_sys::Oid) -> bool {
     .unwrap_or(false)
 }
 
-fn sync_guard_sql(buffer_key: &str) -> String {
-    let key = buffer_key.replace('\'', "''");
-    format!(
-        "IF EXISTS (SELECT 1 FROM pgtrickle.pgt_change_buffers \
-                   WHERE buffer_key = '{key}' AND durability = 'sync') THEN \
-             PERFORM set_config('synchronous_commit', 'on', true); \
-         END IF;"
+pub(crate) fn buffer_uses_sync_commit(buffer_key: &str) -> Result<bool, PgTrickleError> {
+    Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_change_buffers \
+         WHERE buffer_key = $1 AND durability = 'sync')",
+        &[buffer_key.into()],
     )
+    .map_err(|e| PgTrickleError::SpiError(format!("change-buffer durability lookup failed: {e}")))
+    .map(|sync| sync.unwrap_or(false))
 }
 
-fn with_sync_guard(sql: &str, buffer_key: &str) -> String {
-    sql.replacen(
-        "BEGIN",
-        &format!("BEGIN\n             {}", sync_guard_sql(buffer_key)),
-        1,
-    )
+fn sync_guard_sql(sync_commit: bool) -> &'static str {
+    if sync_commit {
+        "PERFORM set_config('synchronous_commit', 'on', true);"
+    } else {
+        ""
+    }
+}
+
+pub(crate) fn with_sync_guard(sql: &str, sync_commit: bool) -> String {
+    if sync_commit {
+        sql.replacen(
+            "BEGIN",
+            &format!("BEGIN\n             {}", sync_guard_sql(sync_commit)),
+            1,
+        )
+    } else {
+        sql.to_string()
+    }
 }
 
 /// Apply the registry's synchronous-commit policy to the current transaction.
@@ -821,6 +833,8 @@ pub fn create_change_trigger(
     // UPDATE or DELETE CDC triggers — only an INSERT trigger is registered.
     let insert_only = is_insert_only_table(source_oid);
     let mode = config::pg_trickle_cdc_trigger_mode();
+    let buffer_key = format!("changes_{stable_name}");
+    let sync_commit = buffer_uses_sync_commit(&buffer_key)?;
     match mode {
         config::CdcTriggerMode::Statement => {
             let (ins_fn, upd_fn, del_fn) = build_stmt_trigger_fn_sql(
@@ -830,21 +844,20 @@ pub fn create_change_trigger(
                 columns,
                 has_immediate_primary_key(source_oid)?,
             );
-            let buffer_key = format!("changes_{stable_name}");
-            Spi::run(&with_sync_guard(&ins_fn, &buffer_key)).map_err(|e| {
+            Spi::run(&with_sync_guard(&ins_fn, sync_commit)).map_err(|e| {
                 PgTrickleError::SpiError(format!(
                     "Failed to create CDC INSERT trigger function: {}",
                     e
                 ))
             })?;
             if !insert_only {
-                Spi::run(&with_sync_guard(&upd_fn, &buffer_key)).map_err(|e| {
+                Spi::run(&with_sync_guard(&upd_fn, sync_commit)).map_err(|e| {
                     PgTrickleError::SpiError(format!(
                         "Failed to create CDC UPDATE trigger function: {}",
                         e
                     ))
                 })?;
-                Spi::run(&with_sync_guard(&del_fn, &buffer_key)).map_err(|e| {
+                Spi::run(&with_sync_guard(&del_fn, sync_commit)).map_err(|e| {
                     PgTrickleError::SpiError(format!(
                         "Failed to create CDC DELETE trigger function: {}",
                         e
@@ -901,8 +914,7 @@ pub fn create_change_trigger(
         }
         config::CdcTriggerMode::Row => {
             let fn_sql = build_row_trigger_fn_sql(change_schema, stable_name, pk_columns, columns);
-            let buffer_key = format!("changes_{stable_name}");
-            Spi::run(&with_sync_guard(&fn_sql, &buffer_key)).map_err(|e| {
+            Spi::run(&with_sync_guard(&fn_sql, sync_commit)).map_err(|e| {
                 PgTrickleError::SpiError(format!("Failed to create CDC trigger function: {}", e))
             })?;
             let dml_events = if insert_only {
@@ -930,8 +942,7 @@ pub fn create_change_trigger(
     }
 
     // ── TRUNCATE capture (statement-level trigger) ──────────────────
-    let buffer_key = format!("changes_{stable_name}");
-    let sync_guard = sync_guard_sql(&buffer_key);
+    let sync_guard = sync_guard_sql(sync_commit);
     let truncate_fn_sql = format!(
         "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
@@ -2343,10 +2354,17 @@ fn build_pk_hash_trigger_exprs(
 
     if hash_cols.len() == 1 {
         let col = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
-        (
-            format!("pgtrickle.encode_row_id_v3('{domain}', ROW(NEW.{col}))"),
-            format!("pgtrickle.encode_row_id_v3('{domain}', ROW(OLD.{col}))"),
-        )
+        let sql_type = all_columns
+            .iter()
+            .find(|(name, _)| name == &hash_cols[0])
+            .map(|(_, sql_type)| sql_type.as_str())
+            .unwrap_or("");
+        let expr = |prefix: &str| {
+            let value = format!("{prefix}.{col}");
+            scalar_pk_row_id_expr(domain, &value, sql_type)
+                .unwrap_or_else(|| format!("pgtrickle.encode_row_id_v3('{domain}', ROW({value}))"))
+        };
+        (expr("NEW"), expr("OLD"))
     } else {
         let new_items: Vec<String> = hash_cols
             .iter()
@@ -2361,6 +2379,21 @@ fn build_pk_hash_trigger_exprs(
             crate::hash::build_row_identity_expr(domain, &old_items),
         )
     }
+}
+
+fn scalar_pk_row_id_expr(domain: &str, value: &str, sql_type: &str) -> Option<String> {
+    if domain != "SCAN_KEY" {
+        return None;
+    }
+    let (type_tag, send, sign_bit) = match sql_type {
+        "smallint" => (0x02, "int2send", "(-32768)::smallint"),
+        "integer" => (0x03, "int4send", "(-2147483648)::integer"),
+        "bigint" => (0x04, "int8send", "(-9223372036854775808)::bigint"),
+        _ => return None,
+    };
+    Some(format!(
+        "pg_catalog.decode('030100000001{type_tag:02x}01','hex') || pg_catalog.{send}(({value}) # {sign_bit}) || pg_catalog.decode('ff','hex')"
+    ))
 }
 
 // ── Trigger SQL builders ──────────────────────────────────────────────────
@@ -2628,21 +2661,27 @@ fn build_stmt_trigger_fn_sql(
         let old_event_cols = columns
             .iter()
             .enumerate()
-            .map(|(i, _)| format!(", (p.__pgt_old_row).f{}", i + 1))
+            .map(|(i, _)| format!(", p.__pgt_old_{}", i + 1))
             .collect::<String>();
         let new_event_cols = columns
             .iter()
             .enumerate()
-            .map(|(i, _)| format!(", (p.__pgt_new_row).f{}", i + 1))
+            .map(|(i, _)| format!(", p.__pgt_new_{}", i + 1))
             .collect::<String>();
         let new_pair_cols = columns
             .iter()
-            .map(|(col, _)| format!("n.\"{}\"", col.replace('"', "\"\"")))
+            .enumerate()
+            .map(|(i, (col, _))| {
+                format!("n.\"{}\" AS __pgt_new_{}", col.replace('"', "\"\""), i + 1)
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let old_pair_cols = columns
             .iter()
-            .map(|(col, _)| format!("o.\"{}\"", col.replace('"', "\"\"")))
+            .enumerate()
+            .map(|(i, (col, _))| {
+                format!("o.\"{}\" AS __pgt_old_{}", col.replace('"', "\"\""), i + 1)
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let matched_changed_cols = bitmask_opt.as_deref().map_or_else(
@@ -2650,7 +2689,8 @@ fn build_stmt_trigger_fn_sql(
             |bitmask| format!("CASE WHEN {n_present} AND {o_present} THEN ({bitmask}) END"),
         );
         // A materialized pair CTE computes identity and the changed mask once
-        // per matched UPDATE; UNION ALL preserves the required D-before-I order.
+        // per matched UPDATE. Scan compaction uses change_id, so explicitly order
+        // the D/I stream; UNION ALL alone does not guarantee row order.
         format!(
             "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
@@ -2668,7 +2708,7 @@ fn build_stmt_trigger_fn_sql(
              END IF;
              -- Pair stable keys and PK-changing UPDATEs once, then emit D before I.
              WITH pair_rows AS MATERIALIZED (
-                 SELECT ROW({new_pair_cols}) AS __pgt_new_row, ROW({old_pair_cols}) AS __pgt_old_row,
+                 SELECT {new_pair_cols}, {old_pair_cols},
                         ({n_present}) AS __pgt_new_present,
                         ({o_present}) AS __pgt_old_present,
                         ({pair_row_id}) AS __pgt_row_id,
@@ -2683,7 +2723,8 @@ fn build_stmt_trigger_fn_sql(
              UNION ALL
              SELECT statement_lsn, 'I', p.__pgt_row_id{event_changed_cols}{new_event_cols}, trace_context
              FROM pair_rows p
-             WHERE p.__pgt_new_present;
+             WHERE p.__pgt_new_present
+             ORDER BY 2;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
@@ -2730,9 +2771,10 @@ fn build_stmt_trigger_fn_sql(
 pub(crate) fn build_inactive_trigger_fn_sql(
     change_schema: &str,
     name: &str,
+    sync_commit: bool,
 ) -> (String, String, String, String, String) {
     let body = |function: &str| {
-        let guard = sync_guard_sql(&format!("changes_{name}"));
+        let guard = sync_guard_sql(sync_commit);
         format!(
             "CREATE OR REPLACE FUNCTION {change_schema}.{function}_{name}()\n             RETURNS trigger LANGUAGE plpgsql\n             SECURITY DEFINER -- nosemgrep: sql.security-definer.present\n             SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$\n             BEGIN\n                 {guard}\n                 RETURN NULL;\n             END;\n             $$",
             function = function,
@@ -2758,8 +2800,9 @@ pub fn refresh_capture_body_for_source(
         return rebuild_cdc_trigger_function(source_oid, &change_schema);
     }
 
+    let sync_commit = buffer_uses_sync_commit(&format!("changes_{name}"))?;
     let (row, insert, update, delete, truncate) =
-        build_inactive_trigger_fn_sql(&change_schema, &name);
+        build_inactive_trigger_fn_sql(&change_schema, &name, sync_commit);
     let functions = if crate::config::pg_trickle_cdc_trigger_mode()
         == crate::config::CdcTriggerMode::Statement
     {
@@ -2823,7 +2866,14 @@ fn build_pk_hash_stmt_expr(
 
     if hash_cols.len() == 1 {
         let col = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
-        format!("pgtrickle.encode_row_id_v3('{domain}', ROW({prefix}.{col}))")
+        let value = format!("{prefix}.{col}");
+        let sql_type = all_columns
+            .iter()
+            .find(|(name, _)| name == &hash_cols[0])
+            .map(|(_, sql_type)| sql_type.as_str())
+            .unwrap_or("");
+        scalar_pk_row_id_expr(domain, &value, sql_type)
+            .unwrap_or_else(|| format!("pgtrickle.encode_row_id_v3('{domain}', ROW({value}))"))
     } else {
         let items: Vec<String> = hash_cols
             .iter()
@@ -2846,11 +2896,12 @@ fn build_changed_cols_bitmask_stmt_expr(
     }
     let parts: Vec<String> = columns
         .iter()
-        .map(|(col_name, _)| {
+        .map(|(col_name, sql_type)| {
             let qcol = col_name.replace('"', "\"\"");
-            crate::cdc_elision::changed_column_sql(
+            crate::cdc_elision::changed_column_sql_for_type(
                 &format!("o.\"{qcol}\""),
                 &format!("n.\"{qcol}\""),
+                sql_type,
             )
         })
         .collect();
@@ -3792,12 +3843,29 @@ mod tests {
     #[test]
     fn test_inactive_trigger_bodies_are_write_free() {
         let (row, insert, update, delete, truncate) =
-            build_inactive_trigger_fn_sql("pgtrickle_changes", "pg_trickle_cdc_42");
+            build_inactive_trigger_fn_sql("pgtrickle_changes", "pg_trickle_cdc_42", false);
         for body in [row, insert, update, delete, truncate] {
             assert!(body.contains("RETURN NULL;"));
             assert!(!body.contains("INSERT INTO"));
             assert!(!body.contains("NOTIFY"));
+            assert!(!body.contains("pgt_change_buffers"));
         }
+    }
+
+    #[test]
+    fn test_sync_guard_is_baked_into_trigger_function() {
+        let trigger_fn = "BEGIN\n    RETURN NULL;\nEND;";
+        let logged_fn = with_sync_guard(trigger_fn, false);
+        assert_eq!(logged_fn, trigger_fn);
+
+        let sync_guard = sync_guard_sql(true);
+        assert!(sync_guard.contains("set_config('synchronous_commit', 'on', true)"));
+        assert!(!sync_guard.contains("pgt_change_buffers"));
+        assert_eq!(sync_guard_sql(false), "");
+
+        let sync_fn = with_sync_guard(trigger_fn, true);
+        assert!(sync_fn.contains("set_config('synchronous_commit', 'on', true)"));
+        assert!(!sync_fn.contains("pgt_change_buffers"));
     }
 
     #[test]
@@ -3815,6 +3883,10 @@ mod tests {
             update.contains("WITH pair_rows AS MATERIALIZED"),
             "{update}"
         );
+        assert!(update.contains("p.__pgt_old_2"), "{update}");
+        assert!(update.contains("p.__pgt_new_2"), "{update}");
+        assert!(!update.contains("__pgt_old_row"), "{update}");
+        assert!(!update.contains("__pgt_new_row"), "{update}");
         let d_row = update
             .find("SELECT statement_lsn, 'D'")
             .expect("D event query");
@@ -3827,6 +3899,7 @@ mod tests {
             d_row < union && union < i_row,
             "D must precede I in {update}"
         );
+        assert!(update.contains("ORDER BY 2;"), "{update}");
         assert!(!update.contains("NOT EXISTS"), "{update}");
     }
 
@@ -3842,7 +3915,7 @@ mod tests {
         assert!(!update.contains("FULL JOIN"), "{update}");
         assert!(update.contains("FROM __pgt_old o"));
         assert!(update.contains("FROM __pgt_new n"));
-        assert!(update.contains("'SCAN_KEY'"));
+        assert!(update.contains("0301000000010301"), "{update}");
     }
 
     // ── build_pk_hash_trigger_exprs tests ────────────────────────────
@@ -3854,11 +3927,42 @@ mod tests {
         let (new_expr, old_expr) = build_pk_hash_trigger_exprs(&pk, &all);
         assert_eq!(
             new_expr,
-            r#"pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(NEW."id"))"#
+            "pg_catalog.decode('0301000000010301','hex') || pg_catalog.int4send((NEW.\"id\") # (-2147483648)::integer) || pg_catalog.decode('ff','hex')"
         );
         assert_eq!(
             old_expr,
-            r#"pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(OLD."id"))"#
+            "pg_catalog.decode('0301000000010301','hex') || pg_catalog.int4send((OLD.\"id\") # (-2147483648)::integer) || pg_catalog.decode('ff','hex')"
+        );
+        assert_eq!(
+            build_pk_hash_stmt_expr("n", &pk, &all),
+            "pg_catalog.decode('0301000000010301','hex') || pg_catalog.int4send((n.\"id\") # (-2147483648)::integer) || pg_catalog.decode('ff','hex')"
+        );
+    }
+
+    #[test]
+    fn test_build_pk_hash_integer_widths_and_fallback() {
+        for (sql_type, tag, send, sign_bit) in [
+            ("smallint", "02", "int2send", "(-32768)::smallint"),
+            ("integer", "03", "int4send", "(-2147483648)::integer"),
+            ("bigint", "04", "int8send", "(-9223372036854775808)::bigint"),
+        ] {
+            let pk = vec!["id".to_string()];
+            let columns = vec![("id".to_string(), sql_type.to_string())];
+            let expr = build_pk_hash_stmt_expr("n", &pk, &columns);
+            assert_eq!(
+                expr,
+                format!(
+                    "pg_catalog.decode('030100000001{tag}01','hex') || pg_catalog.{send}((n.\"id\") # {sign_bit}) || pg_catalog.decode('ff','hex')"
+                ),
+                "{sql_type}"
+            );
+        }
+
+        let pk = vec!["id".to_string()];
+        let columns = vec![("id".to_string(), "text".to_string())];
+        assert_eq!(
+            build_pk_hash_stmt_expr("n", &pk, &columns),
+            r#"pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(n."id"))"#
         );
     }
 
@@ -3977,6 +4081,10 @@ mod tests {
             ("amount".to_string(), "numeric(12, 2)".to_string()),
         ];
         let expr = build_changed_cols_bitmask_stmt_expr(&pk, &cols).unwrap();
+        assert!(
+            expr.contains("o.\"id\" IS DISTINCT FROM n.\"id\""),
+            "fixed-width columns should use scalar comparison: {expr}"
+        );
         assert!(
             expr.contains("pg_catalog.pg_typeof(n.\"amount\")::oid IN")
                 && expr.contains("ELSE B'1' END)::varbit"),

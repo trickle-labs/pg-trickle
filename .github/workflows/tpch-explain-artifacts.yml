@@ -66,6 +66,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-explain-
 
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
       # ── Build E2E Docker image ───────────────────────────────────────────────
       - name: Build E2E Docker image
         run: ./tests/build_e2e_image.sh
@@ -86,6 +89,7 @@ jobs:
           TPCH_EXPLAIN_QUERIES: ${{ inputs.queries || '4,5,7,8,9,20,22' }}
           TPCH_EXPLAIN_OUTPUT_DIR: /tmp/tpch-explain-artifacts
         run: |
+          set -o pipefail
           # Start the E2E database container.
           export TPCH_CYCLES=1
           export TPCH_SCALE="${TPCH_SCALE}"
@@ -95,7 +99,7 @@ jobs:
             --test e2e_tpch_tests \
             test_tpch_explain_artifacts \
             -- --ignored --test-threads=1 --nocapture \
-          2>&1 | tee /tmp/tpch-explain-artifacts/test-output.txt || true
+          2>&1 | tee /tmp/tpch-explain-artifacts/test-output.txt
 
       # ── Generate timing summary ──────────────────────────────────────────────
       - name: Generate timing summary (p50 / p99)

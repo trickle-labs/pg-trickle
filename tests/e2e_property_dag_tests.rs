@@ -383,9 +383,9 @@ async fn run_order_variation_trace(seed: u64, config: TraceConfig) {
         order.swap(1, j);
 
         for name in order {
-            db.refresh_st_with_retry(name).await;
+            db.refresh_st_until_converged(name).await;
         }
-        db.refresh_st_with_retry("prop_ord_apex").await;
+        db.refresh_st_until_converged("prop_ord_apex").await;
 
         assert_st_query_invariants(&db, &ORDER_INVARIANTS, seed, cycle, &step).await;
     }

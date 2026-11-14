@@ -306,6 +306,20 @@ async fn test_stmt_cdc_bulk_update_keyed_table() {
     assert_eq!(d_count, 50, "50 D-rows from keyed bulk UPDATE");
     assert_eq!(i_count, 50, "50 I-rows from keyed bulk UPDATE");
 
+    let old_before_new: bool = db
+        .query_scalar(&format!(
+            "SELECT COALESCE(bool_and(d.first_id < i.first_id), FALSE) \
+             FROM (SELECT id, min(change_id) AS first_id FROM {buf} \
+                   WHERE action = 'D' GROUP BY id) d \
+             JOIN (SELECT id, min(change_id) AS first_id FROM {buf} \
+                   WHERE action = 'I' GROUP BY id) i USING (id)"
+        ))
+        .await;
+    assert!(
+        old_before_new,
+        "each updated row must emit its DELETE before its INSERT"
+    );
+
     // D-row for id=25 carries the OLD value; I-row carries the NEW value.
     let old_val: String = db
         .query_scalar(&format!(
