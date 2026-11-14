@@ -2931,7 +2931,8 @@ END AS __pgt_meta_action"#
     // FULL encoding does not parenthesize composite ROW elements; delta
     // encoding does. The parentheses do not change values or types, but
     // these SQL strings must be compared in FULL's exact canonical form.
-    let expected_full_identity = crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys);
+    let expected_full_identity =
+        crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys);
     let can_probe_row_identity = ctx
         .defining_query
         .as_ref()
