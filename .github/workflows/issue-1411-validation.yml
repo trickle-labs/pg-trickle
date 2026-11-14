@@ -1,0 +1,25 @@
+name: Issue 1411 isolated validation
+
+on:
+  push:
+    branches: [work/issue-1411-recursive-validation]
+    paths:
+      - .github/workflows/issue-1411-validation.yml
+      - scripts/issue_1411_apply.py
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Archive source for isolated editing
+        run: git archive --format=tar.gz HEAD > /tmp/issue-1411-source.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: issue-1411-source
+          path: /tmp/issue-1411-source.tar.gz
+          retention-days: 1
