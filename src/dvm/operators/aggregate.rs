@@ -2934,9 +2934,9 @@ END AS __pgt_meta_action"#
     let expected_full_identity =
         crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys);
     let can_probe_row_identity = ctx
-        .defining_query
+        .st_full_row_identity_expr
         .as_ref()
-        .is_none_or(|query| crate::dvm::row_id_expr_for_query(query) == expected_full_identity);
+        .is_none_or(|full_expr| full_expr == &expected_full_identity);
 
     // PostgreSQL 18 cannot use a B-tree/hash join for a composite
     // IS NOT DISTINCT FROM predicate; it scanned the stream table for every
@@ -4175,6 +4175,11 @@ mod tests {
     #[test]
     fn test_grouped_aggregate_probe_keeps_all_nullable_composite_key_parts() {
         let mut ctx = test_ctx_with_st("public", "st");
+        // This is exactly the canonical FULL-refresh row ID SQL, without
+        // the harmless extra parentheses in the DVM's composite ROW SQL.
+        ctx.st_full_row_identity_expr = Some(
+            "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(sub.\"region\", sub.\"day\"))".into(),
+        );
         let child = filter(
             binop(">", colref("amount"), lit("0")),
             scan(1, "t", "public", "t", &["id", "region", "day", "amount"]),
@@ -4203,7 +4208,9 @@ mod tests {
         // Simulate a target whose FULL refresh used another identity domain.
         // The storage lookup must preserve null-safe group matching instead
         // of using a GROUP_KEY that would miss existing rows.
-        let mut ctx = test_ctx_with_st("public", "st").with_defining_query("SELECT 1");
+        let mut ctx = test_ctx_with_st("public", "st");
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(sub.*))".into());
         let tree = aggregate(
             vec![colref("region")],
             vec![count_star("cnt")],
