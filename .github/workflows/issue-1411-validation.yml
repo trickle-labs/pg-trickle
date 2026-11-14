@@ -8,18 +8,124 @@ on:
       - scripts/issue_1411_apply.py
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: never
+  NEXTEST_PROFILE: ci
+  PGT_DISABLE_NEXTEST: '1'
 
 jobs:
-  source:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v7
-      - name: Archive source and test harness for isolated editing
-        run: git ls-files -z | tar -czf /tmp/issue-1411-source.tar.gz --null -T -
-      - uses: actions/upload-artifact@v7
         with:
-          name: issue-1411-source
-          path: /tmp/issue-1411-source.tar.gz
-          retention-days: 1
+          fetch-depth: 0
+      - name: Apply exact candidate patch
+        run: |
+          mkdir -p /tmp/issue-1411-evidence
+          cp scripts/issue_1411_apply.py /tmp/issue-1411-evidence/bootstrap.py
+          python3 - <<'PY'
+          import ast, hashlib, pathlib
+          p = pathlib.Path('scripts/issue_1411_apply.py')
+          s = p.read_text().replace('3R4buTo0ZiVM', '3R4buTo0OZiVM')
+          p.write_text(s)
+          tree = ast.parse(s)
+          patch = next(n.value.value for n in tree.body if isinstance(n, ast.Assign)
+                       and any(isinstance(t, ast.Name) and t.id == 'PATCH' for t in n.targets))
+          actual = hashlib.sha256(patch.encode()).hexdigest()
+          assert actual == 'e8498daa4219842d575f6525996a28b75b638f29fbdb85ede9d67e4ba24eccd4', actual
+          PY
+          python3 scripts/issue_1411_apply.py
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+      - name: Install just
+        uses: taiki-e/install-action@just
+      - name: Format and preserve exact tested commit
+        id: candidate
+        run: |
+          just fmt
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md docs/CONFIGURATION.md docs/DVM_OPERATORS.md docs/DVM_SUPPORT_MATRIX.md docs/FAQ.md docs/GUC_CATALOG.md docs/LIMITATIONS.md docs/SQL_REFERENCE.md src/config/dvm.rs src/dvm/operators/recursive_cte.rs tests/e2e_cte_tests.rs
+          git diff --cached --quiet || git commit -m 'fix: preserve recursive UNION results across source mutations (#1411)'
+          git push origin HEAD:work/issue-1411-recursive-validation
+          git rev-parse HEAD | tee /tmp/issue-1411-evidence/tested-commit.txt
+          git diff 012edc766b3c3f6d2c35ca4bc7af9d2676442709 HEAD -- README.md docs src/config/dvm.rs src/dvm/operators/recursive_cte.rs tests/e2e_cte_tests.rs > /tmp/issue-1411-evidence/candidate.patch
+      - name: Lint
+        id: lint
+        continue-on-error: true
+        run: just lint 2>&1 | tee /tmp/issue-1411-evidence/lint.log
+      - name: All pure Rust unit tests
+        id: unit
+        continue-on-error: true
+        run: just test-unit 2>&1 | tee /tmp/issue-1411-evidence/unit.log
+      - name: Package candidate extension
+        id: package
+        run: bash scripts/run_light_e2e_tests.sh --package-only 2>&1 | tee /tmp/issue-1411-evidence/package.log
+      - name: Issue 1411 regression matrix
+        id: regression
+        continue-on-error: true
+        run: |
+          bash scripts/run_light_e2e_tests.sh --test e2e_cte_tests --filter test_issue_1411_ --no-capture 2>&1 | tee /tmp/issue-1411-evidence/regression.log
+          grep -F '14 passed; 0 failed;' /tmp/issue-1411-evidence/regression.log
+      - name: Complete CTE suite
+        id: cte
+        continue-on-error: true
+        run: bash scripts/run_light_e2e_tests.sh --test e2e_cte_tests 2>&1 | tee /tmp/issue-1411-evidence/cte.log
+      - name: Immediate maintenance suite
+        id: ivm
+        continue-on-error: true
+        run: bash scripts/run_light_e2e_tests.sh --test e2e_ivm_tests 2>&1 | tee /tmp/issue-1411-evidence/ivm.log
+      - name: Differential versus full equivalence suite
+        id: equivalence
+        continue-on-error: true
+        run: bash scripts/run_light_e2e_tests.sh --test e2e_diff_full_equivalence_tests 2>&1 | tee /tmp/issue-1411-evidence/equivalence.log
+      - name: Prove original failures on unmodified runtime
+        id: baseline
+        if: steps.regression.outcome == 'success'
+        continue-on-error: true
+        run: |
+          git checkout 012edc766b3c3f6d2c35ca4bc7af9d2676442709 -- src/config/dvm.rs src/dvm/operators/recursive_cte.rs
+          bash scripts/run_light_e2e_tests.sh --package-only 2>&1 | tee /tmp/issue-1411-evidence/baseline-package.log
+          for case in differential_recursive_source_delete immediate_recursive_source_delete immediate_cycle_closing_insert; do
+            set +e
+            bash scripts/run_light_e2e_tests.sh --test e2e_cte_tests --filter "test_issue_1411_${case}" --no-capture > "/tmp/issue-1411-evidence/baseline-${case}.log" 2>&1
+            rc=$?
+            set -e
+            cat "/tmp/issue-1411-evidence/baseline-${case}.log"
+            test "$rc" -ne 0
+            grep -F '0 passed; 1 failed;' "/tmp/issue-1411-evidence/baseline-${case}.log"
+          done
+          grep -F 'operator does not exist: text = integer' /tmp/issue-1411-evidence/baseline-immediate_recursive_source_delete.log
+          grep -F 'ON CONFLICT DO UPDATE command cannot affect row a second time' /tmp/issue-1411-evidence/baseline-immediate_cycle_closing_insert.log
+          git restore --source=HEAD --staged --worktree src/config/dvm.rs src/dvm/operators/recursive_cte.rs
+      - name: Require complete validation
+        if: always()
+        env:
+          LINT: ${{ steps.lint.outcome }}
+          UNIT: ${{ steps.unit.outcome }}
+          REGRESSION: ${{ steps.regression.outcome }}
+          CTE: ${{ steps.cte.outcome }}
+          IVM: ${{ steps.ivm.outcome }}
+          EQUIVALENCE: ${{ steps.equivalence.outcome }}
+          BASELINE: ${{ steps.baseline.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          keys = ['LINT', 'UNIT', 'REGRESSION', 'CTE', 'IVM', 'EQUIVALENCE', 'BASELINE']
+          results = {k: os.environ[k] for k in keys}
+          pathlib.Path('/tmp/issue-1411-evidence/results.json').write_text(json.dumps(results, indent=2))
+          print(json.dumps(results, indent=2))
+          assert all(v == 'success' for v in results.values()), results
+          PY
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: issue-1411-validation-evidence
+          path: /tmp/issue-1411-evidence
+          retention-days: 7
