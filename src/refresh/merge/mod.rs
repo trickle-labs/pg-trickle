@@ -1705,6 +1705,9 @@ pub fn execute_differential_refresh_with_tuning(
             .map(|oid| format!("{oid}::oid"))
             .collect::<Vec<_>>()
             .join(", ");
+        // OIDs are catalog-derived u32 values, rendered as numeric literals;
+        // there are no user-controlled strings or identifiers in this SQL.
+        // nosemgrep: rust.spi.query.dynamic-format
         Spi::get_one::<i64>(&format!(
             "SELECT SUM(GREATEST(reltuples::bigint, 1000))::bigint \
              FROM pg_class WHERE oid IN ({oids})"
