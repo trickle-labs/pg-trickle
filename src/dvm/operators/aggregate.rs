@@ -2907,32 +2907,22 @@ END AS __pgt_meta_action"#
     };
     merge_selects.push(action_case);
 
-    // Join condition on group-by columns
+    // Look up existing groups using the same typed GROUP_KEY identity that
+    // FULL refresh stores and the delta emits. PostgreSQL 18 cannot use a
+    // B-tree/hash join for a composite IS NOT DISTINCT FROM predicate: a
+    // large stream table was scanned once per changed group (#1405).
+    //
+    // row_probe_v1 is only an index accelerator (it can have collisions).
+    // Always recheck the complete bytea identity for correctness. V3 group
+    // identities encode NULLs and types, so nullable group keys are safe.
     let join_cond = if group_columns.is_empty() {
+        // Scalar aggregates have a single persistent row.
         "TRUE".to_string()
     } else {
-        group_columns
-            .iter()
-            .enumerate()
-            .map(|(index, c)| {
-                let internal = format!("__pgt_group_{index}");
-                let st_c = if c.starts_with("__pgt_group_") {
-                    ctx.st_column_alias_map
-                        .as_ref()
-                        .and_then(|map| map.get(&internal))
-                        .cloned()
-                        .unwrap_or_else(|| st_col_name(c))
-                } else {
-                    st_col_name(c)
-                };
-                format!(
-                    "st.{st_qc} IS NOT DISTINCT FROM d.{d_qc}",
-                    st_qc = quote_ident(&st_c),
-                    d_qc = quote_ident(c),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" AND ")
+        format!(
+            "pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1({row_id_expr}) \
+             AND st.__pgt_row_id = {row_id_expr}"
+        )
     };
 
     // Optional LEFT JOIN to the rescan CTE for group-rescan aggregates
@@ -4129,6 +4119,34 @@ mod tests {
         assert_sql_not_contains(&sql, "LATERAL");
         // Should use standard path with __pgt_action
         assert_sql_contains(&sql, "__pgt_action");
+        // The storage probe must use the GROUP_KEY identity instead of an
+        // unindexable null-safe join on the storage table's group columns.
+        assert_sql_contains(&sql, "pgtrickle.row_probe_v1(st.__pgt_row_id)");
+        assert_sql_contains(
+            &sql,
+            "st.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(d.\"region\"))",
+        );
+        assert_sql_not_contains(&sql, "st.\"region\" IS NOT DISTINCT FROM d.\"region\"");
+    }
+
+    #[test]
+    fn test_grouped_aggregate_probe_keeps_all_nullable_composite_key_parts() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        let child = filter(
+            binop(">", colref("amount"), lit("0")),
+            scan(1, "t", "public", "t", &["id", "region", "day", "amount"]),
+        );
+        let tree = aggregate(
+            vec![colref("region"), colref("day")],
+            vec![count_star("cnt")],
+            child,
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        let identity = "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(d.\"region\", d.\"day\"))";
+        assert!(sql.contains(&format!("pgtrickle.row_probe_v1({identity})")), "{sql}");
+        assert!(sql.contains(&format!("st.__pgt_row_id = {identity}")), "{sql}");
+        assert!(!sql.contains("st.\"region\" IS NOT DISTINCT FROM"), "{sql}");
     }
 
     #[test]
@@ -7180,11 +7198,15 @@ mod tests {
                 && sql.contains("m.\"__pgt_group_1\" AS \"source_record_id\""),
             "{sql}"
         );
+        // The row identity preserves positional group keys (including
+        // duplicate source column names) without looking up ST columns.
         assert!(
-            sql.contains("st.\"left_source_record_id\" IS NOT DISTINCT FROM d.\"__pgt_group_0\"")
-                && sql.contains(
-                    "st.\"right_source_record_id\" IS NOT DISTINCT FROM d.\"__pgt_group_1\""
-                ),
+            sql.contains("pgtrickle.row_probe_v1(st.__pgt_row_id)")
+                && sql.contains("ROW(d.\"__pgt_group_0\", d.\"__pgt_group_1\","),
+            "{sql}"
+        );
+        assert!(
+            !sql.contains("st.\"left_source_record_id\" IS NOT DISTINCT FROM"),
             "{sql}"
         );
         assert!(!sql.contains("m.\"source_record_id\""), "{sql}");
