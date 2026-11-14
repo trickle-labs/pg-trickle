@@ -156,8 +156,12 @@ SELECT * FROM tree
 ```
 
 - INSERT-only changes use semi-naive evaluation.
-- DELETE and UPDATE changes use delete-and-rederive when the stored columns
-  contain the recursive state required by the algorithm.
+- DELETE and UPDATE changes in either seed or recursive sources are considered.
+  Set-valued `UNION` re-evaluates the least fixed point and diffs against storage;
+  eligible `UNION ALL` uses delete-and-rederive when the stored columns contain
+  the recursive state required by the algorithm.
+- `UNION` insertions deduplicate on user columns and exclude already-stored
+  tuples. The hidden depth guard applies only to `UNION ALL`, not set recursion.
 - Column projection mismatches and non-monotone recursive terms recompute the
   recursive result locally. `refresh_reason` is `recursive_cte_fallback`; this
   is not a whole-query FULL fallback.

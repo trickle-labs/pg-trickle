@@ -6809,7 +6809,8 @@ async fn test_pgvector_compat_installed_version() {
     assert_eq!(server / 10_000, 18, "wrong PostgreSQL major version");
     assert_eq!(pg_trickle, env!("CARGO_PKG_VERSION"));
     if let Ok(expected) = std::env::var("PGVECTOR_EXPECTED_VERSION") {
-        assert_eq!(server, 180_006, "wrong PostgreSQL compatibility image");
+        // The compatibility image pins pgvector, not the PostgreSQL minor release.
+        // The PostgreSQL major is checked above; accept security patch upgrades.
         assert_eq!(installed, expected, "wrong pgvector test image");
     }
 }
