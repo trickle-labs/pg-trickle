@@ -3170,11 +3170,7 @@ fn check_transition_eligible(
     }
 
     let identity = cdc::get_replica_identity_mode(dep.source_relid)?;
-    if identity != "full" {
-        return Ok(false);
-    }
-
-    Ok(true)
+    Ok(identity == "full")
 }
 
 /// Finish a WAL transition after the replication slot has been created.
