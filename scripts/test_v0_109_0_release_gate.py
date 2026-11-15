@@ -84,6 +84,7 @@ class RetirementContractTests(unittest.TestCase):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
         for version in ("0.8.1", "0.8.7"):
             for case in (
+                "test_ann_supervisor_allows_restricted_reads_and_writes_during_reindex",
                 "test_distance_subscription_concurrent_commit_and_rollback",
                 "test_distance_subscription_trigger_concurrent_commit_and_rollback",
                 "test_distance_subscription_duplicate_predicates_with_user_trigger",

@@ -53,6 +53,7 @@ PGVECTOR_CASES = {
         "test_distance_subscription_concurrent_commit_and_rollback",
         "test_distance_subscription_trigger_concurrent_commit_and_rollback",
         "test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
+        "test_ann_supervisor_allows_restricted_reads_and_writes_during_reindex",
         "test_ann_worker_records_lock_timeout_and_can_retry",
         "test_ann_worker_retries_after_restart_during_concurrent_reindex",
         "test_ann_request_listing_filters_privileges_and_pages",
