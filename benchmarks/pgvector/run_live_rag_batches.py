@@ -68,11 +68,33 @@ MAINTENANCE = {
 def availability_sql(changed_ids: str) -> str:
     return """
 WITH changed AS MATERIALIZED (""" + changed_ids + """)
+ , eligible AS MATERIALIZED (SELECT t.* FROM live_rag.truth t JOIN changed USING (id))
+ , application AS MATERIALIZED (
+     SELECT c.*, t.id IS NOT NULL AS current FROM live_rag.application c JOIN changed USING (id)
+     LEFT JOIN eligible t ON (c.id, c.tenant_id, c.body, c.incarnation, c.revision,
+       c.chunk_version, c.model_version, c.embedding) =
+       (t.id, t.tenant_id, t.body, t.incarnation, t.revision, t.chunk_version, t.model_version, t.embedding))
+ , periodic_full AS MATERIALIZED (
+     SELECT c.*, t.id IS NOT NULL AS current FROM live_rag.periodic_full c JOIN changed USING (id)
+     LEFT JOIN eligible t ON (c.id, c.tenant_id, c.body, c.incarnation, c.revision,
+       c.chunk_version, c.model_version, c.embedding) =
+       (t.id, t.tenant_id, t.body, t.incarnation, t.revision, t.chunk_version, t.model_version, t.embedding))
+ , differential AS MATERIALIZED (
+     SELECT c.*, t.id IS NOT NULL AS current FROM live_rag.differential c JOIN changed USING (id)
+     LEFT JOIN eligible t ON (c.id, c.tenant_id, c.body, c.incarnation, c.revision,
+       c.chunk_version, c.model_version, c.embedding) =
+       (t.id, t.tenant_id, t.body, t.incarnation, t.revision, t.chunk_version, t.model_version, t.embedding))
 SELECT json_build_object(
- 'eligible', (SELECT count(*) FROM live_rag.truth WHERE id IN (SELECT id FROM changed)),
- 'application', (SELECT count(*) FROM live_rag.application_current WHERE id IN (SELECT id FROM changed)),
- 'periodic_full', (SELECT count(*) FROM live_rag.periodic_full_current WHERE id IN (SELECT id FROM changed)),
- 'differential', (SELECT count(*) FROM live_rag.differential_current WHERE id IN (SELECT id FROM changed))
+ 'eligible', (SELECT count(*) FROM eligible),
+ 'application', (SELECT count(*) FROM application WHERE current),
+ 'application_absent', (SELECT count(*) FROM eligible) - (SELECT count(*) FROM application WHERE current),
+ 'application_stale', (SELECT count(*) FROM application WHERE NOT current),
+ 'periodic_full', (SELECT count(*) FROM periodic_full WHERE current),
+ 'periodic_full_absent', (SELECT count(*) FROM eligible) - (SELECT count(*) FROM periodic_full WHERE current),
+ 'periodic_full_stale', (SELECT count(*) FROM periodic_full WHERE NOT current),
+ 'differential', (SELECT count(*) FROM differential WHERE current),
+ 'differential_absent', (SELECT count(*) FROM eligible) - (SELECT count(*) FROM differential WHERE current),
+ 'differential_stale', (SELECT count(*) FROM differential WHERE NOT current)
 )::text;
 """
 
@@ -96,6 +118,10 @@ def percentile(values: list[float], fraction: float) -> float:
 def summary(values: list[float]) -> dict:
     return {"samples": len(values), "p50": percentile(values, .50),
             "p95": percentile(values, .95), "p99": percentile(values, .99)}
+
+
+def plan_execution_ms(measurement: dict, name: str) -> float:
+    return measurement["plans"][name][0]["Execution Time"]
 
 
 def timed(sql: str, **variables: str) -> tuple[str, float]:
@@ -175,7 +201,8 @@ SELECT json_build_object('postgres', current_setting('server_version'),
         committed = time.monotonic()
         after_commit = json_result(worker.psql(availability_query, **variables))
         generation_start = time.monotonic()
-        generation = worker.drain("model-v1", 3600, args.delay_seconds, args.batch, False, args.dimensions)
+        generation = worker.drain("model-v1", 3600, args.delay_seconds, args.batch, False,
+                                  args.dimensions, args.delay_profile, args.delay_seed + cycle)
         eligible = time.monotonic()
         expected_jobs = (args.batch + 3) // 4 + args.batch // 4 if args.workload == "mixed" else args.batch
         if generation["accepted"] != expected_jobs or generation["stale"]:
@@ -238,12 +265,21 @@ SELECT json_build_object('application', pg_total_relation_size('live_rag.applica
             "identity_source": "archive manifest and installed files checked before and after run" if initial_attestation else "operator-declared; installed payload not attested",
             "attestation": initial_attestation, "rows": args.rows,
             "dimensions": args.dimensions, "batch": args.batch, "cycles": args.cycles, "workload": args.workload,
-            "delay_seconds_per_job": args.delay_seconds, "concurrent_readers": args.concurrent_readers, "retrieval_tenant": args.tenant, "initial_setup_seconds": initial_seconds,
+            "delay_profile": args.delay_profile, "mean_delay_seconds_per_job": args.delay_seconds,
+            "delay_seed": args.delay_seed, "concurrent_readers": args.concurrent_readers,
+            "retrieval_tenant": args.tenant, "initial_setup_seconds": initial_seconds,
             "initial_corpora_exact": initial_exact, "samples": samples, "relation_bytes_including_indexes": sizes,
-            "batch_latency_seconds": {"commit_to_eligible": summary([s["commit_to_eligible_seconds"] for s in samples]),
-              "generation": summary([s["generation_seconds"] for s in samples]),
+            "batch_latency_seconds": {"source_transaction": summary([s["source_transaction_seconds"] for s in samples]),
+              "commit_to_eligible": summary([s["commit_to_eligible_seconds"] for s in samples]),
+              "embedding_generation": summary([s["generation_seconds"] for s in samples]),
+              "eligible_to_searchable": {name: summary([s["maintenance"][name]["eligible_to_searchable_seconds"] for s in samples]) for name in MAINTENANCE},
+              "commit_to_searchable": {name: summary([s["commit_to_eligible_seconds"] + s["maintenance"][name]["eligible_to_searchable_seconds"] for s in samples]) for name in MAINTENANCE},
               **{name: summary([s["maintenance"][name]["duration_seconds"] for s in samples]) for name in MAINTENANCE}},
-            "notes": "Deterministic hash-derived synthetic initial backfill bypasses claims; changed revisions use the fake worker. Timings include psql startup; commit-to-eligible also includes the post-commit availability check. Approaches run serially in rotating order; eligible-to-searchable includes preceding approaches and availability checks. WAL is cluster-wide insert-LSN movement around maintenance; other activity can contaminate it. Retrieval and optional concurrent reads use administrative current views, not restricted-role latency. Reader overlap uses database timestamps and client latencies include psql startup. No concurrent writes or embedding-delay distribution."}
+            "retrieval_latency_ms": {corpus: {plan: summary([
+                plan_execution_ms(sample["retrieval"][corpus], plan) for sample in samples
+            ]) for plan in ("exact", "planner", "eligibility", "hybrid_exact", "hybrid_planner")}
+                for corpus in MAINTENANCE},
+            "notes": "Deterministic hash-derived synthetic initial backfill bypasses claims; changed revisions use the fake worker. Uniform delay samples are deterministic per cycle from the recorded seed and have mean delay_seconds_per_job. Timings include psql startup; commit-to-eligible also includes the post-commit availability check. Approaches run serially in rotating order; eligible-to-searchable includes the post-generation availability check. WAL is cluster-wide insert-LSN movement around maintenance; other activity can contaminate it. Retrieval and optional concurrent reads use administrative current views, not restricted-role latency. Reader overlap uses database timestamps and client latencies include psql startup. Concurrent writers and host CPU require the separate load test and Docker stats sampling."}
 
 
 def main() -> None:
@@ -253,6 +289,8 @@ def main() -> None:
     parser.add_argument("--batch", type=int, default=10)
     parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument("--delay-seconds", type=float, default=0)
+    parser.add_argument("--delay-profile", choices=("fixed", "uniform"), default="fixed")
+    parser.add_argument("--delay-seed", type=int, default=0)
     parser.add_argument("--tenant", type=int, default=1)
     parser.add_argument("--workload", choices=("updates", "mixed"), default="updates")
     parser.add_argument("--concurrent-readers", type=int, default=0, help="bounded hybrid readers per maintenance step (0-4)")
