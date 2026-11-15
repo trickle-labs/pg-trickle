@@ -1401,8 +1401,63 @@ fn source_identity_changed(source_oid: pg_sys::Oid, pgt_id: i64) -> bool {
 
 /// A replacement table may reuse the old logical name while receiving a new
 /// OID. Keep the old dependency suspended until an explicit repair updates it.
+/// Refresh source ancestry after CREATE TABLE ... PARTITION OF.
+///
+/// There is no ALTER TABLE event on the parent for this DDL form. Use the
+/// *current* inheritance chain to update every tracked ancestor, including
+/// roots several partition levels above the newly created child.
+fn snapshot_created_partition_ancestry(
+    child_oid: pg_sys::Oid,
+) -> Result<(), PgTrickleError> {
+    let ancestors: Vec<(i64, pg_sys::Oid)> = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "WITH RECURSIVE ancestors(relid) AS ( \
+                     SELECT inhparent FROM pg_catalog.pg_inherits WHERE inhrelid = $1 \
+                     UNION ALL \
+                     SELECT i.inhparent FROM pg_catalog.pg_inherits i \
+                     JOIN ancestors a ON i.inhrelid = a.relid \
+                 ) SELECT DISTINCT d.pgt_id, d.source_relid \
+                   FROM ancestors a \
+                   JOIN pgtrickle.pgt_dependencies d ON d.source_relid = a.relid \
+                   WHERE d.source_type = 'TABLE'",
+                None,
+                &[child_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut tracked = Vec::new();
+        for row in rows {
+            let id = row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let source = row
+                .get::<pg_sys::Oid>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if let (Some(id), Some(source)) = (id, source) {
+                tracked.push((id, source));
+            }
+        }
+        Ok::<_, PgTrickleError>(tracked)
+    })?;
+    for (pgt_id, source_oid) in ancestors {
+        crate::catalog::store_column_snapshot_for_pgt_id(pgt_id, source_oid)?;
+    }
+    Ok(())
+}
+
 fn handle_created_table(cmd: &DdlCommand) {
     let identity = cmd.object_identity.as_deref().unwrap_or("unknown");
+    // CREATE TABLE ... PARTITION OF does not produce an ALTER TABLE command
+    // for the parent, but its new child must be tracked before a future DROP.
+    // A newly created partition contains no pre-existing data: update the
+    // ancestry snapshot without forcing a full refresh.
+    snapshot_created_partition_ancestry(cmd.objid).unwrap_or_else(|e| {
+        pgrx::error!(
+            "pg_trickle: cannot record newly created partition {}: {}",
+            identity,
+            e
+        )
+    });
     let Some(schema) = cmd.schema_name.as_deref() else {
         return;
     };
