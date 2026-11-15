@@ -193,7 +193,10 @@ SELECT pgtrickle.refresh_stream_table('regional_sales');
 This detection also covers nested partitions. Partition DDL is not a
 row-level change, so materialized results may remain from the previous
 refresh until the rebuild completes; monitor `needs_reinit` when performing
-retention jobs.
+retention jobs. **IMMEDIATE-mode streams are suspended instead**: they have
+no scheduled refresh worker, so explicitly call
+`pgtrickle.resume_stream_table('name')` after the partition operation to
+rebuild their state under source locks.
 
 ## LIST Partitioning
 
