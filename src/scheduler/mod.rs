@@ -4011,22 +4011,19 @@ fn execute_scheduled_refresh(
     } else {
         safe_bound.to_string()
     };
-    let slot_positions = match cdc::get_slot_positions_at_bound(
-        &source_oids,
-        &source_bound,
-        full_baseline,
-    ) {
-        Ok(pos) => pos,
-        Err(e) => {
-            log!(
-                "pg_trickle: failed to get slot positions for {}.{}: {}",
-                st.pgt_schema,
-                st.pgt_name,
-                e
-            );
-            return RefreshOutcome::RetryableFailure;
-        }
-    };
+    let slot_positions =
+        match cdc::get_slot_positions_at_bound(&source_oids, &source_bound, full_baseline) {
+            Ok(pos) => pos,
+            Err(e) => {
+                log!(
+                    "pg_trickle: failed to get slot positions for {}.{}: {}",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    e
+                );
+                return RefreshOutcome::RetryableFailure;
+            }
+        };
 
     // Select target data timestamp
     let schedule_secs = st
