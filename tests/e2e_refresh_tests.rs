@@ -68,6 +68,9 @@ async fn test_refresh_rejects_unreadable_change_buffer_without_advancing_frontie
         "DIFFERENTIAL",
     )
     .await;
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_broken_buffer_st'])")
+        .await;
     let before: String = db
         .query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_broken_buffer_st'")
         .await;
