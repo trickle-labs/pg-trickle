@@ -1209,7 +1209,17 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &Alt
                 // CONCURRENTLY is two-phase: until its second phase commits,
                 // the query can still see the old partition. Keep it suspended
                 // rather than clearing needs_reinit against an interim state.
-                if matches!(alter_table_hint, AlterTableHint::DetachPartitionConcurrent) {
+                // IMMEDIATE streams have no scheduler to consume a pending
+                // reinit. Suspend them and require an explicit resume, which
+                // executes the protected FULL rebuild under source locks.
+                let immediate = StreamTableMeta::get_by_id(*pgt_id)
+                    .unwrap_or_else(|e| {
+                        pgrx::error!("pg_trickle: cannot read stream table {}: {}", pgt_id, e)
+                    })
+                    .is_some_and(|st| st.refresh_mode.is_immediate());
+                if immediate
+                    || matches!(alter_table_hint, AlterTableHint::DetachPartitionConcurrent)
+                {
                     suspend_for_source_ddl(
                         *pgt_id,
                         AlterReasonCode::DependencyAmbiguous,
@@ -1850,6 +1860,28 @@ fn handle_dropped_table(obj: &DroppedObject) {
     );
 }
 
+/// For scheduled streams, the next refresh executes the FULL rebuild.
+/// IMMEDIATE has no refresh worker, so fail closed until resume performs its
+/// synchronous protected rebuild. This also applies to immediate descendants.
+fn mark_partition_removal_recovery(
+    pgt_id: i64,
+    identity: &str,
+) -> Result<(), PgTrickleError> {
+    let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
+        PgTrickleError::NotFound(format!("stream table {pgt_id}"))
+    })?;
+    if st.refresh_mode.is_immediate() {
+        suspend_for_source_ddl(
+            pgt_id,
+            AlterReasonCode::DependencyAmbiguous,
+            identity,
+        );
+    } else {
+        StreamTableMeta::mark_for_reinitialize(pgt_id)?;
+    }
+    Ok(())
+}
+
 /// Invalidate any live parent source whose partition descendant was dropped.
 ///
 /// pg_event_trigger_dropped_objects() gives the child's OID, but pg_inherits
@@ -1884,7 +1916,7 @@ fn invalidate_dropped_partition(
 
     let mut affected = Vec::new();
     for (pgt_id, parent_oid) in parents {
-        StreamTableMeta::mark_for_reinitialize(pgt_id)?;
+        mark_partition_removal_recovery(pgt_id, identity)?;
         crate::catalog::store_column_snapshot_for_pgt_id(pgt_id, parent_oid)?;
         shmem::signal_dag_invalidation(pgt_id);
         affected.push(pgt_id);
@@ -1894,7 +1926,7 @@ fn invalidate_dropped_partition(
     }
     // A child's data removal also affects downstream materializations.
     for pgt_id in find_transitive_downstream_sts(&affected)? {
-        StreamTableMeta::mark_for_reinitialize(pgt_id)?;
+        mark_partition_removal_recovery(pgt_id, identity)?;
         shmem::signal_dag_invalidation(pgt_id);
     }
     shmem::bump_cache_generation();
