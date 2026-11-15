@@ -75,6 +75,7 @@ OLD_VERSION="$(psql 'SELECT pgtrickle.version()')"
     exit 1
 }
 
+AGGREGATE_UPGRADE=false
 if [[ "$VECTOR_UPGRADE" == true ]]; then
     psql "CREATE EXTENSION vector; CREATE TABLE public.upgrade_vector_source(id int PRIMARY KEY, embedding vector(3));
         INSERT INTO public.upgrade_vector_source VALUES (1, '[1,0,0]'), (2, '[0,1,0]');
@@ -89,6 +90,59 @@ if [[ "$VECTOR_UPGRADE" == true ]]; then
         WHERE s.pgt_name='upgrade_vector_st' AND op.opcname='vector_l2_ops' AND i.indisvalid AND i.indisready")"
     [[ -n "$VECTOR_BEFORE" ]] || { echo "published helper did not create a valid L2 index" >&2; exit 1; }
     echo "Published vector baseline: pgvector=0.8.7 image=$POSTGRES_IMAGE index=$VECTOR_BEFORE"
+fi
+
+# Exercise upgrade of actual stream-table storage created by the published
+# v0.108.3 binary (not a freshly created stream under the candidate binary).
+if [[ "$FROM_VERSION" == "0.108.3" && ( "$TO_VERSION" == "0.109.0" || "$TO_VERSION" == "0.110.0" ) ]]; then
+    AGGREGATE_UPGRADE=true
+    psql "CREATE TABLE public.upgrade_agg_orders(
+              id int PRIMARY KEY, customer text, amt numeric)" >/dev/null
+    psql "INSERT INTO public.upgrade_agg_orders VALUES
+              (1,'a',1),(2,'a',2),(3,'b',4)" >/dev/null
+    psql "SELECT pgtrickle.create_stream_table(
+              name=>'upgrade_agg_sum_st',
+              query=>'SELECT customer, SUM(amt) AS total, COUNT(*) AS n
+                      FROM public.upgrade_agg_orders GROUP BY customer',
+              schedule=>'1h', refresh_mode=>'DIFFERENTIAL',
+              orchestration_mode=>'EXTERNAL')" >/dev/null
+    psql "SELECT pgtrickle.create_stream_table(
+              name=>'upgrade_agg_mixed_st',
+              query=>'SELECT customer, SUM(amt) AS total, AVG(amt) AS mean,
+                             COUNT(*) AS n
+                      FROM public.upgrade_agg_orders GROUP BY customer',
+              schedule=>'24h', refresh_mode=>'DIFFERENTIAL',
+              orchestration_mode=>'MANAGED')" >/dev/null
+    psql "SELECT pgtrickle.create_stream_table(
+              name=>'upgrade_agg_control_st',
+              query=>'SELECT customer, COUNT(*) AS n, MAX(amt) AS largest
+                      FROM public.upgrade_agg_orders GROUP BY customer',
+              schedule=>'24h', refresh_mode=>'DIFFERENTIAL',
+              orchestration_mode=>'MANAGED')" >/dev/null
+
+    # EXTERNAL creation deliberately leaves the storage unpopulated even
+    # when initialize=true. Seed it through its coordinator under v0.108.3
+    # so this test actually upgrades existing materialized SUM rows.
+    psql "SELECT * FROM pgtrickle.refresh_graph_strict(
+              ARRAY['public.upgrade_agg_sum_st'::regclass],
+              (SELECT graph_digest FROM pgtrickle.graph_contract(
+                  ARRAY['public.upgrade_agg_sum_st'::regclass])),
+              'ALLOW')" >/dev/null
+    psql "SELECT count(*)=3 FROM pgtrickle.pgt_stream_tables
+           WHERE pgt_name IN ('upgrade_agg_sum_st','upgrade_agg_mixed_st',
+                              'upgrade_agg_control_st')
+             AND is_populated" | grep -qx t
+    psql "SELECT NOT EXISTS (
+             SELECT 1 FROM pg_catalog.pg_attribute
+             WHERE attrelid='public.upgrade_agg_sum_st'::regclass
+               AND attname='__pgt_aux_special_total'
+           ) AND NOT EXISTS (
+             SELECT 1 FROM pg_catalog.pg_attribute
+             WHERE attrelid='public.upgrade_agg_mixed_st'::regclass
+               AND attname='__pgt_aux_special_mean'
+           )" | grep -qx t
+    UPGRADE_SUM_RELID_BEFORE="$(psql "SELECT 'public.upgrade_agg_sum_st'::regclass::oid")"
+    UPGRADE_MIXED_RELID_BEFORE="$(psql "SELECT 'public.upgrade_agg_mixed_st'::regclass::oid")"
 fi
 
 WAL_SLOT=""
@@ -204,15 +258,20 @@ QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
 
 UPGRADE_DIR="$CANDIDATE_DIR/usr/share/postgresql/18/extension"
 if [[ ! -f "$UPGRADE_DIR/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql" ]]; then
-    [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.1" || "$IDENTITY_MIGRATION" == true ) ]]
-    test -f "$UPGRADE_DIR/pg_trickle--0.106.1--0.107.0.sql"
-    test -f "$UPGRADE_DIR/pg_trickle--0.107.0--0.108.0.sql"
-    test -f "$UPGRADE_DIR/pg_trickle--0.108.0--0.108.1.sql"
-    if [[ "$IDENTITY_MIGRATION" == true ]]; then
-        test -f "$UPGRADE_DIR/pg_trickle--0.108.1--0.108.3.sql"
-    fi
-    if [[ "$TO_VERSION" == "0.109.0" ]]; then
+    if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.110.0" ]]; then
         test -f "$UPGRADE_DIR/pg_trickle--0.108.3--0.109.0.sql"
+        test -f "$UPGRADE_DIR/pg_trickle--0.109.0--0.110.0.sql"
+    else
+        [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.1" || "$IDENTITY_MIGRATION" == true ) ]]
+        test -f "$UPGRADE_DIR/pg_trickle--0.106.1--0.107.0.sql"
+        test -f "$UPGRADE_DIR/pg_trickle--0.107.0--0.108.0.sql"
+        test -f "$UPGRADE_DIR/pg_trickle--0.108.0--0.108.1.sql"
+        if [[ "$IDENTITY_MIGRATION" == true ]]; then
+            test -f "$UPGRADE_DIR/pg_trickle--0.108.1--0.108.3.sql"
+        fi
+        if [[ "$TO_VERSION" == "0.109.0" ]]; then
+            test -f "$UPGRADE_DIR/pg_trickle--0.108.3--0.109.0.sql"
+        fi
     fi
 fi
 docker cp "$CANDIDATE_DIR/usr/lib/postgresql/18/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"
@@ -283,6 +342,20 @@ if [[ "$VECTOR_UPGRADE" == true ]]; then
     psql "SET enable_seqscan=off; EXPLAIN SELECT id FROM public.upgrade_vector_st ORDER BY (embedding::vector(3)) <-> '[1,0,0]'::vector LIMIT 1" | grep -q 'upgrade_vector_st_embedding_idx'
     echo "Published vector stream, L2 index, inactive legacy subscription and default-off centroid state preserved."
 fi
+
+if [[ "$AGGREGATE_UPGRADE" == true ]]; then
+    psql "SELECT
+        (SELECT count(*)=2 FROM pgtrickle.pgt_stream_tables
+          WHERE pgt_name IN ('upgrade_agg_sum_st','upgrade_agg_mixed_st')
+            AND needs_reinit)
+        AND (SELECT NOT needs_reinit FROM pgtrickle.pgt_stream_tables
+               WHERE pgt_name='upgrade_agg_control_st')" | grep -qx t
+    # Prevent scheduled maintenance from racing the explicit MANAGED
+    # reinitialization; this pause is distinct from the global upgrade drain.
+    psql "SELECT pgtrickle.pause_scheduler(
+              ARRAY['public.upgrade_agg_mixed_st',
+                    'public.upgrade_agg_control_st'])" >/dev/null
+fi
 psql 'SELECT pgtrickle.resume_all()' >/dev/null
 if [[ "$VECTOR_UPGRADE" == true ]]; then
     psql "UPDATE public.upgrade_vector_source SET embedding='[0,0,1]' WHERE id=1;
@@ -299,6 +372,98 @@ if [[ "$VECTOR_UPGRADE" == true ]]; then
 fi
 CAPTURE_STATE="$(psql 'SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton')"
 [[ "$CAPTURE_STATE" == "ACTIVE" ]] || { echo "capture did not resume after update" >&2; exit 1; }
+
+if [[ "$AGGREGATE_UPGRADE" == true ]]; then
+    # Graph-coordinated refresh exercises the manual FULL target for an
+    # EXTERNAL relation; explicit reinitialize and ordinary manual refresh
+    # exercise the MANAGED relation's repair path.
+    refresh_agg_sum() {
+        psql "SELECT * FROM pgtrickle.refresh_graph_strict(
+                  ARRAY['public.upgrade_agg_sum_st'::regclass],
+                  (SELECT graph_digest FROM pgtrickle.graph_contract(
+                      ARRAY['public.upgrade_agg_sum_st'::regclass])),
+                  'ALLOW')" >/dev/null
+    }
+    psql "INSERT INTO public.upgrade_agg_orders VALUES(4,'a',10)" >/dev/null
+    refresh_agg_sum
+    psql "SELECT pgtrickle.reinitialize_stream_table('public.upgrade_agg_mixed_st')" >/dev/null
+    psql "SELECT pgtrickle.refresh_stream_table('public.upgrade_agg_mixed_st')" >/dev/null
+    psql "SELECT NOT EXISTS (
+        SELECT 1 FROM public.upgrade_agg_sum_st
+         WHERE pg_catalog.jsonb_typeof(__pgt_aux_special_total) <> 'object'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM public.upgrade_agg_mixed_st
+         WHERE pg_catalog.jsonb_typeof(__pgt_aux_special_total) <> 'object'
+            OR pg_catalog.jsonb_typeof(__pgt_aux_special_mean) <> 'object'
+    )" | grep -qx t
+
+    # Prove that private finite state survives a change while Infinity is
+    # present and recovers after Infinity is deleted, without another FULL.
+    psql "INSERT INTO public.upgrade_agg_orders VALUES(5,'a','Infinity'::numeric)" >/dev/null
+    refresh_agg_sum
+    psql "SELECT pgtrickle.refresh_stream_table('public.upgrade_agg_mixed_st')" >/dev/null
+    psql "UPDATE public.upgrade_agg_orders SET amt=12 WHERE id=4" >/dev/null
+    refresh_agg_sum
+    psql "SELECT pgtrickle.refresh_stream_table('public.upgrade_agg_mixed_st')" >/dev/null
+    psql "DELETE FROM public.upgrade_agg_orders WHERE id=5" >/dev/null
+    refresh_agg_sum
+    psql "SELECT pgtrickle.refresh_stream_table('public.upgrade_agg_mixed_st')" >/dev/null
+    psql "SELECT pgtrickle.refresh_stream_table('public.upgrade_agg_control_st')" >/dev/null
+
+    # Verify both directions under bag semantics, including the independent
+    # COUNT/MAX control that should never have been marked for reinitialization.
+    psql "SELECT NOT EXISTS (
+        (SELECT customer,total,n FROM public.upgrade_agg_sum_st
+         EXCEPT ALL SELECT customer,SUM(amt),COUNT(*)
+           FROM public.upgrade_agg_orders GROUP BY customer)
+        UNION ALL
+        (SELECT customer,SUM(amt),COUNT(*)
+           FROM public.upgrade_agg_orders GROUP BY customer
+         EXCEPT ALL SELECT customer,total,n FROM public.upgrade_agg_sum_st)
+    )" | grep -qx t
+    psql "SELECT NOT EXISTS (
+        (SELECT customer,total,mean,n FROM public.upgrade_agg_mixed_st
+         EXCEPT ALL SELECT customer,SUM(amt),AVG(amt),COUNT(*)
+           FROM public.upgrade_agg_orders GROUP BY customer)
+        UNION ALL
+        (SELECT customer,SUM(amt),AVG(amt),COUNT(*)
+           FROM public.upgrade_agg_orders GROUP BY customer
+         EXCEPT ALL SELECT customer,total,mean,n FROM public.upgrade_agg_mixed_st)
+    )" | grep -qx t
+    psql "SELECT NOT EXISTS (
+        (SELECT customer,n,largest FROM public.upgrade_agg_control_st
+         EXCEPT ALL SELECT customer,COUNT(*),MAX(amt)
+           FROM public.upgrade_agg_orders GROUP BY customer)
+        UNION ALL
+        (SELECT customer,COUNT(*),MAX(amt)
+           FROM public.upgrade_agg_orders GROUP BY customer
+         EXCEPT ALL SELECT customer,n,largest FROM public.upgrade_agg_control_st)
+    )" | grep -qx t
+    psql "SELECT total=15::numeric FROM public.upgrade_agg_sum_st WHERE customer='a'" | grep -qx t
+    psql "SELECT total=15::numeric AND mean=5::numeric
+            FROM public.upgrade_agg_mixed_st WHERE customer='a'" | grep -qx t
+
+    # Repeating the explicit repair must remain idempotent and state-complete.
+    psql "SELECT pgtrickle.reinitialize_stream_table('public.upgrade_agg_mixed_st')" >/dev/null
+    psql "SELECT pgtrickle.refresh_stream_table('public.upgrade_agg_mixed_st')" >/dev/null
+    psql "SELECT total=15::numeric AND mean=5::numeric
+            FROM public.upgrade_agg_mixed_st WHERE customer='a'" | grep -qx t
+    [[ "$(psql "SELECT 'public.upgrade_agg_sum_st'::regclass::oid")" == "$UPGRADE_SUM_RELID_BEFORE" ]] || {
+        echo "upgrade changed SUM storage relation identity" >&2
+        exit 1
+    }
+    [[ "$(psql "SELECT 'public.upgrade_agg_mixed_st'::regclass::oid")" == "$UPGRADE_MIXED_RELID_BEFORE" ]] || {
+        echo "reinitialize changed mixed aggregate storage relation identity" >&2
+        exit 1
+    }
+    psql "SELECT count(*)=3 FROM pgtrickle.pgt_stream_tables
+           WHERE pgt_name IN ('upgrade_agg_sum_st','upgrade_agg_mixed_st','upgrade_agg_control_st')
+             AND NOT needs_reinit" | grep -qx t
+    psql "SELECT pgtrickle.resume_scheduler(
+              ARRAY['public.upgrade_agg_mixed_st',
+                    'public.upgrade_agg_control_st'])" >/dev/null
+    echo "Published v0.108.3 SUM/AVG storage repaired; incremental non-finite state and COUNT/MAX control verified."
+fi
 
 PENDING_AFTER="$(psql "SELECT count(*) FROM ${BUFFER}")"
 GRAPH_AFTER="$(psql "SELECT encode(graph_digest, 'hex') FROM \
