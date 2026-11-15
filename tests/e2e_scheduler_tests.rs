@@ -430,8 +430,10 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
     .execute(&mut *writer)
     .await
     .expect("write source rows before the scheduler watermark");
+    // The relation is catalog-derived and SQL-identifier quoted by PostgreSQL
+    // format('%I.%I'); no user string is interpolated into this query.
     let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
-    let writer_delta_lsn: String = sqlx::query_scalar(&delta_sql)
+    let writer_delta_lsn: String = sqlx::query_scalar(sqlx::AssertSqlSafe(delta_sql))
         .fetch_one(&mut *writer)
         .await
         .expect("read uncommitted source CDC LSN");
@@ -611,8 +613,10 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
     .execute(&mut *writer)
     .await
     .expect("insert fallback source rows");
+    // The relation is catalog-derived and SQL-identifier quoted by PostgreSQL
+    // format('%I.%I'); no user string is interpolated into this query.
     let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
-    let writer_delta_lsn: String = sqlx::query_scalar(&delta_sql)
+    let writer_delta_lsn: String = sqlx::query_scalar(sqlx::AssertSqlSafe(delta_sql))
         .fetch_one(&mut *writer)
         .await
         .expect("read fallback writer's CDC LSN");
@@ -815,6 +819,8 @@ async fn test_manual_full_fallback_after_new_commit_does_not_replay() {
          SELECT i, i % 3, 100 FROM generate_series(11, 110) AS i",
     )
     .await;
+    // The relation is catalog-derived and SQL-identifier quoted by PostgreSQL
+    // format('%I.%I'); no user string is interpolated into this query.
     let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
     let writer_delta_lsn: String = db.query_scalar(&delta_sql).await;
 
