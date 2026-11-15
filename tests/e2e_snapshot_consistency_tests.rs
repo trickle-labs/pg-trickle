@@ -89,6 +89,74 @@ async fn test_snapshot_restore_after_cdc_cleanup_reinitializes_from_sources() {
     );
 }
 
+/// IMMEDIATE tables have no deferred history with which to replay a rewind.
+/// A rejected restore must not replace visible rows or disable future IVM.
+#[tokio::test]
+async fn test_snapshot_restore_immediate_rejects_rewind_without_mutating_state() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE snap_imm_source (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO snap_imm_source VALUES (1)").await;
+    let query = "SELECT id FROM snap_imm_source";
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+         name => 'snap_imm_st', query => 'SELECT id FROM snap_imm_source',\
+         refresh_mode => 'IMMEDIATE')",
+    )
+    .await;
+    let snapshot: String = db
+        .query_scalar("SELECT pgtrickle.snapshot_stream_table('snap_imm_st')")
+        .await;
+
+    db.execute("INSERT INTO snap_imm_source VALUES (2)").await;
+    db.assert_st_matches_query("snap_imm_st", query).await;
+    let before_rows: String = db
+        .query_scalar("SELECT array_agg(id ORDER BY id)::text FROM snap_imm_st")
+        .await;
+    assert_eq!(before_rows, "{1,2}");
+    let before_state: String = db
+        .query_scalar(
+            "SELECT status || ':' || needs_reinit::text
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'snap_imm_st'",
+        )
+        .await;
+
+    let error = db
+        .try_execute(&format!(
+            "SELECT pgtrickle.restore_from_snapshot('snap_imm_st', '{snapshot}')"
+        ))
+        .await
+        .expect_err("IMMEDIATE restore must reject an unreplayable historical baseline");
+    assert!(
+        error.to_string().contains("IMMEDIATE")
+            && error.to_string().contains("reinitialize"),
+        "unexpected restore error: {error}"
+    );
+
+    let after_rows: String = db
+        .query_scalar("SELECT array_agg(id ORDER BY id)::text FROM snap_imm_st")
+        .await;
+    assert_eq!(after_rows, before_rows, "rejected restore changed visible rows");
+    let after_state: String = db
+        .query_scalar(
+            "SELECT status || ':' || needs_reinit::text
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'snap_imm_st'",
+        )
+        .await;
+    assert_eq!(after_state, before_state, "rejected restore changed state");
+
+    db.execute("INSERT INTO snap_imm_source VALUES (3)").await;
+    db.execute("UPDATE snap_imm_source SET id = 4 WHERE id = 2")
+        .await;
+    db.execute("DELETE FROM snap_imm_source WHERE id = 1")
+        .await;
+    db.assert_st_matches_query("snap_imm_st", query).await;
+    let rows: String = db
+        .query_scalar("SELECT array_agg(id ORDER BY id)::text FROM snap_imm_st")
+        .await;
+    assert_eq!(rows, "{3,4}");
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // K1 — Two STs on overlapping sources produce consistent results
 // ══════════════════════════════════════════════════════════════════════
