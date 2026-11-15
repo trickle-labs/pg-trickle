@@ -172,9 +172,10 @@ wait_for_correctness() {
         refreshed="$(db_query "SELECT count(*) = 3 FROM pgtrickle.pgt_stream_tables s WHERE EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = s.pgt_id AND h.status = 'COMPLETED' AND h.start_time >= '$workload_finished_at'::timestamptz)")"
         if [[ "$refreshed" == t ]]; then
             [[ "$(correctness_check)" == t ]] && return 0
-            return 1
+            sleep 5
+        else
+            sleep 0.5
         fi
-        sleep 0.5
     done
     return 1
 }
