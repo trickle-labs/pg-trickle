@@ -20,10 +20,11 @@ source tables transparently:
   written to. All captured changes are recorded in a single change buffer keyed
   by the parent table's OID.
 
-- **ATTACH PARTITION is detected automatically.** When you add a new
-  partition with pre-existing data, pg_trickle's DDL event trigger detects
-  the change and marks affected stream tables for reinitialization. No
-  manual intervention required.
+- **ATTACH PARTITION is detected automatically.** When you attach a
+  partition with pre-existing data, pg_trickle marks affected stream tables
+  for reinitialization; an empty attach stays active. A partition created with
+  `CREATE TABLE ... PARTITION OF` is also recorded immediately so that a
+  later direct DROP cannot silently leave stale aggregates.
 
 - **Partitioned sources currently use trigger CDC.** Although PostgreSQL
   supports `publish_via_partition_root`, the WAL cutover recheck does not
