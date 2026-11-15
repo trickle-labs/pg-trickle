@@ -66,6 +66,16 @@ The owner still needs access to the defining query's sources and functions, but
 does not need direct grants on pg_trickle's internal tables or change buffers.
 Review any temporary workaround grants separately before removing them.
 
+Existing DIFFERENTIAL stream tables containing `SUM` or `AVG` (including plain
+`SUM(amount) GROUP BY key`) are marked for a protected FULL
+reinitialization. The first scheduled or manual refresh restores any missing
+private aggregate-state columns and recomputes their values from source data
+before differential maintenance resumes. This preserves the stream table's
+relation identity, downstream dependencies, and external bindings. An
+explicit `reinitialize_stream_table()` followed by a refresh uses the same
+repair path. If a FULL refresh is prohibited by an operator's refresh policy,
+allow the protected rebuild before resuming differential refreshes.
+
 This release also corrects several differential-refresh and CDC cases. Review
 existing stream tables that use casted or complex aggregates, count composite
 values containing NULL fields, or use filtered `AVG`, statistical, or

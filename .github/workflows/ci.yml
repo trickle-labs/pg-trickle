@@ -612,6 +612,37 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
+  # Exercise real published storage across the extension SQL and binary upgrade.
+  # Ordinary same-version E2E tests cannot reproduce old physical SUM/AVG state.
+  legacy-aggregate-upgrade:
+    name: Published v0.108.3 SUM/AVG upgrade
+    needs: light-e2e-package
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prepare runner disk space
+        run: bash scripts/ci_prepare_disk.sh
+
+      - name: Download extension package
+        uses: actions/download-artifact@v8
+        with:
+          name: light-e2e-package
+          path: target/release/pg_trickle-pg18
+
+      - name: Pull PostgreSQL 18 base image
+        run: docker pull postgres:18.6
+
+      - name: Qualify published-source aggregate upgrade
+        env:
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
+        run: |
+          candidate="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          test -n "$candidate"
+          bash scripts/qualify_live_package_upgrade.sh 0.108.3 "$candidate"
+
   lsn-candidate-runtime:
     name: Checked LSN runtime against verified candidate package
     needs: [light-e2e-package, release-qualification-contract]
@@ -1039,6 +1070,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+
+      - name: Check live published-package regression syntax
+        run: |
+          bash -n scripts/qualify_live_package_upgrade.sh
+          python3 -m py_compile scripts/check_ci_results.py
 
       - name: Check version references are in sync
         run: ./scripts/check_version_sync.sh
@@ -2168,6 +2204,7 @@ jobs:
       - windows-compile-gate
       - light-e2e-package
       - light-e2e-tests
+      - legacy-aggregate-upgrade
       - release-evidence-runtime
       - lsn-candidate-runtime
       - e2e-sensitive-gate
