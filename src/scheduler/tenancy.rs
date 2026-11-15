@@ -87,6 +87,8 @@ impl PressureState {
         self.deferral_factor
     }
 
+    /// Return whether ordinary work should be skipped on this tick. Sustained
+    /// pressure still slows polling, but must not starve scheduled refreshes.
     pub fn observe(&mut self, pressure: f64, threshold: f64) -> bool {
         let threshold = threshold.clamp(0.0, 1.0);
         if threshold == 0.0 {
@@ -99,7 +101,9 @@ impl PressureState {
         if self.deferred {
             if pressure < threshold * 0.75 {
                 self.healthy_ticks = self.healthy_ticks.saturating_add(1);
-                self.overloaded_ticks = 0;
+                // Keep the pressure-epoch count until recovery is confirmed.
+                // Resetting it on a single healthy sample lets alternating
+                // high/low samples defer work forever without reaching the cap.
                 self.deferral_factor = self.deferral_factor.saturating_sub(1).max(1);
                 if self.healthy_ticks >= 2 {
                     self.deferred = false;
@@ -120,7 +124,11 @@ impl PressureState {
             self.overloaded_ticks = 1;
             self.deferral_factor = 1;
         }
-        self.deferred
+        // Once polling has backed off to its maximum, admit due work at that
+        // reduced cadence. Previously the capped interval still skipped every
+        // tick, so sustained writes could freeze a stream until load stopped
+        // (or its change buffer finally reached the memory-budget exemption).
+        self.deferred && self.deferral_factor < 8
     }
 }
 
@@ -224,6 +232,50 @@ mod tests {
         assert_eq!(state.deferral_factor(), 2);
         assert!(state.observe(0.5, 0.8));
         assert!(!state.observe(0.5, 0.8));
+    }
+
+    #[test]
+    fn sustained_pressure_admits_work_at_capped_poll_interval() {
+        let mut state = PressureState::new();
+        for factor in [1, 2, 4] {
+            assert!(state.observe(1.0, 0.8));
+            assert_eq!(state.deferral_factor(), factor);
+        }
+        // Continue past u8 saturation to catch policies that only admit a
+        // single tick or stop making progress after their counter overflows.
+        for _ in 0..512 {
+            assert!(!state.observe(1.0, 0.8));
+            assert_eq!(state.deferral_factor(), 8);
+            assert!(state.deferred());
+        }
+        assert!(state.observe(0.5, 0.8));
+        assert!(!state.observe(0.5, 0.8));
+        assert_eq!(state.deferral_factor(), 1);
+        assert!(!state.deferred());
+    }
+
+    #[test]
+    fn disabling_load_shedding_resets_capped_backoff() {
+        let mut state = PressureState::new();
+        for _ in 0..8 {
+            state.observe(1.0, 0.8);
+        }
+        assert!(!state.observe(1.0, 0.0));
+        assert_eq!(state.deferral_factor(), 1);
+        assert!(!state.deferred());
+    }
+
+    #[test]
+    fn isolated_healthy_samples_do_not_restart_deferral_forever() {
+        let mut state = PressureState::new();
+        for _ in 0..3 {
+            assert!(state.observe(1.0, 0.8));
+            assert!(state.observe(0.5, 0.8));
+        }
+        for _ in 0..512 {
+            assert!(!state.observe(1.0, 0.8));
+            assert!(state.observe(0.5, 0.8));
+        }
     }
 
     #[test]

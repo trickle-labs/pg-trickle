@@ -2907,28 +2907,63 @@ END AS __pgt_meta_action"#
     };
     merge_selects.push(action_case);
 
-    // Join condition on group-by columns
+    // The indexed identity lookup is valid only when the FULL refresh used
+    // exactly the same ordered GROUP_KEY encoding as this delta. Unusual
+    // projections, type fallbacks, or legacy row-identity paths can store a
+    // different identity: preserve the original key-based join for those.
+    let stored_group_keys: Vec<String> = group_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let internal = format!("__pgt_group_{index}");
+            let storage_name = if column.starts_with("__pgt_group_") {
+                ctx.st_column_alias_map
+                    .as_ref()
+                    .and_then(|map| map.get(&internal))
+                    .cloned()
+                    .unwrap_or_else(|| st_col_name(column))
+            } else {
+                st_col_name(column)
+            };
+            format!("sub.{}", quote_ident(&storage_name))
+        })
+        .collect();
+    // FULL encoding does not parenthesize composite ROW elements; delta
+    // encoding does. The parentheses do not change values or types, but
+    // these SQL strings must be compared in FULL's exact canonical form.
+    let expected_full_identity =
+        crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys);
+    // An unknown FULL identity (e.g. execution-harness state or legacy
+    // targets) must not assume that a GROUP_KEY probe will find the row.
+    let can_probe_row_identity = ctx
+        .st_full_row_identity_expr
+        .as_ref()
+        .is_some_and(|full_expr| full_expr == &expected_full_identity);
+
+    // PostgreSQL 18 cannot use a B-tree/hash join for a composite
+    // IS NOT DISTINCT FROM predicate; it scanned the stream table for every
+    // changed group (#1405). For matching V3 GROUP_KEY identities, use the
+    // row-probe expression index. The probe can collide, so always compare
+    // the complete bytea identity too. Typed encoding preserves NULL keys.
     let join_cond = if group_columns.is_empty() {
+        // Scalar aggregates have a single persistent row.
         "TRUE".to_string()
+    } else if can_probe_row_identity {
+        format!(
+            "pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1({row_id_expr}) \
+             AND st.__pgt_row_id = {row_id_expr}"
+        )
     } else {
+        // FULL refresh did not use the delta's group identity. A key-based
+        // fallback is necessary for correctness, even though it is slower.
         group_columns
             .iter()
-            .enumerate()
-            .map(|(index, c)| {
-                let internal = format!("__pgt_group_{index}");
-                let st_c = if c.starts_with("__pgt_group_") {
-                    ctx.st_column_alias_map
-                        .as_ref()
-                        .and_then(|map| map.get(&internal))
-                        .cloned()
-                        .unwrap_or_else(|| st_col_name(c))
-                } else {
-                    st_col_name(c)
-                };
+            .zip(&stored_group_keys)
+            .map(|(column, stored)| {
+                let storage_ref = stored.replacen("sub.", "st.", 1);
                 format!(
-                    "st.{st_qc} IS NOT DISTINCT FROM d.{d_qc}",
-                    st_qc = quote_ident(&st_c),
-                    d_qc = quote_ident(c),
+                    "{storage_ref} IS NOT DISTINCT FROM d.{}",
+                    quote_ident(column)
                 )
             })
             .collect::<Vec<_>>()
@@ -4117,6 +4152,8 @@ mod tests {
     #[test]
     fn test_diff_aggregate_standard_path_when_child_is_filter() {
         let mut ctx = test_ctx_with_st("public", "st");
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(sub.\"region\"))".into());
         let child = filter(
             binop(">", colref("amount"), lit("0")),
             scan(1, "t", "public", "t", &["id", "region", "amount"]),
@@ -4129,6 +4166,64 @@ mod tests {
         assert_sql_not_contains(&sql, "LATERAL");
         // Should use standard path with __pgt_action
         assert_sql_contains(&sql, "__pgt_action");
+        // The storage probe must use the GROUP_KEY identity instead of an
+        // unindexable null-safe join on the storage table's group columns.
+        assert_sql_contains(&sql, "pgtrickle.row_probe_v1(st.__pgt_row_id)");
+        assert_sql_contains(
+            &sql,
+            "st.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(d.\"region\"))",
+        );
+        assert_sql_not_contains(&sql, "st.\"region\" IS NOT DISTINCT FROM d.\"region\"");
+    }
+
+    #[test]
+    fn test_grouped_aggregate_probe_keeps_all_nullable_composite_key_parts() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        // This is exactly the canonical FULL-refresh row ID SQL, without
+        // the harmless extra parentheses in the DVM's composite ROW SQL.
+        ctx.st_full_row_identity_expr = Some(
+            "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(sub.\"region\", sub.\"day\"))".into(),
+        );
+        let child = filter(
+            binop(">", colref("amount"), lit("0")),
+            scan(1, "t", "public", "t", &["id", "region", "day", "amount"]),
+        );
+        let tree = aggregate(
+            vec![colref("region"), colref("day")],
+            vec![count_star("cnt")],
+            child,
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        let identity = "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW((d.\"region\"), (d.\"day\")))";
+        assert!(
+            sql.contains(&format!("pgtrickle.row_probe_v1({identity})")),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!("st.__pgt_row_id = {identity}")),
+            "{sql}"
+        );
+        assert!(!sql.contains("st.\"region\" IS NOT DISTINCT FROM"), "{sql}");
+    }
+
+    #[test]
+    fn test_grouped_aggregate_preserves_key_join_for_incompatible_full_identity() {
+        // Simulate a target whose FULL refresh used another identity domain.
+        // The storage lookup must preserve null-safe group matching instead
+        // of using a GROUP_KEY that would miss existing rows.
+        let mut ctx = test_ctx_with_st("public", "st");
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(sub.*))".into());
+        let tree = aggregate(
+            vec![colref("region")],
+            vec![count_star("cnt")],
+            scan(1, "t", "public", "t", &["id", "region"]),
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(&sql, "st.\"region\" IS NOT DISTINCT FROM d.\"region\"");
+        assert_sql_not_contains(&sql, "pgtrickle.row_probe_v1(st.__pgt_row_id)");
     }
 
     #[test]
@@ -7180,11 +7275,17 @@ mod tests {
                 && sql.contains("m.\"__pgt_group_1\" AS \"source_record_id\""),
             "{sql}"
         );
+        // Without a verified FULL identity, a projected/renamed aggregate
+        // must keep the null-safe key lookup (including its alias mapping).
         assert!(
             sql.contains("st.\"left_source_record_id\" IS NOT DISTINCT FROM d.\"__pgt_group_0\"")
                 && sql.contains(
                     "st.\"right_source_record_id\" IS NOT DISTINCT FROM d.\"__pgt_group_1\""
                 ),
+            "{sql}"
+        );
+        assert!(
+            !sql.contains("pgtrickle.row_probe_v1(st.__pgt_row_id)"),
             "{sql}"
         );
         assert!(!sql.contains("m.\"source_record_id\""), "{sql}");
