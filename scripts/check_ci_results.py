@@ -22,10 +22,15 @@ def check(needs: dict, *, draft: bool) -> list[str]:
     if ready:
         required.update({
             "windows-compile-gate", "light-e2e-package",
-            "light-e2e-tests", "legacy-aggregate-upgrade",
-            "release-evidence-runtime", "lsn-candidate-runtime",
-            "e2e-sensitive-gate",
+            "light-e2e-tests", "release-evidence-runtime",
+            "lsn-candidate-runtime", "e2e-sensitive-gate",
         })
+        # Some pull_request runs load the default branch workflow before the
+        # newly added legacy-aggregate-upgrade job exists in that workflow.
+        # The required light-E2E shard runs the same published-package test
+        # in that case. If GitHub schedules the dedicated job, require it too.
+        if "legacy-aggregate-upgrade" in needs:
+            required.add("legacy-aggregate-upgrade")
         flags = outputs
         for name in ("unsafe_boundary_changed", "failure_recovery_changed"):
             if flags.get(name) not in {"true", "false"}:
