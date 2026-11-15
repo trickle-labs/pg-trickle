@@ -864,6 +864,56 @@ async fn test_partition_append_only_pk_survives_insert_only_refresh() {
 
 
 #[tokio::test]
+async fn test_partition_direct_drop_suspends_immediate_until_protected_resume() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE immediate_part_source (
+            id INT, d DATE NOT NULL, PRIMARY KEY (id,d)
+        ) PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE immediate_part_old PARTITION OF immediate_part_source
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE immediate_part_new PARTITION OF immediate_part_source
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO immediate_part_source VALUES
+         (1,'2025-02-01'),(2,'2026-02-01')",
+    )
+    .await;
+    let query = "SELECT id, d FROM immediate_part_source";
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            'immediate_part_st',
+            $SELECT id, d FROM immediate_part_source$,
+            NULL,
+            'IMMEDIATE'
+        )",
+    )
+    .await;
+    db.assert_st_matches_query("immediate_part_st", query).await;
+
+    // IMMEDIATE has no scheduler to process a pending reinitialization.
+    db.execute("DROP TABLE immediate_part_old").await;
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'immediate_part_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED");
+    db.execute("SELECT pgtrickle.resume_stream_table('immediate_part_st')")
+        .await;
+    db.assert_st_matches_query("immediate_part_st", query).await;
+}
+
+#[tokio::test]
 async fn test_partition_and_plain_wal_requests_report_eligibility_blockers() {
     let db = E2eDb::new().await.with_extension().await;
 
