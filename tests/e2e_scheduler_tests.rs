@@ -556,8 +556,7 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
          SELECT i, i % 2, 10 FROM generate_series(1, 9) AS i",
     )
     .await;
-    let query =
-        "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_fallback_src GROUP BY grp";
+    let query = "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_fallback_src GROUP BY grp";
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             name => 'scheduler_fallback_st',
