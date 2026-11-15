@@ -2393,6 +2393,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_partition_descendant_snapshot_decode_is_strict_and_legacy_safe() {
+        let snapshot = serde_json::json!({
+            "partition_descendant_oids": [12, 42, 84],
+        });
+        assert_eq!(
+            snapshot_partition_descendants(&snapshot),
+            Some(vec![12, 42, 84])
+        );
+        assert_eq!(
+            snapshot_partition_descendants(&serde_json::json!({
+                "partition_descendant_oids": []
+            })),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            snapshot_partition_descendants(&serde_json::json!({"columns": []})),
+            None
+        );
+        assert_eq!(
+            snapshot_partition_descendants(&serde_json::json!({
+                "partition_descendant_oids": [12, "not-an-oid"]
+            })),
+            None
+        );
+    }
+
+    #[test]
     fn test_schema_change_kind_eq() {
         assert_eq!(
             SchemaChangeKind::ColumnChange,
