@@ -849,7 +849,10 @@ async fn test_manual_full_fallback_after_new_commit_does_not_replay() {
             )",
         )
         .await;
-    assert!(fell_back, "manual differential must actually fall back to FULL");
+    assert!(
+        fell_back,
+        "manual differential must actually fall back to FULL"
+    );
     db.assert_st_matches_query("manual_cut_st", query).await;
 
     let frontier_covers_writer: bool = sqlx::query_scalar(
@@ -890,7 +893,10 @@ async fn test_manual_full_fallback_after_new_commit_does_not_replay() {
             )"
         ))
         .await;
-    assert!(actual_diff, "manual post-FULL refresh must really be differential");
+    assert!(
+        actual_diff,
+        "manual post-FULL refresh must really be differential"
+    );
     db.assert_st_matches_query("manual_cut_st", query).await;
 }
 
