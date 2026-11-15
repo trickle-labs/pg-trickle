@@ -1412,10 +1412,12 @@ fn alter_stream_table_partition_key(
     if !downstream_ids.is_empty() {
         return Err(PgTrickleError::InvalidArgument(format!(
             concat!(
-                "cannot change partition_by on {schema}.{table_name}: ",
+                "cannot change partition_by on {}.{}: ",
                 "{} downstream stream table(s) depend on this storage relation; ",
                 "remove dependent stream tables before repartitioning, then recreate them"
             ),
+            schema,
+            table_name,
             downstream_ids.len()
         )));
     }
