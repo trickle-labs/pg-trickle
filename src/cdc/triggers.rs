@@ -53,11 +53,12 @@ pub fn build_changed_cols_bitmask_expr(
     }
     let parts: Vec<String> = columns
         .iter()
-        .map(|(col_name, _)| {
+        .map(|(col_name, sql_type)| {
             let qcol = col_name.replace('"', "\"\"");
-            crate::cdc_elision::changed_column_sql(
+            crate::cdc_elision::changed_column_sql_for_type(
                 &format!("OLD.\"{qcol}\""),
                 &format!("NEW.\"{qcol}\""),
+                sql_type,
             )
         })
         .collect();

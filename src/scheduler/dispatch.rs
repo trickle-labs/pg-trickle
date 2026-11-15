@@ -318,45 +318,83 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
 
             let failure = crate::error::classify_refresh_failure(sqlstate.as_deref(), &error_msg);
 
-            // Set error state on member STs in a fresh transaction.
-            BackgroundWorker::transaction(AssertUnwindSafe(|| {
-                for &pgt_id in &job.member_pgt_ids {
-                    if failure.retryable && failure.counts_toward_suspension {
-                        let tuning = load_st_by_id(pgt_id)
-                            .map(|st| st.runtime_tuning())
-                            .unwrap_or_else(|| crate::catalog::RefreshRuntimeTuning {
-                                merge_work_mem_mb: 0,
-                                delta_work_mem_mb: 0,
-                                delta_work_mem_cap_mb: 0,
-                                lock_backoff_exponent: 0,
-                            });
-                        let _ = StreamTableMeta::record_scheduled_failure(
-                            pgt_id,
-                            failure.kind.code(),
-                            true,
-                            failure.kind == crate::error::RefreshFailureKind::OutOfMemory
-                                && config::pg_trickle_self_heal_oom()
-                                && tuning.merge_work_mem_mb > 0,
-                            failure.kind == crate::error::RefreshFailureKind::LockTimeout
-                                && config::pg_trickle_self_heal_lock_timeout(),
+            let status = if failure.retryable {
+                JobStatus::RetryableFailed
+            } else {
+                JobStatus::PermanentFailed
+            };
+            // Publish the error and terminal job together, so a resume cannot
+            // be overwritten by later reconciliation of the same failure.
+            let recorded = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                let subtxn = super::SubTransaction::begin();
+                let result = (|| -> Result<(), crate::error::PgTrickleError> {
+                    for &pgt_id in &job.member_pgt_ids {
+                        if failure.retryable && failure.counts_toward_suspension {
+                            let tuning = load_st_by_id(pgt_id)
+                                .map(|st| st.runtime_tuning())
+                                .unwrap_or_else(|| crate::catalog::RefreshRuntimeTuning {
+                                    merge_work_mem_mb: 0,
+                                    delta_work_mem_mb: 0,
+                                    delta_work_mem_cap_mb: 0,
+                                    lock_backoff_exponent: 0,
+                                });
+                            StreamTableMeta::record_scheduled_failure(
+                                pgt_id,
+                                failure.kind.code(),
+                                true,
+                                failure.kind == crate::error::RefreshFailureKind::OutOfMemory
+                                    && config::pg_trickle_self_heal_oom()
+                                    && tuning.merge_work_mem_mb > 0,
+                                failure.kind == crate::error::RefreshFailureKind::LockTimeout
+                                    && config::pg_trickle_self_heal_lock_timeout(),
+                            )?;
+                        } else {
+                            StreamTableMeta::set_typed_error(
+                                pgt_id,
+                                &failure.message,
+                                failure.kind.code(),
+                                failure.retryable,
+                            )?;
+                        }
+                    }
+                    SchedulerJob::complete_typed(
+                        job_id,
+                        status,
+                        Some(&error_msg),
+                        Some(failure.retryable),
+                        Some(failure.kind.code()),
+                        failure.sqlstate.as_deref(),
+                    )?;
+                    Spi::run_with_args(
+                        "UPDATE pgtrickle.pgt_scheduler_jobs SET member_failure_recorded = true WHERE job_id = $1",
+                        &[job_id.into()],
+                    )
+                    .map_err(|e| crate::error::PgTrickleError::SpiError(e.to_string()))
+                })();
+                match result {
+                    Ok(()) => {
+                        subtxn.commit();
+                        true
+                    }
+                    Err(error) => {
+                        subtxn.rollback();
+                        warning!(
+                            "pg_trickle refresh worker: could not record job {} failure: {}",
+                            job_id,
+                            error
                         );
-                    } else {
-                        let _ = StreamTableMeta::set_typed_error(
-                            pgt_id,
-                            &failure.message,
-                            failure.kind.code(),
-                            failure.retryable,
-                        );
+                        false
                     }
                 }
             }));
-
-            let outcome = if failure.retryable {
-                RefreshOutcome::RetryableFailure
-            } else {
-                RefreshOutcome::PermanentFailure
-            };
-            (outcome, Some(error_msg), sqlstate)
+            if !recorded {
+                warning!(
+                    "pg_trickle refresh worker: job {} remains RUNNING for orphan recovery",
+                    job_id
+                );
+            }
+            shmem::release_worker_slot(database_oid, job_id, generation);
+            return;
         }
     };
 
@@ -881,11 +919,9 @@ pub(super) fn parallel_dispatch_tick(
                     job_id,
                 );
 
-                // ERR-1d: Ensure ERROR status is set on member STs for permanent
-                // failures. The worker may have already set this via the
-                // catch_unwind path, but this is a safety net in case the
-                // worker died before completing the error-state UPDATE.
-                if job.status == JobStatus::PermanentFailed {
+                // Older jobs and other failure paths still need this safety net.
+                // An atomically recorded failure may already have been resumed.
+                if job.status == JobStatus::PermanentFailed && !job.member_failure_recorded {
                     // PERF-5: O(1) lookup via unit_by_id.
                     let unit = eu_dag.unit_by_id(unit_id);
                     if let Some(unit) = unit {
