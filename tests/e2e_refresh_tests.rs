@@ -709,10 +709,13 @@ async fn test_bit_or_differential_mode() {
     )
     .await;
 
-    // Insert: adds a new permission bit
+    // Insert: adds a new permission bit.  A single manual refresh can be
+    // deferred by a concurrent scheduler refresh or the CDC writer holdback.
+    // Require a completed refresh and exact bounded convergence instead of
+    // interpreting an accepted but skipped refresh call as successful apply.
     db.execute("INSERT INTO bitor_src VALUES (4, 'eng', 8)")
         .await;
-    db.refresh_st("bit_or_st").await;
+    db.refresh_st_until_converged("bit_or_st").await;
 
     db.assert_st_matches_query(
         "public.bit_or_st",
