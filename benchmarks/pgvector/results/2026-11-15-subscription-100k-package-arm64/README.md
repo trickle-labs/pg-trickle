@@ -1,8 +1,8 @@
 # 100,000-row subscription matrix against the v0.109.0 package
 
 The existing ignored subscription benchmark ran on 2026-11-15 from source
-`17ca7bcd` against the Linux ARM64 v0.109.0 archive built from
-`7e7b51c2a7f31cdf24d06408cd815e4b6b147a77` (SHA-256
+`17ca7bcdaa835345c3ed2bee839327e57328fca4` against the Linux ARM64 v0.109.0
+archive built from `7e7b51c2a7f31cdf24d06408cd815e4b6b147a77` (SHA-256
 `90d121bfa63fb30197ce535a78be93367b0f8e72dad2ae52d06b0b9a9e94591b`). It used
 PostgreSQL 18.6, pgvector 0.8.7, and Docker image
 `sha256:f1a28666a96308630d613d012b3889628ab8f295d7e2f0a436c000011ba31332`
