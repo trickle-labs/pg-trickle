@@ -105,6 +105,8 @@ if [[ "$FROM_VERSION" == "0.108.3" && ( "$TO_VERSION" == "0.109.0" || "$TO_VERSI
              WHERE attrelid='public.upgrade_agg_mixed_st'::regclass
                AND attname='__pgt_aux_special_mean'
            )" | grep -qx t
+    UPGRADE_SUM_RELID_BEFORE="$(psql "SELECT 'public.upgrade_agg_sum_st'::regclass::oid")"
+    UPGRADE_MIXED_RELID_BEFORE="$(psql "SELECT 'public.upgrade_agg_mixed_st'::regclass::oid")"
 fi
 
 WAL_SLOT=""
@@ -298,10 +300,14 @@ CAPTURE_STATE="$(psql 'SELECT state FROM pgtrickle.pgt_capture_instance WHERE si
 [[ "$CAPTURE_STATE" == "ACTIVE" ]] || { echo "capture did not resume after update" >&2; exit 1; }
 
 if [[ "$AGGREGATE_UPGRADE" == true ]]; then
-    # First refresh must rebuild automatically; explicit reinitialize must
-    # repair the second legacy table even though its physical relation exists.
+    # Graph refresh exercises the scheduler FULL target with a legacy physical
+    # layout; explicit reinitialize exercises manual FULL on a different table.
     psql "INSERT INTO public.upgrade_agg_orders VALUES(4,'a',10)" >/dev/null
-    psql "SELECT pgtrickle.refresh_stream_table('public.upgrade_agg_sum_st')" >/dev/null
+    psql "SELECT * FROM pgtrickle.refresh_graph_strict(
+              ARRAY['public.upgrade_agg_sum_st'::regclass],
+              (SELECT graph_digest FROM pgtrickle.graph_contract(
+                  ARRAY['public.upgrade_agg_sum_st'::regclass])),
+              'ALLOW')" >/dev/null
     psql "SELECT pgtrickle.reinitialize_stream_table('public.upgrade_agg_mixed_st')" >/dev/null
     psql "SELECT pgtrickle.refresh_stream_table('public.upgrade_agg_mixed_st')" >/dev/null
     psql "SELECT NOT EXISTS (
@@ -364,6 +370,14 @@ if [[ "$AGGREGATE_UPGRADE" == true ]]; then
     psql "SELECT pgtrickle.refresh_stream_table('public.upgrade_agg_mixed_st')" >/dev/null
     psql "SELECT total=15::numeric AND mean=5::numeric
             FROM public.upgrade_agg_mixed_st WHERE customer='a'" | grep -qx t
+    [[ "$(psql "SELECT 'public.upgrade_agg_sum_st'::regclass::oid")" == "$UPGRADE_SUM_RELID_BEFORE" ]] || {
+        echo "upgrade changed SUM storage relation identity" >&2
+        exit 1
+    }
+    [[ "$(psql "SELECT 'public.upgrade_agg_mixed_st'::regclass::oid")" == "$UPGRADE_MIXED_RELID_BEFORE" ]] || {
+        echo "reinitialize changed mixed aggregate storage relation identity" >&2
+        exit 1
+    }
     psql "SELECT count(*)=3 FROM pgtrickle.pgt_stream_tables
            WHERE pgt_name IN ('upgrade_agg_sum_st','upgrade_agg_mixed_st','upgrade_agg_control_st')
              AND NOT needs_reinit" | grep -qx t
