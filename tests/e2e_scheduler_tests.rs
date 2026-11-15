@@ -372,8 +372,7 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             name => 'scheduler_cut_st',
-            query => $SELECT grp, SUM(qty) AS total, COUNT(*) AS n
-                        FROM scheduler_cut_src GROUP BY grp$,
+            query => 'SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_cut_src GROUP BY grp',
             schedule => '1s',
             refresh_mode => 'DIFFERENTIAL',
             cdc_mode => 'trigger'
@@ -422,21 +421,12 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
         .fetch_one(&mut *writer)
         .await
         .expect("get source writer PID");
-    sqlx::query(
-        "INSERT INTO scheduler_cut_src (id, day, grp, qty)
-         SELECT i, '2026-11-15', i % 3, 100
-         FROM generate_series(10, 109) AS i",
-    )
-    .execute(&mut *writer)
-    .await
-    .expect("write source rows before the scheduler watermark");
-    // The relation is catalog-derived and SQL-identifier quoted by PostgreSQL
-    // format('%I.%I'); no user string is interpolated into this query.
-    let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
-    let writer_delta_lsn: String = sqlx::query_scalar(sqlx::AssertSqlSafe(delta_sql))
-        .fetch_one(&mut *writer)
+    // Acquire the conflicting source lock without writing yet.  The scheduler
+    // must capture its tick and start waiting before the CDC LSN is minted.
+    sqlx::query("LOCK TABLE scheduler_cut_src IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
         .await
-        .expect("read uncommitted source CDC LSN");
+        .expect("hold source lock before scheduler tick");
 
     // Resume only after the writer has its source RowExclusiveLock.  The
     // scheduled REINITIALIZE must wait on this transaction's source lock.
@@ -460,6 +450,22 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
         .await,
         "the scheduler must capture its tick before the writer commits"
     );
+    // This write occurs strictly *after* the scheduler recorded its tick.
+    sqlx::query(
+        "INSERT INTO scheduler_cut_src (id, day, grp, qty)
+         SELECT i, '2026-11-15', i % 3, 100
+         FROM generate_series(10, 109) AS i",
+    )
+    .execute(&mut *writer)
+    .await
+    .expect("insert rows after the scheduler was blocked");
+    // The relation is catalog-derived and SQL-identifier quoted by PostgreSQL
+    // format('%I.%I'); no user string is interpolated into this query.
+    let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
+    let writer_delta_lsn: String = sqlx::query_scalar(sqlx::AssertSqlSafe(delta_sql))
+        .fetch_one(&mut *writer)
+        .await
+        .expect("read uncommitted source CDC LSN");
     writer
         .commit()
         .await
@@ -570,8 +576,7 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             name => 'scheduler_fallback_st',
-            query => $SELECT grp, SUM(qty) AS total, COUNT(*) AS n
-                        FROM scheduler_fallback_src GROUP BY grp$,
+            query => 'SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_fallback_src GROUP BY grp',
             schedule => '1s',
             refresh_mode => 'DIFFERENTIAL',
             cdc_mode => 'trigger'
@@ -606,20 +611,10 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
         .fetch_one(&mut *writer)
         .await
         .expect("get fallback writer PID");
-    sqlx::query(
-        "INSERT INTO scheduler_fallback_src
-         SELECT i, i % 2, 100 FROM generate_series(11, 110) AS i",
-    )
-    .execute(&mut *writer)
-    .await
-    .expect("insert fallback source rows");
-    // The relation is catalog-derived and SQL-identifier quoted by PostgreSQL
-    // format('%I.%I'); no user string is interpolated into this query.
-    let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
-    let writer_delta_lsn: String = sqlx::query_scalar(sqlx::AssertSqlSafe(delta_sql))
-        .fetch_one(&mut *writer)
+    sqlx::query("LOCK TABLE scheduler_fallback_src IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
         .await
-        .expect("read fallback writer's CDC LSN");
+        .expect("hold fallback source lock before scheduler tick");
 
     db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['scheduler_fallback_st'])")
         .await;
@@ -641,6 +636,21 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
         .await,
         "the fallback must reach the FULL source lock under an old tick"
     );
+    // Mint the CDC LSN only after the scheduler has captured its old tick.
+    sqlx::query(
+        "INSERT INTO scheduler_fallback_src
+         SELECT i, i % 2, 100 FROM generate_series(11, 110) AS i",
+    )
+    .execute(&mut *writer)
+    .await
+    .expect("insert fallback source rows");
+    // The relation is catalog-derived and SQL-identifier quoted by PostgreSQL
+    // format('%I.%I'); no user string is interpolated into this query.
+    let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
+    let writer_delta_lsn: String = sqlx::query_scalar(sqlx::AssertSqlSafe(delta_sql))
+        .fetch_one(&mut *writer)
+        .await
+        .expect("read fallback writer's CDC LSN");
     writer
         .commit()
         .await
@@ -731,8 +741,7 @@ async fn test_manual_full_fallback_after_new_commit_does_not_replay() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             name => 'manual_cut_st',
-            query => $SELECT grp, SUM(qty) AS total, COUNT(*) AS n
-                        FROM manual_cut_src GROUP BY grp$,
+            query => 'SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM manual_cut_src GROUP BY grp',
             schedule => '1h',
             refresh_mode => 'DIFFERENTIAL',
             cdc_mode => 'trigger'
