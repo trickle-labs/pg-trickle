@@ -3192,7 +3192,11 @@ pub(crate) fn wal_transition_blocker(
                     .to_string(),
             ));
         }
-        _ => return Ok(Some("WAL CDC requires an ordinary source table".to_string())),
+        _ => {
+            return Ok(Some(
+                "WAL CDC requires an ordinary source table".to_string(),
+            ));
+        }
     }
     if cdc::resolve_pk_columns(source_oid)?.is_empty() {
         return Ok(Some("WAL CDC requires a PRIMARY KEY".to_string()));
