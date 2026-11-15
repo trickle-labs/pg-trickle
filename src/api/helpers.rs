@@ -3272,6 +3272,26 @@ pub(crate) fn ensure_differential_storage_auxiliary_columns(
         quote_identifier(table_name)
     );
     for (column, definition) in differential_storage_auxiliary_columns(query)? {
+        // Avoid an AccessExclusive DDL lock (and DDL event hooks) on every
+        // reinitialization when the storage contract is already satisfied.
+        let exists = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = pg_catalog.to_regclass($1)
+                   AND attname = $2::name
+                   AND attnum > 0 AND NOT attisdropped
+            )",
+            &[table.as_str().into(), column.as_str().into()],
+        )
+        .map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "Failed to inspect differential state column {column}: {e}"
+            ))
+        })?
+        .unwrap_or(false);
+        if exists {
+            continue;
+        }
         Spi::run(&format!(
             "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {} {definition}",
             quote_identifier(&column),

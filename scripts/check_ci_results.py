@@ -22,7 +22,8 @@ def check(needs: dict, *, draft: bool) -> list[str]:
     if ready:
         required.update({
             "windows-compile-gate", "light-e2e-package",
-            "light-e2e-tests", "release-evidence-runtime", "lsn-candidate-runtime",
+            "light-e2e-tests", "legacy-aggregate-upgrade",
+            "release-evidence-runtime", "lsn-candidate-runtime",
             "e2e-sensitive-gate",
         })
         flags = outputs
