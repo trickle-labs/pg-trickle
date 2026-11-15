@@ -617,6 +617,7 @@ fn ensure_storage_authorization_is_replaceable(st: &StreamTableMeta) -> Result<(
         quote_identifier(&st.pgt_name)
     );
     // Lock descendants too, so their authorization cannot change before the drop.
+    // nosemgrep: rust.spi.run.dynamic-format — both identifiers are quote_identifier-escaped.
     Spi::run(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     let protected = Spi::get_one_with_args::<bool>(
