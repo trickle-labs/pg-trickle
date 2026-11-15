@@ -3421,6 +3421,12 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
+    // The scheduler may still hold a DAG snapshot that excludes the ERROR or
+    // SUSPENDED node. Publishing ACTIVE in the catalog is not sufficient:
+    // invalidate its cached eligibility so it can enqueue the protected
+    // reinitialization (including after a cancelled dispatcher job).
+    shmem::signal_dag_invalidation(st.pgt_id);
+
     crate::monitor::alert_resumed(&schema, &table_name, st.pooler_compatibility_mode);
 
     pgrx::info!(
