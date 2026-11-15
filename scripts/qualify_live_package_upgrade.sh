@@ -180,8 +180,13 @@ QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
 [[ "$QUIESCED" == "t" ]] || { echo "upgrade quiesce failed" >&2; exit 1; }
 
 UPGRADE_DIR="$CANDIDATE_DIR/usr/share/postgresql/18/extension"
-if [[ ! -f "$UPGRADE_DIR/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql" ]]; then
-    [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.1" || "$IDENTITY_MIGRATION" == true ) ]]
+# The historical 0.106.1 identity-migration test deliberately pins its
+# intermediate hop so it can exercise the active-consumer rejection boundary.
+# Other published-source upgrades need not have a direct SQL edge: PostgreSQL
+# supports safe, ordered multi-hop extension updates.
+if [[ ! -f "$UPGRADE_DIR/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql" \
+      && "$FROM_VERSION" == "0.106.1" ]]; then
+    [[ "$TO_VERSION" == "0.108.1" || "$IDENTITY_MIGRATION" == true ]]
     test -f "$UPGRADE_DIR/pg_trickle--0.106.1--0.107.0.sql"
     test -f "$UPGRADE_DIR/pg_trickle--0.107.0--0.108.0.sql"
     test -f "$UPGRADE_DIR/pg_trickle--0.108.0--0.108.1.sql"
@@ -206,6 +211,18 @@ for attempt in $(seq 1 60); do
     fi
     sleep 1
 done
+
+# Verify the *installed* upgrade graph, not only a direct SQL filename.
+# For example, 0.108.3 -> 0.110.1 legitimately traverses
+# 0.108.3 -> 0.109.0 -> 0.110.0 -> 0.110.1. A missing edge must
+# remain a hard failure before ALTER EXTENSION can touch durable state.
+UPDATE_PATH="$(psql "SELECT path FROM pg_extension_update_paths('pg_trickle')
+    WHERE source = '${FROM_VERSION}' AND target = '${TO_VERSION}'")"
+[[ -n "$UPDATE_PATH" ]] || {
+    echo "no installed pg_trickle upgrade path from ${FROM_VERSION} to ${TO_VERSION}" >&2
+    exit 1
+}
+echo "PostgreSQL extension upgrade path: ${UPDATE_PATH}"
 
 LOADED_VERSION="$(psql 'SELECT pgtrickle.version()')"
 [[ "$LOADED_VERSION" == "$TO_VERSION" ]] || {
