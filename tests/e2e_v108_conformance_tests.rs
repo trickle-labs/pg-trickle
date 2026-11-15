@@ -268,10 +268,8 @@ async fn test_v108_restore_revokes_outstanding_resnapshot_token_and_allows_new_b
             "SELECT pgtrickle.snapshot_stream_table('{prefix}_stream')"
         ))
         .await;
-    db.execute(&format!(
-        "INSERT INTO {prefix}_source VALUES (2, 'later')"
-    ))
-    .await;
+    db.execute(&format!("INSERT INTO {prefix}_source VALUES (2, 'later')"))
+        .await;
     let graph = graph_digest(&db.pool, &root).await;
     refresh_graph_without_full(&db.pool, &root, &graph).await;
 
@@ -284,13 +282,12 @@ async fn test_v108_restore_revokes_outstanding_resnapshot_token_and_allows_new_b
     let mut tx = db.pool.begin().await.expect("begin baseline transaction");
     let (stale_token, _) =
         reference_clients::begin_resnapshot(&mut *tx, &consumer.consumer_id).await;
-    let copied_rows: Vec<(i32, String)> =
-        sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT id, value FROM {root} ORDER BY id"
-        )))
-        .fetch_all(&mut *tx)
-        .await
-        .expect("read the old baseline in the same transaction");
+    let copied_rows: Vec<(i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, value FROM {root} ORDER BY id"
+    )))
+    .fetch_all(&mut *tx)
+    .await
+    .expect("read the old baseline in the same transaction");
     assert_eq!(copied_rows, vec![(1, "before".into()), (2, "later".into())]);
 
     sqlx::query("SELECT pgtrickle.restore_from_snapshot($1, $2)")
@@ -323,14 +320,18 @@ async fn test_v108_restore_revokes_outstanding_resnapshot_token_and_allows_new_b
     .await
     .expect_err("a pre-restore token must not reactivate an obsolete mirror");
     assert!(
-        error.to_string().contains("unknown or replayed resnapshot token"),
+        error
+            .to_string()
+            .contains("unknown or replayed resnapshot token"),
         "unexpected stale-token error: {error}"
     );
     sqlx::query("ROLLBACK TO SAVEPOINT stale_ack_attempt")
         .execute(&mut *tx)
         .await
         .expect("recover after expected ACK rejection");
-    tx.commit().await.expect("commit restored storage and token revocation");
+    tx.commit()
+        .await
+        .expect("commit restored storage and token revocation");
 
     let status = reference_clients::validate_consumer(&db.pool, &consumer.consumer_id).await;
     assert_eq!(status.state, "INVALIDATED");
@@ -346,21 +347,15 @@ async fn test_v108_restore_revokes_outstanding_resnapshot_token_and_allows_new_b
     let (new_token, _) =
         reference_clients::begin_resnapshot(&mut *new_tx, &consumer.consumer_id).await;
     assert_ne!(new_token, stale_token);
-    let restored_rows: Vec<(i32, String)> =
-        sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT id, value FROM {root} ORDER BY id"
-        )))
-        .fetch_all(&mut *new_tx)
-        .await
-        .expect("read restored baseline");
+    let restored_rows: Vec<(i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, value FROM {root} ORDER BY id"
+    )))
+    .fetch_all(&mut *new_tx)
+    .await
+    .expect("read restored baseline");
     assert_eq!(restored_rows, vec![(1, "before".into())]);
     assert_eq!(
-        reference_clients::ack_resnapshot(
-            &mut *new_tx,
-            &consumer.consumer_id,
-            &new_token
-        )
-        .await,
+        reference_clients::ack_resnapshot(&mut *new_tx, &consumer.consumer_id, &new_token).await,
         "ACTIVE"
     );
     new_tx.commit().await.expect("commit fresh baseline");
@@ -384,10 +379,8 @@ async fn test_v108_rolled_back_restore_preserves_pending_resnapshot_token() {
             "SELECT pgtrickle.snapshot_stream_table('{prefix}_stream')"
         ))
         .await;
-    db.execute(&format!(
-        "INSERT INTO {prefix}_source VALUES (2, 'later')"
-    ))
-    .await;
+    db.execute(&format!("INSERT INTO {prefix}_source VALUES (2, 'later')"))
+        .await;
     let graph = graph_digest(&db.pool, &root).await;
     refresh_graph_without_full(&db.pool, &root, &graph).await;
     sqlx::query("SELECT * FROM pgtrickle.request_output_delta_resnapshot($1::uuid)")
