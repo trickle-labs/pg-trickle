@@ -491,7 +491,9 @@ async fn test_v108_restore_keeps_unrelated_stream_resnapshot_token_valid() {
         reference_clients::ack_resnapshot(&mut *tx, &peer.consumer_id, &peer_token).await,
         "ACTIVE"
     );
-    tx.commit().await.expect("commit unaffected consumer baseline");
+    tx.commit()
+        .await
+        .expect("commit unaffected consumer baseline");
 
     let restored_status =
         reference_clients::validate_consumer(&db.pool, &restored_consumer.consumer_id).await;
