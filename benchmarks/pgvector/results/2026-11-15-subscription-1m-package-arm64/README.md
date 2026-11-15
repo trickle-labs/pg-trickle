@@ -34,3 +34,18 @@ earlier integrated candidate, not the final release candidate. Previous
 instrumented explanation of full-stream visits is recorded in the
 [subscription controls](../2026-11-09-subscription-controls-arm64/README.md)
 and the [10,000-row package matrix](../2026-11-15-subscription-768-package-arm64/README.md).
+
+One additional analyzed 1,000-subscription run enabled nested `auto_explain`
+with actual rows and buffers. It passed with a one-row bounded snapshot and
+recorded zero sequential tuples returned from the stream. The [measured plan
+summary](subscription-plans.json) retains one representative bounded-snapshot
+plan and one membership plan, with totals across all 1,000 membership
+statements: 5,000 shared-buffer hits and zero reads. The snapshot plan recorded
+one shared hit and three shared reads. The measured interval contained 5,167
+plan records and 58,874 shared-buffer counter fields; the [complete PostgreSQL
+log](postgres-plans.log.gz) is retained (63.8 MB raw, 7.3 MB compressed).
+Instrumented refresh took 835.9 ms, compared with 508.9 ms in the separate
+un-instrumented single sample; instrumentation changes the timing, so this is
+plan evidence rather than a performance comparison. Its separate [test
+log](subscriptions-1000-instrumented.log) and [package
+attestation](attest-1000-instrumented.json.gz) are retained.
