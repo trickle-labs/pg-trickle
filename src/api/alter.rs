@@ -1384,6 +1384,18 @@ fn alter_stream_table_partition_key(
     check_stream_table_ownership(st.pgt_relid, schema, table_name)?;
     publication::ensure_storage_replacement_allowed(st)?;
 
+    // Repartitioning drops and recreates the storage relation. Unlike the
+    // ALTER QUERY shadow swap, this path cannot rebind downstream dependency
+    // OIDs, ST change buffers, and synchronous IVM triggers. Fail closed
+    // *before* changing storage or catalog identity to preserve the graph.
+    let downstream_ids = StDependency::get_downstream_pgt_ids(st.pgt_relid)?;
+    if !downstream_ids.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "cannot change partition_by on {schema}.{table_name}: {} downstream stream table(s)              depend on this storage relation; remove dependent stream tables              before repartitioning, then recreate them",
+            downstream_ids.len()
+        )));
+    }
+
     // Get current storage columns for validation.
     let columns = get_storage_table_columns(schema, table_name)?;
 
