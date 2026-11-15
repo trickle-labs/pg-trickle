@@ -128,15 +128,17 @@ async fn test_snapshot_restore_immediate_rejects_rewind_without_mutating_state()
         .await
         .expect_err("IMMEDIATE restore must reject an unreplayable historical baseline");
     assert!(
-        error.to_string().contains("IMMEDIATE")
-            && error.to_string().contains("reinitialize"),
+        error.to_string().contains("IMMEDIATE") && error.to_string().contains("reinitialize"),
         "unexpected restore error: {error}"
     );
 
     let after_rows: String = db
         .query_scalar("SELECT array_agg(id ORDER BY id)::text FROM snap_imm_st")
         .await;
-    assert_eq!(after_rows, before_rows, "rejected restore changed visible rows");
+    assert_eq!(
+        after_rows, before_rows,
+        "rejected restore changed visible rows"
+    );
     let after_state: String = db
         .query_scalar(
             "SELECT status || ':' || needs_reinit::text
@@ -148,8 +150,7 @@ async fn test_snapshot_restore_immediate_rejects_rewind_without_mutating_state()
     db.execute("INSERT INTO snap_imm_source VALUES (3)").await;
     db.execute("UPDATE snap_imm_source SET id = 4 WHERE id = 2")
         .await;
-    db.execute("DELETE FROM snap_imm_source WHERE id = 1")
-        .await;
+    db.execute("DELETE FROM snap_imm_source WHERE id = 1").await;
     db.assert_st_matches_query("snap_imm_st", query).await;
     let rows: String = db
         .query_scalar("SELECT array_agg(id ORDER BY id)::text FROM snap_imm_st")
