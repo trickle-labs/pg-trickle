@@ -81,7 +81,7 @@ pub use polling::{
 #[allow(unused_imports)]
 pub(crate) use rebuild::trigger_name_for_source;
 pub use rebuild::{
-    can_use_logical_replication, can_use_logical_replication_for_mode, check_replica_identity,
+    can_use_logical_replication_for_mode, check_replica_identity,
     get_replica_identity_mode, has_user_triggers, rebuild_cdc_trigger,
     rebuild_cdc_trigger_function, trigger_exists,
 };
