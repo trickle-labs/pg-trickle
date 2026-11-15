@@ -2132,11 +2132,11 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
             .await
             .expect("refresh recovered centroid");
     }
-    let recovered: bool = sqlx::query_scalar("SELECT public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)) AND s.centroid::text = '[6,7]' AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND h.merge_strategy_used = 'centroid_algebraic' FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass")
+    let (recovered, details): (bool, serde_json::Value) = sqlx::query_as("SELECT public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)) AND s.centroid::text = '[6,7]' AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND h.merge_strategy_used = 'centroid_algebraic', jsonb_build_object('actual', s.centroid::text, 'native', (SELECT avg(v)::text FROM centroid_crash_src), 'binary_matches', public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)), 'baseline_frontier', c.baseline_frontier::text, 'frontier', t.frontier::text, 'materialized_xid', c.materialized_xid::text, 'merge_strategy', h.merge_strategy_used, 'refresh_reason', h.refresh_reason, 'refresh_detail', h.refresh_reason_detail) FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass")
         .fetch_one(&mut *conn).await.expect("check post-crash catch-up");
     assert!(
         recovered,
-        "algebraic refresh must apply the committed source change after crash recovery"
+        "algebraic refresh must apply the committed source change after crash recovery: {details}"
     );
 }
 
