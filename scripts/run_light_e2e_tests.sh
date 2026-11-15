@@ -422,7 +422,7 @@ if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request"
       && "$shard_index" == "1" && "$shard_count" == "3"
       && "${#requested_tests[@]}" -eq 0
       && -z "$test_filter" && "$ignored_only" == false ]]; then
-    candidate_version="$(sed -n 's/^version = "\\([^"]*\\)"/\\1/p' Cargo.toml | head -1)"
+    candidate_version="$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)"
     if [[ "$candidate_version" == "0.110.0" || "$candidate_version" == "0.109.0" ]]; then
         echo "Qualifying legacy aggregate storage upgrade with the packaged candidate"
         bash scripts/qualify_live_package_upgrade.sh 0.108.3 "$candidate_version"
