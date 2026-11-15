@@ -432,6 +432,78 @@ async fn test_v108_rolled_back_restore_preserves_pending_resnapshot_token() {
     );
 }
 
+/// A restore of one stream must not invalidate a different stream's
+/// in-progress consumer baseline.
+#[tokio::test]
+async fn test_v108_restore_keeps_unrelated_stream_resnapshot_token_valid() {
+    let (db, restored_consumer, _) = active_consumer("v108_restore_token_isolation").await;
+    let restored_root = "public.v108_restore_token_isolation_stream";
+    let snapshot: String = db
+        .query_scalar(
+            "SELECT pgtrickle.snapshot_stream_table('v108_restore_token_isolation_stream')",
+        )
+        .await;
+
+    db.execute("CREATE TABLE v108_token_peer_source (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO v108_token_peer_source VALUES (1)")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+         name => 'v108_token_peer_stream',\
+         query => 'SELECT id FROM v108_token_peer_source',\
+         schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,\
+         orchestration_mode => 'EXTERNAL')",
+    )
+    .await;
+    let peer_root = "public.v108_token_peer_stream";
+    let peer_graph = graph_digest(&db.pool, peer_root).await;
+    reference_clients::refresh_graph(&db.pool, peer_root, &peer_graph).await;
+    let peer_contract = reference_clients::stream_contract_digest(&db.pool, peer_root).await;
+    let peer = reference_clients::register(
+        &db.pool,
+        peer_root,
+        "v108_token_peer_consumer",
+        &peer_contract,
+    )
+    .await;
+
+    let mut tx = db.pool.begin().await.expect("begin peer baseline");
+    let (peer_token, _) = reference_clients::begin_resnapshot(&mut *tx, &peer.consumer_id).await;
+    sqlx::query("SELECT pgtrickle.restore_from_snapshot($1, $2)")
+        .bind(restored_root)
+        .bind(&snapshot)
+        .execute(&mut *tx)
+        .await
+        .expect("restore a different stream table");
+
+    let still_valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM pgtrickle.pgt_output_delta_resnapshots
+            WHERE resnapshot_token = $1::uuid)",
+    )
+    .bind(&peer_token)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("check unrelated token persists");
+    assert!(still_valid, "restore must not revoke other stream tokens");
+    assert_eq!(
+        reference_clients::ack_resnapshot(&mut *tx, &peer.consumer_id, &peer_token).await,
+        "ACTIVE"
+    );
+    tx.commit().await.expect("commit unaffected consumer baseline");
+
+    let restored_status =
+        reference_clients::validate_consumer(&db.pool, &restored_consumer.consumer_id).await;
+    assert_eq!(restored_status.state, "INVALIDATED");
+    assert_eq!(
+        reference_clients::validate_consumer(&db.pool, &peer.consumer_id)
+            .await
+            .state,
+        "ACTIVE"
+    );
+}
+
 async fn assert_persistently_invalidated(db: &E2eDb, consumer: &DeltaRegistration, reason: &str) {
     for _ in 0..2 {
         let status = reference_clients::validate_consumer(&db.pool, &consumer.consumer_id).await;
