@@ -2225,6 +2225,128 @@ async fn test_alter_st_partition_key_rejects_immediate_downstream_without_losing
     .await;
 }
 
+/// An uncommitted CREATE of a downstream stream holds a read lock on the
+/// upstream relation. Repartition must wait for that dependency to commit
+/// before deciding whether it may drop and replace the relation.
+#[tokio::test]
+async fn test_alter_st_partition_key_serializes_concurrent_downstream_registration() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE guard_race_src (
+            id INT PRIMARY KEY, event_day DATE NOT NULL)",
+    )
+    .await;
+    db.execute("INSERT INTO guard_race_src VALUES (1, '2026-01-01')")
+        .await;
+    db.create_st(
+        "guard_race_up",
+        "SELECT id, event_day FROM guard_race_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let upstream_oid: i64 = db
+        .query_scalar("SELECT 'guard_race_up'::regclass::oid::bigint")
+        .await;
+
+    // Complete downstream creation, but deliberately keep its transaction
+    // uncommitted while the repartition request begins.
+    let mut create_tx = db.pool.begin().await.expect("begin dependent creation");
+    sqlx::query(
+        "SELECT pgtrickle.create_stream_table(
+            'guard_race_down',
+            'SELECT id FROM guard_race_up',
+            '1m', 'DIFFERENTIAL')",
+    )
+    .execute(&mut *create_tx)
+    .await
+    .expect("create downstream stream table inside transaction");
+
+    let pool = db.pool.clone();
+    let alter = tokio::spawn(async move {
+        let mut conn = pool.acquire().await.expect("acquire ALTER session");
+        sqlx::query("SET application_name = 'guard_repartition_wait'")
+            .execute(&mut *conn)
+            .await
+            .expect("identify ALTER backend for lock observation");
+        sqlx::query(
+            "SELECT pgtrickle.alter_stream_table(
+                'guard_race_up', partition_by => 'event_day')",
+        )
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+    });
+
+    // A witnessed lock wait, not a sleep alone, proves the race is exercised.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut observed_wait = false;
+    while std::time::Instant::now() < deadline {
+        let waiting: bool = db
+            .query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_stat_activity
+                    WHERE application_name = 'guard_repartition_wait'
+                      AND wait_event_type = 'Lock')",
+            )
+            .await;
+        if waiting {
+            observed_wait = true;
+            break;
+        }
+        if alter.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        observed_wait,
+        "repartition request did not wait for the concurrent downstream registration"
+    );
+
+    create_tx
+        .commit()
+        .await
+        .expect("publish downstream dependency before ALTER resumes");
+    let err = tokio::time::timeout(std::time::Duration::from_secs(20), alter)
+        .await
+        .expect("ALTER must finish after downstream commits")
+        .expect("ALTER task must not panic")
+        .expect_err("a committed downstream must block repartition");
+    assert!(
+        err.to_string().contains("downstream stream table"),
+        "unexpected post-wait ALTER result: {err}"
+    );
+    assert_eq!(
+        db.query_scalar::<i64>(
+            "SELECT 'guard_race_up'::regclass::oid::bigint"
+        )
+        .await,
+        upstream_oid
+    );
+    assert_eq!(
+        db.query_scalar::<i64>(
+            "SELECT source_relid::bigint FROM pgtrickle.pgt_dependencies
+             WHERE source_type = 'STREAM_TABLE'
+               AND pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                             WHERE pgt_name = 'guard_race_down')"
+        )
+        .await,
+        upstream_oid,
+        "the waiting ALTER must not orphan the newly committed dependency"
+    );
+
+    db.execute("INSERT INTO guard_race_src VALUES (2, '2026-02-01')")
+        .await;
+    db.refresh_st_with_retry("guard_race_up").await;
+    db.refresh_st_with_retry("guard_race_down").await;
+    db.assert_st_matches_query(
+        "guard_race_down",
+        "SELECT id FROM guard_race_src",
+    )
+    .await;
+}
+
 // ── A1-3b: HASH partitioned stream tables ───────────────────────────────
 
 #[tokio::test]
