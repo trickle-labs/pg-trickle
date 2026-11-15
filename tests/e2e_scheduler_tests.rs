@@ -606,6 +606,42 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
              WHERE source_relid = {source_oid}::oid"
         ))
         .await;
+    // A persisted INTERVAL freshness target is eligible only after its
+    // controller's next_due_at, even when the source has pending CDC rows.
+    // Make both the controller and legacy timestamp due while the scheduler
+    // is paused, then establish the conflicting writer lock. Without this
+    // step the test can time out before attempting the protected FULL at all.
+    let source_has_pending_cdc: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS(SELECT 1 FROM {source_buffer} WHERE action <> 'S')"
+        ))
+        .await;
+    assert!(
+        source_has_pending_cdc,
+        "the committed source update must be present in its trigger buffer"
+    );
+    let mut due = db.pool.begin().await.expect("begin fallback scheduler due setup");
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_stream_tables
+         SET last_refresh_at = clock_timestamp() - interval '2 hours'
+         WHERE pgt_name = 'scheduler_fallback_st'",
+    )
+    .execute(&mut *due)
+    .await
+    .expect("make fallback stream overdue");
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_freshness_controller_state
+         SET next_due_at = clock_timestamp() - interval '1 second'
+         WHERE pgt_id = (
+             SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'scheduler_fallback_st'
+         )",
+    )
+    .execute(&mut *due)
+    .await
+    .expect("make fallback freshness controller due");
+    due.commit().await.expect("commit fallback due setup");
+
     let mut writer = db.pool.begin().await.expect("open fallback source writer");
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *writer)
