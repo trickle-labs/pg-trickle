@@ -36,3 +36,18 @@ files. The package is an earlier integrated candidate, not the final release
 candidate. For the plan-level explanation of full stream visits in the earlier
 exploratory case, see the [instrumented subscription controls](../2026-11-09-subscription-controls-arm64/README.md)
 and the [10,000-row analyzed/unanalyzed plan excerpts](../2026-11-15-subscription-768-package-arm64/README.md).
+
+One additional analyzed 1,000-subscription run enabled nested `auto_explain`
+with actual rows and buffers. It passed with a one-row bounded snapshot and
+recorded zero sequential tuples returned from the stream. The [measured plan
+summary](subscription-plans.json) retains one representative bounded-snapshot
+plan and one membership plan, with totals across all 1,000 membership
+statements: 5,000 shared-buffer hits and zero reads. The snapshot plan recorded
+two shared hits and two shared reads. The measured interval contained 5,167
+plan records and 58,874 shared-buffer counter fields; the [complete PostgreSQL
+log](postgres-plans.log.gz) is retained (64.0 MB raw, 7.4 MB compressed).
+Instrumented refresh took 846.6 ms, compared with 442.5 ms for the median of
+the separate uninstrumented three-round run; instrumentation changes timing,
+so this is plan evidence rather than a performance comparison. Its separate
+[test log](subscriptions-1000-instrumented.log) and [package
+attestation](attest-instrumented.json.gz) are retained.
