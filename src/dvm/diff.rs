@@ -1039,7 +1039,13 @@ impl DiffContext {
         let result = self.diff_node_inner(op);
         self.optimization.exit_diff();
         let result = result?;
-        if result.schema.names() != result.columns {
+        if !result
+            .schema
+            .0
+            .iter()
+            .map(|column| &column.name)
+            .eq(result.columns.iter())
+        {
             return Err(PgTrickleError::TypeMismatch(format!(
                 "{} at root declared columns {:?}, schema {:?}",
                 operator_name(op),

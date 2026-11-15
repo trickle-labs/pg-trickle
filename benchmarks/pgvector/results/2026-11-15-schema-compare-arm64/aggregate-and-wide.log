@@ -1,0 +1,98 @@
+Gnuplot not found, using plotters backend
+Benchmarking diff_aggregate/count_star_1group
+Benchmarking diff_aggregate/count_star_1group: Warming up for 1.0000 s
+Benchmarking diff_aggregate/count_star_1group: Collecting 100 samples in estimated 5.0223 s (975k iterations)
+Benchmarking diff_aggregate/count_star_1group: Analyzing
+diff_aggregate/count_star_1group
+                        time:   [5.1280 µs 5.1379 µs 5.1484 µs]
+                        change: [-0.3340% -0.1017% +0.1195%] (p = 0.37 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_aggregate/count_star_1group
+Benchmarking diff_aggregate/count_star_1group: Warming up for 1.0000 s
+Benchmarking diff_aggregate/count_star_1group: Collecting 100 samples in estimated 5.0066 s (965k iterations)
+Benchmarking diff_aggregate/count_star_1group: Analyzing
+diff_aggregate/count_star_1group
+                        time:   [5.0927 µs 5.1030 µs 5.1138 µs]
+                        change: [-0.9136% -0.5519% -0.0696%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_aggregate/count_star_1group
+Benchmarking diff_aggregate/count_star_1group: Warming up for 1.0000 s
+Benchmarking diff_aggregate/count_star_1group: Collecting 100 samples in estimated 5.0065 s (985k iterations)
+Benchmarking diff_aggregate/count_star_1group: Analyzing
+diff_aggregate/count_star_1group
+                        time:   [5.0345 µs 5.0406 µs 5.0473 µs]
+                        change: [-1.4075% -0.9318% -0.5452%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_aggregate/count_star_1group
+Benchmarking diff_aggregate/count_star_1group: Warming up for 1.0000 s
+Benchmarking diff_aggregate/count_star_1group: Collecting 100 samples in estimated 5.0156 s (980k iterations)
+Benchmarking diff_aggregate/count_star_1group: Analyzing
+diff_aggregate/count_star_1group
+                        time:   [5.0923 µs 5.0971 µs 5.1029 µs]
+                        change: [+0.7338% +1.0138% +1.2684%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 11 outliers among 100 measurements (11.00%)
+  4 (4.00%) high mild
+  7 (7.00%) high severe
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/20cols
+Benchmarking diff_scan/20cols: Warming up for 1.0000 s
+Benchmarking diff_scan/20cols: Collecting 200 samples in estimated 10.027 s (724k iterations)
+Benchmarking diff_scan/20cols: Analyzing
+diff_scan/20cols        time:   [13.786 µs 13.792 µs 13.800 µs]
+Found 25 outliers among 200 measurements (12.50%)
+  9 (4.50%) low mild
+  9 (4.50%) high mild
+  7 (3.50%) high severe
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/20cols
+Benchmarking diff_scan/20cols: Warming up for 1.0000 s
+Benchmarking diff_scan/20cols: Collecting 200 samples in estimated 10.145 s (744k iterations)
+Benchmarking diff_scan/20cols: Analyzing
+diff_scan/20cols        time:   [13.474 µs 13.486 µs 13.501 µs]
+                        change: [-2.3924% -2.2890% -2.1893%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 30 outliers among 200 measurements (15.00%)
+  10 (5.00%) low mild
+  12 (6.00%) high mild
+  8 (4.00%) high severe
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/20cols
+Benchmarking diff_scan/20cols: Warming up for 1.0000 s
+Benchmarking diff_scan/20cols: Collecting 200 samples in estimated 10.026 s (744k iterations)
+Benchmarking diff_scan/20cols: Analyzing
+diff_scan/20cols        time:   [13.447 µs 13.460 µs 13.477 µs]
+                        change: [-0.2273% -0.1053% +0.0073%] (p = 0.08 > 0.05)
+                        No change in performance detected.
+Found 24 outliers among 200 measurements (12.00%)
+  3 (1.50%) low mild
+  8 (4.00%) high mild
+  13 (6.50%) high severe
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/20cols
+Benchmarking diff_scan/20cols: Warming up for 1.0000 s
+Benchmarking diff_scan/20cols: Collecting 200 samples in estimated 10.007 s (724k iterations)
+Benchmarking diff_scan/20cols: Analyzing
+diff_scan/20cols        time:   [13.800 µs 13.814 µs 13.831 µs]
+                        change: [+2.4839% +2.6312% +2.7684%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 19 outliers among 200 measurements (9.50%)
+  1 (0.50%) low mild
+  4 (2.00%) high mild
+  14 (7.00%) high severe
