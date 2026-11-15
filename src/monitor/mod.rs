@@ -1722,6 +1722,24 @@ fn check_cdc_health() -> TableIterator<
 
         match dep.cdc_mode {
             CdcMode::Trigger => {
+                // An explicit WAL request is an observable preference, not an
+                // assurance that the decoder can adopt the source. Report the
+                // *actual* blocker in health checks instead of silently saying
+                // TRIGGER with an empty alert column.
+                let requested = StDependency::effective_requested_mode_for_source(dep.source_relid)
+                    .ok()
+                    .flatten();
+                let alert = if requested.as_deref() == Some("wal") {
+                    match wal_decoder::wal_transition_blocker(dep.source_relid, "wal") {
+                        Ok(Some(reason)) => Some(format!("WAL CDC requested: {reason}")),
+                        Ok(None) => Some(
+                            "WAL CDC requested: waiting for scheduler cutover".to_string(),
+                        ),
+                        Err(e) => Some(format!("WAL CDC eligibility check failed: {e}")),
+                    }
+                } else {
+                    None
+                };
                 rows.push((
                     oid_u32 as i64,
                     source_name,
@@ -1729,7 +1747,7 @@ fn check_cdc_health() -> TableIterator<
                     None,
                     None,
                     None,
-                    None,
+                    alert,
                     selective,
                 ));
             }
