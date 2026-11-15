@@ -3,7 +3,7 @@
 # Multi-stage Dockerfile for pg_trickle E2E integration tests.
 #
 # Stage 1 (builder): Compiles the extension from source.
-# Stage 2 (runtime): Copies the compiled artifacts into a clean postgres:18.6.
+# Stage 2 (runtime): Copies the compiled artifacts into a clean postgres:18.7.
 #
 # Usage:
 #   # Fast build — uses pre-built builder image (Rust + cargo-pgrx pre-baked):
@@ -79,17 +79,19 @@ RUN echo "=== Package artifacts ===" && \
 # ── Stage 2: Runtime image with extension installed ─────────────────────────
 # OPS-10-03: Pinned to exact SHA256 digest for reproducibility.
 # Run scripts/update_base_image_digests.sh to refresh quarterly.
-FROM postgres:18.6-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc AS runtime-base
+FROM postgres:18.7-bookworm@sha256:ece55f7868da684e400f82f1030a050718adbdd65c23aa500c486f6e2950dc0f AS runtime-base
 
 ARG DVM_MUTATION_RUNTIME_SOURCE_SHA
 LABEL com.pgtrickle.dvm-mutation.runtime-source-sha=${DVM_MUTATION_RUNTIME_SOURCE_SHA}
 LABEL org.opencontainers.image.title="pg_trickle E2E test image"
-LABEL org.opencontainers.image.description="PostgreSQL 18.6 with pg_trickle extension for integration testing"
+LABEL org.opencontainers.image.description="PostgreSQL 18.7 with pg_trickle extension for integration testing"
 
 # F4 (v0.37.0): Install pgvector for vector aggregate E2E tests.
-# Keep the pinned PostgreSQL patch unchanged while installing pgvector.
-RUN apt-get update && apt-get install -y --no-install-recommends --no-upgrade \
+# Prevent pgvector dependencies from upgrading the pinned server packages.
+RUN apt-mark hold libpq5 postgresql-18 postgresql-18-jit postgresql-client-18 && \
+    apt-get update && apt-get install -y --no-install-recommends \
     postgresql-18-pgvector \
+    && apt-mark unhold libpq5 postgresql-18 postgresql-18-jit postgresql-client-18 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install a SQL-only pg_tide contract stub for outbox boundary tests. The
