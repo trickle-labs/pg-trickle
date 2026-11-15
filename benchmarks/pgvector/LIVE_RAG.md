@@ -30,8 +30,14 @@ rechecks the document's incarnation, revision, chunk version, publication and
 lease. `--delay-seconds` can hold a claim while another session edits or
 deletes a document; a late completion is rejected. `--duplicate` verifies that
 a second completion cannot publish again. Use `--model model-v2` to drain the
-existing example's second model queue; these comparison tables currently select
-only model-v1 and do not implement a model cutover.
+existing example's second model queue. Each document's selected model is in
+`live_rag.access.model_version` (default `model-v1`). To roll a document over,
+enqueue and complete its new-model embedding, update that column, then include
+the document ID in the application batch and refresh both other corpora. The
+guarded views immediately exclude the old model after the update, including
+when the new embedding or a corpus refresh is still pending. For an atomic
+group cutover, update the selected model for that group in one transaction;
+the guarded views may temporarily omit rows until maintenance catches up.
 
 Compare complete corpus snapshots separately from retrieval quality:
 

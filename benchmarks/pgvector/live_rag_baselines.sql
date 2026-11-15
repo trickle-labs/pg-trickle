@@ -3,7 +3,8 @@ CREATE SCHEMA live_rag;
 CREATE TABLE live_rag.access (
     document_id bigint PRIMARY KEY REFERENCES embedding_demo.documents(id) ON DELETE CASCADE,
     tenant_id bigint NOT NULL,
-    visible boolean NOT NULL DEFAULT true
+    visible boolean NOT NULL DEFAULT true,
+    model_version text NOT NULL DEFAULT 'model-v1'
 );
 
 -- This is the authoritative eligible corpus, not an approximate search result.
@@ -14,8 +15,8 @@ FROM embedding_demo.documents d
 JOIN live_rag.access a ON a.document_id = d.id
 JOIN embedding_demo.results e ON e.document_id = d.id
  AND e.incarnation = d.incarnation AND e.revision = d.revision
- AND e.chunk_version = d.chunk_version
-WHERE d.published AND a.visible AND e.model_version = 'model-v1';
+ AND e.chunk_version = d.chunk_version AND e.model_version = a.model_version
+WHERE d.published AND a.visible;
 
 CREATE TABLE live_rag.application AS SELECT * FROM live_rag.truth WITH NO DATA;
 CREATE TABLE live_rag.periodic_full AS SELECT * FROM live_rag.truth WITH NO DATA;
