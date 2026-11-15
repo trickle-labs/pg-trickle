@@ -166,7 +166,7 @@ fn build_group_filter(
 fn special_aggregate_delta_filter(aggregates: &[AggExpr], child: &OpTree) -> Option<String> {
     let filters: Vec<String> = aggregates
         .iter()
-        .filter(|agg| needs_special_value_rescan(agg))
+        .filter(|agg| needs_special_value_rescan(agg, child))
         .map(|agg| {
             let state_guard = if agg.uses_incremental_nonfinite_state(child) {
                 format!(
@@ -201,10 +201,35 @@ fn special_state_delta_exprs(
     (state_for("I"), state_for("D"))
 }
 
-fn needs_special_value_rescan(agg: &AggExpr) -> bool {
-    !agg.is_distinct
-        && (matches!(agg.function, AggFunc::Sum | AggFunc::Avg)
+fn needs_special_value_rescan(agg: &AggExpr, child: &OpTree) -> bool {
+    if agg.is_distinct
+        || !(matches!(agg.function, AggFunc::Sum | AggFunc::Avg)
             || agg.function.needs_sum_of_squares())
+    {
+        return false;
+    }
+
+    let Some(Expr::ColumnRef {
+        table_alias,
+        column_name,
+    }) = agg.argument.as_ref()
+    else {
+        return true;
+    };
+    let mut source = child;
+    while let OpTree::Filter { child, .. } = source {
+        source = child;
+    }
+    let OpTree::Scan { alias, columns, .. } = source else {
+        return true;
+    };
+    if table_alias.as_ref().is_some_and(|table| table != alias) {
+        return true;
+    }
+    !columns
+        .iter()
+        .find(|column| column.name == *column_name)
+        .is_some_and(|column| matches!(column.type_oid, 20 | 21 | 23))
 }
 
 fn internal_group_columns(group_output: &[String]) -> Vec<String> {
@@ -1416,7 +1441,7 @@ impl RescanConfig<'_> {
             || agg.function.is_group_rescan()
             || matches!(agg.function, AggFunc::Min | AggFunc::Max)
             || (self.include_special_aggs
-                && needs_special_value_rescan(agg)
+                && needs_special_value_rescan(agg, child)
                 && !agg.uses_incremental_nonfinite_state(child))
     }
 }
@@ -1602,7 +1627,7 @@ fn build_rescan_cte(
                 quote_ident(&format!("__pgt_rescan_special_{}", agg.alias)),
             ));
         }
-        if config.include_special_aggs && needs_special_value_rescan(agg) {
+        if config.include_special_aggs && needs_special_value_rescan(agg, child) {
             selects.push(format!(
                 "{} AS {}",
                 agg_sum_rescan_sql(agg),
@@ -2179,7 +2204,7 @@ fn generate_direct_agg_delta(
             quote_ident(&format!("__del_{}", agg.alias)),
         ));
 
-        if needs_special_value_rescan(agg) {
+        if needs_special_value_rescan(agg, scan) {
             let argument = case_rewrites
                 .get(&agg.alias)
                 .cloned()
@@ -2419,7 +2444,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             delta_selects.push(format!("{ins_expr} AS {}", quote_ident(&alias_i)));
             delta_selects.push(format!("{del_expr} AS {}", quote_ident(&alias_d)));
 
-            if needs_special_value_rescan(agg) {
+            if needs_special_value_rescan(agg, child) {
                 let argument = agg
                     .argument
                     .as_ref()
@@ -2589,7 +2614,9 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     };
     let rescan_config = RescanConfig {
         force_all_aggs: use_having_rescan,
-        include_special_aggs: aggregates.iter().any(needs_special_value_rescan),
+        include_special_aggs: aggregates
+            .iter()
+            .any(|agg| needs_special_value_rescan(agg, child)),
         special_value_filter: special_value_filter.as_deref(),
     };
     let rescan_cte = build_rescan_cte(
@@ -2798,7 +2825,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                     &format!("({value})::numeric"),
                 );
                 format!("CASE WHEN {use_state} THEN {special_value} ELSE {aux_sum_value} END")
-            } else if needs_special_value_rescan(agg) && agg_has_rescan {
+            } else if needs_special_value_rescan(agg, child) && agg_has_rescan {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN COALESCE(r.{}, 0) ELSE {aux_sum_value} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
@@ -4301,6 +4328,7 @@ mod tests {
 
         // G-S1: change detection guard should be present
         assert_sql_contains(&sql, "IS DISTINCT FROM");
+        assert!(!sql.contains("__special_total"));
     }
 
     // ── agg_delta_exprs tests ───────────────────────────────────────
@@ -4329,11 +4357,20 @@ mod tests {
         assert!(special_delta.contains("(amount)::text IN ('Infinity', '-Infinity', 'NaN')"));
 
         let mut child = scan(1, "t", "public", "t", &["amount"]);
+        let avg = avg_col("amount", "average");
+        let special_aggs = [sum_col("amount", "total"), avg.clone()];
+        assert!(
+            special_aggs
+                .iter()
+                .all(|agg| !needs_special_value_rescan(agg, &child))
+        );
+        assert!(special_aggregate_delta_filter(&special_aggs, &child).is_none());
+        let mut unknown_arg = sum_col("amount", "unknown");
+        unknown_arg.argument = Some(Expr::Raw("amount * 1.0".into()));
+        assert!(needs_special_value_rescan(&unknown_arg, &child));
         if let OpTree::Scan { columns, .. } = &mut child {
             columns[0].type_oid = 1700;
         }
-        let avg = avg_col("amount", "average");
-        let special_aggs = [sum_col("amount", "total"), avg.clone()];
         let special_filter = special_aggregate_delta_filter(&special_aggs, &child).unwrap();
         assert!(special_filter.contains("__special_total"));
         assert!(special_filter.contains("__special_average"));
@@ -4371,10 +4408,13 @@ mod tests {
     #[test]
     fn test_statistical_special_values_rescan_auxiliaries() {
         let stddev = stddev_pop_col("amount", "stddev");
-        let child = scan(1, "t", "public", "t", &["amount"]);
+        let mut child = scan(1, "t", "public", "t", &["amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[0].type_oid = 1700;
+        }
         let filter = special_aggregate_delta_filter(std::slice::from_ref(&stddev), &child).unwrap();
         assert!(filter.contains("__special_stddev"));
-        assert!(needs_special_value_rescan(&stddev));
+        assert!(needs_special_value_rescan(&stddev, &child));
         assert_eq!(
             agg_sum2_rescan_sql(&stddev),
             "COALESCE(SUM((amount)::numeric * (amount)::numeric), 0)"
@@ -6060,6 +6100,10 @@ mod tests {
     #[test]
     fn test_diff_aggregate_mixed_with_statistical() {
         let mut ctx = test_ctx_with_st("public", "st");
+        let mut child = scan(1, "t", "public", "t", &["dept", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 1700;
+        }
         let agg = OpTree::Aggregate {
             group_by: vec![colref("dept")],
             aggregates: vec![
@@ -6067,7 +6111,7 @@ mod tests {
                 sum_col("amount", "total"),
                 stddev_pop_col("amount", "sd_pop"),
             ],
-            child: Box::new(scan(1, "t", "public", "t", &["dept", "amount"])),
+            child: Box::new(child),
         };
         let result = diff_aggregate(&mut ctx, &agg);
         assert!(
@@ -6360,7 +6404,10 @@ mod tests {
     #[test]
     fn test_sum_rescan_is_scoped_to_special_deltas() {
         let mut ctx = test_ctx_with_st("public", "st");
-        let child = scan(1, "t", "public", "t", &["region", "amount"]);
+        let mut child = scan(1, "t", "public", "t", &["region", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 99999;
+        }
         let tree = aggregate(
             vec![colref("region")],
             vec![sum_col("amount", "total")],
@@ -6399,9 +6446,12 @@ mod tests {
 
     #[test]
     fn test_combined_algebraic_aggs_scope_special_sum_rescan() {
-        // SUM, COUNT, AVG are algebraic; only special SUM deltas are rescanned.
+        // Unknown SUM inputs retain the conservative special-value rescan.
         let mut ctx = test_ctx_with_st("public", "st");
-        let child = scan(1, "t", "public", "t", &["region", "amount"]);
+        let mut child = scan(1, "t", "public", "t", &["region", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 99999;
+        }
         let tree = aggregate(
             vec![colref("region")],
             vec![
@@ -6525,12 +6575,12 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // No unrestricted rescan; only groups with special-value deltas rescan.
+        // Integer SUM inputs need no special-value rescan.
         assert!(
             !sql.contains("agg_rescan"),
             "SUM above plain scan should not use an unrestricted rescan CTE:\n{sql}"
         );
-        assert_sql_contains(&sql, "agg_special_groups");
+        assert_sql_not_contains(&sql, "agg_special_groups");
 
         assert_sql_contains(&sql, "__ins_nonnull_total");
         assert_sql_contains(&sql, "__del_nonnull_total");
