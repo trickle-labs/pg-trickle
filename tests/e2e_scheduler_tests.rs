@@ -430,10 +430,10 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
     .execute(&mut *writer)
     .await
     .expect("write source rows before the scheduler watermark");
-    let writer_delta_lsn: String =
-        sqlx::query_scalar(&format!("SELECT MAX(lsn)::text FROM {source_buffer}"))
-    .fetch_one(&mut *writer)
-    .await
+    let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
+    let writer_delta_lsn: String = sqlx::query_scalar(&delta_sql)
+        .fetch_one(&mut *writer)
+        .await
     .expect("read uncommitted source CDC LSN");
 
     // Resume only after the writer has its source RowExclusiveLock.  The
@@ -610,10 +610,10 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
     .execute(&mut *writer)
     .await
     .expect("insert fallback source rows");
-    let writer_delta_lsn: String =
-        sqlx::query_scalar(&format!("SELECT MAX(lsn)::text FROM {source_buffer}"))
-    .fetch_one(&mut *writer)
-    .await
+    let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
+    let writer_delta_lsn: String = sqlx::query_scalar(&delta_sql)
+        .fetch_one(&mut *writer)
+        .await
     .expect("read fallback writer's CDC LSN");
 
     db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['scheduler_fallback_st'])")
