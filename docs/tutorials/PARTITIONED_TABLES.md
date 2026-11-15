@@ -25,9 +25,11 @@ source tables transparently:
   the change and marks affected stream tables for reinitialization. No
   manual intervention required.
 
-- **WAL-based CDC works correctly.** When using WAL mode, publications are
-  created with `publish_via_partition_root = true` so all partition changes
-  appear under the parent table's identity.
+- **Partitioned sources currently use trigger CDC.** Although PostgreSQL
+  supports `publish_via_partition_root`, the WAL cutover recheck does not
+  yet admit partitioned parents. An explicit `cdc_mode => 'wal'` request
+  retains trigger capture and reports the eligibility reason through
+  `pgtrickle.check_cdc_health()`.
 
 ## Example: Monthly Sales Partitions (RANGE)
 
@@ -168,6 +170,30 @@ SELECT * FROM regional_sales ORDER BY region;
 -- (only rows from remaining partitions)
 ```
 
+## DROP TABLE of an attached partition
+
+A direct `DROP TABLE` of a partition does not generate row-level DELETE
+events. pg_trickle records the partition OIDs in its source dependency
+snapshots and detects their removal at the `sql_drop` event. The parent
+stream table is marked `needs_reinit = true`; the next refresh rebuilds
+its results from the surviving source rows, including downstream streams.
+
+```sql
+DROP TABLE sales_h1_2025; -- no preceding DETACH is needed
+
+SELECT pgt_name, status, needs_reinit
+FROM pgtrickle.pgt_stream_tables
+WHERE pgt_name = 'regional_sales';
+-- status ACTIVE, needs_reinit true
+
+SELECT pgtrickle.refresh_stream_table('regional_sales');
+```
+
+This detection also covers nested partitions. Partition DDL is not a
+row-level change, so materialized results may remain from the previous
+refresh until the rebuild completes; monitor `needs_reinit` when performing
+retention jobs.
+
 ## LIST Partitioning
 
 LIST partitioning splits rows by discrete values. It works identically:
@@ -274,4 +300,4 @@ SELECT pgtrickle.create_stream_table(
 | **Sub-partitioning** | Multi-level partitioning (partitions of partitions) works in principle because triggers propagate through the entire hierarchy, but it is not extensively tested. |
 | **pg_partman compatibility** | `pg_partman` dynamically creates and drops partitions. Since pg_trickle detects ATTACH/DETACH via DDL event triggers, it should work, but this combination is not yet tested. |
 | **Partitioned storage tables** | Using a partitioned table as the stream table's *storage* is not supported. This is tracked for a future release. |
-| **DETACH PARTITION CONCURRENTLY** | `DETACH PARTITION ... CONCURRENTLY` is a two-phase operation. The DDL event trigger fires after the first phase; the partition is not fully detached until the second phase commits. The stream table may briefly reflect the old partition count. |
+| **DETACH PARTITION CONCURRENTLY** | This is a two-phase operation. To avoid refreshing against an incomplete intermediate state, pg_trickle suspends dependent stream tables. After DETACH completes, explicitly run `pgtrickle.resume_stream_table('regional_sales')` and refresh. The resume action schedules a full reinitialization. |
