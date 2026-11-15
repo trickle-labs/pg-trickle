@@ -74,28 +74,28 @@ AGGREGATE_UPGRADE=false
 if [[ "$FROM_VERSION" == "0.108.3" && ( "$TO_VERSION" == "0.109.0" || "$TO_VERSION" == "0.110.0" ) ]]; then
     AGGREGATE_UPGRADE=true
     psql "CREATE TABLE public.upgrade_agg_orders(
-              id int PRIMARY KEY, customer text, amt numeric);
-          INSERT INTO public.upgrade_agg_orders VALUES
-              (1,'a',1),(2,'a',2),(3,'b',4);
-          SELECT pgtrickle.create_stream_table(
+              id int PRIMARY KEY, customer text, amt numeric)" >/dev/null
+    psql "INSERT INTO public.upgrade_agg_orders VALUES
+              (1,'a',1),(2,'a',2),(3,'b',4)" >/dev/null
+    psql "SELECT pgtrickle.create_stream_table(
               name=>'upgrade_agg_sum_st',
               query=>'SELECT customer, SUM(amt) AS total, COUNT(*) AS n
                       FROM public.upgrade_agg_orders GROUP BY customer',
               schedule=>'1h', refresh_mode=>'DIFFERENTIAL',
-              orchestration_mode=>'EXTERNAL');
-          SELECT pgtrickle.create_stream_table(
+              orchestration_mode=>'EXTERNAL')" >/dev/null
+    psql "SELECT pgtrickle.create_stream_table(
               name=>'upgrade_agg_mixed_st',
               query=>'SELECT customer, SUM(amt) AS total, AVG(amt) AS mean,
                              COUNT(*) AS n
                       FROM public.upgrade_agg_orders GROUP BY customer',
               schedule=>'1h', refresh_mode=>'DIFFERENTIAL',
-              orchestration_mode=>'EXTERNAL');
-          SELECT pgtrickle.create_stream_table(
+              orchestration_mode=>'EXTERNAL')" >/dev/null
+    psql "SELECT pgtrickle.create_stream_table(
               name=>'upgrade_agg_control_st',
               query=>'SELECT customer, COUNT(*) AS n, MAX(amt) AS largest
                       FROM public.upgrade_agg_orders GROUP BY customer',
               schedule=>'1h', refresh_mode=>'DIFFERENTIAL',
-              orchestration_mode=>'EXTERNAL');" >/dev/null
+              orchestration_mode=>'EXTERNAL')" >/dev/null
     psql "SELECT NOT EXISTS (
              SELECT 1 FROM pg_catalog.pg_attribute
              WHERE attrelid='public.upgrade_agg_sum_st'::regclass
