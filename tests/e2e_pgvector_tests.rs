@@ -2832,8 +2832,20 @@ async fn test_centroid_diverse_high_dimensional_drift_matches_native_avg() {
     run_centroid_randomized_refresh_churn(2000, 1536, true).await;
 }
 
+#[tokio::test]
+#[ignore = "long-running diverse numerical qualification; run explicitly"]
+async fn test_centroid_diverse_384_dimensional_drift_matches_native_avg() {
+    run_centroid_randomized_refresh_churn(2000, 384, true).await;
+}
+
+#[tokio::test]
+#[ignore = "long-running diverse numerical qualification; run explicitly"]
+async fn test_centroid_diverse_768_dimensional_drift_matches_native_avg() {
+    run_centroid_randomized_refresh_churn(2000, 768, true).await;
+}
+
 async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, diverse: bool) {
-    assert!(dimensions == 3 || dimensions == 1536);
+    assert!([3, 384, 768, 1536].contains(&dimensions));
     let db = E2eDb::new().await.with_extension().await;
     setup_pgvector(&db).await;
     let mut conn = db.pool.acquire().await.expect("acquire churn session");
@@ -2846,17 +2858,18 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
         "SET pg_trickle.enable_vector_agg = on",
         "SET pg_trickle.enable_centroid_state = on",
         "SET pg_trickle.refresh_strategy = 'differential'",
-        if dimensions == 3 {
-            "CREATE TABLE centroid_churn_src (id int PRIMARY KEY, grp int NOT NULL, v vector(3))"
-        } else {
-            "CREATE TABLE centroid_churn_src (id int PRIMARY KEY, grp int NOT NULL, v vector(1536))"
-        },
     ] {
         sqlx::query(sql)
             .execute(&mut *conn)
             .await
             .expect("set up centroid churn source");
     }
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TABLE centroid_churn_src (id int PRIMARY KEY, grp int NOT NULL, v vector({dimensions}))"
+    )))
+    .execute(&mut *conn)
+    .await
+    .expect("create centroid churn source");
     sqlx::query("INSERT INTO centroid_churn_src SELECT id, id % 5, ('[' || array_to_string(ARRAY(SELECT CASE i % 3 WHEN 1 THEN CASE WHEN id % 2 = 0 THEN 10000 ELSE -10000 END WHEN 2 THEN id ELSE -id END FROM generate_series(1, $1) i), ',') || ']')::vector FROM generate_series(1, 30) AS id")
         .bind(dimensions as i32).execute(&mut *conn).await.expect("seed centroid churn source");
     for sql in [
