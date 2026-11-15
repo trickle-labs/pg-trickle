@@ -2,6 +2,38 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.110.0 to 0.110.1
+
+Install the v0.110.1 library and extension SQL files, then run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.110.1';
+```
+
+The upgrade backfills each tracked partitioned source's child and nested
+partition OIDs in the existing dependency snapshot. The data and original
+schema fingerprints are preserved; existing stream tables are not
+unconditionally rebuilt. This enables the `sql_drop` hook to find a live
+partitioned parent after PostgreSQL removes a child and its catalog ancestry.
+
+Regular `ATTACH` and `DETACH` now mark the parent stream table for
+automatic reinitialization. `DETACH ... CONCURRENTLY` is two-phase and
+continues to require an explicit resume after the command finishes.
+
+**Important:** An already-stale stream table from a partition deleted *before*
+this upgrade cannot be repaired retroactively by the new tracker. Reinitialize
+affected stream tables once and compare their results against their source
+queries:
+
+```sql
+SELECT pgtrickle.reinitialize_stream_table('public.my_stream_table');
+SELECT pgtrickle.refresh_stream_table('public.my_stream_table');
+```
+
+The CDC health view now explains why an explicit WAL request stays in
+trigger mode. The current WAL decoder requires a regular table with a
+primary key and `REPLICA IDENTITY FULL`.
+
 ## 0.109.0 to 0.110.0
 
 Install the v0.110.0 library and extension files, then run
