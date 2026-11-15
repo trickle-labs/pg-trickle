@@ -155,16 +155,15 @@ pub static PGS_MERGE_SEQSCAN_THRESHOLD: GucSetting<f64> = GucSetting::<f64>::new
 /// latency to the trigger path. Set to 0 to disable TopK in IMMEDIATE mode.
 pub static PGS_IVM_TOPK_MAX_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(1000);
 
-/// Maximum recursion depth for `WITH RECURSIVE` CTEs in IMMEDIATE mode.
+/// Maximum propagation depth for recursive `UNION ALL` delta queries.
 ///
-/// The semi-naive delta query generated for an IMMEDIATE-mode recursive
-/// CTE includes a `__pgt_depth` counter.  Propagation stops when this
-/// counter reaches the configured limit, preventing infinite loops caused
-/// by cyclic data or deeply recursive hierarchies that would otherwise
-/// exhaust PostgreSQL's `max_stack_depth` inside a trigger body.
+/// DIFFERENTIAL and IMMEDIATE bag-recursion paths carry a `__pgt_depth`
+/// counter. UNION (set recursion) must not carry it: depth changes tuple
+/// equality and defeats duplicate elimination on cycles. Set recursion uses
+/// the defining query's termination semantics; unbounded definitions should
+/// use an explicit termination predicate or PostgreSQL statement_timeout.
 ///
-/// Set to 0 to disable the depth guard (allow unlimited recursion).
-/// The default (100) is sufficient for virtually all practical hierarchies.
+/// Set to 0 to disable the UNION ALL depth guard. Default: 100.
 pub static PGS_IVM_RECURSIVE_MAX_DEPTH: GucSetting<i32> = GucSetting::<i32>::new(100);
 
 /// STAB-1: Cluster-wide connection pooler mode.
@@ -798,10 +797,10 @@ pub fn register_dvm_gucs() {
 
     GucRegistry::define_int_guc(
         c"pg_trickle.ivm_recursive_max_depth",
-        c"Maximum recursion depth for WITH RECURSIVE CTEs in IMMEDIATE mode.",
-        c"Limits the depth counter injected into semi-naive delta queries to guard \
-           against infinite loops from cyclic data or very deep hierarchies inside \
-           trigger bodies. Set to 0 to disable the guard (allow unlimited recursion).",
+        c"Maximum propagation depth for recursive UNION ALL delta queries.",
+        c"Applies in DIFFERENTIAL and IMMEDIATE modes. UNION uses set fixpoint \
+           semantics without a hidden depth column. Set to 0 to disable the \
+           UNION ALL depth guard.",
         &PGS_IVM_RECURSIVE_MAX_DEPTH,
         0,
         100_000,
@@ -1487,7 +1486,7 @@ pub fn pg_trickle_enable_centroid_state() -> bool {
     PGS_ENABLE_CENTROID_STATE.get()
 }
 
-/// Returns the maximum recursion depth for WITH RECURSIVE in IMMEDIATE mode.
+/// Returns the maximum propagation depth for recursive UNION ALL deltas.
 /// Returns `None` when the guard is disabled (value = 0).
 pub fn pg_trickle_ivm_recursive_max_depth() -> Option<i32> {
     crate::config::cdc::normalize_recursive_max_depth(PGS_IVM_RECURSIVE_MAX_DEPTH.get())

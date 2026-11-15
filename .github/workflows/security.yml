@@ -16,11 +16,13 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".github/workflows/security.yml"
   pull_request:
     branches: [main]
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".github/workflows/security.yml"
   schedule:
     # Weekly on Monday at 08:00 UTC — catches newly published advisories
     - cron: "0 8 * * 1"
@@ -38,14 +40,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Reject active SQLite dependency
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo tree --locked --workspace --all-features --target all --edges normal,build,dev --prefix none --format '{p}' |
+            awk '/^libsqlite3-sys v/ { found = 1 } END { exit found }'
+
       - name: Run cargo audit
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # SEC-001: Advisory ignores are centralized in deny.toml.
-          # This list must stay in sync with the [advisories] ignore list in deny.toml.
-          # See deny.toml for the rationale comment on each advisory.
-          ignore: RUSTSEC-2021-0127
+          # shortcut: SQLx 0.9 locks an unused SQLite; remove this exception when a patched SQLx is available.
+          # The preceding graph check rejects active SQLite; cargo-deny does not ignore this advisory.
+          ignore: RUSTSEC-2021-0127,RUSTSEC-2026-0459
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
@@ -53,9 +61,7 @@ jobs:
           tool: cargo-deny
 
       - name: Run cargo deny (advisory check via deny.toml)
-        # SEC-001: cargo deny reads deny.toml as the single source of truth
-        # for advisory ignores. This step confirms deny.toml and cargo-audit
-        # ignores stay in sync.
+        # Unlike cargo-audit, cargo-deny checks the selected dependency graph.
         run: cargo deny check advisories
 
   audit-scheduled:
@@ -69,11 +75,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Reject active SQLite dependency
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo tree --locked --workspace --all-features --target all --edges normal,build,dev --prefix none --format '{p}' |
+            awk '/^libsqlite3-sys v/ { found = 1 } END { exit found }'
+
       - name: Run cargo audit
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Only serde_cbor's unmaintained notice is ignored: it comes from
-          # the pinned pgrx dependency. See deny.toml for owner, upstream
-          # issue, review date and removal criteria.
-          ignore: RUSTSEC-2021-0127
+          # shortcut: SQLx 0.9 locks an unused SQLite; remove this exception when a patched SQLx is available.
+          # The preceding graph check rejects active SQLite.
+          ignore: RUSTSEC-2021-0127,RUSTSEC-2026-0459

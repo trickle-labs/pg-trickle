@@ -539,6 +539,7 @@ async fn test_upgrade_embedding_helpers_from_01083() {
     db.execute("CREATE EXTENSION vector").await;
     db.execute("CREATE EXTENSION pg_trickle VERSION '0.108.3' CASCADE")
         .await;
+    db.execute("INSERT INTO pgtrickle.pgt_scheduler_jobs (dag_version, unit_key, unit_kind, member_pgt_ids, root_pgt_id, status, scheduler_pid) VALUES (1, 'legacy', 'singleton', ARRAY[1]::bigint[], 1, 'PERMANENT_FAILED', 1)").await;
     db.execute("CREATE TABLE upgrade_epoch_storage (__pgt_row_id bytea, id int)")
         .await;
     db.execute(
@@ -551,6 +552,11 @@ async fn test_upgrade_embedding_helpers_from_01083() {
     .await;
     db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.109.0'")
         .await;
+    let legacy_failure_recorded: bool = db.query_scalar("SELECT member_failure_recorded FROM pgtrickle.pgt_scheduler_jobs WHERE unit_key = 'legacy'").await;
+    assert!(
+        !legacy_failure_recorded,
+        "old failures retain the scheduler safety net"
+    );
     let guard_upgraded: bool = db.query_scalar("SELECT pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[1.0]::float8[], ARRAY[1.0]::float8[]) IS NULL AND pgtrickle._centroid_rebase_reason(1, 1, 0, ARRAY[[1.0]]::float8[], ARRAY[1.0]::float8[]) = 'INVALID_STATE'").await;
     assert!(guard_upgraded, "upgrade must install the centroid guard");
     let marker_upgraded: bool = db.query_scalar("SELECT a.attnotnull AND pg_catalog.pg_get_expr(d.adbin, d.adrelid) = 'false' FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid = 'pgtrickle.pgt_centroid_states'::regclass AND a.attname = 'last_change_limit_rebase' AND NOT a.attisdropped").await;
@@ -779,6 +785,22 @@ async fn test_upgrade_embedding_helpers_from_01083() {
     );
     let diagnostics: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.ann_index_status_v2() v WHERE v->>'table' IN ('upgrade_l2', 'upgrade_cosine') AND v->>'valid' = 'true'").await;
     assert_eq!(diagnostics, 2);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_scheduler_failure_marker_from_01084() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.108.4") {
+        return;
+    }
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.108.4' CASCADE")
+        .await;
+    db.execute("INSERT INTO pgtrickle.pgt_scheduler_jobs (dag_version, unit_key, unit_kind, member_pgt_ids, root_pgt_id, status, scheduler_pid) VALUES (1, 'legacy', 'singleton', ARRAY[1]::bigint[], 1, 'PERMANENT_FAILED', 1)").await;
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.109.0'")
+        .await;
+    let recorded: bool = db.query_scalar("SELECT member_failure_recorded FROM pgtrickle.pgt_scheduler_jobs WHERE unit_key = 'legacy'").await;
+    assert!(!recorded, "old failures retain the scheduler safety net");
 }
 
 #[tokio::test]

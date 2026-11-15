@@ -21,6 +21,11 @@ claim to bound PostgreSQL or source-table disk growth; set it to `0` to disable
 the warning.
 `pg_trickle.load_shed_threshold` (default `0.80`, `0` disables) defers only
 non-urgent scheduled work under the documented load-pressure proxy.
+Deferral is bounded: after polling backs off to its maximum factor of eight,
+due work is admitted again while the slower base polling cadence remains in effect.
+Sustained application writes therefore do not require a quiet interval before
+ordinary stream tables can refresh. This is an admission guarantee, not a
+promise that overloaded hardware can meet every configured freshness target.
 
 v0.89 adds no window-specific GUC. The window-state guard derives its hard
 ceiling from the full `pg_trickle.memory_budget_mb` value. If candidate state
@@ -1554,13 +1559,18 @@ SET pg_trickle.ivm_topk_max_limit = 5000;
 
 ### pg_trickle.ivm_recursive_max_depth
 
-Maximum recursion depth for `WITH RECURSIVE` queries in **IMMEDIATE** mode.
-The semi-naive evaluation injects a `__pgt_depth` counter column into the
-recursive SQL; iteration stops when the counter reaches this limit. Protects
-against infinite recursion in pathological graphs.
+Maximum propagation depth for recursive `UNION ALL` delta queries in
+**DIFFERENTIAL** and **IMMEDIATE** modes. A hidden `__pgt_depth` counter bounds
+semi-naive propagation. Set to `0` to disable this guard.
+
+Recursive `UNION` uses PostgreSQL's set fixed-point semantics without a hidden
+depth column. Adding depth would make repeated tuples distinct and break cycle
+elimination. Finite reachability queries are not truncated at this limit.
+Definitions that generate infinitely many distinct tuples still need an explicit
+termination predicate or PostgreSQL `statement_timeout`.
 
 **Default:** `100`  
-**Range:** `1` – `10000`
+**Range:** `0` – `100000`
 
 ```sql
 -- Allow deeper recursion for large hierarchies

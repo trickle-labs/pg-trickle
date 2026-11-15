@@ -3493,3 +3493,278 @@ async fn test_cte_invalid_query_fails() {
         "Creation with invalid CTE query should fail"
     );
 }
+
+// Issue #1411: a recursive dependency is not necessarily a seed dependency.
+// Compare complete multisets after every mutation, not just row counts: a
+// repeated derivation must not duplicate a node, and an alternate path must
+// keep it reachable after another derivation is deleted.
+const ISSUE_1411_REACH: &str = "WITH RECURSIVE d AS (\
+    SELECT id AS node FROM nodes WHERE id = 0 \
+    UNION \
+    SELECT e.dst AS node FROM d JOIN edges e ON e.src = d.node\
+) SELECT node FROM d";
+
+async fn issue_1411_graph(mode: &str, edges: &str) -> E2eDb {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE nodes (id INT PRIMARY KEY)").await;
+    db.execute("INSERT INTO nodes SELECT generate_series(0, 9)")
+        .await;
+    db.execute("CREATE TABLE edges (src INT, dst INT, PRIMARY KEY (src, dst))")
+        .await;
+    if !edges.is_empty() {
+        db.execute(&format!("INSERT INTO edges VALUES {edges}"))
+            .await;
+    }
+    if mode == "IMMEDIATE" {
+        create_immediate_st(&db, "reach_from_0", ISSUE_1411_REACH).await;
+    } else {
+        db.create_st("reach_from_0", ISSUE_1411_REACH, "1d", mode)
+            .await;
+    }
+    db.assert_st_matches_query("public.reach_from_0", ISSUE_1411_REACH)
+        .await;
+    db
+}
+
+async fn issue_1411_check(db: &E2eDb, mode: &str) {
+    if mode != "IMMEDIATE" {
+        db.refresh_st("reach_from_0").await;
+    }
+    // IMMEDIATE must pass without a refresh or eventual-convergence retry.
+    db.assert_st_matches_query("public.reach_from_0", ISSUE_1411_REACH)
+        .await;
+}
+
+#[tokio::test]
+async fn test_issue_1411_differential_recursive_source_delete() {
+    let db = issue_1411_graph("DIFFERENTIAL", "(0,1), (1,2), (2,3), (0,7), (7,3)").await;
+    db.execute("DELETE FROM edges WHERE src = 1 AND dst = 2")
+        .await;
+    issue_1411_check(&db, "DIFFERENTIAL").await;
+    let nodes: Vec<i32> = db
+        .query_scalar("SELECT array_agg(node ORDER BY node) FROM reach_from_0")
+        .await;
+    assert_eq!(nodes, vec![0, 1, 3, 7]);
+    // The fix must not hide the wrong differential result behind FULL refresh.
+    let action: String = db
+        .query_scalar(
+            "SELECT action FROM pgtrickle.pgt_refresh_history \
+             WHERE status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1",
+        )
+        .await;
+    assert_eq!(action, "DIFFERENTIAL");
+    issue_1411_check(&db, "DIFFERENTIAL").await;
+}
+
+#[tokio::test]
+async fn test_issue_1411_auto_recursive_source_delete() {
+    let db = issue_1411_graph("AUTO", "(0,1), (1,2), (2,3), (0,7), (7,3)").await;
+    db.execute("DELETE FROM edges WHERE src = 1 AND dst = 2")
+        .await;
+    issue_1411_check(&db, "AUTO").await;
+}
+
+#[tokio::test]
+async fn test_issue_1411_immediate_recursive_source_delete() {
+    let db = issue_1411_graph("IMMEDIATE", "(0,1), (1,2), (2,3), (0,7), (7,3)").await;
+    db.execute("INSERT INTO edges VALUES (3,4)").await;
+    issue_1411_check(&db, "IMMEDIATE").await;
+    db.execute("DELETE FROM edges WHERE src = 1 AND dst = 2")
+        .await;
+    issue_1411_check(&db, "IMMEDIATE").await;
+    let nodes: Vec<i32> = db
+        .query_scalar("SELECT array_agg(node ORDER BY node) FROM reach_from_0")
+        .await;
+    assert_eq!(nodes, vec![0, 1, 3, 4, 7]);
+}
+
+#[tokio::test]
+async fn test_issue_1411_immediate_cycle_closing_insert() {
+    let db = issue_1411_graph("IMMEDIATE", "(0,1), (1,2)").await;
+    db.execute("INSERT INTO edges VALUES (2,0)").await;
+    issue_1411_check(&db, "IMMEDIATE").await;
+    assert_eq!(db.count("public.reach_from_0").await, 3);
+}
+
+async fn issue_1411_cycle_removal(mode: &str) {
+    let db = issue_1411_graph(mode, "(0,1), (1,2), (2,3)").await;
+    for sql in [
+        "INSERT INTO edges VALUES (3,1), (0,3)",
+        // The cycle remains supported by an independent root edge.
+        "DELETE FROM edges WHERE src = 0 AND dst = 1",
+        // No root path remains. A cycle cannot support its own reachability.
+        "DELETE FROM edges WHERE src = 0 AND dst = 3",
+        "INSERT INTO edges VALUES (0,2)",
+        "DELETE FROM nodes WHERE id = 0",
+        // edges has no NEW transition relation when nodes is the DML target.
+        "INSERT INTO nodes VALUES (0)",
+    ] {
+        db.execute(sql).await;
+        issue_1411_check(&db, mode).await;
+    }
+}
+
+#[tokio::test]
+async fn test_issue_1411_differential_disconnected_cycle_and_root_changes() {
+    issue_1411_cycle_removal("DIFFERENTIAL").await;
+}
+
+#[tokio::test]
+async fn test_issue_1411_immediate_disconnected_cycle_and_root_changes() {
+    issue_1411_cycle_removal("IMMEDIATE").await;
+}
+
+#[tokio::test]
+async fn test_issue_1411_mixed_batch_does_not_expand_from_deleted_path() {
+    let db = issue_1411_graph("DIFFERENTIAL", "(0,1), (1,2), (0,7)").await;
+    db.execute("DELETE FROM edges WHERE src = 0 AND dst = 1")
+        .await;
+    db.execute("INSERT INTO edges VALUES (2,3), (7,4)").await;
+    issue_1411_check(&db, "DIFFERENTIAL").await;
+    let nodes: Vec<i32> = db
+        .query_scalar("SELECT array_agg(node ORDER BY node) FROM reach_from_0")
+        .await;
+    assert_eq!(nodes, vec![0, 4, 7]);
+    db.execute("UPDATE edges SET dst = 1 WHERE src = 0 AND dst = 7")
+        .await;
+    issue_1411_check(&db, "DIFFERENTIAL").await;
+    db.execute("DELETE FROM edges WHERE src = 1 AND dst = 2")
+        .await;
+    db.execute("INSERT INTO edges VALUES (1,2)").await;
+    issue_1411_check(&db, "DIFFERENTIAL").await;
+}
+
+async fn issue_1411_mutation_trace(mode: &str) {
+    let db = issue_1411_graph(mode, "(0,1), (1,2), (2,3), (0,7), (7,3)").await;
+    for sql in [
+        "INSERT INTO edges VALUES (3,4), (7,4), (4,1), (4,4)",
+        "DELETE FROM edges WHERE src = 1 AND dst = 2",
+        "UPDATE edges SET dst = 5 WHERE src = 7 AND dst = 3",
+        "INSERT INTO edges VALUES (5,2), (2,0)",
+        "DELETE FROM edges WHERE src = 0",
+        "INSERT INTO edges VALUES (0,6), (6,7)",
+        "DELETE FROM edges WHERE dst = 4",
+        "INSERT INTO edges VALUES (4,5), (6,4)",
+        "UPDATE edges SET dst = 9 WHERE src = 6 AND dst = 7",
+        "DELETE FROM edges WHERE src IN (4, 5, 6)",
+        "INSERT INTO edges VALUES (6,1), (1,5), (5,3)",
+        "DELETE FROM edges WHERE src = 8", // empty transition relations
+        "UPDATE edges SET dst = dst WHERE src = 0", // unchanged result
+    ] {
+        db.execute(sql).await;
+        issue_1411_check(&db, mode).await;
+    }
+}
+
+#[tokio::test]
+async fn test_issue_1411_differential_alternating_mutation_trace() {
+    issue_1411_mutation_trace("DIFFERENTIAL").await;
+}
+
+#[tokio::test]
+async fn test_issue_1411_immediate_alternating_mutation_trace() {
+    issue_1411_mutation_trace("IMMEDIATE").await;
+}
+
+async fn issue_1411_deep_set_recursion(mode: &str) {
+    let db = issue_1411_graph(mode, "").await;
+    db.execute("INSERT INTO edges SELECT n, n + 1 FROM generate_series(0, 149) n")
+        .await;
+    issue_1411_check(&db, mode).await;
+    assert_eq!(db.count("public.reach_from_0").await, 151);
+    db.execute("INSERT INTO edges VALUES (150,0), (0,150)")
+        .await;
+    issue_1411_check(&db, mode).await;
+    // Deleting the long path leaves the short path to 150 (and the root).
+    db.execute("DELETE FROM edges WHERE src = 0 AND dst = 1")
+        .await;
+    issue_1411_check(&db, mode).await;
+    assert_eq!(db.count("public.reach_from_0").await, 2);
+}
+
+#[tokio::test]
+async fn test_issue_1411_differential_union_not_truncated_by_depth_guard() {
+    issue_1411_deep_set_recursion("DIFFERENTIAL").await;
+}
+
+#[tokio::test]
+async fn test_issue_1411_immediate_union_not_truncated_by_depth_guard() {
+    issue_1411_deep_set_recursion("IMMEDIATE").await;
+}
+
+#[tokio::test]
+async fn test_issue_1411_immediate_uuid_transition_inputs() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE uuid_roots (id UUID PRIMARY KEY)")
+        .await;
+    db.execute("CREATE TABLE uuid_edges (src UUID, dst UUID, PRIMARY KEY (src, dst))")
+        .await;
+    db.execute("INSERT INTO uuid_roots VALUES ('00000000-0000-0000-0000-000000000001')")
+        .await;
+    db.execute(
+        "INSERT INTO uuid_edges VALUES \
+         ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002')",
+    )
+    .await;
+    let query = "WITH RECURSIVE d AS (SELECT id AS node FROM uuid_roots UNION \
+                 SELECT e.dst AS node FROM d JOIN uuid_edges e ON e.src = d.node) \
+                 SELECT node FROM d";
+    create_immediate_st(&db, "uuid_reach", query).await;
+    for sql in [
+        "INSERT INTO uuid_edges VALUES \
+         ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001')",
+        "DELETE FROM uuid_roots",
+        "INSERT INTO uuid_roots VALUES ('00000000-0000-0000-0000-000000000001')",
+        "DELETE FROM uuid_edges WHERE src = '00000000-0000-0000-0000-000000000001'",
+    ] {
+        db.execute(sql).await;
+        db.assert_st_matches_query("public.uuid_reach", query).await;
+    }
+}
+
+#[tokio::test]
+async fn test_issue_1411_immediate_duplicate_nullable_derivations() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE roots (id TEXT PRIMARY KEY)").await;
+    db.execute("CREATE TABLE links (id INT PRIMARY KEY, src TEXT, dst TEXT)")
+        .await;
+    db.execute("INSERT INTO roots VALUES ('root')").await;
+    let query = "WITH RECURSIVE d AS (SELECT id AS node FROM roots UNION \
+                 SELECT e.dst AS node FROM d JOIN links e ON e.src = d.node) \
+                 SELECT node FROM d";
+    create_immediate_st(&db, "text_reach", query).await;
+    for sql in [
+        "INSERT INTO links VALUES (1,'root','a'), (2,'root','a'), \
+         (3,'root',NULL), (4,'a',NULL), (5,'a','root')",
+        "DELETE FROM links WHERE id IN (1,3)",
+        "DELETE FROM roots",
+        "INSERT INTO roots VALUES ('root')",
+        "DELETE FROM links WHERE id = 2",
+    ] {
+        db.execute(sql).await;
+        db.assert_st_matches_query("public.text_reach", query).await;
+    }
+}
+
+#[tokio::test]
+async fn test_issue_1411_immediate_transaction_rollback_preserves_result() {
+    let db = issue_1411_graph("IMMEDIATE", "(0,1), (1,2)").await;
+    let mut tx = db.pool.begin().await.expect("begin source transaction");
+    sqlx::query("INSERT INTO edges VALUES (2,0)")
+        .execute(&mut *tx)
+        .await
+        .expect("close cycle within transaction");
+    sqlx::query("DELETE FROM edges WHERE src = 0 AND dst = 1")
+        .execute(&mut *tx)
+        .await
+        .expect("disconnect cycle within transaction");
+    let nodes: Vec<i32> =
+        sqlx::query_scalar("SELECT array_agg(node ORDER BY node) FROM reach_from_0")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read immediate result before commit");
+    assert_eq!(nodes, vec![0]);
+    tx.rollback().await.expect("rollback source transaction");
+    issue_1411_check(&db, "IMMEDIATE").await;
+    assert_eq!(db.count("public.reach_from_0").await, 3);
+}

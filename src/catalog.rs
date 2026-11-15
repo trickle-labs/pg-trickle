@@ -3965,6 +3965,7 @@ pub struct SchedulerJob {
     pub outcome_code: Option<String>,
     pub outcome_sqlstate: Option<String>,
     pub worker_slot_generation: Option<i64>,
+    pub member_failure_recorded: bool,
 }
 
 impl SchedulerJob {
@@ -4135,7 +4136,7 @@ impl SchedulerJob {
                      root_pgt_id, status, scheduler_pid, worker_pid, attempt_no, \
                      enqueued_at, started_at, finished_at, outcome_detail, retryable, \
                      dispatch_tick_id, tick_watermark_lsn::text, \
-                     outcome_code, outcome_sqlstate, worker_slot_generation \
+                     outcome_code, outcome_sqlstate, worker_slot_generation, member_failure_recorded \
                      FROM pgtrickle.pgt_scheduler_jobs \
                      WHERE job_id = $1",
                     None,
@@ -4252,7 +4253,7 @@ impl SchedulerJob {
     /// 6=root_pgt_id, 7=status, 8=scheduler_pid, 9=worker_pid, 10=attempt_no,
     /// 11=enqueued_at, 12=started_at, 13=finished_at, 14=outcome_detail, 15=retryable,
     /// 16=dispatch_tick_id, 17=tick_watermark_lsn, 18=outcome_code,
-    /// 19=outcome_sqlstate, 20=worker_slot_generation.
+    /// 19=outcome_sqlstate, 20=worker_slot_generation, 21=member_failure_recorded.
     fn from_spi_table_row(table: &SpiTupleTable<'_>) -> Result<Self, PgTrickleError> {
         let map_spi = |e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string());
 
@@ -4285,6 +4286,7 @@ impl SchedulerJob {
             outcome_code: table.get::<String>(18).map_err(map_spi)?,
             outcome_sqlstate: table.get::<String>(19).map_err(map_spi)?,
             worker_slot_generation: table.get::<i64>(20).map_err(map_spi)?,
+            member_failure_recorded: table.get::<bool>(21).map_err(map_spi)?.unwrap_or(false),
         })
     }
 }

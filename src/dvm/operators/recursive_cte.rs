@@ -7,7 +7,7 @@
 //!    base case normally, then propagate new rows through the recursive
 //!    term using a nested `WITH RECURSIVE`.
 //!
-//! 2. **Delete-and-Rederive (DRed)** for mixed INSERT/DELETE/UPDATE changes:
+//! 2. **Delete-and-Rederive (DRed)** for mixed UNION ALL changes:
 //!    a) Propagate insertions via semi-naive (same as #1)
 //!    b) Over-delete: propagate base-case deletions through the recursive
 //!    term against ST storage to find all transitively-derived rows
@@ -19,12 +19,15 @@
 //!    diffs against ST storage. Used when the CTE has more columns than
 //!    the outer SELECT projects (column mismatch), since the incremental
 //!    paths require all CTE columns to be present in the ST storage table.
+//!    Also used for UNION with deletions: a set result need not retain the
+//!    recursive source's join columns or provenance, and may contain cycles.
 //!
 //! ## Strategy Selection
 //!
 //! When CTE output columns == ST storage columns (no mismatch):
 //!   - INSERT-only → semi-naive (strategy 1)
-//!   - Mixed changes → DRed (strategy 2)
+//!   - Mixed UNION ALL changes → DRed (strategy 2)
+//!   - Mixed UNION changes → recomputation/diff (strategy 3)
 //!
 //! When CTE columns ⊃ ST columns (mismatch):
 //!   - All change types → recomputation (strategy 3)
@@ -69,8 +72,10 @@ use crate::error::PgTrickleError;
 /// The strategy depends on whether deletion changes are present:
 ///
 /// - **INSERT-only**: Semi-naive propagation (efficient)
-/// - **Mixed changes**: Delete-and-Rederive (DRed) — propagates both
-///   insertions and deletions incrementally without full recomputation.
+/// - **Mixed UNION ALL changes**: Delete-and-Rederive (DRed).
+/// - **Mixed UNION changes**: recompute the least fixed point and diff it
+///   against storage; alternative derivations and cycles must not survive
+///   without a path from the base case.
 ///
 /// **Non-linear recursion** (multiple self-references in the recursive
 /// term) is detected and rejected, since PostgreSQL restricts the
@@ -150,13 +155,22 @@ pub fn diff_recursive_cte(
         return generate_recomputation_delta(ctx, alias, columns, base, recursive, *union_all);
     }
 
-    // Columns match — differentiate the base case and choose strategy.
-    let base_delta = ctx.diff_node(base)?;
-
-    // Check whether any source table has DELETE or UPDATE changes.
-    let source_oids = base.source_oids();
+    // A source used only by the recursive term can retract a derivation too
+    // (for example, deleting an edge while the root/seed table is unchanged).
+    let source_oids = op.source_oids();
     let has_deletes = check_for_delete_changes(ctx, &source_oids)?;
 
+    if has_deletes && !*union_all {
+        // Set recursion can have alternative paths and self-supporting cycles.
+        // The storage-based DRed cascade assumes parent/join columns are stored;
+        // reachability(node) does not contain edges(src, dst). Recompute the
+        // least fixed point, then emit only its difference from storage. This
+        // also handles mixed batches without expanding from now-unreachable
+        // rows in the old result. Keep the stream table in DIFFERENTIAL mode.
+        return generate_recomputation_delta(ctx, alias, columns, base, recursive, *union_all);
+    }
+
+    let base_delta = ctx.diff_node(base)?;
     if has_deletes {
         // Mixed INSERT/DELETE/UPDATE changes → DRed (Delete-and-Rederive) algorithm.
         //
@@ -245,13 +259,15 @@ fn check_for_delete_changes(
     // ── DIFFERENTIAL mode: query change buffer tables via LSN ─────────
     for &oid in source_oids {
         let change_table = ctx.change_table_for_source(oid);
-        let prev_lsn = ctx.prev_frontier().get_lsn(oid);
+        let prev_lsn = ctx.get_prev_lsn(oid);
+        let new_lsn = ctx.get_new_lsn(oid);
 
         let check_sql = format!(
             "SELECT EXISTS(\
                 SELECT 1 FROM {change_table} \
                 WHERE action = 'D' \
-                AND lsn > '{prev_lsn}'::pg_lsn\
+                AND lsn > '{prev_lsn}'::pg_lsn \
+                AND lsn <= '{new_lsn}'::pg_lsn\
             )"
         );
 
@@ -288,7 +304,7 @@ fn generate_recomputation_delta(
     columns: &[String],
     base: &OpTree,
     recursive: &OpTree,
-    _union_all: bool,
+    union_all: bool,
 ) -> Result<DiffResult, PgTrickleError> {
     // We need the ST storage table name for the anti-join
     let st_table = ctx
@@ -318,10 +334,11 @@ fn generate_recomputation_delta(
         let rec_sql = generate_query_sql(recursive, Some(alias))?;
         let alias_q = quote_ident(alias);
         let col_list_str = col_list(columns);
+        let union_kw = if union_all { "UNION ALL" } else { "UNION" };
         let sql = format!(
             "WITH RECURSIVE {alias_q} AS (\n\
                     {base_sql}\n\
-                    UNION ALL\n\
+                    {union_kw}\n\
                     {rec_sql}\n\
                 )\n\
                 SELECT {col_list_str} FROM {alias_q}",
@@ -664,12 +681,14 @@ fn generate_semi_naive_ins_only(
         columns,
     )?;
 
-    // ── Depth guard (both DIFFERENTIAL and IMMEDIATE modes) ──────────
-    // COR-2: Guard is now unconditional — the GUC is applied to both modes.
+    // Preserve UNION's tuple identity; only bag recursion carries depth.
     #[cfg(not(test))]
-    let max_depth = crate::config::pg_trickle_ivm_recursive_max_depth();
+    let max_depth = recursive_delta_depth_limit(
+        union_all,
+        crate::config::pg_trickle_ivm_recursive_max_depth(),
+    );
     #[cfg(test)]
-    let max_depth: Option<i32> = None;
+    let max_depth = recursive_delta_depth_limit(union_all, None);
 
     let (seed_from_base, seed_from_existing, propagation) = if let Some(depth_limit) = max_depth {
         // Wrap each seed in a subquery so __pgt_depth is added as a new
@@ -717,12 +736,13 @@ fn generate_semi_naive_ins_only(
         .collect();
     let dred_row_id_hash = crate::dvm::operators::scan::build_hash_expr(&dred_hash_exprs);
 
+    let insert_source = recursive_insert_source(ctx, alias, columns, &delta_cte, union_all)?;
     let ins_final_cte = ctx.next_cte_name(&format!("dred_ifin_{alias}"));
     let ins_final_sql = format!(
         "SELECT {dred_row_id_hash} AS __pgt_row_id,\n\
                'I'::text AS __pgt_action,\n\
                {col_list_str}\n\
-         FROM {delta_cte} sub",
+         FROM {insert_source} sub",
     );
     ctx.add_cte(ins_final_cte.clone(), ins_final_sql);
 
@@ -730,7 +750,7 @@ fn generate_semi_naive_ins_only(
         cte_name: ins_final_cte,
         columns: columns.to_vec(),
         schema: crate::dvm::schema::RelationSchema::from_names(columns),
-        is_deduplicated: false,
+        is_deduplicated: !union_all,
         has_key_changed: false,
     })
 }
@@ -968,6 +988,44 @@ fn collect_cascade_cols(op: &OpTree, out: &mut Vec<String>) {
     }
 }
 
+/// A hidden depth column would make (node, 0) and (node, 3) distinct under
+/// UNION, defeating its fixpoint on cycles. Only UNION ALL carries that column.
+/// Set recursion uses PostgreSQL's original tuple equality and termination;
+/// unbounded definitions still need a SQL termination predicate/statement timeout.
+fn recursive_delta_depth_limit(union_all: bool, configured: Option<i32>) -> Option<i32> {
+    if union_all { configured } else { None }
+}
+
+/// Turn candidate insertions into a genuine set delta, not new derivations of
+/// already stored rows. EXCEPT also deduplicates on user columns (including
+/// NULLs), before row IDs are attached and the result reaches an upsert.
+/// UNION ALL deliberately retains its multiplicities.
+fn recursive_insert_source(
+    ctx: &mut DiffContext,
+    alias: &str,
+    columns: &[String],
+    delta_cte: &str,
+    union_all: bool,
+) -> Result<String, PgTrickleError> {
+    if union_all {
+        return Ok(delta_cte.to_string());
+    }
+    let st_table = ctx
+        .st_qualified_name
+        .as_ref()
+        .ok_or_else(|| {
+            PgTrickleError::InternalError("storage required for recursive set delta".into())
+        })?
+        .clone();
+    let cols = col_list(columns);
+    let new_rows = ctx.next_cte_name(&format!("rc_new_{alias}"));
+    ctx.add_cte(
+        new_rows.clone(),
+        format!("SELECT {cols} FROM {delta_cte}\nEXCEPT\nSELECT {cols} FROM {st_table}"),
+    );
+    Ok(new_rows)
+}
+
 /// Try to generate depth-guarded propagation SQL for the semi-naive recursive step.
 ///
 /// When `max_depth` is active in IMMEDIATE mode, the propagation term of the
@@ -1125,15 +1183,15 @@ fn generate_semi_naive_delta(
         columns,
     )?;
 
-    // ── Depth guard (IMMEDIATE mode only) ────────────────────────────
-    //
-    // In IMMEDIATE mode (TransitionTable delta source), inject a
-    // ── Depth guard (both DIFFERENTIAL and IMMEDIATE modes) ──────────
-    // COR-2: Guard is now unconditional — the GUC is applied to both modes.
+    // UNION ALL keeps the configured depth guard in both refresh modes.
+    // UNION must deduplicate on user columns only, including on cyclic graphs.
     #[cfg(not(test))]
-    let max_depth = crate::config::pg_trickle_ivm_recursive_max_depth();
+    let max_depth = recursive_delta_depth_limit(
+        union_all,
+        crate::config::pg_trickle_ivm_recursive_max_depth(),
+    );
     #[cfg(test)]
-    let max_depth: Option<i32> = None;
+    let max_depth = recursive_delta_depth_limit(union_all, None);
 
     let (seed_from_base, seed_from_existing, propagation) = if let Some(depth_limit) = max_depth {
         // Wrap each seed in a subquery and add __pgt_depth = 0 in the
@@ -1239,12 +1297,13 @@ fn build_semi_naive_result(
         .collect();
     let sn_row_id_hash = crate::dvm::operators::scan::build_hash_expr(&sn_hash_exprs);
 
+    let insert_source = recursive_insert_source(ctx, alias, columns, delta_cte, union_all)?;
     let final_cte_name = ctx.next_cte_name(&format!("rc_final_{alias}"));
     let final_sql = format!(
         "SELECT {sn_row_id_hash} AS __pgt_row_id,\n\
                'I'::text AS __pgt_action,\n\
                {col_list_str}\n\
-         FROM {delta_cte} sub",
+         FROM {insert_source} sub",
     );
     ctx.add_cte(final_cte_name.clone(), final_sql);
 
@@ -1252,7 +1311,7 @@ fn build_semi_naive_result(
         cte_name: final_cte_name,
         columns: columns.to_vec(),
         schema: crate::dvm::schema::RelationSchema::from_names(columns),
-        is_deduplicated: false,
+        is_deduplicated: !union_all,
         has_key_changed: false,
     })
 }
@@ -1768,20 +1827,17 @@ fn generate_change_buffer_from(
                 }
                 // No NEW table for this OID — source had no inserts/updates.
                 // Return an empty relation with the correct columns.
-                let col_refs: Vec<String> = columns
-                    .iter()
-                    .map(|c| format!("NULL::text AS {}", quote_ident(&c.name)))
-                    .collect();
+                let source_sql = generate_query_sql(op, None)?;
                 let alias_q = quote_ident(alias);
                 return Ok(format!(
-                    "(SELECT {cols} WHERE false) AS {alias_q}",
-                    cols = col_refs.join(", "),
+                    "(SELECT * FROM ({source_sql}) __pgt_empty WHERE false) AS {alias_q}",
                 ));
             }
 
             // ── DIFFERENTIAL mode: read INSERT rows ─────────────────
             let change_table = ctx.change_table_for_source(*table_oid);
             let prev_lsn = ctx.get_prev_lsn(*table_oid);
+            let new_lsn = ctx.get_new_lsn(*table_oid);
 
             // A44-10 (D+I schema): flat column names — c."col" for I-rows (new values).
             // D-rows (old values) are excluded — only new/surviving rows contribute
@@ -1793,7 +1849,8 @@ fn generate_change_buffer_from(
 
             Ok(format!(
                 "(SELECT {cols} FROM {change_table} c \
-                 WHERE c.action = 'I' AND c.lsn > '{prev_lsn}'::pg_lsn) AS {alias_q}",
+                 WHERE c.action = 'I' AND c.lsn > '{prev_lsn}'::pg_lsn \
+                 AND c.lsn <= '{new_lsn}'::pg_lsn) AS {alias_q}",
                 cols = col_refs.join(", "),
                 alias_q = quote_ident(alias),
             ))
@@ -1882,19 +1939,16 @@ fn generate_old_change_buffer_from(
                     ));
                 }
 
-                let col_refs: Vec<String> = columns
-                    .iter()
-                    .map(|c| format!("NULL::text AS {}", quote_ident(&c.name)))
-                    .collect();
+                let source_sql = generate_query_sql(op, None)?;
                 let alias_q = quote_ident(alias);
                 return Ok(format!(
-                    "(SELECT {cols} WHERE false) AS {alias_q}",
-                    cols = col_refs.join(", "),
+                    "(SELECT * FROM ({source_sql}) __pgt_empty WHERE false) AS {alias_q}",
                 ));
             }
 
             let change_table = ctx.change_table_for_source(*table_oid);
             let prev_lsn = ctx.get_prev_lsn(*table_oid);
+            let new_lsn = ctx.get_new_lsn(*table_oid);
 
             let col_refs: Vec<String> = columns
                 .iter()
@@ -1906,7 +1960,8 @@ fn generate_old_change_buffer_from(
 
             Ok(format!(
                 "(SELECT {cols} FROM {change_table} c \
-                 WHERE c.action = 'D' AND c.lsn > '{prev_lsn}'::pg_lsn) AS {alias_q}",
+                 WHERE c.action = 'D' AND c.lsn > '{prev_lsn}'::pg_lsn \
+                 AND c.lsn <= '{new_lsn}'::pg_lsn) AS {alias_q}",
                 cols = col_refs.join(", "),
                 alias_q = quote_ident(alias),
             ))
@@ -3983,5 +4038,150 @@ mod tests {
             !result.cte_name.is_empty(),
             "Result should have a non-empty CTE name"
         );
+    }
+    // Issue #1411: set-valued recursion, typed empty inputs, and CDC windows.
+    #[test]
+    fn test_issue_1411_depth_guard_does_not_change_union_identity() {
+        assert_eq!(recursive_delta_depth_limit(false, Some(100)), None);
+        assert_eq!(recursive_delta_depth_limit(true, Some(100)), Some(100));
+        assert_eq!(recursive_delta_depth_limit(true, None), None);
+    }
+
+    #[test]
+    fn test_issue_1411_missing_transition_inputs_preserve_source_types() {
+        use crate::dvm::diff::DeltaSource;
+        use std::collections::HashMap;
+
+        let ctx = test_ctx().with_delta_source(DeltaSource::TransitionTable {
+            tables: HashMap::new(),
+        });
+        let scan = make_scan(200, "edge table", "graph schema", "e", &["src", "dst"]);
+        for sql in [
+            generate_change_buffer_from(&ctx, &scan, "\"public\".\"reach\"").unwrap(),
+            generate_old_change_buffer_from(&ctx, &scan, "\"public\".\"reach\"").unwrap(),
+        ] {
+            assert!(sql.contains("\"graph schema\".\"edge table\""), "{sql}");
+            assert!(sql.contains("\"e\".\"src\""), "{sql}");
+            assert!(sql.contains("\"e\".\"dst\""), "{sql}");
+            assert!(sql.contains("WHERE false"), "{sql}");
+            assert!(!sql.contains("NULL::text"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn test_issue_1411_present_transition_inputs_still_use_transition_rows() {
+        use crate::dvm::diff::{DeltaSource, TransitionTableNames};
+        use std::collections::HashMap;
+
+        let ctx = test_ctx().with_delta_source(DeltaSource::TransitionTable {
+            tables: HashMap::from([(
+                200,
+                TransitionTableNames {
+                    old_name: Some("old_edges".into()),
+                    new_name: Some("new_edges".into()),
+                },
+            )]),
+        });
+        let scan = make_scan(200, "edges", "public", "e", &["src", "dst"]);
+        let new_sql = generate_change_buffer_from(&ctx, &scan, "reach").unwrap();
+        let old_sql = generate_old_change_buffer_from(&ctx, &scan, "reach").unwrap();
+        assert!(new_sql.contains("FROM new_edges"), "{new_sql}");
+        assert!(old_sql.contains("FROM old_edges"), "{old_sql}");
+        assert!(!new_sql.contains("WHERE false"));
+        assert!(!old_sql.contains("WHERE false"));
+    }
+
+    #[test]
+    fn test_issue_1411_union_emits_new_tuples_not_additional_derivations() {
+        use crate::dvm::operators::test_helpers::test_ctx_with_st;
+
+        let mut ctx = test_ctx_with_st("public", "reach");
+        let columns = vec!["node".to_string()];
+        let result = build_semi_naive_result(
+            &mut ctx,
+            "d",
+            &columns,
+            "\"node\"",
+            "delta_nodes",
+            "SELECT 0 AS node".into(),
+            None,
+            vec![],
+            "SELECT node FROM delta_nodes".into(),
+            false,
+        )
+        .unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert!(sql.contains("\nUNION\n"), "{sql}");
+        assert!(
+            sql.contains("\nEXCEPT\nSELECT \"node\" FROM \"public\".\"reach\""),
+            "{sql}"
+        );
+        assert!(!sql.contains("__pgt_depth"), "{sql}");
+        assert!(result.is_deduplicated);
+    }
+
+    #[test]
+    fn test_issue_1411_union_all_keeps_bag_delta() {
+        use crate::dvm::operators::test_helpers::test_ctx_with_st;
+
+        let mut ctx = test_ctx_with_st("public", "reach");
+        let columns = vec!["node".to_string()];
+        let result = build_semi_naive_result(
+            &mut ctx,
+            "d",
+            &columns,
+            "\"node\"",
+            "delta_nodes",
+            "SELECT 0 AS node".into(),
+            None,
+            vec![],
+            "SELECT node FROM delta_nodes".into(),
+            true,
+        )
+        .unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert!(sql.contains("\nUNION ALL\n"), "{sql}");
+        assert!(!sql.contains("\nEXCEPT\n"), "{sql}");
+        assert!(!result.is_deduplicated);
+    }
+
+    #[test]
+    fn test_issue_1411_recomputation_reconstruction_preserves_union() {
+        use crate::dvm::operators::test_helpers::test_ctx_with_st;
+
+        let columns = vec!["node".to_string()];
+        let base = make_scan(100, "nodes", "public", "n", &["node"]);
+        let recursive = make_self_ref("d", "d", &["node"]);
+        for union_all in [false, true] {
+            let mut ctx = test_ctx_with_st("public", "reach");
+            let result =
+                generate_recomputation_delta(&mut ctx, "d", &columns, &base, &recursive, union_all)
+                    .unwrap();
+            let sql = ctx.build_with_query(&result.cte_name);
+            let expected = if union_all { "UNION ALL" } else { "UNION" };
+            assert!(
+                sql.contains(&format!("\n{expected}\nSELECT \"d\".\"node\"")),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_issue_1411_recursive_seeds_respect_both_frontiers() {
+        use crate::version::Frontier;
+
+        let mut prev = Frontier::new();
+        let mut next = Frontier::new();
+        prev.set_source(200, "0/10".into(), String::new());
+        next.set_source(200, "0/20".into(), String::new());
+        let ctx = DiffContext::new_standalone(prev, next);
+        let scan = make_scan(200, "edges", "public", "e", &["src", "dst"]);
+        for sql in [
+            generate_change_buffer_from(&ctx, &scan, "reach").unwrap(),
+            generate_old_change_buffer_from(&ctx, &scan, "reach").unwrap(),
+        ] {
+            assert!(sql.contains("lsn > '0/10'::pg_lsn"), "{sql}");
+            assert!(sql.contains("lsn <= '0/20'::pg_lsn"), "{sql}");
+        }
     }
 }

@@ -281,7 +281,7 @@ jobs:
     name: Unit tests (scheduled/manual, macos-arm64)
     needs: release-qualification-contract
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7

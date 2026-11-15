@@ -26,6 +26,7 @@ pub fn rebuild_cdc_trigger_function(
     let oid_u32 = source_oid.to_u32();
     // CITUS-4: Use stable_name for all trigger/function names.
     let cdc_name = super::get_cdc_name_for_source(source_oid);
+    let sync_commit = super::buffer_uses_sync_commit(&format!("changes_{cdc_name}"))?;
 
     // Rebuild the function body(ies) for the current CDC trigger mode GUC.
     let mode = config::pg_trickle_cdc_trigger_mode();
@@ -38,19 +39,19 @@ pub fn rebuild_cdc_trigger_function(
                 &columns,
                 super::has_immediate_primary_key(source_oid)?,
             );
-            Spi::run(&ins_fn).map_err(|e| {
+            Spi::run(&super::with_sync_guard(&ins_fn, sync_commit)).map_err(|e| {
                 PgTrickleError::SpiError(format!(
                     "Failed to rebuild CDC INSERT trigger function: {}",
                     e
                 ))
             })?;
-            Spi::run(&upd_fn).map_err(|e| {
+            Spi::run(&super::with_sync_guard(&upd_fn, sync_commit)).map_err(|e| {
                 PgTrickleError::SpiError(format!(
                     "Failed to rebuild CDC UPDATE trigger function: {}",
                     e
                 ))
             })?;
-            Spi::run(&del_fn).map_err(|e| {
+            Spi::run(&super::with_sync_guard(&del_fn, sync_commit)).map_err(|e| {
                 PgTrickleError::SpiError(format!(
                     "Failed to rebuild CDC DELETE trigger function: {}",
                     e
@@ -60,7 +61,7 @@ pub fn rebuild_cdc_trigger_function(
         config::CdcTriggerMode::Row => {
             let fn_sql =
                 super::build_row_trigger_fn_sql(change_schema, &cdc_name, &pk_columns, &columns);
-            Spi::run(&fn_sql).map_err(|e| {
+            Spi::run(&super::with_sync_guard(&fn_sql, sync_commit)).map_err(|e| {
                 PgTrickleError::SpiError(format!("Failed to rebuild CDC trigger function: {}", e))
             })?;
         }
