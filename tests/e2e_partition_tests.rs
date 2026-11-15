@@ -2055,7 +2055,10 @@ async fn test_alter_st_partition_key_with_downstream_chain_rejects_before_replac
     let current_oid: i64 = db
         .query_scalar("SELECT 'guard_chain_up'::regclass::oid::bigint")
         .await;
-    assert_eq!(current_oid, original_oid, "rejected ALTER replaced the parent");
+    assert_eq!(
+        current_oid, original_oid,
+        "rejected ALTER replaced the parent"
+    );
     let current_dependency_oid: i64 = db
         .query_scalar(
             "SELECT source_relid::bigint FROM pgtrickle.pgt_dependencies
@@ -2083,11 +2086,8 @@ async fn test_alter_st_partition_key_with_downstream_chain_rejects_before_replac
         "SELECT id, event_day, amount FROM guard_chain_src",
     )
     .await;
-    db.assert_st_matches_query(
-        "guard_chain_down",
-        "SELECT id, amount FROM guard_chain_src",
-    )
-    .await;
+    db.assert_st_matches_query("guard_chain_down", "SELECT id, amount FROM guard_chain_src")
+        .await;
     db.assert_st_matches_query("guard_chain_leaf", "SELECT id FROM guard_chain_src")
         .await;
 }
@@ -2100,10 +2100,8 @@ async fn test_alter_st_partition_key_change_and_remove_reject_with_downstream() 
             id INT PRIMARY KEY, event_day DATE NOT NULL, category TEXT NOT NULL)",
     )
     .await;
-    db.execute(
-        "INSERT INTO guard_change_src VALUES (1, '2026-01-01', 'A')",
-    )
-    .await;
+    db.execute("INSERT INTO guard_change_src VALUES (1, '2026-01-01', 'A')")
+        .await;
     db.create_st_partitioned(
         "guard_change_up",
         "SELECT id, event_day, category FROM guard_change_src",
@@ -2143,10 +2141,8 @@ async fn test_alter_st_partition_key_change_and_remove_reject_with_downstream() 
             .await;
         assert_eq!(key, "event_day");
     }
-    db.execute(
-        "INSERT INTO guard_change_src VALUES (2, '2026-02-01', 'B')",
-    )
-    .await;
+    db.execute("INSERT INTO guard_change_src VALUES (2, '2026-02-01', 'B')")
+        .await;
     db.refresh_st_with_retry("guard_change_up").await;
     db.refresh_st_with_retry("guard_change_down").await;
     db.assert_st_matches_query(
@@ -2189,7 +2185,10 @@ async fn test_alter_st_partition_key_rejects_immediate_downstream_without_losing
              WHERE tgrelid = 'guard_immediate_up'::regclass AND NOT tgisinternal",
         )
         .await;
-    assert!(triggers_before > 0, "downstream IVM must have source triggers");
+    assert!(
+        triggers_before > 0,
+        "downstream IVM must have source triggers"
+    );
 
     let err = db
         .try_execute(
@@ -2200,10 +2199,8 @@ async fn test_alter_st_partition_key_rejects_immediate_downstream_without_losing
         .expect_err("repartitioning must preserve downstream IVM trigger ownership");
     assert!(err.to_string().contains("downstream stream table"));
     assert_eq!(
-        db.query_scalar::<i64>(
-            "SELECT 'guard_immediate_up'::regclass::oid::bigint"
-        )
-        .await,
+        db.query_scalar::<i64>("SELECT 'guard_immediate_up'::regclass::oid::bigint")
+            .await,
         parent_oid
     );
     assert_eq!(
@@ -2261,6 +2258,10 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
     .execute(&mut *create_tx)
     .await
     .expect("create downstream stream table inside transaction");
+    let creator_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *create_tx)
+        .await
+        .expect("identify the connection holding the upstream read lock");
 
     let pool = db.pool.clone();
     let alter = tokio::spawn(async move {
@@ -2282,14 +2283,17 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let mut observed_wait = false;
     while std::time::Instant::now() < deadline {
-        let waiting: bool = db
-            .query_scalar(
-                "SELECT EXISTS (
-                    SELECT 1 FROM pg_catalog.pg_stat_activity
-                    WHERE application_name = 'guard_repartition_wait'
-                      AND wait_event_type = 'Lock')",
-            )
-            .await;
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_stat_activity a
+                WHERE a.application_name = 'guard_repartition_wait'
+                  AND a.wait_event_type = 'Lock'
+                  AND $1::integer = ANY(pg_catalog.pg_blocking_pids(a.pid)))",
+        )
+        .bind(creator_pid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("observe the creator blocking repartition");
         if waiting {
             observed_wait = true;
             break;
@@ -2318,10 +2322,8 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
         "unexpected post-wait ALTER result: {err}"
     );
     assert_eq!(
-        db.query_scalar::<i64>(
-            "SELECT 'guard_race_up'::regclass::oid::bigint"
-        )
-        .await,
+        db.query_scalar::<i64>("SELECT 'guard_race_up'::regclass::oid::bigint")
+            .await,
         upstream_oid
     );
     assert_eq!(
@@ -2340,11 +2342,8 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
         .await;
     db.refresh_st_with_retry("guard_race_up").await;
     db.refresh_st_with_retry("guard_race_down").await;
-    db.assert_st_matches_query(
-        "guard_race_down",
-        "SELECT id FROM guard_race_src",
-    )
-    .await;
+    db.assert_st_matches_query("guard_race_down", "SELECT id FROM guard_race_src")
+        .await;
 }
 
 // ── A1-3b: HASH partitioned stream tables ───────────────────────────────

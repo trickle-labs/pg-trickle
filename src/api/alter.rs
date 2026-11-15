@@ -1395,10 +1395,14 @@ fn alter_stream_table_partition_key(
         quote_identifier(table_name)
     );
     // nosemgrep: rust.spi.run.dynamic-format — both identifiers are escaped and ownership was checked above.
-    Spi::run(&format!("LOCK TABLE {storage_name} IN ACCESS EXCLUSIVE MODE"))
-        .map_err(|e| PgTrickleError::SpiError(format!(
+    Spi::run(&format!(
+        "LOCK TABLE {storage_name} IN ACCESS EXCLUSIVE MODE"
+    ))
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!(
             "cannot lock {schema}.{table_name} for repartitioning: {e}"
-        )))?;
+        ))
+    })?;
 
     // Repartitioning drops and recreates the storage relation. Unlike the
     // ALTER QUERY shadow swap, this path cannot rebind downstream dependency
