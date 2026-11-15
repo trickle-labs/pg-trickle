@@ -56,8 +56,8 @@ case "$PROFILE" in
         ;;
     publication)
         scale="${PGT_PGBENCH_SCALE:-10}"
-        clients="${PGT_PGBENCH_CLIENTS:-16}"
-        jobs="${PGT_PGBENCH_JOBS:-4}"
+        clients="${PGT_PGBENCH_CLIENTS:-8}"
+        jobs="${PGT_PGBENCH_JOBS:-2}"
         warmup="${PGT_PGBENCH_WARMUP:-30}"
         duration="${PGT_PGBENCH_DURATION:-60}"
         repetitions="${PGT_PGBENCH_REPETITIONS:-5}"

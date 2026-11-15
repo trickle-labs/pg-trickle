@@ -26,14 +26,16 @@ paired repetition and rotates the configuration order deterministically:
 
 The blocking profile uses the pinned PostgreSQL base image from
 `tests/Dockerfile.e2e`, scale 10, 8 clients, 2 jobs, a
-10-second warm-up, a 30-second measurement, and 3 paired repetitions. It
-matches PostgreSQL settings across the stock and extension images, then
+10-second warm-up, a 30-second measurement, and 3 paired repetitions. The
+publication profile keeps the same scale and concurrency, with a 30-second
+warm-up, 60-second measurement, and 5 paired repetitions. Matching concurrency
+keeps its p99 budget comparable to the blocking profile. Both profiles match
+PostgreSQL settings across the stock and extension images, then
 samples pgbench transaction logs at 10%, records p50/p95/p99, checks active
 stream-table correctness after each table completes a post-workload refresh,
 and samples worker `/proc` jiffies against container cgroup CPU time. The
 correctness gate waits up to eight minutes for those refreshes because a
-checkpoint-bound refresh took 345 seconds on a nightly runner. The publication
-profile is a five-repetition, 60-second run.
+checkpoint-bound refresh took 345 seconds on a nightly runner.
 
 ```bash
 ./tests/build_e2e_image.sh
