@@ -5589,6 +5589,21 @@ async fn assert_ann_worker_allows_reads_and_refresh(
     db.execute(&format!("CREATE INDEX ann_live_idx ON ann_live_stream USING {method} (embedding vector_l2_ops){options}"))
         .await;
     let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_live_stream'::regclass::oid, 'ann_live_idx'::regclass::oid)").await;
+    let operator = format!("ann_load_{method}");
+    if supervised {
+        db.execute_seq(&[
+            &format!("CREATE ROLE {operator} LOGIN PASSWORD 'ann-test-only'"),
+            &format!("GRANT USAGE ON SCHEMA pgtrickle, public TO {operator}"),
+            &format!("GRANT SELECT, MAINTAIN ON ann_live_stream TO {operator}"),
+            &format!("GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer), pgtrickle.ann_maintenance_request(bigint), pgtrickle.claim_ann_maintenance(bigint), pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO {operator}"),
+        ]).await;
+        let restricted: bool = sqlx::query_scalar("SELECT NOT rolsuper AND NOT has_table_privilege(oid, 'pgtrickle.pgt_ann_maintenance_requests', 'SELECT') FROM pg_roles WHERE rolname = $1")
+            .bind(&operator).fetch_one(&db.pool).await.expect("inspect supervisor privileges");
+        assert!(
+            restricted,
+            "supervisor must not need superuser or direct queue access"
+        );
+    }
 
     let mut old_snapshot = db.pool.begin().await.expect("begin old snapshot");
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -5619,8 +5634,8 @@ async fn assert_ann_worker_allows_reads_and_refresh(
             .env("PGHOST", "127.0.0.1")
             .env("PGPORT", port)
             .env("PGDATABASE", &database)
-            .env("PGUSER", "postgres")
-            .env("PGPASSWORD", "postgres")
+            .env("PGUSER", &operator)
+            .env("PGPASSWORD", "ann-test-only")
             .env("PGSSLMODE", "disable")
             .env("PGAPPNAME", "pgtrickle_ann_worker")
             .env("PGS_ANN_POLL_SECONDS", "1")
