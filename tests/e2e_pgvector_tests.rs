@@ -5545,6 +5545,13 @@ async fn test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex() {
 }
 
 #[tokio::test]
+async fn test_ann_supervisor_allows_restricted_reads_and_writes_during_reindex() {
+    for method in ["hnsw", "ivfflat"] {
+        assert_ann_worker_allows_reads_and_refresh(method, 5, false, true).await;
+    }
+}
+
+#[tokio::test]
 #[ignore = "sustained concurrent ANN maintenance qualification"]
 async fn test_ann_worker_sustains_reads_and_refresh_during_concurrent_reindex() {
     for method in ["hnsw", "ivfflat"] {
@@ -5589,19 +5596,35 @@ async fn assert_ann_worker_allows_reads_and_refresh(
     db.execute(&format!("CREATE INDEX ann_live_idx ON ann_live_stream USING {method} (embedding vector_l2_ops){options}"))
         .await;
     let request: i64 = db.query_scalar("SELECT pgtrickle.request_ann_maintenance('ann_live_stream'::regclass::oid, 'ann_live_idx'::regclass::oid)").await;
-    let operator = format!("ann_load_{method}");
+    let database_oid: i64 = db
+        .query_scalar("SELECT oid::bigint FROM pg_database WHERE datname = current_database()")
+        .await;
+    let operator = format!("ann_load_{method}_{database_oid}");
+    let reader_role = format!("ann_reader_{method}_{database_oid}");
+    let writer_role = format!("ann_writer_{method}_{database_oid}");
     if supervised {
         db.execute_seq(&[
             &format!("CREATE ROLE {operator} LOGIN PASSWORD 'ann-test-only'"),
+            &format!("CREATE ROLE {reader_role} NOLOGIN"),
+            &format!("CREATE ROLE {writer_role} NOLOGIN"),
             &format!("GRANT USAGE ON SCHEMA pgtrickle, public TO {operator}"),
             &format!("GRANT SELECT, MAINTAIN ON ann_live_stream TO {operator}"),
             &format!("GRANT EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer), pgtrickle.ann_maintenance_request(bigint), pgtrickle.claim_ann_maintenance(bigint), pgtrickle.finish_ann_maintenance(bigint, boolean, text) TO {operator}"),
+            &format!("GRANT USAGE ON SCHEMA public TO {reader_role}, {writer_role}"),
+            &format!("GRANT SELECT ON ann_live_stream TO {reader_role}"),
+            &format!("GRANT INSERT ON ann_live_source TO {writer_role}"),
         ]).await;
         let restricted: bool = sqlx::query_scalar("SELECT NOT rolsuper AND NOT has_table_privilege(oid, 'pgtrickle.pgt_ann_maintenance_requests', 'SELECT') FROM pg_roles WHERE rolname = $1")
             .bind(&operator).fetch_one(&db.pool).await.expect("inspect supervisor privileges");
         assert!(
             restricted,
             "supervisor must not need superuser or direct queue access"
+        );
+        let separated: bool = sqlx::query_scalar("SELECT NOT has_table_privilege($1::text::name, 'ann_live_source', 'INSERT') AND NOT has_table_privilege($2::text::name, 'ann_live_stream', 'SELECT')")
+            .bind(&reader_role).bind(&writer_role).fetch_one(&db.pool).await.expect("inspect reader and writer grants");
+        assert!(
+            separated,
+            "reader and writer privileges must remain separate"
         );
     }
 
@@ -5665,11 +5688,21 @@ async fn assert_ann_worker_allows_reads_and_refresh(
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
             let embedding = format!("[0,{id},0]");
+            let mut writer = db.pool.begin().await.expect("begin source write");
+            if supervised {
+                sqlx::query(sqlx::AssertSqlSafe(format!("SET LOCAL ROLE {writer_role}")))
+                    .execute(&mut *writer).await.expect("assume writer role");
+            }
             sqlx::query("INSERT INTO ann_live_source VALUES ($1, $2::text::vector)")
-                .bind(id).bind(&embedding).execute(&db.pool).await.expect("commit source write");
+                .bind(id).bind(&embedding).execute(&mut *writer).await.expect("insert source row");
+            writer.commit().await.expect("commit source write");
             db.refresh_st("ann_live_stream").await;
             assert_eq!(db.count("ann_live_stream").await, i64::from(id));
             let mut reader = db.pool.begin().await.expect("begin reader");
+            if supervised {
+                sqlx::query(sqlx::AssertSqlSafe(format!("SET LOCAL ROLE {reader_role}")))
+                    .execute(&mut *reader).await.expect("assume reader role");
+            }
             sqlx::query("SET LOCAL enable_seqscan = off")
                 .execute(&mut *reader).await.expect("enable index plan");
             let plan: Vec<String> = sqlx::query_scalar("EXPLAIN (COSTS OFF) SELECT id FROM ann_live_stream ORDER BY embedding <-> $1::text::vector LIMIT 1")
