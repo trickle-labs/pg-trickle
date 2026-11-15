@@ -1071,6 +1071,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check live published-package regression syntax
+        run: |
+          bash -n scripts/qualify_live_package_upgrade.sh
+          python3 -m py_compile scripts/check_ci_results.py
+
       - name: Check version references are in sync
         run: ./scripts/check_version_sync.sh
 
