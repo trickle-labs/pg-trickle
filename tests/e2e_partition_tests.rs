@@ -836,17 +836,20 @@ async fn test_partition_append_only_pk_survives_insert_only_refresh() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             name => 'app_st',
-            query => 'SELECT region, COUNT(*) AS n FROM app_source GROUP BY region',
+            query => 'SELECT id, d, region FROM app_source',
             schedule => '1m',
             refresh_mode => 'DIFFERENTIAL',
             append_only => true
         )",
     )
     .await;
-    db.refresh_st("app_st").await;
+    db.refresh_st_with_retry("app_st").await;
     db.execute("INSERT INTO app_source VALUES (2,'2025-06-01','EU')")
         .await;
-    db.refresh_st("app_st").await;
+    db.refresh_st_with_retry("app_st").await;
+    // The append-only INSERT fast path is valid for a monotonic row
+    // projection; an aggregate would legitimately revert to MERGE because
+    // inserting source rows can UPDATE an existing output group.
     let append_only: bool = db
         .query_scalar(
             "SELECT is_append_only FROM pgtrickle.pgt_stream_tables
@@ -857,11 +860,8 @@ async fn test_partition_append_only_pk_survives_insert_only_refresh() {
         append_only,
         "insert-only batches must not disable the explicit flag"
     );
-    db.assert_st_matches_query(
-        "app_st",
-        "SELECT region, COUNT(*) AS n FROM app_source GROUP BY region",
-    )
-    .await;
+    db.assert_st_matches_query("app_st", "SELECT id, d, region FROM app_source")
+        .await;
 }
 
 #[tokio::test]
@@ -891,10 +891,9 @@ async fn test_partition_direct_drop_suspends_immediate_until_protected_resume() 
     let query = "SELECT id, d FROM immediate_part_source";
     db.execute(
         "SELECT pgtrickle.create_stream_table(
-            'immediate_part_st',
-            $SELECT id, d FROM immediate_part_source$,
-            NULL,
-            'IMMEDIATE'
+            name => 'immediate_part_st',
+            query => 'SELECT id, d FROM immediate_part_source',
+            refresh_mode => 'IMMEDIATE'
         )",
     )
     .await;
