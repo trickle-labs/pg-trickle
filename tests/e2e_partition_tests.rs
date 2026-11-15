@@ -583,6 +583,51 @@ async fn test_partition_direct_drop_marks_parent_reinit_and_rebuilds_differentia
 }
 
 #[tokio::test]
+async fn test_partition_create_child_after_stream_then_direct_drop() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE create_part_root (
+            id INT, d DATE NOT NULL, PRIMARY KEY (id,d)
+        ) PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE create_part_old PARTITION OF create_part_root
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute("INSERT INTO create_part_root VALUES (1,'2025-02-01')")
+        .await;
+    let query = "SELECT COUNT(*) AS n FROM create_part_root";
+    db.create_st("create_part_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.refresh_st("create_part_st").await;
+
+    // Unlike ALTER TABLE ATTACH, CREATE TABLE ... PARTITION OF only issues
+    // CREATE TABLE on the child. It must still update the parent snapshot.
+    db.execute(
+        "CREATE TABLE create_part_new PARTITION OF create_part_root
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    db.execute("INSERT INTO create_part_root VALUES (2,'2026-03-01')")
+        .await;
+    db.refresh_st("create_part_st").await;
+    db.assert_st_matches_query("create_part_st", query).await;
+
+    db.execute("DROP TABLE create_part_new").await;
+    let state: String = db
+        .query_scalar(
+            "SELECT status || ':' || needs_reinit::text
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'create_part_st'",
+        )
+        .await;
+    assert_eq!(state, "ACTIVE:true");
+    db.refresh_st("create_part_st").await;
+    db.assert_st_matches_query("create_part_st", query).await;
+}
+
+#[tokio::test]
 async fn test_partition_nested_drop_invalidates_grandparent() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute(
