@@ -1056,14 +1056,15 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &Alt
             if empty_partition_attach {
                 // Even an empty child can later receive rows and be dropped.
                 // Keep its OID in the durable parent ancestry snapshot.
-                crate::catalog::store_column_snapshot_for_pgt_id(*pgt_id, objid)
-                    .unwrap_or_else(|e| {
+                crate::catalog::store_column_snapshot_for_pgt_id(*pgt_id, objid).unwrap_or_else(
+                    |e| {
                         pgrx::error!(
                             "pg_trickle: cannot snapshot empty attached partition on {}: {}",
                             identity,
                             e,
                         )
-                    });
+                    },
+                );
             }
             continue;
         }
@@ -1220,11 +1221,7 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &Alt
                 if immediate
                     || matches!(alter_table_hint, AlterTableHint::DetachPartitionConcurrent)
                 {
-                    suspend_for_source_ddl(
-                        *pgt_id,
-                        AlterReasonCode::DependencyAmbiguous,
-                        identity,
-                    );
+                    suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
                     suspended_pgt_ids.push(*pgt_id);
                 } else {
                     StreamTableMeta::mark_for_reinitialize(*pgt_id).unwrap_or_else(|e| {
@@ -1238,14 +1235,15 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &Alt
                 }
                 // Persist the new child membership in the same DDL transaction,
                 // so sql_drop can later trace a dropped child back to this root.
-                crate::catalog::store_column_snapshot_for_pgt_id(*pgt_id, objid)
-                    .unwrap_or_else(|e| {
+                crate::catalog::store_column_snapshot_for_pgt_id(*pgt_id, objid).unwrap_or_else(
+                    |e| {
                         pgrx::error!(
                             "pg_trickle: cannot snapshot partition change on {}: {}",
                             identity,
                             e,
                         )
-                    });
+                    },
+                );
             }
         }
     }
@@ -1416,9 +1414,7 @@ fn source_identity_changed(source_oid: pg_sys::Oid, pgt_id: i64) -> bool {
 /// There is no ALTER TABLE event on the parent for this DDL form. Use the
 /// *current* inheritance chain to update every tracked ancestor, including
 /// roots several partition levels above the newly created child.
-fn snapshot_created_partition_ancestry(
-    child_oid: pg_sys::Oid,
-) -> Result<(), PgTrickleError> {
+fn snapshot_created_partition_ancestry(child_oid: pg_sys::Oid) -> Result<(), PgTrickleError> {
     let ancestors: Vec<(i64, pg_sys::Oid)> = Spi::connect(|client| {
         let rows = client
             .select(
@@ -1863,19 +1859,11 @@ fn handle_dropped_table(obj: &DroppedObject) {
 /// For scheduled streams, the next refresh executes the FULL rebuild.
 /// IMMEDIATE has no refresh worker, so fail closed until resume performs its
 /// synchronous protected rebuild. This also applies to immediate descendants.
-fn mark_partition_removal_recovery(
-    pgt_id: i64,
-    identity: &str,
-) -> Result<(), PgTrickleError> {
-    let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
-        PgTrickleError::NotFound(format!("stream table {pgt_id}"))
-    })?;
+fn mark_partition_removal_recovery(pgt_id: i64, identity: &str) -> Result<(), PgTrickleError> {
+    let st = StreamTableMeta::get_by_id(pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
     if st.refresh_mode.is_immediate() {
-        suspend_for_source_ddl(
-            pgt_id,
-            AlterReasonCode::DependencyAmbiguous,
-            identity,
-        );
+        suspend_for_source_ddl(pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
     } else {
         StreamTableMeta::mark_for_reinitialize(pgt_id)?;
     }
