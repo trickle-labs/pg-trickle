@@ -817,6 +817,69 @@ async fn test_partition_append_only_pk_survives_insert_only_refresh() {
     .await;
 }
 
+
+#[tokio::test]
+async fn test_partition_and_plain_wal_requests_report_eligibility_blockers() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE requested_wal_plain (id INT PRIMARY KEY, v INT)")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'requested_wal_plain_st',
+            query => 'SELECT id, v FROM requested_wal_plain',
+            refresh_mode => 'DIFFERENTIAL',
+            cdc_mode => 'wal'
+        )",
+    )
+    .await;
+
+    db.execute(
+        "CREATE TABLE requested_wal_root (
+            id INT, d DATE NOT NULL, PRIMARY KEY (id,d)
+        ) PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE requested_wal_leaf PARTITION OF requested_wal_root
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'requested_wal_root_st',
+            query => 'SELECT id, d FROM requested_wal_root',
+            refresh_mode => 'DIFFERENTIAL',
+            cdc_mode => 'wal'
+        )",
+    )
+    .await;
+
+    // Neither source is currently safe to adopt into WAL: the regular table
+    // has default replica identity, and the partitioned source has relkind p.
+    // The requested CDC mode must be visible, not silently treated as TRIGGER.
+    for source in ["requested_wal_plain", "requested_wal_root"] {
+        let alert: Option<String> = db
+            .query_scalar(&format!(
+                "SELECT alert FROM pgtrickle.check_cdc_health()
+                 WHERE source_relid = '{source}'::regclass::oid::bigint",
+            ))
+            .await;
+        let alert = alert.expect("explicit WAL request needs a health explanation");
+        assert!(
+            alert.contains("WAL CDC requested"),
+            "unexpected {source} eligibility alert: {alert}",
+        );
+        assert!(
+            alert.contains("REPLICA IDENTITY FULL")
+                || alert.contains("partitioned parent")
+                || alert.contains("wal_level")
+                || alert.contains("replication slot"),
+            "alert must identify the prerequisite: {alert}",
+        );
+    }
+}
+
 // ── PT4: Foreign table source restriction ──────────────────────────────
 
 #[tokio::test]
