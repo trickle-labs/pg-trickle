@@ -13,6 +13,9 @@ class BenchmarkTests(unittest.TestCase):
     def test_json_result_ignores_prior_psql_output(self):
         self.assertEqual(benchmark.json_result('\n{"ok":true}\n'), {"ok": True})
 
+    def test_plan_execution_time_is_extracted_from_explain(self):
+        self.assertEqual(benchmark.plan_execution_ms({"plans": {"planner": [{"Execution Time": 1.25}]}}, "planner"), 1.25)
+
     def test_reader_query_uses_requested_vector_dimensions(self):
         sql = benchmark.reader_sql(768)
         self.assertIn("vector(768)", sql)
@@ -42,6 +45,12 @@ class BenchmarkTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("deleted IDs are not reused", result.stderr)
+
+    def test_availability_reports_searchable_absent_and_stale_rows(self):
+        sql = benchmark.availability_sql("SELECT 1 AS id")
+        for approach in ("application", "periodic_full", "differential"):
+            self.assertIn(f"'{approach}_absent'", sql)
+            self.assertIn(f"'{approach}_stale'", sql)
 
     def test_attestation_requires_both_archive_and_container(self):
         result = subprocess.run(
