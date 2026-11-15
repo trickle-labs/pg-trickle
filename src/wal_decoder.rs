@@ -2905,8 +2905,6 @@ pub fn advance_wal_transitions_phase1(change_schema: &str) -> Result<Phase1Resul
             pending_aborts: Vec::new(),
         });
     }
-    let cdc_mode = config::pg_trickle_cdc_mode();
-
     // Get all dependencies to check their CDC mode
     let mut all_deps = StDependency::get_all()?;
     // Match restore's source-lock order across a multi-source poll transaction.
@@ -2987,10 +2985,9 @@ pub fn advance_wal_transitions_phase1(change_schema: &str) -> Result<Phase1Resul
                         }
                     }
                     Ok(false) => {
-                        // Not eligible — stay on triggers
-                        if cdc_mode == "auto" {
-                            emit_auto_cdc_stuck_log(dep);
-                        }
+                        // Not eligible — keep safe trigger capture, but make the
+                        // unmet prerequisite visible even for per-table WAL.
+                        emit_cdc_stuck_log(dep, requested_mode.as_deref().unwrap_or("auto"));
                     }
                     Err(e) => {
                         log!(
@@ -3156,21 +3153,60 @@ fn check_transition_eligible(
     dep: &StDependency,
     requested_mode: &str,
 ) -> Result<bool, PgTrickleError> {
-    if !cdc::can_use_logical_replication_for_mode(requested_mode)? {
-        return Ok(false);
-    }
+    Ok(wal_transition_blocker(dep.source_relid, requested_mode)?.is_none())
+}
 
-    if !cdc::check_replica_identity(dep.source_relid)? {
-        return Ok(false);
+/// Explain why a requested trigger-to-WAL transition cannot start.
+///
+/// This is intentionally the same prerequisite check used by the scheduler
+/// and the health view; a per-table 'wal' request must not silently remain
+/// on triggers. FULL replica identity is required by the current decoder's
+/// old-row reconstruction, and partitioned parents are not admitted by its
+/// cutover safety recheck.
+pub(crate) fn wal_transition_blocker(
+    source_oid: pg_sys::Oid,
+    requested_mode: &str,
+) -> Result<Option<String>, PgTrickleError> {
+    if !matches!(requested_mode, "auto" | "wal") {
+        return Ok(None);
     }
-
-    let pk_columns = cdc::resolve_pk_columns(dep.source_relid)?;
-    if pk_columns.is_empty() {
-        return Ok(false);
+    match cdc::can_use_logical_replication_for_mode(requested_mode) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Ok(Some(
+                "wal_level must be logical and a replication slot must be available".to_string(),
+            ));
+        }
+        Err(e) => return Ok(Some(e.to_string())),
     }
-
-    let identity = cdc::get_replica_identity_mode(dep.source_relid)?;
-    Ok(identity == "full")
+    let relkind = Spi::get_one_with_args::<String>(
+        "SELECT relkind::text FROM pg_catalog.pg_class WHERE oid = $1",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    match relkind.as_deref() {
+        Some("r") => {}
+        Some("p") => {
+            return Ok(Some(
+                "partitioned parent relations are not yet eligible for WAL CDC; using triggers"
+                    .to_string(),
+            ));
+        }
+        _ => return Ok(Some("WAL CDC requires an ordinary source table".to_string())),
+    }
+    if cdc::resolve_pk_columns(source_oid)?.is_empty() {
+        return Ok(Some("WAL CDC requires a PRIMARY KEY".to_string()));
+    }
+    if !cdc::check_replica_identity(source_oid)? {
+        return Ok(Some("WAL CDC requires REPLICA IDENTITY FULL".to_string()));
+    }
+    let identity = cdc::get_replica_identity_mode(source_oid)?;
+    if identity != "full" {
+        return Ok(Some(format!(
+            "WAL CDC requires REPLICA IDENTITY FULL (currently {identity}); run ALTER TABLE ... REPLICA IDENTITY FULL"
+        )));
+    }
+    Ok(None)
 }
 
 /// Finish a WAL transition after the replication slot has been created.
@@ -3385,13 +3421,9 @@ fn reset_wal_error_count(source_oid: u32) {
     }
 }
 
-/// EC-18: Rate-limited LOG explaining why `auto` CDC mode is stuck in TRIGGER
-/// phase for a particular source.
-///
-/// Uses a simple modular counter on scheduler ticks. Only emits once every
-/// ~60 invocations (approximately once per minute at the default 1s
-/// scheduler interval).
-fn emit_auto_cdc_stuck_log(dep: &StDependency) {
+/// Rate-limited diagnostic for a CDC request that cannot transition.
+/// The persistent reason is also exposed in check_cdc_health().alert.
+fn emit_cdc_stuck_log(dep: &StDependency, requested_mode: &str) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -3400,47 +3432,23 @@ fn emit_auto_cdc_stuck_log(dep: &StDependency) {
         return;
     }
 
-    let source_oid = dep.source_relid;
-    let reason = match cdc::can_use_logical_replication() {
-        Ok(false) | Err(_) => {
-            "wal_level is not 'logical'. Set wal_level = logical in postgresql.conf and restart."
-                .to_string()
-        }
-        Ok(true) => {
-            // WAL is available, check other prerequisites
-            let pk_columns = cdc::resolve_pk_columns(source_oid).unwrap_or_default();
-            if pk_columns.is_empty() {
-                format!(
-                    "source OID {} has no PRIMARY KEY. WAL-based CDC requires a PK. \
-                     Add a PRIMARY KEY or switch to cdc_mode = 'trigger'.",
-                    source_oid.to_u32()
-                )
-            } else {
-                let identity = cdc::get_replica_identity_mode(source_oid)
-                    .unwrap_or_else(|_| "unknown".to_string());
-                if identity != "full" {
-                    format!(
-                        "source OID {} has REPLICA IDENTITY '{}' (need FULL). \
-                         Run: ALTER TABLE ... REPLICA IDENTITY FULL",
-                        source_oid.to_u32(),
-                        identity
-                    )
-                } else {
-                    format!(
-                        "source OID {} meets prerequisites but transition has not started yet. \
-                         This may resolve on the next scheduler tick.",
-                        source_oid.to_u32()
-                    )
-                }
-            }
-        }
-    };
-
-    log!(
-        "pg_trickle: cdc_mode = 'auto' but source OID {} is still using triggers. Reason: {}",
-        source_oid.to_u32(),
-        reason
-    );
+    let reason = wal_transition_blocker(dep.source_relid, requested_mode)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "transition has not started yet; check the scheduler".to_string());
+    if requested_mode == "wal" {
+        pgrx::warning!(
+            "pg_trickle: cdc_mode='wal' requested for source OID {} but trigger CDC is still active: {}",
+            dep.source_relid.to_u32(),
+            reason,
+        );
+    } else {
+        pgrx::log!(
+            "pg_trickle: cdc_mode='auto' source OID {} is still using triggers: {}",
+            dep.source_relid.to_u32(),
+            reason,
+        );
+    }
 }
 
 /// Poll WAL changes for a source that's in TRANSITIONING or WAL mode.
