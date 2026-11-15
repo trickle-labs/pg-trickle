@@ -709,6 +709,191 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
         .await;
 }
 
+/// #1417: manual DIFFERENTIAL-to-FULL fallback must not retain a bound taken
+/// before its source lock.  The input-boundary advisory barrier lets new source
+/// rows commit after the differential frontier but before the FULL snapshot.
+#[tokio::test]
+async fn test_manual_full_fallback_after_new_commit_does_not_replay() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.execute("CREATE TABLE manual_cut_src (id INT PRIMARY KEY, grp INT, qty BIGINT)")
+        .await;
+    db.execute(
+        "INSERT INTO manual_cut_src
+         SELECT i, i % 3, 10 FROM generate_series(1, 9) AS i",
+    )
+    .await;
+    let query = "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM manual_cut_src GROUP BY grp";
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'manual_cut_st',
+            query => $SELECT grp, SUM(qty) AS total, COUNT(*) AS n
+                        FROM manual_cut_src GROUP BY grp$,
+            schedule => '1h',
+            refresh_mode => 'DIFFERENTIAL',
+            cdc_mode => 'trigger'
+        )",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['manual_cut_st'])")
+        .await;
+    db.assert_st_matches_query("manual_cut_st", query).await;
+    db.execute("INSERT INTO manual_cut_src VALUES (10, 1, 10)")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.refresh_strategy", "full", "full")
+        .await;
+
+    let st_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'manual_cut_st'",
+        )
+        .await;
+    let source_oid: i64 = db
+        .query_scalar("SELECT 'manual_cut_src'::regclass::oid::bigint")
+        .await;
+    let source_buffer: String = db
+        .query_scalar(&format!(
+            "SELECT format('%I.%I', 'pgtrickle_changes',
+                           'changes_' || COALESCE(source_stable_name, {source_oid}::text))
+             FROM pgtrickle.pgt_change_tracking
+             WHERE source_relid = {source_oid}::oid"
+        ))
+        .await;
+
+    // The extension pauses at its real differential input boundary after the
+    // pre-lock frontier is captured.  It must subsequently do a FULL fallback.
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_phase",
+        "'input_boundary'",
+        "input_boundary",
+    )
+    .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_for_table",
+        "'manual_cut_st'",
+        "manual_cut_st",
+    )
+    .await;
+    let mut barrier = db.pool.acquire().await.expect("acquire manual barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .expect("get manual barrier PID");
+    sqlx::query("SELECT pg_advisory_lock($1::int, 1)")
+        .bind(st_id as i32)
+        .execute(&mut *barrier)
+        .await
+        .expect("hold input-boundary advisory lock");
+
+    let pool = db.pool.clone();
+    let refresh = tokio::spawn(async move {
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('manual_cut_st')")
+            .execute(&pool)
+            .await
+    });
+    let blocked = format!(
+        "SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity a
+            WHERE a.datname = current_database()
+              AND a.application_name LIKE 'pgt_atomicity:{st_id}:input_boundary:%'
+              AND a.wait_event_type = 'Lock'
+              AND {blocker_pid} = ANY(pg_blocking_pids(a.pid))
+        )"
+    );
+    assert!(
+        db.wait_for_condition(
+            "manual differential blocked after its frontier snapshot",
+            &blocked,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        )
+        .await,
+        "manual refresh must reach the witnessed input boundary"
+    );
+    db.execute(
+        "INSERT INTO manual_cut_src
+         SELECT i, i % 3, 100 FROM generate_series(11, 110) AS i",
+    )
+    .await;
+    let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
+    let writer_delta_lsn: String = db.query_scalar(&delta_sql).await;
+
+    let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1::int, 1)")
+        .bind(st_id as i32)
+        .fetch_one(&mut *barrier)
+        .await
+        .expect("release the manual barrier");
+    assert!(unlocked, "the manual test barrier must be released");
+    tokio::time::timeout(Duration::from_secs(90), refresh)
+        .await
+        .expect("manual FULL fallback timed out")
+        .expect("manual refresh task panicked")
+        .expect("manual FULL fallback failed");
+    db.alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "''", "")
+        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_phase",
+        "'before_apply'",
+        "before_apply",
+    )
+    .await;
+
+    let fell_back: bool = db
+        .query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'manual_cut_st'
+                  AND h.action = 'FULL' AND h.was_full_fallback
+                  AND h.status = 'COMPLETED'
+            )",
+        )
+        .await;
+    assert!(fell_back, "manual differential must actually fall back to FULL");
+    db.assert_st_matches_query("manual_cut_st", query).await;
+
+    let frontier_covers_writer: bool = sqlx::query_scalar(
+        "SELECT (frontier #>> ARRAY['sources', $1::text, 'lsn'])::pg_lsn >= $2::pg_lsn
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'manual_cut_st'",
+    )
+    .bind(source_oid.to_string())
+    .bind(&writer_delta_lsn)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the manually rebuilt source frontier");
+    assert!(
+        frontier_covers_writer,
+        "manual FULL fallback must cover rows committed after its pre-lock cut"
+    );
+
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "differential",
+        "differential",
+    )
+    .await;
+    db.execute("INSERT INTO manual_cut_src VALUES (111, 0, 7)")
+        .await;
+    let before_diff: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.refresh_st("manual_cut_st").await;
+    let actual_diff: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'manual_cut_st'
+                  AND h.refresh_id > {before_diff}
+                  AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED'
+                  AND NOT h.was_full_fallback
+            )"
+        ))
+        .await;
+    assert!(actual_diff, "manual post-FULL refresh must really be differential");
+    db.assert_st_matches_query("manual_cut_st", query).await;
+}
+
 #[tokio::test]
 async fn test_scheduler_full_baseline_does_not_replay_upstream_changes() {
     assert_scheduler_baseline_does_not_replay("FULL", true).await;
