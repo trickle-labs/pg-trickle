@@ -57,7 +57,7 @@ testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
 # DEP-001 (v0.74.0): upgraded from 0.8 to 0.9.0 (query safety improvements).
-sqlx = { version = "0.9", features = ["runtime-tokio", "postgres", "json"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "json"] }
 tokio-postgres = "0.7"
 regex-lite = "0.1"
 proptest = "1"
