@@ -324,6 +324,215 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
     db.assert_st_matches_query("replay_sibling", query).await;
 }
 
+/// #1417: a scheduled REINITIALIZE must not reuse the pre-lock tick LSN.
+/// A pending source writer blocks the scheduler's SHARE lock, forcing its FULL
+/// snapshot to include a commit that happened *after* the scheduler tick.  The
+/// next DIFFERENTIAL must not count that writer's rows a second time.
+#[tokio::test]
+async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "differential",
+        "differential",
+    )
+    .await;
+
+    db.execute(
+        "CREATE TABLE scheduler_cut_src (
+            id BIGINT NOT NULL,
+            day DATE NOT NULL,
+            grp INT NOT NULL,
+            qty BIGINT NOT NULL,
+            PRIMARY KEY (id, day)
+        ) PARTITION BY RANGE (day)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE scheduler_cut_active PARTITION OF scheduler_cut_src
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE scheduler_cut_empty PARTITION OF scheduler_cut_src
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO scheduler_cut_src (id, day, grp, qty)
+         SELECT i, '2026-11-15', i % 3, 10 FROM generate_series(1, 9) AS i",
+    )
+    .await;
+    let query =
+        "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_cut_src GROUP BY grp";
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'scheduler_cut_st',
+            query => $SELECT grp, SUM(qty) AS total, COUNT(*) AS n
+                        FROM scheduler_cut_src GROUP BY grp$,
+            schedule => '1s',
+            refresh_mode => 'DIFFERENTIAL',
+            cdc_mode => 'trigger'
+         )",
+    )
+    .await;
+    db.assert_st_matches_query("scheduler_cut_st", query).await;
+
+    // Block automated work while the real detach/drop/resume lifecycle marks
+    // this stream as needing a protected REINITIALIZE, not a manual rebuild.
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['scheduler_cut_st'])")
+        .await;
+    db.execute("ALTER TABLE scheduler_cut_src DETACH PARTITION scheduler_cut_empty")
+        .await;
+    db.execute("DROP TABLE scheduler_cut_empty").await;
+    let suspended: String = db
+        .query_scalar(
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'scheduler_cut_st'",
+        )
+        .await;
+    assert_eq!(suspended, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
+    db.execute("SELECT pgtrickle.resume_stream_table('scheduler_cut_st')")
+        .await;
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'scheduler_cut_st'",
+        )
+        .await;
+    assert!(needs_reinit, "resume must request REINITIALIZE");
+
+    let source_oid: i64 = db
+        .query_scalar("SELECT 'scheduler_cut_src'::regclass::oid::bigint")
+        .await;
+    let mut writer = db.pool.begin().await.expect("open source writer");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("get source writer PID");
+    sqlx::query(
+        "INSERT INTO scheduler_cut_src (id, day, grp, qty)
+         SELECT i, '2026-11-15', i % 3, 100
+         FROM generate_series(10, 109) AS i",
+    )
+    .execute(&mut *writer)
+    .await
+    .expect("write source rows before the scheduler watermark");
+    let writer_delta_lsn: String = sqlx::query_scalar(&format!(
+        "SELECT MAX(lsn)::text FROM pgtrickle_changes.changes_{source_oid}"
+    ))
+    .fetch_one(&mut *writer)
+    .await
+    .expect("read uncommitted source CDC LSN");
+
+    // Resume only after the writer has its source RowExclusiveLock.  The
+    // scheduled REINITIALIZE must wait on this transaction's source lock.
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['scheduler_cut_st'])")
+        .await;
+    let blocked = format!(
+        "SELECT EXISTS (
+            SELECT 1 FROM pg_locks l
+            WHERE l.relation = 'scheduler_cut_src'::regclass
+              AND l.mode = 'ShareLock' AND NOT l.granted
+              AND {writer_pid} = ANY(pg_blocking_pids(l.pid))
+        )"
+    );
+    assert!(
+        db.wait_for_condition(
+            "scheduled REINITIALIZE blocked by the source writer",
+            &blocked,
+            Duration::from_secs(45),
+            Duration::from_millis(50),
+        )
+        .await,
+        "the scheduler must capture its tick before the writer commits"
+    );
+    writer.commit().await.expect("commit the blocked source writer");
+
+    assert!(
+        db.wait_for_condition(
+            "scheduled REINITIALIZE completed after the writer committed",
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'scheduler_cut_st'
+                  AND h.action = 'REINITIALIZE' AND h.status = 'COMPLETED'
+            )",
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+        )
+        .await,
+        "the scheduler must complete a real REINITIALIZE"
+    );
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['scheduler_cut_st'])")
+        .await;
+    db.assert_st_matches_query("scheduler_cut_st", query).await;
+
+    // These two witnesses distinguish a repaired frontier from merely having
+    // a correct FULL output: the tick was older than the writer's CDC row, but
+    // the new per-source frontier must cover that row.
+    let tick_is_older: bool = sqlx::query_scalar(
+        "SELECT h.tick_watermark_lsn < $1::pg_lsn
+         FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+         WHERE st.pgt_name = 'scheduler_cut_st'
+           AND h.action = 'REINITIALIZE' AND h.status = 'COMPLETED'
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .bind(&writer_delta_lsn)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read scheduler tick watermark");
+    assert!(tick_is_older, "the test must exercise the stale-tick interleaving");
+    let frontier_covers_writer: bool = sqlx::query_scalar(
+        "SELECT (frontier #>> ARRAY['sources', $1::text, 'lsn'])::pg_lsn >= $2::pg_lsn
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'scheduler_cut_st'",
+    )
+    .bind(source_oid.to_string())
+    .bind(&writer_delta_lsn)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read protected source frontier");
+    assert!(
+        frontier_covers_writer,
+        "the baseline frontier must cover every change included in the FULL snapshot"
+    );
+
+    // Force a genuine differential refresh with one new write; an old frontier
+    // would replay the previous 100 inserts as well as this one.
+    db.execute(
+        "INSERT INTO scheduler_cut_src (id, day, grp, qty)
+         VALUES (110, '2026-11-15', 1, 7)",
+    )
+    .await;
+    let before_diff: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.refresh_st("scheduler_cut_st").await;
+    let was_differential: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'scheduler_cut_st'
+                  AND h.refresh_id > {before_diff}
+                  AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED'
+                  AND NOT h.was_full_fallback
+            )"
+        ))
+        .await;
+    assert!(
+        was_differential,
+        "the post-rebuild correctness check must actually apply a differential delta"
+    );
+    db.assert_st_matches_query("scheduler_cut_st", query).await;
+}
+
 #[tokio::test]
 async fn test_scheduler_full_baseline_does_not_replay_upstream_changes() {
     assert_scheduler_baseline_does_not_replay("FULL", true).await;
