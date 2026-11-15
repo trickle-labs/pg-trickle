@@ -641,10 +641,8 @@ async fn test_partition_nested_drop_invalidates_grandparent() {
          PARTITION BY LIST (region)",
     )
     .await;
-    db.execute(
-        "CREATE TABLE nest_leaf PARTITION OF nest_year FOR VALUES IN ('EU')",
-    )
-    .await;
+    db.execute("CREATE TABLE nest_leaf PARTITION OF nest_year FOR VALUES IN ('EU')")
+        .await;
     db.execute(
         "CREATE TABLE nest_other PARTITION OF nest_source
          FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
@@ -738,7 +736,8 @@ async fn test_partition_drop_rollback_preserves_materialization() {
     db.execute("INSERT INTO rollback_source VALUES (1,'2025-01-01')")
         .await;
     let query = "SELECT COUNT(*) AS n FROM rollback_source";
-    db.create_st("rollback_st", query, "1m", "DIFFERENTIAL").await;
+    db.create_st("rollback_st", query, "1m", "DIFFERENTIAL")
+        .await;
     db.refresh_st("rollback_st").await;
 
     let mut connection = db.pool.acquire().await.expect("acquire connection");
@@ -854,14 +853,16 @@ async fn test_partition_append_only_pk_survives_insert_only_refresh() {
              WHERE pgt_name = 'app_st'",
         )
         .await;
-    assert!(append_only, "insert-only batches must not disable the explicit flag");
+    assert!(
+        append_only,
+        "insert-only batches must not disable the explicit flag"
+    );
     db.assert_st_matches_query(
         "app_st",
         "SELECT region, COUNT(*) AS n FROM app_source GROUP BY region",
     )
     .await;
 }
-
 
 #[tokio::test]
 async fn test_partition_direct_drop_suspends_immediate_until_protected_resume() {
