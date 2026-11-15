@@ -1732,9 +1732,9 @@ fn check_cdc_health() -> TableIterator<
                 let alert = if requested.as_deref() == Some("wal") {
                     match wal_decoder::wal_transition_blocker(dep.source_relid, "wal") {
                         Ok(Some(reason)) => Some(format!("WAL CDC requested: {reason}")),
-                        Ok(None) => Some(
-                            "WAL CDC requested: waiting for scheduler cutover".to_string(),
-                        ),
+                        Ok(None) => {
+                            Some("WAL CDC requested: waiting for scheduler cutover".to_string())
+                        }
                         Err(e) => Some(format!("WAL CDC eligibility check failed: {e}")),
                     }
                 } else {
