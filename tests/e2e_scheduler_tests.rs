@@ -538,6 +538,160 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
     db.assert_st_matches_query("scheduler_cut_st", query).await;
 }
 
+/// #1417: a DIFFERENTIAL-to-FULL fallback also needs to replace its original
+/// tick-bounded base-table frontier after the FULL acquires source locks.
+#[tokio::test]
+async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+        .await;
+
+    db.execute("CREATE TABLE scheduler_fallback_src (id INT PRIMARY KEY, grp INT, qty BIGINT)")
+        .await;
+    db.execute(
+        "INSERT INTO scheduler_fallback_src
+         SELECT i, i % 2, 10 FROM generate_series(1, 9) AS i",
+    )
+    .await;
+    let query =
+        "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_fallback_src GROUP BY grp";
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'scheduler_fallback_st',
+            query => $SELECT grp, SUM(qty) AS total, COUNT(*) AS n
+                        FROM scheduler_fallback_src GROUP BY grp$,
+            schedule => '1s',
+            refresh_mode => 'DIFFERENTIAL',
+            cdc_mode => 'trigger'
+        )",
+    )
+    .await;
+    db.assert_st_matches_query("scheduler_fallback_st", query)
+        .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['scheduler_fallback_st'])")
+        .await;
+
+    // One committed change guarantees that a normal differential run is due.
+    // Force that run to choose FULL, then block its source lock with another
+    // writer whose changes the old scheduler tick cannot safely cover.
+    db.execute("INSERT INTO scheduler_fallback_src VALUES (10, 0, 10)")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.refresh_strategy", "full", "full")
+        .await;
+    let source_oid: i64 = db
+        .query_scalar("SELECT 'scheduler_fallback_src'::regclass::oid::bigint")
+        .await;
+    let mut writer = db.pool.begin().await.expect("open fallback source writer");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("get fallback writer PID");
+    sqlx::query(
+        "INSERT INTO scheduler_fallback_src
+         SELECT i, i % 2, 100 FROM generate_series(11, 110) AS i",
+    )
+    .execute(&mut *writer)
+    .await
+    .expect("insert fallback source rows");
+    let writer_delta_lsn: String = sqlx::query_scalar(&format!(
+        "SELECT MAX(lsn)::text FROM pgtrickle_changes.changes_{source_oid}"
+    ))
+    .fetch_one(&mut *writer)
+    .await
+    .expect("read fallback writer's CDC LSN");
+
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['scheduler_fallback_st'])")
+        .await;
+    let blocked = format!(
+        "SELECT EXISTS (
+            SELECT 1 FROM pg_locks l
+            WHERE l.relation = 'scheduler_fallback_src'::regclass
+              AND l.mode = 'ShareLock' AND NOT l.granted
+              AND {writer_pid} = ANY(pg_blocking_pids(l.pid))
+        )"
+    );
+    assert!(
+        db.wait_for_condition(
+            "fallback FULL waiting for the writer's source lock",
+            &blocked,
+            Duration::from_secs(45),
+            Duration::from_millis(50),
+        )
+        .await,
+        "the fallback must reach the FULL source lock under an old tick"
+    );
+    writer
+        .commit()
+        .await
+        .expect("commit the blocked fallback writer");
+
+    assert!(
+        db.wait_for_condition(
+            "scheduled differential FULL fallback completed",
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'scheduler_fallback_st'
+                  AND h.action = 'FULL' AND h.was_full_fallback
+                  AND h.status = 'COMPLETED'
+            )",
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+        )
+        .await,
+        "scheduler must complete the intended FULL fallback"
+    );
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['scheduler_fallback_st'])")
+        .await;
+    db.assert_st_matches_query("scheduler_fallback_st", query)
+        .await;
+
+    let frontier_covers_writer: bool = sqlx::query_scalar(
+        "SELECT (frontier #>> ARRAY['sources', $1::text, 'lsn'])::pg_lsn >= $2::pg_lsn
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'scheduler_fallback_st'",
+    )
+    .bind(source_oid.to_string())
+    .bind(&writer_delta_lsn)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read fallback source frontier");
+    assert!(
+        frontier_covers_writer,
+        "FULL fallback must replace the tick-bounded base-source frontier"
+    );
+
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "differential",
+        "differential",
+    )
+    .await;
+    db.execute("INSERT INTO scheduler_fallback_src VALUES (111, 1, 7)")
+        .await;
+    let before_diff: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.refresh_st("scheduler_fallback_st").await;
+    let was_differential: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'scheduler_fallback_st'
+                  AND h.refresh_id > {before_diff}
+                  AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED'
+                  AND NOT h.was_full_fallback
+            )"
+        ))
+        .await;
+    assert!(was_differential, "post-fallback refresh must be differential");
+    db.assert_st_matches_query("scheduler_fallback_st", query)
+        .await;
+}
+
 #[tokio::test]
 async fn test_scheduler_full_baseline_does_not_replay_upstream_changes() {
     assert_scheduler_baseline_does_not_replay("FULL", true).await;
