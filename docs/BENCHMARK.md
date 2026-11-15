@@ -29,11 +29,13 @@ The blocking profile uses the pinned PostgreSQL base image from
 10-second warm-up, a 30-second measurement, and 3 paired repetitions. The
 publication profile keeps the same scale and concurrency, with a 30-second
 warm-up, 60-second measurement, and 5 paired repetitions. Matching concurrency
-keeps its p99 budget comparable to the blocking profile. Both profiles match
-PostgreSQL settings across the stock and extension images, then
-samples pgbench transaction logs at 10%, records p50/p95/p99, checks active
-stream-table correctness after each table completes a post-workload refresh,
-and samples worker `/proc` jiffies against container cgroup CPU time. The
+keeps its p99 budget comparable to the blocking profile. The join uses an
+immutable copy of branch keys so pgbench's branch-balance updates do not fan
+out into million-row output deltas. Both profiles match PostgreSQL settings
+across the stock and extension images, then sample pgbench transaction logs at
+10%, record p50/p95/p99, check active stream-table correctness after each table
+completes a post-workload refresh, and sample worker `/proc` jiffies against
+container cgroup CPU time. The
 correctness gate waits up to eight minutes for those refreshes because a
 checkpoint-bound refresh took 345 seconds on a nightly runner.
 

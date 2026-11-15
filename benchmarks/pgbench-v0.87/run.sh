@@ -156,11 +156,11 @@ setup_active_streams() {
     db_query "SELECT pg_reload_conf();" >/dev/null
     db_query "SELECT pgtrickle.create_stream_table('bench_projection', \$\$SELECT aid, bid, abalance FROM pgbench_accounts\$\$, '1s', 'DIFFERENTIAL');" >/dev/null
     db_query "SELECT pgtrickle.create_stream_table('bench_balances', \$\$SELECT bid, sum(abalance) AS total_balance FROM pgbench_accounts GROUP BY bid\$\$, '1s', 'DIFFERENTIAL');" >/dev/null
-    db_query "SELECT pgtrickle.create_stream_table('bench_join', \$\$SELECT a.aid, a.bid, a.abalance, b.bbalance FROM pgbench_accounts a JOIN pgbench_branches b ON b.bid = a.bid\$\$, '1s', 'DIFFERENTIAL');" >/dev/null
+    db_query "SELECT pgtrickle.create_stream_table('bench_join', \$\$SELECT a.aid, a.bid, a.abalance, b.bid AS branch_id FROM pgbench_accounts a JOIN bench_branch_dim b ON b.bid = a.bid\$\$, '1s', 'DIFFERENTIAL');" >/dev/null
 }
 
 correctness_check() {
-    db_query "SELECT (SELECT count(*) FROM pgtrickle.pgt_stream_tables WHERE status <> 'ACTIVE') = 0 AND NOT EXISTS ((SELECT aid, bid, abalance FROM pgbench_accounts EXCEPT ALL SELECT aid, bid, abalance FROM bench_projection) UNION ALL (SELECT aid, bid, abalance FROM bench_projection EXCEPT ALL SELECT aid, bid, abalance FROM pgbench_accounts)) AND NOT EXISTS ((SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid EXCEPT ALL SELECT bid, total_balance FROM bench_balances) UNION ALL (SELECT bid, total_balance FROM bench_balances EXCEPT ALL SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid)) AND NOT EXISTS ((SELECT a.aid, a.bid, a.abalance, b.bbalance FROM pgbench_accounts a JOIN pgbench_branches b ON b.bid = a.bid EXCEPT ALL SELECT aid, bid, abalance, bbalance FROM bench_join) UNION ALL (SELECT aid, bid, abalance, bbalance FROM bench_join EXCEPT ALL SELECT a.aid, a.bid, a.abalance, b.bbalance FROM pgbench_accounts a JOIN pgbench_branches b ON b.bid = a.bid))"
+    db_query "SELECT (SELECT count(*) FROM pgtrickle.pgt_stream_tables WHERE status <> 'ACTIVE') = 0 AND NOT EXISTS ((SELECT aid, bid, abalance FROM pgbench_accounts EXCEPT ALL SELECT aid, bid, abalance FROM bench_projection) UNION ALL (SELECT aid, bid, abalance FROM bench_projection EXCEPT ALL SELECT aid, bid, abalance FROM pgbench_accounts)) AND NOT EXISTS ((SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid EXCEPT ALL SELECT bid, total_balance FROM bench_balances) UNION ALL (SELECT bid, total_balance FROM bench_balances EXCEPT ALL SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid)) AND NOT EXISTS ((SELECT a.aid, a.bid, a.abalance, b.bid AS branch_id FROM pgbench_accounts a JOIN bench_branch_dim b ON b.bid = a.bid EXCEPT ALL SELECT aid, bid, abalance, branch_id FROM bench_join) UNION ALL (SELECT aid, bid, abalance, branch_id FROM bench_join EXCEPT ALL SELECT a.aid, a.bid, a.abalance, b.bid AS branch_id FROM pgbench_accounts a JOIN bench_branch_dim b ON b.bid = a.bid))"
 }
 
 wait_for_correctness() {
@@ -199,7 +199,7 @@ run_one() {
     chmod 777 "$run_dir" "$log_dir"
     container="pgtrickle-pgbench-${repetition}-${config}-$$"
     container_names+=("$container")
-    docker run --rm -d --name "$container" -v "$run_dir:/bench" \
+    docker run --rm -d --platform "linux/$runtime_arch" --name "$container" -v "$run_dir:/bench" \
         -v "$BENCH_DIR:/bench-scripts:ro" \
         -e POSTGRES_PASSWORD=postgres "$image" "${postgres_args[@]}" >/dev/null
     wait_for_postgres
@@ -211,6 +211,7 @@ run_one() {
     fi
     docker exec "$container" sh -ceu 'command -v pgbench >/dev/null'
     docker exec "$container" pgbench -h 127.0.0.1 -U postgres -i -s "$scale" postgres >"$run_dir/init.stdout"
+    db_query "CREATE TABLE bench_branch_dim (bid integer PRIMARY KEY); INSERT INTO bench_branch_dim SELECT bid FROM pgbench_branches; ANALYZE bench_branch_dim;" >/dev/null
 
     if [[ "$config" == active ]]; then
         setup_active_streams
@@ -300,13 +301,8 @@ for ((repetition = 0; repetition < repetitions; repetition++)); do
     done
 done
 
-ci_noise_flag=()
+compare_args=(--raw "$raw_file" --budgets "$BENCH_DIR/budgets.json" --output "$result_file" --expected-repetitions "$repetitions")
 if [[ "$PROFILE" == blocking ]]; then
-    ci_noise_flag+=(--allow-ci-noise)
+    compare_args+=(--allow-ci-noise)
 fi
-python3 "$BENCH_DIR/compare.py" \
-    --raw "$raw_file" \
-    --budgets "$BENCH_DIR/budgets.json" \
-    --output "$result_file" \
-    --expected-repetitions "$repetitions" \
-    "${ci_noise_flag[@]}"
+python3 "$BENCH_DIR/compare.py" "${compare_args[@]}"
