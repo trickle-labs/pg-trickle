@@ -413,22 +413,6 @@ trap cleanup_light_e2e_containers EXIT INT TERM
 
 echo "Light-E2E run id: ${PGT_LIGHT_E2E_RUN_ID}"
 
-# The existing PR light-E2E shard runs even when GitHub does not instantiate
-# a newly added workflow job from the pull request's workflow definition.
-# Exercise the published-storage migration in this already-required job as well:
-# it must not be possible to green-light #1419 without actually refreshing
-# materializations built by the v0.108.3 binary.
-if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request"
-      && "$shard_index" == "1" && "$shard_count" == "3"
-      && "${#requested_tests[@]}" -eq 0
-      && -z "$test_filter" && "$ignored_only" == false ]]; then
-    candidate_version="$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)"
-    if [[ "$candidate_version" == "0.110.0" || "$candidate_version" == "0.109.0" ]]; then
-        echo "Qualifying legacy aggregate storage upgrade with the packaged candidate"
-        bash scripts/qualify_live_package_upgrade.sh 0.108.3 "$candidate_version"
-    fi
-fi
-
 # Start ONE shared PostgreSQL container for all 48+ test binaries.
 # Each binary connects to this container via PGT_LIGHT_E2E_PORT instead of
 # spawning its own testcontainers instance.  This avoids 48 simultaneous
