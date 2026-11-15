@@ -368,8 +368,7 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
          SELECT i, '2026-11-15', i % 3, 10 FROM generate_series(1, 9) AS i",
     )
     .await;
-    let query =
-        "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_cut_src GROUP BY grp";
+    let query = "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_cut_src GROUP BY grp";
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             name => 'scheduler_cut_st',
@@ -452,7 +451,10 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
         .await,
         "the scheduler must capture its tick before the writer commits"
     );
-    writer.commit().await.expect("commit the blocked source writer");
+    writer
+        .commit()
+        .await
+        .expect("commit the blocked source writer");
 
     assert!(
         db.wait_for_condition(
@@ -488,7 +490,10 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
     .fetch_one(&db.pool)
     .await
     .expect("read scheduler tick watermark");
-    assert!(tick_is_older, "the test must exercise the stale-tick interleaving");
+    assert!(
+        tick_is_older,
+        "the test must exercise the stale-tick interleaving"
+    );
     let frontier_covers_writer: bool = sqlx::query_scalar(
         "SELECT (frontier #>> ARRAY['sources', $1::text, 'lsn'])::pg_lsn >= $2::pg_lsn
          FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'scheduler_cut_st'",
