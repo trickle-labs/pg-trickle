@@ -101,7 +101,7 @@ async fn test_snapshot_restore_immediate_rejects_rewind_without_mutating_state()
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'snap_imm_st', query => 'SELECT id FROM snap_imm_source',\
-         refresh_mode => 'IMMEDIATE')",
+         schedule => NULL, refresh_mode => 'IMMEDIATE')",
     )
     .await;
     let snapshot: String = db

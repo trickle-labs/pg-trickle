@@ -1103,7 +1103,11 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
     // Reject before any storage, frontier, or consumer state is modified.
     if meta.refresh_mode.is_immediate() {
         return Err(PgTrickleError::InvalidArgument(format!(
-            "cannot restore a snapshot into IMMEDIATE stream table {}:              intervening source changes cannot be replayed;              reinitialize the stream table from its sources instead",
+            concat!(
+                "cannot restore a snapshot into IMMEDIATE stream table {}: ",
+                "intervening source changes cannot be replayed; ",
+                "reinitialize the stream table from its sources instead"
+            ),
             stream_name.quoted()
         )));
     }
