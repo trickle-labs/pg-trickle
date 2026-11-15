@@ -3811,9 +3811,11 @@ The `'IMMEDIATE'` refresh mode supports nearly all SQL constructs supported by `
 - `LATERAL` set-returning functions (`unnest()`, `jsonb_array_elements()`, etc.)
 - Scalar subqueries in `SELECT`
 - Cascading IMMEDIATE stream tables (ST depending on another IMMEDIATE ST)
-- Recursive CTEs (`WITH RECURSIVE`) — uses semi-naive evaluation (INSERT-only) or
-  Delete-and-Rederive (DELETE/UPDATE); bounded by `pg_trickle.ivm_recursive_max_depth`
-  (default 100) to guard against infinite loops from cyclic data
+- Recursive CTEs (`WITH RECURSIVE`) — semi-naive evaluation for INSERT-only
+  changes; eligible `UNION ALL` queries use Delete-and-Rederive for DELETE/UPDATE.
+  Set-valued `UNION` deletions recompute the fixed point and apply its delta.
+  Only `UNION ALL` delta propagation is bounded by `pg_trickle.ivm_recursive_max_depth`
+  (default 100).
 
 **Not yet supported in IMMEDIATE mode:**
 
@@ -3829,9 +3831,11 @@ back; pg_trickle does not switch the stream table to SCHEDULED mode.
 
 **Notes on `WITH RECURSIVE` in IMMEDIATE mode:**
 
-- A `__pgt_depth` counter is injected into the generated semi-naive SQL.  Propagation
-  stops when the counter reaches `ivm_recursive_max_depth` (default 100).  Raise this
-  GUC for deeper hierarchies or set it to 0 to disable the guard.
+- Recursive `UNION ALL` semi-naive SQL carries `__pgt_depth`; propagation stops
+  at `ivm_recursive_max_depth` (default 100; 0 disables it). Recursive `UNION`
+  does not add depth to tuple identity, so finite cyclic reachability converges
+  and deep finite graphs are not truncated. Definitions producing infinitely
+  many distinct tuples need a termination predicate or `statement_timeout`.
 - A WARNING is emitted at stream table creation time reminding operators to monitor
   for `stack depth limit exceeded` errors on very deep hierarchies.
 - Non-linear recursion (multiple self-references) is rejected — PostgreSQL itself
@@ -4012,7 +4016,7 @@ Added at query-rewrite time (before storage table creation) when the defining qu
 
 #### `__pgt_depth` — Recursion depth counter (recursive CTE)
 
-Present only inside the DVM-generated SQL for recursive CTE queries. Used to limit unbounded recursion in semi-naive evaluation. Not added as a permanent column to the storage table.
+Present only inside DVM-generated semi-naive SQL for recursive `UNION ALL` queries. Bounds delta propagation in DIFFERENTIAL and IMMEDIATE modes. It is not added to `UNION` tuple identity or as a permanent storage column.
 
 ---
 

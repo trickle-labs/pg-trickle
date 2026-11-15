@@ -825,6 +825,7 @@ fn generate_delta_query_impl(
     let is_scan_chain = is_scan_chain_tree(&result.tree);
     let st_scan_payload_identity = is_rowwise_scan_tree(&result.tree);
     let has_pgt_count = result.tree.needs_pgt_count();
+    let full_identity_expr = row_id_expr_for_tree(defining_query, Some(&result.tree));
     let mut ctx = DiffContext::new(prev_frontier.clone(), new_frontier.clone())
         .with_pgt_name(pgt_schema, pgt_name)
         .with_cte_registry(result.cte_registry)
@@ -836,6 +837,7 @@ fn generate_delta_query_impl(
         ctx = ctx.with_decision_trace();
     }
     ctx.st_user_columns = Some(st_user_cols);
+    ctx.st_full_row_identity_expr = Some(full_identity_expr);
     ctx.window_state_row_relation = window_state_row_relation.map(str::to_owned);
     ctx.merge_safe_dedup = is_scan_chain;
     ctx.st_scan_payload_identity = st_scan_payload_identity;
@@ -1196,6 +1198,7 @@ pub fn generate_delta_query_cached(
         let st_scan_payload_identity = is_rowwise_scan_tree(&result.tree);
         let st_user_cols = result.tree.output_columns();
         let has_pgt_count = result.tree.needs_pgt_count();
+        let full_identity_expr = row_id_expr_for_tree(defining_query, Some(&result.tree));
         let mut ctx = DiffContext::new(Frontier::new(), Frontier::new())
             .with_placeholders()
             .with_pgt_name(pgt_schema, pgt_name)
@@ -1203,6 +1206,7 @@ pub fn generate_delta_query_cached(
             .with_cte_registry(result.cte_registry)
             .with_defining_query(defining_query);
         ctx.st_user_columns = Some(st_user_cols);
+        ctx.st_full_row_identity_expr = Some(full_identity_expr);
         ctx.merge_safe_dedup = is_scan_chain;
         ctx.st_scan_payload_identity = st_scan_payload_identity;
         ctx.st_has_pgt_count = has_pgt_count;

@@ -128,6 +128,11 @@ pub struct DiffContext {
     /// recomputation to re-execute the query directly instead of
     /// reconstructing SQL from the OpTree.
     pub defining_query: Option<String>,
+    /// Exact FULL-refresh row-identity expression for the target, computed by
+    /// the outer code generator from its already-parsed root OpTree. Aggregate
+    /// operators compare this against their GROUP_KEY encoding before using
+    /// an indexed ID join. None is used by standalone SQL-generation tests.
+    pub st_full_row_identity_expr: Option<String>,
     /// Columns that the ST storage table has (outer projection columns),
     /// used by recursive CTE recomputation to match the storage schema.
     pub st_user_columns: Option<Vec<String>>,
@@ -689,6 +694,7 @@ impl DiffContext {
             setop_state_relation: None,
             window_state_row_relation: None,
             defining_query: None,
+            st_full_row_identity_expr: None,
             st_user_columns: None,
             merge_safe_dedup: false,
             st_scan_payload_identity: false,
