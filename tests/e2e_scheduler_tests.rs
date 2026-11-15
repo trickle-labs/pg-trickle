@@ -434,7 +434,7 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
     let writer_delta_lsn: String = sqlx::query_scalar(&delta_sql)
         .fetch_one(&mut *writer)
         .await
-    .expect("read uncommitted source CDC LSN");
+        .expect("read uncommitted source CDC LSN");
 
     // Resume only after the writer has its source RowExclusiveLock.  The
     // scheduled REINITIALIZE must wait on this transaction's source lock.
@@ -563,7 +563,8 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
          SELECT i, i % 2, 10 FROM generate_series(1, 9) AS i",
     )
     .await;
-    let query = "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_fallback_src GROUP BY grp";
+    let query =
+        "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_fallback_src GROUP BY grp";
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             name => 'scheduler_fallback_st',
@@ -614,7 +615,7 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
     let writer_delta_lsn: String = sqlx::query_scalar(&delta_sql)
         .fetch_one(&mut *writer)
         .await
-    .expect("read fallback writer's CDC LSN");
+        .expect("read fallback writer's CDC LSN");
 
     db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['scheduler_fallback_st'])")
         .await;
@@ -700,7 +701,10 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
             )"
         ))
         .await;
-    assert!(was_differential, "post-fallback refresh must be differential");
+    assert!(
+        was_differential,
+        "post-fallback refresh must be differential"
+    );
     db.assert_st_matches_query("scheduler_fallback_st", query)
         .await;
 }
