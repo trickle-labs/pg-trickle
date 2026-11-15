@@ -105,6 +105,91 @@ async fn run_live_rag_script_as(
 }
 
 #[tokio::test]
+async fn test_live_rag_model_rollover_hides_old_results_until_reconciled() {
+    let db = E2eDb::new().await.with_extension().await;
+    let setup = run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", "3"]).await;
+    assert!(
+        setup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    db.execute_seq(&[
+        "INSERT INTO embedding_demo.documents(id, body) VALUES (1, 'A')",
+        "INSERT INTO live_rag.access(document_id, tenant_id) VALUES (1, 10)",
+        "SELECT pgtrickle.pause_scheduler(ARRAY['live_rag.differential'])",
+    ])
+    .await;
+    enqueue(&db, "model-v1").await;
+    assert!(complete(&db, &claim(&db, "model-v1").await, "model-v1").await);
+    db.execute_seq(&[
+        "SELECT live_rag.sync_application(ARRAY[1]::bigint[])",
+        "SELECT live_rag.recompute_full()",
+    ])
+    .await;
+    db.refresh_st_with_retry("live_rag.differential").await;
+    for view in [
+        "application_current",
+        "periodic_full_current",
+        "differential_current",
+    ] {
+        let model: String = db
+            .query_scalar(&format!("SELECT model_version FROM live_rag.{view}"))
+            .await;
+        assert_eq!(model, "model-v1");
+    }
+
+    enqueue(&db, "model-v2").await;
+    let pending = claim(&db, "model-v2").await;
+    db.execute("UPDATE live_rag.access SET model_version = 'model-v2' WHERE document_id = 1")
+        .await;
+    for view in [
+        "application_current",
+        "periodic_full_current",
+        "differential_current",
+    ] {
+        let count: i64 = db
+            .query_scalar(&format!("SELECT count(*) FROM live_rag.{view}"))
+            .await;
+        assert_eq!(count, 0, "{view} exposed the old model during rollover");
+    }
+    assert!(complete(&db, &pending, "model-v2").await);
+    for view in [
+        "application_current",
+        "periodic_full_current",
+        "differential_current",
+    ] {
+        let count: i64 = db
+            .query_scalar(&format!("SELECT count(*) FROM live_rag.{view}"))
+            .await;
+        assert_eq!(count, 0, "{view} exposed stale data before maintenance");
+    }
+    db.execute_seq(&[
+        "SELECT live_rag.sync_application(ARRAY[1]::bigint[])",
+        "SELECT live_rag.recompute_full()",
+    ])
+    .await;
+    db.refresh_st_with_retry("live_rag.differential").await;
+    let incremental: bool = db.query_scalar("SELECT h.action = 'DIFFERENTIAL' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_relid = 'live_rag.differential'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert!(
+        incremental,
+        "model cutover must be maintained differentially"
+    );
+    for corpus in ["application", "periodic_full", "differential"] {
+        db.assert_st_matches_query(
+            &format!("live_rag.{corpus}"),
+            "SELECT * FROM live_rag.truth",
+        )
+        .await;
+        let model: String = db
+            .query_scalar(&format!(
+                "SELECT model_version FROM live_rag.{corpus}_current"
+            ))
+            .await;
+        assert_eq!(model, "model-v2");
+    }
+}
+
+#[tokio::test]
 async fn test_live_rag_batched_benchmark_compares_equivalent_corpora() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE EXTENSION vector").await;
