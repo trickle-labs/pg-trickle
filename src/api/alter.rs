@@ -1391,7 +1391,11 @@ fn alter_stream_table_partition_key(
     let downstream_ids = StDependency::get_downstream_pgt_ids(st.pgt_relid)?;
     if !downstream_ids.is_empty() {
         return Err(PgTrickleError::InvalidArgument(format!(
-            "cannot change partition_by on {schema}.{table_name}: {} downstream stream table(s)              depend on this storage relation; remove dependent stream tables              before repartitioning, then recreate them",
+            concat!(
+                "cannot change partition_by on {schema}.{table_name}: ",
+                "{} downstream stream table(s) depend on this storage relation; ",
+                "remove dependent stream tables before repartitioning, then recreate them"
+            ),
             downstream_ids.len()
         )));
     }

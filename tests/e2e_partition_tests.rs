@@ -2177,7 +2177,7 @@ async fn test_alter_st_partition_key_rejects_immediate_downstream_without_losing
         "SELECT pgtrickle.create_stream_table(
             name => 'guard_immediate_down',
             query => 'SELECT id, amount FROM guard_immediate_up',
-            refresh_mode => 'IMMEDIATE')",
+            schedule => NULL, refresh_mode => 'IMMEDIATE')",
     )
     .await;
     let parent_oid: i64 = db
