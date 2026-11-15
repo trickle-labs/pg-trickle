@@ -594,7 +594,8 @@ impl OptimizationContext {
         self.cte_counter += 1;
         let suffix = format!("_{}", self.cte_counter);
         let max_prefix = 63usize.saturating_sub("__pgt_cte_".len() + suffix.len());
-        let mut name = String::with_capacity(63);
+        let mut name =
+            String::with_capacity("__pgt_cte_".len() + prefix.len().min(max_prefix) + suffix.len());
         name.push_str("__pgt_cte_");
         name.extend(prefix.chars().take(max_prefix).map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' {
