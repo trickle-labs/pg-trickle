@@ -439,9 +439,8 @@ pub(crate) fn reconciliation_delta_sql(
 ///   * For every fingerprint where recon count > ST count, insert the
 ///     missing rows.
 ///
-/// The cleanup runs in batches of `batch_size` rows to avoid holding long
-/// locks on either side. Returns the total number of rows deleted plus
-/// inserted.
+/// Reconcile the full multiset atomically and return the total number of rows
+/// deleted plus inserted.
 ///
 /// Called after each non-deduplicated, non-partitioned, join-bearing apply
 /// so stale rows converge even when the current delta did not contain the
@@ -451,7 +450,6 @@ pub fn cleanup_cross_cycle_phantoms(
     st: &crate::catalog::StreamTableMeta,
     stream_table_name: &str,
     defining_query: &str,
-    batch_size: i64,
 ) -> Result<i64, PgTrickleError> {
     let pgt_id = st.pgt_id;
     let user_cols = crate::dvm::get_defining_query_columns(defining_query)?;
@@ -570,7 +568,6 @@ pub fn cleanup_cross_cycle_phantoms(
                 SELECT n.ctid \
                 FROM numbered n JOIN excess e USING (__pgt_sig) \
                 WHERE n.rn <= e.extras \
-                LIMIT $1 \
             ), \
             deleted AS ( \
                 DELETE FROM {stream_table_name} \
@@ -581,7 +578,7 @@ pub fn cleanup_cross_cycle_phantoms(
     );
 
     let delete_start = std::time::Instant::now();
-    let deleted = Spi::get_one_with_args::<i64>(&delete_sql, &[batch_size.into()])
+    let deleted = Spi::get_one::<i64>(&delete_sql)
         .map_err(|e| PgTrickleError::SpiError(format!("EC01-2 reconcile DELETE failed: {e}")))?
         .unwrap_or(0);
     let delete_ms = delete_start.elapsed().as_secs_f64() * 1000.0;
@@ -619,7 +616,6 @@ pub fn cleanup_cross_cycle_phantoms(
                 FROM recon_numbered n \
                 JOIN shortfall sh ON sh.__pgt_sig = n.__pgt_sig_x \
                 WHERE n.{recon_row_number_alias} <= sh.missing_n \
-                LIMIT $1 \
             ), \
             inserted AS ( \
                 INSERT INTO {stream_table_name} ({all_cols_csv}) \
@@ -635,7 +631,7 @@ pub fn cleanup_cross_cycle_phantoms(
     );
 
     let insert_start = std::time::Instant::now();
-    let inserted = Spi::get_one_with_args::<i64>(&insert_sql, &[batch_size.into()])
+    let inserted = Spi::get_one::<i64>(&insert_sql)
         .map_err(|e| PgTrickleError::SpiError(format!("EC01-2 reconcile INSERT failed: {e}")))?
         .unwrap_or(0);
     let insert_ms = insert_start.elapsed().as_secs_f64() * 1000.0;
