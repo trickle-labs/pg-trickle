@@ -620,7 +620,11 @@ async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
         source_has_pending_cdc,
         "the committed source update must be present in its trigger buffer"
     );
-    let mut due = db.pool.begin().await.expect("begin fallback scheduler due setup");
+    let mut due = db
+        .pool
+        .begin()
+        .await
+        .expect("begin fallback scheduler due setup");
     sqlx::query(
         "UPDATE pgtrickle.pgt_stream_tables
          SET last_refresh_at = clock_timestamp() - interval '2 hours'
