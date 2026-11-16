@@ -1366,18 +1366,18 @@ fn rewrite_bounded_source_reads(sql: &str, source: &str, bounded: &str) -> Strin
             continue;
         }
         // PostgreSQL dollar-quoted bodies (including tagged delimiters).
-        if bytes[i] == b'$' {
-            if let Some(relative) = bytes[i + 1..].iter().position(|&b| b == b'$') {
-                let end = i + relative + 2;
-                if bytes[i + 1..end - 1]
-                    .iter()
-                    .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
-                {
-                    let delimiter = &sql[i..end];
-                    if let Some(close) = sql[end..].find(delimiter) {
-                        i = end + close + delimiter.len();
-                        continue;
-                    }
+        if bytes[i] == b'$'
+            && let Some(relative) = bytes[i + 1..].iter().position(|&b| b == b'$')
+        {
+            let end = i + relative + 2;
+            if bytes[i + 1..end - 1]
+                .iter()
+                .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                let delimiter = &sql[i..end];
+                if let Some(close) = sql[end..].find(delimiter) {
+                    i = end + close + delimiter.len();
+                    continue;
                 }
             }
         }
