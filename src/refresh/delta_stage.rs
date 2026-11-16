@@ -4,7 +4,7 @@ use crate::catalog::{StDependency, StreamTableMeta};
 use crate::error::PgTrickleError;
 use crate::version::Frontier;
 use pgrx::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Default)]
 pub struct DeltaStage {
@@ -19,6 +19,19 @@ impl DeltaStage {
 
     pub fn table_name(pgt_id: i64, source_oid: u32) -> String {
         format!("__pgt_cdc_{pgt_id}_{source_oid}")
+    }
+
+    /// A source relation as of its NEW frontier, for every live read in DVM.
+    /// The name is stable so cached delta templates can refer to it.
+    pub fn bounded_table_name(pgt_id: i64, source_oid: u32) -> String {
+        format!("__pgt_bound_{pgt_id}_{source_oid}")
+    }
+
+    fn bounded_name(&self, pgt_id: i64, source_oid: u32) -> String {
+        match self.centroid_nonce {
+            Some(nonce) => format!("__pgt_bound_{pgt_id}_{source_oid}_{nonce}"),
+            None => Self::bounded_table_name(pgt_id, source_oid),
+        }
     }
 
     /// Copy every source's immutable refresh window before changing identity.
@@ -56,6 +69,18 @@ impl DeltaStage {
             names: HashMap::new(),
             centroid_nonce,
         };
+
+        // A SHARE lock blocks source writers but not ordinary readers. Take it
+        // before inspecting post-bound CDC and keep it through the refresh
+        // transaction: otherwise a commit after snapshot staging but before
+        // MERGE would create another gap. The stage therefore freezes BOTH
+        // sides of the logical frontier, not just the consumed CDC window.
+        let locked_sources = dependencies
+            .iter()
+            .filter(|d| matches!(d.source_type.as_str(), "TABLE" | "MATVIEW" | "STREAM_TABLE"))
+            .map(|d| d.source_relid)
+            .collect::<Vec<_>>();
+        crate::cdc::lock_source_relations(&locked_sources)?;
 
         for dependency in dependencies {
             let source_oid = dependency.source_relid.to_u32();
@@ -224,10 +249,255 @@ impl DeltaStage {
             ))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         }
+        // Stage the logical source at new_lsn as well as the bounded delta.
+        // This is intentionally done under the source lock acquired above.
+        // The materialized case reads source and future CDC in ONE statement,
+        // so both sides share a PostgreSQL MVCC snapshot.
+        self.stage_bounded_source(
+            st,
+            dependency,
+            &source,
+            new_lsn,
+            owner,
+            &source_table,
+            &hash_columns,
+        )?;
         self.names.insert(source_oid, qualified_name);
         Ok(())
     }
 }
+
+
+    /// Build a source snapshot at the NEW logical frontier. If no post-bound
+    /// changes are visible, a temporary view avoids copying a large relation.
+    /// SHARE locks from prepare_inner keep that view stable until MERGE ends.
+    ///
+    /// With post-bound changes, materialize a snapshot that reverses them.
+    /// For keyed tables the earliest event per identity gives the old row;
+    /// for keyless tables signed multiplicities preserve duplicate rows.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_bounded_source(
+        &self,
+        st: &StreamTableMeta,
+        dependency: &StDependency,
+        buffer: &str,
+        new_lsn: &str,
+        owner: &str,
+        source_table: &str,
+        hash_columns: &[String],
+    ) -> Result<(), PgTrickleError> {
+        let source_oid = dependency.source_relid.to_u32();
+        let name = self.bounded_name(st.pgt_id, source_oid);
+        let target = format!("pg_temp.{}", quote_ident(&name));
+
+        // A previous no-gap refresh in a pooled backend may have left a
+        // session-local VIEW. A table is ON COMMIT DROP instead.
+        let old_kind = Spi::get_one_with_args::<String>(
+            "SELECT c.relkind::text FROM pg_catalog.pg_class c \
+             WHERE c.oid = pg_catalog.to_regclass($1)",
+            &[target.as_str().into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        match old_kind.as_deref() {
+            Some("v") => Spi::run(&format!("DROP VIEW {target}")),
+            Some(_) => Spi::run(&format!("DROP TABLE {target}")),
+            None => Ok(()),
+        }
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        let is_future_truncate = Spi::get_one_with_args::<bool>(
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM {buffer} \
+                 WHERE lsn > $1::pg_lsn AND action = 'T')"
+            ),
+            &[new_lsn.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        if is_future_truncate {
+            // TRUNCATE has no D-images to replay backwards. Fail closed:
+            // treating a post-TRUNCATE source as an as-of source loses rows.
+            return Err(PgTrickleError::UnsupportedOperator(format!(
+                "post-bound TRUNCATE for source OID {source_oid} requires FULL refresh"
+            )));
+        }
+
+        let has_future = Spi::get_one_with_args::<bool>(
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM {buffer} \
+                 WHERE lsn > $1::pg_lsn AND action IN ('I', 'D'))"
+            ),
+            &[new_lsn.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+
+        if !has_future {
+            // The source lock makes the live source identical to its bounded
+            // state until the transaction ends. No full-table copy needed.
+            Spi::run(&format!(
+                "CREATE TEMP VIEW {target} AS SELECT * FROM {source_table}"
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        } else {
+            let pk_columns = crate::cdc::resolve_pk_columns(dependency.source_relid)?;
+            let is_st = dependency.source_type == "STREAM_TABLE";
+            let keyless = !is_st && pk_columns.is_empty();
+
+            // Use the real column order, but only columns captured in CDC.
+            // The change buffer can track a superset of this ST's columns;
+            // absent source columns are never referenced by the DVM plan.
+            let columns = Spi::connect(|client| {
+                let rows = client
+                    .select(
+                        "SELECT attname::text FROM pg_catalog.pg_attribute \
+                         WHERE attrelid = $1 AND attnum > 0 AND NOT attisdropped \
+                         ORDER BY attnum",
+                        None,
+                        &[dependency.source_relid.into()],
+                    )
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                rows.into_iter()
+                    .map(|row| {
+                        row.get::<String>(1)
+                            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                            .ok_or_else(|| {
+                                PgTrickleError::InternalError(
+                                    "source column name unexpectedly NULL".into(),
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })?;
+            let captured: HashSet<String> = Spi::connect(|client| {
+                let rows = client
+                    .select(
+                        "SELECT a.attname::text FROM pg_catalog.pg_attribute a \
+                         WHERE a.attrelid = pg_catalog.to_regclass($1) \
+                           AND a.attnum > 0 AND NOT a.attisdropped",
+                        None,
+                        &[buffer.into()],
+                    )
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                rows.into_iter()
+                    .map(|row| {
+                        row.get::<String>(1)
+                            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                            .ok_or_else(|| {
+                                PgTrickleError::InternalError(
+                                    "buffer column name unexpectedly NULL".into(),
+                                )
+                            })
+                    })
+                    .collect::<Result<HashSet<_>, _>>()
+            })?;
+            let mut cols = columns
+                .into_iter()
+                .filter(|col| captured.contains(&crate::cdc::cb_col_name(col)))
+                .collect::<Vec<_>>();
+            if is_st && !cols.iter().any(|col| col == "__pgt_row_id") {
+                cols.push("__pgt_row_id".to_string());
+            }
+            if cols.is_empty() {
+                return Err(PgTrickleError::UnsupportedOperator(format!(
+                    "cannot reconstruct source OID {source_oid} without captured columns"
+                )));
+            }
+            let live_cols = cols
+                .iter()
+                .map(|c| format!("s.{}", quote_ident(c)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let first_cols = cols
+                .iter()
+                .map(|c| format!("f.{}", quote_ident(c)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let future_cols = cols
+                .iter()
+                .filter(|c| *c != "__pgt_row_id")
+                .map(|c| {
+                    format!(
+                        "c.{} AS {}",
+                        quote_ident(&crate::cdc::cb_col_name(c)),
+                        quote_ident(c)
+                    )
+                })
+                .collect::<Vec<_>>();
+            let future_cols = if future_cols.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", future_cols.join(", "))
+            };
+            let projected = cols
+                .iter()
+                .map(|c| format!("f.{}", quote_ident(c)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let first = format!(
+                "SELECT DISTINCT ON (f.__pgt_row_id) f.__pgt_row_id, f.action, \
+                 {projected} FROM __pgt_future f \
+                 ORDER BY f.__pgt_row_id, f.change_id"
+            );
+            let common = format!(
+                "WITH __pgt_future AS MATERIALIZED (\
+                   SELECT c.__pgt_row_id, c.action, c.change_id{future_cols} \
+                   FROM {buffer} c \
+                   WHERE c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')\
+                 ), __pgt_first AS ({first})"
+            );
+            let select = if keyless {
+                let identity = crate::refresh::codegen::build_content_hash_expr_for_domain(
+                    "s.", hash_columns, "KEYLESS_ROW"
+                );
+                format!(
+                    "{common}, __pgt_net AS (\
+                       SELECT __pgt_row_id, \
+                         SUM(CASE WHEN action = 'I' THEN 1 ELSE -1 END)::bigint AS net \
+                       FROM __pgt_future GROUP BY __pgt_row_id\
+                     ), __pgt_live AS (\
+                       SELECT {live_cols}, {identity} AS __pgt_bound_identity, \
+                         ROW_NUMBER() OVER (PARTITION BY {identity}) AS __pgt_bound_rn \
+                       FROM {source_table} s\
+                     ) \
+                     SELECT {cols} FROM __pgt_live l \
+                     LEFT JOIN __pgt_net n ON n.__pgt_row_id = l.__pgt_bound_identity \
+                     WHERE l.__pgt_bound_rn > GREATEST(n.net, 0) \
+                     UNION ALL SELECT {first_cols} FROM __pgt_first f \
+                     JOIN __pgt_net n ON n.__pgt_row_id = f.__pgt_row_id \
+                     CROSS JOIN LATERAL generate_series(1::bigint, GREATEST(-n.net, 0)) g",
+                    cols = cols.iter().map(|c| format!("l.{}", quote_ident(c)))
+                        .collect::<Vec<_>>().join(", "),
+                )
+            } else {
+                let identity = if is_st {
+                    "s.__pgt_row_id".to_string()
+                } else {
+                    crate::refresh::codegen::build_content_hash_expr_for_domain(
+                        "s.", hash_columns, "SCAN_KEY"
+                    )
+                };
+                format!(
+                    "{common} \
+                     SELECT {live_cols} FROM {source_table} s \
+                     WHERE NOT EXISTS (SELECT 1 FROM __pgt_first f \
+                       WHERE f.__pgt_row_id = {identity}) \
+                     UNION ALL SELECT {first_cols} FROM __pgt_first f \
+                     WHERE f.action = 'D'"
+                )
+            };
+
+            // Single statement: live rows and post-bound change images share
+            // the same MVCC snapshot. Afterwards the temp table is immutable.
+            Spi::run(&format!(
+                "CREATE TEMP TABLE {target} ON COMMIT DROP AS {select}"
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+        Spi::run(&format!("GRANT SELECT ON TABLE {target} TO {owner}"))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Ok(())
+    }
 
 fn frontier_lsn(frontier: &Frontier, key: &str) -> String {
     frontier
