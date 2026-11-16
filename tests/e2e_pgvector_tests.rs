@@ -3906,8 +3906,43 @@ async fn test_centroid_cost_model_rescans_and_rebinds_safely() {
             .await
             .expect("continue cost rescan");
     }
-    let active: String = sqlx::query_scalar("SELECT h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' FROM pgtrickle.pgt_stream_tables t CROSS JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
-        .fetch_one(&mut *conn).await.expect("inspect active cost rescan");
+    // A manual refresh may complete NO_DATA after restart if the committed
+    // source delta is temporarily held back by the CDC safe frontier.  Only
+    // a real delta refresh can establish COST_MODEL_RESCAN_ACTIVE: retry the
+    // deferred window, but fail immediately on a non-NO_DATA unexpected mode.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let active = loop {
+        let (action, reason): (String, Option<String>) = sqlx::query_as(
+            "SELECT h.action, h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason'
+             FROM pgtrickle.pgt_stream_tables t
+             CROSS JOIN LATERAL (
+                 SELECT action, refresh_reason_detail
+                 FROM pgtrickle.pgt_refresh_history h
+                 WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED'
+                 ORDER BY h.refresh_id DESC LIMIT 1
+             ) h
+             WHERE t.pgt_relid = 'centroid_policy_st'::regclass",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("inspect active cost rescan");
+        if let Some(reason) = reason {
+            break reason;
+        }
+        assert_eq!(
+            action, "NO_DATA",
+            "missing centroid cost reason on a non-NO_DATA refresh"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "committed centroid delta never advanced beyond NO_DATA holdback"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_policy_st')")
+            .execute(&mut *conn)
+            .await
+            .expect("retry deferred cost-rescan window");
+    };
     assert_eq!(active, "COST_MODEL_RESCAN_ACTIVE");
     for statement in [
         "BEGIN",

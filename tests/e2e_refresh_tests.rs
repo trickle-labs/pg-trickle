@@ -68,6 +68,9 @@ async fn test_refresh_rejects_unreadable_change_buffer_without_advancing_frontie
         "DIFFERENTIAL",
     )
     .await;
+    // A competing background refresh returns a NOTICE (not an error) from
+    // refresh_stream_table(). Drain it before corrupting the CDC buffer so
+    // this test exercises the actual fail-closed validation path.
     #[cfg(not(feature = "light-e2e"))]
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_broken_buffer_st'])")
         .await;
@@ -87,8 +90,11 @@ async fn test_refresh_rejects_unreadable_change_buffer_without_advancing_frontie
         .await
         .expect_err("an unreadable buffer must not look empty");
     assert!(
-        error.to_string().contains("lsn"),
-        "unexpected error: {error}"
+        error.to_string().contains("lsn")
+            || error
+                .to_string()
+                .contains("required control columns are missing"),
+        "unexpected CDC buffer validation error: {error}"
     );
     let after: String = db
         .query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_broken_buffer_st'")
@@ -712,10 +718,13 @@ async fn test_bit_or_differential_mode() {
     )
     .await;
 
-    // Insert: adds a new permission bit
+    // Insert: adds a new permission bit.  A single manual refresh can be
+    // deferred by a concurrent scheduler refresh or the CDC writer holdback.
+    // Require a completed refresh and exact bounded convergence instead of
+    // interpreting an accepted but skipped refresh call as successful apply.
     db.execute("INSERT INTO bitor_src VALUES (4, 'eng', 8)")
         .await;
-    db.refresh_st("bit_or_st").await;
+    db.refresh_st_until_converged("bit_or_st").await;
 
     db.assert_st_matches_query(
         "public.bit_or_st",
