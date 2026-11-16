@@ -16,7 +16,7 @@ PostgreSQL and pgvector versions before collecting evidence. Configure libpq
 with a service or environment variables, then:
 
 ```sh
-psql -X -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION pg_trickle CASCADE'
+psql -X -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION vector; CREATE EXTENSION pg_trickle'
 python3 benchmarks/pgvector/setup_live_rag.py --dimensions 3
 psql -X -v ON_ERROR_STOP=1 -c "INSERT INTO embedding_demo.documents(id, body) VALUES (1, 'alpha'), (2, 'beta'); INSERT INTO live_rag.access(document_id, tenant_id) VALUES (1, 10), (2, 20); SELECT embedding_demo.enqueue(1, 'model-v1'); SELECT embedding_demo.enqueue(2, 'model-v1')"
 python3 benchmarks/pgvector/fake_embedding_worker.py --model model-v1 --duplicate
@@ -28,7 +28,12 @@ change, include every changed or deleted ID in the application batch, then
 refresh each corpus. The worker claims before generating, and completion
 rechecks the document's incarnation, revision, chunk version, publication and
 lease. `--delay-seconds` can hold a claim while another session edits or
-deletes a document; a late completion is rejected. `--duplicate` verifies that
+deletes a document; a late completion is rejected. The batch runner also
+supports deterministic per-job delay samples with
+`--delay-profile uniform --delay-seed <seed>` and reports their p50/p95/p99
+and maximum. It records persisted stale and absent rows after source commit,
+generation and maintenance, plus p50/p95/p99 for retrieval query plans.
+`--duplicate` verifies that
 a second completion cannot publish again. Use `--model model-v2` to drain the
 existing example's second model queue. Each document's selected model is in
 `live_rag.access.model_version` (default `model-v1`). To roll a document over,
@@ -187,11 +192,16 @@ client-window overlap does not prove that the database executed it throughout
 that interval. A 35-second client timeout fails the run because server cleanup
 cannot be confirmed.
 
-This runner uses a fixed per-job delay (`--delay-seconds`), not concurrent
-writes, a delay distribution, or per-document freshness percentiles. It does
-not collect
-CPU or lock metrics, or provide a representative decision table. Record the
-environment and run repeated, isolated scenarios before drawing conclusions.
+This runner uses a fixed delay or deterministic uniform per-job delays
+(`--delay-profile uniform --delay-seed <seed>`); it does not run concurrent
+writers or report per-document freshness percentiles. The run itself does not
+collect host CPU or lock metrics; a separate Docker stats sample records
+database-container CPU and memory for the 100k case. See the
+[candidate-bounded scale report](results/2026-11-15-rag-scale-bd0813-arm64/README.md)
+for the 10k dimension matrix and 100k/384 sample, including its unfavorable
+filtered ANN result. These observations use candidate `bd0813e8`, before the
+current package fix, and are not final v0.109.0 qualification or a general
+decision model.
 
 For an opt-in concurrent three-approach exercise, run the ignored
 `test_live_rag_unblocked_writes_and_reads_during_refresh` E2E test. It uses
@@ -214,9 +224,13 @@ The test records client and server intervals, not ANN recall or full RAG
 freshness, and runs the three databases serially. Larger sizes require suitable
 memory, disk and execution time; the accepted limit is not a measured capacity.
 
-This is a functional fixture, not the finished #1396 benchmark. The measurement
-script substitutes the configured vector dimensions into the hybrid query;
-the standalone SQL example above remains three-dimensional. It does not yet
-provide the 384/768/1536-dimensional scale matrix, representative concurrent writes, end-to-end latency and resource
-measurements, or a decision table. Do not infer a performance advantage from
-this example.
+This ignored E2E case is a functional concurrency fixture, not the scale
+benchmark: it does not measure ANN recall or per-document freshness and runs
+the three databases serially. The batch runner substitutes the configured
+vector dimensions into the hybrid query; the standalone SQL example above
+remains three-dimensional. The retained candidate-bounded results cover
+10k rows at 384/768/1536 dimensions and 100k rows at 384 dimensions, but not
+the higher-dimensional 100k cases or 1m-row corpus. Concurrent writers,
+recovery-to-searchability under load and final integrated-package reruns remain
+outstanding. The report records a scoped comparison and limitations; do not
+infer a universal performance advantage from these synthetic cases.

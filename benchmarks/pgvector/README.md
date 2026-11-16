@@ -1,5 +1,8 @@
 # Filtered pgvector workload
 
+The end-to-end revision-safe RAG comparison is documented in
+[LIVE_RAG.md](LIVE_RAG.md).
+
 ### Controlled distance-subscription measurements
 
 The opt-in subscription workload accepts comma-separated `PGVECTOR_SUB_ROWS`
