@@ -164,18 +164,20 @@ async fn test_concurrent_insert_during_pipeline_refresh() {
     // Wait for all inserts to complete
     inserter.await.expect("inserter task should not panic");
 
-    // Final convergence: a FULL refresh of L1 guarantees correctness even when
-    // the concurrent DIFFERENTIAL cycles missed a change-buffer entry due to
-    // the WAL-LSN-vs-MVCC-visibility race (the frontier can advance past an
-    // in-flight CDC row that wasn't yet committed and therefore invisible to
-    // the snapshot that read the change buffer).
-    // This mirrors production behavior where the scheduler periodically runs
-    // FULL refreshes to self-heal.
+    // Final convergence: concurrent DIFFERENTIAL windows can miss a CDC row
+    // at an MVCC/WAL visibility boundary. FULL refreshes repair the affected
+    // materialization, but an upstream FULL only emits its current pre/post
+    // diff: it cannot remove historical phantom rows already left behind in a
+    // downstream stream table. Rebuild the whole two-layer chain in dependency
+    // order before returning to DIFFERENTIAL maintenance.
     db.alter_st("conc_dag_l1", "refresh_mode => 'FULL'").await;
-    db.refresh_st("conc_dag_l1").await;
+    db.refresh_st_with_retry("conc_dag_l1").await;
     db.alter_st("conc_dag_l1", "refresh_mode => 'DIFFERENTIAL'")
         .await;
+    db.alter_st("conc_dag_l2", "refresh_mode => 'FULL'").await;
     db.refresh_st_with_retry("conc_dag_l2").await;
+    db.alter_st("conc_dag_l2", "refresh_mode => 'DIFFERENTIAL'")
+        .await;
 
     // Verify full convergence
     db.assert_st_matches_query("conc_dag_l1", l1_q).await;

@@ -900,15 +900,18 @@ async fn test_intersect_multi_column_full() {
     db.create_st("isect_mc_st", q, "1m", "FULL").await;
     db.assert_st_matches_query("isect_mc_st", q).await;
 
+    // A background refresh can hold the lock and make a manual refresh return
+    // a NOTICE without doing work. Require a completed manual refresh before
+    // checking the exact set-operation result after each source change.
     // Make (2,'b') match by updating B
     db.execute("UPDATE isect_mc_b SET y = 'b' WHERE x = 2")
         .await;
-    db.refresh_st("isect_mc_st").await;
+    db.refresh_st_with_retry("isect_mc_st").await;
     db.assert_st_matches_query("isect_mc_st", q).await;
 
     // Remove matching row from A
     db.execute("DELETE FROM isect_mc_a WHERE x = 1").await;
-    db.refresh_st("isect_mc_st").await;
+    db.refresh_st_with_retry("isect_mc_st").await;
     db.assert_st_matches_query("isect_mc_st", q).await;
 }
 

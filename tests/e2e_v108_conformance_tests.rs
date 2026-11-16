@@ -256,6 +256,256 @@ async fn test_v108_snapshot_restore_reinitializes_downstream_and_invalidates_con
     );
 }
 
+/// A copy made before restore must not be activated with its old token,
+/// even if its contract, output schema, and row-identity version are unchanged.
+#[tokio::test]
+async fn test_v108_restore_revokes_outstanding_resnapshot_token_and_allows_new_baseline() {
+    let prefix = "v108_restore_token_revocation";
+    let (db, consumer, _) = active_consumer(prefix).await;
+    let root = format!("public.{prefix}_stream");
+    let snapshot: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.snapshot_stream_table('{prefix}_stream')"
+        ))
+        .await;
+    db.execute(&format!("INSERT INTO {prefix}_source VALUES (2, 'later')"))
+        .await;
+    let graph = graph_digest(&db.pool, &root).await;
+    refresh_graph_without_full(&db.pool, &root, &graph).await;
+
+    sqlx::query("SELECT * FROM pgtrickle.request_output_delta_resnapshot($1::uuid)")
+        .bind(&consumer.consumer_id)
+        .execute(&db.pool)
+        .await
+        .expect("request a new consumer baseline");
+
+    let mut tx = db.pool.begin().await.expect("begin baseline transaction");
+    let (stale_token, _) =
+        reference_clients::begin_resnapshot(&mut *tx, &consumer.consumer_id).await;
+    let copied_rows: Vec<(i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, value FROM {root} ORDER BY id"
+    )))
+    .fetch_all(&mut *tx)
+    .await
+    .expect("read the old baseline in the same transaction");
+    assert_eq!(copied_rows, vec![(1, "before".into()), (2, "later".into())]);
+
+    sqlx::query("SELECT pgtrickle.restore_from_snapshot($1, $2)")
+        .bind(&root)
+        .bind(&snapshot)
+        .execute(&mut *tx)
+        .await
+        .expect("restore the original one-row snapshot");
+    let pending_tokens: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pgtrickle.pgt_output_delta_resnapshots WHERE consumer_id = $1::uuid",
+    )
+    .bind(&consumer.consumer_id)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("check token revocation inside restore transaction");
+    assert_eq!(pending_tokens, 0, "restore must revoke previous tokens");
+
+    // PostgreSQL aborts a transaction after an expected error. Isolate ACK
+    // in a savepoint so we can commit the restore and inspect its state.
+    sqlx::query("SAVEPOINT stale_ack_attempt")
+        .execute(&mut *tx)
+        .await
+        .expect("create stale-ack savepoint");
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle.ack_output_delta_resnapshot($1::uuid, $2::uuid)",
+    )
+    .bind(&consumer.consumer_id)
+    .bind(&stale_token)
+    .fetch_one(&mut *tx)
+    .await
+    .expect_err("a pre-restore token must not reactivate an obsolete mirror");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown or replayed resnapshot token"),
+        "unexpected stale-token error: {error}"
+    );
+    sqlx::query("ROLLBACK TO SAVEPOINT stale_ack_attempt")
+        .execute(&mut *tx)
+        .await
+        .expect("recover after expected ACK rejection");
+    tx.commit()
+        .await
+        .expect("commit restored storage and token revocation");
+
+    let status = reference_clients::validate_consumer(&db.pool, &consumer.consumer_id).await;
+    assert_eq!(status.state, "INVALIDATED");
+    assert_eq!(status.state_reason.as_deref(), Some("SNAPSHOT_RESTORED"));
+    assert_eq!(
+        db.query_scalar::<i64>(&format!("SELECT count(*) FROM {root}"))
+            .await,
+        1
+    );
+
+    // A fresh baseline taken *after* restore must still be able to activate.
+    let mut new_tx = db.pool.begin().await.expect("begin post-restore baseline");
+    let (new_token, _) =
+        reference_clients::begin_resnapshot(&mut *new_tx, &consumer.consumer_id).await;
+    assert_ne!(new_token, stale_token);
+    let restored_rows: Vec<(i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, value FROM {root} ORDER BY id"
+    )))
+    .fetch_all(&mut *new_tx)
+    .await
+    .expect("read restored baseline");
+    assert_eq!(restored_rows, vec![(1, "before".into())]);
+    assert_eq!(
+        reference_clients::ack_resnapshot(&mut *new_tx, &consumer.consumer_id, &new_token).await,
+        "ACTIVE"
+    );
+    new_tx.commit().await.expect("commit fresh baseline");
+    assert_eq!(
+        reference_clients::validate_consumer(&db.pool, &consumer.consumer_id)
+            .await
+            .state,
+        "ACTIVE"
+    );
+}
+
+/// Restore and token invalidation must be atomic: a rolled-back restore cannot
+/// revoke a token whose baseline still matches the original storage.
+#[tokio::test]
+async fn test_v108_rolled_back_restore_preserves_pending_resnapshot_token() {
+    let prefix = "v108_restore_token_rollback";
+    let (db, consumer, _) = active_consumer(prefix).await;
+    let root = format!("public.{prefix}_stream");
+    let snapshot: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.snapshot_stream_table('{prefix}_stream')"
+        ))
+        .await;
+    db.execute(&format!("INSERT INTO {prefix}_source VALUES (2, 'later')"))
+        .await;
+    let graph = graph_digest(&db.pool, &root).await;
+    refresh_graph_without_full(&db.pool, &root, &graph).await;
+    sqlx::query("SELECT * FROM pgtrickle.request_output_delta_resnapshot($1::uuid)")
+        .bind(&consumer.consumer_id)
+        .execute(&db.pool)
+        .await
+        .expect("request resnapshot");
+
+    let mut tx = db.pool.begin().await.expect("begin baseline transaction");
+    let (token, _) = reference_clients::begin_resnapshot(&mut *tx, &consumer.consumer_id).await;
+    sqlx::query("SAVEPOINT restore_that_will_roll_back")
+        .execute(&mut *tx)
+        .await
+        .expect("savepoint before restore");
+    sqlx::query("SELECT pgtrickle.restore_from_snapshot($1, $2)")
+        .bind(&root)
+        .bind(&snapshot)
+        .execute(&mut *tx)
+        .await
+        .expect("restore inside savepoint");
+    let removed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pgtrickle.pgt_output_delta_resnapshots WHERE resnapshot_token = $1::uuid",
+    )
+    .bind(&token)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("check temporary token revocation");
+    assert_eq!(removed, 0);
+    sqlx::query("ROLLBACK TO SAVEPOINT restore_that_will_roll_back")
+        .execute(&mut *tx)
+        .await
+        .expect("roll back restore while retaining the baseline");
+    assert_eq!(
+        reference_clients::ack_resnapshot(&mut *tx, &consumer.consumer_id, &token).await,
+        "ACTIVE",
+        "a rolled-back restore must preserve its baseline token"
+    );
+    tx.commit().await.expect("commit valid resnapshot");
+    assert_eq!(
+        db.query_scalar::<i64>(&format!("SELECT count(*) FROM {root}"))
+            .await,
+        2
+    );
+    assert_eq!(
+        reference_clients::validate_consumer(&db.pool, &consumer.consumer_id)
+            .await
+            .state,
+        "ACTIVE"
+    );
+}
+
+/// A restore of one stream must not invalidate a different stream's
+/// in-progress consumer baseline.
+#[tokio::test]
+async fn test_v108_restore_keeps_unrelated_stream_resnapshot_token_valid() {
+    let (db, restored_consumer, _) = active_consumer("v108_restore_token_isolation").await;
+    let restored_root = "public.v108_restore_token_isolation_stream";
+    let snapshot: String = db
+        .query_scalar(
+            "SELECT pgtrickle.snapshot_stream_table('v108_restore_token_isolation_stream')",
+        )
+        .await;
+
+    db.execute("CREATE TABLE v108_token_peer_source (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO v108_token_peer_source VALUES (1)")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+         name => 'v108_token_peer_stream',\
+         query => 'SELECT id FROM v108_token_peer_source',\
+         schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,\
+         orchestration_mode => 'EXTERNAL')",
+    )
+    .await;
+    let peer_root = "public.v108_token_peer_stream";
+    let peer_graph = graph_digest(&db.pool, peer_root).await;
+    reference_clients::refresh_graph(&db.pool, peer_root, &peer_graph).await;
+    let peer_contract = reference_clients::stream_contract_digest(&db.pool, peer_root).await;
+    let peer = reference_clients::register(
+        &db.pool,
+        peer_root,
+        "v108_token_peer_consumer",
+        &peer_contract,
+    )
+    .await;
+
+    let mut tx = db.pool.begin().await.expect("begin peer baseline");
+    let (peer_token, _) = reference_clients::begin_resnapshot(&mut *tx, &peer.consumer_id).await;
+    sqlx::query("SELECT pgtrickle.restore_from_snapshot($1, $2)")
+        .bind(restored_root)
+        .bind(&snapshot)
+        .execute(&mut *tx)
+        .await
+        .expect("restore a different stream table");
+
+    let still_valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM pgtrickle.pgt_output_delta_resnapshots
+            WHERE resnapshot_token = $1::uuid)",
+    )
+    .bind(&peer_token)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("check unrelated token persists");
+    assert!(still_valid, "restore must not revoke other stream tokens");
+    assert_eq!(
+        reference_clients::ack_resnapshot(&mut *tx, &peer.consumer_id, &peer_token).await,
+        "ACTIVE"
+    );
+    tx.commit()
+        .await
+        .expect("commit unaffected consumer baseline");
+
+    let restored_status =
+        reference_clients::validate_consumer(&db.pool, &restored_consumer.consumer_id).await;
+    assert_eq!(restored_status.state, "INVALIDATED");
+    assert_eq!(
+        reference_clients::validate_consumer(&db.pool, &peer.consumer_id)
+            .await
+            .state,
+        "ACTIVE"
+    );
+}
+
 async fn assert_persistently_invalidated(db: &E2eDb, consumer: &DeltaRegistration, reason: &str) {
     for _ in 0..2 {
         let status = reference_clients::validate_consumer(&db.pool, &consumer.consumer_id).await;
