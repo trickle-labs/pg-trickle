@@ -286,7 +286,10 @@ impl DeltaStage {
             if !self.names.contains_key(&oid) {
                 continue;
             }
-            let bound = format!("pg_temp.{}", quote_ident(&self.bounded_name(st.pgt_id, oid)));
+            let bound = format!(
+                "pg_temp.{}",
+                quote_ident(&self.bounded_name(st.pgt_id, oid))
+            );
             let kind = Spi::get_one_with_args::<String>(
                 "SELECT (SELECT relkind::text FROM pg_catalog.pg_class \
                  WHERE oid = pg_catalog.to_regclass($1))",
@@ -311,8 +314,10 @@ impl DeltaStage {
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             let (source, _) = crate::refresh::source_visibility_key(dependency.source_relid)?;
             // nosemgrep: rust.spi.run.dynamic-format -- source is catalog-qualified, bound is quoted.
-            Spi::run(&format!("CREATE TEMP VIEW {bound} AS SELECT * FROM {source}"))
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Spi::run(&format!(
+                "CREATE TEMP VIEW {bound} AS SELECT * FROM {source}"
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             // nosemgrep: rust.spi.run.dynamic-format -- bound and owner are quoted identifiers.
             Spi::run(&format!("GRANT SELECT ON TABLE {bound} TO {owner}"))
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
