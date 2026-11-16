@@ -958,6 +958,11 @@ fn generate_delta_query_impl(
         );
     }
 
+    // P5/direct-aggregate paths do not invoke diff_scan for every leaf.
+    // Register their catalog-qualified sources too, so any generated
+    // endpoint, rescan or join snapshot reads the bounded relation.
+    ctx.register_all_source_scans(&source_oids)?;
+
     // DAG-4: Apply any active bypass table mappings from fused-chain execution.
     ctx.set_st_bypass_tables(crate::refresh::get_st_bypass_tables());
 
@@ -1304,6 +1309,10 @@ pub fn generate_delta_query_cached(
                 })
                 .collect(),
         );
+
+        // Optimization may skip diff_scan (P5 algebraic aggregate fast
+        // path), but reconstructed FROMs still reference those leaves.
+        ctx.register_all_source_scans(&source_oids)?;
 
         let (template_sql, output_columns, diff_dedup, diff_has_key_changed) =
             ctx.differentiate_with_columns(&result.tree)?;
