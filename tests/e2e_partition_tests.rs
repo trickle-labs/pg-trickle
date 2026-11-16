@@ -583,6 +583,72 @@ async fn test_partition_direct_drop_marks_parent_reinit_and_rebuilds_differentia
 }
 
 #[tokio::test]
+async fn test_partition_drop_with_misaligned_shared_hour_rebuilds_exact_groups() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute(
+        "CREATE TABLE shared_hour_events (
+            id INT NOT NULL, event_day DATE NOT NULL, occurred TIMESTAMP NOT NULL,
+            account TEXT NOT NULL, amount INT NOT NULL, PRIMARY KEY (id, event_day)
+         ) PARTITION BY RANGE (event_day)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE shared_hour_old PARTITION OF shared_hour_events
+         FOR VALUES FROM ('2025-01-01') TO ('2025-01-02')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE shared_hour_live PARTITION OF shared_hour_events
+         FOR VALUES FROM ('2025-01-02') TO ('2025-01-03')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO shared_hour_events VALUES
+         (1, '2025-01-01', '2025-01-02 10:10', 'a', 10),
+         (2, '2025-01-02', '2025-01-02 10:20', 'a', 20),
+         (3, '2025-01-01', '2025-01-01 09:00', 'b', 30),
+         (4, '2025-01-02', '2025-01-02 11:00', 'b', 40)",
+    )
+    .await;
+    let query = "SELECT account, date_trunc('hour', occurred) AS hour, \
+                 SUM(amount) AS total, COUNT(*) AS n FROM shared_hour_events GROUP BY 1, 2";
+    db.create_st("shared_hour_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("shared_hour_st", query).await;
+
+    db.execute("DROP TABLE shared_hour_old").await;
+    db.refresh_st_with_retry("shared_hour_st").await;
+    let history: (String, String) = sqlx::query_as(
+        "SELECT action, status FROM pgtrickle.pgt_refresh_history \
+         WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                         WHERE pgt_name = 'shared_hour_st') \
+         ORDER BY refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read partition removal refresh history");
+    assert_eq!(history, ("REINITIALIZE".into(), "COMPLETED".into()));
+    db.assert_st_matches_query("shared_hour_st", query).await;
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT account, to_char(hour, 'YYYY-MM-DD HH24:MI'), total, n \
+         FROM shared_hour_st ORDER BY account, hour",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read remaining shared-hour aggregates");
+    assert_eq!(
+        rows,
+        vec![
+            ("a".into(), "2025-01-02 10:00".into(), 20, 1),
+            ("b".into(), "2025-01-02 11:00".into(), 40, 1),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn test_partition_create_child_after_stream_then_direct_drop() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute(
@@ -656,8 +722,75 @@ async fn test_partition_nested_drop_invalidates_grandparent() {
     let query = "SELECT COUNT(*) AS n FROM nest_source";
     db.create_st("nest_st", query, "1m", "DIFFERENTIAL").await;
     db.refresh_st("nest_st").await;
+    let fingerprint: String = db
+        .query_scalar(
+            "SELECT schema_fingerprint FROM pgtrickle.pgt_dependencies \
+             WHERE source_relid = 'nest_source'::regclass",
+        )
+        .await;
+    db.execute("CREATE TABLE nest_leaf_us PARTITION OF nest_year FOR VALUES IN ('US')")
+        .await;
+    let new_fingerprint: String = db
+        .query_scalar(
+            "SELECT schema_fingerprint FROM pgtrickle.pgt_dependencies \
+             WHERE source_relid = 'nest_source'::regclass",
+        )
+        .await;
+    assert_eq!(fingerprint, new_fingerprint);
+
+    async fn snapshot(db: &E2eDb) -> serde_json::Value {
+        sqlx::query_scalar(
+            "SELECT column_snapshot->'partition_descendants' \
+             FROM pgtrickle.pgt_dependencies WHERE source_relid = 'nest_source'::regclass \
+             AND pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'nest_st')",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("read saved partition bounds")
+    }
+
+    let live: Vec<(i64, i64, String, String)> = sqlx::query_as(
+        "SELECT c.oid::bigint, i.inhparent::bigint, c.relpartbound::text, c.relkind::text \
+         FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
+         WHERE i.inhparent IN ('nest_source'::regclass, 'nest_year'::regclass) \
+         ORDER BY c.oid, i.inhparent",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read live partition bounds");
+    let expected = serde_json::Value::Array(
+        live.iter()
+            .map(|(oid, parent, bound, kind)| {
+                serde_json::json!({
+                    "oid": oid, "parent_oid": parent, "bound_node": bound, "relkind": kind
+                })
+            })
+            .collect(),
+    );
+    assert_eq!(snapshot(&db).await, expected);
+    let leaf_oid: i64 = db
+        .query_scalar("SELECT 'nest_leaf'::regclass::oid::bigint")
+        .await;
+
+    let mut tx = db.pool.begin().await.expect("begin partition rollback");
+    sqlx::query("DROP TABLE nest_leaf")
+        .execute(&mut *tx)
+        .await
+        .expect("drop partition within transaction");
+    tx.rollback().await.expect("roll back partition drop");
+    assert_eq!(snapshot(&db).await, expected);
 
     db.execute("DROP TABLE nest_leaf").await;
+    let remaining_snapshot = serde_json::Value::Array(
+        expected
+            .as_array()
+            .expect("partition snapshot array")
+            .iter()
+            .filter(|entry| entry["oid"] != serde_json::json!(leaf_oid))
+            .cloned()
+            .collect(),
+    );
+    assert_eq!(snapshot(&db).await, remaining_snapshot);
     let needs_reinit: bool = db
         .query_scalar(
             "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables
