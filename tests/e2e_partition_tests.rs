@@ -1788,6 +1788,94 @@ async fn test_retention_hourly_tutorial_policies() {
 
 #[tokio::test]
 #[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_nested_partition_subtree_and_leaf_safety() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retention_nested_src (d date NOT NULL, account text NOT NULL, amount integer NOT NULL) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE retention_nested_old PARTITION OF retention_nested_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01') PARTITION BY LIST (account)").await;
+    db.execute(
+        "CREATE TABLE retention_nested_a PARTITION OF retention_nested_old FOR VALUES IN ('a')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE retention_nested_b PARTITION OF retention_nested_old FOR VALUES IN ('b')",
+    )
+    .await;
+    db.execute("CREATE TABLE retention_nested_live PARTITION OF retention_nested_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO retention_nested_src VALUES ('2025-06-01','a',10), ('2025-06-01','b',5), ('2026-06-01','a',20)").await;
+    let query = "SELECT d, account, sum(amount) AS total, count(*) AS n FROM retention_nested_src GROUP BY d, account";
+    for (name, policy) in [
+        ("retention_nested_trim", "TRIM"),
+        ("retention_nested_keep", "RETAIN"),
+    ] {
+        sqlx::query("SELECT pgtrickle.create_stream_table_with_retention($1, $2, $3, 'd', '2026-01-01', '1h')")
+            .bind(name).bind(query).bind(policy).execute(&db.pool).await.expect("configure nested source");
+    }
+    let baseline: Vec<(String, String, i64, i64)> = sqlx::query_as("SELECT d::text, account, sum(amount), count(*) FROM retention_nested_src GROUP BY d, account ORDER BY d, account")
+        .fetch_all(&db.pool).await.expect("capture historical baseline");
+    let error = db
+        .try_execute("ALTER TABLE retention_nested_old DETACH PARTITION retention_nested_a")
+        .await
+        .expect_err("retained history requires a proven whole-root range");
+    assert!(error.to_string().contains("direct partition"), "{error}");
+    let attached: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid = 'retention_nested_a'::regclass AND inhparent = 'retention_nested_old'::regclass)").await;
+    assert!(attached);
+    db.execute("ALTER TABLE retention_nested_src DETACH PARTITION retention_nested_old")
+        .await;
+    db.assert_st_matches_query("retention_nested_trim", query)
+        .await;
+    let retained: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT d::text, account, total, n FROM retention_nested_keep ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read retained subtree history");
+    assert_eq!(retained, baseline);
+}
+
+#[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_trim_updates_immediate_downstream() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retention_immediate_src (d date NOT NULL, account text NOT NULL, amount integer NOT NULL) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE retention_immediate_old PARTITION OF retention_immediate_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE retention_immediate_live PARTITION OF retention_immediate_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute(
+        "INSERT INTO retention_immediate_src VALUES ('2025-06-01','a',10), ('2026-06-01','a',20)",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.create_stream_table_with_retention('retention_immediate_up', 'SELECT d, account, sum(amount) AS total, count(*) AS n FROM retention_immediate_src GROUP BY d, account', 'TRIM', 'd', '2026-01-01', '1h')").await;
+    db.execute("SELECT pgtrickle.create_stream_table(name => 'retention_immediate_down', query => 'SELECT d, account, total, n FROM retention_immediate_up', schedule => NULL, refresh_mode => 'IMMEDIATE')").await;
+    db.execute("ALTER TABLE retention_immediate_src DETACH PARTITION retention_immediate_old")
+        .await;
+    let read = || {
+        sqlx::query_as::<_, (String, String, i64, i64)>(
+            "SELECT d::text, account, total, n FROM retention_immediate_down ORDER BY d, account",
+        )
+    };
+    let rows = read()
+        .fetch_all(&db.pool)
+        .await
+        .expect("read downstream after trim");
+    assert_eq!(rows, vec![("2026-06-01".into(), "a".into(), 20, 1)]);
+    db.execute("INSERT INTO retention_immediate_src VALUES ('2026-06-01','a',7)")
+        .await;
+    db.refresh_st_until_converged("retention_immediate_up")
+        .await;
+    let rows = read()
+        .fetch_all(&db.pool)
+        .await
+        .expect("read downstream after differential refresh");
+    assert_eq!(rows, vec![("2026-06-01".into(), "a".into(), 27, 2)]);
+}
+
+#[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
 async fn test_retention_truncate_cannot_delete_sealed_history() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
