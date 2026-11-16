@@ -405,6 +405,8 @@ impl DeltaStage {
 
         // Both checks read our own materialized rows (not the possibly stale
         // snapshot of a separate SPI read-only query).
+        // nosemgrep: rust.spi.query.dynamic-format -- post_stage is an
+        // identifier-quoted, numeric-ID-scoped pg_temp table we just created.
         let is_future_truncate = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action = 'T')"
         ))
@@ -418,6 +420,8 @@ impl DeltaStage {
             )));
         }
 
+        // nosemgrep: rust.spi.query.dynamic-format -- post_stage is an
+        // identifier-quoted, numeric-ID-scoped pg_temp table we just created.
         let has_future = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action IN ('I', 'D'))"
         ))
