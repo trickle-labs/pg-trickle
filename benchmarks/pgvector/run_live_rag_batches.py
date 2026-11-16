@@ -225,6 +225,7 @@ SELECT json_build_object('postgres', current_setting('server_version'),
     variables = {"rows": str(args.rows), "batch": str(args.batch), "cycle": "0"}
     worker.psql("SELECT live_rag.sync_application(ARRAY(SELECT id FROM live_rag.truth)::bigint[]); "
                 "SELECT live_rag.recompute_full(); SELECT pgtrickle.refresh_stream_table('live_rag.differential');")
+    worker.psql(setup_live_rag.index_sql(args.dimensions))
     worker.psql("ANALYZE embedding_demo.documents; ANALYZE embedding_demo.results; ANALYZE live_rag.access; "
                 "ANALYZE live_rag.application; ANALYZE live_rag.periodic_full; ANALYZE live_rag.differential;")
     initial_seconds = time.monotonic() - start

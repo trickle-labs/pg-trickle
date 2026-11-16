@@ -180,6 +180,12 @@ activity contaminates WAL measurements. Retrieval
 uses administrative current views after all approaches converge, and the
 EXPLAIN plans contain per-query timing and buffer information.
 
+The batch runner populates all three corpora before creating their ANN and
+lexical indexes, so the large initial copy does not pay per-row index updates.
+The reported initial setup time includes those index builds. The standalone
+`setup_live_rag.py` command still creates indexes immediately for interactive
+and E2E fixture setup.
+
 Add `--concurrent-readers 1` (up to four) to issue repeated tenant-filtered
 hybrid reads against each approach while its maintenance runs. Each reader
 starts a new `psql` process per query and pauses 50 ms between queries. The
