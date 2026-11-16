@@ -84,6 +84,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("refresh_tier", "text"),
         ("requested_cdc_mode", "text"),
         ("refresh_mode", "text"),
+        ("recovery_generation", "bigint"),
         ("requested_refresh_mode", "text"),
         ("refresh_reason", "text"),
         ("refresh_reason_detail", "text"),
