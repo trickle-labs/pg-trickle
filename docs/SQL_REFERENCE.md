@@ -6223,6 +6223,12 @@ SELECT pgtrickle.snapshot_stream_table(
 
 Restore a stream table from an archival snapshot and realign its frontier.
 
+**IMMEDIATE streams cannot be restored from archival snapshots.** They use
+synchronous triggers rather than replayable CDC history, so restoring a
+historical image would make future deltas accumulate on an incorrect baseline.
+The API rejects an IMMEDIATE destination without changing its data or state.
+Use a protected reinitialization from the current sources instead.
+
 ```sql
 pgtrickle.restore_from_snapshot(
     name   TEXT,  -- stream table to restore into
