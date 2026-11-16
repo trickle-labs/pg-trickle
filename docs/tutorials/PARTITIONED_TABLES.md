@@ -80,6 +80,105 @@ SELECT * FROM regional_sales ORDER BY region;
 --  US     | 275.00 |   2
 ```
 
+## Retention policies
+
+Retention is disabled by default. An eligible stream can opt into `TRIM` or
+`RETAIN` with an explicit cutoff. A partition is expired only when its entire
+half-open range `[lower, upper)` is at or below the cutoff. Advancing the
+cutoff does not remove a partition; it makes a subsequent ordinary `DETACH`
+or direct `DROP TABLE` eligible for retention processing.
+
+This example uses the **same** `occurred` column for partitioning and hourly
+grouping. It does not infer any relationship between two timestamps. Run it in
+a database with pg_trickle installed:
+
+```sql
+CREATE TABLE retention_events (
+    occurred timestamp NOT NULL,
+    account_id integer NOT NULL,
+    amount numeric NOT NULL
+) PARTITION BY RANGE (occurred);
+CREATE TABLE retention_events_old PARTITION OF retention_events
+    FOR VALUES FROM ('2025-01-01') TO ('2025-02-01');
+CREATE TABLE retention_events_live PARTITION OF retention_events
+    FOR VALUES FROM ('2025-02-01') TO ('2025-03-01');
+INSERT INTO retention_events VALUES
+    ('2025-01-15 12:05', 1, 10), ('2025-01-15 12:30', 1, 5),
+    ('2025-02-15 09:10', 1, 20), ('2025-02-15 09:20', 2, 7);
+
+SELECT pgtrickle.create_stream_table_with_retention(
+    'hourly_trim',
+    'SELECT pg_catalog.date_trunc(''hour'', occurred) AS hour, account_id,
+            sum(amount) AS total, count(*) AS n
+       FROM retention_events GROUP BY 1, 2',
+    'TRIM', 'occurred', '2025-02-01', '1h'
+);
+SELECT pgtrickle.create_stream_table_with_retention(
+    'hourly_history',
+    'SELECT pg_catalog.date_trunc(''hour'', occurred) AS hour, account_id,
+            sum(amount) AS total, count(*) AS n
+       FROM retention_events GROUP BY 1, 2',
+    'RETAIN', 'occurred', '2025-02-01', '1h'
+);
+
+ALTER TABLE retention_events DETACH PARTITION retention_events_old;
+SELECT hour, account_id, total, n FROM hourly_trim ORDER BY 1, 2;
+-- 2025-02-15 09:00:00 | 1 | 20 | 1
+-- 2025-02-15 09:00:00 | 2 |  7 | 1
+SELECT hour, account_id, total, n FROM hourly_history ORDER BY 1, 2;
+-- The same two rows plus 2025-01-15 12:00:00 | 1 | 15 | 2.
+SELECT pgtrickle.get_stream_table_partition_retention('hourly_history');
+```
+
+For `TRIM`, pg_trickle first brings the stream current under its existing CDC
+locking protocol, then removes the affected output groups using an index. The
+remaining groups continue to receive differential updates. An ineligible
+removal, including a partition that crosses the cutoff, falls back to normal
+reinitialization. A stream with user triggers or output-delta consumers cannot
+currently enable TRIM.
+
+For `RETAIN`, removal seals the expired range and preserves its aggregate
+rows. Later differential refreshes continue to update live groups. Sealed
+history cannot be reconstructed from the surviving raw source: FULL refresh,
+reinitialization, policy removal, incompatible query changes and restore paths
+that would replace it are rejected. Save the raw events externally if you need
+to rebuild or correct historical aggregates; deleting and recreating the
+stream deliberately discards its retained history.
+
+The contract is intentionally narrow:
+
+- The source is one logged, trigger-CDC RANGE-partitioned table with one
+  non-null `date`, `timestamp`, or `timestamptz` partition column, the default
+  btree operator class, finite bounds, and no default partition. Descendants
+  must be durable local tables.
+- The defining query is a single-source grouped aggregate with `COUNT` and/or
+  `SUM`, without DISTINCT or aggregate filters. Its output includes either
+  the exact partition key or an hourly bucket of that same key. Hourly
+  `timestamp` buckets use `pg_catalog.date_trunc('hour', key)`; `timestamptz`
+  buckets must use `pg_catalog.date_trunc('hour', key, 'UTC')`. Partition
+  bounds must align with bucket boundaries. Joins and other query shapes are
+  rejected at configuration time.
+- The source workload may append rows, but grouped output rows are updated;
+  this feature does not require the stream's append-only output fast path.
+- `RETAIN` rejects overlapping historical attachments, including empty
+  partitions, and nonempty attachments that would require rebuilding sealed
+  history. Late arrivals or backfills into a sealed range therefore require a
+  deliberate external rebuild. Ordinary writes to still-attached ranges remain
+  supported. `DETACH PARTITION CONCURRENTLY` is rejected for RETAIN; for TRIM
+  it follows the normal safe suspension/reinitialization path. Removing a
+  nested child falls back for TRIM and is rejected for RETAIN; removing a
+  direct child that itself contains subpartitions is supported.
+
+The retention cutoff is parsed as the source column type. Include a timezone
+offset for `timestamptz` cutoffs to avoid dependence on the session timezone.
+For an existing initialized managed differential stream, use
+`pgtrickle.set_stream_table_partition_retention(name, policy, column, cutoff)`;
+the API validates the existing source, query, storage and partition layout.
+Use the same function with a later cutoff to advance it. `OFF` disables a
+policy only before any RETAIN range has been sealed. Upgrading leaves existing
+streams disabled until explicitly configured. Inspect the JSON status and
+refresh history when diagnosing a rejected operation or fallback.
+
 ## Adding New Partitions
 
 When you add a new partition, any new rows inserted through the parent are

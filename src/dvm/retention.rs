@@ -4,6 +4,8 @@
 //! validate the partition key, every bound, and the retention lifecycle.
 
 use super::parser::{AggFunc, Expr, OpTree};
+#[cfg(not(test))]
+use pgrx::pg_sys;
 use serde::{Deserialize, Serialize};
 
 const DATE_OID: u32 = 1082;
@@ -340,7 +342,165 @@ pub struct PreparedRetentionCut {
 
 #[cfg(not(test))]
 thread_local! {
-    static PREPARED_DETACH: std::cell::RefCell<Option<PreparedRetentionCut>> = const { std::cell::RefCell::new(None) };
+    static PREPARED_DETACH: std::cell::RefCell<Vec<PreparedRetentionCut>> = const { std::cell::RefCell::new(Vec::new()) };
+    static PREPARED_CALLBACK_XID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(not(test))]
+fn clear_prepared_detaches() {
+    PREPARED_DETACH.with(|slot| {
+        if let Ok(mut cuts) = slot.try_borrow_mut() {
+            cuts.clear();
+        }
+    });
+    PREPARED_CALLBACK_XID.with(|xid| xid.set(0));
+}
+
+#[cfg(not(test))]
+fn register_prepared_detach(cut: PreparedRetentionCut) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    let register = PREPARED_CALLBACK_XID.with(|xid| {
+        if xid.get() == cut.transaction_id {
+            false
+        } else {
+            xid.set(cut.transaction_id);
+            true
+        }
+    });
+    if register {
+        pgrx::register_xact_callback(pgrx::PgXactCallbackEvent::Abort, clear_prepared_detaches);
+        pgrx::register_xact_callback(pgrx::PgXactCallbackEvent::Commit, clear_prepared_detaches);
+        pgrx::register_xact_callback(pgrx::PgXactCallbackEvent::PreCommit, || {
+            PREPARED_DETACH.with(|slot| {
+                if !slot.try_borrow().is_ok_and(|cuts| cuts.is_empty()) {
+                    pgrx::error!("pg_trickle: a prepared partition detach was not finalized");
+                }
+            });
+        });
+        pgrx::register_xact_callback(pgrx::PgXactCallbackEvent::PrePrepare, || {
+            PREPARED_DETACH.with(|slot| {
+                if !slot.try_borrow().is_ok_and(|cuts| cuts.is_empty()) {
+                    pgrx::error!("pg_trickle: a prepared partition detach was not finalized");
+                }
+            });
+        });
+        pgrx::register_subxact_callback(pgrx::PgSubXactCallbackEvent::AbortSub, |subid, _| {
+            PREPARED_DETACH.with(|slot| {
+                if let Ok(mut cuts) = slot.try_borrow_mut() {
+                    cuts.retain(|cut| cut.subtransaction_id != subid);
+                }
+            });
+        });
+    }
+    PREPARED_DETACH.with(|slot| {
+        let mut cuts = slot.borrow_mut();
+        if cuts.iter().any(|existing| {
+            existing.pgt_id == cut.pgt_id
+                && existing.source_oid == cut.source_oid
+                && existing.target_oid == cut.target_oid
+        }) {
+            return Err(PgTrickleError::InvalidArgument(
+                "partition cut is already prepared".into(),
+            ));
+        }
+        cuts.push(cut);
+        Ok(())
+    })
+}
+
+#[cfg(not(test))]
+fn prepared_detach_exists(pgt_id: i64, source_oid: u32, target_oid: u32) -> bool {
+    // SAFETY: PostgreSQL exposes these identifiers for the current backend transaction.
+    let (xid, subid) = unsafe {
+        (
+            pg_sys::GetTopFullTransactionIdIfAny().value,
+            pg_sys::GetCurrentSubTransactionId(),
+        )
+    };
+    PREPARED_DETACH.with(|slot| {
+        slot.borrow().iter().any(|cut| {
+            cut.pgt_id == pgt_id
+                && cut.source_oid == source_oid
+                && cut.target_oid == target_oid
+                && cut.transaction_id == xid
+                && cut.subtransaction_id == subid
+        })
+    })
+}
+
+/// Prepare eligible configured consumers before PostgreSQL detaches the child.
+#[cfg(not(test))]
+pub(crate) fn prepare_automatic_detaches(
+    source_oid: pg_sys::Oid,
+    target_oid: pg_sys::Oid,
+) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let policies = Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT pgt_id, column_snapshot->'partition_retention' FROM pgtrickle.pgt_dependencies \
+             WHERE source_relid = $1 AND source_type = 'TABLE' AND column_snapshot ? 'partition_retention' \
+             ORDER BY pgt_id",
+            None, &[source_oid.into()],
+        ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut policies = Vec::new();
+        for row in rows {
+            let id = row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("missing retention stream ID".into())
+                })?;
+            let value = row
+                .get::<pgrx::JsonB>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InvalidArgument("partition retention state is missing".into())
+                })?;
+            let state: RetentionState = serde_json::from_value(value.0).map_err(|e| {
+                PgTrickleError::InvalidArgument(format!("invalid partition retention state: {e}"))
+            })?;
+            state.validate().map_err(|e| {
+                PgTrickleError::InvalidArgument(format!("invalid partition retention state: {e:?}"))
+            })?;
+            policies.push((id, state));
+        }
+        Ok::<_, PgTrickleError>(policies)
+    })?;
+    // Refreshes and configuration take stream locks before source locks.
+    for (pgt_id, _) in &policies {
+        crate::api::alter::lock_alter_target(*pgt_id)?;
+    }
+    for (pgt_id, state) in policies {
+        if prepared_detach_exists(pgt_id, source_oid.to_u32(), target_oid.to_u32()) {
+            continue;
+        }
+        let layout = match validate_partition_layout(
+            source_oid,
+            &state.candidate.source_column,
+            &state.candidate,
+            state.cutoff,
+        ) {
+            Ok(layout) => layout,
+            Err(PgTrickleError::InvalidArgument(_)) if state.mode == RetentionMode::Trim => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let partition = layout
+            .iter()
+            .find(|partition| partition.oid == target_oid.to_u32());
+        if partition.is_none_or(|partition| !partition.expired) {
+            if state.mode == RetentionMode::Trim {
+                continue;
+            }
+            return Err(PgTrickleError::InvalidArgument(
+                "RETAIN requires a direct partition wholly below its retention cutoff".into(),
+            ));
+        }
+        register_prepared_detach(prepare_retention_cut(pgt_id, target_oid)?)?;
+    }
+    Ok(())
 }
 
 #[cfg(not(test))]
@@ -350,7 +510,7 @@ struct PreparedDetachGuard;
 impl Drop for PreparedDetachGuard {
     fn drop(&mut self) {
         PREPARED_DETACH.with(|slot| {
-            slot.borrow_mut().take();
+            slot.borrow_mut().clear();
         });
     }
 }
@@ -363,18 +523,17 @@ pub fn with_prepared_retained_detach<T>(
 ) -> Result<T, crate::error::PgTrickleError> {
     use crate::error::PgTrickleError;
     PREPARED_DETACH.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if slot.is_some() {
+        if !slot.borrow().is_empty() {
             return Err(PgTrickleError::InvalidArgument(
                 "nested retention detach is not supported".into(),
             ));
         }
-        *slot = Some(cut);
         Ok(())
     })?;
+    register_prepared_detach(cut)?;
     let _guard = PreparedDetachGuard;
     let result = detach()?;
-    let pending = PREPARED_DETACH.with(|slot| slot.borrow().is_some());
+    let pending = PREPARED_DETACH.with(|slot| !slot.borrow().is_empty());
     if pending {
         return Err(PgTrickleError::InvalidArgument(
             "prepared partition detach was not finalized by the DDL hook".into(),
@@ -388,17 +547,26 @@ pub fn with_prepared_retained_detach<T>(
 pub(crate) fn finish_prepared_retained_detach(
     pgt_id: i64,
     source_oid: pgrx::pg_sys::Oid,
+    target_oid: Option<pgrx::pg_sys::Oid>,
 ) -> Result<bool, crate::error::PgTrickleError> {
+    // SAFETY: PostgreSQL exposes these identifiers for the current backend transaction.
+    let (xid, subid) = unsafe {
+        (
+            pg_sys::GetTopFullTransactionIdIfAny().value,
+            pg_sys::GetCurrentSubTransactionId(),
+        )
+    };
     let cut = PREPARED_DETACH.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if slot
-            .as_ref()
-            .is_some_and(|cut| cut.pgt_id == pgt_id && cut.source_oid == source_oid.to_u32())
-        {
-            slot.take()
-        } else {
-            None
-        }
+        let mut cuts = slot.borrow_mut();
+        cuts.iter()
+            .position(|cut| {
+                cut.pgt_id == pgt_id
+                    && cut.source_oid == source_oid.to_u32()
+                    && target_oid.is_none_or(|target| cut.target_oid == target.to_u32())
+                    && cut.transaction_id == xid
+                    && cut.subtransaction_id == subid
+            })
+            .map(|position| cuts.remove(position))
     });
     match cut {
         Some(cut) => {
@@ -416,35 +584,62 @@ pub(crate) fn finish_prepared_retained_detach(
 pub(crate) fn finish_prepared_retained_detach(
     _pgt_id: i64,
     _source_oid: pgrx::pg_sys::Oid,
+    _target_oid: Option<pgrx::pg_sys::Oid>,
 ) -> Result<bool, crate::error::PgTrickleError> {
     Ok(false)
 }
 
-/// Drain this stream's trigger CDC under source SHARE locks before removal.
-/// The caller must perform the matching DDL in the same transaction.
+/// Finalize all prepared cuts for this DROP before ancestry snapshots change.
 #[cfg(not(test))]
-pub fn prepare_retention_cut(
-    pgt_id: i64,
-    target_oid: pgrx::pg_sys::Oid,
-) -> Result<PreparedRetentionCut, crate::error::PgTrickleError> {
-    use crate::catalog::{CdcMode, StDependency, StreamTableMeta, compute_defining_query_hash};
+pub(crate) fn finish_prepared_drops(
+    dropped: &[pg_sys::Oid],
+) -> Result<std::collections::HashSet<(i64, u32, u32)>, crate::error::PgTrickleError> {
+    // SAFETY: PostgreSQL exposes these identifiers for the current backend transaction.
+    let (xid, subid) = unsafe {
+        (
+            pg_sys::GetTopFullTransactionIdIfAny().value,
+            pg_sys::GetCurrentSubTransactionId(),
+        )
+    };
+    let candidates = PREPARED_DETACH.with(|slot| {
+        slot.borrow()
+            .iter()
+            .filter(|cut| {
+                cut.transaction_id == xid
+                    && cut.subtransaction_id == subid
+                    && dropped.iter().any(|oid| oid.to_u32() == cut.target_oid)
+            })
+            .map(|cut| (cut.pgt_id, cut.source_oid, cut.target_oid))
+            .collect::<Vec<_>>()
+    });
+    let mut finalized = std::collections::HashSet::new();
+    for (id, source, target) in candidates {
+        if finish_prepared_retained_detach(
+            id,
+            pg_sys::Oid::from(source),
+            Some(pg_sys::Oid::from(target)),
+        )? {
+            finalized.insert((id, source, target));
+        }
+    }
+    Ok(finalized)
+}
+
+#[cfg(test)]
+pub(crate) fn finish_prepared_drops(
+    _dropped: &[pgrx::pg_sys::Oid],
+) -> Result<std::collections::HashSet<(i64, u32, u32)>, crate::error::PgTrickleError> {
+    Ok(std::collections::HashSet::new())
+}
+
+/// Validate the stream and resolve the single trigger-CDC source.
+#[cfg(not(test))]
+pub(crate) fn retention_source(
+    st: &crate::catalog::StreamTableMeta,
+) -> Result<pg_sys::Oid, crate::error::PgTrickleError> {
+    use crate::catalog::{CdcMode, StDependency};
     use crate::dag::{RefreshMode, StStatus};
     use crate::error::PgTrickleError;
-    use pgrx::prelude::*;
-
-    Spi::run_with_args(
-        "SELECT pg_catalog.pg_advisory_xact_lock($1)",
-        &[pgt_id.into()],
-    )
-    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-    Spi::get_one_with_args::<i64>(
-        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR UPDATE",
-        &[pgt_id.into()],
-    )
-    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-    .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
-    let st = StreamTableMeta::get_by_id(pgt_id)?
-        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
     if st.status != StStatus::Active
         || st.refresh_mode != RefreshMode::Differential
         || st.needs_reinit
@@ -460,7 +655,7 @@ pub fn prepare_retention_cut(
             "retention requires an active, initialized, managed DIFFERENTIAL stream without pending reinitialization".into(),
         ));
     }
-    let dependencies = StDependency::get_for_st(pgt_id)?;
+    let dependencies = StDependency::get_for_st(st.pgt_id)?;
     let [dependency] = dependencies.as_slice() else {
         return Err(PgTrickleError::InvalidArgument(
             "retention requires exactly one source".into(),
@@ -471,7 +666,115 @@ pub fn prepare_retention_cut(
             "retention requires a trigger-CDC table source".into(),
         ));
     }
-    let source_oid = dependency.source_relid;
+    Ok(dependency.source_relid)
+}
+
+/// Validate storage and CDC assumptions shared by configuration and cuts.
+#[cfg(not(test))]
+pub(crate) fn validate_retention_storage(
+    st: &crate::catalog::StreamTableMeta,
+    source_oid: pg_sys::Oid,
+    candidate: &RetentionGroupCandidate,
+    mode: RetentionMode,
+    create_index: bool,
+) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let output_valid = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = $1 \
+         AND attname = $2 AND attnum > 0 AND NOT attisdropped AND atttypid = $3)",
+        &[
+            st.pgt_relid.into(),
+            candidate.output_column.clone().into(),
+            pg_sys::Oid::from(candidate.source_type_oid).into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !output_valid
+        || !st.storage_backend.eq_ignore_ascii_case("heap")
+        || !st.st_placement.eq_ignore_ascii_case("local")
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "retention requires local heap storage with the proven output group key".into(),
+        ));
+    }
+    if mode == RetentionMode::Retain {
+        if st.st_partition_key.is_some() {
+            return Err(PgTrickleError::InvalidArgument(
+                "RETAIN requires unpartitioned stream storage".into(),
+            ));
+        }
+        let durable = Spi::get_one_with_args::<bool>(
+            "SELECT s.relkind = 'r' AND s.relpersistence = 'p' AND src.relpersistence = 'p' \
+                    AND b.durability IN ('logged', 'sync') \
+             FROM pg_catalog.pg_class s JOIN pg_catalog.pg_class src ON src.oid = $2 \
+             JOIN pgtrickle.pgt_change_buffers b ON b.source_kind = 'BASE' AND b.source_id = $2::oid::bigint \
+             WHERE s.oid = $1",
+            &[st.pgt_relid.into(), source_oid.into()],
+        ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false);
+        if !durable {
+            return Err(PgTrickleError::InvalidArgument(
+                "RETAIN requires logged source, stream storage, and CDC buffer".into(),
+            ));
+        }
+        return Ok(());
+    }
+    let has_export = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_output_delta_consumers WHERE pgt_id = $1 AND state <> 'DROPPED')",
+        &[st.pgt_id.into()],
+    ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(true);
+    if has_export || crate::cdc::has_user_triggers(st.pgt_relid)? {
+        return Err(PgTrickleError::InvalidArgument(
+            "TRIM does not support output-delta consumers or user triggers".into(),
+        ));
+    }
+    let has_index = || -> Result<bool, PgTrickleError> {
+        Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_index i \
+             JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid \
+             JOIN pg_catalog.pg_am am ON am.oid = idx.relam \
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attname = $2 \
+             JOIN pg_catalog.pg_opclass op ON op.oid = i.indclass[0] \
+             WHERE i.indrelid = $1 AND i.indisvalid AND i.indisready \
+               AND i.indpred IS NULL AND i.indexprs IS NULL AND i.indkey[0] = a.attnum \
+               AND am.amname = 'btree' AND op.opcdefault AND op.opcintype = a.atttypid)",
+            &[st.pgt_relid.into(), candidate.output_column.clone().into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        .map(|value| value.unwrap_or(false))
+    };
+    if !has_index()? && create_index {
+        let table = crate::sql_builder::qualified(&st.pgt_schema, &st.pgt_name);
+        let key = crate::sql_builder::ident(&candidate.output_column);
+        crate::refresh::with_stream_owner(st, || {
+            Spi::run(&format!("CREATE INDEX ON {table} ({key})")) // nosemgrep: rust.spi.run.dynamic-format — identifiers are quoted from catalog metadata.
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })?;
+    }
+    if !has_index()? {
+        return Err(PgTrickleError::InvalidArgument(
+            "TRIM requires a btree index on the output group key".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Drain this stream's trigger CDC under source SHARE locks before removal.
+/// The caller must perform the matching DDL in the same transaction.
+#[cfg(not(test))]
+pub fn prepare_retention_cut(
+    pgt_id: i64,
+    target_oid: pgrx::pg_sys::Oid,
+) -> Result<PreparedRetentionCut, crate::error::PgTrickleError> {
+    use crate::catalog::{StreamTableMeta, compute_defining_query_hash};
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+
+    crate::api::alter::lock_alter_target(pgt_id)?;
+    let st = StreamTableMeta::get_by_id(pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
+    let source_oid = retention_source(&st)?;
     let value = pgrx::Spi::get_one_with_args::<pgrx::JsonB>(
         "SELECT column_snapshot->'partition_retention' FROM pgtrickle.pgt_dependencies \
          WHERE pgt_id = $1 AND source_relid = $2",
@@ -487,60 +790,8 @@ pub fn prepare_retention_cut(
     state.validate().map_err(|e| {
         PgTrickleError::InvalidArgument(format!("invalid partition retention state: {e:?}"))
     })?;
-    if state.mode == RetentionMode::Retain {
-        if st.st_partition_key.is_some()
-            || !st.storage_backend.eq_ignore_ascii_case("heap")
-            || !st.st_placement.eq_ignore_ascii_case("local")
-        {
-            return Err(PgTrickleError::InvalidArgument(
-                "RETAIN requires local, unpartitioned heap storage".into(),
-            ));
-        }
-        let durable = Spi::get_one_with_args::<bool>(
-            "SELECT s.relkind = 'r' AND s.relpersistence = 'p' AND src.relpersistence = 'p' \
-                    AND b.durability IN ('logged', 'sync') \
-             FROM pg_catalog.pg_class s JOIN pg_catalog.pg_class src ON src.oid = $2 \
-             JOIN pgtrickle.pgt_change_buffers b ON b.source_kind = 'BASE' AND b.source_id = $2::oid::bigint \
-             WHERE s.oid = $1",
-            &[st.pgt_relid.into(), source_oid.into()],
-        )
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-        .unwrap_or(false);
-        if !durable {
-            return Err(PgTrickleError::InvalidArgument(
-                "RETAIN requires logged source, stream storage, and CDC buffer".into(),
-            ));
-        }
-    }
+    validate_retention_storage(&st, source_oid, &state.candidate, state.mode, false)?;
     if state.mode == RetentionMode::Trim {
-        let indexed = Spi::get_one_with_args::<bool>(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_index i \
-             JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid \
-             JOIN pg_catalog.pg_am am ON am.oid = idx.relam \
-             JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attname = $2 \
-             JOIN pg_catalog.pg_opclass op ON op.oid = i.indclass[0] \
-             WHERE i.indrelid = $1 AND i.indisvalid AND i.indisready \
-               AND i.indpred IS NULL AND i.indexprs IS NULL AND i.indkey[0] = a.attnum \
-               AND am.amname = 'btree' AND op.opcdefault AND op.opcintype = a.atttypid)",
-            &[
-                st.pgt_relid.into(),
-                state.candidate.output_column.clone().into(),
-            ],
-        )
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-        .unwrap_or(false);
-        let has_export = Spi::get_one_with_args::<bool>(
-            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_output_delta_consumers \
-             WHERE pgt_id = $1 AND state <> 'DROPPED')",
-            &[pgt_id.into()],
-        )
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-        .unwrap_or(true);
-        if !indexed || has_export || crate::cdc::has_user_triggers(st.pgt_relid)? {
-            return Err(PgTrickleError::InvalidArgument(
-                "TRIM requires a btree index on the output group key and no output-delta consumers or user triggers".into(),
-            ));
-        }
         let table = crate::sql_builder::qualified(&st.pgt_schema, &st.pgt_name);
         crate::refresh::with_stream_owner(&st, || {
             Spi::run(&format!("LOCK TABLE ONLY {table} IN ROW EXCLUSIVE MODE"))
@@ -610,6 +861,7 @@ pub fn prepare_retention_cut(
     }
 
     crate::cdc::lock_source_relations(&[source_oid])?;
+    ensure_durable_partition_tree(source_oid)?;
     let safe_bound = crate::cdc::get_current_wal_lsn()?;
     let refresh = crate::refresh::with_refresh_context(
         crate::refresh::RefreshContext::graph(&safe_bound, crate::refresh::FullPolicy::Error),
@@ -649,7 +901,7 @@ pub fn prepare_retention_cut(
 }
 
 #[cfg(not(test))]
-fn retention_bound_sql(bound: RetentionBound) -> String {
+pub(crate) fn retention_bound_sql(bound: RetentionBound) -> String {
     match bound {
         RetentionBound::Date(days) => format!("(DATE '2000-01-01' OPERATOR(pg_catalog.+) {days})"),
         RetentionBound::Timestamp(micros) | RetentionBound::Timestamptz(micros) => {
@@ -665,6 +917,51 @@ fn retention_bound_sql(bound: RetentionBound) -> String {
             }
         }
     }
+}
+
+/// Parse a cutoff using PostgreSQL's date and time input semantics.
+#[cfg(not(test))]
+pub(crate) fn parse_retention_cutoff(
+    source_type_oid: u32,
+    cutoff: &str,
+) -> Result<RetentionBound, crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let value = match source_type_oid {
+        DATE_OID => {
+            let days = Spi::get_one_with_args::<i32>(
+                "SELECT CASE WHEN pg_catalog.isfinite($1::date) THEN $1::date OPERATOR(pg_catalog.-) DATE '2000-01-01' END",
+                &[cutoff.into()],
+            ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InvalidArgument("retention cutoff must be finite".into()))?;
+            RetentionBound::Date(days)
+        }
+        TIMESTAMP_OID | TIMESTAMPTZ_OID => {
+            let sql = if source_type_oid == TIMESTAMP_OID {
+                "SELECT CASE WHEN pg_catalog.isfinite($1::timestamp) THEN \
+                 (EXTRACT(EPOCH FROM ($1::timestamp OPERATOR(pg_catalog.-) TIMESTAMP '2000-01-01')) OPERATOR(pg_catalog.*) 1000000)::bigint END"
+            } else {
+                "SELECT CASE WHEN pg_catalog.isfinite($1::timestamptz) THEN \
+                 (EXTRACT(EPOCH FROM ($1::timestamptz OPERATOR(pg_catalog.-) TIMESTAMPTZ '2000-01-01 00:00:00+00')) OPERATOR(pg_catalog.*) 1000000)::bigint END"
+            };
+            let micros = Spi::get_one_with_args::<i64>(sql, &[cutoff.into()])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InvalidArgument("retention cutoff must be finite".into())
+                })?;
+            if source_type_oid == TIMESTAMP_OID {
+                RetentionBound::Timestamp(micros)
+            } else {
+                RetentionBound::Timestamptz(micros)
+            }
+        }
+        _ => {
+            return Err(PgTrickleError::InvalidArgument(
+                "unsupported retention cutoff type".into(),
+            ));
+        }
+    };
+    Ok(value)
 }
 
 /// Delete only the groups proved to belong to the removed range.
@@ -779,16 +1076,40 @@ pub fn finalize_retained_cut(
             "retention source lock is missing or target is still attached".into(),
         ));
     }
-    cut.state_after_removal
+    let before = Spi::get_one_with_args::<pgrx::JsonB>(
+        "SELECT column_snapshot->'partition_retention' FROM pgtrickle.pgt_dependencies \
+         WHERE pgt_id = $1 AND source_relid = $2",
+        &[cut.pgt_id.into(), pg_sys::Oid::from(cut.source_oid).into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InvalidArgument(
+            "retention state disappeared during partition removal".into(),
+        )
+    })?;
+    let mut current: RetentionState = serde_json::from_value(before.0.clone())
+        .map_err(|e| PgTrickleError::InvalidArgument(format!("invalid retained state: {e}")))?;
+    current
         .validate()
         .map_err(|e| PgTrickleError::InvalidArgument(format!("invalid retained state: {e:?}")))?;
-    let before = pgrx::JsonB(
-        serde_json::to_value(&cut.state_before_removal)
-            .map_err(|e| PgTrickleError::InternalError(e.to_string()))?,
-    );
+    let mut original = current.clone();
+    original.sealed = cut.state_before_removal.sealed.clone();
+    if original != cut.state_before_removal
+        || !cut
+            .state_before_removal
+            .sealed
+            .iter()
+            .all(|range| current.sealed.contains(range))
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "retention state changed during partition removal".into(),
+        ));
+    }
+    current.seal(cut.range).map_err(|e| {
+        PgTrickleError::InvalidArgument(format!("cannot seal retained range: {e:?}"))
+    })?;
     let after = pgrx::JsonB(
-        serde_json::to_value(&cut.state_after_removal)
-            .map_err(|e| PgTrickleError::InternalError(e.to_string()))?,
+        serde_json::to_value(current).map_err(|e| PgTrickleError::InternalError(e.to_string()))?,
     );
     let updated = Spi::get_one_with_args::<i64>(
         "UPDATE pgtrickle.pgt_dependencies SET column_snapshot = \
@@ -842,22 +1163,7 @@ pub(crate) fn ensure_retained_attach_safe(
             "cannot attach a nonempty partition to a stream with retained history; attach an empty future partition and insert live rows normally".into(),
         ));
     }
-    // SAFETY: The GUC nest is restored even if PostgreSQL reports an error.
-    let layout = unsafe {
-        let level = pg_sys::NewGUCNestLevel();
-        pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-            Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            validate_partition_layout(
-                source_oid,
-                &state.candidate.source_column,
-                &state.candidate,
-                state.cutoff,
-            )
-        }))
-        .finally(move || pg_sys::AtEOXact_GUC(false, level))
-        .execute()?
-    };
+    let layout = validate_partition_layout_trusted(source_oid, &state.candidate, state.cutoff)?;
     if layout.iter().any(|partition| {
         state.sealed.iter().any(|range| {
             bound_value(partition.lower) < bound_value(range.upper)
@@ -866,6 +1172,52 @@ pub(crate) fn ensure_retained_attach_safe(
     }) {
         return Err(PgTrickleError::InvalidArgument(
             "cannot attach a partition overlapping retained history".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate under a trusted catalog path without changing the caller's settings.
+#[cfg(not(test))]
+pub(crate) fn validate_partition_layout_trusted(
+    source_oid: pg_sys::Oid,
+    candidate: &RetentionGroupCandidate,
+    cutoff: RetentionBound,
+) -> Result<Vec<RetentionPartition>, crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    // SAFETY: The GUC nest is restored even if PostgreSQL reports an error.
+    unsafe {
+        let level = pg_sys::NewGUCNestLevel();
+        pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            validate_partition_layout(source_oid, &candidate.source_column, candidate, cutoff)
+        }))
+        .finally(move || pg_sys::AtEOXact_GUC(false, level))
+        .execute()
+    }
+}
+
+#[cfg(not(test))]
+fn ensure_durable_partition_tree(
+    source_oid: pg_sys::Oid,
+) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let durable = Spi::get_one_with_args::<bool>(
+        "WITH RECURSIVE descendants(relid) AS (\
+             SELECT $1::oid UNION ALL \
+             SELECT i.inhrelid FROM pg_catalog.pg_inherits i JOIN descendants d ON i.inhparent = d.relid\
+         ) SELECT NOT EXISTS (SELECT 1 FROM descendants d JOIN pg_catalog.pg_class c ON c.oid = d.relid \
+             WHERE c.relkind NOT IN ('r', 'p') OR c.relpersistence <> 'p')",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !durable {
+        return Err(PgTrickleError::InvalidArgument(
+            "retention requires permanent local tables throughout the partition tree".into(),
         ));
     }
     Ok(())
@@ -984,6 +1336,7 @@ pub fn validate_partition_layout(
             "retention requires one non-null RANGE column with its default btree operator class and no default partition".into(),
         ));
     }
+    ensure_durable_partition_tree(source_oid)?;
     Spi::connect_mut(|client| {
         let rows = client.update(
             "SELECT c.oid::bigint, c.relpartbound::text, i.inhdetachpending FROM pg_catalog.pg_inherits i \

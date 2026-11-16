@@ -531,7 +531,7 @@ fn diff_dependencies(
 
 // ── Core ALTER QUERY implementation ──────────────────────────────────────
 
-fn lock_alter_target(pgt_id: i64) -> Result<(), PgTrickleError> {
+pub(crate) fn lock_alter_target(pgt_id: i64) -> Result<(), PgTrickleError> {
     Spi::run_with_args(
         "SELECT pg_catalog.pg_advisory_xact_lock($1)",
         &[pgt_id.into()],

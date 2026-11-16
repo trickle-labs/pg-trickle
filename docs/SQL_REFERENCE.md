@@ -1593,6 +1593,57 @@ SELECT pgtrickle.set_stream_table_refresh_policy('order_totals', 'DIFFERENTIAL')
 
 ---
 
+### pgtrickle.create_stream_table_with_retention
+
+```sql
+pgtrickle.create_stream_table_with_retention(
+    name TEXT, query TEXT, policy TEXT, source_column TEXT, cutoff TEXT,
+    schedule TEXT DEFAULT 'calculated'
+) RETURNS void
+```
+
+Create an initialized, managed differential stream and configure its retention
+policy atomically. If policy validation fails, the creation rolls back. For
+additional creation options, call `create_stream_table` and then configure
+retention in the same transaction.
+
+### pgtrickle.set_stream_table_partition_retention
+
+```sql
+pgtrickle.set_stream_table_partition_retention(
+    name TEXT, policy TEXT, source_column TEXT DEFAULT NULL, cutoff TEXT DEFAULT NULL
+) RETURNS void
+```
+
+Configure an explicit cutoff for a stream whose single partitioned source and
+aggregate grouping satisfy the retention eligibility checks. `policy` is
+`TRIM`, `RETAIN`, or `OFF`. The cutoff uses PostgreSQL input syntax for the
+source partition column's date or timestamp type. Include an explicit offset
+for `timestamptz` cutoffs when the session time zone should not determine it.
+
+For an eligible expired partition, TRIM removes its groups and RETAIN preserves
+them. RETAIN rejects operations that would rebuild sealed history from an
+incomplete source. `OFF` is allowed only while no history has been sealed.
+Concurrent DETACH is rejected for RETAIN; a TRIM removal that does not qualify falls
+back to reinitialization. TRIM currently rejects user triggers and output-delta
+consumers. See the partitioned-table tutorial for the full contract.
+
+```sql
+SELECT pgtrickle.set_stream_table_partition_retention(
+    'daily_totals', 'TRIM', 'event_day', '2026-01-01'
+);
+```
+
+### pgtrickle.get_stream_table_partition_retention
+
+```sql
+pgtrickle.get_stream_table_partition_retention(name TEXT) RETURNS jsonb
+```
+
+Return whether retention is enabled and, when enabled, the policy, source and
+group columns, cutoff, and sealed ranges. The stream owner can call this
+function to inspect progress before changing the cutoff.
+
 ### pgtrickle.set_stream_table_storage_policy
 
 Update the storage policy (append-only flag and/or storage tier) of an existing

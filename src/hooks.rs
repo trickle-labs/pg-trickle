@@ -94,32 +94,86 @@ use crate::{cdc, config, wal_decoder};
 pub extern "C-unwind" fn pg_trickle_on_ddl_start_wrapper(
     fcinfo: pg_sys::FunctionCallInfo,
 ) -> pg_sys::Datum {
+    let hint = classify_alter_table(fcinfo);
+    let dropped = resolve_drop_table_targets(fcinfo);
     if !matches!(
-        classify_alter_table(fcinfo),
-        AlterTableHint::DetachPartitionConcurrent
-    ) {
+        hint,
+        AlterTableHint::DetachPartition | AlterTableHint::DetachPartitionConcurrent
+    ) && dropped.is_none()
+    {
         return pg_sys::Datum::null();
     }
     // SAFETY: classify_alter_table verified that the live event contains an
     // AlterTableStmt; PostgreSQL owns its RangeVar for the duration of this call.
-    let parent = unsafe {
-        let event = &*((*fcinfo).context as *const pg_sys::EventTriggerData);
-        let stmt = &*(event.parsetree as *const pg_sys::AlterTableStmt);
-        pg_sys::RangeVarGetRelidExtended(
-            stmt.relation,
-            pg_sys::AccessShareLock as pg_sys::LOCKMODE,
-            if stmt.missing_ok {
-                pg_sys::RVROption::RVR_MISSING_OK
-            } else {
-                0
-            },
-            None,
-            std::ptr::null_mut(),
-        )
+    let parent = if dropped.is_none() {
+        unsafe {
+            let event = &*((*fcinfo).context as *const pg_sys::EventTriggerData);
+            let stmt = &*(event.parsetree as *const pg_sys::AlterTableStmt);
+            pg_sys::RangeVarGetRelidExtended(
+                stmt.relation,
+                pg_sys::AccessShareLock as pg_sys::LOCKMODE,
+                if stmt.missing_ok {
+                    pg_sys::RVROption::RVR_MISSING_OK
+                } else {
+                    0
+                },
+                None,
+                std::ptr::null_mut(),
+            )
+        }
+    } else {
+        pg_sys::InvalidOid
     };
-    if parent == pg_sys::InvalidOid {
+    if dropped.is_none() && parent == pg_sys::InvalidOid {
         return pg_sys::Datum::null();
     }
+    if dropped.as_ref().is_some_and(Vec::is_empty) {
+        return pg_sys::Datum::null();
+    }
+    let target = if matches!(hint, AlterTableHint::DetachPartition) {
+        // SAFETY: classify_alter_table verified the single PartitionCmd parse node.
+        unsafe {
+            let event = &*((*fcinfo).context as *const pg_sys::EventTriggerData);
+            let stmt = &*(event.parsetree as *const pg_sys::AlterTableStmt);
+            let cmd = &*(pg_sys::list_nth(stmt.cmds, 0) as *const pg_sys::AlterTableCmd);
+            let partition = &*(cmd.def as *const pg_sys::PartitionCmd);
+            if partition.name.is_null() {
+                pgrx::error!("pg_trickle: partition detach target is missing");
+            }
+            pg_sys::RangeVarGetRelidExtended(
+                partition.name,
+                pg_sys::AccessShareLock as pg_sys::LOCKMODE,
+                0,
+                None,
+                std::ptr::null_mut(),
+            )
+        }
+    } else {
+        pg_sys::InvalidOid
+    };
+    // SAFETY: Ownership is checked as the invoking role before any privileged refresh.
+    let authorized = unsafe {
+        let caller = pg_sys::GetUserId();
+        if let Some(targets) = &dropped {
+            targets.iter().all(|target| {
+                let namespace = pg_sys::get_rel_namespace(*target);
+                pg_sys::object_ownercheck(pg_sys::RelationRelationId, *target, caller)
+                    || (namespace != pg_sys::InvalidOid
+                        && pg_sys::object_ownercheck(
+                            pg_sys::NamespaceRelationId,
+                            namespace,
+                            caller,
+                        ))
+            })
+        } else {
+            pg_sys::object_ownercheck(pg_sys::RelationRelationId, parent, caller)
+        }
+    };
+    if !authorized {
+        return pg_sys::Datum::null();
+    }
+    #[cfg(test)]
+    let _ = target;
     let owner = Spi::get_one::<pg_sys::Oid>(
         "SELECT extowner FROM pg_catalog.pg_extension \
          WHERE extname OPERATOR(pg_catalog.=) 'pg_trickle'::pg_catalog.name",
@@ -142,16 +196,42 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_start_wrapper(
     let suspend = || -> Result<(), PgTrickleError> {
         Spi::run("SET LOCAL search_path = pg_catalog, pgtrickle, pg_temp")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        #[cfg(not(test))]
+        if let Some(targets) = &dropped {
+            for &target in targets {
+                for source in tracked_partition_ancestors(target)? {
+                    crate::dvm::retention::prepare_automatic_detaches(source, target)?;
+                }
+            }
+            return Ok(());
+        }
+        #[cfg(test)]
+        if dropped.is_some() {
+            return Ok(());
+        }
         let mut sources = tracked_partition_ancestors(parent)?;
         sources.push(parent);
         sources.sort_unstable_by_key(|source| source.to_u32());
         sources.dedup();
+        #[cfg(not(test))]
+        if matches!(hint, AlterTableHint::DetachPartition) {
+            for source in sources {
+                crate::dvm::retention::prepare_automatic_detaches(source, target)?;
+            }
+            return Ok(());
+        }
         let mut ids = Vec::new();
         for &source in &sources {
             ids.extend(find_downstream_pgt_ids(source)?);
         }
         if ids.is_empty() {
             return Ok(());
+        }
+        ids.extend(find_transitive_downstream_sts(&ids)?);
+        ids.sort_unstable();
+        ids.dedup();
+        for &id in &ids {
+            crate::api::alter::lock_alter_target(id)?;
         }
         // Keep policy configuration serialized until the first detach phase commits.
         for &source in &sources {
@@ -185,6 +265,7 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_start_wrapper(
         ids.sort_unstable();
         ids.dedup();
         for id in ids {
+            crate::api::alter::lock_alter_target(id)?;
             crate::dvm::retention::ensure_removal_prepared(id).map_err(|e| {
                 PgTrickleError::InvalidArgument(format!(
                     "concurrent partition detach cannot proceed with retained history: {e}"
@@ -217,6 +298,46 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_start_wrapper(
         );
     }
     pg_sys::Datum::null()
+}
+
+/// Resolve DROP TABLE names in the caller's search path before changing roles.
+fn resolve_drop_table_targets(fcinfo: pg_sys::FunctionCallInfo) -> Option<Vec<pg_sys::Oid>> {
+    // SAFETY: PostgreSQL owns the event data and its parse tree for this call.
+    unsafe {
+        let call = fcinfo.as_ref()?;
+        let event = (call.context as *const pg_sys::EventTriggerData).as_ref()?;
+        let node = event.parsetree.as_ref()?;
+        if node.type_ != pg_sys::NodeTag::T_DropStmt {
+            return None;
+        }
+        let stmt = &*(event.parsetree as *const pg_sys::DropStmt);
+        if stmt.removeType != pg_sys::ObjectType::OBJECT_TABLE {
+            return None;
+        }
+        let mut targets = Vec::new();
+        for i in 0..pg_sys::list_length(stmt.objects) {
+            let names = pg_sys::list_nth(stmt.objects, i) as *const pg_sys::List;
+            if names.is_null() {
+                pgrx::error!("pg_trickle: DROP TABLE target is missing");
+            }
+            let relation = pg_sys::makeRangeVarFromNameList(names);
+            let oid = pg_sys::RangeVarGetRelidExtended(
+                relation,
+                pg_sys::AccessShareLock as pg_sys::LOCKMODE,
+                if stmt.missing_ok {
+                    pg_sys::RVROption::RVR_MISSING_OK
+                } else {
+                    0
+                },
+                None,
+                std::ptr::null_mut(),
+            );
+            if oid != pg_sys::InvalidOid && !targets.contains(&oid) {
+                targets.push(oid);
+            }
+        }
+        Some(targets)
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1388,7 +1509,7 @@ fn handle_alter_table(
             }
             SchemaChangeKind::PartitionChange => {
                 if matches!(alter_table_hint, AlterTableHint::DetachPartition)
-                    && crate::dvm::retention::finish_prepared_retained_detach(*pgt_id, objid)
+                    && crate::dvm::retention::finish_prepared_retained_detach(*pgt_id, objid, None)
                         .unwrap_or_else(|e| {
                             pgrx::error!("pg_trickle: retained partition detach failed: {}", e)
                         })
@@ -1897,9 +2018,16 @@ fn pg_trickle_on_sql_drop() {
         }
     };
 
+    let dropped_tables = dropped
+        .iter()
+        .filter(|obj| obj.object_type == "table")
+        .map(|obj| obj.objid)
+        .collect::<Vec<_>>();
+    let finalized = crate::dvm::retention::finish_prepared_drops(&dropped_tables)
+        .unwrap_or_else(|e| pgrx::error!("pg_trickle: retained partition DROP failed: {}", e));
     for obj in &dropped {
         match obj.object_type.as_str() {
-            "table" => handle_dropped_table(obj),
+            "table" => handle_dropped_table(obj, &finalized),
             "view" => handle_dropped_view(obj),
             "function" => handle_dropped_function(obj),
             _ => {}
@@ -1955,7 +2083,7 @@ fn collect_dropped_objects() -> Result<Vec<DroppedObject>, PgTrickleError> {
 }
 
 /// Handle a dropped table: either an upstream source or a ST storage table.
-fn handle_dropped_table(obj: &DroppedObject) {
+fn handle_dropped_table(obj: &DroppedObject, finalized: &HashSet<(i64, u32, u32)>) {
     let identity = obj.object_identity.as_deref().unwrap_or("unknown");
 
     // Case 1: Check if the dropped table is a ST storage table.
@@ -2056,7 +2184,7 @@ fn handle_dropped_table(obj: &DroppedObject) {
     // A partition child has no direct dependency row: its ST depends on the
     // partitioned parent. PostgreSQL already deleted pg_inherits at sql_drop,
     // so resolve the parent via the pre-DDL ancestry snapshot instead.
-    invalidate_dropped_partition(obj.objid, identity).unwrap_or_else(|e| {
+    invalidate_dropped_partition(obj.objid, identity, finalized).unwrap_or_else(|e| {
         pgrx::error!(
             "pg_trickle: DROP TABLE {} cannot invalidate partition parents: {}",
             identity,
@@ -2119,6 +2247,7 @@ fn mark_partition_removal_recovery(pgt_id: i64, identity: &str) -> Result<(), Pg
 fn invalidate_dropped_partition(
     dropped_oid: pg_sys::Oid,
     identity: &str,
+    finalized: &HashSet<(i64, u32, u32)>,
 ) -> Result<(), PgTrickleError> {
     let parents: Vec<(i64, pg_sys::Oid)> = Spi::connect(|client| {
         let rows = client
@@ -2144,7 +2273,14 @@ fn invalidate_dropped_partition(
     })?;
 
     let mut affected = Vec::new();
+    let mut handled = false;
     for (pgt_id, parent_oid) in parents {
+        if finalized.contains(&(pgt_id, parent_oid.to_u32(), dropped_oid.to_u32())) {
+            crate::catalog::store_column_snapshot_for_pgt_id(pgt_id, parent_oid)?;
+            shmem::signal_dag_invalidation(pgt_id);
+            handled = true;
+            continue;
+        }
         crate::dvm::retention::ensure_removal_prepared(pgt_id).map_err(|e| {
             PgTrickleError::InvalidArgument(format!(
                 "unprepared partition DROP cannot proceed with retained history: {e}"
@@ -2156,6 +2292,9 @@ fn invalidate_dropped_partition(
         affected.push(pgt_id);
     }
     if affected.is_empty() {
+        if handled {
+            shmem::bump_cache_generation();
+        }
         return Ok(());
     }
     // A child's data removal also affects downstream materializations.
