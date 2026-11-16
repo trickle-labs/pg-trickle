@@ -42,7 +42,9 @@ def postgres_metrics(args):
     # The frozen worker-health checks deliberately restart PostgreSQL.
     for attempt in range(5):
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)
-        if not postgres_is_restarting(result) or attempt == 4:
+        # Docker can return a signal exit with no streams if the container restarts mid-exec.
+        silent_exit = result.returncode != 0 and not result.stdout and not result.stderr
+        if not (postgres_is_restarting(result) or silent_exit) or attempt == 4:
             return result
         time.sleep(1)
 

@@ -87,6 +87,7 @@ for failure in ("timeout", "daemon"):
         if failure == "timeout":
             assert (root / failure / f"{name}-full.log").read_text() == "retained full log\n"
 
+silent_exit = subprocess.CompletedProcess([], -9, "", "")
 for failures, expected_calls in ((2, 3), (5, 5)):
     failed = subprocess.CompletedProcess([], 2, "", "psql: error: connection to server failed: No such file or directory")
     healthy = subprocess.CompletedProcess([], 0, '{"database_bytes":1,"wal_bytes":2}', "")
@@ -96,6 +97,13 @@ for failures, expected_calls in ((2, 3), (5, 5)):
     assert run_mock.call_count == expected_calls
     assert sleep_mock.call_count == expected_calls - 1
     assert result is (healthy if failures == 2 else failed)
+for failures, expected_calls in ((2, 3), (5, 5)):
+    with patch.object(bounded.subprocess, "run", side_effect=[silent_exit] * failures + [healthy]) as run_mock, \
+         patch.object(bounded.time, "sleep") as sleep_mock:
+        result = bounded.postgres_metrics(["docker", "exec", name, "psql"])
+    assert run_mock.call_count == expected_calls
+    assert sleep_mock.call_count == expected_calls - 1
+    assert result is (healthy if failures == 2 else silent_exit)
 with patch.object(bounded.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "permission denied")) as run_mock:
     assert bounded.postgres_metrics([]).returncode == 1
     assert run_mock.call_count == 1
@@ -205,7 +213,6 @@ with patch.object(bounded.subprocess, "run", side_effect=[vanished_internal, hea
     assert bounded.disk_metrics(["docker", "exec", name, "sh"]) is healthy
     assert run_mock.call_count == 2 and sleep_mock.call_count == 1
 
-silent_exit = subprocess.CompletedProcess([], -9, "", "")
 for failures, expected_calls in ((2, 3), (5, 5)):
     with patch.object(bounded.subprocess, "run", side_effect=[silent_exit] * failures + [healthy]) as run_mock, \
          patch.object(bounded.time, "sleep") as sleep_mock:
