@@ -2,6 +2,9 @@
 
 use std::cmp::Ordering;
 
+const MAX_PRESSURE_DEFERRAL_SHIFT: u32 = 4;
+const MAX_PRESSURE_DEFERRAL_FACTOR: u8 = 1 << MAX_PRESSURE_DEFERRAL_SHIFT;
+
 /// One scheduler-tick view of application pressure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadSnapshot {
@@ -115,8 +118,12 @@ impl PressureState {
                 self.healthy_ticks = 0;
                 self.overloaded_ticks = self.overloaded_ticks.saturating_add(1);
                 self.deferral_factor = 1u8
-                    .checked_shl(self.overloaded_ticks.saturating_sub(1).min(3) as u32)
-                    .unwrap_or(8);
+                    .checked_shl(
+                        self.overloaded_ticks
+                            .saturating_sub(1)
+                            .min(MAX_PRESSURE_DEFERRAL_SHIFT as u8) as u32,
+                    )
+                    .unwrap_or(MAX_PRESSURE_DEFERRAL_FACTOR);
             }
         } else if pressure >= threshold {
             self.deferred = true;
@@ -128,7 +135,7 @@ impl PressureState {
         // reduced cadence. Previously the capped interval still skipped every
         // tick, so sustained writes could freeze a stream until load stopped
         // (or its change buffer finally reached the memory-budget exemption).
-        self.deferred && self.deferral_factor < 8
+        self.deferred && self.deferral_factor < MAX_PRESSURE_DEFERRAL_FACTOR
     }
 }
 
@@ -237,7 +244,7 @@ mod tests {
     #[test]
     fn sustained_pressure_admits_work_at_capped_poll_interval() {
         let mut state = PressureState::new();
-        for factor in [1, 2, 4] {
+        for factor in [1, 2, 4, 8] {
             assert!(state.observe(1.0, 0.8));
             assert_eq!(state.deferral_factor(), factor);
         }
@@ -245,7 +252,7 @@ mod tests {
         // single tick or stop making progress after their counter overflows.
         for _ in 0..512 {
             assert!(!state.observe(1.0, 0.8));
-            assert_eq!(state.deferral_factor(), 8);
+            assert_eq!(state.deferral_factor(), MAX_PRESSURE_DEFERRAL_FACTOR);
             assert!(state.deferred());
         }
         assert!(state.observe(0.5, 0.8));
@@ -268,10 +275,12 @@ mod tests {
     #[test]
     fn isolated_healthy_samples_do_not_restart_deferral_forever() {
         let mut state = PressureState::new();
-        for _ in 0..3 {
+        for _ in 0..MAX_PRESSURE_DEFERRAL_SHIFT {
             assert!(state.observe(1.0, 0.8));
             assert!(state.observe(0.5, 0.8));
         }
+        assert!(!state.observe(1.0, 0.8));
+        assert_eq!(state.deferral_factor(), MAX_PRESSURE_DEFERRAL_FACTOR);
         for _ in 0..512 {
             assert!(!state.observe(1.0, 0.8));
             assert!(state.observe(0.5, 0.8));
