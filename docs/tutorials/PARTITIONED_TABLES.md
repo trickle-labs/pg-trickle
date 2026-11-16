@@ -143,7 +143,10 @@ history cannot be reconstructed from the surviving raw source: FULL refresh,
 reinitialization, policy removal, incompatible query changes and restore paths
 that would replace it are rejected. Save the raw events externally if you need
 to rebuild or correct historical aggregates; deleting and recreating the
-stream deliberately discards its retained history.
+stream deliberately discards its retained history. A source `TRUNCATE` can
+commit, but its next refresh is rejected once history has been sealed: the
+whole-table delete optimization cannot distinguish live from retained groups.
+Avoid truncating a source while its retained stream is in use.
 
 The contract is intentionally narrow:
 

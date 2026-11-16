@@ -1788,6 +1788,48 @@ async fn test_retention_hourly_tutorial_policies() {
 
 #[tokio::test]
 #[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_truncate_cannot_delete_sealed_history() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retention_truncate_src (d date NOT NULL, account text NOT NULL, amount integer NOT NULL) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE retention_truncate_old PARTITION OF retention_truncate_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE retention_truncate_live PARTITION OF retention_truncate_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute(
+        "INSERT INTO retention_truncate_src VALUES ('2025-06-01','a',10), ('2026-06-01','a',20)",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.create_stream_table_with_retention('retention_truncate_st', 'SELECT d, account, sum(amount) AS total, count(*) AS n FROM retention_truncate_src GROUP BY d, account', 'RETAIN', 'd', '2026-01-01', '1h')").await;
+    db.execute("ALTER TABLE retention_truncate_src DETACH PARTITION retention_truncate_old")
+        .await;
+    let expected = vec![
+        ("2025-06-01".to_string(), "a".to_string(), 10_i64, 1_i64),
+        ("2026-06-01".to_string(), "a".to_string(), 20_i64, 1_i64),
+    ];
+    let frontier: serde_json::Value = db.query_scalar("SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retention_truncate_st'").await;
+    db.execute("TRUNCATE retention_truncate_src").await;
+    let error = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('retention_truncate_st')")
+        .await
+        .expect_err("TRUNCATE refresh must not discard sealed history");
+    assert!(
+        error.to_string().contains("retained partition history"),
+        "{error}"
+    );
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT d::text, account, total, n FROM retention_truncate_st ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read protected history");
+    assert_eq!(rows, expected);
+    let after: serde_json::Value = db.query_scalar("SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retention_truncate_st'").await;
+    assert_eq!(after, frontier);
+}
+
+#[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
 async fn test_retention_scheduled_refresh_preserves_sealed_history() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
