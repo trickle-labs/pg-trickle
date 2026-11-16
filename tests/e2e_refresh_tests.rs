@@ -91,7 +91,9 @@ async fn test_refresh_rejects_unreadable_change_buffer_without_advancing_frontie
         .expect_err("an unreadable buffer must not look empty");
     assert!(
         error.to_string().contains("lsn")
-            || error.to_string().contains("required control columns are missing"),
+            || error
+                .to_string()
+                .contains("required control columns are missing"),
         "unexpected CDC buffer validation error: {error}"
     );
     let after: String = db
