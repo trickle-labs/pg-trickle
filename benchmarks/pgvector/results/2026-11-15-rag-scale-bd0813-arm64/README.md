@@ -59,6 +59,17 @@ zero timeouts. The periodic-full reader had 56 timed-out queries (18, 18 and
 20 per cycle). Client read intervals overlapped maintenance, but this is one
 reader and no concurrent writer was used.
 
+## Concurrent-write functional check
+
+A separate [10k/384 local-source E2E run](../2026-11-16-rag-concurrency-local-arm64/README.md)
+passed one paced 100-write trace with a restricted tenant reader. It completed
+all writes during each approach. Differential maintenance had 99 of 100 writes,
+99 of 100 guard reads and 99 of 100 vector reads overlap its server intervals;
+periodic full had 100 of 100 writes overlap its 30.916-second refresh, while
+its only guard and vector read waited until refresh ended. This is functional
+evidence from a local source build, not an exact release archive. It does not
+extend the scale matrix's ANN or cost measurements.
+
 ## Scoped decision
 
 For these synthetic cases, application batching had the shortest maintenance
