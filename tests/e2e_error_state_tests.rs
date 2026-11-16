@@ -294,3 +294,123 @@ async fn test_refresh_rejects_error_status() {
         "refresh_stream_table should reject SUSPENDED status"
     );
 }
+
+
+/// #1438: A permanent worker failure is handled asynchronously by the
+/// dispatcher. A successful resume must not be revoked by that old job on the
+/// following scheduler tick. Exercise the real parallel scheduler and verify
+/// the protected reinitialization completes and remains ACTIVE.
+#[tokio::test]
+async fn test_resume_after_permanent_parallel_failure_survives_dispatcher_reap() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "on", "on")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.scheduler_interval_ms", "3000", "3000")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.min_schedule_seconds", "1", "1")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.auto_backoff", "off", "off")
+        .await;
+    assert!(
+        db.wait_for_scheduler(Duration::from_secs(90)).await,
+        "parallel scheduler failed to start"
+    );
+
+    db.execute("CREATE TABLE fence_live_src (id INT PRIMARY KEY, divisor INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO fence_live_src VALUES (1, 2)").await;
+    db.create_st(
+        "fence_live_st",
+        "SELECT id, 100 / divisor AS quotient FROM fence_live_src",
+        "1s",
+        "FULL",
+    )
+    .await;
+
+    // The initial view is valid. Inserting a zero divisor creates a
+    // permanently failing scheduled refresh without an intervening DDL hook.
+    db.execute("INSERT INTO fence_live_src VALUES (2, 0)").await;
+    assert!(
+        db.wait_for_condition(
+            "permanent worker failure recorded before dispatch reaping",
+            "SELECT EXISTS(
+                SELECT 1 FROM pgtrickle.pgt_scheduler_jobs j
+                JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = j.root_pgt_id
+                WHERE st.pgt_name = 'fence_live_st' AND j.status = 'PERMANENT_FAILED'
+            ) AND EXISTS(
+                SELECT 1 FROM pgtrickle.pgt_stream_tables
+                WHERE pgt_name = 'fence_live_st' AND status = 'ERROR'
+            )",
+            Duration::from_secs(90),
+            Duration::from_millis(50),
+        )
+        .await,
+        "the worker did not persist a permanent failure"
+    );
+    let previous_generation: i64 = db
+        .query_scalar(
+            "SELECT recovery_generation FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'fence_live_st'",
+        )
+        .await;
+    let failed_job_generation: i64 = db
+        .query_scalar(
+            "SELECT j.member_recovery_generations[1]
+             FROM pgtrickle.pgt_scheduler_jobs j
+             JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = j.root_pgt_id
+             WHERE st.pgt_name = 'fence_live_st'
+               AND j.status = 'PERMANENT_FAILED'
+             ORDER BY j.job_id DESC LIMIT 1",
+        )
+        .await;
+    assert_eq!(failed_job_generation, previous_generation);
+
+    // Repair the original source error and resume while the old dispatch
+    // outcome may still be pending. A later reaper tick must not undo resume.
+    db.execute("UPDATE fence_live_src SET divisor = 2 WHERE id = 2")
+        .await;
+    db.execute("SELECT pgtrickle.resume_stream_table('public.fence_live_st')")
+        .await;
+    let resumed_generation: i64 = db
+        .query_scalar(
+            "SELECT recovery_generation FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'fence_live_st'",
+        )
+        .await;
+    assert_eq!(resumed_generation, previous_generation + 1);
+
+    assert!(
+        db.wait_for_condition(
+            "scheduled reinitialize after resume",
+            "SELECT EXISTS(
+                SELECT 1 FROM pgtrickle.pgt_stream_tables st
+                WHERE st.pgt_name = 'fence_live_st'
+                  AND st.status = 'ACTIVE' AND NOT st.needs_reinit
+                  AND EXISTS(
+                    SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                    WHERE h.pgt_id = st.pgt_id AND h.action = 'REINITIALIZE'
+                      AND h.status = 'COMPLETED'
+                  )
+            )",
+            Duration::from_secs(90),
+            Duration::from_millis(100),
+        )
+        .await,
+        "no protected reinitialization ran after resume"
+    );
+    assert_eq!(db.count("public.fence_live_st").await, 2);
+    let quotient: i32 = db
+        .query_scalar("SELECT quotient FROM public.fence_live_st WHERE id = 2")
+        .await;
+    assert_eq!(quotient, 50);
+
+    // Span more than one slow dispatcher tick after the successful rebuild.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'fence_live_st'",
+        )
+        .await;
+    assert_eq!(status, "ACTIVE", "old failed job overwrote the resume");
+}
