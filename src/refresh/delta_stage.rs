@@ -287,22 +287,40 @@ impl DeltaStage {
         let source_oid = dependency.source_relid.to_u32();
         let name = self.bounded_name(st.pgt_id, source_oid);
         let target = format!("pg_temp.{}", quote_ident(&name));
+        // The bound originates from frontier metadata. Validate it before
+        // interpolating into a nested CREATE TABLE AS SELECT statement.
+        crate::lsn::Lsn::parse(new_lsn).map_err(|error| {
+            PgTrickleError::InvalidArgument(format!(
+                "invalid bounded source frontier LSN: {error}"
+            ))
+        })?;
 
         // A previous no-gap refresh in a pooled backend may have left a
         // session-local VIEW. A table is ON COMMIT DROP instead.
         let old_kind = Spi::get_one_with_args::<String>(
-            "SELECT c.relkind::text FROM pg_catalog.pg_class c \
-             WHERE c.oid = pg_catalog.to_regclass($1)",
+            "SELECT (SELECT c.relkind::text FROM pg_catalog.pg_class c \
+                     WHERE c.oid = pg_catalog.to_regclass($1))",
             &[target.as_str().into()],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         match old_kind.as_deref() {
-            Some("v") => Spi::run(&format!("DROP VIEW {target}")),
-            Some(_) => Spi::run(&format!("DROP TABLE {target}")),
+            Some("v") => {
+                // nosemgrep: rust.spi.run.dynamic-format -- target is a
+                // quoted numeric-ID-scoped pg_temp relation controlled here.
+                Spi::run(&format!("DROP VIEW {target}"))
+            }
+            Some(_) => {
+                // nosemgrep: rust.spi.run.dynamic-format -- target is a
+                // quoted numeric-ID-scoped pg_temp relation controlled here.
+                Spi::run(&format!("DROP TABLE {target}"))
+            },
             None => Ok(()),
         }
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
+        // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- the
+        // buffer name is catalog-derived and quoted by quote_qualified;
+        // new_lsn remains a separate SPI parameter.
         let is_future_truncate = Spi::get_one_with_args::<bool>(
             &format!(
                 "SELECT EXISTS (SELECT 1 FROM {buffer} \
@@ -320,6 +338,8 @@ impl DeltaStage {
             )));
         }
 
+        // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- the
+        // buffer relation was qualified/quoted; LSN is parameterized.
         let has_future = Spi::get_one_with_args::<bool>(
             &format!(
                 "SELECT EXISTS (SELECT 1 FROM {buffer} \
@@ -333,6 +353,8 @@ impl DeltaStage {
         if !has_future {
             // The source lock makes the live source identical to its bounded
             // state until the transaction ends. No full-table copy needed.
+            // nosemgrep: rust.spi.run.dynamic-format -- both names are
+            // catalog-derived, explicitly quoted identifiers.
             Spi::run(&format!(
                 "CREATE TEMP VIEW {target} AS SELECT * FROM {source_table}"
             ))
@@ -491,11 +513,16 @@ impl DeltaStage {
 
             // Single statement: live rows and post-bound change images share
             // the same MVCC snapshot. Afterwards the temp table is immutable.
+            // nosemgrep: rust.spi.run.dynamic-format -- target and source
+            // names are quoted, columns use quote_ident, and new_lsn was
+            // parsed as a pg_lsn before constructing this SQL.
             Spi::run(&format!(
                 "CREATE TEMP TABLE {target} ON COMMIT DROP AS {select}"
             ))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         }
+        // nosemgrep: rust.spi.run.dynamic-format -- temp relation is
+        // numeric-ID-scoped and the owner is identifier-quoted.
         Spi::run(&format!("GRANT SELECT ON TABLE {target} TO {owner}"))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Ok(())
