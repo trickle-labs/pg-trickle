@@ -100,17 +100,48 @@ SELECT json_build_object(
 )::text;
 """
 
-# Wide vector set operations can exhaust Docker's default shared memory when parallelized.
+# Bound the exact check only; measured maintenance and search keep normal settings.
 EXACT = """
-SET max_parallel_workers_per_gather = 0;
+BEGIN;
+SET LOCAL max_parallel_workers_per_gather = 0;
+SET LOCAL work_mem = '16MB';
+WITH truth AS MATERIALIZED (
+    SELECT id, tenant_id, body, incarnation, revision, chunk_version, model_version, embedding
+    FROM live_rag.truth
+)
 SELECT json_build_object(
-  'application', NOT EXISTS ((TABLE live_rag.application EXCEPT ALL TABLE live_rag.truth)
-                             UNION ALL (TABLE live_rag.truth EXCEPT ALL TABLE live_rag.application)),
-  'periodic_full', NOT EXISTS ((TABLE live_rag.periodic_full EXCEPT ALL TABLE live_rag.truth)
-                               UNION ALL (TABLE live_rag.truth EXCEPT ALL TABLE live_rag.periodic_full)),
-  'differential', NOT EXISTS ((SELECT id, tenant_id, body, incarnation, revision, chunk_version, model_version, embedding FROM live_rag.differential EXCEPT ALL TABLE live_rag.truth)
-                              UNION ALL (TABLE live_rag.truth EXCEPT ALL SELECT id, tenant_id, body, incarnation, revision, chunk_version, model_version, embedding FROM live_rag.differential))
+  'application', (
+    (SELECT count(*) FROM live_rag.application) = (SELECT count(*) FROM truth)
+    AND NOT EXISTS (
+      SELECT 1 FROM live_rag.application c FULL OUTER JOIN truth t USING (id)
+      WHERE c.id IS NULL OR t.id IS NULL
+         OR ROW(c.tenant_id, c.body, c.incarnation, c.revision, c.chunk_version, c.model_version, c.embedding)
+            IS DISTINCT FROM
+            ROW(t.tenant_id, t.body, t.incarnation, t.revision, t.chunk_version, t.model_version, t.embedding)
+    )
+  ),
+  'periodic_full', (
+    (SELECT count(*) FROM live_rag.periodic_full) = (SELECT count(*) FROM truth)
+    AND NOT EXISTS (
+      SELECT 1 FROM live_rag.periodic_full c FULL OUTER JOIN truth t USING (id)
+      WHERE c.id IS NULL OR t.id IS NULL
+         OR ROW(c.tenant_id, c.body, c.incarnation, c.revision, c.chunk_version, c.model_version, c.embedding)
+            IS DISTINCT FROM
+            ROW(t.tenant_id, t.body, t.incarnation, t.revision, t.chunk_version, t.model_version, t.embedding)
+    )
+  ),
+  'differential', (
+    (SELECT count(*) FROM live_rag.differential) = (SELECT count(*) FROM truth)
+    AND NOT EXISTS (
+      SELECT 1 FROM live_rag.differential c FULL OUTER JOIN truth t USING (id)
+      WHERE c.id IS NULL OR t.id IS NULL
+         OR ROW(c.tenant_id, c.body, c.incarnation, c.revision, c.chunk_version, c.model_version, c.embedding)
+            IS DISTINCT FROM
+            ROW(t.tenant_id, t.body, t.incarnation, t.revision, t.chunk_version, t.model_version, t.embedding)
+    )
+  )
 )::text;
+COMMIT;
 """
 
 
