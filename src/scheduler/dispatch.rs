@@ -688,6 +688,7 @@ pub(super) fn parallel_dispatch_tick(
     dispatch_tick_id: i64,
     tick_watermark_lsn: Option<&str>,
     load_deferred: bool,
+    under_application_pressure: bool,
     load_shed_buffer_guards: Option<&HashSet<i64>>,
 ) {
     let eu_dag = match &state.eu_dag {
@@ -729,6 +730,8 @@ pub(super) fn parallel_dispatch_tick(
         effective_max_cluster,
         shmem::active_worker_count(),
     );
+    // Preserve OLTP headroom when deferred work is admitted at the capped poll cadence.
+    let max_per_db = pressure_aware_worker_limit(max_per_db, under_application_pressure);
     let dag_version_i64 = state.dag_version as i64;
     // SAFETY: MyProcPid is always valid inside a background worker.
     let scheduler_pid: i32 = unsafe { pg_sys::MyProcPid };
@@ -1146,6 +1149,14 @@ pub(super) fn parallel_dispatch_tick(
     }
 }
 
+fn pressure_aware_worker_limit(max_per_db: u32, under_application_pressure: bool) -> u32 {
+    if under_application_pressure {
+        max_per_db.min(1)
+    } else {
+        max_per_db
+    }
+}
+
 /// Reap RUNNING jobs whose background worker process has died.
 ///
 /// Called at the start of each parallel dispatch tick to detect orphaned
@@ -1283,6 +1294,13 @@ pub fn reconcile_parallel_state() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pressure_limits_parallel_refreshes_to_one() {
+        assert_eq!(pressure_aware_worker_limit(4, true), 1);
+        assert_eq!(pressure_aware_worker_limit(1, true), 1);
+        assert_eq!(pressure_aware_worker_limit(4, false), 4);
+    }
 
     // ── parse_worker_extra ────────────────────────────────────────────────
 

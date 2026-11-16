@@ -1460,6 +1460,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         dispatch_tick_id,
                         tick_watermark.as_deref(),
                         load_deferred,
+                        pressure_state.deferred(),
                         load_shed_buffer_guards,
                     );
 
