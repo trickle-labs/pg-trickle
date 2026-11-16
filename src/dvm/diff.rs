@@ -1344,16 +1344,24 @@ fn rewrite_bounded_source_reads(sql: &str, source: &str, bounded: &str) -> Strin
         }
         if bytes[i..].starts_with(b"--") {
             i += 2;
-            while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
             continue;
         }
         if bytes[i..].starts_with(b"/*") {
             i += 2;
             let mut depth = 1_usize;
             while i < bytes.len() && depth > 0 {
-                if bytes[i..].starts_with(b"/*") { depth += 1; i += 2; }
-                else if bytes[i..].starts_with(b"*/") { depth -= 1; i += 2; }
-                else { i += 1; }
+                if bytes[i..].starts_with(b"/*") {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i..].starts_with(b"*/") {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             }
             continue;
         }
@@ -1361,9 +1369,10 @@ fn rewrite_bounded_source_reads(sql: &str, source: &str, bounded: &str) -> Strin
         if bytes[i] == b'$' {
             if let Some(relative) = bytes[i + 1..].iter().position(|&b| b == b'$') {
                 let end = i + relative + 2;
-                if bytes[i + 1..end - 1].iter().all(|&b|
-                    b.is_ascii_alphanumeric() || b == b'_'
-                ) {
+                if bytes[i + 1..end - 1]
+                    .iter()
+                    .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+                {
                     let delimiter = &sql[i..end];
                     if let Some(close) = sql[end..].find(delimiter) {
                         i = end + close + delimiter.len();
@@ -1379,18 +1388,20 @@ fn rewrite_bounded_source_reads(sql: &str, source: &str, bounded: &str) -> Strin
                 let end = i + keyword.len();
                 (end < bytes.len()
                     && bytes[i..].starts_with(keyword)
-                    && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric()
-                        || bytes[i - 1] == b'_'))
+                    && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
                     && bytes[end].is_ascii_whitespace())
-                    .then_some(end)
+                .then_some(end)
             });
         if let Some(mut at) = after_keyword {
-            while at < bytes.len() && bytes[at].is_ascii_whitespace() { at += 1; }
+            while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+                at += 1;
+            }
             if sql[at..].starts_with(source) {
                 let end = at + source.len();
                 if end == bytes.len()
                     || !(bytes[end].is_ascii_alphanumeric()
-                        || bytes[end] == b'_' || bytes[end] == b'.'
+                        || bytes[end] == b'_'
+                        || bytes[end] == b'.'
                         || bytes[end] == b'"')
                 {
                     result.push_str(&sql[previous..at]);
@@ -2168,9 +2179,8 @@ mod bounded_source_tests {
                    JOIN \"public\".\"b\" b ON a.id = b.id) \
                    SELECT 'FROM \"public\".\"a\"' AS literal FROM t \
                    -- JOIN \"public\".\"a\"\n";
-        let replaced = rewrite_bounded_source_reads(
-            sql, "\"public\".\"a\"", "pg_temp.\"__pgt_bound_4_7\""
-        );
+        let replaced =
+            rewrite_bounded_source_reads(sql, "\"public\".\"a\"", "pg_temp.\"__pgt_bound_4_7\"");
         assert!(replaced.contains("FROM pg_temp.\"__pgt_bound_4_7\" a"));
         assert!(replaced.contains("JOIN \"public\".\"b\" b"));
         assert!(replaced.contains("'FROM \"public\".\"a\"'"));
@@ -2182,9 +2192,7 @@ mod bounded_source_tests {
         let sql = "SELECT * FROM \"public\".\"a_more\" x \
                    JOIN \"public\".\"a\" a ON true \
                    WHERE a.txt = $$FROM \"public\".\"a\"$$";
-        let replaced = rewrite_bounded_source_reads(
-            sql, "\"public\".\"a\"", "pg_temp.\"bounded\""
-        );
+        let replaced = rewrite_bounded_source_reads(sql, "\"public\".\"a\"", "pg_temp.\"bounded\"");
         assert!(replaced.contains("FROM \"public\".\"a_more\" x"));
         assert!(replaced.contains("JOIN pg_temp.\"bounded\" a"));
         assert!(replaced.contains("$$FROM \"public\".\"a\"$$"));
