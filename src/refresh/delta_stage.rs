@@ -438,12 +438,12 @@ impl DeltaStage {
                 format!(", {}", projected.join(", "))
             };
             let first = format!(
-                "SELECT DISTINCT ON (f.__pgt_row_id) f.__pgt_row_id, f.action{selected} FROM __pgt_future f \
-                 ORDER BY f.__pgt_row_id, f.change_id"
+                "SELECT DISTINCT ON (f.__pgt_event_identity) f.__pgt_event_identity AS __pgt_row_id, f.__pgt_event_action AS __pgt_future_action{selected} FROM __pgt_future f \
+                 ORDER BY f.__pgt_event_identity, f.__pgt_event_sequence"
             );
             let common = format!(
                 "WITH __pgt_future AS MATERIALIZED (\
-                   SELECT c.__pgt_row_id, c.action, c.change_id{future_cols} \
+                   SELECT c.__pgt_row_id AS __pgt_event_identity, c.action AS __pgt_event_action, c.change_id AS __pgt_event_sequence{future_cols} \
                    FROM {buffer} c \
                    WHERE c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')\
                  ), __pgt_first AS ({first})"
@@ -454,9 +454,9 @@ impl DeltaStage {
                 );
                 format!(
                     "{common}, __pgt_net AS (\
-                       SELECT __pgt_row_id, \
-                         SUM(CASE WHEN action = 'I' THEN 1 ELSE -1 END)::bigint AS net \
-                       FROM __pgt_future GROUP BY __pgt_row_id\
+                       SELECT __pgt_event_identity AS __pgt_row_id, \
+                         SUM(CASE WHEN __pgt_event_action = 'I' THEN 1 ELSE -1 END)::bigint AS net \
+                       FROM __pgt_future GROUP BY __pgt_event_identity\
                      ), __pgt_live AS (\
                        SELECT {live_cols}, {identity} AS __pgt_bound_identity, \
                          ROW_NUMBER() OVER (PARTITION BY {identity}) AS __pgt_bound_rn \
@@ -485,7 +485,7 @@ impl DeltaStage {
                      WHERE NOT EXISTS (SELECT 1 FROM __pgt_first f \
                        WHERE f.__pgt_row_id = {identity}) \
                      UNION ALL SELECT {first_cols} FROM __pgt_first f \
-                     WHERE f.action = 'D'"
+                     WHERE f.__pgt_future_action = 'D'"
                 )
             };
 
