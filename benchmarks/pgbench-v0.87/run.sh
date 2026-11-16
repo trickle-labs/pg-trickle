@@ -53,6 +53,7 @@ case "$PROFILE" in
         warmup="${PGT_PGBENCH_WARMUP:-10}"
         duration="${PGT_PGBENCH_DURATION:-30}"
         repetitions="${PGT_PGBENCH_REPETITIONS:-3}"
+        latency_rate=""
         ;;
     publication)
         scale="${PGT_PGBENCH_SCALE:-10}"
@@ -61,6 +62,7 @@ case "$PROFILE" in
         warmup="${PGT_PGBENCH_WARMUP:-30}"
         duration="${PGT_PGBENCH_DURATION:-60}"
         repetitions="${PGT_PGBENCH_REPETITIONS:-5}"
+        latency_rate=1000
         ;;
     *)
         echo "unsupported profile: $PROFILE" >&2
@@ -188,6 +190,7 @@ run_one() {
     local stdout_file="$run_dir/pgbench.stdout"
     local log_dir="$run_dir/logs"
     local warmup_file="$run_dir/warmup.stdout"
+    local tps_file="$stdout_file"
     local history_before refresh_count refresh_duration correct workload_finished_at postgres_version postgres_settings
     local cpu_before cpu_after cpu_hz sampler_pid
     # Avoid checkpoint interference from PostgreSQL's default 1 GB WAL limit.
@@ -220,9 +223,21 @@ run_one() {
 
     docker exec "$container" pgbench -h 127.0.0.1 -U postgres -c "$clients" -j "$jobs" -T "$warmup" -n postgres >"$warmup_file"
     if [[ "$config" == active ]]; then
+        if [[ "$PROFILE" == publication ]]; then
+            tps_file="$warmup_file"
+            workload_finished_at="$(db_query "SELECT clock_timestamp()")"
+            if ! wait_for_correctness "$workload_finished_at"; then
+                echo "stream tables did not converge after the publication warm-up" >&2
+                docker logs "$container" >"$run_dir/postgres.log" 2>&1 || true
+                exit 1
+            fi
+        fi
         history_before="$(db_query "SELECT coalesce(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")"
     else
         history_before=0
+        if [[ "$PROFILE" == publication ]]; then
+            tps_file="$warmup_file"
+        fi
     fi
     rm -f "$run_dir/cpu.stop" "$run_dir/cpu.ready"
     docker exec "$container" sh /bench-scripts/cpu_sampler.sh \
@@ -235,8 +250,12 @@ run_one() {
     [[ -e "$run_dir/cpu.ready" ]] || { echo "CPU sampler did not start" >&2; exit 1; }
     cpu_hz="$(docker exec "$container" getconf CLK_TCK)"
     cpu_before="$(cpu_total_sample)"
-    docker exec "$container" pgbench -h 127.0.0.1 -U postgres -c "$clients" -j "$jobs" -T "$duration" -n \
-        -l --sampling-rate=0.1 --log-prefix=/bench/logs/pgbench postgres >"$stdout_file"
+    local pgbench_args=(-h 127.0.0.1 -U postgres -c "$clients" -j "$jobs" -T "$duration" -n)
+    if [[ -n "$latency_rate" ]]; then
+        pgbench_args+=(-R "$latency_rate")
+    fi
+    pgbench_args+=(-l --sampling-rate=0.1 --log-prefix=/bench/logs/pgbench postgres)
+    docker exec "$container" pgbench "${pgbench_args[@]}" >"$stdout_file"
     cpu_after="$(cpu_total_sample)"
     touch "$run_dir/cpu.stop"
     wait "$sampler_pid"
@@ -268,7 +287,7 @@ run_one() {
     python3 "$BENCH_DIR/parse_pgbench.py" \
         --config "$config" \
         --repetition "$repetition" \
-        --stdout "$stdout_file" \
+        --stdout "$tps_file" \
         --log-dir "$log_dir" \
         --cpu-before "$cpu_before" \
         --cpu-after "$cpu_after" \
