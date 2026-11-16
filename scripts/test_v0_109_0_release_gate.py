@@ -83,6 +83,8 @@ class RetirementContractTests(unittest.TestCase):
                 broken = copy.deepcopy(contract)
                 cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
                 cases.remove(f"e2e_pgvector_tests::{case}")
+                with self.assertRaises(SystemExit):
+                    gate.check_pgvector_contract(broken)
 
     def test_live_rag_cases_are_required_for_both_versions(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
@@ -93,6 +95,25 @@ class RetirementContractTests(unittest.TestCase):
                 cases.remove(f"e2e_pgvector_revision_tests::{case}")
                 with self.assertRaises(SystemExit):
                     gate.check_pgvector_contract(broken)
+
+    def test_subscription_concurrency_case_is_required_for_both_versions(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        for version in ("0.8.1", "0.8.7"):
+            for name in ("test_distance_subscription_concurrent_commit_and_rollback", "test_distance_subscription_trigger_concurrent_commit_and_rollback"):
+                broken = copy.deepcopy(contract)
+                cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
+                cases.remove(f"e2e_pgvector_tests::{name}")
+                with self.assertRaises(SystemExit):
+                    gate.check_pgvector_contract(broken)
+
+    def test_duplicate_subscription_case_is_required_for_both_versions(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        for version in ("0.8.1", "0.8.7"):
+            broken = copy.deepcopy(contract)
+            cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
+            cases.remove("e2e_pgvector_tests::test_distance_subscription_duplicate_predicates_with_user_trigger")
+            with self.assertRaises(SystemExit):
+                gate.check_pgvector_contract(broken)
 
     def test_metadata_tracks_package_and_never_precedes_gate(self):
         check = gate.prior.shared.check_metadata_version

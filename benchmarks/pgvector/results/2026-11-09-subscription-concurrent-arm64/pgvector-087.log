@@ -1,0 +1,25 @@
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-task-1399)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.64s
+────────────
+ Nextest run ID b79789ee-3ca4-423b-ba59-655d91a1e9dd with nextest profile: default
+    Starting 2 tests across 1 binary (137 tests skipped)
+       START [         ] (1/2) pg_trickle::e2e_pgvector_tests test_distance_subscription_concurrent_commit_and_rollback
+
+running 1 test
+DISTANCE_CONCURRENCY_JSON={"dimensions":3,"exit_post_commit_drain_ms":0.161666,"first_post_commit_drain_ms":0.19037500000000002,"listener_connections":1,"pg_trickle":"0.109.0","pgvector":"0.8.7","postgres":"18.6 (Debian 18.6-1.pgdg13+2)","rows":100,"second_post_commit_drain_ms":0.146,"subscriptions":10}
+test test_distance_subscription_concurrent_commit_and_rollback ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out; finished in 16.31s
+
+        PASS [  16.587s] (1/2) pg_trickle::e2e_pgvector_tests test_distance_subscription_concurrent_commit_and_rollback
+       START [         ] (2/2) pg_trickle::e2e_pgvector_tests test_distance_subscription_concurrent_scale
+
+running 1 test
+DISTANCE_CONCURRENCY_JSON={"dimensions":3,"exit_post_commit_drain_ms":3.048791,"first_post_commit_drain_ms":1.084667,"listener_connections":1,"pg_trickle":"0.109.0","pgvector":"0.8.7","postgres":"18.6 (Debian 18.6-1.pgdg13+2)","rows":10000,"second_post_commit_drain_ms":0.945542,"subscriptions":100}
+test test_distance_subscription_concurrent_scale ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out; finished in 16.85s
+
+        PASS [  17.160s] (2/2) pg_trickle::e2e_pgvector_tests test_distance_subscription_concurrent_scale
+────────────
+     Summary [  33.747s] 2 tests run: 2 passed, 137 skipped

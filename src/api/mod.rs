@@ -5,7 +5,7 @@
 
 use pgrx::prelude::*;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::catalog::{CdcMode, RefreshRecord, StDependency, StreamTableMeta};
@@ -2583,6 +2583,64 @@ fn prepare_distance_snapshot_inner(st: &StreamTableMeta, delta: Option<&str>) {
     }
 }
 
+fn prepare_distance_changed_rows(
+    st: &StreamTableMeta,
+    snapshot: &str,
+    column: &str,
+    index: usize,
+) -> Result<Option<(String, String)>, PgTrickleError> {
+    let oid = Spi::get_one_with_args::<i64>(
+        "SELECT atttypid::bigint FROM pg_catalog.pg_attribute WHERE attrelid=$1 AND attname=$2 AND attnum>0 AND NOT attisdropped",
+        &[st.pgt_relid.into(), column.into()],
+    )
+    .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
+    let Some(oid) = oid.and_then(|value| u32::try_from(value).ok()) else {
+        return Ok(None);
+    };
+    let senders = crate::dvm::pgvector_binary_senders()?;
+    let Some(sender) = senders.get(&oid) else {
+        return Ok(None);
+    };
+    let table = format!(
+        "{}.{}",
+        quote_identifier(&st.pgt_schema),
+        quote_identifier(&st.pgt_name)
+    );
+    let column = quote_identifier(column);
+    crate::refresh::with_stream_owner(st, || {
+        let before_select = format!("SELECT __pgt_row_id, {column} FROM {snapshot}");
+        let after_select = format!("SELECT __pgt_row_id, {column} FROM {table}");
+        let old = crate::refresh::prepare_owner_temp_table(
+            st,
+            &format!("__pgt_distance_changed_before_{}_{}", st.pgt_id, index),
+            &before_select,
+        )?;
+        let new = crate::refresh::prepare_owner_temp_table(
+            st,
+            &format!("__pgt_distance_changed_after_{}_{}", st.pgt_id, index),
+            &after_select,
+        )?;
+        // Identical identity/value multiplicities cancel for every distance predicate.
+        let compact = format!(
+            "WITH b AS MATERIALIZED (SELECT __pgt_row_id, {column} AS value, {sender}({column}) AS image FROM {snapshot}), \
+             a AS MATERIALIZED (SELECT __pgt_row_id, {column} AS value, {sender}({column}) AS image FROM {table}), \
+             changed AS MATERIALIZED (SELECT DISTINCT __pgt_row_id FROM \
+               ((SELECT __pgt_row_id, image FROM b EXCEPT ALL SELECT __pgt_row_id, image FROM a) UNION ALL \
+                (SELECT __pgt_row_id, image FROM a EXCEPT ALL SELECT __pgt_row_id, image FROM b) UNION ALL \
+                SELECT __pgt_row_id, image FROM b WHERE __pgt_row_id IS NULL UNION ALL \
+                SELECT __pgt_row_id, image FROM a WHERE __pgt_row_id IS NULL) differences), \
+             old_rows AS (INSERT INTO {old} SELECT b.__pgt_row_id, b.value FROM b JOIN changed d \
+               ON b.__pgt_row_id = d.__pgt_row_id UNION ALL SELECT b.__pgt_row_id, b.value FROM b \
+               WHERE b.__pgt_row_id IS NULL RETURNING 1) \
+             INSERT INTO {new} SELECT a.__pgt_row_id, a.value FROM a JOIN changed d \
+               ON a.__pgt_row_id = d.__pgt_row_id UNION ALL SELECT a.__pgt_row_id, a.value FROM a \
+               WHERE a.__pgt_row_id IS NULL"
+        );
+        Spi::run(&compact).map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
+        Ok(Some((old, new)))
+    })
+}
+
 pub(crate) fn fire_distance_subscriptions(st: &StreamTableMeta, refresh_id: i64) {
     if crate::config::effective_pooler_compat(st.pooler_compatibility_mode) {
         return;
@@ -2621,7 +2679,51 @@ pub(crate) fn fire_distance_subscriptions(st: &StreamTableMeta, refresh_id: i64)
             return;
         }
     };
+    let mut changed_sources = HashMap::new();
+    if !bounded {
+        let mut distinct = HashMap::<&str, std::collections::HashSet<(&str, &str, u64)>>::new();
+        for (_, column, query, op, threshold) in &subscriptions {
+            distinct
+                .entry(column)
+                .or_default()
+                .insert((query, op, threshold.to_bits()));
+        }
+        let snapshot = format!(
+            "pg_temp.{}",
+            quote_identifier(&format!("__pgt_distance_pre_{}", st.pgt_id))
+        );
+        for (index, (column, _)) in distinct
+            .into_iter()
+            .filter(|(_, values)| values.len() > 1)
+            .enumerate()
+        {
+            let changed = isolate_distance_notification(|| {
+                prepare_distance_changed_rows(st, &snapshot, column, index)
+            });
+            match changed {
+                Ok(Some(sources)) => {
+                    changed_sources.insert(column.to_owned(), sources);
+                }
+                Ok(None) => {}
+                Err(error) => pgrx::warning!(
+                    "pg_trickle: distance comparison for {}.{} column {} uses full snapshots: {}",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    column,
+                    error
+                ),
+            }
+        }
+    }
+    let mut evaluated = HashMap::new();
     for (channel, column, query, op, threshold) in subscriptions {
+        let key = (
+            column.clone(),
+            query.clone(),
+            op.clone(),
+            threshold.to_bits(),
+        );
+        let cached = evaluated.get(&key).copied();
         let result = isolate_distance_notification(|| {
             if !matches!(op.as_str(), "<->" | "<=>" | "<#>" | "<+>" | "<~>" | "<%>")
                 || !threshold.is_finite()
@@ -2657,7 +2759,11 @@ pub(crate) fn fire_distance_subscriptions(st: &StreamTableMeta, refresh_id: i64)
                 quote_identifier(&st.pgt_schema),
                 quote_identifier(&st.pgt_name)
             );
-            let after_source = if bounded {
+            let compacted = changed_sources.get(&column);
+            let before_source = compacted.map_or(snapshot.as_str(), |sources| sources.0.as_str());
+            let after_source = if let Some((_, after)) = compacted {
+                format!("{after} st")
+            } else if bounded {
                 let ids = format!(
                     "pg_temp.{}",
                     quote_identifier(&format!("__pgt_distance_ids_{}", st.pgt_id))
@@ -2669,19 +2775,26 @@ pub(crate) fn fire_distance_subscriptions(st: &StreamTableMeta, refresh_id: i64)
                 format!("{table} st")
             };
             let sql = format!(
-                "WITH before_rows AS (SELECT __pgt_row_id, count(*)::bigint AS n FROM {snapshot} WHERE {predicate} GROUP BY __pgt_row_id), after_rows AS (SELECT st.__pgt_row_id, count(*)::bigint AS n FROM {after_source} WHERE {predicate} GROUP BY st.__pgt_row_id) SELECT COALESCE(sum(greatest(COALESCE(a.n,0)-COALESCE(b.n,0),0)),0)::bigint, COALESCE(sum(greatest(COALESCE(b.n,0)-COALESCE(a.n,0),0)),0)::bigint FROM before_rows b FULL JOIN after_rows a USING (__pgt_row_id)"
+                "WITH before_rows AS (SELECT __pgt_row_id, count(*)::bigint AS n FROM {before_source} WHERE {predicate} GROUP BY __pgt_row_id), after_rows AS (SELECT st.__pgt_row_id, count(*)::bigint AS n FROM {after_source} WHERE {predicate} GROUP BY st.__pgt_row_id) SELECT COALESCE(sum(greatest(COALESCE(a.n,0)-COALESCE(b.n,0),0)),0)::bigint, COALESCE(sum(greatest(COALESCE(b.n,0)-COALESCE(a.n,0),0)),0)::bigint FROM before_rows b FULL JOIN after_rows a USING (__pgt_row_id)"
             );
             crate::refresh::with_stream_owner(st, || {
-                let (entered, exited) = Spi::connect_mut(|client| {
-                    let rows =
-                        client.update(&sql, None, &[query.as_str().into(), threshold.into()])?;
-                    let row = rows.first();
-                    Ok::<_, pgrx::spi::Error>((
-                        row.get::<i64>(1)?.unwrap_or(0),
-                        row.get::<i64>(2)?.unwrap_or(0),
-                    ))
-                })
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                let (entered, exited) = if let Some(counts) = cached {
+                    counts
+                } else {
+                    Spi::connect_mut(|client| {
+                        let rows = client.update(
+                            &sql,
+                            None,
+                            &[query.as_str().into(), threshold.into()],
+                        )?;
+                        let row = rows.first();
+                        Ok::<_, pgrx::spi::Error>((
+                            row.get::<i64>(1)?.unwrap_or(0),
+                            row.get::<i64>(2)?.unwrap_or(0),
+                        ))
+                    })
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                };
                 if entered > 0 || exited > 0 {
                     let payload = serde_json::json!({"schema": st.pgt_schema, "stream_table": st.pgt_name, "op": op, "threshold": threshold, "entered": entered, "exited": exited, "refresh_id": refresh_id}).to_string();
                     Spi::run_with_args(
@@ -2690,16 +2803,19 @@ pub(crate) fn fire_distance_subscriptions(st: &StreamTableMeta, refresh_id: i64)
                     )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 }
-                Ok(())
+                Ok((entered, exited))
             })
         });
-        if let Err(error) = result {
-            pgrx::warning!(
+        match result {
+            Ok(counts) => {
+                evaluated.insert(key, counts);
+            }
+            Err(error) => pgrx::warning!(
                 "pg_trickle: distance subscription failed for {} on {}: {}",
                 channel,
                 full_name,
                 error
-            );
+            ),
         }
     }
 }
