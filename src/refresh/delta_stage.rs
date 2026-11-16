@@ -392,8 +392,9 @@ impl DeltaStage {
         // nosemgrep: rust.spi.run.dynamic-format -- generated numeric-scoped temporary name.
         Spi::run(&format!("DROP TABLE IF EXISTS {post_stage}"))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        // nosemgrep: rust.spi.run_with_args.dynamic-format -- buffer is quoted
-        // from the CDC catalog; the validated frontier is bound as a parameter.
+        // Buffer and temporary-stage identifiers are quoted catalog-derived
+        // names; the frontier LSN is parameterized as $1.
+        // nosemgrep: rust.spi.run_with_args.dynamic-format
         Spi::run_with_args(
             &format!(
                 "CREATE TEMP TABLE {post_stage} ON COMMIT DROP AS \
@@ -405,8 +406,8 @@ impl DeltaStage {
 
         // Both checks read our own materialized rows (not the possibly stale
         // snapshot of a separate SPI read-only query).
-        // nosemgrep: rust.spi.query.dynamic-format -- post_stage is an
-        // identifier-quoted, numeric-ID-scoped pg_temp table we just created.
+        // post_stage is a quoted, numeric-ID-scoped pg_temp table created above.
+        // nosemgrep: rust.spi.query.dynamic-format
         let is_future_truncate = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action = 'T')"
         ))
@@ -420,8 +421,8 @@ impl DeltaStage {
             )));
         }
 
-        // nosemgrep: rust.spi.query.dynamic-format -- post_stage is an
-        // identifier-quoted, numeric-ID-scoped pg_temp table we just created.
+        // post_stage is a quoted, numeric-ID-scoped pg_temp table created above.
+        // nosemgrep: rust.spi.query.dynamic-format
         let has_future = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action IN ('I', 'D'))"
         ))
