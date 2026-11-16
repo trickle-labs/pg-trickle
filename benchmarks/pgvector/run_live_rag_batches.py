@@ -2,6 +2,7 @@
 """Compare batched live RAG corpus maintenance in an empty disposable database."""
 
 import argparse
+import atexit
 import json
 import math
 import re
@@ -179,6 +180,13 @@ SELECT json_build_object('postgres', current_setting('server_version'),
 
     start = time.monotonic()
     worker.psql(setup_live_rag.setup_sql(args.dimensions))
+    worker.psql("SET pg_trickle.scheduler_drain_timeout=3600; "
+                "SELECT pgtrickle.pause_scheduler(ARRAY['live_rag.differential']);")
+
+    def resume_scheduler() -> None:
+        worker.psql("SELECT pgtrickle.resume_scheduler(ARRAY['live_rag.differential']);")
+
+    atexit.register(resume_scheduler)
     worker.psql(SEED, rows=str(args.rows), dimensions=str(args.dimensions))
     variables = {"rows": str(args.rows), "batch": str(args.batch), "cycle": "0"}
     worker.psql("SELECT live_rag.sync_application(ARRAY(SELECT id FROM live_rag.truth)::bigint[]); "
@@ -261,6 +269,8 @@ SELECT json_build_object('application', pg_total_relation_size('live_rag.applica
     final_attestation = attest() if initial_attestation else None
     if initial_attestation and initial_attestation != final_attestation:
         raise ValueError("candidate or PostgreSQL instance changed during the benchmark")
+    resume_scheduler()
+    atexit.unregister(resume_scheduler)
     return {"metadata": metadata, "candidate_commit": args.candidate_commit, "package_sha256": args.package_sha256,
             "identity_source": "archive manifest and installed files checked before and after run" if initial_attestation else "operator-declared; installed payload not attested",
             "attestation": initial_attestation, "rows": args.rows,
