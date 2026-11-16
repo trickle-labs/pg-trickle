@@ -1,6 +1,6 @@
 # Exact-package live RAG sample
 
-**Status:** one exact-package 10k/384 mixed-workload run; not release sign-off.
+**Status:** exact-package 10k/384 and 100k/768 mixed-workload runs; not release sign-off.
 
 The run used the Linux ARM64 archive built from candidate `277efecf7305246092c549e1e643f9449ecdf9af` (v0.109.0), PostgreSQL 18.6 and pgvector 0.8.7. Archive SHA-256 is
 `9b04a50a25ecde66dc0cfeed28c4885e0bd03d2d1d8bc3ccbbd25d708392249f`;
@@ -36,6 +36,38 @@ application and periodic-full diagnostics used B-tree paths, so their recall
 values are not ANN measurements.
 
 The normalized report and full plans are in [`10k-384.json`](10k-384.json);
-the complete run output is in [`10k-384-run.log`](10k-384-run.log). Larger
-exact-package runs at 100k/768, 100k/1536 and 1m remain outstanding, as do
+the complete run output is in [`10k-384-run.log`](10k-384-run.log).
+
+## Exact-package 100k/768 run
+
+This run used 100,000 rows, 768 dimensions, batch size 1,000, three mixed
+cycles, tenant 2, one reader, and the same uniform fake embedding delay and
+seed. It used the exact candidate archive and installed-file attestation
+described above. Setup took 3,216.31 seconds (53.6 minutes); all three corpora
+matched their defining SQL at setup and after every cycle. The initial
+differential initialization used its FULL fallback at 15,001 changes against
+the 15,000-row threshold. All three changed-cycle differential refreshes were
+incremental with `explicit_dml_reconciled`.
+
+| Approach | Median seconds | p95 seconds |
+|---|---:|---:|
+| Application batching | 8.50 | 8.85 |
+| Differential | 18.11 | 20.77 |
+| Periodic full | 1,146.53 | 1,405.48 |
+
+The source transaction p95 was 343.29 seconds; commit-to-eligible p50/p95 was
+48.76/58.61 seconds. The periodic-full reader timed out 48, 39, and 38 times
+in the three cycles (two completed queries per cycle). Application and
+differential readers had no timeouts. All retrievals returned exact top-10
+results without underfill. The normal planner did not use HNSW; forced HNSW was
+selected only for differential and had recall@10 of zero for this query.
+
+Final relation sizes including indexes were 860 MB for application, 841 MB for
+periodic full, and 877 MB for differential. Docker sampling observed a peak of
+7.099 GiB out of 7.748 GiB; the run completed without an OOM event. The full
+report, run log, and resource samples are in [`100k-768.json`](100k-768.json),
+[`100k-768-run.log`](100k-768-run.log), and
+[`100k-768-docker-stats.csv`](100k-768-docker-stats.csv).
+
+Exact-package 100k/1536 and 1m/384 runs remain outstanding, as do
 package-bound concurrent-write and recovery measurements.
