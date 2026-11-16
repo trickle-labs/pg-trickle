@@ -632,19 +632,6 @@ pub(crate) fn replica_identity_sufficient(identity: &str) -> bool {
 
 // ── WAL Availability Detection ─────────────────────────────────────────────
 
-/// Check if the server supports logical replication for CDC.
-///
-/// Returns `true` if ALL of:
-/// - `pg_trickle.cdc_mode` is `"auto"` or `"wal"` (not `"trigger"`)
-/// - `wal_level` is `'logical'`
-/// - `max_replication_slots` > currently used slots
-///
-/// When `cdc_mode = "wal"` and `wal_level != logical`, returns an error
-/// instead of `false` (hard requirement).
-pub fn can_use_logical_replication() -> Result<bool, PgTrickleError> {
-    can_use_logical_replication_for_mode(&config::pg_trickle_cdc_mode())
-}
-
 /// Check if the server supports logical replication for a requested CDC mode.
 pub fn can_use_logical_replication_for_mode(cdc_mode: &str) -> Result<bool, PgTrickleError> {
     if cdc_mode.eq_ignore_ascii_case("trigger") {
