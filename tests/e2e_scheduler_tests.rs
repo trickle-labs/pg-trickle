@@ -324,6 +324,640 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
     db.assert_st_matches_query("replay_sibling", query).await;
 }
 
+/// #1417: a scheduled REINITIALIZE must not reuse the pre-lock tick LSN.
+/// A pending source writer blocks the scheduler's SHARE lock, forcing its FULL
+/// snapshot to include a commit that happened *after* the scheduler tick.  The
+/// next DIFFERENTIAL must not count that writer's rows a second time.
+#[tokio::test]
+async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "differential",
+        "differential",
+    )
+    .await;
+
+    db.execute(
+        "CREATE TABLE scheduler_cut_src (
+            id BIGINT NOT NULL,
+            day DATE NOT NULL,
+            grp INT NOT NULL,
+            qty BIGINT NOT NULL,
+            PRIMARY KEY (id, day)
+        ) PARTITION BY RANGE (day)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE scheduler_cut_active PARTITION OF scheduler_cut_src
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE scheduler_cut_empty PARTITION OF scheduler_cut_src
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO scheduler_cut_src (id, day, grp, qty)
+         SELECT i, '2026-11-15', i % 3, 10 FROM generate_series(1, 9) AS i",
+    )
+    .await;
+    let query = "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_cut_src GROUP BY grp";
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'scheduler_cut_st',
+            query => 'SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_cut_src GROUP BY grp',
+            schedule => '1s',
+            refresh_mode => 'DIFFERENTIAL',
+            cdc_mode => 'trigger'
+         )",
+    )
+    .await;
+    db.assert_st_matches_query("scheduler_cut_st", query).await;
+
+    // Keep scheduler work paused while a normal DETACH + DROP requests a
+    // protected REINITIALIZE. Partition removal now leaves managed streams
+    // ACTIVE with SCHEMA_CHANGED (rather than suspending them); the scheduler
+    // must perform the rebuild after it resumes, not a manual refresh.
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['scheduler_cut_st'])")
+        .await;
+    db.execute("ALTER TABLE scheduler_cut_src DETACH PARTITION scheduler_cut_empty")
+        .await;
+    db.execute("DROP TABLE scheduler_cut_empty").await;
+    let state: String = db
+        .query_scalar(
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'scheduler_cut_st'",
+        )
+        .await;
+    assert_eq!(state, "ACTIVE:SCHEMA_CHANGED");
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'scheduler_cut_st'",
+        )
+        .await;
+    assert!(
+        needs_reinit,
+        "normal partition removal must request REINITIALIZE"
+    );
+
+    let source_oid: i64 = db
+        .query_scalar("SELECT 'scheduler_cut_src'::regclass::oid::bigint")
+        .await;
+    let source_buffer: String = db
+        .query_scalar(&format!(
+            "SELECT format('%I.%I', 'pgtrickle_changes',
+                           'changes_' || COALESCE(source_stable_name, {source_oid}::text))
+             FROM pgtrickle.pgt_change_tracking
+             WHERE source_relid = {source_oid}::oid"
+        ))
+        .await;
+    let mut writer = db.pool.begin().await.expect("open source writer");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("get source writer PID");
+    // Acquire the conflicting source lock without writing yet.  The scheduler
+    // must capture its tick and start waiting before the CDC LSN is minted.
+    sqlx::query("LOCK TABLE scheduler_cut_src IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
+        .await
+        .expect("hold source lock before scheduler tick");
+
+    // Resume only after the writer has its source RowExclusiveLock.  The
+    // scheduled REINITIALIZE must wait on this transaction's source lock.
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['scheduler_cut_st'])")
+        .await;
+    let blocked = format!(
+        "SELECT EXISTS (
+            SELECT 1 FROM pg_locks l
+            WHERE l.relation = 'scheduler_cut_src'::regclass
+              AND l.mode = 'ShareLock' AND NOT l.granted
+              AND {writer_pid} = ANY(pg_blocking_pids(l.pid))
+        )"
+    );
+    assert!(
+        db.wait_for_condition(
+            "scheduled REINITIALIZE blocked by the source writer",
+            &blocked,
+            Duration::from_secs(45),
+            Duration::from_millis(50),
+        )
+        .await,
+        "the scheduler must capture its tick before the writer commits"
+    );
+    // This write occurs strictly *after* the scheduler recorded its tick.
+    sqlx::query(
+        "INSERT INTO scheduler_cut_src (id, day, grp, qty)
+         SELECT i, '2026-11-15', i % 3, 100
+         FROM generate_series(10, 109) AS i",
+    )
+    .execute(&mut *writer)
+    .await
+    .expect("insert rows after the scheduler was blocked");
+    // The relation is catalog-derived and SQL-identifier quoted by PostgreSQL
+    // format('%I.%I'); no user string is interpolated into this query.
+    let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
+    let writer_delta_lsn: String = sqlx::query_scalar(sqlx::AssertSqlSafe(delta_sql))
+        .fetch_one(&mut *writer)
+        .await
+        .expect("read uncommitted source CDC LSN");
+    writer
+        .commit()
+        .await
+        .expect("commit the blocked source writer");
+
+    assert!(
+        db.wait_for_condition(
+            "scheduled REINITIALIZE completed after the writer committed",
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'scheduler_cut_st'
+                  AND h.action = 'REINITIALIZE' AND h.status = 'COMPLETED'
+            )",
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+        )
+        .await,
+        "the scheduler must complete a real REINITIALIZE"
+    );
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['scheduler_cut_st'])")
+        .await;
+    db.assert_st_matches_query("scheduler_cut_st", query).await;
+
+    // These two witnesses distinguish a repaired frontier from merely having
+    // a correct FULL output: the tick was older than the writer's CDC row, but
+    // the new per-source frontier must cover that row.
+    let tick_is_older: bool = sqlx::query_scalar(
+        "SELECT h.tick_watermark_lsn < $1::pg_lsn
+         FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+         WHERE st.pgt_name = 'scheduler_cut_st'
+           AND h.action = 'REINITIALIZE' AND h.status = 'COMPLETED'
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .bind(&writer_delta_lsn)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read scheduler tick watermark");
+    assert!(
+        tick_is_older,
+        "the test must exercise the stale-tick interleaving"
+    );
+    let frontier_covers_writer: bool = sqlx::query_scalar(
+        "SELECT (frontier #>> ARRAY['sources', $1::text, 'lsn'])::pg_lsn >= $2::pg_lsn
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'scheduler_cut_st'",
+    )
+    .bind(source_oid.to_string())
+    .bind(&writer_delta_lsn)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read protected source frontier");
+    assert!(
+        frontier_covers_writer,
+        "the baseline frontier must cover every change included in the FULL snapshot"
+    );
+
+    // Force a genuine differential refresh with one new write; an old frontier
+    // would replay the previous 100 inserts as well as this one.
+    db.execute(
+        "INSERT INTO scheduler_cut_src (id, day, grp, qty)
+         VALUES (110, '2026-11-15', 1, 7)",
+    )
+    .await;
+    let before_diff: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.refresh_st("scheduler_cut_st").await;
+    let was_differential: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'scheduler_cut_st'
+                  AND h.refresh_id > {before_diff}
+                  AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED'
+                  AND NOT h.was_full_fallback
+            )"
+        ))
+        .await;
+    assert!(
+        was_differential,
+        "the post-rebuild correctness check must actually apply a differential delta"
+    );
+    db.assert_st_matches_query("scheduler_cut_st", query).await;
+}
+
+/// #1417: a DIFFERENTIAL-to-FULL fallback also needs to replace its original
+/// tick-bounded base-table frontier after the FULL acquires source locks.
+#[tokio::test]
+async fn test_scheduler_full_fallback_after_blocked_writer_does_not_replay() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+        .await;
+
+    db.execute("CREATE TABLE scheduler_fallback_src (id INT PRIMARY KEY, grp INT, qty BIGINT)")
+        .await;
+    db.execute(
+        "INSERT INTO scheduler_fallback_src
+         SELECT i, i % 2, 10 FROM generate_series(1, 9) AS i",
+    )
+    .await;
+    let query =
+        "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_fallback_src GROUP BY grp";
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'scheduler_fallback_st',
+            query => 'SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM scheduler_fallback_src GROUP BY grp',
+            schedule => '1s',
+            refresh_mode => 'DIFFERENTIAL',
+            cdc_mode => 'trigger'
+        )",
+    )
+    .await;
+    db.assert_st_matches_query("scheduler_fallback_st", query)
+        .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['scheduler_fallback_st'])")
+        .await;
+
+    // One committed change guarantees that a normal differential run is due.
+    // Force that run to choose FULL, then block its source lock with another
+    // writer whose changes the old scheduler tick cannot safely cover.
+    db.execute("INSERT INTO scheduler_fallback_src VALUES (10, 0, 10)")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.refresh_strategy", "full", "full")
+        .await;
+    let source_oid: i64 = db
+        .query_scalar("SELECT 'scheduler_fallback_src'::regclass::oid::bigint")
+        .await;
+    let source_buffer: String = db
+        .query_scalar(&format!(
+            "SELECT format('%I.%I', 'pgtrickle_changes',
+                           'changes_' || COALESCE(source_stable_name, {source_oid}::text))
+             FROM pgtrickle.pgt_change_tracking
+             WHERE source_relid = {source_oid}::oid"
+        ))
+        .await;
+    // A persisted INTERVAL freshness target is eligible only after its
+    // controller's next_due_at, even when the source has pending CDC rows.
+    // Make both the controller and legacy timestamp due while the scheduler
+    // is paused, then establish the conflicting writer lock. Without this
+    // step the test can time out before attempting the protected FULL at all.
+    let source_has_pending_cdc: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS(SELECT 1 FROM {source_buffer} WHERE action <> 'S')"
+        ))
+        .await;
+    assert!(
+        source_has_pending_cdc,
+        "the committed source update must be present in its trigger buffer"
+    );
+    let mut due = db
+        .pool
+        .begin()
+        .await
+        .expect("begin fallback scheduler due setup");
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_stream_tables
+         SET last_refresh_at = clock_timestamp() - interval '2 hours'
+         WHERE pgt_name = 'scheduler_fallback_st'",
+    )
+    .execute(&mut *due)
+    .await
+    .expect("make fallback stream overdue");
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_freshness_controller_state
+         SET next_due_at = clock_timestamp() - interval '1 second'
+         WHERE pgt_id = (
+             SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'scheduler_fallback_st'
+         )",
+    )
+    .execute(&mut *due)
+    .await
+    .expect("make fallback freshness controller due");
+    due.commit().await.expect("commit fallback due setup");
+
+    let mut writer = db.pool.begin().await.expect("open fallback source writer");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("get fallback writer PID");
+    sqlx::query("LOCK TABLE scheduler_fallback_src IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
+        .await
+        .expect("hold fallback source lock before scheduler tick");
+
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['scheduler_fallback_st'])")
+        .await;
+    let blocked = format!(
+        "SELECT EXISTS (
+            SELECT 1 FROM pg_locks l
+            WHERE l.relation = 'scheduler_fallback_src'::regclass
+              AND l.mode = 'ShareLock' AND NOT l.granted
+              AND {writer_pid} = ANY(pg_blocking_pids(l.pid))
+        )"
+    );
+    assert!(
+        db.wait_for_condition(
+            "fallback FULL waiting for the writer's source lock",
+            &blocked,
+            Duration::from_secs(45),
+            Duration::from_millis(50),
+        )
+        .await,
+        "the fallback must reach the FULL source lock under an old tick"
+    );
+    // Mint the CDC LSN only after the scheduler has captured its old tick.
+    sqlx::query(
+        "INSERT INTO scheduler_fallback_src
+         SELECT i, i % 2, 100 FROM generate_series(11, 110) AS i",
+    )
+    .execute(&mut *writer)
+    .await
+    .expect("insert fallback source rows");
+    // The relation is catalog-derived and SQL-identifier quoted by PostgreSQL
+    // format('%I.%I'); no user string is interpolated into this query.
+    let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
+    let writer_delta_lsn: String = sqlx::query_scalar(sqlx::AssertSqlSafe(delta_sql))
+        .fetch_one(&mut *writer)
+        .await
+        .expect("read fallback writer's CDC LSN");
+    writer
+        .commit()
+        .await
+        .expect("commit the blocked fallback writer");
+
+    assert!(
+        db.wait_for_condition(
+            "scheduled differential FULL fallback completed",
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'scheduler_fallback_st'
+                  AND h.action = 'FULL' AND h.was_full_fallback
+                  AND h.status = 'COMPLETED'
+            )",
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+        )
+        .await,
+        "scheduler must complete the intended FULL fallback"
+    );
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['scheduler_fallback_st'])")
+        .await;
+    db.assert_st_matches_query("scheduler_fallback_st", query)
+        .await;
+
+    let frontier_covers_writer: bool = sqlx::query_scalar(
+        "SELECT (frontier #>> ARRAY['sources', $1::text, 'lsn'])::pg_lsn >= $2::pg_lsn
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'scheduler_fallback_st'",
+    )
+    .bind(source_oid.to_string())
+    .bind(&writer_delta_lsn)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read fallback source frontier");
+    assert!(
+        frontier_covers_writer,
+        "FULL fallback must replace the tick-bounded base-source frontier"
+    );
+
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "differential",
+        "differential",
+    )
+    .await;
+    db.execute("INSERT INTO scheduler_fallback_src VALUES (111, 1, 7)")
+        .await;
+    let before_diff: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.refresh_st("scheduler_fallback_st").await;
+    let was_differential: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'scheduler_fallback_st'
+                  AND h.refresh_id > {before_diff}
+                  AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED'
+                  AND NOT h.was_full_fallback
+            )"
+        ))
+        .await;
+    assert!(
+        was_differential,
+        "post-fallback refresh must be differential"
+    );
+    db.assert_st_matches_query("scheduler_fallback_st", query)
+        .await;
+}
+
+/// #1417: manual DIFFERENTIAL-to-FULL fallback must not retain a bound taken
+/// before its source lock.  The input-boundary advisory barrier lets new source
+/// rows commit after the differential frontier but before the FULL snapshot.
+#[tokio::test]
+async fn test_manual_full_fallback_after_new_commit_does_not_replay() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.execute("CREATE TABLE manual_cut_src (id INT PRIMARY KEY, grp INT, qty BIGINT)")
+        .await;
+    db.execute(
+        "INSERT INTO manual_cut_src
+         SELECT i, i % 3, 10 FROM generate_series(1, 9) AS i",
+    )
+    .await;
+    let query = "SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM manual_cut_src GROUP BY grp";
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'manual_cut_st',
+            query => 'SELECT grp, SUM(qty) AS total, COUNT(*) AS n FROM manual_cut_src GROUP BY grp',
+            schedule => '1h',
+            refresh_mode => 'DIFFERENTIAL',
+            cdc_mode => 'trigger'
+        )",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['manual_cut_st'])")
+        .await;
+    db.assert_st_matches_query("manual_cut_st", query).await;
+    db.execute("INSERT INTO manual_cut_src VALUES (10, 1, 10)")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.refresh_strategy", "full", "full")
+        .await;
+
+    let st_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'manual_cut_st'",
+        )
+        .await;
+    let source_oid: i64 = db
+        .query_scalar("SELECT 'manual_cut_src'::regclass::oid::bigint")
+        .await;
+    let source_buffer: String = db
+        .query_scalar(&format!(
+            "SELECT format('%I.%I', 'pgtrickle_changes',
+                           'changes_' || COALESCE(source_stable_name, {source_oid}::text))
+             FROM pgtrickle.pgt_change_tracking
+             WHERE source_relid = {source_oid}::oid"
+        ))
+        .await;
+
+    // The extension pauses at its real differential input boundary after the
+    // pre-lock frontier is captured.  It must subsequently do a FULL fallback.
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_phase",
+        "'input_boundary'",
+        "input_boundary",
+    )
+    .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_for_table",
+        "'manual_cut_st'",
+        "manual_cut_st",
+    )
+    .await;
+    let mut barrier = db.pool.acquire().await.expect("acquire manual barrier");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .expect("get manual barrier PID");
+    sqlx::query("SELECT pg_advisory_lock($1::int, 1)")
+        .bind(st_id as i32)
+        .execute(&mut *barrier)
+        .await
+        .expect("hold input-boundary advisory lock");
+
+    let pool = db.pool.clone();
+    let refresh = tokio::spawn(async move {
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('manual_cut_st')")
+            .execute(&pool)
+            .await
+    });
+    let blocked = format!(
+        "SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity a
+            WHERE a.datname = current_database()
+              AND a.application_name LIKE 'pgt_atomicity:{st_id}:input_boundary:%'
+              AND a.wait_event_type = 'Lock'
+              AND {blocker_pid} = ANY(pg_blocking_pids(a.pid))
+        )"
+    );
+    assert!(
+        db.wait_for_condition(
+            "manual differential blocked after its frontier snapshot",
+            &blocked,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        )
+        .await,
+        "manual refresh must reach the witnessed input boundary"
+    );
+    db.execute(
+        "INSERT INTO manual_cut_src
+         SELECT i, i % 3, 100 FROM generate_series(11, 110) AS i",
+    )
+    .await;
+    // The relation is catalog-derived and SQL-identifier quoted by PostgreSQL
+    // format('%I.%I'); no user string is interpolated into this query.
+    let delta_sql = format!("SELECT MAX(lsn)::text FROM {source_buffer}");
+    let writer_delta_lsn: String = db.query_scalar(&delta_sql).await;
+
+    let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1::int, 1)")
+        .bind(st_id as i32)
+        .fetch_one(&mut *barrier)
+        .await
+        .expect("release the manual barrier");
+    assert!(unlocked, "the manual test barrier must be released");
+    tokio::time::timeout(Duration::from_secs(90), refresh)
+        .await
+        .expect("manual FULL fallback timed out")
+        .expect("manual refresh task panicked")
+        .expect("manual FULL fallback failed");
+    db.alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "''", "")
+        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_phase",
+        "'before_apply'",
+        "before_apply",
+    )
+    .await;
+
+    let fell_back: bool = db
+        .query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'manual_cut_st'
+                  AND h.action = 'FULL' AND h.was_full_fallback
+                  AND h.status = 'COMPLETED'
+            )",
+        )
+        .await;
+    assert!(
+        fell_back,
+        "manual differential must actually fall back to FULL"
+    );
+    db.assert_st_matches_query("manual_cut_st", query).await;
+
+    let frontier_covers_writer: bool = sqlx::query_scalar(
+        "SELECT (frontier #>> ARRAY['sources', $1::text, 'lsn'])::pg_lsn >= $2::pg_lsn
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'manual_cut_st'",
+    )
+    .bind(source_oid.to_string())
+    .bind(&writer_delta_lsn)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the manually rebuilt source frontier");
+    assert!(
+        frontier_covers_writer,
+        "manual FULL fallback must cover rows committed after its pre-lock cut"
+    );
+
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "differential",
+        "differential",
+    )
+    .await;
+    db.execute("INSERT INTO manual_cut_src VALUES (111, 0, 7)")
+        .await;
+    let before_diff: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.refresh_st("manual_cut_st").await;
+    let actual_diff: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'manual_cut_st'
+                  AND h.refresh_id > {before_diff}
+                  AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED'
+                  AND NOT h.was_full_fallback
+            )"
+        ))
+        .await;
+    assert!(
+        actual_diff,
+        "manual post-FULL refresh must really be differential"
+    );
+    db.assert_st_matches_query("manual_cut_st", query).await;
+}
+
 #[tokio::test]
 async fn test_scheduler_full_baseline_does_not_replay_upstream_changes() {
     assert_scheduler_baseline_does_not_replay("FULL", true).await;

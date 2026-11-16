@@ -164,12 +164,12 @@ async fn test_concurrent_insert_during_pipeline_refresh() {
     // Wait for all inserts to complete
     inserter.await.expect("inserter task should not panic");
 
-    // Final convergence: concurrent DIFFERENTIAL windows can miss a CDC row
-    // at an MVCC/WAL visibility boundary. FULL refreshes repair the affected
-    // materialization, but an upstream FULL only emits its current pre/post
-    // diff: it cannot remove historical phantom rows already left behind in a
-    // downstream stream table. Rebuild the whole two-layer chain in dependency
-    // order before returning to DIFFERENTIAL maintenance.
+    // Repair the WHOLE DAG after the writer race. A protected FULL baseline
+    // of L1 repairs L1 but cannot retract obsolete rows in L2 when an earlier
+    // differential window on L2 missed their matching deletes. A subsequent
+    // differential on L2 sees only the *latest* L1 changes, not all historical
+    // differences between L1 and L2. FULL both levels to re-establish a
+    // consistent baseline before returning to differential maintenance.
     db.alter_st("conc_dag_l1", "refresh_mode => 'FULL'").await;
     db.refresh_st_with_retry("conc_dag_l1").await;
     db.alter_st("conc_dag_l1", "refresh_mode => 'DIFFERENTIAL'")
@@ -179,7 +179,37 @@ async fn test_concurrent_insert_during_pipeline_refresh() {
     db.alter_st("conc_dag_l2", "refresh_mode => 'DIFFERENTIAL'")
         .await;
 
-    // Verify full convergence
+    db.assert_st_matches_query("conc_dag_l1", l1_q).await;
+    db.assert_st_matches_query("conc_dag_l2", l2_q).await;
+
+    // Prove the recovered FULL baseline can safely resume DIFFERENTIAL on
+    // both layers without double-applying any of the already materialized
+    // source writes (#1417). Do not allow another FULL to mask the replay.
+    let after_baseline: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.execute("INSERT INTO conc_dag_src (grp, val) VALUES ('x', 101)")
+        .await;
+    db.refresh_st_until_converged("conc_dag_l1").await;
+    db.refresh_st_until_converged("conc_dag_l2").await;
+    for name in ["conc_dag_l1", "conc_dag_l2"] {
+        let used_differential: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                    JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                    WHERE st.pgt_name = '{name}'
+                      AND h.refresh_id > {after_baseline}
+                      AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED'
+                      AND NOT h.was_full_fallback
+                )"
+            ))
+            .await;
+        assert!(
+            used_differential,
+            "{name} must apply a real differential refresh after the protected FULL"
+        );
+    }
     db.assert_st_matches_query("conc_dag_l1", l1_q).await;
     db.assert_st_matches_query("conc_dag_l2", l2_q).await;
 }
