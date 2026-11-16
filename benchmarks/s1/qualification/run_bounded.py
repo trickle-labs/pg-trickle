@@ -77,8 +77,12 @@ def disk_metrics(args):
     for attempt in range(5):
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)
         transient = result.stderr.splitlines()
-        if (result.returncode == 0 or not transient or attempt == 4
-                or not all(re.fullmatch(vanished, line) for line in transient)):
+        # A container restart can kill docker exec without producing output.
+        silent_exit = result.returncode != 0 and not result.stdout and not result.stderr
+        if (result.returncode == 0 or attempt == 4
+                or not (silent_exit or transient and all(
+                    re.fullmatch(vanished, line) for line in transient
+                ))):
             return result
         time.sleep(0.2)
 
@@ -178,7 +182,13 @@ def main(image, run_name, profile_cases=None):
                             capture_output=True, text=True, timeout=15)
                         if container_has_exited(state.returncode, state.stdout, state.stderr):
                             continue
-                        raise RuntimeError(f"resource measurement failed: {measured.stderr} {disk.stderr}")
+                        raise RuntimeError(
+                            "resource measurement failed: "
+                            f"PostgreSQL metrics rc={measured.returncode} "
+                            f"stdout={measured.stdout!r} stderr={measured.stderr!r}; "
+                            f"PGDATA size rc={disk.returncode} "
+                            f"stdout={disk.stdout!r} stderr={disk.stderr!r}"
+                        )
                     if measured.returncode:
                         now = time.monotonic()
                         since = postgres_unavailable_since.setdefault(name, now)
