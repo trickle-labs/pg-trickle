@@ -244,6 +244,48 @@ pub(crate) fn ensure_history_reconstructible(
     Ok(())
 }
 
+/// RETAIN must capture a cut before any source partition can disappear.
+#[cfg(not(test))]
+pub(crate) fn ensure_removal_prepared(pgt_id: i64) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT column_snapshot->'partition_retention' FROM pgtrickle.pgt_dependencies \
+             WHERE pgt_id = $1 AND column_snapshot ? 'partition_retention'",
+                None,
+                &[pgt_id.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        for row in rows {
+            let value = row
+                .get::<pgrx::JsonB>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InvalidArgument("partition retention state is missing".into())
+                })?;
+            let state: RetentionState = serde_json::from_value(value.0).map_err(|e| {
+                PgTrickleError::InvalidArgument(format!("invalid partition retention state: {e}"))
+            })?;
+            state.validate().map_err(|e| {
+                PgTrickleError::InvalidArgument(format!("invalid partition retention state: {e:?}"))
+            })?;
+            if state.mode == RetentionMode::Retain {
+                return Err(PgTrickleError::InvalidArgument(
+                    "RETAIN requires a prepared partition cut to preserve retained partition history".into(),
+                ));
+            }
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn ensure_removal_prepared(_pgt_id: i64) -> Result<(), crate::error::PgTrickleError> {
+    Ok(())
+}
+
 /// A query change invalidates the proof associated with any configured policy.
 #[cfg(not(test))]
 pub(crate) fn ensure_query_change_allowed(pgt_id: i64) -> Result<(), crate::error::PgTrickleError> {
@@ -320,11 +362,6 @@ pub fn with_prepared_retained_detach<T>(
     detach: impl FnOnce() -> Result<T, crate::error::PgTrickleError>,
 ) -> Result<T, crate::error::PgTrickleError> {
     use crate::error::PgTrickleError;
-    if cut.state_after_removal.mode != RetentionMode::Retain {
-        return Err(PgTrickleError::InvalidArgument(
-            "prepared detach is not RETAIN".into(),
-        ));
-    }
     PREPARED_DETACH.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_some() {
@@ -365,7 +402,10 @@ pub(crate) fn finish_prepared_retained_detach(
     });
     match cut {
         Some(cut) => {
-            finalize_retained_cut(cut)?;
+            match cut.state_after_removal.mode {
+                RetentionMode::Retain => finalize_retained_cut(cut)?,
+                RetentionMode::Trim => finalize_trimmed_cut(cut)?,
+            }
             Ok(true)
         }
         None => Ok(false),
@@ -472,6 +512,41 @@ pub fn prepare_retention_cut(
             ));
         }
     }
+    if state.mode == RetentionMode::Trim {
+        let indexed = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_index i \
+             JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid \
+             JOIN pg_catalog.pg_am am ON am.oid = idx.relam \
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attname = $2 \
+             JOIN pg_catalog.pg_opclass op ON op.oid = i.indclass[0] \
+             WHERE i.indrelid = $1 AND i.indisvalid AND i.indisready \
+               AND i.indpred IS NULL AND i.indexprs IS NULL AND i.indkey[0] = a.attnum \
+               AND am.amname = 'btree' AND op.opcdefault AND op.opcintype = a.atttypid)",
+            &[
+                st.pgt_relid.into(),
+                state.candidate.output_column.clone().into(),
+            ],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        let has_export = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_output_delta_consumers \
+             WHERE pgt_id = $1 AND state <> 'DROPPED')",
+            &[pgt_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(true);
+        if !indexed || has_export || crate::cdc::has_user_triggers(st.pgt_relid)? {
+            return Err(PgTrickleError::InvalidArgument(
+                "TRIM requires a btree index on the output group key and no output-delta consumers or user triggers".into(),
+            ));
+        }
+        let table = crate::sql_builder::qualified(&st.pgt_schema, &st.pgt_name);
+        crate::refresh::with_stream_owner(&st, || {
+            Spi::run(&format!("LOCK TABLE ONLY {table} IN ROW EXCLUSIVE MODE"))
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })?;
+    }
     if state.candidate.source_oid != source_oid.to_u32()
         || state.query_hash != compute_defining_query_hash(&st.defining_query)
     {
@@ -573,6 +648,109 @@ pub fn prepare_retention_cut(
     })
 }
 
+#[cfg(not(test))]
+fn retention_bound_sql(bound: RetentionBound) -> String {
+    match bound {
+        RetentionBound::Date(days) => format!("(DATE '2000-01-01' OPERATOR(pg_catalog.+) {days})"),
+        RetentionBound::Timestamp(micros) | RetentionBound::Timestamptz(micros) => {
+            let days = micros.div_euclid(86_400_000_000);
+            let remainder = micros.rem_euclid(86_400_000_000);
+            let timestamp = format!(
+                "(TIMESTAMP '2000-01-01' OPERATOR(pg_catalog.+) ({days} OPERATOR(pg_catalog.*) INTERVAL '1 day') OPERATOR(pg_catalog.+) ({remainder} OPERATOR(pg_catalog.*) INTERVAL '1 microsecond'))"
+            );
+            if matches!(bound, RetentionBound::Timestamptz(_)) {
+                format!("({timestamp} AT TIME ZONE 'UTC')")
+            } else {
+                timestamp
+            }
+        }
+    }
+}
+
+/// Delete only the groups proved to belong to the removed range.
+#[cfg(not(test))]
+fn finalize_trimmed_cut(cut: PreparedRetentionCut) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    // SAFETY: PostgreSQL exposes these identifiers for the current backend transaction.
+    let same_transaction = unsafe {
+        pg_sys::GetTopFullTransactionIdIfAny().value == cut.transaction_id
+            && pg_sys::GetCurrentSubTransactionId() == cut.subtransaction_id
+    };
+    let detached = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid = pg_catalog.pg_backend_pid() \
+                       AND relation = $1 AND mode = 'ShareLock' AND granted) \
+            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhparent = $1 AND inhrelid = $2)",
+        &[pg_sys::Oid::from(cut.source_oid).into(), pg_sys::Oid::from(cut.target_oid).into()],
+    ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false);
+    if !same_transaction || !detached || cut.state_after_removal.mode != RetentionMode::Trim {
+        return Err(PgTrickleError::InvalidArgument(
+            "trim cut belongs to another transaction or target is still attached".into(),
+        ));
+    }
+    let st = crate::catalog::StreamTableMeta::get_by_id(cut.pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {}", cut.pgt_id)))?;
+    let cols = crate::refresh::get_st_user_columns(&st);
+    if cols.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(
+            "cannot resolve TRIM output columns".into(),
+        ));
+    }
+    let table = crate::sql_builder::qualified(&st.pgt_schema, &st.pgt_name);
+    let key = crate::sql_builder::ident(&cut.state_after_removal.candidate.output_column);
+    let columns = cols
+        .iter()
+        .map(|c| crate::sql_builder::ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let lower = retention_bound_sql(cut.range.lower);
+    let upper = retention_bound_sql(cut.range.upper);
+    let has_downstream = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies dep \
+         JOIN pgtrickle.pgt_stream_tables downstream ON downstream.pgt_id = dep.pgt_id \
+         WHERE dep.source_relid = $1 AND dep.source_type = 'STREAM_TABLE' \
+           AND downstream.refresh_mode <> 'IMMEDIATE')",
+        &[st.pgt_relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::InternalError("cannot inspect downstream streams".into()))?;
+    let pre = if has_downstream {
+        Some(crate::refresh::prepare_owner_temp_table(
+            &st,
+            &format!("__pgt_trim_{}", st.pgt_id),
+            &format!("SELECT __pgt_row_id, {columns} FROM {table}"),
+        )?)
+    } else {
+        None
+    };
+    Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    crate::refresh::with_stream_owner(&st, || {
+        let delete = format!(
+            "DELETE FROM {table} WHERE {key} OPERATOR(pg_catalog.>=) {lower} AND {key} OPERATOR(pg_catalog.<) {upper}"
+        );
+        let sql = if let Some(pre) = &pre {
+            format!(
+                "WITH removed AS ({delete} RETURNING __pgt_row_id, {columns}) INSERT INTO {pre} SELECT * FROM removed"
+            )
+        } else {
+            delete
+        };
+        Spi::run(&sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    })?;
+    if let Some(pre) = pre {
+        let schema = crate::config::pg_trickle_change_buffer_schema();
+        crate::cdc::set_sync_commit_for_buffer(&format!("changes_pgt_{}", st.pgt_id))?;
+        crate::cdc::validate_st_change_buffer(st.pgt_id, &schema)?;
+        let buffer = crate::sql_builder::qualified(&schema, &format!("changes_pgt_{}", st.pgt_id));
+        Spi::run(&format!(
+            "INSERT INTO {buffer} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {columns}) \
+             SELECT pg_catalog.pg_current_wal_insert_lsn(), 'D', __pgt_row_id, NULL::xid, NULL::timestamptz, {columns} FROM {pre}"
+        )).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Persist a retained cut after its partition has been removed in this transaction.
 #[cfg(not(test))]
 pub fn finalize_retained_cut(
@@ -628,6 +806,66 @@ pub fn finalize_retained_cut(
     if updated != Some(cut.pgt_id) {
         return Err(PgTrickleError::InvalidArgument(
             "retention state changed during partition removal".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject attachments that could mix live rows with sealed historical groups.
+#[cfg(not(test))]
+pub(crate) fn ensure_retained_attach_safe(
+    pgt_id: i64,
+    source_oid: pgrx::pg_sys::Oid,
+    empty: bool,
+) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+
+    let value = Spi::get_one_with_args::<pgrx::JsonB>(
+        "SELECT column_snapshot->'partition_retention' FROM pgtrickle.pgt_dependencies \
+         WHERE pgt_id = $1 AND source_relid = $2",
+        &[pgt_id.into(), source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let Some(value) = value else { return Ok(()) };
+    let state: RetentionState = serde_json::from_value(value.0).map_err(|e| {
+        PgTrickleError::InvalidArgument(format!("invalid partition retention state: {e}"))
+    })?;
+    state.validate().map_err(|e| {
+        PgTrickleError::InvalidArgument(format!("invalid partition retention state: {e:?}"))
+    })?;
+    if state.mode != RetentionMode::Retain || state.sealed.is_empty() {
+        return Ok(());
+    }
+    if !empty {
+        return Err(PgTrickleError::InvalidArgument(
+            "cannot attach a nonempty partition to a stream with retained history; attach an empty future partition and insert live rows normally".into(),
+        ));
+    }
+    // SAFETY: The GUC nest is restored even if PostgreSQL reports an error.
+    let layout = unsafe {
+        let level = pg_sys::NewGUCNestLevel();
+        pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            validate_partition_layout(
+                source_oid,
+                &state.candidate.source_column,
+                &state.candidate,
+                state.cutoff,
+            )
+        }))
+        .finally(move || pg_sys::AtEOXact_GUC(false, level))
+        .execute()?
+    };
+    if layout.iter().any(|partition| {
+        state.sealed.iter().any(|range| {
+            bound_value(partition.lower) < bound_value(range.upper)
+                && bound_value(range.lower) < bound_value(partition.upper)
+        })
+    }) {
+        return Err(PgTrickleError::InvalidArgument(
+            "cannot attach a partition overlapping retained history".into(),
         ));
     }
     Ok(())

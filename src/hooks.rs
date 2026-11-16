@@ -144,17 +144,52 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_start_wrapper(
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         let mut sources = tracked_partition_ancestors(parent)?;
         sources.push(parent);
+        sources.sort_unstable_by_key(|source| source.to_u32());
+        sources.dedup();
         let mut ids = Vec::new();
+        for &source in &sources {
+            ids.extend(find_downstream_pgt_ids(source)?);
+        }
+        if ids.is_empty() {
+            return Ok(());
+        }
+        // Keep policy configuration serialized until the first detach phase commits.
+        for &source in &sources {
+            let name = Spi::get_one_with_args::<String>(
+                "SELECT pg_catalog.format('%I.%I', n.nspname, c.relname) \
+                 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.oid = $1",
+                &[source.into()],
+            ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InvalidArgument("partition source disappeared".into()))?;
+            Spi::run(&format!(
+                "LOCK TABLE ONLY {name} IN SHARE UPDATE EXCLUSIVE MODE"
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let locked = Spi::get_one_with_args::<bool>(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid = pg_catalog.pg_backend_pid() \
+                 AND relation = $1 AND mode = 'ShareUpdateExclusiveLock' AND granted)",
+                &[source.into()],
+            ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false);
+            if !locked {
+                return Err(PgTrickleError::InvalidArgument(
+                    "partition source changed while locking".into(),
+                ));
+            }
+        }
+        ids.clear();
         for source in sources {
             ids.extend(find_downstream_pgt_ids(source)?);
         }
         ids.extend(find_transitive_downstream_sts(&ids)?);
         ids.sort_unstable();
         ids.dedup();
-        if ids.is_empty() {
-            return Ok(());
-        }
         for id in ids {
+            crate::dvm::retention::ensure_removal_prepared(id).map_err(|e| {
+                PgTrickleError::InvalidArgument(format!(
+                    "concurrent partition detach cannot proceed with retained history: {e}"
+                ))
+            })?;
             suspend_for_source_ddl_checked(
                 id,
                 AlterReasonCode::DependencyAmbiguous,
@@ -1164,6 +1199,23 @@ fn handle_alter_table(
     let mut reinit_pgt_ids = Vec::new();
     let mut suspended_pgt_ids = Vec::new();
     for pgt_id in &affected_pgt_ids {
+        if matches!(alter_table_hint, AlterTableHint::DetachPartitionConcurrent) {
+            crate::dvm::retention::ensure_removal_prepared(*pgt_id).unwrap_or_else(|e| {
+                pgrx::error!(
+                    "pg_trickle: concurrent partition detach cannot proceed: {}",
+                    e
+                )
+            });
+        }
+        #[cfg(not(test))]
+        if matches!(alter_table_hint, AlterTableHint::AttachPartition { .. }) {
+            crate::dvm::retention::ensure_retained_attach_safe(
+                *pgt_id,
+                objid,
+                empty_partition_attach,
+            )
+            .unwrap_or_else(|e| pgrx::error!("pg_trickle: partition attach blocked: {}", e));
+        }
         // Only this exact subcommand can be proved harmless from the saved owner.
         // Older snapshots lack the owner and retain the conservative behavior.
         if matches!(alter_table_hint, AlterTableHint::OwnerOnly)
@@ -1351,6 +1403,17 @@ fn handle_alter_table(
                     shmem::signal_dag_invalidation(*pgt_id);
                     shmem::bump_cache_generation();
                     continue;
+                }
+                if matches!(
+                    alter_table_hint,
+                    AlterTableHint::DetachPartition | AlterTableHint::DetachPartitionConcurrent
+                ) {
+                    crate::dvm::retention::ensure_removal_prepared(*pgt_id).unwrap_or_else(|e| {
+                        pgrx::error!(
+                            "pg_trickle: unprepared partition detach cannot proceed: {}",
+                            e
+                        )
+                    });
                 }
                 // Partition membership changes have no row-level CDC events.
                 // Rebuild from the parent query instead of applying deltas.
@@ -1622,6 +1685,8 @@ fn snapshot_created_partition_ancestry(child_oid: pg_sys::Oid) -> Result<(), PgT
         Ok::<_, PgTrickleError>(tracked)
     })?;
     for (pgt_id, source_oid) in ancestors {
+        #[cfg(not(test))]
+        crate::dvm::retention::ensure_retained_attach_safe(pgt_id, source_oid, true)?;
         crate::catalog::store_column_snapshot_for_pgt_id(pgt_id, source_oid)?;
     }
     Ok(())
@@ -2080,6 +2145,11 @@ fn invalidate_dropped_partition(
 
     let mut affected = Vec::new();
     for (pgt_id, parent_oid) in parents {
+        crate::dvm::retention::ensure_removal_prepared(pgt_id).map_err(|e| {
+            PgTrickleError::InvalidArgument(format!(
+                "unprepared partition DROP cannot proceed with retained history: {e}"
+            ))
+        })?;
         mark_partition_removal_recovery(pgt_id, identity)?;
         crate::catalog::store_column_snapshot_for_pgt_id(pgt_id, parent_oid)?;
         shmem::signal_dag_invalidation(pgt_id);

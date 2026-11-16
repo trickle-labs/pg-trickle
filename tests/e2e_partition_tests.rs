@@ -1164,8 +1164,230 @@ async fn test_retained_history_blocks_rebuild_query_change_and_restore() {
 
 #[tokio::test]
 #[cfg(feature = "e2e-unsafe-test-hooks")]
-async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
+async fn test_retention_trim_detach_preserves_live_groups_and_downstream() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE trim_cut_src (id INT NOT NULL, d DATE NOT NULL, account TEXT NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE trim_cut_old PARTITION OF trim_cut_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE trim_cut_live PARTITION OF trim_cut_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO trim_cut_src VALUES (1,'2025-06-01','a',10), (2,'2025-06-01','b',8), (3,'2026-06-01','a',20), (4,'2026-06-02','b',7)").await;
+    let query =
+        "SELECT d, account, SUM(amount) AS total, COUNT(*) AS n FROM trim_cut_src GROUP BY 1,2";
+    db.create_st("trim_cut_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st(
+        "trim_cut_downstream",
+        "SELECT d, account, total, n FROM trim_cut_st",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let (pgt_id, query_hash): (i64, i64) = sqlx::query_as("SELECT pgt_id, defining_query_hash FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'trim_cut_st'")
+        .fetch_one(&db.pool).await.expect("read stream identity");
+    let (source_oid, target_oid, cutoff): (i64, i64, i32) = sqlx::query_as("SELECT 'trim_cut_src'::regclass::oid::bigint, 'trim_cut_old'::regclass::oid::bigint, DATE '2026-01-01' - DATE '2000-01-01'")
+        .fetch_one(&db.pool).await.expect("read partition identities");
+    let state = serde_json::json!({
+        "version": 1, "mode": "TRIM", "candidate": {
+            "output_column": "d", "bucket": "EXACT", "source_type_oid": 1082,
+            "source_oid": source_oid, "source_column": "d"
+        }, "cutoff": {"kind": "DATE", "value": cutoff}, "query_hash": query_hash, "sealed": []
+    });
+    sqlx::query("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_retention}', $1::jsonb) WHERE pgt_id = $2 AND source_relid = $3::bigint::oid")
+        .bind(&state).bind(pgt_id).bind(source_oid).execute(&db.pool).await.expect("install retention fixture");
+    db.execute("DROP INDEX trim_cut_st_d_account_idx").await;
+    let err = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT pgtrickle.retention_detach_test($1, $2::bigint::oid, false)",
+    )
+    .bind(pgt_id)
+    .bind(target_oid)
+    .fetch_one(&db.pool)
+    .await
+    .expect_err("reject unindexed TRIM");
+    assert!(err.to_string().contains("btree index"));
+    db.execute("CREATE INDEX ON trim_cut_st (d)").await;
+    let mut plan_conn = db.pool.acquire().await.expect("acquire plan session");
+    sqlx::query("SET enable_seqscan = off")
+        .execute(&mut *plan_conn)
+        .await
+        .expect("prefer available indexes");
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN DELETE FROM trim_cut_st WHERE d >= DATE '2025-01-01' AND d < DATE '2026-01-01'",
+    )
+    .fetch_all(&mut *plan_conn)
+    .await
+    .expect("explain bounded deletion");
+    assert!(
+        plan.iter().any(|line| line.contains("trim_cut_st_d_idx")),
+        "bounded deletion cannot use the group index: {plan:?}"
+    );
+    sqlx::query("RESET enable_seqscan")
+        .execute(&mut *plan_conn)
+        .await
+        .expect("restore planner setting");
+    drop(plan_conn);
+    let mut partial = state.clone();
+    partial["cutoff"]["value"] = serde_json::json!(cutoff - 1);
+    sqlx::query("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_retention}', $1::jsonb) WHERE pgt_id = $2")
+        .bind(&partial).bind(pgt_id).execute(&db.pool).await.expect("install partially overlapping cutoff");
+    let err = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT pgtrickle.retention_detach_test($1, $2::bigint::oid, false)",
+    )
+    .bind(pgt_id)
+    .bind(target_oid)
+    .fetch_one(&db.pool)
+    .await
+    .expect_err("reject partially expired partition");
+    assert!(err.to_string().contains("not wholly below"));
+    db.assert_st_matches_query("trim_cut_st", query).await;
+    sqlx::query("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_retention}', $1::jsonb) WHERE pgt_id = $2")
+        .bind(&state).bind(pgt_id).execute(&db.pool).await.expect("restore expired cutoff");
+    let err = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT pgtrickle.retention_detach_test($1, $2::bigint::oid, true)",
+    )
+    .bind(pgt_id)
+    .bind(target_oid)
+    .fetch_one(&db.pool)
+    .await
+    .expect_err("roll back trimmed detach");
+    assert!(
+        err.to_string()
+            .contains("intentional retention test rollback")
+    );
+    db.assert_st_matches_query("trim_cut_st", query).await;
+    let before_frontier: serde_json::Value = sqlx::query_scalar(
+        "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'trim_cut_downstream'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read downstream frontier");
+    let mut removal = db.pool.begin().await.expect("begin trim transaction");
+    let _: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.retention_detach_test($1, $2::bigint::oid, false)")
+            .bind(pgt_id)
+            .bind(target_oid)
+            .fetch_one(&mut *removal)
+            .await
+            .expect("trim detached range");
+    let visible: Vec<(String, String, i64, i64)> = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sqlx::query_as("SELECT d::text, account, total, n FROM trim_cut_st ORDER BY d, account")
+            .fetch_all(&db.pool),
+    )
+    .await
+    .expect("reader does not block on uncommitted trim")
+    .expect("read prior snapshot");
+    assert_eq!(
+        visible,
+        vec![
+            ("2025-06-01".into(), "a".into(), 10, 1),
+            ("2025-06-01".into(), "b".into(), 8, 1),
+            ("2026-06-01".into(), "a".into(), 20, 1),
+            ("2026-06-02".into(), "b".into(), 7, 1),
+        ]
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        db.refresh_st_with_retry("trim_cut_downstream"),
+    )
+    .await
+    .expect("downstream refresh during uncommitted trim");
+    let during_frontier: serde_json::Value = sqlx::query_scalar(
+        "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'trim_cut_downstream'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read downstream frontier during trim");
+    let source_key = format!("pgt_{pgt_id}");
+    let before_lsn = before_frontier["sources"][&source_key]["lsn"]
+        .as_str()
+        .expect("downstream source WAL position");
+    assert_eq!(
+        during_frontier["sources"][&source_key]["lsn"].as_str(),
+        Some(before_lsn)
+    );
+    let downstream_before_commit: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT d::text, account, total, n FROM trim_cut_downstream ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read downstream output during trim");
+    assert_eq!(downstream_before_commit, visible);
+    removal.commit().await.expect("commit trim transaction");
+    db.assert_st_matches_query("trim_cut_st", query).await;
+    db.refresh_st_until_converged("trim_cut_downstream").await;
+    db.assert_st_matches_query("trim_cut_downstream", query)
+        .await;
+    let downstream_history: (String, String, bool) = sqlx::query_as("SELECT h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'trim_cut_downstream' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&db.pool).await.expect("read downstream refresh action");
+    assert_eq!(
+        downstream_history,
+        ("DIFFERENTIAL".into(), "COMPLETED".into(), false)
+    );
+    db.execute("INSERT INTO trim_cut_src VALUES (5,'2026-06-01','a',3)")
+        .await;
+    db.refresh_st_until_converged("trim_cut_st").await;
+    db.refresh_st_until_converged("trim_cut_downstream").await;
+    db.assert_st_matches_query("trim_cut_st", query).await;
+    db.assert_st_matches_query("trim_cut_downstream", query)
+        .await;
+    let history: (String, String, bool) = sqlx::query_as("SELECT action, status, was_full_fallback FROM pgtrickle.pgt_refresh_history WHERE pgt_id = $1 ORDER BY refresh_id DESC LIMIT 1")
+        .bind(pgt_id).fetch_one(&db.pool).await.expect("read refresh action");
+    assert_eq!(history, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+}
+
+#[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_trim_utc_hour_bounds_before_postgres_epoch() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE trim_hour_src (id INT NOT NULL, d TIMESTAMPTZ NOT NULL, account TEXT NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE trim_hour_old PARTITION OF trim_hour_src FOR VALUES FROM ('1999-12-31 23:00:00+00') TO ('2000-01-01 00:00:00+00')").await;
+    db.execute("CREATE TABLE trim_hour_live PARTITION OF trim_hour_src FOR VALUES FROM ('2000-01-01 00:00:00+00') TO ('2000-01-01 02:00:00+00')").await;
+    db.execute("INSERT INTO trim_hour_src VALUES (1,'1999-12-31 23:59:59+00','a',10), (2,'2000-01-01 00:15:00+00','a',20), (3,'2000-01-01 01:15:00+00','b',7)").await;
+    let query = "SELECT pg_catalog.date_trunc('hour', d, 'UTC') AS bucket, account, SUM(amount) AS total, COUNT(*) AS n FROM trim_hour_src GROUP BY 1,2";
+    db.create_st("trim_hour_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("CREATE INDEX ON trim_hour_st (bucket)").await;
+    let (pgt_id, query_hash): (i64, i64) = sqlx::query_as("SELECT pgt_id, defining_query_hash FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'trim_hour_st'")
+        .fetch_one(&db.pool).await.expect("read stream identity");
+    let (source_oid, target_oid): (i64, i64) = sqlx::query_as(
+        "SELECT 'trim_hour_src'::regclass::oid::bigint, 'trim_hour_old'::regclass::oid::bigint",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read partition identities");
+    let state = serde_json::json!({
+        "version": 1, "mode": "TRIM", "candidate": {
+            "output_column": "bucket", "bucket": "HOUR_UTC_TIMESTAMPTZ", "source_type_oid": 1184,
+            "source_oid": source_oid, "source_column": "d"
+        }, "cutoff": {"kind": "TIMESTAMPTZ", "value": 0}, "query_hash": query_hash, "sealed": []
+    });
+    sqlx::query("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_retention}', $1::jsonb) WHERE pgt_id = $2 AND source_relid = $3::bigint::oid")
+        .bind(&state).bind(pgt_id).bind(source_oid).execute(&db.pool).await.expect("install retention fixture");
+    let mut conn = db.pool.acquire().await.expect("acquire session");
+    sqlx::query("SET TIME ZONE 'America/New_York'")
+        .execute(&mut *conn)
+        .await
+        .expect("set session time zone");
+    let _: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.retention_detach_test($1, $2::bigint::oid, false)")
+            .bind(pgt_id)
+            .bind(target_oid)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("trim UTC range");
+    drop(conn);
+    db.assert_st_matches_query("trim_hour_st", query).await;
+}
+
+#[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
         .await;
     db.execute("SELECT pg_reload_conf()").await;
@@ -1194,6 +1416,20 @@ async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
     sqlx::query("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_retention}', $1::jsonb) WHERE pgt_id = $2 AND source_relid = $3::bigint::oid")
         .bind(&state).bind(pgt_id).bind(source_oid).execute(&db.pool).await.expect("install retention fixture");
 
+    for command in [
+        "ALTER TABLE retention_cut_src DETACH PARTITION retention_cut_old",
+        "ALTER TABLE retention_cut_src DETACH PARTITION retention_cut_old CONCURRENTLY",
+        "DROP TABLE retention_cut_old",
+    ] {
+        let error = db
+            .try_execute(command)
+            .await
+            .expect_err("reject unprepared first cut");
+        assert!(
+            error.to_string().contains("retained partition history"),
+            "{command}: {error}"
+        );
+    }
     let mut writer = db.pool.begin().await.expect("begin source writer");
     let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *writer)
@@ -1347,11 +1583,73 @@ async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
     .await
     .expect("read retained stream state");
     assert_eq!(status, ("ACTIVE".into(), false));
+    for command in [
+        "ALTER TABLE retention_cut_src DETACH PARTITION retention_cut_live",
+        "ALTER TABLE retention_cut_src DETACH PARTITION retention_cut_live CONCURRENTLY",
+        "DROP TABLE retention_cut_live",
+    ] {
+        let error = db
+            .try_execute(command)
+            .await
+            .expect_err("reject unprepared removal after sealing");
+        assert!(
+            error.to_string().contains("retained partition history"),
+            "{command}: {error}"
+        );
+    }
+    let still_attached: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhparent = 'retention_cut_src'::regclass AND inhrelid = 'retention_cut_live'::regclass AND NOT inhdetachpending)").await;
+    assert!(
+        still_attached,
+        "failed removal must roll back partition state"
+    );
+    let error = db.try_execute("ALTER TABLE retention_cut_src ATTACH PARTITION retention_cut_old FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')")
+        .await.expect_err("reject reattachment of retained rows");
+    assert!(error.to_string().contains("nonempty partition"));
+    let error = db.try_execute("CREATE TABLE retention_cut_old_empty PARTITION OF retention_cut_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')")
+        .await.expect_err("reject empty partition over retained history");
+    assert!(
+        error.to_string().contains("overlapping retained history"),
+        "{error}"
+    );
+    db.execute("CREATE TABLE retention_cut_old_attach (LIKE retention_cut_src INCLUDING DEFAULTS INCLUDING CONSTRAINTS)").await;
+    let error = db.try_execute("ALTER TABLE retention_cut_src ATTACH PARTITION retention_cut_old_attach FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')")
+        .await.expect_err("reject empty reattachment over retained history");
+    assert!(
+        error.to_string().contains("overlapping retained history"),
+        "{error}"
+    );
+    db.execute("CREATE TABLE retention_cut_backfill (LIKE retention_cut_src INCLUDING DEFAULTS INCLUDING CONSTRAINTS)").await;
+    db.execute("INSERT INTO retention_cut_backfill VALUES (6,'2027-06-01','b',8)")
+        .await;
+    let error = db.try_execute("ALTER TABLE retention_cut_src ATTACH PARTITION retention_cut_backfill FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')")
+        .await.expect_err("reject nonempty future attachment");
+    assert!(error.to_string().contains("nonempty partition"));
+    let mut attach_conn = db.pool.acquire().await.expect("acquire DDL session");
+    sqlx::query("SET search_path = public, pg_catalog")
+        .execute(&mut *attach_conn)
+        .await
+        .expect("set caller search path");
+    sqlx::query("CREATE TABLE retention_cut_future PARTITION OF retention_cut_src FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')")
+        .execute(&mut *attach_conn).await.expect("create empty future partition");
+    let path: String = sqlx::query_scalar("SELECT pg_catalog.current_setting('search_path')")
+        .fetch_one(&mut *attach_conn)
+        .await
+        .expect("read restored search path");
+    assert_eq!(path, "public, pg_catalog");
+    drop(attach_conn);
+    db.execute("CREATE TABLE retention_cut_future_attach (LIKE retention_cut_src INCLUDING DEFAULTS INCLUDING CONSTRAINTS)").await;
+    db.execute("ALTER TABLE retention_cut_src ATTACH PARTITION retention_cut_future_attach FOR VALUES FROM ('2028-01-01') TO ('2029-01-01')").await;
     db.execute("INSERT INTO retention_cut_src VALUES (5,'2026-06-01','a',3)")
+        .await;
+    db.execute("INSERT INTO retention_cut_src VALUES (7,'2027-06-01','b',9)")
+        .await;
+    db.execute("INSERT INTO retention_cut_src VALUES (8,'2028-06-01','c',11)")
         .await;
     let mut expected = baseline.clone();
     expected[1].2 += 3;
     expected[1].3 += 1;
+    expected.push(("2027-06-01".into(), "b".into(), 9, 1));
+    expected.push(("2028-06-01".into(), "c".into(), 11, 1));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         db.refresh_st_with_retry("retention_cut_st").await;
@@ -1373,6 +1671,50 @@ async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
     let history: (String, String, bool) = sqlx::query_as("SELECT action, status, was_full_fallback FROM pgtrickle.pgt_refresh_history WHERE pgt_id = $1 ORDER BY refresh_id DESC LIMIT 1")
         .bind(pgt_id).fetch_one(&db.pool).await.expect("read post-retention refresh action");
     assert_eq!(history, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    db.pool.close().await;
+    let restart = tokio::process::Command::new("docker")
+        .args(["restart", db.container_id()])
+        .output()
+        .await
+        .expect("restart retention database");
+    assert!(
+        restart.status.success(),
+        "container restart failed: {}",
+        String::from_utf8_lossy(&restart.stderr)
+    );
+    db.pool = db.reconnect_after_restart().await;
+    let after_restart: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT d::text, account, total, n FROM retention_cut_st ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read retained output after restart");
+    assert_eq!(after_restart, expected);
+    db.execute("INSERT INTO retention_cut_src VALUES (9,'2027-06-01','b',4)")
+        .await;
+    expected[2].2 += 4;
+    expected[2].3 += 1;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        db.refresh_st_with_retry("retention_cut_st").await;
+        let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+            "SELECT d::text, account, total, n FROM retention_cut_st ORDER BY d, account",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .expect("read retained output after restart refresh");
+        if rows == expected {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "post-restart refresh did not converge: {rows:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let history: (String, String, bool) = sqlx::query_as("SELECT action, status, was_full_fallback FROM pgtrickle.pgt_refresh_history WHERE pgt_id = $1 ORDER BY refresh_id DESC LIMIT 1")
+        .bind(pgt_id).fetch_one(&db.pool).await.expect("read post-restart refresh action");
+    assert_eq!(history, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
     db.execute("UPDATE pgtrickle.pgt_stream_tables SET refresh_mode = 'FULL' WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retention_cut_st')")
         .await;
     let error = db
@@ -1380,6 +1722,102 @@ async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
         .await
         .expect_err("FULL must not erase retained history");
     assert!(error.to_string().contains("retained partition history"));
+    let after_failed_full: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT d::text, account, total, n FROM retention_cut_st ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read retained output after rejected FULL");
+    assert_eq!(after_failed_full, expected);
+}
+
+#[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_configuration_serializes_with_concurrent_detach() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retention_race_src (id INT NOT NULL, d DATE NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE retention_race_old PARTITION OF retention_race_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("INSERT INTO retention_race_src VALUES (1,'2025-06-01',10)")
+        .await;
+    let query = "SELECT d, SUM(amount) AS total, COUNT(*) AS n FROM retention_race_src GROUP BY d";
+    db.create_st("retention_race_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    let (pgt_id, query_hash): (i64, i64) = sqlx::query_as("SELECT pgt_id, defining_query_hash FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retention_race_st'")
+        .fetch_one(&db.pool).await.expect("read stream identity");
+    let (source_oid, cutoff): (i64, i32) = sqlx::query_as(
+        "SELECT 'retention_race_src'::regclass::oid::bigint, DATE '2026-01-01' - DATE '2000-01-01'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read source identity");
+    let state = serde_json::json!({
+        "version": 1, "mode": "RETAIN", "candidate": {
+            "output_column": "d", "bucket": "EXACT", "source_type_oid": 1082,
+            "source_oid": source_oid, "source_column": "d"
+        }, "cutoff": {"kind": "DATE", "value": cutoff}, "query_hash": query_hash, "sealed": []
+    });
+    let mut configure = db
+        .pool
+        .begin()
+        .await
+        .expect("begin retention configuration");
+    sqlx::query("LOCK TABLE ONLY retention_race_src IN SHARE UPDATE EXCLUSIVE MODE")
+        .execute(&mut *configure)
+        .await
+        .expect("lock source during configuration");
+    sqlx::query("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_retention}', $1::jsonb) WHERE pgt_id = $2")
+        .bind(&state).bind(pgt_id).execute(&mut *configure).await.expect("configure retention");
+    let configure_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *configure)
+        .await
+        .expect("read configuration PID");
+    let mut conn = db.pool.acquire().await.expect("acquire detach connection");
+    let detach_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("read detach PID");
+    let detach = tokio::spawn(async move {
+        sqlx::query(
+            "ALTER TABLE retention_race_src DETACH PARTITION retention_race_old CONCURRENTLY",
+        )
+        .execute(&mut *conn)
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid = $1 AND relation = 'retention_race_src'::regclass AND mode = 'ShareUpdateExclusiveLock' AND NOT granted AND $2 = ANY(pg_catalog.pg_blocking_pids(pid)))")
+                .bind(detach_pid).bind(configure_pid).fetch_one(&db.pool).await.expect("inspect source lock");
+            if waiting { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }).await.expect("concurrent detach waits for configuration");
+    configure
+        .commit()
+        .await
+        .expect("commit retention configuration");
+    let error = detach
+        .await
+        .expect("join detach")
+        .expect_err("configured RETAIN rejects unprepared detach");
+    assert!(
+        error.to_string().contains("retained partition history"),
+        "{error}"
+    );
+    let attached: (bool, bool) = sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhparent = 'retention_race_src'::regclass AND inhrelid = 'retention_race_old'::regclass), COALESCE((SELECT inhdetachpending FROM pg_catalog.pg_inherits WHERE inhrelid = 'retention_race_old'::regclass), false)")
+        .fetch_one(&db.pool).await.expect("read partition lifecycle");
+    assert_eq!(attached, (true, false));
+    let status: (String, bool) = sqlx::query_as(
+        "SELECT status, needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+    )
+    .bind(pgt_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read stream status");
+    assert_eq!(status, ("ACTIVE".into(), false));
+    db.assert_st_matches_query("retention_race_st", query).await;
 }
 
 #[tokio::test]
