@@ -22,7 +22,8 @@ the warning.
 `pg_trickle.load_shed_threshold` (default `0.80`, `0` disables) defers only
 non-urgent scheduled work under the documented load-pressure proxy.
 Deferral is bounded: after polling backs off to its maximum factor of sixteen,
-due work is admitted again while the slower base polling cadence remains in effect.
+ordinary work is admitted at most once per sixteen configured scheduler intervals,
+even when in-flight workers wake the coordinator more often.
 While pressure remains high, parallel refresh dispatch is limited to one worker
 per database. Sustained application writes therefore do not require a quiet
 interval before ordinary stream tables can refresh. This is an admission

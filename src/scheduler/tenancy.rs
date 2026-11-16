@@ -70,6 +70,7 @@ pub struct PressureState {
     healthy_ticks: u8,
     overloaded_ticks: u8,
     deferral_factor: u8,
+    last_pressure_admission_ms: Option<u64>,
 }
 
 impl PressureState {
@@ -79,6 +80,7 @@ impl PressureState {
             healthy_ticks: 0,
             overloaded_ticks: 0,
             deferral_factor: 1,
+            last_pressure_admission_ms: None,
         }
     }
 
@@ -92,13 +94,20 @@ impl PressureState {
 
     /// Return whether ordinary work should be skipped on this tick. Sustained
     /// pressure still slows polling, but must not starve scheduled refreshes.
-    pub fn observe(&mut self, pressure: f64, threshold: f64) -> bool {
+    pub fn observe(
+        &mut self,
+        pressure: f64,
+        threshold: f64,
+        now_ms: u64,
+        scheduler_interval_ms: u64,
+    ) -> bool {
         let threshold = threshold.clamp(0.0, 1.0);
         if threshold == 0.0 {
             self.deferred = false;
             self.healthy_ticks = 0;
             self.overloaded_ticks = 0;
             self.deferral_factor = 1;
+            self.last_pressure_admission_ms = None;
             return false;
         }
         if self.deferred {
@@ -113,6 +122,7 @@ impl PressureState {
                     self.healthy_ticks = 0;
                     self.overloaded_ticks = 0;
                     self.deferral_factor = 1;
+                    self.last_pressure_admission_ms = None;
                 }
             } else {
                 self.healthy_ticks = 0;
@@ -131,11 +141,27 @@ impl PressureState {
             self.overloaded_ticks = 1;
             self.deferral_factor = 1;
         }
-        // Once polling has backed off to its maximum, admit due work at that
-        // reduced cadence. Previously the capped interval still skipped every
-        // tick, so sustained writes could freeze a stream until load stopped
-        // (or its change buffer finally reached the memory-budget exemption).
-        self.deferred && self.deferral_factor < MAX_PRESSURE_DEFERRAL_FACTOR
+        if !self.deferred {
+            return false;
+        }
+        if self.deferral_factor < MAX_PRESSURE_DEFERRAL_FACTOR {
+            return true;
+        }
+
+        // In-flight workers wake the coordinator faster than its backoff
+        // interval. Pace admissions by elapsed time so the capped factor also
+        // limits refresh duty cycle under sustained application load.
+        let admission_interval_ms = scheduler_interval_ms
+            .max(1)
+            .saturating_mul(u64::from(self.deferral_factor));
+        if self
+            .last_pressure_admission_ms
+            .is_some_and(|last_ms| now_ms.saturating_sub(last_ms) < admission_interval_ms)
+        {
+            return true;
+        }
+        self.last_pressure_admission_ms = Some(now_ms);
+        false
     }
 }
 
@@ -233,30 +259,28 @@ mod tests {
     #[test]
     fn hysteresis_requires_two_healthy_ticks() {
         let mut state = PressureState::new();
-        assert!(state.observe(0.9, 0.8));
+        assert!(state.observe(0.9, 0.8, 0, 1_000));
         assert_eq!(state.deferral_factor(), 1);
-        assert!(state.observe(0.9, 0.8));
+        assert!(state.observe(0.9, 0.8, 200, 1_000));
         assert_eq!(state.deferral_factor(), 2);
-        assert!(state.observe(0.5, 0.8));
-        assert!(!state.observe(0.5, 0.8));
+        assert!(state.observe(0.5, 0.8, 400, 1_000));
+        assert!(!state.observe(0.5, 0.8, 600, 1_000));
     }
 
     #[test]
-    fn sustained_pressure_admits_work_at_capped_poll_interval() {
+    fn sustained_pressure_spaces_admissions_at_capped_poll_interval() {
         let mut state = PressureState::new();
-        for factor in [1, 2, 4, 8] {
-            assert!(state.observe(1.0, 0.8));
+        for (now_ms, factor) in [(0, 1), (200, 2), (400, 4), (600, 8)] {
+            assert!(state.observe(1.0, 0.8, now_ms, 1_000));
             assert_eq!(state.deferral_factor(), factor);
         }
-        // Continue past u8 saturation to catch policies that only admit a
-        // single tick or stop making progress after their counter overflows.
-        for _ in 0..512 {
-            assert!(!state.observe(1.0, 0.8));
-            assert_eq!(state.deferral_factor(), MAX_PRESSURE_DEFERRAL_FACTOR);
-            assert!(state.deferred());
-        }
-        assert!(state.observe(0.5, 0.8));
-        assert!(!state.observe(0.5, 0.8));
+        assert!(!state.observe(1.0, 0.8, 800, 1_000));
+        assert_eq!(state.deferral_factor(), MAX_PRESSURE_DEFERRAL_FACTOR);
+        assert!(state.observe(1.0, 0.8, 16_799, 1_000));
+        assert!(!state.observe(1.0, 0.8, 16_800, 1_000));
+        assert!(state.observe(1.0, 0.8, 16_801, 1_000));
+        assert!(state.observe(0.5, 0.8, 16_802, 1_000));
+        assert!(!state.observe(0.5, 0.8, 16_803, 1_000));
         assert_eq!(state.deferral_factor(), 1);
         assert!(!state.deferred());
     }
@@ -265,9 +289,9 @@ mod tests {
     fn disabling_load_shedding_resets_capped_backoff() {
         let mut state = PressureState::new();
         for _ in 0..8 {
-            state.observe(1.0, 0.8);
+            state.observe(1.0, 0.8, 0, 1_000);
         }
-        assert!(!state.observe(1.0, 0.0));
+        assert!(!state.observe(1.0, 0.0, 1, 1_000));
         assert_eq!(state.deferral_factor(), 1);
         assert!(!state.deferred());
     }
@@ -275,16 +299,14 @@ mod tests {
     #[test]
     fn isolated_healthy_samples_do_not_restart_deferral_forever() {
         let mut state = PressureState::new();
-        for _ in 0..MAX_PRESSURE_DEFERRAL_SHIFT {
-            assert!(state.observe(1.0, 0.8));
-            assert!(state.observe(0.5, 0.8));
+        for tick in 0..MAX_PRESSURE_DEFERRAL_SHIFT {
+            let now_ms = u64::from(tick) * 2_000;
+            assert!(state.observe(1.0, 0.8, now_ms, 1_000));
+            assert!(state.observe(0.5, 0.8, now_ms + 100, 1_000));
         }
-        assert!(!state.observe(1.0, 0.8));
+        assert!(!state.observe(1.0, 0.8, 8_000, 1_000));
         assert_eq!(state.deferral_factor(), MAX_PRESSURE_DEFERRAL_FACTOR);
-        for _ in 0..512 {
-            assert!(!state.observe(1.0, 0.8));
-            assert!(state.observe(0.5, 0.8));
-        }
+        assert!(state.observe(1.0, 0.8, 8_001, 1_000));
     }
 
     #[test]
