@@ -25,6 +25,10 @@ class RetirementContractTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             gate.check_pgvector_upgrade_script(script.replace("bool_and(pgt_id IS NULL)", "true"))
 
+    def test_published_upgrade_does_not_use_unreleased_0110_path(self):
+        script = (gate.prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text()
+        self.assertNotIn("0.110.0", script)
+
     def test_pgvector_runner_selects_declared_cases_and_version(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
         cases = next(s for s in contract["required_suites"] if s["id"] == "pgvector-0.8.7")["required_cases"]
