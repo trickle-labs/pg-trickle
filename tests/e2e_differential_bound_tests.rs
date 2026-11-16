@@ -42,13 +42,12 @@ async fn refresh_with_optional_barrier(pool: &PgPool, st: &'static str, barrier:
 }
 
 async fn pgt_id(db: &E2eDb, st: &'static str) -> i32 {
-    let id: i64 = sqlx::query_scalar(
-        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $1",
-    )
-    .bind(st)
-    .fetch_one(&db.pool)
-    .await
-    .expect("read stream pgt id");
+    let id: i64 =
+        sqlx::query_scalar("SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $1")
+            .bind(st)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read stream pgt id");
     i32::try_from(id).expect("fixture pgt id fits advisory lock key")
 }
 
@@ -176,12 +175,10 @@ async fn extremum_case(minimum: bool) {
 
     // Even though the source now contains a future extreme, this materialized
     // result corresponds to the earlier NEW frontier, not the live source.
-    let ex: i64 = sqlx::query_scalar(
-        "SELECT ex::bigint FROM bound_ext_st WHERE g = 0",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .expect("read bounded extreme");
+    let ex: i64 = sqlx::query_scalar("SELECT ex::bigint FROM bound_ext_st WHERE g = 0")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read bounded extreme");
     assert_eq!(ex, if minimum { 6 } else { 27 });
 
     // In the next window that temporary row is both inserted and deleted.
@@ -208,10 +205,8 @@ async fn max_restores_future_deleted_row_in_current_window() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE bound_del_src(id int PRIMARY KEY, g int, v int)")
         .await;
-    db.execute(
-        "INSERT INTO bound_del_src SELECT i, i % 3, i FROM generate_series(1, 30) i",
-    )
-    .await;
+    db.execute("INSERT INTO bound_del_src SELECT i, i % 3, i FROM generate_series(1, 30) i")
+        .await;
     let query = "SELECT g, max(v) AS ex, sum(v) AS s, count(*) AS n \
                  FROM bound_del_src GROUP BY g";
     db.create_st("bound_delete_st", query, "1h", "DIFFERENTIAL")
@@ -239,24 +234,21 @@ async fn max_undoes_future_update_before_replaying_it() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE bound_upd_src(id int PRIMARY KEY, g int, v int)")
         .await;
-    db.execute(
-        "INSERT INTO bound_upd_src SELECT i, i % 3, i FROM generate_series(1, 30) i",
-    )
-    .await;
+    db.execute("INSERT INTO bound_upd_src SELECT i, i % 3, i FROM generate_series(1, 30) i")
+        .await;
     let query = "SELECT g, max(v) AS ex, sum(v) AS s, count(*) AS n \
                  FROM bound_upd_src GROUP BY g";
     db.create_st("bound_update_st", query, "1h", "DIFFERENTIAL")
         .await;
     db.execute("DELETE FROM bound_upd_src WHERE id = 30").await;
     let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_update_st").await;
-    db.execute("UPDATE bound_upd_src SET v = 1000 WHERE id = 27").await;
+    db.execute("UPDATE bound_upd_src SET v = 1000 WHERE id = 27")
+        .await;
     finish_bounded_refresh(&mut blocker, id, refresh).await;
-    let max_before: i32 = sqlx::query_scalar(
-        "SELECT ex FROM bound_update_st WHERE g = 0",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .expect("read as-of max before update");
+    let max_before: i32 = sqlx::query_scalar("SELECT ex FROM bound_update_st WHERE g = 0")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read as-of max before update");
     assert_eq!(max_before, 27);
     refresh_normally(&db, "bound_update_st").await;
     db.assert_st_matches_query("bound_update_st", query).await;
@@ -290,22 +282,18 @@ async fn join_counts_future_partner_only_in_next_window() {
     finish_bounded_refresh(&mut blocker, id, refresh).await;
 
     // A had no partner at new_bound. Its partner is not counted early.
-    let before: (i64, i64) = sqlx::query_as(
-        "SELECT n, sw::bigint FROM bound_join_st WHERE g = 0",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .expect("read as-of join");
+    let before: (i64, i64) = sqlx::query_as("SELECT n, sw::bigint FROM bound_join_st WHERE g = 0")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read as-of join");
     assert_eq!(before, (10, 10));
 
     refresh_normally(&db, "bound_join_st").await;
     refresh_normally(&db, "bound_join_st").await;
-    let after: (i64, i64) = sqlx::query_as(
-        "SELECT n, sw::bigint FROM bound_join_st WHERE g = 0",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .expect("read final join");
+    let after: (i64, i64) = sqlx::query_as("SELECT n, sw::bigint FROM bound_join_st WHERE g = 0")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read final join");
     assert_eq!(after, (11, 15));
     db.assert_st_matches_query("bound_join_st", query).await;
     assert_no_full_fallback(&db, "bound_join_st").await;
