@@ -670,6 +670,18 @@ fn execute_manual_full_refresh_target(
         crate::cdc::lock_source_relations(source_oids)?;
         crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
     }
+    // An extension upgrade may introduce private aggregate columns absent from
+    // the existing relation. Reconcile them before TRUNCATE/INSERT, but only
+    // when a protected FULL reinitialization will populate their state.
+    if st.refresh_mode == RefreshMode::Differential && st.needs_reinit {
+        refresh::with_stream_owner(st, || {
+            super::helpers::ensure_differential_storage_auxiliary_columns(
+                schema,
+                table_name,
+                &st.defining_query,
+            )
+        })?;
+    }
     if !distance_snapshot_prepared && schema == st.pgt_schema && table_name == st.pgt_name {
         crate::api::prepare_distance_snapshot(st);
     }
