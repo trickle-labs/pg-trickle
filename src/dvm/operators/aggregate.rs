@@ -2703,6 +2703,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         // numeric values; ordinary changes keep the algebraic path.
         let agg_has_nonnull_aux = matches!(agg.function, AggFunc::Sum) && !agg.is_distinct;
         let agg_has_rescan = rescan_config.includes(agg, child);
+        let has_special_value_delta = needs_special_value_rescan(agg, child);
         let special_state = if agg.uses_incremental_nonfinite_state(child) {
             let state_col = quote_ident(&format!("__pgt_aux_special_{}", st_col_name(&agg.alias)));
             let inserts = quote_ident(&format!("__ins_special_{}", agg.alias));
@@ -2741,6 +2742,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         let algebraic_value = agg_merge_expr_mapped(
             agg,
             agg_has_rescan,
+            has_special_value_delta,
             use_having_rescan,
             agg_has_nonnull_aux,
             &st_col_name(&agg.alias),
@@ -2864,7 +2866,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             let algebraic = format!(
                 "COALESCE(st.{aux_sum2}, 0) + COALESCE(d.{ins_sum2}, 0) - COALESCE(d.{del_sum2}, 0)"
             );
-            let value = if agg_has_rescan {
+            let value = if agg_has_rescan && has_special_value_delta {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {algebraic} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
@@ -3628,6 +3630,7 @@ fn sum_nonnull_count_expr(alias: &str, st_col: &str, having_rescan: bool) -> Str
 fn agg_merge_expr_mapped(
     agg: &AggExpr,
     has_rescan: bool,
+    has_special_value_delta: bool,
     having_rescan: bool,
     has_nonnull_aux: bool,
     st_col: &str,
@@ -3679,7 +3682,7 @@ fn agg_merge_expr_mapped(
                     format!("COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)");
                 let value =
                     initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
-                let value = if has_rescan {
+                let value = if has_rescan && has_special_value_delta {
                     format!(
                         "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
                         quote_ident(&format!("__special_{alias}")),
@@ -3733,7 +3736,7 @@ fn agg_merge_expr_mapped(
                  / NULLIF(COALESCE(st.{aux_count_col}, 0) + COALESCE(d.{ins_cnt}, 0) - COALESCE(d.{del_cnt}, 0), 0)",
             );
             let value = initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
-            if has_rescan {
+            if has_rescan && has_special_value_delta {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
                     quote_ident(&format!("__special_{alias}")),
@@ -3786,7 +3789,7 @@ fn agg_merge_expr_mapped(
                 var_expr
             };
             let algebraic = format!("CASE WHEN {null_guard} THEN NULL ELSE {body} END");
-            if has_rescan {
+            if has_rescan && has_special_value_delta {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {algebraic} END",
                     quote_ident(&format!("__special_{alias}")),
@@ -4000,9 +4003,9 @@ fn agg_merge_expr_mapped(
 
 /// Convenience wrapper: uses the aggregate's own alias as the ST column name.
 ///
-/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, false, false, &agg.alias, None)`.
+/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, has_rescan, false, false, &agg.alias, None)`.
 pub fn agg_merge_expr(agg: &AggExpr, has_rescan: bool) -> String {
-    agg_merge_expr_mapped(agg, has_rescan, false, false, &agg.alias, None)
+    agg_merge_expr_mapped(agg, has_rescan, has_rescan, false, false, &agg.alias, None)
 }
 
 #[cfg(test)]
@@ -4392,6 +4395,7 @@ mod tests {
         let merge = agg_merge_expr_mapped(
             &sum_col("amount", "total"),
             true,
+            true,
             false,
             true,
             "total",
@@ -4400,7 +4404,7 @@ mod tests {
         assert!(merge.contains("d.\"__special_total\""));
         assert!(merge.contains("r.\"total\""));
 
-        let avg_merge = agg_merge_expr_mapped(&avg, true, false, false, "average", None);
+        let avg_merge = agg_merge_expr_mapped(&avg, true, true, false, false, "average", None);
         assert!(avg_merge.contains("d.\"__special_average\""));
         assert!(avg_merge.contains("r.\"average\""));
     }
@@ -4421,7 +4425,7 @@ mod tests {
         );
         assert_eq!(agg_sum_rescan_sql(&stddev), "COALESCE(SUM(amount), 0)");
 
-        let merge = agg_merge_expr_mapped(&stddev, true, false, false, "stddev", None);
+        let merge = agg_merge_expr_mapped(&stddev, true, true, false, false, "stddev", None);
         assert!(merge.contains("d.\"__special_stddev\""));
         assert!(merge.contains("r.\"stddev\""));
     }
@@ -6596,6 +6600,26 @@ mod tests {
                 .columns
                 .contains(&"__pgt_aux_nonnull_total".to_string())
         );
+    }
+
+    #[test]
+    fn test_having_integer_sum_does_not_reference_special_delta() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        ctx.having_filter = true;
+        let mut child = scan(1, "t", "public", "t", &["region", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 23;
+        }
+        let tree = aggregate(
+            vec![colref("region")],
+            vec![sum_col("amount", "total")],
+            child,
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "agg_rescan");
+        assert_sql_not_contains(&sql, "d.\"__special_total\"");
     }
 
     #[test]
