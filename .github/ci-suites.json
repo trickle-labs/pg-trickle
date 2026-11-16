@@ -20,6 +20,7 @@
     "e2e_dag_operations_tests",
     "e2e_dag_topology_tests",
     "e2e_diamond_tests",
+    "e2e_differential_bound_tests",
     "e2e_drain_mode_tests",
     "e2e_dvm_corpus_tests",
     "e2e_dvm_failpoint_tests",
