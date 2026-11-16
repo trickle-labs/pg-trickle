@@ -54,6 +54,17 @@ not ANN recall measurements. Hybrid plans also did not use HNSW. The benchmark
 thus found a severe selective-filter recall problem in this synthetic case and
 does not establish comparable ANN quality across all three approaches.
 
+A read-only parameter spot check on the retained 100k/384 database used tenant
+2 and the same `seed document 1` query vector after the measured workload. On
+the differential corpus, forced HNSW recall@10 was 0.0 with
+`ef_search=40`/`strict_order`, 0.2 with `ef_search=400`/`strict_order`, and 0.7
+with `ef_search=400`/`relaxed_order`; `ef_search=1000`/`relaxed_order` also
+returned 0.7. Each returned ten rows. This single post-run query shows that
+pgvector search settings affect the result, but it still missed three exact
+neighbors and recorded no latency comparison. It does not qualify a default
+setting or resolve filtered ANN quality; multiple query vectors and settings
+need measurement on the final package.
+
 During the three maintenance cycles, application and differential readers had
 zero timeouts. The periodic-full reader had 56 timed-out queries (18, 18 and
 20 per cycle). Client read intervals overlapped maintenance, but this is one
