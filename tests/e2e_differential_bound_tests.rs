@@ -58,13 +58,12 @@ async fn refresh_with_optional_barrier(pool: &PgPool, st: &'static str, barrier:
         .fetch_one(&mut *connection)
         .await
         .expect("find frontier-bounded source stage");
-        let stages: Vec<(i32, i32)> =
-            sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                "SELECT id, v FROM pg_temp.\"{stage}\" WHERE id = 27",
-            )))
-            .fetch_all(&mut *connection)
-            .await
-            .expect("inspect bounded source row");
+        let stages: Vec<(i32, i32)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT id, v FROM pg_temp.\"{stage}\" WHERE id = 27",
+        )))
+        .fetch_all(&mut *connection)
+        .await
+        .expect("inspect bounded source row");
         assert_eq!(
             stages,
             vec![(27, 27)],
