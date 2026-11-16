@@ -1255,6 +1255,13 @@
       "class": "owner_lifecycle",
       "execution_policy": "capability_specific"
     },
+    "pgtrickle.list_ann_maintenance_requests(bigint, integer)": {
+      "schema": "pgtrickle",
+      "name": "list_ann_maintenance_requests",
+      "identity_arguments": "bigint, integer",
+      "class": "owner_lifecycle",
+      "execution_policy": "capability_specific"
+    },
     "pgtrickle.cancel_ann_maintenance(bigint)": {
       "schema": "pgtrickle",
       "name": "cancel_ann_maintenance",

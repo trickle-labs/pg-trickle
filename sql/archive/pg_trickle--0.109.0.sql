@@ -1880,6 +1880,14 @@ LANGUAGE c AS 'MODULE_PATHNAME', 'ann_maintenance_request_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- pg_trickle::api::ann_maintenance::list_ann_maintenance_requests
+CREATE FUNCTION pgtrickle.list_ann_maintenance_requests(after_request_id bigint, max_results integer)
+RETURNS SETOF jsonb STRICT SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', 'list_ann_maintenance_requests_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- pg_trickle::api::ann_maintenance::cancel_ann_maintenance
 CREATE FUNCTION pgtrickle.cancel_ann_maintenance(request_id bigint)
 RETURNS jsonb STRICT SECURITY DEFINER
@@ -4641,6 +4649,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_handle_truncate(bigint) FROM PUBLIC
 
 -- owner_lifecycle
 REVOKE EXECUTE ON FUNCTION pgtrickle.ann_maintenance_request(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.cancel_ann_maintenance(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.claim_ann_maintenance(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.finish_ann_maintenance(bigint, boolean, text) FROM PUBLIC;
