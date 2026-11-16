@@ -64,6 +64,7 @@ MAINTENANCE = {
     "periodic_full": "SELECT live_rag.recompute_full();",
     "differential": "SELECT pgtrickle.refresh_stream_table('live_rag.differential');",
 }
+SCHEDULER_STREAMS = "ARRAY['embedding_demo.corpus_v1', 'embedding_demo.corpus_v2', 'live_rag.differential']"
 
 
 def availability_sql(changed_ids: str) -> str:
@@ -100,6 +101,7 @@ SELECT json_build_object(
 """
 
 EXACT = """
+SET max_parallel_workers_per_gather = 0;
 SELECT json_build_object(
   'application', NOT EXISTS ((TABLE live_rag.application EXCEPT ALL TABLE live_rag.truth)
                              UNION ALL (TABLE live_rag.truth EXCEPT ALL TABLE live_rag.application)),
@@ -180,11 +182,11 @@ SELECT json_build_object('postgres', current_setting('server_version'),
 
     start = time.monotonic()
     worker.psql(setup_live_rag.setup_sql(args.dimensions))
-    worker.psql("SET pg_trickle.scheduler_drain_timeout=3600; "
-                "SELECT pgtrickle.pause_scheduler(ARRAY['live_rag.differential']);")
+    worker.psql(f"SET pg_trickle.scheduler_drain_timeout=3600; "
+                f"SELECT pgtrickle.pause_scheduler({SCHEDULER_STREAMS});")
 
     def resume_scheduler() -> None:
-        worker.psql("SELECT pgtrickle.resume_scheduler(ARRAY['live_rag.differential']);")
+        worker.psql(f"SELECT pgtrickle.resume_scheduler({SCHEDULER_STREAMS});")
 
     atexit.register(resume_scheduler)
     worker.psql(SEED, rows=str(args.rows), dimensions=str(args.dimensions))

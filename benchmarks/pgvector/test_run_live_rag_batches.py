@@ -22,6 +22,13 @@ class BenchmarkTests(unittest.TestCase):
         self.assertNotIn("vector(3)", sql)
         self.assertIn("server_started", sql)
 
+    def test_exact_comparison_disables_parallel_workers_and_pauses_all_fixture_streams(self):
+        self.assertIn("SET max_parallel_workers_per_gather = 0;", benchmark.EXACT)
+        self.assertEqual(
+            benchmark.SCHEDULER_STREAMS,
+            "ARRAY['embedding_demo.corpus_v1', 'embedding_demo.corpus_v2', 'live_rag.differential']",
+        )
+
     def test_reader_overlap_and_timeout_windows_are_reported_separately(self):
         reads = [
             {"server_started": 1, "server_finished": 2, "client_seconds": 0.2},
