@@ -94,7 +94,7 @@ fi
 
 # Exercise upgrade of actual stream-table storage created by the published
 # v0.108.3 binary (not a freshly created stream under the candidate binary).
-if [[ "$FROM_VERSION" == "0.108.3" && ( "$TO_VERSION" == "0.109.0" || "$TO_VERSION" == "0.110.0" ) ]]; then
+if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.109.0" ]]; then
     AGGREGATE_UPGRADE=true
     psql "CREATE TABLE public.upgrade_agg_orders(
               id int PRIMARY KEY, customer text, amt numeric)" >/dev/null
@@ -258,20 +258,15 @@ QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
 
 UPGRADE_DIR="$CANDIDATE_DIR/usr/share/postgresql/18/extension"
 if [[ ! -f "$UPGRADE_DIR/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql" ]]; then
-    if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.110.0" ]]; then
+    [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.1" || "$IDENTITY_MIGRATION" == true ) ]]
+    test -f "$UPGRADE_DIR/pg_trickle--0.106.1--0.107.0.sql"
+    test -f "$UPGRADE_DIR/pg_trickle--0.107.0--0.108.0.sql"
+    test -f "$UPGRADE_DIR/pg_trickle--0.108.0--0.108.1.sql"
+    if [[ "$IDENTITY_MIGRATION" == true ]]; then
+        test -f "$UPGRADE_DIR/pg_trickle--0.108.1--0.108.3.sql"
+    fi
+    if [[ "$TO_VERSION" == "0.109.0" ]]; then
         test -f "$UPGRADE_DIR/pg_trickle--0.108.3--0.109.0.sql"
-        test -f "$UPGRADE_DIR/pg_trickle--0.109.0--0.110.0.sql"
-    else
-        [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.1" || "$IDENTITY_MIGRATION" == true ) ]]
-        test -f "$UPGRADE_DIR/pg_trickle--0.106.1--0.107.0.sql"
-        test -f "$UPGRADE_DIR/pg_trickle--0.107.0--0.108.0.sql"
-        test -f "$UPGRADE_DIR/pg_trickle--0.108.0--0.108.1.sql"
-        if [[ "$IDENTITY_MIGRATION" == true ]]; then
-            test -f "$UPGRADE_DIR/pg_trickle--0.108.1--0.108.3.sql"
-        fi
-        if [[ "$TO_VERSION" == "0.109.0" ]]; then
-            test -f "$UPGRADE_DIR/pg_trickle--0.108.3--0.109.0.sql"
-        fi
     fi
 fi
 docker cp "$CANDIDATE_DIR/usr/lib/postgresql/18/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"
