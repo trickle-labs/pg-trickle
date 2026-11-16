@@ -2960,14 +2960,14 @@ END AS __pgt_meta_action"#
     // FULL encoding does not parenthesize composite ROW elements; delta
     // encoding does. The parentheses do not change values or types, but
     // these SQL strings must be compared in FULL's exact canonical form.
-    let expected_full_identity =
-        crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys);
     // An unknown FULL identity (e.g. execution-harness state or legacy
     // targets) must not assume that a GROUP_KEY probe will find the row.
     let can_probe_row_identity = ctx
         .st_full_row_identity_expr
         .as_ref()
-        .is_some_and(|full_expr| full_expr == &expected_full_identity);
+        .is_some_and(|full_expr| {
+            full_expr == &crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys)
+        });
 
     // PostgreSQL 18 cannot use a B-tree/hash join for a composite
     // IS NOT DISTINCT FROM predicate; it scanned the stream table for every
