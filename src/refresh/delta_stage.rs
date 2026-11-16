@@ -375,17 +375,39 @@ impl DeltaStage {
         }
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-        // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- the
-        // buffer name is catalog-derived and quoted by quote_qualified;
-        // new_lsn remains a separate SPI parameter.
-        // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- qualified buffer, bound LSN.
-        let is_future_truncate = Spi::get_one_with_args::<bool>(
+        // Materialize *all* post-bound CDC in one writable SPI statement
+        // while holding the source relation lock. A separate read-only
+        // EXISTS probe can use the caller's older SPI snapshot, while the
+        // later CREATE TABLE AS / MERGE sees freshly committed source rows.
+        // Reconstructing against those different snapshots silently loses
+        // the old row images for post-bound DELETE and UPDATE (#1437).
+        //
+        // A temp relation also guarantees the TRUNCATE check, no-future fast
+        // path, and keyed/keyless inverse calculations see identical events.
+        let post_name = match self.centroid_nonce {
+            Some(nonce) => format!("__pgt_post_{}_{source_oid}_{nonce}", st.pgt_id),
+            None => format!("__pgt_post_{}_{source_oid}", st.pgt_id),
+        };
+        let post_stage = format!("pg_temp.{}", quote_ident(&post_name));
+        // nosemgrep: rust.spi.run.dynamic-format -- generated numeric-scoped temporary name.
+        Spi::run(&format!("DROP TABLE IF EXISTS {post_stage}"))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        // nosemgrep: rust.spi.run_with_args.dynamic-format -- buffer is quoted
+        // from the CDC catalog; the validated frontier is bound as a parameter.
+        Spi::run_with_args(
             &format!(
-                "SELECT EXISTS (SELECT 1 FROM {buffer} \
-                 WHERE lsn > $1::pg_lsn AND action = 'T')"
+                "CREATE TEMP TABLE {post_stage} ON COMMIT DROP AS \
+                 SELECT * FROM {buffer} WHERE lsn > $1::pg_lsn"
             ),
             &[new_lsn.into()],
         )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        // Both checks read our own materialized rows (not the possibly stale
+        // snapshot of a separate SPI read-only query).
+        let is_future_truncate = Spi::get_one::<bool>(&format!(
+            "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action = 'T')"
+        ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
         .unwrap_or(false);
         if is_future_truncate {
@@ -396,16 +418,9 @@ impl DeltaStage {
             )));
         }
 
-        // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- the
-        // buffer relation was qualified/quoted; LSN is parameterized.
-        // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- qualified buffer, bound LSN.
-        let has_future = Spi::get_one_with_args::<bool>(
-            &format!(
-                "SELECT EXISTS (SELECT 1 FROM {buffer} \
-                 WHERE lsn > $1::pg_lsn AND action IN ('I', 'D'))"
-            ),
-            &[new_lsn.into()],
-        )
+        let has_future = Spi::get_one::<bool>(&format!(
+            "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action IN ('I', 'D'))"
+        ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
         .unwrap_or(false);
 
@@ -526,8 +541,8 @@ impl DeltaStage {
             let common = format!(
                 "WITH __pgt_future AS MATERIALIZED (\
                    SELECT c.__pgt_row_id AS __pgt_event_identity, c.action AS __pgt_event_action, c.change_id AS __pgt_event_sequence{future_cols} \
-                   FROM {buffer} c \
-                   WHERE c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')\
+                   FROM {post_stage} c \
+                   WHERE c.action IN ('I', 'D')\
                  ), __pgt_first AS ({first})"
             );
             let select = if keyless {
