@@ -205,6 +205,15 @@ with patch.object(bounded.subprocess, "run", side_effect=[vanished_internal, hea
     assert bounded.disk_metrics(["docker", "exec", name, "sh"]) is healthy
     assert run_mock.call_count == 2 and sleep_mock.call_count == 1
 
+silent_exit = subprocess.CompletedProcess([], -9, "", "")
+for failures, expected_calls in ((2, 3), (5, 5)):
+    with patch.object(bounded.subprocess, "run", side_effect=[silent_exit] * failures + [healthy]) as run_mock, \
+         patch.object(bounded.time, "sleep") as sleep_mock:
+        result = bounded.disk_metrics(["docker", "exec", name, "sh"])
+    assert run_mock.call_count == expected_calls
+    assert sleep_mock.call_count == expected_calls - 1
+    assert result is (healthy if failures == 2 else silent_exit)
+
 for message in ("permission denied", "du: cannot access '/data/global/pg_control': No such file or directory",
                 vanished.stderr + "permission denied"):
     with patch.object(bounded.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", message)) as run_mock:
