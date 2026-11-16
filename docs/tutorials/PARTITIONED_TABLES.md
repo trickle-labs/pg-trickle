@@ -168,9 +168,12 @@ The contract is intentionally narrow:
   history. Late arrivals or backfills into a sealed range therefore require a
   deliberate external rebuild. Ordinary writes to still-attached ranges remain
   supported. `DETACH PARTITION CONCURRENTLY` is rejected for RETAIN; for TRIM
-  it follows the normal safe suspension/reinitialization path. Removing a
-  nested child falls back for TRIM and is rejected for RETAIN; removing a
-  direct child that itself contains subpartitions is supported.
+  it follows the normal safe suspension/reinitialization path. A nested child
+  can be removed when every intermediate partition level is RANGE-partitioned
+  on the same key with finite, bucket-aligned bounds; the effective range is
+  the intersection of its bounds with all ancestor bounds. For other nested
+  layouts, TRIM falls back and RETAIN rejects the removal. Removing an entire
+  direct child that itself contains subpartitions is also supported.
 
 The retention cutoff is parsed as the source column type. Include a timezone
 offset for `timestamptz` cutoffs to avoid dependence on the session timezone.

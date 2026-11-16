@@ -150,22 +150,8 @@ fn set_policy(
     state.validate().map_err(|error| {
         PgTrickleError::InvalidArgument(format!("invalid retention state: {error:?}"))
     })?;
-    let layout =
-        retention::validate_partition_layout_trusted(source_oid, &state.candidate, state.cutoff)?;
-    if layout.iter().any(|partition| {
-        state.sealed.iter().any(|range| {
-            let value = |bound| match bound {
-                RetentionBound::Date(v) => i64::from(v),
-                RetentionBound::Timestamp(v) | RetentionBound::Timestamptz(v) => v,
-            };
-            value(partition.lower) < value(range.upper)
-                && value(range.lower) < value(partition.upper)
-        })
-    }) {
-        return Err(PgTrickleError::InvalidArgument(
-            "a live partition overlaps retained history".into(),
-        ));
-    }
+    retention::validate_partition_layout_trusted(source_oid, &state.candidate, state.cutoff)?;
+    retention::ensure_no_live_sealed_overlap(source_oid, &state, None)?;
     retention::validate_retention_storage(&st, source_oid, &state.candidate, mode, true)?;
     if old_policy
         .as_ref()

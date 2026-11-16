@@ -1819,7 +1819,7 @@ async fn test_retention_nested_partition_subtree_and_leaf_safety() {
         .try_execute("ALTER TABLE retention_nested_old DETACH PARTITION retention_nested_a")
         .await
         .expect_err("retained history requires a proven whole-root range");
-    assert!(error.to_string().contains("direct partition"), "{error}");
+    assert!(error.to_string().contains("RANGE"), "{error}");
     let attached: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid = 'retention_nested_a'::regclass AND inhparent = 'retention_nested_old'::regclass)").await;
     assert!(attached);
     db.execute("ALTER TABLE retention_nested_src DETACH PARTITION retention_nested_old")
@@ -1833,6 +1833,190 @@ async fn test_retention_nested_partition_subtree_and_leaf_safety() {
     .await
     .expect("read retained subtree history");
     assert_eq!(retained, baseline);
+}
+
+#[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_nested_unaligned_shared_group_fails_closed() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retention_shared_src (occurred timestamp NOT NULL, account text NOT NULL, amount integer NOT NULL) PARTITION BY RANGE (occurred)").await;
+    db.execute("CREATE TABLE retention_shared_day PARTITION OF retention_shared_src FOR VALUES FROM ('2025-01-01') TO ('2025-01-02') PARTITION BY RANGE (occurred)").await;
+    db.execute("CREATE TABLE retention_shared_first PARTITION OF retention_shared_day FOR VALUES FROM ('2025-01-01 00:00') TO ('2025-01-01 00:30')").await;
+    db.execute("CREATE TABLE retention_shared_second PARTITION OF retention_shared_day FOR VALUES FROM ('2025-01-01 00:30') TO ('2025-01-01 01:00')").await;
+    db.execute("INSERT INTO retention_shared_src VALUES ('2025-01-01 00:10','a',10), ('2025-01-01 00:40','a',20)").await;
+    let query = "SELECT pg_catalog.date_trunc('hour', occurred) AS hour, account, sum(amount) AS total, count(*) AS n FROM retention_shared_src GROUP BY 1,2";
+    for (name, policy) in [
+        ("retention_shared_trim", "TRIM"),
+        ("retention_shared_keep", "RETAIN"),
+    ] {
+        sqlx::query("SELECT pgtrickle.create_stream_table_with_retention($1, $2, $3, 'occurred', '2025-01-02', '1h')")
+            .bind(name).bind(query).bind(policy).execute(&db.pool).await.expect("configure shared-group source");
+    }
+    let error = db
+        .try_execute("ALTER TABLE retention_shared_day DETACH PARTITION retention_shared_first")
+        .await
+        .expect_err("unaligned nested range must not freeze a shared group");
+    assert!(error.to_string().contains("UnalignedHour"), "{error}");
+    let before: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT hour::text, account, total, n FROM retention_shared_keep ORDER BY 1,2",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read protected shared group");
+    assert_eq!(
+        before,
+        vec![("2025-01-01 00:00:00".into(), "a".into(), 30, 2)]
+    );
+    db.execute(
+        "SELECT pgtrickle.set_stream_table_partition_retention('retention_shared_keep', 'OFF')",
+    )
+    .await;
+    let marker: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.execute("ALTER TABLE retention_shared_day DETACH PARTITION retention_shared_first")
+        .await;
+    db.refresh_st_until_converged("retention_shared_trim").await;
+    db.assert_st_matches_query("retention_shared_trim", query)
+        .await;
+    let action: (String, String) = sqlx::query_as("SELECT h.action, h.status FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name = 'retention_shared_trim' AND h.refresh_id > $1 AND h.action = 'REINITIALIZE' ORDER BY h.refresh_id DESC LIMIT 1")
+        .bind(marker).fetch_one(&db.pool).await.expect("read fallback action");
+    assert_eq!(action, ("REINITIALIZE".into(), "COMPLETED".into()));
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT hour::text, account, total, n FROM retention_shared_trim ORDER BY 1,2",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read live shared group after fallback");
+    assert_eq!(
+        rows,
+        vec![("2025-01-01 00:00:00".into(), "a".into(), 20, 1)]
+    );
+}
+
+#[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_nested_aligned_range_leaves() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retention_nested_range_src (occurred timestamp NOT NULL, account text NOT NULL, amount integer NOT NULL) PARTITION BY RANGE (occurred)").await;
+    db.execute("CREATE TABLE retention_nested_range_old PARTITION OF retention_nested_range_src FOR VALUES FROM ('2025-01-01') TO ('2025-02-01') PARTITION BY RANGE (occurred)").await;
+    db.execute("CREATE TABLE retention_nested_range_first PARTITION OF retention_nested_range_old FOR VALUES FROM ('2025-01-01') TO ('2025-01-15')").await;
+    db.execute("CREATE TABLE retention_nested_range_second PARTITION OF retention_nested_range_old FOR VALUES FROM ('2025-01-15') TO ('2025-02-01')").await;
+    db.execute("CREATE TABLE retention_nested_range_live PARTITION OF retention_nested_range_src FOR VALUES FROM ('2025-02-01') TO ('2025-03-01')").await;
+    db.execute("INSERT INTO retention_nested_range_src VALUES ('2025-01-05 12:05','a',10), ('2025-01-20 12:10','a',20), ('2025-02-05 10:10','b',7)").await;
+    let query = "SELECT pg_catalog.date_trunc('hour', occurred) AS hour, account, sum(amount) AS total, count(*) AS n FROM retention_nested_range_src GROUP BY 1,2";
+    for (name, policy) in [
+        ("retention_nested_range_trim", "TRIM"),
+        ("retention_nested_range_keep", "RETAIN"),
+    ] {
+        sqlx::query("SELECT pgtrickle.create_stream_table_with_retention($1, $2, $3, 'occurred', '2025-02-01', '1h')")
+            .bind(name).bind(query).bind(policy).execute(&db.pool).await.expect("configure nested range source");
+    }
+    let baseline: Vec<(String, String, i64, i64)> = sqlx::query_as("SELECT pg_catalog.date_trunc('hour', occurred)::text, account, sum(amount), count(*) FROM retention_nested_range_src GROUP BY 1,2 ORDER BY 1,2")
+        .fetch_all(&db.pool).await.expect("capture nested historical baseline");
+    let marker: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    let mut transaction = db
+        .pool
+        .begin()
+        .await
+        .expect("begin nested detach transaction");
+    sqlx::query("SAVEPOINT before_nested_detach")
+        .execute(&mut *transaction)
+        .await
+        .expect("create savepoint");
+    sqlx::query(
+        "ALTER TABLE retention_nested_range_old DETACH PARTITION retention_nested_range_first",
+    )
+    .execute(&mut *transaction)
+    .await
+    .expect("detach nested range in savepoint");
+    sqlx::query("ROLLBACK TO SAVEPOINT before_nested_detach")
+        .execute(&mut *transaction)
+        .await
+        .expect("roll back nested cut");
+    transaction.commit().await.expect("commit nested rollback");
+    db.execute(
+        "ALTER TABLE retention_nested_range_old DETACH PARTITION retention_nested_range_first",
+    )
+    .await;
+    db.assert_st_matches_query("retention_nested_range_trim", query)
+        .await;
+    let retained: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT hour::text, account, total, n FROM retention_nested_range_keep ORDER BY 1,2",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read retained nested range");
+    assert_eq!(retained, baseline);
+    let error = db.try_execute("CREATE TABLE retention_nested_range_overlap PARTITION OF retention_nested_range_old FOR VALUES FROM ('2025-01-01') TO ('2025-01-15')").await.expect_err("reject empty nested historical reattachment");
+    assert!(
+        error.to_string().contains("overlapping retained history"),
+        "{error}"
+    );
+    db.execute("CREATE TABLE retention_nested_range_attach (LIKE retention_nested_range_src INCLUDING DEFAULTS INCLUDING CONSTRAINTS)").await;
+    let error = db.try_execute("ALTER TABLE retention_nested_range_old ATTACH PARTITION retention_nested_range_attach FOR VALUES FROM ('2025-01-01') TO ('2025-01-15')")
+        .await.expect_err("reject nested attachment over retained history");
+    assert!(
+        error.to_string().contains("overlapping retained history"),
+        "{error}"
+    );
+    db.execute("INSERT INTO retention_nested_range_src VALUES ('2025-01-20 12:40','a',3)")
+        .await;
+    db.refresh_st_until_converged("retention_nested_range_trim")
+        .await;
+    db.execute("DROP TABLE retention_nested_range_second").await;
+    db.assert_st_matches_query("retention_nested_range_trim", query)
+        .await;
+    let mut expected = baseline;
+    expected[1].2 += 3;
+    expected[1].3 += 1;
+    let retained: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT hour::text, account, total, n FROM retention_nested_range_keep ORDER BY 1,2",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read retained history after second cut");
+    assert_eq!(retained, expected);
+    db.execute("INSERT INTO retention_nested_range_src VALUES ('2025-02-05 10:30','b',5)")
+        .await;
+    expected[2].2 += 5;
+    expected[2].3 += 1;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        db.refresh_st_with_retry("retention_nested_range_keep")
+            .await;
+        let retained: Vec<(String, String, i64, i64)> = sqlx::query_as(
+            "SELECT hour::text, account, total, n FROM retention_nested_range_keep ORDER BY 1,2",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .expect("read nested history after live insert");
+        if retained == expected {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nested retained history did not converge: {retained:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let rebuilds: Vec<String> = sqlx::query_scalar("SELECT h.action FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name IN ('retention_nested_range_trim','retention_nested_range_keep') AND h.refresh_id > $1 AND (h.action IN ('FULL','REINITIALIZE') OR h.was_full_fallback) ORDER BY h.refresh_id")
+        .bind(marker).fetch_all(&db.pool).await.expect("read nested refresh history");
+    assert_eq!(rebuilds, Vec::<String>::new());
+    let differential: Vec<String> = sqlx::query_scalar("SELECT DISTINCT s.pgt_name FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name IN ('retention_nested_range_trim','retention_nested_range_keep') AND h.refresh_id > $1 AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback ORDER BY s.pgt_name")
+        .bind(marker).fetch_all(&db.pool).await.expect("read nested differential actions");
+    assert_eq!(
+        differential,
+        vec!["retention_nested_range_keep", "retention_nested_range_trim"]
+    );
 }
 
 #[tokio::test]

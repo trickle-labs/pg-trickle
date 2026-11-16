@@ -475,27 +475,25 @@ pub(crate) fn prepare_automatic_detaches(
         if prepared_detach_exists(pgt_id, source_oid.to_u32(), target_oid.to_u32()) {
             continue;
         }
-        let layout = match validate_partition_layout(
+        let partition = match resolve_retention_partition(
             source_oid,
-            &state.candidate.source_column,
+            target_oid,
             &state.candidate,
             state.cutoff,
+            None,
         ) {
-            Ok(layout) => layout,
+            Ok(partition) => partition,
             Err(PgTrickleError::InvalidArgument(_)) if state.mode == RetentionMode::Trim => {
                 continue;
             }
             Err(error) => return Err(error),
         };
-        let partition = layout
-            .iter()
-            .find(|partition| partition.oid == target_oid.to_u32());
         if partition.is_none_or(|partition| !partition.expired) {
             if state.mode == RetentionMode::Trim {
                 continue;
             }
             return Err(PgTrickleError::InvalidArgument(
-                "RETAIN requires a direct partition wholly below its retention cutoff".into(),
+                "RETAIN requires an aligned partition wholly below its retention cutoff".into(),
             ));
         }
         register_prepared_detach(prepare_retention_cut(pgt_id, target_oid)?)?;
@@ -820,30 +818,14 @@ pub fn prepare_retention_cut(
             "retention group mapping changed; reconfigure before removal".into(),
         ));
     }
-    let layout = validate_partition_layout(
-        source_oid,
-        &candidate.source_column,
-        &candidate,
-        state.cutoff,
-    )?;
-    for partition in &layout {
-        if state.sealed.iter().any(|range| {
-            bound_value(partition.lower) < bound_value(range.upper)
-                && bound_value(range.lower) < bound_value(partition.upper)
-        }) {
-            return Err(PgTrickleError::InvalidArgument(
-                "a live partition overlaps retained history".into(),
-            ));
-        }
-    }
-    let partition = layout
-        .iter()
-        .find(|partition| partition.oid == target_oid.to_u32())
-        .ok_or_else(|| {
-            PgTrickleError::InvalidArgument(
-                "retention target is not a direct source partition".into(),
-            )
-        })?;
+    ensure_no_live_sealed_overlap(source_oid, &state, None)?;
+    let partition =
+        resolve_retention_partition(source_oid, target_oid, &candidate, state.cutoff, None)?
+            .ok_or_else(|| {
+                PgTrickleError::InvalidArgument(
+                    "retention target is not an aligned source partition".into(),
+                )
+            })?;
     if !partition.expired {
         return Err(PgTrickleError::InvalidArgument(
             "partition is not wholly below the retention cutoff".into(),
@@ -977,9 +959,18 @@ fn finalize_trimmed_cut(cut: PreparedRetentionCut) -> Result<(), crate::error::P
     let detached = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid = pg_catalog.pg_backend_pid() \
                        AND relation = $1 AND mode = 'ShareLock' AND granted) \
-            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhparent = $1 AND inhrelid = $2)",
-        &[pg_sys::Oid::from(cut.source_oid).into(), pg_sys::Oid::from(cut.target_oid).into()],
-    ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false);
+            AND NOT EXISTS (WITH RECURSIVE ancestors(oid) AS ( \
+                SELECT inhparent FROM pg_catalog.pg_inherits WHERE inhrelid = $2 \
+                UNION ALL SELECT i.inhparent FROM pg_catalog.pg_inherits i \
+                JOIN ancestors a ON i.inhrelid = a.oid \
+            ) SELECT 1 FROM ancestors WHERE oid = $1)",
+        &[
+            pg_sys::Oid::from(cut.source_oid).into(),
+            pg_sys::Oid::from(cut.target_oid).into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
     if !same_transaction || !detached || cut.state_after_removal.mode != RetentionMode::Trim {
         return Err(PgTrickleError::InvalidArgument(
             "trim cut belongs to another transaction or target is still attached".into(),
@@ -1068,9 +1059,18 @@ pub fn finalize_retained_cut(
     let valid = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid = pg_catalog.pg_backend_pid() \
                        AND relation = $1 AND mode = 'ShareLock' AND granted) \
-            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhparent = $1 AND inhrelid = $2)",
-        &[pg_sys::Oid::from(cut.source_oid).into(), pg_sys::Oid::from(cut.target_oid).into()],
-    ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false);
+            AND NOT EXISTS (WITH RECURSIVE ancestors(oid) AS ( \
+                SELECT inhparent FROM pg_catalog.pg_inherits WHERE inhrelid = $2 \
+                UNION ALL SELECT i.inhparent FROM pg_catalog.pg_inherits i \
+                JOIN ancestors a ON i.inhrelid = a.oid \
+            ) SELECT 1 FROM ancestors WHERE oid = $1)",
+        &[
+            pg_sys::Oid::from(cut.source_oid).into(),
+            pg_sys::Oid::from(cut.target_oid).into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
     if !valid {
         return Err(PgTrickleError::InvalidArgument(
             "retention source lock is missing or target is still attached".into(),
@@ -1163,16 +1163,122 @@ pub(crate) fn ensure_retained_attach_safe(
             "cannot attach a nonempty partition to a stream with retained history; attach an empty future partition and insert live rows normally".into(),
         ));
     }
-    let layout = validate_partition_layout_trusted(source_oid, &state.candidate, state.cutoff)?;
-    if layout.iter().any(|partition| {
-        state.sealed.iter().any(|range| {
-            bound_value(partition.lower) < bound_value(range.upper)
-                && bound_value(range.lower) < bound_value(partition.upper)
-        })
-    }) {
-        return Err(PgTrickleError::InvalidArgument(
-            "cannot attach a partition overlapping retained history".into(),
-        ));
+    ensure_no_live_sealed_overlap(source_oid, &state, None).map_err(|error| {
+        PgTrickleError::InvalidArgument(format!(
+            "cannot attach a partition overlapping retained history or with an unprovable layout: {error}"
+        ))
+    })
+}
+
+/// Resolve a nested cut only through RANGE levels on the proven source key.
+#[cfg(not(test))]
+fn resolve_retention_partition(
+    parent_oid: pg_sys::Oid,
+    target_oid: pg_sys::Oid,
+    candidate: &RetentionGroupCandidate,
+    cutoff: RetentionBound,
+    inherited: Option<SealedRange>,
+) -> Result<Option<RetentionPartition>, crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let mut parent_candidate = candidate.clone();
+    parent_candidate.source_oid = parent_oid.to_u32();
+    let layout = validate_partition_layout_trusted(parent_oid, &parent_candidate, cutoff)?;
+    for mut partition in layout {
+        if let Some(range) = inherited {
+            if bound_value(partition.lower) < bound_value(range.lower) {
+                partition.lower = range.lower;
+            }
+            if bound_value(partition.upper) > bound_value(range.upper) {
+                partition.upper = range.upper;
+            }
+        }
+        if bound_value(partition.lower) >= bound_value(partition.upper) {
+            continue;
+        }
+        partition.expired = range_is_expired(candidate, partition.lower, partition.upper, cutoff)
+            .map_err(|e| {
+            PgTrickleError::InvalidArgument(format!("invalid nested partition range: {e:?}"))
+        })?;
+        if partition.oid == target_oid.to_u32() {
+            return Ok(Some(partition));
+        }
+        let child_oid = pg_sys::Oid::from(partition.oid);
+        let contains_target = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_partition_ancestors($2::regclass) a(relid) \
+             WHERE a.relid = $1::regclass)",
+            &[child_oid.into(), target_oid.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        if contains_target {
+            return resolve_retention_partition(
+                child_oid,
+                target_oid,
+                candidate,
+                cutoff,
+                Some(SealedRange {
+                    lower: partition.lower,
+                    upper: partition.upper,
+                }),
+            );
+        }
+    }
+    Ok(None)
+}
+
+/// Prove that no still-attached leaf can contribute to a sealed range.
+#[cfg(not(test))]
+pub(crate) fn ensure_no_live_sealed_overlap(
+    parent_oid: pg_sys::Oid,
+    state: &RetentionState,
+    inherited: Option<SealedRange>,
+) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    if state.sealed.is_empty() {
+        return Ok(());
+    }
+    let mut candidate = state.candidate.clone();
+    candidate.source_oid = parent_oid.to_u32();
+    let layout = validate_partition_layout_trusted(parent_oid, &candidate, state.cutoff)?;
+    for mut partition in layout {
+        if let Some(range) = inherited {
+            if bound_value(partition.lower) < bound_value(range.lower) {
+                partition.lower = range.lower;
+            }
+            if bound_value(partition.upper) > bound_value(range.upper) {
+                partition.upper = range.upper;
+            }
+        }
+        if bound_value(partition.lower) >= bound_value(partition.upper)
+            || !state.sealed.iter().any(|range| {
+                bound_value(partition.lower) < bound_value(range.upper)
+                    && bound_value(range.lower) < bound_value(partition.upper)
+            })
+        {
+            continue;
+        }
+        let child_oid = pg_sys::Oid::from(partition.oid);
+        let partitioned = Spi::get_one_with_args::<bool>(
+            "SELECT relkind = 'p' FROM pg_catalog.pg_class WHERE oid = $1",
+            &[child_oid.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        if !partitioned {
+            return Err(PgTrickleError::InvalidArgument(
+                "a live partition overlaps retained history".into(),
+            ));
+        }
+        ensure_no_live_sealed_overlap(
+            child_oid,
+            state,
+            Some(SealedRange {
+                lower: partition.lower,
+                upper: partition.upper,
+            }),
+        )?;
     }
     Ok(())
 }
