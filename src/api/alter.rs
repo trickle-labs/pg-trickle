@@ -1432,6 +1432,44 @@ fn alter_stream_table_partition_key(
     publication::ensure_storage_replacement_allowed(st)?;
     ensure_storage_authorization_is_replaceable(st)?;
 
+    // Lock the *existing* relation before inspecting dependent stream tables.
+    // A concurrent CREATE may still hold an ACCESS SHARE lock while adding
+    // its STREAM_TABLE dependency. Without this lock a new dependent can
+    // commit after our check but before DROP obtains ACCESS EXCLUSIVE.
+    // No catalog/storage changes have happened at this point.
+    let storage_name = format!(
+        "{}.{}",
+        quote_identifier(schema),
+        quote_identifier(table_name)
+    );
+    // nosemgrep: rust.spi.run.dynamic-format — both identifiers are escaped and ownership was checked above.
+    Spi::run(&format!(
+        "LOCK TABLE {storage_name} IN ACCESS EXCLUSIVE MODE"
+    ))
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "cannot lock {schema}.{table_name} for repartitioning: {e}"
+        ))
+    })?;
+
+    // Repartitioning drops and recreates the storage relation. Unlike the
+    // ALTER QUERY shadow swap, this path cannot rebind downstream dependency
+    // OIDs, ST change buffers, and synchronous IVM triggers. Fail closed
+    // *before* changing storage or catalog identity to preserve the graph.
+    let downstream_ids = StDependency::get_downstream_pgt_ids(st.pgt_relid)?;
+    if !downstream_ids.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            concat!(
+                "cannot change partition_by on {}.{}: ",
+                "{} downstream stream table(s) depend on this storage relation; ",
+                "remove dependent stream tables before repartitioning, then recreate them"
+            ),
+            schema,
+            table_name,
+            downstream_ids.len()
+        )));
+    }
+
     // Get current storage columns for validation.
     let columns = get_storage_table_columns(schema, table_name)?;
 
