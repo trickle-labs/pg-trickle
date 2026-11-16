@@ -2104,7 +2104,8 @@ async fn test_alter_st_partition_key_change_and_remove_reject_with_downstream() 
         .await;
     db.create_st_partitioned(
         "guard_change_up",
-        "SELECT id, event_day, category FROM guard_change_src",
+        "SELECT event_day, category, SUM(id) AS total FROM guard_change_src \
+         GROUP BY event_day, category",
         "1m",
         "DIFFERENTIAL",
         "event_day",
@@ -2112,7 +2113,7 @@ async fn test_alter_st_partition_key_change_and_remove_reject_with_downstream() 
     .await;
     db.create_st(
         "guard_change_down",
-        "SELECT id, category FROM guard_change_up",
+        "SELECT event_day, category, total FROM guard_change_up",
         "1m",
         "DIFFERENTIAL",
     )
@@ -2146,8 +2147,13 @@ async fn test_alter_st_partition_key_change_and_remove_reject_with_downstream() 
     db.refresh_st_with_retry("guard_change_up").await;
     db.refresh_st_with_retry("guard_change_down").await;
     db.assert_st_matches_query(
+        "guard_change_up",
+        "SELECT event_day, category, SUM(id) AS total FROM guard_change_src GROUP BY event_day, category",
+    )
+    .await;
+    db.assert_st_matches_query(
         "guard_change_down",
-        "SELECT id, category FROM guard_change_src",
+        "SELECT event_day, category, SUM(id) AS total FROM guard_change_src GROUP BY event_day, category",
     )
     .await;
 }
