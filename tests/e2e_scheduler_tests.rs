@@ -403,7 +403,10 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
              WHERE pgt_name = 'scheduler_cut_st'",
         )
         .await;
-    assert!(needs_reinit, "normal partition removal must request REINITIALIZE");
+    assert!(
+        needs_reinit,
+        "normal partition removal must request REINITIALIZE"
+    );
 
     let source_oid: i64 = db
         .query_scalar("SELECT 'scheduler_cut_src'::regclass::oid::bigint")
