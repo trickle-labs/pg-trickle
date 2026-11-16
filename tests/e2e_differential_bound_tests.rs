@@ -1,13 +1,12 @@
-//! Regression tests for issue #1437: live DVM sources must be at the
-//! exact NEW LSN bound, not the later MERGE statement's MVCC snapshot.
+//! Regression for #1437: the CDC upper LSN and every live source read
+//! must represent the same logical input boundary.
 //!
-//! A SHARE lock on the stream table forces the refresh to pause between
-//! taking its WAL bound and applying its MERGE. A source writer commits
-//! after the bound. The refresh must neither use the future row early nor
-//! leave it in materialized state after subsequent bounded windows.
+//! The existing input_boundary test barrier pauses a manual refresh *after*
+//! it chooses the new frontier and *before* its staged CDC / MERGE. Writers
+//! commit in that gap. The first refresh must exclude those changes, and
+//! subsequent bounded refreshes must converge without FULL fallback.
 //!
-//! Run:
-//! cargo test --test e2e_differential_bound_tests -- --nocapture
+//! Run: cargo test --test e2e_differential_bound_tests -- --nocapture
 
 mod e2e;
 
@@ -15,60 +14,125 @@ use e2e::E2eDb;
 use sqlx::{PgPool, Postgres, pool::PoolConnection};
 use std::time::Duration;
 
-async fn refresh_differential(pool: &PgPool, st: &'static str) {
-    let mut conn = pool.acquire().await.expect("refresh connection");
+const INPUT_BOUNDARY: i32 = 1;
+
+async fn refresh_with_optional_barrier(pool: &PgPool, st: &'static str, barrier: bool) {
+    let mut connection = pool.acquire().await.expect("acquire refresh session");
     sqlx::query("SET pg_trickle.refresh_strategy = 'differential'")
-        .execute(&mut *conn)
+        .execute(&mut *connection)
         .await
         .expect("force differential strategy");
-    let sql = format!("SELECT pgtrickle.refresh_stream_table('{st}')");
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .execute(&mut *conn)
+    if barrier {
+        sqlx::query("SET pg_trickle.test_chaos_phase = 'input_boundary'")
+            .execute(&mut *connection)
+            .await
+            .expect("set input boundary test phase");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SET pg_trickle.test_chaos_for_table = '{st}'"
+        )))
+        .execute(&mut *connection)
         .await
-        .expect("bounded differential refresh");
+        .expect("enable input boundary test barrier");
+    }
+    sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
+        .bind(st)
+        .execute(&mut *connection)
+        .await
+        .expect("differential refresh");
 }
 
-async fn hold_stream_share_lock(db: &E2eDb, stream: &'static str) -> PoolConnection<Postgres> {
-    let mut conn = db.pool.acquire().await.expect("stream lock connection");
-    sqlx::query("BEGIN")
-        .execute(&mut *conn)
-        .await
-        .expect("begin blocker");
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "LOCK TABLE {stream} IN SHARE MODE"
-    )))
-    .execute(&mut *conn)
+async fn pgt_id(db: &E2eDb, st: &'static str) -> i32 {
+    let id: i64 = sqlx::query_scalar(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $1",
+    )
+    .bind(st)
+    .fetch_one(&db.pool)
     .await
-    .expect("lock stream table");
-    conn
+    .expect("read stream pgt id");
+    i32::try_from(id).expect("fixture pgt id fits advisory lock key")
 }
 
-async fn wait_until_refresh_blocked(db: &E2eDb) {
+async fn hold_boundary(db: &E2eDb, id: i32) -> (PoolConnection<Postgres>, i32) {
+    let mut connection = db.pool.acquire().await.expect("acquire barrier connection");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *connection)
+        .await
+        .expect("read blocker backend pid");
+    sqlx::query("SELECT pg_advisory_lock($1, $2)")
+        .bind(id)
+        .bind(INPUT_BOUNDARY)
+        .execute(&mut *connection)
+        .await
+        .expect("hold input boundary");
+    (connection, pid)
+}
+
+async fn wait_for_input_boundary(db: &E2eDb, id: i32, blocker_pid: i32) {
+    let pattern = format!("pgt_atomicity:{id}:input_boundary:%");
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS( \
-                   SELECT 1 FROM pg_stat_activity \
-                   WHERE state = 'active' \
-                     AND wait_event_type = 'Lock' \
-                     AND query LIKE '%pgtrickle.refresh_stream_table%' \
-                     AND pid <> pg_backend_pid())",
+            let observed: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a \
+                 WHERE a.application_name LIKE $1 AND a.wait_event_type = 'Lock' \
+                   AND $2 = ANY(pg_blocking_pids(a.pid)))",
             )
+            .bind(&pattern)
+            .bind(blocker_pid)
             .fetch_one(&db.pool)
             .await
-            .expect("query blocked refresh");
-            if waiting {
+            .expect("inspect advisory barrier");
+            if observed {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("refresh did not block at the stream-table lock");
+    .expect("manual refresh did not stop after its input LSN bound");
+}
+
+async fn release_boundary(connection: &mut PoolConnection<Postgres>, id: i32) {
+    let released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1, $2)")
+        .bind(id)
+        .bind(INPUT_BOUNDARY)
+        .fetch_one(&mut **connection)
+        .await
+        .expect("release input boundary");
+    assert!(released, "advisory barrier must have been held");
+}
+
+async fn start_bounded_refresh(
+    db: &E2eDb,
+    st: &'static str,
+) -> (PoolConnection<Postgres>, i32, tokio::task::JoinHandle<()>) {
+    let id = pgt_id(db, st).await;
+    let (blocker, pid) = hold_boundary(db, id).await;
+    let pool = db.pool.clone();
+    let task = tokio::spawn(async move {
+        refresh_with_optional_barrier(&pool, st, true).await;
+    });
+    wait_for_input_boundary(db, id, pid).await;
+    (blocker, id, task)
+}
+
+async fn finish_bounded_refresh(
+    blocker: &mut PoolConnection<Postgres>,
+    id: i32,
+    task: tokio::task::JoinHandle<()>,
+) {
+    release_boundary(blocker, id).await;
+    tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("bounded refresh timed out")
+        .expect("bounded refresh task panicked");
+}
+
+async fn refresh_normally(db: &E2eDb, st: &'static str) {
+    refresh_with_optional_barrier(&db.pool, st, false).await;
 }
 
 async fn assert_no_full_fallback(db: &E2eDb, st: &'static str) {
-    let full_fallbacks: i64 = sqlx::query_scalar(
+    let fallbacks: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM pgtrickle.pgt_refresh_history \
          WHERE was_full_fallback = true \
            AND pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $1)",
@@ -77,89 +141,139 @@ async fn assert_no_full_fallback(db: &E2eDb, st: &'static str) {
     .fetch_one(&db.pool)
     .await
     .expect("read refresh history");
-    assert_eq!(full_fallbacks, 0, "reproduction must stay on differential path");
+    assert_eq!(fallbacks, 0, "race must not be hidden by a FULL fallback");
 }
 
-async fn run_extremum_test(minimum: bool) {
+async fn extremum_case(minimum: bool) {
     let db = E2eDb::new().await.with_extension().await;
-    db.execute("CREATE TABLE bound_src (id integer PRIMARY KEY, g integer, v numeric)")
+    db.execute("CREATE TABLE bound_src(id int PRIMARY KEY, g int, v numeric)")
         .await;
-    db.execute(
-        "INSERT INTO bound_src \
-         SELECT i, i % 3, i FROM generate_series(1, 30) i",
-    )
-    .await;
-    let aggregate = if minimum { "min" } else { "max" };
-    let defining_query = format!(
-        "SELECT g, {aggregate}(v) AS ex, sum(v) AS s, count(*) AS n \
+    db.execute("INSERT INTO bound_src SELECT i, i % 3, i FROM generate_series(1, 30) i")
+        .await;
+    let function = if minimum { "min" } else { "max" };
+    let query = format!(
+        "SELECT g, {function}(v) AS ex, sum(v) AS s, count(*) AS n \
          FROM bound_src GROUP BY g"
     );
-    db.create_st("bound_ext_st", &defining_query, "1h", "DIFFERENTIAL")
+    db.create_st("bound_ext_st", &query, "1h", "DIFFERENTIAL")
         .await;
-
-    // Delete the old extremum in the first window, then pause its MERGE.
+    // First window deletes a real old extremum (the rescan is required).
     if minimum {
         db.execute("DELETE FROM bound_src WHERE id = 3").await;
     } else {
         db.execute("DELETE FROM bound_src WHERE id = 30").await;
     }
-    let mut blocker = hold_stream_share_lock(&db, "bound_ext_st").await;
-    let refresh_pool = db.pool.clone();
-    let refresh = tokio::spawn(async move {
-        refresh_differential(&refresh_pool, "bound_ext_st").await;
-    });
-    wait_until_refresh_blocked(&db).await;
 
-    // This row is AFTER the first window bound. It must never appear in
-    // the rescan for the first window, even when visible to a later snapshot.
-    let writer_pool = db.pool.clone();
+    let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_ext_st").await;
+    // Committed after the new frontier but before DVM executes.
     let future = if minimum { -1000 } else { 1000 };
-    let writer = tokio::spawn(async move {
-        sqlx::query("INSERT INTO bound_src VALUES (9999, 0, $1)")
-            .bind(future)
-            .execute(&writer_pool)
-            .await
-            .expect("insert future extreme");
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    sqlx::query("COMMIT")
-        .execute(&mut *blocker)
+    sqlx::query("INSERT INTO bound_src VALUES (9999, 0, $1)")
+        .bind(future)
+        .execute(&db.pool)
         .await
-        .expect("release blocker");
-    tokio::time::timeout(Duration::from_secs(30), async {
-        refresh.await.expect("refresh task");
-        writer.await.expect("writer task");
-    })
-    .await
-    .expect("concurrency reproduction timed out");
+        .expect("commit future extreme");
+    finish_bounded_refresh(&mut blocker, id, refresh).await;
 
-    // The future extremum is transient: INSERT and DELETE cancel in the
-    // next bounded window. A stale rescan value would persist indefinitely.
+    // Even though the source now contains a future extreme, this materialized
+    // result corresponds to the earlier NEW frontier, not the live source.
+    let ex: i64 = sqlx::query_scalar(
+        "SELECT ex::bigint FROM bound_ext_st WHERE g = 0",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read bounded extreme");
+    assert_eq!(ex, if minimum { 6 } else { 27 });
+
+    // In the next window that temporary row is both inserted and deleted.
+    // No further delta will repair a wrongly included extremum.
     db.execute("DELETE FROM bound_src WHERE id = 9999").await;
-    refresh_differential(&db.pool, "bound_ext_st").await;
-    refresh_differential(&db.pool, "bound_ext_st").await;
-    db.assert_st_matches_query("bound_ext_st", &defining_query)
-        .await;
+    refresh_normally(&db, "bound_ext_st").await;
+    refresh_normally(&db, "bound_ext_st").await;
+    db.assert_st_matches_query("bound_ext_st", &query).await;
     assert_no_full_fallback(&db, "bound_ext_st").await;
 }
 
 #[tokio::test]
-async fn max_does_not_retain_future_deleted_extreme() {
-    run_extremum_test(false).await;
+async fn max_excludes_future_insert_and_converges() {
+    extremum_case(false).await;
 }
 
 #[tokio::test]
-async fn min_does_not_retain_future_deleted_extreme() {
-    run_extremum_test(true).await;
+async fn min_excludes_future_insert_and_converges() {
+    extremum_case(true).await;
 }
 
 #[tokio::test]
-async fn join_counts_future_partner_once() {
+async fn max_restores_future_deleted_row_in_current_window() {
     let db = E2eDb::new().await.with_extension().await;
-    db.execute("CREATE TABLE bound_a(id integer PRIMARY KEY, k integer, g integer)")
+    db.execute("CREATE TABLE bound_del_src(id int PRIMARY KEY, g int, v int)")
         .await;
-    db.execute("CREATE TABLE bound_b(id integer PRIMARY KEY, k integer, w integer)")
+    db.execute(
+        "INSERT INTO bound_del_src SELECT i, i % 3, i FROM generate_series(1, 30) i",
+    )
+    .await;
+    let query = "SELECT g, max(v) AS ex, sum(v) AS s, count(*) AS n \
+                 FROM bound_del_src GROUP BY g";
+    db.create_st("bound_delete_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("DELETE FROM bound_del_src WHERE id = 30").await;
+    let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_delete_st").await;
+
+    // The next largest value is deleted *after* the new frontier. A bounded
+    // rescan must restore its D image even though the live table lacks it.
+    db.execute("DELETE FROM bound_del_src WHERE id = 27").await;
+    finish_bounded_refresh(&mut blocker, id, refresh).await;
+    let ex: i32 = sqlx::query_scalar("SELECT ex FROM bound_delete_st WHERE g = 0")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read bounded max after future delete");
+    assert_eq!(ex, 27);
+
+    refresh_normally(&db, "bound_delete_st").await;
+    db.assert_st_matches_query("bound_delete_st", query).await;
+    assert_no_full_fallback(&db, "bound_delete_st").await;
+}
+
+#[tokio::test]
+async fn max_undoes_future_update_before_replaying_it() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE bound_upd_src(id int PRIMARY KEY, g int, v int)")
+        .await;
+    db.execute(
+        "INSERT INTO bound_upd_src SELECT i, i % 3, i FROM generate_series(1, 30) i",
+    )
+    .await;
+    let query = "SELECT g, max(v) AS ex, sum(v) AS s, count(*) AS n \
+                 FROM bound_upd_src GROUP BY g";
+    db.create_st("bound_update_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("DELETE FROM bound_upd_src WHERE id = 30").await;
+    let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_update_st").await;
+    db.execute("UPDATE bound_upd_src SET v = 1000 WHERE id = 27").await;
+    finish_bounded_refresh(&mut blocker, id, refresh).await;
+    let max_before: i32 = sqlx::query_scalar(
+        "SELECT ex FROM bound_update_st WHERE g = 0",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read as-of max before update");
+    assert_eq!(max_before, 27);
+    refresh_normally(&db, "bound_update_st").await;
+    db.assert_st_matches_query("bound_update_st", query).await;
+    let max_after: i32 = sqlx::query_scalar("SELECT ex FROM bound_update_st WHERE g = 0")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read max after update replay");
+    assert_eq!(max_after, 1000);
+    assert_no_full_fallback(&db, "bound_update_st").await;
+}
+
+#[tokio::test]
+async fn join_counts_future_partner_only_in_next_window() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE bound_a(id int PRIMARY KEY, k int, g int)")
+        .await;
+    db.execute("CREATE TABLE bound_b(id int PRIMARY KEY, k int, w int)")
         .await;
     db.execute("INSERT INTO bound_a SELECT i, i, i % 3 FROM generate_series(1, 30) i")
         .await;
@@ -170,35 +284,29 @@ async fn join_counts_future_partner_once() {
     db.create_st("bound_join_st", query, "1h", "DIFFERENTIAL")
         .await;
 
-    // A joins no row in the first window; B is committed after its bound.
     db.execute("INSERT INTO bound_a VALUES (100, 100, 0)").await;
-    let mut blocker = hold_stream_share_lock(&db, "bound_join_st").await;
-    let refresh_pool = db.pool.clone();
-    let refresh = tokio::spawn(async move {
-        refresh_differential(&refresh_pool, "bound_join_st").await;
-    });
-    wait_until_refresh_blocked(&db).await;
-    let writer_pool = db.pool.clone();
-    let writer = tokio::spawn(async move {
-        sqlx::query("INSERT INTO bound_b VALUES (100, 100, 5)")
-            .execute(&writer_pool)
-            .await
-            .expect("insert future join partner");
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    sqlx::query("COMMIT")
-        .execute(&mut *blocker)
-        .await
-        .expect("release blocker");
-    tokio::time::timeout(Duration::from_secs(30), async {
-        refresh.await.expect("refresh task");
-        writer.await.expect("writer task");
-    })
-    .await
-    .expect("join concurrency reproduction timed out");
+    let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_join_st").await;
+    db.execute("INSERT INTO bound_b VALUES (100, 100, 5)").await;
+    finish_bounded_refresh(&mut blocker, id, refresh).await;
 
-    refresh_differential(&db.pool, "bound_join_st").await;
-    refresh_differential(&db.pool, "bound_join_st").await;
+    // A had no partner at new_bound. Its partner is not counted early.
+    let before: (i64, i64) = sqlx::query_as(
+        "SELECT n, sw::bigint FROM bound_join_st WHERE g = 0",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read as-of join");
+    assert_eq!(before, (10, 10));
+
+    refresh_normally(&db, "bound_join_st").await;
+    refresh_normally(&db, "bound_join_st").await;
+    let after: (i64, i64) = sqlx::query_as(
+        "SELECT n, sw::bigint FROM bound_join_st WHERE g = 0",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read final join");
+    assert_eq!(after, (11, 15));
     db.assert_st_matches_query("bound_join_st", query).await;
     assert_no_full_fallback(&db, "bound_join_st").await;
 }
