@@ -919,6 +919,36 @@ fn generate_delta_query_impl(
         );
     }
 
+    // Every live source access in a deferred delta must use the state at the
+    // NEW LSN, not the current MERGE snapshot. DeltaStage prepares these
+    // relations under a source lock before any refresh SQL is executed.
+    if let Some(pgt_id) = stage_pgt_id {
+        ctx.set_source_bound_tables(
+            source_oids.iter().map(|oid| {
+                (
+                    *oid,
+                    format!(
+                        "pg_temp.{}",
+                        diff::quote_ident(
+                            &crate::refresh::delta_stage::DeltaStage::bounded_table_name(
+                                pgt_id, *oid
+                            )
+                        )
+                    ),
+                )
+            }).collect(),
+        );
+    } else if let Some(tables) = source_stage_tables {
+        // The centroid path uses per-execution suffixed stage names.
+        // Its bounded snapshot is created using the same nonce.
+        ctx.set_source_bound_tables(
+            tables.iter().map(|(oid, name)| {
+                (*oid, name.replace("__pgt_cd_", "__pgt_bound_")
+                           .replace("__pgt_cdc_", "__pgt_bound_"))
+            }).collect(),
+        );
+    }
+
     // DAG-4: Apply any active bypass table mappings from fused-chain execution.
     ctx.set_st_bypass_tables(crate::refresh::get_st_bypass_tables());
 
@@ -1243,6 +1273,24 @@ pub fn generate_delta_query_cached(
                     )
                 })
                 .collect(),
+        );
+
+        // Cacheable SQL refers to the same stable frontier-aligned source
+        // stage name that DeltaStage prepares on every execution.
+        ctx.set_source_bound_tables(
+            source_oids.iter().map(|oid| {
+                (
+                    *oid,
+                    format!(
+                        "pg_temp.{}",
+                        diff::quote_ident(
+                            &crate::refresh::delta_stage::DeltaStage::bounded_table_name(
+                                pgt_id, *oid
+                            )
+                        )
+                    ),
+                )
+            }).collect(),
         );
 
         let (template_sql, output_columns, diff_dedup, diff_has_key_changed) =
