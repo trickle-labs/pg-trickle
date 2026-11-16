@@ -4759,7 +4759,7 @@ mod recovery_generation_unit_tests {
 
 #[cfg(feature = "pg_test")]
 #[pgrx::pg_schema]
-mod recovery_generation_pg_tests {
+mod pg_tests {
     use super::*;
 
     #[pg_test]
