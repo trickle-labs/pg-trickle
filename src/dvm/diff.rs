@@ -860,7 +860,22 @@ impl DiffContext {
             return Ok(());
         }
         for &oid in source_oids {
-            let source = crate::cdc::get_qualified_table_name(pgrx::pg_sys::Oid::from(oid))?;
+            // Generated DVM SQL always quotes BOTH components, even for
+            // ordinary lowercase names. PostgreSQL format('%I') omits
+            // optional quotes, so its result would silently fail to match
+            // the generated FROM/JOIN reference. Force the same canonical
+            // spelling here, escaping embedded identifier quotes.
+            let source = pgrx::Spi::get_one_with_args::<String>(
+                "SELECT pg_catalog.format('\"%s\".\"%s\"', \
+                    pg_catalog.replace(n.nspname::text, '\"', '\"\"'), \
+                    pg_catalog.replace(c.relname::text, '\"', '\"\"')) \
+                 FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.oid = $1",
+                &[pgrx::pg_sys::Oid::from(oid).into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::NotFound(format!("source relation with OID {oid}")))?;
             self.cache.source_scan_relations.insert(oid, source);
         }
         Ok(())
