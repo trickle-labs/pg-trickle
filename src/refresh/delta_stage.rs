@@ -472,7 +472,9 @@ impl DeltaStage {
             );
             let select = if keyless {
                 let identity = crate::refresh::codegen::build_content_hash_expr_for_domain(
-                    "s.", hash_columns, "KEYLESS_ROW"
+                    "s.",
+                    hash_columns,
+                    "KEYLESS_ROW",
                 );
                 format!(
                     "{common}, __pgt_net AS (\
@@ -490,15 +492,20 @@ impl DeltaStage {
                      UNION ALL SELECT {first_cols} FROM __pgt_first f \
                      JOIN __pgt_net n ON n.__pgt_row_id = f.__pgt_row_id \
                      CROSS JOIN LATERAL generate_series(1::bigint, GREATEST(-n.net, 0)) g",
-                    cols = cols.iter().map(|c| format!("l.{}", quote_ident(c)))
-                        .collect::<Vec<_>>().join(", "),
+                    cols = cols
+                        .iter()
+                        .map(|c| format!("l.{}", quote_ident(c)))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 )
             } else {
                 let identity = if is_st {
                     "s.__pgt_row_id".to_string()
                 } else {
                     crate::refresh::codegen::build_content_hash_expr_for_domain(
-                        "s.", hash_columns, "SCAN_KEY"
+                        "s.",
+                        hash_columns,
+                        "SCAN_KEY",
                     )
                 };
                 format!(
