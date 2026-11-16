@@ -295,7 +295,6 @@ async fn test_refresh_rejects_error_status() {
     );
 }
 
-
 /// #1438: A permanent worker failure is handled asynchronously by the
 /// dispatcher. A successful resume must not be revoked by that old job on the
 /// following scheduler tick. Exercise the real parallel scheduler and verify

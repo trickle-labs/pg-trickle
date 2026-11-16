@@ -1055,7 +1055,11 @@ impl StreamTableMeta {
              WHERE pgt_id = $2 AND recovery_generation = $3 \
                AND status IN ('ACTIVE', 'INITIALIZING') \
              RETURNING pgt_id",
-            &[error_message.into(), pgt_id.into(), recovery_generation.into()],
+            &[
+                error_message.into(),
+                pgt_id.into(),
+                recovery_generation.into(),
+            ],
         )
         .map(|updated| updated.is_some())
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
@@ -4778,8 +4782,10 @@ mod recovery_generation_pg_tests {
         )
         .expect("read first generation")
         .expect("generation exists");
-        Spi::run("UPDATE pgtrickle.pgt_stream_tables SET status = 'ERROR' WHERE pgt_name = 'fence_st'")
-            .expect("simulate worker failure");
+        Spi::run(
+            "UPDATE pgtrickle.pgt_stream_tables SET status = 'ERROR' WHERE pgt_name = 'fence_st'",
+        )
+        .expect("simulate worker failure");
         Spi::run("SELECT pgtrickle.resume_stream_table('public.fence_st')").expect("resume");
         let resumed_generation = Spi::get_one::<i64>(
             "SELECT recovery_generation FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fence_st'",
@@ -4788,14 +4794,22 @@ mod recovery_generation_pg_tests {
         .expect("generation exists");
         assert_eq!(resumed_generation, first_generation + 1);
 
-        assert!(!StreamTableMeta::lock_for_scheduled_failure(pgt_id, first_generation)
-            .expect("reject late worker failure"));
-        assert!(!StreamTableMeta::set_error_state_if_generation(pgt_id, "stale", first_generation)
-            .expect("reject late dispatcher failure"));
-        assert!(StreamTableMeta::lock_for_scheduled_failure(pgt_id, resumed_generation)
-            .expect("accept current worker failure"));
-        assert!(StreamTableMeta::set_error_state_if_generation(pgt_id, "current", resumed_generation)
-            .expect("accept current dispatcher failure"));
+        assert!(
+            !StreamTableMeta::lock_for_scheduled_failure(pgt_id, first_generation)
+                .expect("reject late worker failure")
+        );
+        assert!(
+            !StreamTableMeta::set_error_state_if_generation(pgt_id, "stale", first_generation)
+                .expect("reject late dispatcher failure")
+        );
+        assert!(
+            StreamTableMeta::lock_for_scheduled_failure(pgt_id, resumed_generation)
+                .expect("accept current worker failure")
+        );
+        assert!(
+            StreamTableMeta::set_error_state_if_generation(pgt_id, "current", resumed_generation)
+                .expect("accept current dispatcher failure")
+        );
         let status = Spi::get_one::<String>(
             "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fence_st'",
         )
@@ -4805,12 +4819,27 @@ mod recovery_generation_pg_tests {
 
         Spi::run("SELECT pgtrickle.resume_stream_table('public.fence_st')").expect("resume again");
         let job_id = SchedulerJob::enqueue(
-            1, "fence-test", "singleton", &[pgt_id], pgt_id, 1, 1, 1, "0/0",
+            1,
+            "fence-test",
+            "singleton",
+            &[pgt_id],
+            pgt_id,
+            1,
+            1,
+            1,
+            "0/0",
         )
         .expect("enqueue after resume");
-        let job = SchedulerJob::get_by_id(job_id).expect("read job").expect("job exists");
-        assert_eq!(job.generation_for_member(pgt_id), Some(resumed_generation + 1));
-        assert!(!StreamTableMeta::set_error_state_if_generation(pgt_id, "stale", resumed_generation)
-            .expect("previous generation still fenced"));
+        let job = SchedulerJob::get_by_id(job_id)
+            .expect("read job")
+            .expect("job exists");
+        assert_eq!(
+            job.generation_for_member(pgt_id),
+            Some(resumed_generation + 1)
+        );
+        assert!(
+            !StreamTableMeta::set_error_state_if_generation(pgt_id, "stale", resumed_generation)
+                .expect("previous generation still fenced")
+        );
     }
 }

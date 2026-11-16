@@ -324,7 +324,8 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
                     let Some(generation) = job.generation_for_member(pgt_id) else {
                         warning!(
                             "pg_trickle: job {} has no recovery fence for member {}, skipping stale failure",
-                            job_id, pgt_id,
+                            job_id,
+                            pgt_id,
                         );
                         continue;
                     };
@@ -334,7 +335,9 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
                         Err(e) => {
                             warning!(
                                 "pg_trickle: job {} could not lock member {} for failure: {}",
-                                job_id, pgt_id, e,
+                                job_id,
+                                pgt_id,
+                                e,
                             );
                             continue;
                         }
@@ -915,7 +918,8 @@ pub(super) fn parallel_dispatch_tick(
                             let Some(generation) = job.generation_for_member(pgt_id) else {
                                 warning!(
                                     "pg_trickle: failed job {} lacks recovery fence for member {}",
-                                    job_id, pgt_id,
+                                    job_id,
+                                    pgt_id,
                                 );
                                 continue;
                             };
@@ -926,7 +930,9 @@ pub(super) fn parallel_dispatch_tick(
                             ) {
                                 warning!(
                                     "pg_trickle: failed job {} could not mark member {} ERROR: {}",
-                                    job_id, pgt_id, e,
+                                    job_id,
+                                    pgt_id,
+                                    e,
                                 );
                             }
                         }
