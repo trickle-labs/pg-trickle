@@ -558,6 +558,14 @@ pub(crate) fn adopt_database_instance(instance_id: &str) -> Result<(), PgTrickle
 }
 
 pub(crate) fn invalidate_after_snapshot_restore(pgt_id: i64) -> Result<(), PgTrickleError> {
+    // An outstanding resnapshot token belongs to the pre-restore baseline.
+    // Marking its consumer INVALIDATED alone is insufficient: ACK can still
+    // accept the token and reactivate a mirror copied before storage changed.
+    // Both changes run in restore's subtransaction and roll back together.
+    spi(Spi::run_with_args(
+        "DELETE FROM pgtrickle.pgt_output_delta_resnapshots WHERE pgt_id = $1",
+        &[pgt_id.into()],
+    ))?;
     spi(Spi::run_with_args(
         "UPDATE pgtrickle.pgt_output_delta_consumers
             SET state = 'INVALIDATED', state_reason = 'SNAPSHOT_RESTORED', updated_at = now()
