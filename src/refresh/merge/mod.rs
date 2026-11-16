@@ -2291,6 +2291,15 @@ pub fn execute_differential_refresh_with_tuning(
             new_frontier,
         )?,
     };
+    // A centroid SOURCE_AHEAD fallback is a current-source group rescan,
+    // not a bounded delta evaluation. If the CDC cut splits one UPDATE's
+    // D/I images, reversing only the later D image would resurrect an old
+    // vector value and make the fallback incorrect. Keep the existing
+    // live-rescan contract for this exceptional, unbound centroid path;
+    // ordinary DVM plans continue to use frontier-aligned source stages.
+    if centroid_fallback == Some("SOURCE_AHEAD_OF_FRONTIER") {
+        delta_stage.use_live_sources_for_centroid_rescan(st, &dependencies)?;
+    }
     let t_staging = staging_start.elapsed();
     let t0 = Instant::now();
 
