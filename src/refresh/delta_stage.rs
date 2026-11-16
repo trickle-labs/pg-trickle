@@ -265,8 +265,6 @@ impl DeltaStage {
         self.names.insert(source_oid, qualified_name);
         Ok(())
     }
-}
-
 
     /// Build a source snapshot at the NEW logical frontier. If no post-bound
     /// changes are visible, a temporary view avoids copying a large relation.
@@ -431,12 +429,17 @@ impl DeltaStage {
             };
             let projected = cols
                 .iter()
+                .filter(|c| *c != "__pgt_row_id")
                 .map(|c| format!("f.{}", quote_ident(c)))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .collect::<Vec<_>>();
+            let selected = if projected.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", projected.join(", "))
+            };
             let first = format!(
-                "SELECT DISTINCT ON (f.__pgt_row_id) f.__pgt_row_id, f.action, \
-                 {projected} FROM __pgt_future f \
+                "SELECT DISTINCT ON (f.__pgt_row_id) f.__pgt_row_id, f.action\
+                 {selected} FROM __pgt_future f \
                  ORDER BY f.__pgt_row_id, f.change_id"
             );
             let common = format!(
@@ -498,6 +501,9 @@ impl DeltaStage {
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Ok(())
     }
+
+}
+
 
 fn frontier_lsn(frontier: &Frontier, key: &str) -> String {
     frontier
