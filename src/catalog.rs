@@ -2274,10 +2274,21 @@ fn query_partition_snapshot(
             .get::<pgrx::JsonB>(1)
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .ok_or_else(|| PgTrickleError::InternalError("missing partition OIDs".into()))?;
-        let descendants = row
+        let mut descendants = row
             .get::<pgrx::JsonB>(2)
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .ok_or_else(|| PgTrickleError::InternalError("missing partition bounds".into()))?;
+        let entries = descendants.0.as_array_mut().ok_or_else(|| {
+            PgTrickleError::InternalError("invalid partition snapshot array".into())
+        })?;
+        for entry in entries {
+            let range = entry
+                .get("bound_node")
+                .and_then(serde_json::Value::as_str)
+                .and_then(crate::dvm::retention::decode_catalog_range)
+                .unwrap_or(serde_json::Value::Null);
+            entry["range"] = range;
+        }
         Ok((oids.0, descendants.0))
     })
 }
@@ -2444,7 +2455,12 @@ pub fn store_column_snapshot_for_pgt_id(
     let (snapshot, fingerprint) = build_column_snapshot(source_oid)?;
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_dependencies \
-         SET column_snapshot = $1, schema_fingerprint = $2 \
+         SET column_snapshot = CASE \
+               WHEN column_snapshot ? 'partition_retention' \
+               THEN pg_catalog.jsonb_set($1, '{partition_retention}', \
+                                        column_snapshot->'partition_retention', true) \
+               ELSE $1 END, \
+             schema_fingerprint = $2 \
          WHERE pgt_id = $3 AND source_relid = $4",
         &[
             snapshot.into(),

@@ -55,6 +55,7 @@ pub mod diff;
 pub mod operators;
 pub mod parser;
 pub mod planner;
+pub mod retention;
 pub mod row_id;
 pub mod row_id_v2;
 pub mod schema;

@@ -88,6 +88,108 @@ use crate::{cdc, config, wal_decoder};
 
 // ── Event trigger handler ──────────────────────────────────────────────────
 
+/// Suspend tracked consumers before the first transaction of a concurrent detach commits.
+#[pg_guard]
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn pg_trickle_on_ddl_start_wrapper(
+    fcinfo: pg_sys::FunctionCallInfo,
+) -> pg_sys::Datum {
+    if !matches!(
+        classify_alter_table(fcinfo),
+        AlterTableHint::DetachPartitionConcurrent
+    ) {
+        return pg_sys::Datum::null();
+    }
+    // SAFETY: classify_alter_table verified that the live event contains an
+    // AlterTableStmt; PostgreSQL owns its RangeVar for the duration of this call.
+    let parent = unsafe {
+        let event = &*((*fcinfo).context as *const pg_sys::EventTriggerData);
+        let stmt = &*(event.parsetree as *const pg_sys::AlterTableStmt);
+        pg_sys::RangeVarGetRelidExtended(
+            stmt.relation,
+            pg_sys::AccessShareLock as pg_sys::LOCKMODE,
+            if stmt.missing_ok {
+                pg_sys::RVROption::RVR_MISSING_OK
+            } else {
+                0
+            },
+            None,
+            std::ptr::null_mut(),
+        )
+    };
+    if parent == pg_sys::InvalidOid {
+        return pg_sys::Datum::null();
+    }
+    let owner = Spi::get_one::<pg_sys::Oid>(
+        "SELECT extowner FROM pg_catalog.pg_extension \
+         WHERE extname OPERATOR(pg_catalog.=) 'pg_trickle'::pg_catalog.name",
+    )
+    .unwrap_or_else(|error| pgrx::error!("pg_trickle: cannot resolve extension owner: {}", error))
+    .unwrap_or_else(|| pgrx::error!("pg_trickle: extension owner is missing"));
+    let mut saved_user = pg_sys::InvalidOid;
+    let mut saved_context = 0;
+    // SAFETY: PostgreSQL backend identity and GUC state are restored by the
+    // finally block, including on PostgreSQL ERROR or Rust unwind.
+    let level = unsafe {
+        pg_sys::GetUserIdAndSecContext(&mut saved_user, &mut saved_context);
+        let level = pg_sys::NewGUCNestLevel();
+        pg_sys::SetUserIdAndSecContext(
+            owner,
+            saved_context | pg_sys::SECURITY_LOCAL_USERID_CHANGE as i32,
+        );
+        level
+    };
+    let suspend = || -> Result<(), PgTrickleError> {
+        Spi::run("SET LOCAL search_path = pg_catalog, pgtrickle, pg_temp")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut sources = tracked_partition_ancestors(parent)?;
+        sources.push(parent);
+        let mut ids = Vec::new();
+        for source in sources {
+            ids.extend(find_downstream_pgt_ids(source)?);
+        }
+        ids.extend(find_transitive_downstream_sts(&ids)?);
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        for id in ids {
+            suspend_for_source_ddl_checked(
+                id,
+                AlterReasonCode::DependencyAmbiguous,
+                "concurrent partition detach",
+            )?;
+            shmem::signal_dag_invalidation(id);
+        }
+        shmem::bump_cache_generation();
+        Ok(())
+    };
+    // SAFETY: This is PostgreSQL's GUC and role restoration protocol; the
+    // closure never executes user-provided SQL while the owner is active.
+    let result = unsafe {
+        pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(suspend))
+            .finally(move || {
+                pg_sys::AtEOXact_GUC(false, level);
+                pg_sys::SetUserIdAndSecContext(saved_user, saved_context);
+            })
+            .execute()
+    };
+    if let Err(error) = result {
+        pgrx::error!(
+            "pg_trickle: cannot suspend consumers before concurrent detach: {}",
+            error
+        );
+    }
+    pg_sys::Datum::null()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pg_finfo_pg_trickle_on_ddl_start_wrapper() -> &'static pg_sys::Pg_finfo_record {
+    static V1: pg_sys::Pg_finfo_record = pg_sys::Pg_finfo_record { api_version: 1 };
+    &V1
+}
+
 /// Handler for the `ddl_command_end` event trigger.
 ///
 /// This function is called by PostgreSQL after any DDL statement completes.
@@ -218,8 +320,11 @@ fn classify_alter_table(fcinfo: pg_sys::FunctionCallInfo) -> AlterTableHint {
                 if partition.concurrent {
                     AlterTableHint::DetachPartitionConcurrent
                 } else {
-                    AlterTableHint::Other
+                    AlterTableHint::DetachPartition
                 }
+            }
+            pg_sys::AlterTableType::AT_DetachPartitionFinalize => {
+                AlterTableHint::DetachPartitionConcurrent
             }
             _ => AlterTableHint::Other,
         }
@@ -248,6 +353,7 @@ enum AlterTableHint {
         schema: Option<String>,
         relation: String,
     },
+    DetachPartition,
     // The first phase of CONCURRENTLY can commit before the detach finishes.
     // Do not reinitialize from an intermediate parent snapshot.
     DetachPartitionConcurrent,
@@ -405,7 +511,26 @@ fn handle_ddl_command(cmd: &DdlCommand, alter_table_hint: &AlterTableHint) {
     match cmd.kind {
         DdlCommandKind::AlterTable => {
             let identity = cmd.object_identity.as_deref().unwrap_or("unknown");
-            handle_alter_table(cmd.objid, identity, alter_table_hint);
+            let ancestors = if matches!(
+                alter_table_hint,
+                AlterTableHint::AttachPartition { .. }
+                    | AlterTableHint::DetachPartition
+                    | AlterTableHint::DetachPartitionConcurrent
+            ) {
+                tracked_partition_ancestors(cmd.objid).unwrap_or_else(|e| {
+                    pgrx::error!(
+                        "pg_trickle: cannot inspect partition ancestors of {}: {}",
+                        identity,
+                        e
+                    )
+                })
+            } else {
+                Vec::new()
+            };
+            handle_alter_table(cmd.objid, cmd.objid, identity, alter_table_hint);
+            for ancestor in ancestors {
+                handle_alter_table(ancestor, cmd.objid, identity, alter_table_hint);
+            }
         }
         DdlCommandKind::CreateTable => {
             handle_created_table(cmd);
@@ -967,7 +1092,12 @@ fn attached_partition_is_empty(
 
 /// Handle ALTER TABLE on an object that may be an upstream dependency or
 /// a ST storage table itself.
-fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &AlterTableHint) {
+fn handle_alter_table(
+    objid: pg_sys::Oid,
+    partition_parent: pg_sys::Oid,
+    identity: &str,
+    alter_table_hint: &AlterTableHint,
+) {
     // Check if this OID is an upstream source of any ST.
     // Fail closed when relevance cannot be determined: allowing the DDL could
     // leave a tracked source's CDC and downstream stream tables inconsistent.
@@ -1008,7 +1138,7 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &Alt
     let trigger_cdc = effective_cdc_mode.as_deref() == Some("trigger");
     let empty_partition_attach = if trigger_cdc {
         if let AlterTableHint::AttachPartition { schema, relation } = alter_table_hint {
-            match attached_partition_is_empty(objid, schema.as_deref(), relation) {
+            match attached_partition_is_empty(partition_parent, schema.as_deref(), relation) {
                 Ok(empty) => empty,
                 Err(e) => {
                     pgrx::debug1!(
@@ -1205,6 +1335,23 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &Alt
                 suspended_pgt_ids.push(*pgt_id);
             }
             SchemaChangeKind::PartitionChange => {
+                if matches!(alter_table_hint, AlterTableHint::DetachPartition)
+                    && crate::dvm::retention::finish_prepared_retained_detach(*pgt_id, objid)
+                        .unwrap_or_else(|e| {
+                            pgrx::error!("pg_trickle: retained partition detach failed: {}", e)
+                        })
+                {
+                    crate::catalog::store_column_snapshot_for_pgt_id(*pgt_id, objid)
+                        .unwrap_or_else(|e| {
+                            pgrx::error!(
+                                "pg_trickle: cannot snapshot retained partition detach: {}",
+                                e
+                            )
+                        });
+                    shmem::signal_dag_invalidation(*pgt_id);
+                    shmem::bump_cache_generation();
+                    continue;
+                }
                 // Partition membership changes have no row-level CDC events.
                 // Rebuild from the parent query instead of applying deltas.
                 // CONCURRENTLY is two-phase: until its second phase commits,
@@ -1362,33 +1509,42 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &Alt
 /// Suspend a stream table when source DDL cannot be proven compatible with
 /// its stored dependency identity. The code is durable and health-check-visible.
 fn suspend_for_source_ddl(pgt_id: i64, code: AlterReasonCode, identity: &str) {
+    if let Err(e) = suspend_for_source_ddl_checked(pgt_id, code, identity) {
+        pgrx::warning!(
+            "pg_trickle_ddl_tracker: failed to suspend ST {} for {} on {}: {}",
+            pgt_id,
+            code.as_str(),
+            identity,
+            e
+        );
+    }
+}
+
+fn suspend_for_source_ddl_checked(
+    pgt_id: i64,
+    code: AlterReasonCode,
+    identity: &str,
+) -> Result<(), PgTrickleError> {
     let reason = code.as_str();
     let detail = format!(
         "{reason}: source {identity} changed in a way that cannot be proven safe. \
          Repair the source and run ALTER STREAM TABLE or the documented resume action."
     );
-    if let Err(e) = Spi::run_with_args(
+    Spi::run_with_args(
         "UPDATE pgtrickle.pgt_stream_tables \
             SET status = 'SUSPENDED', refresh_reason = $1, refresh_reason_detail = $2, \
                 last_error_message = $2, last_error_at = now(), updated_at = now() \
           WHERE pgt_id = $3",
         &[reason.into(), detail.into(), pgt_id.into()],
-    ) {
-        pgrx::warning!(
-            "pg_trickle_ddl_tracker: failed to suspend ST {} for {} on {}: {}",
-            pgt_id,
-            reason,
-            identity,
-            e
-        );
-    } else {
-        pgrx::warning!(
-            "pg_trickle_ddl_tracker: ST {} suspended ({}) after source DDL on {}",
-            pgt_id,
-            reason,
-            identity,
-        );
-    }
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    pgrx::warning!(
+        "pg_trickle_ddl_tracker: ST {} suspended ({}) after source DDL on {}",
+        pgt_id,
+        reason,
+        identity,
+    );
+    Ok(())
 }
 
 /// Detect a rename or schema move using the existing stable source identity.
@@ -1407,13 +1563,33 @@ fn source_identity_changed(source_oid: pg_sys::Oid, pgt_id: i64) -> bool {
     }
 }
 
-/// A replacement table may reuse the old logical name while receiving a new
-/// OID. Keep the old dependency suspended until an explicit repair updates it.
-/// Refresh source ancestry after CREATE TABLE ... PARTITION OF.
-///
-/// There is no ALTER TABLE event on the parent for this DDL form. Use the
-/// *current* inheritance chain to update every tracked ancestor, including
-/// roots several partition levels above the newly created child.
+/// Find tracked sources above a partitioned table in the current hierarchy.
+fn tracked_partition_ancestors(child_oid: pg_sys::Oid) -> Result<Vec<pg_sys::Oid>, PgTrickleError> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "WITH RECURSIVE ancestors(relid) AS ( \
+                   SELECT inhparent FROM pg_catalog.pg_inherits WHERE inhrelid = $1 \
+                   UNION \
+                   SELECT i.inhparent FROM pg_catalog.pg_inherits i \
+                   JOIN ancestors a ON i.inhrelid = a.relid \
+                 ) SELECT DISTINCT d.source_relid FROM ancestors a \
+                   JOIN pgtrickle.pgt_dependencies d ON d.source_relid = a.relid \
+                   WHERE d.source_type = 'TABLE' ORDER BY d.source_relid",
+                None,
+                &[child_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        rows.map(|row| {
+            row.get::<pg_sys::Oid>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("missing partition ancestor".into()))
+        })
+        .collect()
+    })
+}
+
+/// Refresh tracked ancestry after CREATE TABLE ... PARTITION OF.
 fn snapshot_created_partition_ancestry(child_oid: pg_sys::Oid) -> Result<(), PgTrickleError> {
     let ancestors: Vec<(i64, pg_sys::Oid)> = Spi::connect(|client| {
         let rows = client
@@ -2171,13 +2347,13 @@ fn find_transitive_downstream_sts(initial_pgt_ids: &[i64]) -> Result<Vec<i64>, P
 
     while let Some(pgt_id) = queue.pop_front() {
         // Get the storage table OID for this ST.
-        let relid = match get_pgt_relid(pgt_id) {
-            Ok(Some(oid)) => oid,
-            _ => continue,
+        let Some(relid) = get_pgt_relid(pgt_id)? else {
+            continue;
         };
 
         // Find STs that depend on this ST's storage table.
-        let downstream = find_downstream_pgt_ids(relid)?;
+        let mut downstream = find_downstream_pgt_ids(relid)?;
+        downstream.extend(StDependency::get_downstream_pgt_ids(relid)?);
         for child_id in downstream {
             if visited.insert(child_id) {
                 cascade_ids.push(child_id);

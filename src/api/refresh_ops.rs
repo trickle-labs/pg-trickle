@@ -328,6 +328,14 @@ pub(crate) fn execute_manual_refresh(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<ManualRefreshResult, PgTrickleError> {
+    if matches!(st.status, StStatus::Suspended | StStatus::Error) {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "stream table {}.{} is {}; resume it before refreshing",
+            schema,
+            table_name,
+            st.status.as_str(),
+        )));
+    }
     refresh::reset_execution_state();
 
     // EC-25/EC-26: Set the internal_refresh flag so DML guard triggers

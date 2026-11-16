@@ -838,6 +838,7 @@ fn alter_stream_table_query(
     caller_search_path: &str,
 ) -> Result<(), PgTrickleError> {
     lock_alter_target(st.pgt_id)?;
+    crate::dvm::retention::ensure_query_change_allowed(st.pgt_id)?;
     resume_or_rollback_shadow_build(st.pgt_id, schema)?;
     let st = StreamTableMeta::get_by_id(st.pgt_id)?
         .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={}", st.pgt_id)))?;
@@ -1425,6 +1426,7 @@ fn alter_stream_table_partition_key(
     new_partition_key: Option<&str>,
 ) -> Result<(), PgTrickleError> {
     lock_alter_target(st.pgt_id)?;
+    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
     let locked_st = StreamTableMeta::get_by_id(st.pgt_id)?
         .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={}", st.pgt_id)))?;
     let st = &locked_st;
@@ -3454,6 +3456,15 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     let (schema, table_name, st) =
         resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
 
+    // Serialize resume with DDL's pre-detach suspension before checking state.
+    Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR UPDATE",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {schema}.{table_name}")))?;
+    let st = StreamTableMeta::get_by_id(st.pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {schema}.{table_name}")))?;
     if st.status != StStatus::Suspended && st.status != StStatus::Error {
         return Err(PgTrickleError::InvalidArgument(format!(
             "stream table {}.{} is not suspended or in error state (current status: {})",
@@ -3462,6 +3473,35 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
             st.status.as_str(),
         )));
     }
+
+    let pending_detach = Spi::get_one_with_args::<bool>(
+        "WITH RECURSIVE upstream(pgt_id) AS ( \
+           SELECT $1::bigint UNION \
+           SELECT parent.pgt_id FROM upstream u \
+           JOIN pgtrickle.pgt_dependencies d ON d.pgt_id = u.pgt_id \
+           JOIN pgtrickle.pgt_stream_tables parent ON parent.pgt_relid = d.source_relid \
+           WHERE d.source_type = 'STREAM_TABLE' \
+         ), sources(oid) AS ( \
+           SELECT d.source_relid FROM upstream u \
+           JOIN pgtrickle.pgt_dependencies d ON d.pgt_id = u.pgt_id \
+           WHERE d.source_type = 'TABLE' UNION \
+           SELECT i.inhrelid FROM sources s \
+           JOIN pg_catalog.pg_inherits i ON i.inhparent = s.oid \
+         ) \
+         SELECT EXISTS (SELECT 1 FROM sources s \
+           JOIN pg_catalog.pg_inherits i ON i.inhparent = s.oid \
+           WHERE i.inhdetachpending)",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(true);
+    if pending_detach {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "cannot resume {schema}.{table_name} while a source partition detach is pending; \
+             finish DETACH PARTITION CONCURRENTLY or FINALIZE first"
+        )));
+    }
+    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
 
     let deps = StDependency::get_for_st(st.pgt_id)?;
     let source_oids: Vec<_> = deps

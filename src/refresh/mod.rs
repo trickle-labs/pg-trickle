@@ -187,6 +187,7 @@ pub(crate) fn ensure_full_policy(
     st: &StreamTableMeta,
     transition: &str,
 ) -> Result<(), PgTrickleError> {
+    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
     if current_full_policy() == FullPolicy::Error {
         return Err(PgTrickleError::IntegrationError {
             code: "PGT_EXT_FULL_POLICY",

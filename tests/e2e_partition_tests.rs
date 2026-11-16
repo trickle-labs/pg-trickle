@@ -694,6 +694,1031 @@ async fn test_partition_create_child_after_stream_then_direct_drop() {
 }
 
 #[tokio::test]
+async fn test_partition_nested_detach_rebuilds_root_and_downstream() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute(
+        "CREATE TABLE nested_detach_source (d DATE NOT NULL, region TEXT NOT NULL, amount INT NOT NULL)
+         PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE nested_detach_year PARTITION OF nested_detach_source
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01') PARTITION BY LIST (region)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE nested_detach_eu PARTITION OF nested_detach_year FOR VALUES IN ('EU')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE nested_detach_us PARTITION OF nested_detach_year FOR VALUES IN ('US')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO nested_detach_source VALUES ('2025-01-01','EU',10), ('2025-01-02','US',20)",
+    )
+    .await;
+    let query = "SELECT region, SUM(amount) AS total FROM nested_detach_source GROUP BY region";
+    db.create_st("nested_detach_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st(
+        "nested_detach_downstream",
+        "SELECT region, total FROM nested_detach_st",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("CREATE TABLE nested_detach_ca (LIKE nested_detach_source INCLUDING ALL)")
+        .await;
+    db.execute(
+        "ALTER TABLE nested_detach_year ATTACH PARTITION nested_detach_ca FOR VALUES IN ('CA')",
+    )
+    .await;
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'nested_detach_st'",
+        )
+        .await;
+    assert!(!needs_reinit, "empty nested attachment should not rebuild");
+
+    let mut tx = db.pool.begin().await.expect("begin nested detach rollback");
+    sqlx::query("ALTER TABLE nested_detach_year DETACH PARTITION nested_detach_eu")
+        .execute(&mut *tx)
+        .await
+        .expect("detach nested partition in transaction");
+    tx.rollback().await.expect("roll back nested detach");
+    db.assert_st_matches_query("nested_detach_st", query).await;
+    db.execute("ALTER TABLE nested_detach_year DETACH PARTITION nested_detach_eu")
+        .await;
+    let states: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT pgt_name, needs_reinit FROM pgtrickle.pgt_stream_tables \
+         WHERE pgt_name IN ('nested_detach_st', 'nested_detach_downstream') ORDER BY pgt_name",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read nested detach recovery states");
+    assert_eq!(
+        states,
+        vec![
+            ("nested_detach_downstream".into(), true),
+            ("nested_detach_st".into(), true),
+        ]
+    );
+    db.refresh_st_with_retry("nested_detach_st").await;
+    db.refresh_st_with_retry("nested_detach_downstream").await;
+    let actions: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT s.pgt_name, h.action, h.status FROM pgtrickle.pgt_stream_tables s \
+         JOIN LATERAL (SELECT action, status FROM pgtrickle.pgt_refresh_history \
+           WHERE pgt_id = s.pgt_id ORDER BY refresh_id DESC LIMIT 1) h ON true \
+         WHERE s.pgt_name IN ('nested_detach_st', 'nested_detach_downstream') ORDER BY s.pgt_name",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read nested detach refresh actions");
+    assert_eq!(
+        actions,
+        vec![
+            (
+                "nested_detach_downstream".into(),
+                "REINITIALIZE".into(),
+                "COMPLETED".into()
+            ),
+            (
+                "nested_detach_st".into(),
+                "REINITIALIZE".into(),
+                "COMPLETED".into()
+            ),
+        ]
+    );
+    db.assert_st_matches_query("nested_detach_st", query).await;
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT region, total FROM nested_detach_downstream ORDER BY region")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read downstream aggregates after nested detach");
+    assert_eq!(rows, vec![("US".into(), 20)]);
+    db.execute(
+        "ALTER TABLE nested_detach_year ATTACH PARTITION nested_detach_eu FOR VALUES IN ('EU')",
+    )
+    .await;
+    db.refresh_st_with_retry("nested_detach_st").await;
+    db.refresh_st_with_retry("nested_detach_downstream").await;
+    db.assert_st_matches_query("nested_detach_st", query).await;
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT region, total FROM nested_detach_downstream ORDER BY region")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read downstream aggregates after nested reattachment");
+    assert_eq!(rows, vec![("EU".into(), 10), ("US".into(), 20)]);
+
+    db.execute("ALTER TABLE nested_detach_year DETACH PARTITION nested_detach_eu CONCURRENTLY")
+        .await;
+    let statuses: Vec<(String, String)> = sqlx::query_as(
+        "SELECT pgt_name, status FROM pgtrickle.pgt_stream_tables \
+         WHERE pgt_name IN ('nested_detach_st', 'nested_detach_downstream') ORDER BY pgt_name",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read nested concurrent detach statuses");
+    assert_eq!(
+        statuses,
+        vec![
+            ("nested_detach_downstream".into(), "SUSPENDED".into()),
+            ("nested_detach_st".into(), "SUSPENDED".into()),
+        ]
+    );
+    db.execute("SELECT pgtrickle.resume_stream_table('nested_detach_st')")
+        .await;
+    db.execute("SELECT pgtrickle.resume_stream_table('nested_detach_downstream')")
+        .await;
+    db.refresh_st_with_retry("nested_detach_st").await;
+    db.refresh_st_with_retry("nested_detach_downstream").await;
+    db.assert_st_matches_query("nested_detach_st", query).await;
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT region, total FROM nested_detach_downstream ORDER BY region")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read downstream aggregates after concurrent detach recovery");
+    assert_eq!(rows, vec![("US".into(), 20)]);
+}
+
+#[tokio::test]
+async fn test_partition_nested_concurrent_detach_suspends_during_pending_phase() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute(
+        "CREATE TABLE nested_pending_source (d DATE NOT NULL, region TEXT NOT NULL)
+         PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE nested_pending_year PARTITION OF nested_pending_source
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01') PARTITION BY LIST (region)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE nested_pending_eu PARTITION OF nested_pending_year FOR VALUES IN ('EU')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE nested_pending_us PARTITION OF nested_pending_year FOR VALUES IN ('US')",
+    )
+    .await;
+    db.execute("INSERT INTO nested_pending_source VALUES ('2025-01-01','EU'), ('2025-01-02','US')")
+        .await;
+    let query = "SELECT region, COUNT(*) AS n FROM nested_pending_source GROUP BY region";
+    db.create_st("nested_pending_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st(
+        "nested_pending_downstream",
+        "SELECT region, n FROM nested_pending_st",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    let mut reader = db.pool.begin().await.expect("begin old source snapshot");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *reader)
+        .await
+        .expect("set snapshot isolation");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM nested_pending_source")
+        .fetch_one(&mut *reader)
+        .await
+        .expect("hold old partition snapshot");
+    assert_eq!(count, 2);
+    let pool = db.pool.clone();
+    let detach = tokio::spawn(async move {
+        sqlx::query(
+            "ALTER TABLE nested_pending_year DETACH PARTITION nested_pending_eu CONCURRENTLY",
+        )
+        .execute(&pool)
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let pending: bool = db
+                .query_scalar(
+                    "SELECT COALESCE((SELECT inhdetachpending FROM pg_inherits \
+                     WHERE inhrelid = 'nested_pending_eu'::regclass), false)",
+                )
+                .await;
+            if pending {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("concurrent detach enters pending phase");
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'nested_pending_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED");
+    let frontier: serde_json::Value = db
+        .query_scalar(
+            "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'nested_pending_st'",
+        )
+        .await;
+    let error = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('nested_pending_st')")
+        .await
+        .expect_err("refresh must reject the pending detach");
+    assert!(error.to_string().to_lowercase().contains("suspend"));
+    let error = db
+        .try_execute("SELECT pgtrickle.resume_stream_table('nested_pending_st')")
+        .await
+        .expect_err("resume must reject the pending detach");
+    assert!(error.to_string().contains("detach is pending"));
+    let error = db
+        .try_execute("SELECT pgtrickle.resume_stream_table('nested_pending_downstream')")
+        .await
+        .expect_err("downstream resume must reject the pending detach");
+    assert!(error.to_string().contains("detach is pending"));
+    let after: serde_json::Value = db
+        .query_scalar(
+            "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'nested_pending_st'",
+        )
+        .await;
+    assert_eq!(after, frontier);
+    reader.commit().await.expect("release old source snapshot");
+    detach
+        .await
+        .expect("join concurrent detach")
+        .expect("finish concurrent detach");
+    db.execute("SELECT pgtrickle.resume_stream_table('nested_pending_st')")
+        .await;
+    db.refresh_st_with_retry("nested_pending_st").await;
+    db.execute("SELECT pgtrickle.resume_stream_table('nested_pending_downstream')")
+        .await;
+    db.refresh_st_with_retry("nested_pending_downstream").await;
+    db.assert_st_matches_query("nested_pending_st", query).await;
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT region, n FROM nested_pending_downstream ORDER BY region")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read downstream after pending detach recovery");
+    assert_eq!(rows, vec![("US".into(), 1)]);
+}
+
+#[tokio::test]
+async fn test_partition_concurrent_detach_resolves_caller_search_path() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("CREATE ROLE partition_owner LOGIN").await;
+    db.execute("CREATE SCHEMA partition_tenant AUTHORIZATION partition_owner")
+        .await;
+    db.execute("CREATE TABLE partition_tenant.events (d DATE NOT NULL) PARTITION BY RANGE (d)")
+        .await;
+    db.execute(
+        "CREATE TABLE partition_tenant.events_old PARTITION OF partition_tenant.events
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE partition_tenant.events_new PARTITION OF partition_tenant.events
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    db.execute("ALTER TABLE partition_tenant.events OWNER TO partition_owner")
+        .await;
+    db.execute("ALTER TABLE partition_tenant.events_old OWNER TO partition_owner")
+        .await;
+    db.execute("ALTER TABLE partition_tenant.events_new OWNER TO partition_owner")
+        .await;
+    db.execute("INSERT INTO partition_tenant.events VALUES ('2025-01-01'), ('2026-01-01')")
+        .await;
+    db.create_st(
+        "tenant_events_st",
+        "SELECT COUNT(*) AS n FROM partition_tenant.events",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let mut conn = db.pool.acquire().await.expect("acquire caller connection");
+    sqlx::query("SET ROLE partition_owner")
+        .execute(&mut *conn)
+        .await
+        .expect("set non-superuser role");
+    sqlx::query("SET search_path = partition_tenant, pg_catalog")
+        .execute(&mut *conn)
+        .await
+        .expect("set caller search path");
+    sqlx::query("ALTER TABLE events DETACH PARTITION events_old CONCURRENTLY")
+        .execute(&mut *conn)
+        .await
+        .expect("detach as source owner using unqualified names");
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("restore role");
+    sqlx::query("RESET search_path")
+        .execute(&mut *conn)
+        .await
+        .expect("restore search path");
+    drop(conn);
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'tenant_events_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED");
+    db.execute("SELECT pgtrickle.resume_stream_table('tenant_events_st')")
+        .await;
+    db.refresh_st_with_retry("tenant_events_st").await;
+    let count: i64 = db.query_scalar("SELECT n FROM tenant_events_st").await;
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn test_retained_history_blocks_rebuild_query_change_and_restore() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retained_guard_src (d DATE NOT NULL, amount INT NOT NULL) PARTITION BY RANGE (d)")
+        .await;
+    db.execute("CREATE TABLE retained_guard_old PARTITION OF retained_guard_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')")
+        .await;
+    db.execute("INSERT INTO retained_guard_src VALUES ('2025-01-01', 10)")
+        .await;
+    db.create_st(
+        "retained_guard_st",
+        "SELECT d, SUM(amount) AS total FROM retained_guard_src GROUP BY d",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let source_oid: i64 = db
+        .query_scalar("SELECT 'retained_guard_src'::regclass::oid::bigint")
+        .await;
+    let empty_state = serde_json::json!({
+        "version": 1, "mode": "RETAIN",
+        "candidate": {"output_column": "d", "bucket": "EXACT", "source_type_oid": 1082,
+                      "source_oid": source_oid, "source_column": "d"},
+        "cutoff": {"kind": "DATE", "value": 2}, "query_hash": 0, "sealed": []
+    });
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_dependencies SET column_snapshot = \
+         jsonb_set(column_snapshot, '{partition_retention}', $1::jsonb) \
+         WHERE source_relid = 'retained_guard_src'::regclass",
+    )
+    .bind(&empty_state)
+    .execute(&db.pool)
+    .await
+    .expect("install unsealed-state fixture");
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET refresh_mode = 'FULL' WHERE pgt_name = 'retained_guard_st'")
+        .await;
+    db.refresh_st_with_retry("retained_guard_st").await;
+    let action: (String, String) = sqlx::query_as(
+        "SELECT action, status FROM pgtrickle.pgt_refresh_history \
+         WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retained_guard_st') \
+         ORDER BY refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read unsealed FULL refresh");
+    assert_eq!(action, ("FULL".into(), "COMPLETED".into()));
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET refresh_mode = 'DIFFERENTIAL' WHERE pgt_name = 'retained_guard_st'")
+        .await;
+    db.execute("SELECT pgtrickle.snapshot_stream_table('retained_guard_st', 'public.retained_guard_snapshot')")
+        .await;
+    let mut state = empty_state.clone();
+    state["sealed"] = serde_json::json!([{
+        "lower": {"kind": "DATE", "value": 1},
+        "upper": {"kind": "DATE", "value": 2}
+    }]);
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_dependencies SET column_snapshot = \
+         jsonb_set(column_snapshot, '{partition_retention}', $1::jsonb) \
+         WHERE source_relid = 'retained_guard_src'::regclass",
+    )
+    .bind(&state)
+    .execute(&db.pool)
+    .await
+    .expect("install sealed-state fixture");
+    db.execute("CREATE TABLE retained_guard_new PARTITION OF retained_guard_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')")
+        .await;
+    let saved: serde_json::Value = db
+        .query_scalar("SELECT column_snapshot->'partition_retention' FROM pgtrickle.pgt_dependencies WHERE source_relid = 'retained_guard_src'::regclass")
+        .await;
+    assert_eq!(
+        saved, state,
+        "partition metadata refresh must preserve sealed state"
+    );
+    let frontier: serde_json::Value = db
+        .query_scalar(
+            "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retained_guard_st'",
+        )
+        .await;
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET refresh_mode = 'FULL' WHERE pgt_name = 'retained_guard_st'")
+        .await;
+    let error = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('retained_guard_st')")
+        .await
+        .expect_err("FULL must reject sealed history");
+    assert!(error.to_string().contains("retained partition history"));
+    let error = db
+        .try_execute("SELECT pgtrickle.alter_stream_table('retained_guard_st', query => 'SELECT d, COUNT(*) AS n FROM retained_guard_src GROUP BY d')")
+        .await
+        .expect_err("query replacement must reject retention configuration");
+    assert!(error.to_string().contains("disable partition retention"));
+    let error = db
+        .try_execute(
+            "SELECT pgtrickle.alter_stream_table('retained_guard_st', partition_by => 'd')",
+        )
+        .await
+        .expect_err("storage replacement must reject sealed history");
+    assert!(error.to_string().contains("retained partition history"));
+    let error = db
+        .try_execute("SELECT pgtrickle.restore_from_snapshot('retained_guard_st', 'public.retained_guard_snapshot')")
+        .await
+        .expect_err("restore must reject sealed history");
+    assert!(error.to_string().contains("retained partition history"));
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET status = 'SUSPENDED' WHERE pgt_name = 'retained_guard_st'")
+        .await;
+    let error = db
+        .try_execute("SELECT pgtrickle.resume_stream_table('retained_guard_st')")
+        .await
+        .expect_err("resume cannot trigger a rebuild of sealed history");
+    assert!(error.to_string().contains("retained partition history"));
+    let after: serde_json::Value = db
+        .query_scalar(
+            "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retained_guard_st'",
+        )
+        .await;
+    assert_eq!(after, frontier);
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT d::text, total FROM retained_guard_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read protected retained output");
+    assert_eq!(rows, vec![("2025-01-01".into(), 10)]);
+}
+
+#[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retention_cut_src (id INT NOT NULL, d DATE NOT NULL, account TEXT NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE retention_cut_old PARTITION OF retention_cut_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE retention_cut_live PARTITION OF retention_cut_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute(
+        "INSERT INTO retention_cut_src VALUES (1,'2025-06-01','a',10), (2,'2026-06-01','a',20)",
+    )
+    .await;
+    let query = "SELECT d, account, SUM(amount) AS total, COUNT(*) AS n FROM retention_cut_src GROUP BY 1,2";
+    db.create_st("retention_cut_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    let (pgt_id, query_hash): (i64, i64) = sqlx::query_as(
+        "SELECT pgt_id, defining_query_hash FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retention_cut_st'",
+    ).fetch_one(&db.pool).await.expect("read stream identity");
+    let (source_oid, target_oid, cutoff): (i64, i64, i32) = sqlx::query_as(
+        "SELECT 'retention_cut_src'::regclass::oid::bigint, 'retention_cut_old'::regclass::oid::bigint, DATE '2026-01-01' - DATE '2000-01-01'",
+    ).fetch_one(&db.pool).await.expect("read source identity and cutoff");
+    let state = serde_json::json!({
+        "version": 1, "mode": "RETAIN", "candidate": {
+            "output_column": "d", "bucket": "EXACT", "source_type_oid": 1082,
+            "source_oid": source_oid, "source_column": "d"
+        }, "cutoff": {"kind": "DATE", "value": cutoff}, "query_hash": query_hash, "sealed": []
+    });
+    sqlx::query("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_retention}', $1::jsonb) WHERE pgt_id = $2 AND source_relid = $3::bigint::oid")
+        .bind(&state).bind(pgt_id).bind(source_oid).execute(&db.pool).await.expect("install retention fixture");
+
+    let mut writer = db.pool.begin().await.expect("begin source writer");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("read writer PID");
+    sqlx::query("LOCK TABLE retention_cut_src IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
+        .await
+        .expect("hold writer lock");
+    let mut prepare_conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire preparation connection");
+    let prepare_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *prepare_conn)
+        .await
+        .expect("read preparation PID");
+    let prepare = tokio::spawn(async move {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT pgtrickle.retention_prepare_test($1, $2::bigint::oid)",
+        )
+        .bind(pgt_id)
+        .bind(target_oid)
+        .fetch_one(&mut *prepare_conn)
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid = $1 AND relation = 'retention_cut_src'::regclass AND mode = 'ShareLock' AND NOT granted AND $2 = ANY(pg_catalog.pg_blocking_pids(pid)))")
+                .bind(prepare_pid).bind(writer_pid).fetch_one(&db.pool).await.expect("inspect preparation lock");
+            if waiting { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }).await.expect("preparation waits for writer");
+    sqlx::query("INSERT INTO retention_cut_src VALUES (3,'2025-06-01','a',5)")
+        .execute(&mut *writer)
+        .await
+        .expect("write after preparation starts");
+    let writer_lsn: String = sqlx::query_scalar("SELECT pg_current_wal_insert_lsn()::text")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("capture writer WAL position");
+    writer.commit().await.expect("commit source writer");
+    let prepared = prepare
+        .await
+        .expect("join preparation")
+        .expect("prepare retention cut");
+    let bound = prepared["safe_bound"].as_str().expect("prepared WAL bound");
+    let covers_writer: bool = sqlx::query_scalar("SELECT $1::pg_lsn >= $2::pg_lsn")
+        .bind(bound)
+        .bind(&writer_lsn)
+        .fetch_one(&db.pool)
+        .await
+        .expect("compare WAL positions");
+    assert!(
+        covers_writer,
+        "the protected cut must follow the drained writer"
+    );
+    let history: (String, String, bool) = sqlx::query_as("SELECT action, status, was_full_fallback FROM pgtrickle.pgt_refresh_history WHERE pgt_id = $1 ORDER BY refresh_id DESC LIMIT 1")
+        .bind(pgt_id).fetch_one(&db.pool).await.expect("read completed preparation action");
+    assert_eq!(history, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    db.assert_st_matches_query("retention_cut_st", query).await;
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT d::text, account, total, n FROM retention_cut_st ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read prepared aggregates");
+    assert_eq!(
+        rows,
+        vec![
+            ("2025-06-01".into(), "a".into(), 15, 2),
+            ("2026-06-01".into(), "a".into(), 20, 1)
+        ]
+    );
+    db.execute("INSERT INTO retention_cut_src VALUES (4,'2026-06-01','a',7)")
+        .await;
+    db.refresh_st_until_converged("retention_cut_st").await;
+    db.assert_st_matches_query("retention_cut_st", query).await;
+    let history: (String, String, bool) = sqlx::query_as("SELECT action, status, was_full_fallback FROM pgtrickle.pgt_refresh_history WHERE pgt_id = $1 ORDER BY refresh_id DESC LIMIT 1")
+        .bind(pgt_id).fetch_one(&db.pool).await.expect("read subsequent refresh action");
+    assert_eq!(history, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+
+    let baseline: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT d::text, account, SUM(amount), COUNT(*) FROM retention_cut_src GROUP BY d, account ORDER BY d, account",
+    ).fetch_all(&db.pool).await.expect("capture independent pre-removal baseline");
+    let frontier: serde_json::Value =
+        sqlx::query_scalar("SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1")
+            .bind(pgt_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("capture pre-removal frontier");
+    let error = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT pgtrickle.retention_detach_test($1, $2::bigint::oid, true)",
+    )
+    .bind(pgt_id)
+    .bind(target_oid)
+    .fetch_one(&db.pool)
+    .await
+    .expect_err("intentional removal rollback");
+    assert!(
+        error
+            .to_string()
+            .contains("intentional retention test rollback")
+    );
+    let attached: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent = 'retention_cut_src'::regclass AND inhrelid = 'retention_cut_old'::regclass)").await;
+    assert!(attached);
+    let after_rollback: serde_json::Value =
+        sqlx::query_scalar("SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1")
+            .bind(pgt_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read rolled-back frontier");
+    assert_eq!(after_rollback, frontier);
+    let saved: serde_json::Value = sqlx::query_scalar("SELECT column_snapshot->'partition_retention' FROM pgtrickle.pgt_dependencies WHERE pgt_id = $1")
+        .bind(pgt_id).fetch_one(&db.pool).await.expect("read rolled-back policy state");
+    assert_eq!(saved, state);
+
+    let finalized: serde_json::Value =
+        sqlx::query_scalar("SELECT pgtrickle.retention_detach_test($1, $2::bigint::oid, false)")
+            .bind(pgt_id)
+            .bind(target_oid)
+            .fetch_one(&db.pool)
+            .await
+            .expect("detach and finalize retained range");
+    let lower: i32 = db
+        .query_scalar("SELECT DATE '2025-01-01' - DATE '2000-01-01'")
+        .await;
+    assert_eq!(
+        finalized["sealed"],
+        serde_json::json!([{
+            "lower": {"kind": "DATE", "value": lower}, "upper": {"kind": "DATE", "value": cutoff}
+        }])
+    );
+    let saved: serde_json::Value = sqlx::query_scalar("SELECT column_snapshot->'partition_retention' FROM pgtrickle.pgt_dependencies WHERE pgt_id = $1")
+        .bind(pgt_id).fetch_one(&db.pool).await.expect("read committed retained state");
+    assert_eq!(saved, finalized);
+    let retained: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT d::text, account, total, n FROM retention_cut_st ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read retained historical output");
+    assert_eq!(retained, baseline);
+    let status: (String, bool) = sqlx::query_as(
+        "SELECT status, needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+    )
+    .bind(pgt_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read retained stream state");
+    assert_eq!(status, ("ACTIVE".into(), false));
+    db.execute("INSERT INTO retention_cut_src VALUES (5,'2026-06-01','a',3)")
+        .await;
+    let mut expected = baseline.clone();
+    expected[1].2 += 3;
+    expected[1].3 += 1;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        db.refresh_st_with_retry("retention_cut_st").await;
+        let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+            "SELECT d::text, account, total, n FROM retention_cut_st ORDER BY d, account",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .expect("read retained and live aggregates");
+        if rows == expected {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "retained differential refresh did not converge: {rows:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let history: (String, String, bool) = sqlx::query_as("SELECT action, status, was_full_fallback FROM pgtrickle.pgt_refresh_history WHERE pgt_id = $1 ORDER BY refresh_id DESC LIMIT 1")
+        .bind(pgt_id).fetch_one(&db.pool).await.expect("read post-retention refresh action");
+    assert_eq!(history, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET refresh_mode = 'FULL' WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retention_cut_st')")
+        .await;
+    let error = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('retention_cut_st')")
+        .await
+        .expect_err("FULL must not erase retained history");
+    assert!(error.to_string().contains("retained partition history"));
+}
+
+#[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_candidates_use_actual_postgresql_query_trees() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE retention_parse_ts (event_day DATE NOT NULL, occurred TIMESTAMP NOT NULL, \
+         account TEXT NOT NULL, amount INT NOT NULL) PARTITION BY RANGE (occurred)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE retention_parse_tz (occurred TIMESTAMPTZ NOT NULL, amount INT NOT NULL) \
+         PARTITION BY RANGE (occurred)",
+    )
+    .await;
+    let cases = [
+        (
+            "SELECT occurred, count(*) AS n FROM retention_parse_ts GROUP BY 1",
+            "retention_parse_ts",
+            "occurred",
+        ),
+        (
+            "SELECT account, pg_catalog.date_trunc('hour', occurred) AS hour, sum(amount) AS total, count(*) AS n FROM retention_parse_ts GROUP BY 1, 2",
+            "retention_parse_ts",
+            "occurred",
+        ),
+        (
+            "SELECT account, pg_catalog.date_trunc('hour', occurred) AS hour, sum(amount) AS total, count(*) AS n FROM retention_parse_ts GROUP BY 1, 2",
+            "retention_parse_ts",
+            "event_day",
+        ),
+        (
+            "SELECT pg_catalog.date_trunc('hour', occurred) AS hour, count(*) AS n FROM retention_parse_tz GROUP BY 1",
+            "retention_parse_tz",
+            "occurred",
+        ),
+        (
+            "SELECT pg_catalog.date_trunc('hour', occurred, 'UTC') AS hour, count(*) AS n FROM retention_parse_tz GROUP BY 1",
+            "retention_parse_tz",
+            "occurred",
+        ),
+    ];
+    let mut actual = Vec::new();
+    for (query, source, key) in cases {
+        let result: String = sqlx::query_scalar(
+            "SELECT pgtrickle.retention_candidate_test($1, $2::regclass::oid, $3)",
+        )
+        .bind(query)
+        .bind(source)
+        .bind(key)
+        .fetch_one(&db.pool)
+        .await
+        .expect("analyze real query tree");
+        actual.push(result);
+    }
+    assert_eq!(
+        actual,
+        vec![
+            "Ok(\"occurred\", Exact, 1114)",
+            "Ok(\"hour\", HourTimestamp, 1114)",
+            "Err(InvalidSourceKey)",
+            "Err(MissingProjectedGroupKey)",
+            "Ok(\"hour\", HourUtcTimestamptz, 1184)",
+        ]
+    );
+}
+
+#[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_layout_validates_actual_partition_catalog() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE layout_source (t TIMESTAMP NOT NULL, amount INT) PARTITION BY RANGE (t)",
+    )
+    .await;
+    db.execute("CREATE TABLE layout_old PARTITION OF layout_source FOR VALUES FROM ('2000-01-01 00:00') TO ('2000-01-01 01:00')")
+        .await;
+    db.execute("CREATE TABLE layout_live PARTITION OF layout_source FOR VALUES FROM ('2000-01-01 01:00') TO ('2000-01-01 02:00')")
+        .await;
+    let query = "SELECT pg_catalog.date_trunc('hour', t) AS hour, count(*) AS n FROM layout_source GROUP BY 1";
+    let actual: serde_json::Value = sqlx::query_scalar(
+        "SELECT pgtrickle.retention_layout_test($1, 'layout_source'::regclass::oid, 't', $2)",
+    )
+    .bind(query)
+    .bind(3_600_000_000_i64)
+    .fetch_one(&db.pool)
+    .await
+    .expect("validate hourly layout");
+    let oids: (i64, i64) = sqlx::query_as(
+        "SELECT 'layout_old'::regclass::oid::bigint, 'layout_live'::regclass::oid::bigint",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read partition OIDs");
+    assert_eq!(
+        actual,
+        serde_json::json!([
+            {"oid": oids.0, "lower": 0, "upper": 3_600_000_000_i64, "expired": true},
+            {"oid": oids.1, "lower": 3_600_000_000_i64, "upper": 7_200_000_000_i64, "expired": false}
+        ])
+    );
+    let partial: serde_json::Value = sqlx::query_scalar(
+        "SELECT pgtrickle.retention_layout_test($1, 'layout_source'::regclass::oid, 't', $2)",
+    )
+    .bind(query)
+    .bind(5_400_000_000_i64)
+    .fetch_one(&db.pool)
+    .await
+    .expect("validate partial-horizon overlap");
+    assert_eq!(partial, actual);
+
+    let mut tx = db.pool.begin().await.expect("begin locked layout proof");
+    let locked: serde_json::Value = sqlx::query_scalar(
+        "SELECT pgtrickle.retention_layout_test($1, 'layout_source'::regclass::oid, 't', $2)",
+    )
+    .bind(query)
+    .bind(3_600_000_000_i64)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("hold the layout lock");
+    assert_eq!(locked, actual);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sqlx::query("INSERT INTO layout_source VALUES ('2000-01-01 01:30', 1)").execute(&db.pool),
+    )
+    .await
+    .expect("layout lock must not block a source writer")
+    .expect("insert into live partition");
+    let mut ddl_conn = db.pool.acquire().await.expect("acquire DDL connection");
+    let ddl_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *ddl_conn)
+        .await
+        .expect("read DDL backend PID");
+    let ddl = tokio::spawn(async move {
+        sqlx::query("CREATE TABLE layout_future PARTITION OF layout_source FOR VALUES FROM ('2000-01-01 02:00') TO ('2000-01-01 03:00')")
+            .execute(&mut *ddl_conn)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks \
+                 WHERE pid = $1 AND relation = 'layout_source'::regclass AND NOT granted)",
+            )
+            .bind(ddl_pid)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect DDL lock wait");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("partition DDL waits for the layout proof");
+    tx.rollback().await.expect("release layout lock");
+    ddl.await
+        .expect("join partition DDL")
+        .expect("partition DDL completes after lock release");
+
+    let mut repeatable = db.pool.begin().await.expect("begin repeatable-read proof");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *repeatable)
+        .await
+        .expect("set repeatable-read isolation");
+    let error = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT pgtrickle.retention_layout_test($1, 'layout_source'::regclass::oid, 't', $2)",
+    )
+    .bind(query)
+    .bind(3_600_000_000_i64)
+    .fetch_one(&mut *repeatable)
+    .await
+    .expect_err("stale repeatable-read catalog snapshots must fail closed");
+    assert!(error.to_string().contains("READ COMMITTED"));
+    repeatable.rollback().await.expect("release failed proof");
+
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire search-path connection");
+    sqlx::query("SET search_path = public, pg_catalog")
+        .execute(&mut *conn)
+        .await
+        .expect("set unsafe catalog order");
+    let error = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT pgtrickle.retention_layout_test($1, 'public.layout_source'::regclass::oid, 't', $2)",
+    )
+    .bind(query)
+    .bind(3_600_000_000_i64)
+    .fetch_one(&mut *conn)
+    .await
+    .expect_err("untrusted operator resolution must be rejected");
+    assert!(error.to_string().contains("search_path"));
+    sqlx::query("RESET search_path")
+        .execute(&mut *conn)
+        .await
+        .expect("restore search path");
+    drop(conn);
+
+    db.execute("CREATE TABLE layout_default PARTITION OF layout_source DEFAULT")
+        .await;
+    let error = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT pgtrickle.retention_layout_test($1, 'layout_source'::regclass::oid, 't', $2)",
+    )
+    .bind(query)
+    .bind(3_600_000_000_i64)
+    .fetch_one(&db.pool)
+    .await
+    .expect_err("default partition must be rejected");
+    assert!(error.to_string().contains("no default partition"));
+
+    db.execute("CREATE TABLE layout_unaligned (t TIMESTAMP NOT NULL) PARTITION BY RANGE (t)")
+        .await;
+    db.execute("CREATE TABLE layout_unaligned_p PARTITION OF layout_unaligned FOR VALUES FROM ('2000-01-01 00:30') TO ('2000-01-01 02:00')")
+        .await;
+    let error = db
+        .try_execute("SELECT pgtrickle.retention_layout_test($$SELECT pg_catalog.date_trunc('hour', t) AS hour, count(*) AS n FROM layout_unaligned GROUP BY 1$$, 'layout_unaligned'::regclass::oid, 't', 7200000000)")
+        .await
+        .expect_err("unaligned hourly bounds must be rejected");
+    assert!(error.to_string().contains("UnalignedHour"));
+
+    db.execute("CREATE TABLE layout_misaligned (d DATE NOT NULL, t TIMESTAMP NOT NULL) PARTITION BY RANGE (d)")
+        .await;
+    db.execute("CREATE TABLE layout_misaligned_p PARTITION OF layout_misaligned FOR VALUES FROM ('2000-01-01') TO ('2000-01-02')")
+        .await;
+    let error = db
+        .try_execute("SELECT pgtrickle.retention_layout_test($$SELECT pg_catalog.date_trunc('hour', t) AS hour, count(*) AS n FROM layout_misaligned GROUP BY 1$$, 'layout_misaligned'::regclass::oid, 't', 86400000000)")
+        .await
+        .expect_err("partition and grouping keys must match");
+    assert!(error.to_string().contains("one non-null RANGE column"));
+
+    db.execute("CREATE TABLE layout_unbounded (d DATE NOT NULL) PARTITION BY RANGE (d)")
+        .await;
+    db.execute("CREATE TABLE layout_unbounded_p PARTITION OF layout_unbounded FOR VALUES FROM (MINVALUE) TO ('2000-01-01')")
+        .await;
+    let error = db
+        .try_execute("SELECT pgtrickle.retention_layout_test($$SELECT d, count(*) AS n FROM layout_unbounded GROUP BY d$$, 'layout_unbounded'::regclass::oid, 'd', 0)")
+        .await
+        .expect_err("unbounded ranges must fail closed");
+    assert!(error.to_string().contains("unsupported or unbounded"));
+}
+
+#[tokio::test]
+async fn test_partition_snapshot_decodes_timestamp_bounds_without_session_timezone() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("CREATE TABLE saved_bounds (t TIMESTAMPTZ NOT NULL) PARTITION BY RANGE (t)")
+        .await;
+    db.execute(
+        "CREATE TABLE saved_bounds_finite PARTITION OF saved_bounds \
+         FOR VALUES FROM ('1999-12-31 23:00:00+00') TO ('2000-01-01 00:00:00+00')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE saved_bounds_unbounded PARTITION OF saved_bounds \
+         FOR VALUES FROM (MINVALUE) TO ('1999-12-31 23:00:00+00')",
+    )
+    .await;
+    db.execute("CREATE TABLE saved_bounds_default PARTITION OF saved_bounds DEFAULT")
+        .await;
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire timezone connection");
+    sqlx::query("SET TIME ZONE 'America/New_York'")
+        .execute(&mut *conn)
+        .await
+        .expect("set source snapshot timezone");
+    sqlx::query(
+        "SELECT pgtrickle.create_stream_table('saved_bounds_st', \
+         'SELECT t, COUNT(*) AS n FROM saved_bounds GROUP BY t', '1h', 'DIFFERENTIAL')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("create stream with non-UTC timezone");
+    sqlx::query("SET TIME ZONE 'Asia/Tokyo'")
+        .execute(&mut *conn)
+        .await
+        .expect("change session timezone");
+    let bounds: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        "SELECT c.relname::text, entry->'range' FROM pgtrickle.pgt_dependencies d \
+         CROSS JOIN LATERAL jsonb_array_elements(d.column_snapshot->'partition_descendants') entry \
+         JOIN pg_catalog.pg_class c ON c.oid = (entry->>'oid')::oid \
+         WHERE d.source_relid = 'saved_bounds'::regclass ORDER BY c.relname",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .expect("read decoded bound values");
+    assert_eq!(
+        bounds,
+        vec![
+            ("saved_bounds_default".into(), serde_json::Value::Null),
+            (
+                "saved_bounds_finite".into(),
+                serde_json::json!({"type_oid": 1184, "lower": -3_600_000_000_i64, "upper": 0})
+            ),
+            ("saved_bounds_unbounded".into(), serde_json::Value::Null),
+        ]
+    );
+    sqlx::query("CREATE TABLE saved_local_bounds (t TIMESTAMP NOT NULL) PARTITION BY RANGE (t)")
+        .execute(&mut *conn)
+        .await
+        .expect("create local timestamp source");
+    sqlx::query(
+        "CREATE TABLE saved_local_hour PARTITION OF saved_local_bounds \
+         FOR VALUES FROM ('1999-12-31 23:00:00') TO ('2000-01-01 00:00:00')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("create local timestamp partition");
+    sqlx::query(
+        "SELECT pgtrickle.create_stream_table('saved_local_st', \
+         'SELECT t, COUNT(*) AS n FROM saved_local_bounds GROUP BY t', '1h', 'DIFFERENTIAL')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("create local timestamp stream");
+    let local: serde_json::Value = sqlx::query_scalar(
+        "SELECT entry->'range' FROM pgtrickle.pgt_dependencies d \
+         CROSS JOIN LATERAL jsonb_array_elements(d.column_snapshot->'partition_descendants') entry \
+         WHERE d.source_relid = 'saved_local_bounds'::regclass",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("read local timestamp bounds");
+    assert_eq!(
+        local,
+        serde_json::json!({"type_oid": 1114, "lower": -3_600_000_000_i64, "upper": 0})
+    );
+    sqlx::query("RESET TIME ZONE")
+        .execute(&mut *conn)
+        .await
+        .expect("restore timezone");
+}
+
+#[tokio::test]
 async fn test_partition_nested_drop_invalidates_grandparent() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute(
@@ -749,8 +1774,8 @@ async fn test_partition_nested_drop_invalidates_grandparent() {
         .expect("read saved partition bounds")
     }
 
-    let live: Vec<(i64, i64, String, String)> = sqlx::query_as(
-        "SELECT c.oid::bigint, i.inhparent::bigint, c.relpartbound::text, c.relkind::text \
+    let live: Vec<(i64, i64, String, String, String)> = sqlx::query_as(
+        "SELECT c.oid::bigint, i.inhparent::bigint, c.relpartbound::text, c.relkind::text, c.relname::text \
          FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
          WHERE i.inhparent IN ('nest_source'::regclass, 'nest_year'::regclass) \
          ORDER BY c.oid, i.inhparent",
@@ -758,11 +1783,29 @@ async fn test_partition_nested_drop_invalidates_grandparent() {
     .fetch_all(&db.pool)
     .await
     .expect("read live partition bounds");
+    let dates: (i32, i32, i32) = sqlx::query_as(
+        "SELECT DATE '2025-01-01' - DATE '2000-01-01', \
+                DATE '2026-01-01' - DATE '2000-01-01', \
+                DATE '2027-01-01' - DATE '2000-01-01'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read PostgreSQL date offsets");
     let expected = serde_json::Value::Array(
         live.iter()
-            .map(|(oid, parent, bound, kind)| {
+            .map(|(oid, parent, bound, kind, name)| {
+                let range = match name.as_str() {
+                    "nest_year" => {
+                        serde_json::json!({"type_oid": 1082, "lower": dates.0, "upper": dates.1})
+                    }
+                    "nest_other" => {
+                        serde_json::json!({"type_oid": 1082, "lower": dates.1, "upper": dates.2})
+                    }
+                    _ => serde_json::Value::Null,
+                };
                 serde_json::json!({
-                    "oid": oid, "parent_oid": parent, "bound_node": bound, "relkind": kind
+                    "oid": oid, "parent_oid": parent, "bound_node": bound, "relkind": kind,
+                    "range": range,
                 })
             })
             .collect(),

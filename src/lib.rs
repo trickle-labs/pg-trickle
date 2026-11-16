@@ -1635,6 +1635,11 @@ extension_sql!(
 -- Create event trigger functions with correct RETURNS event_trigger type.
 -- pgrx's #[pg_extern] generates RETURNS void, which PostgreSQL rejects for
 -- event triggers. We create them manually here with the correct return type.
+CREATE FUNCTION pgtrickle."_on_ddl_start"()
+    RETURNS event_trigger
+    LANGUAGE c
+    AS 'MODULE_PATHNAME', 'pg_trickle_on_ddl_start_wrapper';
+
 CREATE FUNCTION pgtrickle."_on_ddl_end"()
     RETURNS event_trigger
     SECURITY DEFINER -- nosemgrep: sql.security-definer.present — event trigger runs with pinned pgtrickle catalog search_path below.
@@ -1650,6 +1655,10 @@ CREATE FUNCTION pgtrickle."_on_sql_drop"()
     AS 'MODULE_PATHNAME', 'pg_trickle_on_sql_drop_wrapper';
 
 -- Event trigger: track ALTER TABLE on upstream sources
+CREATE EVENT TRIGGER pg_trickle_ddl_start_tracker
+    ON ddl_command_start
+    EXECUTE FUNCTION pgtrickle._on_ddl_start();
+
 CREATE EVENT TRIGGER pg_trickle_ddl_tracker
     ON ddl_command_end
     EXECUTE FUNCTION pgtrickle._on_ddl_end();
@@ -2433,6 +2442,7 @@ GRANT EXECUTE ON FUNCTION pgtrickle.worker_allocation_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.worker_pool_status() TO PUBLIC;
 
 -- trigger_entry
+REVOKE EXECUTE ON FUNCTION pgtrickle._on_ddl_start() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_ddl_end() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_sql_drop() FROM PUBLIC;
 

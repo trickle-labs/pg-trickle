@@ -752,6 +752,9 @@ fn try_fused_chain_refresh(
             Some(s) => s,
             None => continue,
         };
+        if st.status != StStatus::Active || st.needs_reinit {
+            continue;
+        }
         if is_external_orchestration(&st) {
             continue;
         }
@@ -3827,6 +3830,16 @@ fn execute_scheduled_refresh(
         }
     };
     let st = &st;
+
+    // DDL can suspend a stream after dispatch but before this row lock.
+    if st.status != StStatus::Active && st.status != StStatus::Initializing {
+        return RefreshOutcome::Success;
+    }
+    let action = if st.needs_reinit {
+        RefreshAction::Reinitialize
+    } else {
+        action
+    };
 
     // v0.93.0: Re-check after acquiring the row lock so a mode change racing
     // with scheduler dispatch cannot enter the refresh path.
