@@ -849,6 +849,30 @@ impl DiffContext {
         );
     }
 
+    /// Register every parsed source, including leaves optimized away by P5
+    /// direct aggregate delta generation. Those scans still appear in join
+    /// snapshots and group rescans, even though diff_scan is never called.
+    pub(crate) fn register_all_source_scans(
+        &mut self,
+        source_oids: &[u32],
+    ) -> Result<(), PgTrickleError> {
+        if self.cdc.source_bound_tables.is_empty() {
+            return Ok(());
+        }
+        for &oid in source_oids {
+            let source = crate::cdc::get_qualified_table_name(pgrx::pg_sys::Oid::from(oid))?;
+            self.cache.source_scan_relations.insert(oid, source);
+        }
+        Ok(())
+    }
+
+    /// The source relation in an aggregate's rescan must be constructed
+    /// against its NEW frontier, not replaced after SQL generation. Direct
+    /// construction also covers cases where the scanner is bypassed.
+    pub(crate) fn bounded_source_table(&self, oid: u32) -> Option<&str> {
+        self.cdc.source_bound_tables.get(&oid).map(String::as_str)
+    }
+
     pub(crate) fn cte_registry(&self) -> &CteRegistry {
         &self.cache.cte_registry
     }
