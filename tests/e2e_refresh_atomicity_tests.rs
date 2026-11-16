@@ -1243,6 +1243,19 @@ async fn test_pause_scheduler_drains_inline_refresh_until_commit() {
         .execute(&mut *setup)
         .await
         .expect("make the scheduled refresh due");
+        // Interval targets are admitted by the freshness controller *and*
+        // last_refresh_at.  Backdating only the latter leaves the stream
+        // ineligible until next_due_at, so the input-boundary lock is never
+        // reached on faster runners (#1417 PR regression gate).
+        sqlx::query(
+            "UPDATE pgtrickle.pgt_freshness_controller_state
+                SET next_due_at = clock_timestamp() - interval '1 second'
+              WHERE pgt_id = $1",
+        )
+        .bind(id)
+        .execute(&mut *setup)
+        .await
+        .expect("make the scheduler controller due");
         sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO public.{source} VALUES (2, 20)"
         )))

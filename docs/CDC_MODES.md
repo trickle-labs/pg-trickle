@@ -91,8 +91,21 @@ stream table slightly later than with triggers.
 
 1. `wal_level = logical` in `postgresql.conf`
 2. Sufficient replication slots: `max_replication_slots ≥ (number of tracked source tables) + existing slots`
-3. Source table has `REPLICA IDENTITY DEFAULT` (primary key) or `REPLICA IDENTITY FULL`
-4. PostgreSQL 18.x (required for the pg_trickle extension)
+3. Source is a regular (non-partitioned) table with a `PRIMARY KEY`
+4. Source has `REPLICA IDENTITY FULL` (not merely the default primary-key identity)
+5. PostgreSQL 18.x (required for the pg_trickle extension)
+
+The current decoder's old-row reconstruction requires `FULL`, and WAL
+cutover currently rejects partitioned source parents. Keep partitioned
+sources on trigger CDC until WAL cutover support is implemented.
+
+```sql
+ALTER TABLE orders REPLICA IDENTITY FULL;
+```
+
+A per-table `cdc_mode => 'wal'` request that cannot transition retains
+trigger capture. `pgtrickle.check_cdc_health()` reports the unmet
+prerequisite in the `alert` column instead of silently reporting `TRIGGER`.
 
 ---
 
@@ -175,7 +188,7 @@ SELECT source_table, cdc_mode, pending_rows, buffer_bytes
 FROM pgtrickle.change_buffer_sizes()
 ORDER BY source_table;
 
--- Full health check including WAL lag
+-- Full health check including WAL lag and blocked WAL requests
 SELECT * FROM pgtrickle.check_cdc_health();
 
 -- Which triggers are installed

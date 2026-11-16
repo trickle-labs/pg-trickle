@@ -3986,18 +3986,44 @@ fn execute_scheduled_refresh(
             return RefreshOutcome::RetryableFailure;
         }
     }
-    let slot_positions = match cdc::get_slot_positions_at_bound(&source_oids, safe_bound, true) {
-        Ok(pos) => pos,
-        Err(e) => {
-            log!(
-                "pg_trickle: failed to get slot positions for {}.{}: {}",
-                st.pgt_schema,
-                st.pgt_name,
-                e
-            );
-            return RefreshOutcome::RetryableFailure;
+    // A FULL/REINITIALIZE evaluates the source *after* acquiring SHARE locks.
+    // Writers may have committed while those locks were being acquired, after
+    // the scheduler captured its immutable tick watermark.  Using that older
+    // watermark here would record a frontier behind the rows just rebuilt and
+    // replay their deltas on the next DIFFERENTIAL refresh (#1417).
+    //
+    // All source writers have drained under the locks, so a fresh WAL insertion
+    // position is the correct baseline cut.  Ordinary DIFFERENTIAL refreshes
+    // must continue to use the immutable, holdback-aware tick bound.
+    let source_bound = if full_baseline {
+        match cdc::get_current_wal_lsn() {
+            Ok(bound) => bound,
+            Err(e) => {
+                log!(
+                    "pg_trickle: failed to capture locked FULL baseline for {}.{}: {}",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    e
+                );
+                return RefreshOutcome::RetryableFailure;
+            }
         }
+    } else {
+        safe_bound.to_string()
     };
+    let slot_positions =
+        match cdc::get_slot_positions_at_bound(&source_oids, &source_bound, full_baseline) {
+            Ok(pos) => pos,
+            Err(e) => {
+                log!(
+                    "pg_trickle: failed to get slot positions for {}.{}: {}",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    e
+                );
+                return RefreshOutcome::RetryableFailure;
+            }
+        };
 
     // Select target data timestamp
     let schedule_secs = st
@@ -4392,7 +4418,26 @@ fn execute_scheduled_refresh(
                 )
             {
                 // A differential fallback took the FULL source locks during
-                // execution; its frontier must now match that locked baseline.
+                // execution; *both* base-table and upstream-ST frontiers must
+                // now match that locked baseline, not the earlier tick cut.
+                // Otherwise a source change included by FULL can be replayed
+                // on the next DIFFERENTIAL refresh (#1417).
+                let source_bound = match cdc::get_current_wal_lsn() {
+                    Ok(bound) => bound,
+                    Err(e) => {
+                        pgrx::error!("pg_trickle: FULL source baseline bound failed: {}", e)
+                    }
+                };
+                let source_positions =
+                    match cdc::get_slot_positions_at_bound(&source_oids, &source_bound, true) {
+                        Ok(positions) => positions,
+                        Err(e) => {
+                            pgrx::error!("pg_trickle: FULL source baseline frontier failed: {}", e)
+                        }
+                    };
+                for (oid, lsn) in source_positions {
+                    frontier.set_source(oid, lsn, data_ts_frontier.clone());
+                }
                 let positions = match read_st_source_positions(true) {
                     Ok(positions) => positions,
                     Err(e) => pgrx::error!("pg_trickle: FULL baseline frontier failed: {}", e),

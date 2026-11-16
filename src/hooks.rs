@@ -29,8 +29,7 @@
 //!
 //! ### sql_drop — `_on_sql_drop()`
 //!
-//! Fires specifically when objects are **dropped** (before the object is gone
-//! from the catalog).  The handler:
+//! Fires after objects have been removed from the catalogs. The handler:
 //!
 //! 1. Calls `pg_event_trigger_dropped_objects()` for the list of dropped OIDs.
 //! 2. Handles `DROP TABLE` on upstream source tables — sets dependent STs to
@@ -208,6 +207,20 @@ fn classify_alter_table(fcinfo: pg_sys::FunctionCallInfo) -> AlterTableHint {
                     relation,
                 }
             }
+            pg_sys::AlterTableType::AT_DetachPartition => {
+                let Some(def) = cmd.def.as_ref() else {
+                    return AlterTableHint::Other;
+                };
+                if def.type_ != pg_sys::NodeTag::T_PartitionCmd {
+                    return AlterTableHint::Other;
+                }
+                let partition = &*(cmd.def as *const pg_sys::PartitionCmd);
+                if partition.concurrent {
+                    AlterTableHint::DetachPartitionConcurrent
+                } else {
+                    AlterTableHint::Other
+                }
+            }
             _ => AlterTableHint::Other,
         }
     }
@@ -235,6 +248,9 @@ enum AlterTableHint {
         schema: Option<String>,
         relation: String,
     },
+    // The first phase of CONCURRENTLY can commit before the detach finishes.
+    // Do not reinitialize from an intermediate parent snapshot.
+    DetachPartitionConcurrent,
 }
 
 /// A single DDL command extracted from `pg_event_trigger_ddl_commands()`.
@@ -1037,6 +1053,19 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &Alt
         // REPLICA IDENTITY only changes WAL's old-row representation. It does
         // not affect trigger CDC; other CDC modes retain conservative handling.
         if replica_identity_full || empty_partition_attach {
+            if empty_partition_attach {
+                // Even an empty child can later receive rows and be dropped.
+                // Keep its OID in the durable parent ancestry snapshot.
+                crate::catalog::store_column_snapshot_for_pgt_id(*pgt_id, objid).unwrap_or_else(
+                    |e| {
+                        pgrx::error!(
+                            "pg_trickle: cannot snapshot empty attached partition on {}: {}",
+                            identity,
+                            e,
+                        )
+                    },
+                );
+            }
             continue;
         }
         // ALTER TABLE also covers owner and row-security changes. Those values
@@ -1176,17 +1205,45 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &Alt
                 suspended_pgt_ids.push(*pgt_id);
             }
             SchemaChangeKind::PartitionChange => {
-                // PT2: ATTACH/DETACH PARTITION on a partitioned source table.
-                // Pre-existing rows in newly attached partitions are not
-                // captured by CDC triggers, so reinitialize to pick up all data.
-                pgrx::info!(
-                    "pg_trickle: partition structure changed on {} — \
-                     stream table {} marked for reinit",
-                    identity,
-                    pgt_id,
+                // Partition membership changes have no row-level CDC events.
+                // Rebuild from the parent query instead of applying deltas.
+                // CONCURRENTLY is two-phase: until its second phase commits,
+                // the query can still see the old partition. Keep it suspended
+                // rather than clearing needs_reinit against an interim state.
+                // IMMEDIATE streams have no scheduler to consume a pending
+                // reinit. Suspend them and require an explicit resume, which
+                // executes the protected FULL rebuild under source locks.
+                let immediate = StreamTableMeta::get_by_id(*pgt_id)
+                    .unwrap_or_else(|e| {
+                        pgrx::error!("pg_trickle: cannot read stream table {}: {}", pgt_id, e)
+                    })
+                    .is_some_and(|st| st.refresh_mode.is_immediate());
+                if immediate
+                    || matches!(alter_table_hint, AlterTableHint::DetachPartitionConcurrent)
+                {
+                    suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
+                    suspended_pgt_ids.push(*pgt_id);
+                } else {
+                    StreamTableMeta::mark_for_reinitialize(*pgt_id).unwrap_or_else(|e| {
+                        pgrx::error!(
+                            "pg_trickle: cannot mark stream table {} for partition reinit: {}",
+                            pgt_id,
+                            e,
+                        )
+                    });
+                    reinit_pgt_ids.push(*pgt_id);
+                }
+                // Persist the new child membership in the same DDL transaction,
+                // so sql_drop can later trace a dropped child back to this root.
+                crate::catalog::store_column_snapshot_for_pgt_id(*pgt_id, objid).unwrap_or_else(
+                    |e| {
+                        pgrx::error!(
+                            "pg_trickle: cannot snapshot partition change on {}: {}",
+                            identity,
+                            e,
+                        )
+                    },
                 );
-                suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
-                suspended_pgt_ids.push(*pgt_id);
             }
         }
     }
@@ -1352,8 +1409,61 @@ fn source_identity_changed(source_oid: pg_sys::Oid, pgt_id: i64) -> bool {
 
 /// A replacement table may reuse the old logical name while receiving a new
 /// OID. Keep the old dependency suspended until an explicit repair updates it.
+/// Refresh source ancestry after CREATE TABLE ... PARTITION OF.
+///
+/// There is no ALTER TABLE event on the parent for this DDL form. Use the
+/// *current* inheritance chain to update every tracked ancestor, including
+/// roots several partition levels above the newly created child.
+fn snapshot_created_partition_ancestry(child_oid: pg_sys::Oid) -> Result<(), PgTrickleError> {
+    let ancestors: Vec<(i64, pg_sys::Oid)> = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "WITH RECURSIVE ancestors(relid) AS ( \
+                     SELECT inhparent FROM pg_catalog.pg_inherits WHERE inhrelid = $1 \
+                     UNION ALL \
+                     SELECT i.inhparent FROM pg_catalog.pg_inherits i \
+                     JOIN ancestors a ON i.inhrelid = a.relid \
+                 ) SELECT DISTINCT d.pgt_id, d.source_relid \
+                   FROM ancestors a \
+                   JOIN pgtrickle.pgt_dependencies d ON d.source_relid = a.relid \
+                   WHERE d.source_type = 'TABLE'",
+                None,
+                &[child_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut tracked = Vec::new();
+        for row in rows {
+            let id = row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let source = row
+                .get::<pg_sys::Oid>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if let (Some(id), Some(source)) = (id, source) {
+                tracked.push((id, source));
+            }
+        }
+        Ok::<_, PgTrickleError>(tracked)
+    })?;
+    for (pgt_id, source_oid) in ancestors {
+        crate::catalog::store_column_snapshot_for_pgt_id(pgt_id, source_oid)?;
+    }
+    Ok(())
+}
+
 fn handle_created_table(cmd: &DdlCommand) {
     let identity = cmd.object_identity.as_deref().unwrap_or("unknown");
+    // CREATE TABLE ... PARTITION OF does not produce an ALTER TABLE command
+    // for the parent, but its new child must be tracked before a future DROP.
+    // A newly created partition contains no pre-existing data: update the
+    // ancestry snapshot without forcing a full refresh.
+    snapshot_created_partition_ancestry(cmd.objid).unwrap_or_else(|e| {
+        pgrx::error!(
+            "pg_trickle: cannot record newly created partition {}: {}",
+            identity,
+            e
+        )
+    });
     let Some(schema) = cmd.schema_name.as_deref() else {
         return;
     };
@@ -1702,6 +1812,17 @@ fn handle_dropped_table(obj: &DroppedObject) {
         }
     };
 
+    // A partition child has no direct dependency row: its ST depends on the
+    // partitioned parent. PostgreSQL already deleted pg_inherits at sql_drop,
+    // so resolve the parent via the pre-DDL ancestry snapshot instead.
+    invalidate_dropped_partition(obj.objid, identity).unwrap_or_else(|e| {
+        pgrx::error!(
+            "pg_trickle: DROP TABLE {} cannot invalidate partition parents: {}",
+            identity,
+            e,
+        )
+    });
+
     if affected_pgt_ids.is_empty() {
         return;
     }
@@ -1733,6 +1854,76 @@ fn handle_dropped_table(obj: &DroppedObject) {
         identity,
         total,
     );
+}
+
+/// For scheduled streams, the next refresh executes the FULL rebuild.
+/// IMMEDIATE has no refresh worker, so fail closed until resume performs its
+/// synchronous protected rebuild. This also applies to immediate descendants.
+fn mark_partition_removal_recovery(pgt_id: i64, identity: &str) -> Result<(), PgTrickleError> {
+    let st = StreamTableMeta::get_by_id(pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
+    if st.refresh_mode.is_immediate() {
+        suspend_for_source_ddl(pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
+    } else {
+        StreamTableMeta::mark_for_reinitialize(pgt_id)?;
+    }
+    Ok(())
+}
+
+/// Invalidate any live parent source whose partition descendant was dropped.
+///
+/// pg_event_trigger_dropped_objects() gives the child's OID, but pg_inherits
+/// has already been deleted. A snapshot captured at creation/attach time is
+/// therefore required; reading the live catalog here silently misses drops.
+fn invalidate_dropped_partition(
+    dropped_oid: pg_sys::Oid,
+    identity: &str,
+) -> Result<(), PgTrickleError> {
+    let parents: Vec<(i64, pg_sys::Oid)> = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT DISTINCT d.pgt_id, d.source_relid                  FROM pgtrickle.pgt_dependencies d                  JOIN pg_catalog.pg_class parent ON parent.oid = d.source_relid                  WHERE d.source_type = 'TABLE'                    AND d.column_snapshot -> 'partition_descendant_oids'                        @> pg_catalog.jsonb_build_array($1::bigint)",
+                None,
+                &[(dropped_oid.to_u32() as i64).into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut parents = Vec::new();
+        for row in rows {
+            let id = row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let relid = row
+                .get::<pg_sys::Oid>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if let (Some(id), Some(relid)) = (id, relid) {
+                parents.push((id, relid));
+            }
+        }
+        Ok::<_, PgTrickleError>(parents)
+    })?;
+
+    let mut affected = Vec::new();
+    for (pgt_id, parent_oid) in parents {
+        mark_partition_removal_recovery(pgt_id, identity)?;
+        crate::catalog::store_column_snapshot_for_pgt_id(pgt_id, parent_oid)?;
+        shmem::signal_dag_invalidation(pgt_id);
+        affected.push(pgt_id);
+    }
+    if affected.is_empty() {
+        return Ok(());
+    }
+    // A child's data removal also affects downstream materializations.
+    for pgt_id in find_transitive_downstream_sts(&affected)? {
+        mark_partition_removal_recovery(pgt_id, identity)?;
+        shmem::signal_dag_invalidation(pgt_id);
+    }
+    shmem::bump_cache_generation();
+    pgrx::log!(
+        "pg_trickle_ddl_tracker: dropped partition {} requires reinitialization of {} parent stream table(s)",
+        identity,
+        affected.len(),
+    );
+    Ok(())
 }
 
 /// Handle the case where a ST's own storage table was dropped.
@@ -2061,12 +2252,20 @@ pub fn detect_schema_change_kind(
     // Fast path: compare schema fingerprints.
     // If the stored fingerprint matches the current one, nothing changed
     // (neither columns, RLS state, nor partition structure).
-    // Since v0.6.0, the fingerprint includes partition_child_count.
+    // Keep the legacy column fingerprint stable across the ancestry upgrade,
+    // but check partition OIDs separately. A subpartition change may leave
+    // the immediate child count unchanged.
     if let Ok(Some(stored_fp)) = crate::catalog::get_schema_fingerprint(pgt_id, source_oid)
         && !stored_fp.is_empty()
         && let Ok((_, current_fp)) = crate::catalog::build_column_snapshot(source_oid)
         && stored_fp == current_fp
     {
+        if let Some(snapshot) = crate::catalog::get_column_snapshot(pgt_id, source_oid)?
+            && let Some(previous) = snapshot_partition_descendants(&snapshot.0)
+            && previous != crate::catalog::query_partition_descendant_oids(source_oid)?
+        {
+            return Ok(SchemaChangeKind::PartitionChange);
+        }
         return Ok(SchemaChangeKind::Benign);
     }
 
@@ -2112,6 +2311,11 @@ pub fn detect_schema_change_kind(
                     if stored_child_count != current_child_count {
                         return Ok(SchemaChangeKind::PartitionChange);
                     }
+                    if let Some(previous) = snapshot_partition_descendants(&snapshot.0)
+                        && previous != crate::catalog::query_partition_descendant_oids(source_oid)?
+                    {
+                        return Ok(SchemaChangeKind::PartitionChange);
+                    }
 
                     return Ok(col_kind);
                 }
@@ -2152,6 +2356,16 @@ pub fn detect_schema_change_kind(
 
     // All tracked columns still exist — likely a benign change.
     Ok(SchemaChangeKind::ConstraintChange)
+}
+
+/// Read the saved ancestor lookup set. None denotes a legacy snapshot.
+fn snapshot_partition_descendants(snapshot: &serde_json::Value) -> Option<Vec<i64>> {
+    snapshot
+        .get("partition_descendant_oids")?
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_i64)
+        .collect()
 }
 
 /// Compare a stored column snapshot against the current `pg_attribute` state.
@@ -2252,6 +2466,33 @@ fn get_tracked_columns(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_partition_descendant_snapshot_decode_is_strict_and_legacy_safe() {
+        let snapshot = serde_json::json!({
+            "partition_descendant_oids": [12, 42, 84],
+        });
+        assert_eq!(
+            snapshot_partition_descendants(&snapshot),
+            Some(vec![12, 42, 84])
+        );
+        assert_eq!(
+            snapshot_partition_descendants(&serde_json::json!({
+                "partition_descendant_oids": []
+            })),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            snapshot_partition_descendants(&serde_json::json!({"columns": []})),
+            None
+        );
+        assert_eq!(
+            snapshot_partition_descendants(&serde_json::json!({
+                "partition_descendant_oids": [12, "not-an-oid"]
+            })),
+            None
+        );
+    }
 
     #[test]
     fn test_schema_change_kind_eq() {

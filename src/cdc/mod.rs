@@ -81,9 +81,8 @@ pub use polling::{
 #[allow(unused_imports)]
 pub(crate) use rebuild::trigger_name_for_source;
 pub use rebuild::{
-    can_use_logical_replication, can_use_logical_replication_for_mode, check_replica_identity,
-    get_replica_identity_mode, has_user_triggers, rebuild_cdc_trigger,
-    rebuild_cdc_trigger_function, trigger_exists,
+    can_use_logical_replication_for_mode, check_replica_identity, get_replica_identity_mode,
+    has_user_triggers, rebuild_cdc_trigger, rebuild_cdc_trigger_function, trigger_exists,
 };
 
 // ── Reserved change-buffer column names ─────────────────────────────────────
@@ -2981,9 +2980,15 @@ pub fn get_slot_positions(
 }
 
 /// Build per-source frontier positions from one already-proven safe bound.
-/// WAL sources use only the decoder position that was committed with buffer
+/// DIFFERENTIAL WAL sources use only the decoder position committed with buffer
 /// writes; trigger sources use the visible buffer high-water mark, capped by
 /// the immutable visibility bound.
+///
+/// A protected FULL baseline is different: callers must first lock all source
+/// relations against writes, then pass a fresh WAL insertion LSN captured under
+/// those locks.  The source snapshot already includes every earlier committed
+/// write, even if WAL decoding lags; using the decoder's older position would
+/// replay those writes on the next differential refresh (#1417).
 pub fn get_slot_positions_at_bound(
     source_oids: &[pg_sys::Oid],
     safe_bound: &str,
@@ -3023,6 +3028,7 @@ pub fn get_slot_positions_at_bound(
             reason: e.to_string(),
         })?;
         let position = match wal_position {
+            Some(_) if full_baseline => safe_bound.to_string(),
             Some(lsn) => confirmed_wal_position(*oid, &lsn)?,
             None if tracking_slot.is_none() => safe_bound.to_string(),
             None if full_baseline

@@ -592,8 +592,16 @@ impl OptimizationContext {
 
     fn next_cte_name(&mut self, prefix: &str) -> String {
         self.cte_counter += 1;
+        let digits = self.cte_counter.checked_ilog10().unwrap_or(0) as usize + 1;
+        let max_prefix = 63usize.saturating_sub("__pgt_cte_".len() + digits + 1);
+        if prefix.len() <= max_prefix
+            && prefix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return format!("__pgt_cte_{prefix}_{}", self.cte_counter);
+        }
         let suffix = format!("_{}", self.cte_counter);
-        let max_prefix = 63usize.saturating_sub("__pgt_cte_".len() + suffix.len());
         let mut name =
             String::with_capacity("__pgt_cte_".len() + prefix.len().min(max_prefix) + suffix.len());
         name.push_str("__pgt_cte_");
@@ -1039,7 +1047,13 @@ impl DiffContext {
         let result = self.diff_node_inner(op);
         self.optimization.exit_diff();
         let result = result?;
-        if result.schema.names() != result.columns {
+        if !result
+            .schema
+            .0
+            .iter()
+            .map(|column| &column.name)
+            .eq(result.columns.iter())
+        {
             return Err(PgTrickleError::TypeMismatch(format!(
                 "{} at root declared columns {:?}, schema {:?}",
                 operator_name(op),
@@ -1271,6 +1285,13 @@ impl DiffContext {
 
 /// Helper: quote a SQL identifier.
 pub fn quote_ident(name: &str) -> String {
+    if !name.contains('"') {
+        let mut out = String::with_capacity(name.len() + 2);
+        out.push('"');
+        out.push_str(name);
+        out.push('"');
+        return out;
+    }
     let mut out =
         String::with_capacity(name.len() + 2 + name.bytes().filter(|&byte| byte == b'"').count());
     push_quoted_ident(&mut out, name);
@@ -1504,9 +1525,10 @@ mod tests {
         for _ in 3..10 {
             ctx.next_cte_name("x");
         }
+        assert_eq!(ctx.next_cte_name("safe"), "__pgt_cte_safe_10");
         assert_eq!(
             ctx.next_cte_name(&"x".repeat(100)),
-            format!("__pgt_cte_{}_10", "x".repeat(50))
+            format!("__pgt_cte_{}_11", "x".repeat(50))
         );
     }
 
