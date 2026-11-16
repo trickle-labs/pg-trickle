@@ -2155,10 +2155,11 @@ impl StDependency {
 /// This ensures the snapshot matches the columns tracked in the change
 /// buffer table, preventing false schema-change alerts.
 ///
-/// The snapshot is a JSON array of objects:
-/// ```json
-/// [{"name":"id","type_oid":23,"ordinal":1},{"name":"val","type_oid":25,"ordinal":2}]
-/// ```
+/// The snapshot is a JSON object containing column metadata, RLS state,
+/// partition child count, and the OIDs of all partition descendants. The OID
+/// list is deliberately excluded from the schema fingerprint: it is a durable
+/// pre-DROP lookup for the sql_drop event trigger, and does not change the
+/// existing fingerprint contract used by installed stream tables.
 ///
 /// Used at creation time to record the source schema in `pgt_dependencies`
 /// so `detect_schema_change_kind()` can compare against the current catalog.
@@ -2212,7 +2213,7 @@ pub fn build_column_snapshot(
     let partition_child_count = query_partition_child_count(source_oid)?;
     let owner = query_source_owner(source_oid)?;
 
-    let snapshot_obj = serde_json::json!({
+    let mut snapshot_obj = serde_json::json!({
         "columns": entries,
         "rls_enabled": rls_enabled,
         "rls_forced": rls_forced,
@@ -2220,6 +2221,8 @@ pub fn build_column_snapshot(
         "owner": owner,
     });
 
+    // Keep the schema fingerprint byte-for-byte compatible with prior
+    // releases. Descendant OIDs are checked separately by the DDL tracker.
     let json_str = serde_json::to_string(&snapshot_obj)
         .map_err(|e| PgTrickleError::InternalError(format!("JSON serialization failed: {e}")))?;
 
@@ -2232,6 +2235,11 @@ pub fn build_column_snapshot(
         s
     });
 
+    // PostgreSQL has already deleted pg_inherits rows by the time sql_drop
+    // fires. Persist the ancestry before that DDL so a dropped child can be
+    // traced to the still-live partitioned source, including nested children.
+    snapshot_obj["partition_descendant_oids"] =
+        serde_json::json!(query_partition_descendant_oids(source_oid)?);
     let snapshot = pgrx::JsonB(snapshot_obj);
     Ok((snapshot, fingerprint))
 }
@@ -2319,6 +2327,42 @@ pub fn query_partition_child_count(source_oid: pg_sys::Oid) -> Result<i64, PgTri
 #[cfg(test)]
 pub fn query_partition_child_count(_source_oid: pg_sys::Oid) -> Result<i64, PgTrickleError> {
     Ok(0)
+}
+
+/// Return all inherited descendants, including subpartitions, ordered by OID.
+///
+/// This must be captured before child relations disappear: sql_drop fires
+/// after PostgreSQL removes the relevant pg_inherits rows.
+#[cfg(not(test))]
+pub fn query_partition_descendant_oids(
+    source_oid: pg_sys::Oid,
+) -> Result<Vec<i64>, PgTrickleError> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "WITH RECURSIVE descendants(relid) AS (                      SELECT inhrelid FROM pg_catalog.pg_inherits WHERE inhparent = $1                      UNION ALL                      SELECT i.inhrelid FROM pg_catalog.pg_inherits i                      JOIN descendants d ON i.inhparent = d.relid                  ) SELECT DISTINCT relid::bigint FROM descendants ORDER BY 1",
+                None,
+                &[source_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut oids = Vec::new();
+        for row in rows {
+            if let Some(oid) = row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            {
+                oids.push(oid);
+            }
+        }
+        Ok(oids)
+    })
+}
+
+#[cfg(test)]
+pub fn query_partition_descendant_oids(
+    _source_oid: pg_sys::Oid,
+) -> Result<Vec<i64>, PgTrickleError> {
+    Ok(Vec::new())
 }
 
 /// Get the stored column snapshot for a dependency pair.
