@@ -2159,11 +2159,8 @@ async fn test_alter_st_partition_key_change_and_remove_reject_with_downstream() 
         "SELECT id, event_day, category FROM guard_change_src",
     )
     .await;
-    db.assert_st_matches_query(
-        "guard_change_down",
-        "SELECT id, category FROM guard_change_src",
-    )
-    .await;
+    db.assert_st_matches_query("guard_change_down", "SELECT id, category FROM guard_change_src")
+        .await;
 }
 
 #[tokio::test]
