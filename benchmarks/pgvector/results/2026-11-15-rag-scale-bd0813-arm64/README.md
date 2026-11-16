@@ -65,6 +65,16 @@ neighbors and recorded no latency comparison. It does not qualify a default
 setting or resolve filtered ANN quality; multiple query vectors and settings
 need measurement on the final package.
 
+For a comparable ANN-only check, I repeated the same query against each base
+corpus table after the measured run had verified all three against the defining
+SQL. The planner selected HNSW on all three tables. With
+`ef_search=40`/`strict_order`, recall@10 was 0.0 for application, periodic full
+and differential. With `ef_search=400`/`relaxed_order`, it was 0.3, 0.7 and
+0.7, respectively; every query returned ten rows. These base-table queries
+exclude the guarded-current view's freshness join, so they are not a substitute
+for the live reader path. This remains one query on the retained end state,
+without a latency comparison or final-package attestation.
+
 During the three maintenance cycles, application and differential readers had
 zero timeouts. The periodic-full reader had 56 timed-out queries (18, 18 and
 20 per cycle). Client read intervals overlapped maintenance, but this is one
