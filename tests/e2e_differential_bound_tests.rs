@@ -34,11 +34,49 @@ async fn refresh_with_optional_barrier(pool: &PgPool, st: &'static str, barrier:
         .await
         .expect("enable input boundary test barrier");
     }
+    // Keep the transaction open after the function returns so a regression
+    // can inspect the exact pg_temp bounded source used by its MERGE.
+    if barrier {
+        sqlx::query("BEGIN")
+            .execute(&mut *connection)
+            .await
+            .expect("begin inspectable bounded refresh");
+    }
     sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
         .bind(st)
         .execute(&mut *connection)
         .await
         .expect("differential refresh");
+
+    if matches!(st, "bound_delete_st" | "bound_update_st") && barrier {
+        let stage: String = sqlx::query_scalar(
+            "SELECT relname::text FROM pg_catalog.pg_class
+             WHERE relnamespace = pg_my_temp_schema()
+               AND relname LIKE '__pgt_bound_%'
+             ORDER BY relname LIMIT 1",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .expect("find frontier-bounded source stage");
+        let stages: Vec<(i32, i32)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT id, v FROM pg_temp.\"{stage}\" WHERE id = 27",
+            )))
+            .fetch_all(&mut *connection)
+            .await
+            .expect("inspect bounded source row");
+        assert_eq!(
+            stages,
+            vec![(27, 27)],
+            "post-bound D image must restore the pre-frontier row in {stage}",
+        );
+    }
+    if barrier {
+        sqlx::query("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .expect("commit inspected bounded refresh");
+    }
 }
 
 async fn pgt_id(db: &E2eDb, st: &'static str) -> i32 {
