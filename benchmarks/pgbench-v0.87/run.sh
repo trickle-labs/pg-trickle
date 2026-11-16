@@ -305,11 +305,14 @@ run_one() {
     container_names=()
 }
 
-configs=(absent installed active)
 for ((repetition = 0; repetition < repetitions; repetition++)); do
-    first=$(((repetition + seed) % 3))
-    for ((offset = 0; offset < 3; offset++)); do
-        config="${configs[$(((first + offset) % 3))]}"
+    # Keep the no-stream comparison adjacent; alternate order to limit host-load bias.
+    if (((repetition + seed) % 2 == 0)); then
+        configs=(absent installed active)
+    else
+        configs=(installed absent active)
+    fi
+    for config in "${configs[@]}"; do
         if [[ "$config" == absent ]]; then
             image="$absent_image"
         else

@@ -16,7 +16,8 @@ The core question the benchmarks answer:
 
 `benchmarks/pgbench-v0.87/run.sh` is the versioned three-configuration gate
 for the v0.87 write-path contract. It recreates each database for every
-paired repetition and rotates the configuration order deterministically:
+paired repetition, runs `absent` and `installed` back-to-back in alternating
+order, then runs `active`:
 
 | Configuration | PostgreSQL contents |
 |---|---|
@@ -31,7 +32,8 @@ publication profile keeps the same scale and concurrency, with a 30-second
 unthrottled capacity sample, then a 60-second latency measurement at 1,000 TPS,
 and 5 paired repetitions. The publication profile waits for active stream
 tables to converge after warm-up before measuring, so its p99 sample starts
-without warm-up refresh backlog. Its capacity ratio uses the unthrottled sample;
+without warm-up refresh backlog. Its capacity ratio uses the adjacent
+unthrottled samples;
 p99 uses the common offered rate across all three configurations, and excludes
 pgbench's client-side schedule lag from transaction execution time. The join
 uses an immutable copy of branch keys so pgbench's branch-balance updates do
