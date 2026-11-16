@@ -100,8 +100,8 @@ SELECT json_build_object(
 )::text;
 """
 
-EXACT = """
 # Wide vector set operations can exhaust Docker's default shared memory when parallelized.
+EXACT = """
 SET max_parallel_workers_per_gather = 0;
 SELECT json_build_object(
   'application', NOT EXISTS ((TABLE live_rag.application EXCEPT ALL TABLE live_rag.truth)

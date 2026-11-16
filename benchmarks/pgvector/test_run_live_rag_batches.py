@@ -23,6 +23,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("server_started", sql)
 
     def test_exact_comparison_disables_parallel_workers_and_pauses_all_fixture_streams(self):
+        self.assertTrue(benchmark.EXACT.lstrip().startswith("SET max_parallel_workers_per_gather = 0;"))
         self.assertIn("SET max_parallel_workers_per_gather = 0;", benchmark.EXACT)
         self.assertEqual(
             benchmark.SCHEDULER_STREAMS,
