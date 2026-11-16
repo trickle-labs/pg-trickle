@@ -281,17 +281,56 @@ async fn test_dedup_stats_scan_chain_not_deduped() {
             .expect("dedup_stats() before refresh");
     let (total_before, dedup_before) = before;
 
-    // Trigger a change and run a differential refresh.
+    // The manual endpoint can complete a NO_DATA attempt while a writer
+    // holdback keeps the source delta outside its safe frontier.  A successful
+    // API call alone does not prove that this test executed a differential.
+    // Retry with the differential strategy until our *own* stream has a
+    // completed differential history row and the shared metric advances.
     db.execute("INSERT INTO dedup_src_sc VALUES (3, 30)").await;
-    db.refresh_st("dedup_sc_st").await;
-
-    // Capture counters after.
-    let after: (i64, i64) =
-        sqlx::query_as("SELECT total_diff_refreshes, dedup_needed FROM pgtrickle.dedup_stats()")
-            .fetch_one(&db.pool)
-            .await
-            .expect("dedup_stats() after refresh");
-    let (total_after, dedup_after) = after;
+    let before_id: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let (total_after, dedup_after) = loop {
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy = 'differential'",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+            ],
+            "SELECT pgtrickle.refresh_stream_table('dedup_sc_st')",
+        )
+        .await
+        .expect("execute a differential scan-chain refresh");
+        let after: (i64, i64) = sqlx::query_as(
+            "SELECT total_diff_refreshes, dedup_needed FROM pgtrickle.dedup_stats()",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("dedup_stats() after refresh");
+        let completed_diff: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                    JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                    WHERE st.pgt_name = 'dedup_sc_st'
+                      AND h.refresh_id > {before_id}
+                      AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED'
+                      AND NOT h.was_full_fallback
+                )"
+            ))
+            .await;
+        if completed_diff && after.0 > total_before {
+            break after;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "scan-chain never completed a counted differential refresh: before={total_before}, after={}, history_witness={completed_diff}",
+            after.0
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    db.assert_st_matches_query("dedup_sc_st", "SELECT id, v FROM dedup_src_sc")
+        .await;
 
     assert!(
         total_after > total_before,
