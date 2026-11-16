@@ -1,0 +1,27 @@
+NOTICE:  table "__pgt_cdc_3_17915" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_18077" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_17970" does not exist, skipping
+NOTICE:  table "__pgt_delta_3" does not exist, skipping
+INFO:  [PGS_PROFILE] explicit_dml: materialize=451.32ms delete=2.12ms(9) update=0.28ms(0) insert=132.65ms(6) for live_rag.differential
+NOTICE:  table "__pgt_recon_3" does not exist, skipping
+INFO:  [PGS_PROFILE] decision=4.42ms generate+build=6.72ms merge_exec=6924.30ms cleanup_enqueue=0.00ms total=6935.44ms affected=15 phantom_cleanup=0 delta_est=33 mode=INCR path=cache_miss hints=none strategy=explicit_dml_reconciled
+INFO:  Stream table live_rag.differential refreshed (DIFFERENTIAL: +15 -0)
+ERROR:  canceling statement due to user request
+Traceback (most recent call last):
+  File "/private/tmp/pg-trickle-task-1399/target/issue1396-rag-100k/resume_after_setup.py", line 226, in <module>
+    main()
+  File "/private/tmp/pg-trickle-task-1399/target/issue1396-rag-100k/resume_after_setup.py", line 220, in main
+    print(json.dumps(run(args), sort_keys=True))
+                     ^^^^^^^^^
+  File "/private/tmp/pg-trickle-task-1399/target/issue1396-rag-100k/resume_after_setup.py", line 167, in run
+    output, seconds = timed(recall.measurement_sql(args.dimensions), corpus=corpus,
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/pg-trickle-task-1399/target/issue1396-rag-100k/resume_after_setup.py", line 100, in timed
+    result = worker.psql(sql, **variables)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/pg-trickle-task-1399/benchmarks/pgvector/fake_embedding_worker.py", line 30, in psql
+    return subprocess.run(command, input=sql, text=True, stdout=subprocess.PIPE, check=True).stdout.strip()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/grove/.local/share/uv/python/cpython-3.12.14-macos-aarch64-none/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['psql', '-X', '-w', '-qAt', '-v', 'ON_ERROR_STOP=1', '-v', 'corpus=application_current', '-v', 'tenant=2', '-v', 'query_vector=[-0.088,0.11,0.442,-0.193,0.937,0.607,-0.577,0.69,0.723,-0.33,0.648,-0.005,-0.104,-0.231,0.232,-0.414,0.356,0.364,0.181,0.418,0.746,-0.65,-0.105,-0.287,-0.164,0.843,0.707,0.394,0.699,-0.028,-0.517,0.456,-0.241,0.899,0.1,-0.684,0.031,0.427,0.76,-0.213,0.552,0.407,0.156,0.062,0.725,-0.253,0.562,0.82,-0.403,-0.079,-0.904,0.931,0.058,-0.579,0.58,0.592,-0.696,-0.181,-0.587,-0.893,-0.791,-0.008,-0.536,0.246,-0.379,-0.62,0.66,0.861,0.019,-0.91,0.696,-0.46,-0.745,-0.159,0.982,-0.543,-0.927,-0.158,-0.901,0.74,0.0,0.939,-0.463,0.043,0.818,0.442,-0.292,0.0,0.13,-0.022,-0.428,-0.92,0.962,-0.177,-0.538,-0.424,0.741,0.736,-0.643,-0.029,0.951,-0.092,-0.073,-0.137,-0.164,-0.591,-0.804,0.861,0.805,-0.926,-0.586,0.166,0.771,0.459,0.745,-0.207,0.472,-0.783,0.566,0.505,-0.743,-0.395,0.551,0.394,-0.889,-0.634,-0.403,0.732,-0.703,0.274,-0.071,-0.135,-0.964,-0.165,-0.567,-0.657,0.794,0.09,-0.177,0.039,0.491,-0.994,0.202,-0.699,-0.966,0.968,0.235,0.661,-0.086,-0.203,-0.604,0.049,-0.109,0.05,0.971,-0.936,-0.633,0.031,-0.024,-0.523,-0.137,0.85,-0.245,-0.243,-0.815,-0.92,-0.204,0.471,-0.678,0.738,-0.819,0.774,0.311,0.728,-0.441,0.673,0.897,0.055,-0.383,0.359,0.517,0.69,-0.55,0.989,-0.005,-0.417,-0.905,0.044,0.228,-0.811,-0.703,-0.393,-0.221,-0.079,0.404,0.792,0.632,-0.067,-0.566,0.557,0.911,0.206,0.244,0.984,-0.748,0.928,-0.885,0.828,0.789,0.014,-0.777,-0.885,-0.084,-0.621,0.143,-0.629,-0.52,-0.329,-0.263,0.301,-0.372,-0.128,0.582,-0.534,-0.993,-0.431,0.141,-0.359,0.656,-0.432,-0.691,0.391,-0.394,-0.122,-0.315,-0.316,-0.753,-0.348,0.529,0.396,-0.756,0.558,-0.233,0.531,-0.774,0.647,-0.618,0.315,-0.073,0.787,-0.234,-0.715,0.232,-0.78,-0.162,-0.668,0.628,0.399,0.906,-0.782,-0.404,-0.169,-0.794,0.659,-0.923,-0.076,0.856,0.361,-0.75,-0.97,-0.586,-0.142,0.144,-0.783,0.293,0.044,-0.798,-0.217,0.979,-0.559,-0.823,0.456,0.285,0.75,-0.069,0.401,-0.366,-0.767,-0.373,-0.954,0.281,-0.283,0.605,0.685,-0.358,0.587,0.616,0.859,0.771,-0.19,0.27,-0.33,-0.2,-0.05,-0.288,0.525,-0.539,-0.987,-0.783,0.756,-0.021,-0.475,-0.309,0.558,0.088,0.253,0.288,0.196,-0.528,0.249,0.599,0.898,0.716,-0.29,0.247,-0.254,-0.054,0.393,-0.224,-0.639,-0.13,-0.717,-0.93,-0.302,-0.097,-0.655,-0.332,0.861,-0.825,-0.613,-0.465,-0.837,0.275,-0.937,0.817,0.668,0.501,0.859,-0.885,0.808,0.756,-0.697,0.012,-0.077,0.265,0.212,0.527,-0.929,0.768,0.836,0.545,-0.469,0.857,0.696,0.719,-0.613,0.79,-0.831,-0.737,0.747,0.191,0.354,-0.495,-0.151,0.067,0.208,-0.466,-0.411,0.539,-0.732,-0.239,0.13,0.117,-0.489]', '-v', 'terms=seed', '-v', 'k=10', '-v', 'iterative_scan=strict_order']' returned non-zero exit status 3.

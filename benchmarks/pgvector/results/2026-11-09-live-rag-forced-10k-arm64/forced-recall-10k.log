@@ -1,0 +1,23 @@
+NOTICE:  extension "vector" already exists, skipping
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table embedding_demo.corpus_v1 created (pgt_id=1, mode=DIFFERENTIAL, initialized=true)
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table embedding_demo.corpus_v2 created (pgt_id=2, mode=DIFFERENTIAL, initialized=true)
+WARNING:  [pg_trickle] SELECT_STAR: The defining query uses SELECT *, so source schema changes can require reinitialization. HINT: List output columns explicitly for a more stable stream-table schema.
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_6779e0a335f92cd5" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table live_rag.differential created (pgt_id=3, mode=DIFFERENTIAL, initialized=true)
+NOTICE:  stream table "live_rag"."differential" using FULL refresh: 1501 changes exceed the 1500-row threshold for source OID 17915.
+WARNING:  [pg_trickle] Falling back to FULL refresh for live_rag.differential: DELTA_RATIO_EXCEEDED (1501 changes exceed the 1500-row threshold for source OID 17915.)
+INFO:  Stream table live_rag.differential refreshed (DIFFERENTIAL: +10000 -0)
+NOTICE:  table "__pgt_cdc_3_17915" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_18077" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_17970" does not exist, skipping
+NOTICE:  table "__pgt_delta_3" does not exist, skipping
+INFO:  [PGS_PROFILE] explicit_dml: materialize=56.10ms delete=1.07ms(9) update=0.19ms(0) insert=34.28ms(6) for live_rag.differential
+NOTICE:  table "__pgt_recon_3" does not exist, skipping
+INFO:  [PGS_PROFILE] decision=2.66ms generate+build=5.51ms merge_exec=601.82ms cleanup_enqueue=0.00ms total=609.99ms affected=15 phantom_cleanup=0 delta_est=33 mode=INCR path=cache_miss hints=none strategy=explicit_dml_reconciled
+INFO:  Stream table live_rag.differential refreshed (DIFFERENTIAL: +15 -0)

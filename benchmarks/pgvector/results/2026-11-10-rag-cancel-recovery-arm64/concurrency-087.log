@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running tests/e2e_pgvector_revision_tests.rs (/private/tmp/pg-trickle-task-1399/target/debug/deps/e2e_pgvector_revision_tests-7ac7530d67ba7c77)
+
+running 2 tests
+test test_live_rag_converges_after_writes_during_active_maintenance ... ok
+test test_live_rag_converges_after_writes_during_maintenance ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 8.94s
+
