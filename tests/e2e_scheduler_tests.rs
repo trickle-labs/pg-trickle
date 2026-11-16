@@ -381,29 +381,29 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
     .await;
     db.assert_st_matches_query("scheduler_cut_st", query).await;
 
-    // Block automated work while the real detach/drop/resume lifecycle marks
-    // this stream as needing a protected REINITIALIZE, not a manual rebuild.
+    // Keep scheduler work paused while a normal DETACH + DROP requests a
+    // protected REINITIALIZE. Partition removal now leaves managed streams
+    // ACTIVE with SCHEMA_CHANGED (rather than suspending them); the scheduler
+    // must perform the rebuild after it resumes, not a manual refresh.
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['scheduler_cut_st'])")
         .await;
     db.execute("ALTER TABLE scheduler_cut_src DETACH PARTITION scheduler_cut_empty")
         .await;
     db.execute("DROP TABLE scheduler_cut_empty").await;
-    let suspended: String = db
+    let state: String = db
         .query_scalar(
             "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables
              WHERE pgt_name = 'scheduler_cut_st'",
         )
         .await;
-    assert_eq!(suspended, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
-    db.execute("SELECT pgtrickle.resume_stream_table('scheduler_cut_st')")
-        .await;
+    assert_eq!(state, "ACTIVE:SCHEMA_CHANGED");
     let needs_reinit: bool = db
         .query_scalar(
             "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables
              WHERE pgt_name = 'scheduler_cut_st'",
         )
         .await;
-    assert!(needs_reinit, "resume must request REINITIALIZE");
+    assert!(needs_reinit, "normal partition removal must request REINITIALIZE");
 
     let source_oid: i64 = db
         .query_scalar("SELECT 'scheduler_cut_src'::regclass::oid::bigint")
