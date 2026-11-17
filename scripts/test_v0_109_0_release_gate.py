@@ -47,6 +47,7 @@ class RetirementContractTests(unittest.TestCase):
             run.return_value.returncode = 0
             self.assertEqual(pgvector_suite.main(), 0)
         command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--run-ignored") + 1], "all")
         for case in cases:
             binary, name = case.split("::", 1)
             self.assertIn(binary, command)

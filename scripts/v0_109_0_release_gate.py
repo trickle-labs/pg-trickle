@@ -37,6 +37,10 @@ PGVECTOR_CASES = {
     "e2e_pgvector_tests::" + name
     for name in (
         "test_centroid_randomized_refresh_churn_matches_native_avg",
+        "test_centroid_long_running_drift_matches_native_avg",
+        "test_centroid_diverse_384_dimensional_drift_matches_native_avg",
+        "test_centroid_diverse_768_dimensional_drift_matches_native_avg",
+        "test_centroid_diverse_high_dimensional_drift_matches_native_avg",
         "test_centroid_crash_recovers_committed_source_and_rolls_back_refresh",
         "test_centroid_opt_in_applies_and_falls_back_after_corruption",
         "test_centroid_missing_state_rebuilds_or_stays_unbound",
