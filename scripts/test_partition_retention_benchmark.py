@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,13 @@ spec.loader.exec_module(benchmark)
 
 
 class InternalPlanSummaryTests(unittest.TestCase):
+    def test_database_error_reports_server_diagnostic(self):
+        error = subprocess.CalledProcessError(1, ["psql"], stderr="ERROR: refresh failed\n")
+        with patch.object(benchmark.subprocess, "run", side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, "PostgreSQL command failed: ERROR: refresh failed") as raised:
+                benchmark.run("db", "SELECT 1")
+        self.assertTrue(raised.exception.__suppress_context__)
+
     def test_pending_events_rejects_negative_values(self):
         with patch("sys.argv", ["benchmark.py", "--database", "db", "--output", "out.json",
                                 "--pending-events", "-1"]), patch("sys.stderr", new_callable=io.StringIO) as err:
@@ -53,6 +61,16 @@ class InternalPlanSummaryTests(unittest.TestCase):
     def test_missing_plan_is_an_error(self):
         with self.assertRaisesRegex(ValueError, "did not emit"):
             benchmark.internal_plan_summary("no plans", "trial")
+
+    def test_partitioned_output_scan_is_included_in_guard(self):
+        plan = {"Query Text": "output query", "Plan": {
+            "Node Type": "Seq Scan", "Schema": "trial", "Relation Name": "totals_p0",
+            "Actual Rows": 12, "Actual Loops": 1,
+        }}
+        summary = benchmark.internal_plan_summary("LOG: plan:\n" + json.dumps(plan), "trial")
+        self.assertEqual(summary["output_rows_examined"], 12)
+        with self.assertRaisesRegex(RuntimeError, "unbounded output scan"):
+            benchmark.validate_trim_drop_plan(summary)
 
     def test_trim_plan_rejects_retained_source_and_full_output_scans(self):
         summary = {"source_partitions_scanned": ["p0"], "relevant_plans": [

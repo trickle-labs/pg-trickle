@@ -14,10 +14,13 @@ import uuid
 
 
 def run(db, sql):
-    return subprocess.run(
-        ["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-d", db, "-c", sql],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
+    try:
+        return subprocess.run(
+            ["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-d", db, "-c", sql],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"PostgreSQL command failed: {error.stderr.strip()}") from None
 
 
 def internal_plan_summary(log, schema):
@@ -49,14 +52,15 @@ def internal_plan_summary(log, schema):
             kind = node.get("Node Type", "")
             if node.get("Schema") != schema or not kind.endswith("Scan") or not node.get("Actual Loops", 0):
                 continue
-            if relation != "totals" and not (relation.startswith("p") and relation[1:].isdigit()):
+            if not (relation == "totals" or relation.startswith("totals_") or
+                    (relation.startswith("p") and relation[1:].isdigit())):
                 continue
             rows = (node.get("Actual Rows", 0) + node.get("Rows Removed by Filter", 0)
                     + node.get("Rows Removed by Index Recheck", 0)) * node.get("Actual Loops", 0)
             condition = node.get("Index Cond") or node.get("Recheck Cond") or node.get("TID Cond")
             scans.append({"relation": relation, "node": kind, "rows_examined": rows,
                           "condition": condition})
-            if relation == "totals":
+            if relation == "totals" or relation.startswith("totals_"):
                 output_rows += rows
             else:
                 source_partitions.add(relation)
@@ -72,7 +76,7 @@ def validate_trim_drop_plan(summary):
     retained = set(summary["source_partitions_scanned"]) - {"p0"}
     if retained:
         raise RuntimeError(f"TRIM scanned retained source partitions: {sorted(retained)}")
-    if any(scan["relation"] == "totals" and not scan.get("condition")
+    if any((scan["relation"] == "totals" or scan["relation"].startswith("totals_")) and not scan.get("condition")
            for plan in summary["relevant_plans"] for scan in plan["scans"]):
         raise RuntimeError("TRIM used an unbounded output scan")
 
@@ -93,10 +97,13 @@ def timed(db, sql, schema, instrument):
                 "SET auto_explain.log_min_duration = 0; SET auto_explain.log_analyze = on; "
                 "SET auto_explain.log_timing = off; SET auto_explain.log_nested_statements = on; "
                 "SET auto_explain.log_verbose = on; SET auto_explain.log_format = json; ")
-    result = subprocess.run(
-        ["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-d", db, "-c", settings + sql],
-        check=True, capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-d", db, "-c", settings + sql],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"PostgreSQL command failed: {error.stderr.strip()}") from None
     elapsed = (time.perf_counter() - start) * 1000
     return result.stdout.strip(), elapsed, internal_plan_summary(result.stderr, schema)
 
@@ -158,7 +165,7 @@ def refresh_until_consistent(db, table, defining):
         time.sleep(.1)
 
 
-def trial(db, schema, events, trim, directory, instrument, downstream, keyless, pending_events, failure_plan):
+def trial(db, schema, events, trim, directory, instrument, downstream, keyless, pending_events, partitioned_output, failure_plan):
     old = datetime.date(2025, 1, 1)
     partitions = []
     for day in range(31):
@@ -179,7 +186,8 @@ def trial(db, schema, events, trim, directory, instrument, downstream, keyless, 
         f"((g-1)%1000)::integer, 1 FROM generate_series(1,{events}) g; "
         f"CREATE SEQUENCE {schema}.ids START WITH {events + expired + 1}; ANALYZE {schema}.events")
     defining = f"SELECT d, account, sum(amount) AS total, count(*) AS n FROM {schema}.events GROUP BY d, account"
-    run(db, f"SELECT pgtrickle.create_stream_table('{schema}.totals', $$ {defining} $$, '1h', 'DIFFERENTIAL')")
+    partition_clause = ", partition_by => 'HASH:d'" if partitioned_output else ""
+    run(db, f"SELECT pgtrickle.create_stream_table('{schema}.totals', $$ {defining} $$, '1h', 'DIFFERENTIAL'{partition_clause})")
     if trim:
         run(db, f"SELECT pgtrickle.set_stream_table_partition_retention('{schema}.totals', 'TRIM', 'd', '2025-01-02')")
     if downstream:
@@ -239,6 +247,7 @@ def trial(db, schema, events, trim, directory, instrument, downstream, keyless, 
             raise
     return {"mode": "TRIM" if trim else "baseline", "retained_events": events,
             "pending_events": pending_events,
+            "partitioned_output": partitioned_output,
             "keyless_source": keyless,
             "expired_events": expired, "drop_ms": drop_ms, "refresh_call_ms": refresh_ms,
             "writer": writer_latency, "reader": reader_latency, "refresh_history": history,
@@ -262,6 +271,8 @@ def main():
                         help="create the partitioned source without a primary key")
     parser.add_argument("--pending-events", type=int, default=0,
                         help="insert this many additional events immediately before DROP")
+    parser.add_argument("--partitioned-output", action="store_true",
+                        help="hash-partition the stream table output by its date group")
     args = parser.parse_args()
     if args.events < 30_000:
         parser.error("--events must be at least 30000")
@@ -275,7 +286,7 @@ def main():
                 directory = Path(tmp) / schema
                 directory.mkdir()
                 failure_plan = args.output.with_suffix(args.output.suffix + ".failed-plan.json")
-                results.append(trial(args.database, schema, args.events, trim, directory, args.instrument_internal, args.downstream, args.keyless, args.pending_events, failure_plan))
+                results.append(trial(args.database, schema, args.events, trim, directory, args.instrument_internal, args.downstream, args.keyless, args.pending_events, args.partitioned_output, failure_plan))
                 args.output.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
         finally:
             for schema in schemas:

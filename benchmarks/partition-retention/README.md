@@ -77,6 +77,8 @@ PGOPTIONS='-c random_page_cost=1000000 -c cpu_index_tuple_cost=100000000' python
 `--pending-events` inserts additional live-partition events immediately before
 DROP, so the protected catch-up must process a substantial CDC backlog. These
 events are additional to the requested retained event count.
+Add `--partitioned-output` to use four hash partitions for stream storage;
+instrumentation includes scans of their child tables.
 
 The results depend on cache, storage, CPU, database settings, and concurrent
 load. Run several times and report the environment and individual results;
@@ -229,10 +231,24 @@ downstream completed differential refreshes. The baseline needed two drain
 calls and TRIM one. The writer and reader samples cover the whole workload,
 not just the lock wait, and instrumentation adds overhead.
 
-For unpartitioned output, retention catch-up now correlates delete, update,
+For partitioned and unpartitioned output, retention catch-up correlates delete, update,
 and existence probes with the affected identities, and enables TID scans in
 its restored planner scope. A keyless insert/update/delete check and a
 duplicate-identity multiset check passed against PostgreSQL. Captured plans
-show indexed probes and TID scans; partitioned output retains the existing DML
-path. The planner can still choose other plans, so the hard performance bound
-remains unproven.
+show indexed probes and TID scans. Partitioned output can still visit multiple
+storage partitions per identity, and the planner can choose other plans, so
+the hard performance bound remains unproven.
+
+A 30,000-event HASH-output diagnostic with 20,000 pending events, a keyless
+source, and a downstream stream reproduced missing downstream updates before
+the HASH path was corrected to honor explicit DML. Afterward, ten runs with
+the scheduler disabled and `pg_trickle.refresh_strategy=differential` passed
+the bounded-scan check and both result oracles. One representative run is in
+`results/`; it observed 11,000 output rows during TRIM DROP and no retained
+source scans. This is a small diagnostic, not a scale comparison.
+
+With the scheduler enabled, a separate repetition hit a PostgreSQL deadlock
+between manual upstream refresh and a downstream rebuild. PostgreSQL aborted
+the manual transaction; automatic retry and lock ordering for this overlap
+remain unresolved. An additional high-cost run used a normal FULL fallback
+after the retention cut, which this benchmark rejected.
