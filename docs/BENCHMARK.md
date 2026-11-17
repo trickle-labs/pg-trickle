@@ -16,7 +16,8 @@ The core question the benchmarks answer:
 
 `benchmarks/pgbench-v0.87/run.sh` is the versioned three-configuration gate
 for the v0.87 write-path contract. It recreates each database for every
-paired repetition and rotates the configuration order deterministically:
+paired repetition, runs `absent` and `installed` back-to-back in alternating
+order, then runs `active`:
 
 | Configuration | PostgreSQL contents |
 |---|---|
@@ -26,14 +27,23 @@ paired repetition and rotates the configuration order deterministically:
 
 The blocking profile uses the pinned PostgreSQL base image from
 `tests/Dockerfile.e2e`, scale 10, 8 clients, 2 jobs, a
-10-second warm-up, a 30-second measurement, and 3 paired repetitions. It
-matches PostgreSQL settings across the stock and extension images, then
-samples pgbench transaction logs at 10%, records p50/p95/p99, checks active
-stream-table correctness after each table completes a post-workload refresh,
-and samples worker `/proc` jiffies against container cgroup CPU time. The
+10-second warm-up, a 30-second measurement, and 3 paired repetitions. The
+publication profile keeps the same scale and concurrency, with a 30-second
+unthrottled capacity sample, then a 60-second latency measurement at 1,000 TPS,
+and 5 paired repetitions. The publication profile waits for active stream
+tables to converge after warm-up before measuring, so its p99 sample starts
+without warm-up refresh backlog. Its capacity ratio uses the adjacent
+unthrottled samples;
+p99 uses the common offered rate across all three configurations, and excludes
+pgbench's client-side schedule lag from transaction execution time. The join
+uses an immutable copy of branch keys so pgbench's branch-balance updates do
+not fan out into million-row output deltas. Both profiles match PostgreSQL
+settings across the stock and extension images, sample pgbench transaction
+logs at 10%, record execution-time p50/p95/p99, check active stream-table
+correctness after each table completes a post-workload refresh, and sample
+worker `/proc` jiffies against container cgroup CPU time. The
 correctness gate waits up to eight minutes for those refreshes because a
-checkpoint-bound refresh took 345 seconds on a nightly runner. The publication
-profile is a five-repetition, 60-second run.
+checkpoint-bound refresh took 345 seconds on a nightly runner.
 
 ```bash
 ./tests/build_e2e_image.sh
