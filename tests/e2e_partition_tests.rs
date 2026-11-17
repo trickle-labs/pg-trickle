@@ -3426,6 +3426,125 @@ async fn test_retention_preserves_nonfinite_numeric_aggregates() {
 }
 
 #[tokio::test]
+async fn test_retention_rejects_nondeterministic_group_collations() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE COLLATION retention_case_insensitive (provider = icu, locale = 'und-u-ks-level2', deterministic = false)").await;
+    db.execute("CREATE TABLE collation_retention_src (id INT NOT NULL, d DATE NOT NULL, account TEXT COLLATE retention_case_insensitive NOT NULL, amount INT NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE collation_retention_old PARTITION OF collation_retention_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE collation_retention_live PARTITION OF collation_retention_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    let query =
+        "SELECT d, account, sum(amount) AS total FROM collation_retention_src GROUP BY d, account";
+    for (name, policy) in [("collation_trim", "TRIM"), ("collation_keep", "RETAIN")] {
+        let error = sqlx::query(
+            "SELECT pgtrickle.create_stream_table_with_retention($1,$2,$3,'d','2026-01-01','1h')",
+        )
+        .bind(name)
+        .bind(query)
+        .bind(policy)
+        .execute(&db.pool)
+        .await
+        .expect_err("reject nondeterministic grouping");
+        assert!(
+            error.to_string().contains("nondeterministic collation"),
+            "{error}"
+        );
+        let relation: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+            .bind(name)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(relation, None);
+    }
+    db.create_st("collation_legacy", query, "1h", "DIFFERENTIAL")
+        .await;
+    let error = db.try_execute("SELECT pgtrickle.set_stream_table_partition_retention('collation_legacy','RETAIN','d','2026-01-01')")
+        .await.expect_err("reject an existing stream with unsafe grouping");
+    assert!(
+        error.to_string().contains("nondeterministic collation"),
+        "{error}"
+    );
+    let policy: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('collation_legacy')")
+        .await;
+    assert_eq!(policy, serde_json::json!({"enabled": false}));
+
+    // Simulate a policy installed by an older version; refresh must fail before changing rows.
+    db.execute("UPDATE pgtrickle.pgt_dependencies dep SET column_snapshot = jsonb_set(COALESCE(dep.column_snapshot,'{}'::jsonb), '{partition_retention}', jsonb_build_object('version',1,'mode','RETAIN','candidate',jsonb_build_object('output_column','d','bucket','EXACT','source_type_oid',1082,'source_oid',dep.source_relid::oid::bigint,'source_column','d'),'cutoff',jsonb_build_object('kind','DATE','value',DATE '2026-01-01' - DATE '2000-01-01'),'query_hash',st.defining_query_hash,'sealed','[]'::jsonb)) FROM pgtrickle.pgt_stream_tables st WHERE st.pgt_id = dep.pgt_id AND st.pgt_name = 'collation_legacy' AND dep.source_relid = 'collation_retention_src'::regclass").await;
+    db.execute("INSERT INTO collation_retention_src VALUES (1,'2026-06-01','FOO',1),(2,'2026-06-01','foo',2)").await;
+    let error = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('collation_legacy')")
+        .await
+        .expect_err("reject unsafe legacy policy on refresh");
+    assert!(
+        error.to_string().contains("nondeterministic collation"),
+        "{error}"
+    );
+    let rows: Vec<(String, String, i64)> =
+        sqlx::query_as("SELECT d::text, account, total FROM collation_legacy ORDER BY d, account")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, Vec::new());
+    let expected: Vec<(String, String, i64)> = sqlx::query_as("SELECT d::text, lower(account), total FROM (SELECT d, account, sum(amount) AS total FROM collation_retention_src GROUP BY d, account) q").fetch_all(&db.pool).await.unwrap();
+    assert_eq!(expected, vec![("2026-06-01".into(), "foo".into(), 3)]);
+
+    // A nondeterministic collation on a COUNT input is safe when it is not a group key.
+    db.execute("CREATE TABLE collation_count_src (id INT NOT NULL, d DATE NOT NULL, note TEXT COLLATE retention_case_insensitive, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE collation_count_old PARTITION OF collation_count_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE collation_count_live PARTITION OF collation_count_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO collation_count_src VALUES (1,'2025-06-01','A'),(2,'2026-06-01','b')")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table_with_retention('collation_count_st','SELECT d,count(note) AS n FROM collation_count_src GROUP BY d','TRIM','d','2026-01-01','1h')").await;
+    db.execute("INSERT INTO collation_count_src VALUES (3,'2026-06-01','C')")
+        .await;
+    db.execute("ALTER TABLE collation_count_src DETACH PARTITION collation_count_old")
+        .await;
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT d::text,n FROM collation_count_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, vec![("2026-06-01".into(), 2)]);
+    db.assert_st_matches_query(
+        "collation_count_st",
+        "SELECT d,count(note) AS n FROM collation_count_src GROUP BY d",
+    )
+    .await;
+    let action: (String, String, bool) = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='collation_count_st' ORDER BY h.refresh_id DESC LIMIT 1").fetch_one(&db.pool).await.unwrap();
+    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+
+    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+        .await;
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name = 'collation_legacy'").await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = true")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    assert!(
+        db.wait_for_scheduler(std::time::Duration::from_secs(90))
+            .await
+    );
+    assert!(db.wait_for_condition(
+        "scheduled refresh rejects unsafe collation",
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name = 'collation_legacy' AND h.initiated_by = 'SCHEDULER' AND h.status = 'FAILED' AND h.error_message LIKE '%nondeterministic collation%')",
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_millis(50),
+    ).await);
+    let rows: Vec<(String, String, i64)> =
+        sqlx::query_as("SELECT d::text, account, total FROM collation_legacy ORDER BY d, account")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, Vec::new());
+}
+
+#[tokio::test]
 async fn test_retention_rejects_array_group_identity() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("CREATE TABLE alias_array_src (d DATE NOT NULL, account INT[] NOT NULL, amount INT NOT NULL) PARTITION BY RANGE (d)").await;

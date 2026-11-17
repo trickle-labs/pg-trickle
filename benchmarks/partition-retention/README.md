@@ -338,3 +338,21 @@ join-amplification guard passed. Results and executed plans are in
 `results/2026-11-17-pg18-macos-multiset-27m.json`. These debug-build samples
 include plan-logging overhead; latencies span the workload and do not isolate
 lock waits.
+
+After adding the deterministic-collation guard, the same native PostgreSQL 18.7
+arm64 setup was rerun once at each size, with instrumentation and both oracles:
+
+| Retained events | Mode | DROP | First refresh | Writer p95 / max | Reader p95 / max |
+|---:|---|---:|---:|---:|---:|
+| 9,000,000 | baseline | 41 | 3,738 | 0.10 / 10.32 | 1.99 / 3.09 |
+| 9,000,000 | TRIM | 170 | 59 | 0.11 / 125.05 | 2.12 / 3.32 |
+| 27,000,000 | baseline | 37 | 10,072 | 0.10 / 9.45 | 2.12 / 2.98 |
+| 27,000,000 | TRIM | 175 | 63 | 0.12 / 131.74 | 2.19 / 3.01 |
+
+Times are milliseconds. Baseline reinitialization scanned 30 retained
+partitions and observed 9,014,341 and 27,014,435 source rows, respectively.
+TRIM scanned no retained source partitions during DROP and observed 7,000
+output rows; TRIM and downstream refreshes completed differentially. The
+raw plans and latency samples are in `results/2026-11-17-pg18-macos-collation-9m.json`
+and `results/2026-11-17-pg18-macos-collation-27m.json`. These are single
+instrumented debug-build runs, not a guaranteed planner bound.

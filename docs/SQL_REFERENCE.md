@@ -1620,6 +1620,8 @@ aggregate grouping satisfy the retention eligibility checks. `policy` is
 `TRIM`, `RETAIN`, or `OFF`. The cutoff uses PostgreSQL input syntax for the
 source partition column's date or timestamp type. Include an explicit offset
 for `timestamptz` cutoffs when the session time zone should not determine it.
+Grouping columns with nondeterministic collations are rejected because their
+equality semantics do not match the typed row identity used for maintenance.
 Enabling retention switches the shared source to row-level CDC and performs a
 protected baseline reinitialization so direct writes to child partitions are
 captured. While enabled, source TRUNCATE and writes during lossy CDC discard

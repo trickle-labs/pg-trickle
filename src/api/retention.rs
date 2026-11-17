@@ -121,6 +121,7 @@ fn set_policy(
                     "retention query is not eligible: {error:?}"
                 ))
             })?;
+        retention::validate_retention_group_collations(&tree, source_oid)?;
         retention::validate_builtin_aggregates(&st.defining_query, &tree)?;
         Ok(candidate)
     })?;

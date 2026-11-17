@@ -687,6 +687,7 @@ pub(crate) fn finish_concurrent_retention_detach(
                         "retention query is no longer eligible: {e:?}"
                     ))
                 })?;
+        validate_retention_group_collations(&tree, source_oid)?;
         validate_builtin_aggregates(&st.defining_query, &tree)?;
         Ok(candidate)
     })?;
@@ -1177,6 +1178,52 @@ fn drop_partition_truncate_guard_inner(
     Ok(())
 }
 
+/// Group identities must use equality compatible with the typed row encoding.
+#[cfg(not(test))]
+pub(crate) fn validate_retention_group_collations(
+    tree: &OpTree,
+    source_oid: pg_sys::Oid,
+) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let aggregate = match tree {
+        OpTree::Project { child, .. } => child.as_ref(),
+        tree => tree,
+    };
+    let OpTree::Aggregate { group_by, .. } = aggregate else {
+        return Err(PgTrickleError::InvalidArgument(
+            "partition retention requires a supported grouped aggregate".into(),
+        ));
+    };
+    for group in group_by {
+        let Expr::ColumnRef { column_name, .. } = group else {
+            continue;
+        };
+        let deterministic = Spi::get_one_with_args::<bool>(
+            "SELECT a.attcollation OPERATOR(pg_catalog.=) 0 \
+                    OR COALESCE(c.collisdeterministic, false) \
+             FROM pg_catalog.pg_attribute a \
+             LEFT JOIN pg_catalog.pg_collation c ON c.oid OPERATOR(pg_catalog.=) a.attcollation \
+             WHERE a.attrelid OPERATOR(pg_catalog.=) $1 \
+               AND a.attname OPERATOR(pg_catalog.=) $2 \
+               AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped",
+            &[source_oid.into(), column_name.as_str().into()],
+        )
+        .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
+        .ok_or_else(|| {
+            PgTrickleError::InvalidArgument(format!(
+                "cannot inspect retention grouping column {column_name}"
+            ))
+        })?;
+        if !deterministic {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "partition retention grouping column {column_name} uses a nondeterministic collation; use a deterministic collation before configuring or refreshing retention"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Reject refresh when partition CDC or its TRUNCATE protection is incomplete.
 #[cfg(not(test))]
 pub(crate) fn ensure_retention_capture(pgt_id: i64) -> Result<(), crate::error::PgTrickleError> {
@@ -1191,6 +1238,12 @@ pub(crate) fn ensure_retention_capture(pgt_id: i64) -> Result<(), crate::error::
     let Some(source) = source else {
         return Ok(());
     };
+    let st = crate::catalog::StreamTableMeta::get_by_id(pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
+    crate::refresh::with_stream_owner(&st, || {
+        let tree = super::parser::parse_defining_query(&st.defining_query)?;
+        validate_retention_group_collations(&tree, source)
+    })?;
     let name = crate::cdc::get_cdc_name_for_source(source);
     let capture_name = format!("pg_trickle_cdc_{name}");
     let guard_name = format!("pg_trickle_retention_truncate_{name}");
@@ -1429,6 +1482,7 @@ pub fn prepare_retention_cut(
                         "retention query is no longer eligible: {e:?}"
                     ))
                 })?;
+        validate_retention_group_collations(&tree, source_oid)?;
         validate_builtin_aggregates(&st.defining_query, &tree)?;
         Ok(candidate)
     })?;

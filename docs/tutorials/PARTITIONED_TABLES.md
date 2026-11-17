@@ -165,8 +165,9 @@ The contract is intentionally narrow:
   `COUNT(column)` and/or `SUM(column)`, using PostgreSQL's built-in aggregates
   without DISTINCT or aggregate filters. `SUM` accepts built-in integer,
   floating-point, and numeric columns. Other grouping keys must be source
-  columns supported by the stream table's typed row identity; for example,
-  array-valued grouping keys are rejected. Aggregate arguments cannot be
+  columns supported by the stream table's typed row identity and must use
+  deterministic collations; for example, array-valued grouping keys and
+  nondeterministic text collations are rejected. Aggregate arguments cannot be
   arbitrary expressions. The
   defining search path must leave `pg_catalog` ahead of other schemas, and the
   stream owner must not be subject to source row-level security. Its output
@@ -215,6 +216,12 @@ is configured, TRUNCATE of an attached partition is rejected; use supported
 row-level DELETEs or partition retention instead. Writes are rejected while
 CDC is paused in discard mode, which would otherwise lose their changes. A
 detached table can be modified independently.
+
+If an existing policy used a nondeterministic grouping collation, refresh now
+fails closed. Its existing groups may already be incorrect; changing the
+collation alone does not repair them. Restore the complete raw history and
+build a replacement stream with deterministic grouping. If RETAIN has sealed
+history, do not discard the old stream until the replacement has been checked.
 
 The retention cutoff is parsed as the source column type. Include a timezone
 offset for `timestamptz` cutoffs to avoid dependence on the session timezone.
