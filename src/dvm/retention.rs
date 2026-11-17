@@ -80,7 +80,7 @@ fn retention_catchup(
     source_oid: pg_sys::Oid,
     safe_bound: &str,
 ) -> Result<crate::api::refresh_ops::ManualRefreshResult, crate::error::PgTrickleError> {
-    with_retention_guc_scope(|| {
+    with_retention_index_scans(|| {
         crate::refresh::with_refresh_context(
             crate::refresh::RefreshContext::retention(safe_bound),
             || {
@@ -1597,18 +1597,20 @@ fn finalize_trimmed_cut(cut: PreparedRetentionCut) -> Result<(), crate::error::P
     };
     Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-    crate::refresh::with_stream_owner(&st, || {
-        let delete = format!(
-            "DELETE FROM {table} WHERE {key} OPERATOR(pg_catalog.>=) {lower} AND {key} OPERATOR(pg_catalog.<) {upper}"
-        );
-        let sql = if let Some(pre) = &pre {
-            format!(
-                "WITH removed AS ({delete} RETURNING __pgt_row_id, {columns}) INSERT INTO {pre} SELECT * FROM removed"
-            )
-        } else {
-            delete
-        };
-        Spi::run(&sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    with_retention_index_scans(|| {
+        crate::refresh::with_stream_owner(&st, || {
+            let delete = format!(
+                "DELETE FROM {table} WHERE {key} OPERATOR(pg_catalog.>=) {lower} AND {key} OPERATOR(pg_catalog.<) {upper}"
+            );
+            let sql = if let Some(pre) = &pre {
+                format!(
+                    "WITH removed AS ({delete} RETURNING __pgt_row_id, {columns}) INSERT INTO {pre} SELECT * FROM removed"
+                )
+            } else {
+                delete
+            };
+            Spi::run(&sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })
     })?;
     if let Some(pre) = pre {
         let schema = crate::config::pg_trickle_change_buffer_schema();
@@ -1885,6 +1887,21 @@ fn with_retention_guc_scope<T>(
             .finally(move || pg_sys::AtEOXact_GUC(false, level))
             .execute()
     }
+}
+
+#[cfg(not(test))]
+fn with_retention_index_scans<T>(
+    operation: impl FnOnce() -> Result<T, crate::error::PgTrickleError>,
+) -> Result<T, crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    with_retention_guc_scope(|| {
+        Spi::run("SET LOCAL enable_indexscan = on")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run("SET LOCAL enable_bitmapscan = on")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        operation()
+    })
 }
 
 #[cfg(not(test))]
