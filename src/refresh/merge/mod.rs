@@ -1360,7 +1360,6 @@ pub fn execute_differential_refresh_with_tuning(
                     st,
                     &quoted_table,
                     &effective_defining_query,
-                    10_000,
                 )
             })?;
             crate::refresh::drop_owner_temp_table(st, &format!("__pgt_recon_{}", st.pgt_id));
@@ -4110,12 +4109,7 @@ pub fn execute_differential_refresh_with_tuning(
             name.replace('"', "\"\""),
         );
         let cleanup_result = with_stream_owner(st, || {
-            super::phd1::cleanup_cross_cycle_phantoms(
-                st,
-                &quoted_table,
-                &effective_defining_query,
-                10_000,
-            )
+            super::phd1::cleanup_cross_cycle_phantoms(st, &quoted_table, &effective_defining_query)
         });
         crate::refresh::drop_owner_temp_table(st, &format!("__pgt_recon_{}", st.pgt_id));
         cleanup_result?

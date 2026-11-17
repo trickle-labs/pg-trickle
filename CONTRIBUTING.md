@@ -321,10 +321,11 @@ documentation will be asked to add it before merge.
 
 ## Updating base image digests
 
-Docker base images are pinned to exact SHA256 digests in all Dockerfiles
-(`Dockerfile.demo`, `Dockerfile.ghcr`, `tests/Dockerfile.e2e`,
-`tests/Dockerfile.e2e-asan`) for
-reproducibility and supply-chain security (OPS-10-03).
+Docker base images are pinned to exact SHA256 digests in
+`Dockerfile.demo`, `Dockerfile.ghcr`, `tests/Dockerfile.e2e`, and
+`tests/Dockerfile.e2e-asan` for reproducibility and supply-chain security
+(OPS-10-03). The full E2E image uses PostgreSQL 18.7 because the current
+pgvector package requires that patch version; the other images use 18.6.
 
 To update the digests when a new PostgreSQL patch release is available:
 
@@ -333,10 +334,10 @@ To update the digests when a new PostgreSQL patch release is available:
 scripts/update_base_image_digests.sh
 ```
 
-The script resolves the current `linux/amd64` digest for
-`postgres:18.6-bookworm`, patches all Dockerfiles in-place, and prints the
-commit command. Run this script **quarterly** or when a PostgreSQL patch release
-is needed. Include the digest-update commit in the release PR.
+The script resolves manifest-list digests for `postgres:18.6-bookworm` and
+`postgres:18.7-bookworm`, patches the matching Dockerfiles in-place, and prints
+the commit command. Run this script **quarterly** or when a PostgreSQL patch
+release is needed. Include the digest-update commit in the release PR.
 
 If you are building for `linux/arm64` or another platform, edit the
 `TARGET_PLATFORM` variable in the script or pin to the manifest index digest
