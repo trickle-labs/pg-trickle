@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +21,10 @@ DIMENSIONS = 384
 SUBSCRIPTIONS = (0, 1, 10, 100, 1000)
 STATISTICS = ("unanalyzed", "analyzed")
 ROUNDS = 1
+PLAN_CASES = {
+    (1_000_000, 0, "unanalyzed"),
+    (1_000_000, 1_000, "unanalyzed"),
+}
 REPORT_MARKER = "PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON="
 TEST_COMMAND = [
     "bash",
@@ -33,7 +39,9 @@ TEST_COMMAND = [
 ]
 
 
-def parse_case(output: str, rows: int, subscriptions: int, analyzed: bool) -> dict:
+def parse_case(
+    output: str, rows: int, subscriptions: int, analyzed: bool, plan_capture: bool = False
+) -> dict:
     reports = [line.removeprefix(REPORT_MARKER) for line in output.splitlines() if line.startswith(REPORT_MARKER)]
     if len(reports) != 1:
         raise ValueError("subscription benchmark must emit exactly one JSON result")
@@ -49,6 +57,7 @@ def parse_case(output: str, rows: int, subscriptions: int, analyzed: bool) -> di
         or report.get("dimensions") != DIMENSIONS
         or report.get("distinct_pivots") != 1
         or report.get("force_explicit_with_noop_trigger") is not True
+        or report.get("nested_plan_capture") is not plan_capture
     ):
         raise ValueError("subscription benchmark used unexpected package, database, or plan-control settings")
     measurements = report.get("measurements")
@@ -82,7 +91,7 @@ def parse_case(output: str, rows: int, subscriptions: int, analyzed: bool) -> di
     return report
 
 
-def run_case(rows: int, subscriptions: int, statistics: str) -> dict:
+def run_case(rows: int, subscriptions: int, statistics: str, plan_path: Path | None) -> dict:
     environment = os.environ.copy()
     environment.update(
         {
@@ -95,6 +104,9 @@ def run_case(rows: int, subscriptions: int, statistics: str) -> dict:
             "PGVECTOR_SUB_FORCE_EXPLICIT": "1",
         }
     )
+    environment.pop("PGVECTOR_SUB_PLAN_LOG", None)
+    if plan_path is not None:
+        environment["PGVECTOR_SUB_PLAN_LOG"] = str(plan_path)
     completed = subprocess.run(
         TEST_COMMAND,
         cwd=ROOT,
@@ -108,7 +120,35 @@ def run_case(rows: int, subscriptions: int, statistics: str) -> dict:
     sys.stdout.flush()
     if completed.returncode != 0:
         raise RuntimeError(f"subscription case {rows}/{statistics}/{subscriptions} failed with exit {completed.returncode}")
-    return parse_case(completed.stdout, rows, subscriptions, statistics == "analyzed")
+    return parse_case(
+        completed.stdout,
+        rows,
+        subscriptions,
+        statistics == "analyzed",
+        plan_capture=plan_path is not None,
+    )
+
+
+def validate_plan_log(output: str, rows: int, subscriptions: int, statistics: str) -> None:
+    analyzed = statistics == "analyzed"
+    case = f"rows={rows} subscriptions={subscriptions} analyzed={str(analyzed).lower()} round=0"
+    if any(output.count(f"PGVECTOR_SUB_{stage} {case}") != 1 for stage in ("START", "END")):
+        raise ValueError("subscription plan log is missing the expected case markers")
+    if '"Plan":' not in output:
+        raise ValueError("subscription plan log contains no auto_explain plan")
+
+
+def attach_plan_log(path: Path, rows: int, subscriptions: int, statistics: str, result: dict) -> str:
+    if not path.is_file() or path.stat().st_size == 0:
+        raise ValueError(f"subscription plan log was not written: {path.name}")
+    validate_plan_log(path.read_text(encoding="utf-8", errors="replace"), rows, subscriptions, statistics)
+    compressed_path = path.with_suffix(path.suffix + ".gz")
+    with path.open("rb") as source, gzip.open(compressed_path, "wb") as target:
+        shutil.copyfileobj(source, target)
+    path.unlink()
+    relative_path = compressed_path.relative_to(ROOT).as_posix()
+    result["raw_evidence_files"].append(relative_path)
+    return relative_path
 
 
 def write_measurement(path: Path, result: dict) -> None:
@@ -149,27 +189,43 @@ def main() -> int:
             "rounds_per_case": ROUNDS,
             "host": host_info(),
             "cases": [],
+            "raw_evidence_files": [],
         }
         write_measurement(measurement_path, result)
         postgres_version = None
         for rows in ROW_COUNTS:
             for statistics in STATISTICS:
                 for subscriptions in SUBSCRIPTIONS:
+                    plan_path = None
+                    case_id = (rows, subscriptions, statistics)
+                    if case_id in PLAN_CASES:
+                        plan_name = f"subscription-scale-{rows}-{subscriptions}-{statistics}.log"
+                        plan_path = measurement_path.parent / plan_name
+                        plan_path.unlink(missing_ok=True)
                     print(
                         f"=== Exact-package subscriptions: {rows} rows, {DIMENSIONS} dimensions, "
                         f"{subscriptions} subscriptions, {statistics} ===",
                         flush=True,
                     )
-                    report = run_case(rows, subscriptions, statistics)
+                    try:
+                        report = run_case(rows, subscriptions, statistics, plan_path)
+                    except (OSError, RuntimeError, ValueError):
+                        if plan_path is not None and plan_path.is_file():
+                            attach_plan_log(plan_path, rows, subscriptions, statistics, result)
+                        raise
                     postgres_version = report["postgres"]
-                    result["cases"].append(
-                        {
-                            "rows": rows,
-                            "statistics": statistics,
-                            "subscriptions": subscriptions,
-                            "report": report,
-                        }
-                    )
+                    case = {
+                        "rows": rows,
+                        "statistics": statistics,
+                        "subscriptions": subscriptions,
+                        "report": report,
+                    }
+                    if plan_path is not None:
+                        plan_relative = attach_plan_log(
+                            plan_path, rows, subscriptions, statistics, result
+                        )
+                        case["plan_log"] = plan_relative
+                    result["cases"].append(case)
                     write_measurement(measurement_path, result)
         match = re.match(r"^PostgreSQL (18(?:\.\d+){1,2})", postgres_version or "")
         if not match:

@@ -12,6 +12,7 @@ def report(rows: int, subscriptions: int, analyzed: bool) -> dict:
         "dimensions": 384,
         "distinct_pivots": 1,
         "force_explicit_with_noop_trigger": True,
+        "nested_plan_capture": False,
         "measurements": [
             {
                 "initial_rows": rows,
@@ -61,6 +62,46 @@ class SubscriptionScaleTests(unittest.TestCase):
         self.assertEqual(scale.SUBSCRIPTIONS, (0, 1, 10, 100, 1_000))
         self.assertEqual(scale.DIMENSIONS, 384)
         self.assertEqual(len(scale.ROW_COUNTS) * len(scale.SUBSCRIPTIONS) * len(scale.STATISTICS), 40)
+
+    def test_matrix_captures_same_strategy_plans_at_zero_and_max_subscriptions(self):
+        expected = {
+            (1_000_000, 0, "unanalyzed"),
+            (1_000_000, 1_000, "unanalyzed"),
+        }
+        self.assertEqual(scale.PLAN_CASES, expected)
+        self.assertTrue(scale.PLAN_CASES <= {
+            (rows, subscriptions, statistics)
+            for rows in scale.ROW_COUNTS
+            for subscriptions in scale.SUBSCRIPTIONS
+            for statistics in scale.STATISTICS
+        })
+
+    def test_parse_case_requires_the_declared_plan_capture(self):
+        data = report(1_000_000, 10, False)
+        data["nested_plan_capture"] = True
+        output = scale.REPORT_MARKER + json.dumps(data)
+        self.assertEqual(
+            scale.parse_case(output, 1_000_000, 10, False, plan_capture=True), data
+        )
+        with self.assertRaisesRegex(ValueError, "plan-control"):
+            scale.parse_case(output, 1_000_000, 10, False)
+
+    def test_plan_log_requires_case_markers_and_an_explain_plan(self):
+        plan = (
+            "PGVECTOR_SUB_START rows=1000000 subscriptions=0 analyzed=false round=0\n"
+            '{"Plan":{"Node Type":"Seq Scan"}}\n'
+            "PGVECTOR_SUB_END rows=1000000 subscriptions=0 analyzed=false round=0\n"
+        )
+        scale.validate_plan_log(plan, 1_000_000, 0, "unanalyzed")
+        with self.assertRaisesRegex(ValueError, "case markers"):
+            scale.validate_plan_log(plan.replace("PGVECTOR_SUB_END", "OTHER"), 1_000_000, 0, "unanalyzed")
+        with self.assertRaisesRegex(ValueError, "no auto_explain plan"):
+            scale.validate_plan_log(
+                plan.replace('{"Plan":{"Node Type":"Seq Scan"}}\n', ""),
+                1_000_000,
+                0,
+                "unanalyzed",
+            )
 
 
 if __name__ == "__main__":
