@@ -2278,6 +2278,98 @@ async fn test_retention_scoped_dml_distinguishes_partition_ctids() {
 }
 
 #[tokio::test]
+async fn test_retention_utc_hour_fall_back_keeps_distinct_buckets() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retention_dst_src (id INT NOT NULL, occurred TIMESTAMPTZ NOT NULL, account TEXT NOT NULL, amount INT NOT NULL, PRIMARY KEY(id,occurred)) PARTITION BY RANGE(occurred)").await;
+    db.execute("CREATE TABLE retention_dst_old PARTITION OF retention_dst_src FOR VALUES FROM ('2025-11-02 05:00:00+00') TO ('2025-11-02 06:00:00+00')").await;
+    db.execute("CREATE TABLE retention_dst_live PARTITION OF retention_dst_src FOR VALUES FROM ('2025-11-02 06:00:00+00') TO ('2025-11-02 08:00:00+00')").await;
+    db.execute("INSERT INTO retention_dst_src VALUES (1,'2025-11-02 01:30:00-04','a',10),(2,'2025-11-02 01:00:00-05','a',20),(3,'2025-11-02 01:30:00-05','b',7)").await;
+    let query = "SELECT pg_catalog.date_trunc('hour',occurred,'UTC') AS bucket,account,sum(amount) AS total,count(*) AS n FROM retention_dst_src GROUP BY 1,2";
+    for (name, policy) in [
+        ("retention_dst_trim", "TRIM"),
+        ("retention_dst_keep", "RETAIN"),
+    ] {
+        sqlx::query("SELECT pgtrickle.create_stream_table_with_retention($1,$2,$3,'occurred','2025-11-02 01:00:00-05','1h')")
+            .bind(name).bind(query).bind(policy).execute(&db.pool).await.expect("create UTC bucket stream");
+    }
+    let baseline: Vec<(String,String,i64,i64)> = sqlx::query_as("SELECT to_char(bucket AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI'),account,total,n FROM retention_dst_keep ORDER BY bucket,account").fetch_all(&db.pool).await.unwrap();
+    assert_eq!(
+        baseline,
+        vec![
+            ("2025-11-02 05:00".into(), "a".into(), 10, 1),
+            ("2025-11-02 06:00".into(), "a".into(), 20, 1),
+            ("2025-11-02 06:00".into(), "b".into(), 7, 1)
+        ]
+    );
+    let mut conn = db.pool.acquire().await.expect("acquire DST session");
+    sqlx::query("SET TIME ZONE 'America/New_York'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE retention_dst_src DETACH PARTITION retention_dst_old")
+        .execute(&mut *conn)
+        .await
+        .expect("detach expired UTC hour in a DST session");
+    let status: serde_json::Value = sqlx::query_scalar(
+        "SELECT pgtrickle.get_stream_table_partition_retention('retention_dst_keep')",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    let (lower, upper): (String, String) = sqlx::query_as("SELECT TIMESTAMPTZ '2025-11-02 05:00:00+00'::text, TIMESTAMPTZ '2025-11-02 06:00:00+00'::text")
+        .fetch_one(&mut *conn).await.unwrap();
+    assert_eq!(
+        status["sealed_ranges"],
+        serde_json::json!([{"lower": lower, "upper": upper}])
+    );
+    drop(conn);
+    db.assert_st_matches_query("retention_dst_trim", query)
+        .await;
+    let retained: Vec<(String,String,i64,i64)> = sqlx::query_as("SELECT to_char(bucket AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI'),account,total,n FROM retention_dst_keep ORDER BY bucket,account").fetch_all(&db.pool).await.unwrap();
+    assert_eq!(retained, baseline);
+    let error = db.try_execute("ALTER TABLE retention_dst_src ATTACH PARTITION retention_dst_old FOR VALUES FROM ('2025-11-02 01:00:00-04') TO ('2025-11-02 01:00:00-05')").await.expect_err("nonempty historical reattachment must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot attach a nonempty partition"),
+        "{error}"
+    );
+    db.execute("CREATE TABLE retention_dst_empty (LIKE retention_dst_src INCLUDING ALL)")
+        .await;
+    let error = db.try_execute("ALTER TABLE retention_dst_src ATTACH PARTITION retention_dst_empty FOR VALUES FROM ('2025-11-02 01:00:00-04') TO ('2025-11-02 01:00:00-05')").await.expect_err("empty reattachment must not overlap the sealed UTC hour");
+    assert!(
+        error.to_string().contains("overlapping retained history"),
+        "{error}"
+    );
+    for name in ["retention_dst_trim", "retention_dst_keep"] {
+        let action: (String,String,bool) = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name=$1 ORDER BY h.refresh_id DESC LIMIT 1")
+            .bind(name).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    }
+    db.execute("INSERT INTO retention_dst_src VALUES (4,'2025-11-02 01:45:00-05','a',3),(5,'2025-11-02 02:15:00-05','a',4)").await;
+    db.refresh_st("retention_dst_trim").await;
+    db.refresh_st("retention_dst_keep").await;
+    db.assert_st_matches_query("retention_dst_trim", query)
+        .await;
+    let expected = vec![
+        ("2025-11-02 05:00".into(), "a".into(), 10, 1),
+        ("2025-11-02 06:00".into(), "a".into(), 23, 2),
+        ("2025-11-02 06:00".into(), "b".into(), 7, 1),
+        ("2025-11-02 07:00".into(), "a".into(), 4, 1),
+    ];
+    let retained: Vec<(String,String,i64,i64)> = sqlx::query_as("SELECT to_char(bucket AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI'),account,total,n FROM retention_dst_keep ORDER BY bucket,account").fetch_all(&db.pool).await.unwrap();
+    assert_eq!(retained, expected);
+    for name in ["retention_dst_trim", "retention_dst_keep"] {
+        let action: (String,String,bool) = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name=$1 ORDER BY h.refresh_id DESC LIMIT 1")
+            .bind(name).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    }
+}
+
+#[tokio::test]
 #[cfg(feature = "e2e-unsafe-test-hooks")]
 async fn test_retention_capture_multiset_preserves_duplicate_deltas() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
