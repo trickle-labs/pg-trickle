@@ -19,10 +19,67 @@ def run(db, sql):
     ).stdout.strip()
 
 
-def timed(db, sql):
+def internal_plan_summary(log, schema):
+    decoder = json.JSONDecoder()
+    plans = []
+    position = 0
+    marker = "plan:\n"
+    while (start := log.find(marker, position)) != -1:
+        start = log.find("{", start + len(marker))
+        if start == -1:
+            raise ValueError("auto_explain plan has no JSON object")
+        plan, length = decoder.raw_decode(log[start:])
+        position = start + length
+        if "Plan" in plan:
+            plans.append(plan)
+    if not plans:
+        raise ValueError("auto_explain did not emit any plans")
+    relevant = []
+    source_partitions = set()
+    source_rows = 0
+    output_rows = 0
+    for plan in plans:
+        scans = []
+        stack = [plan["Plan"]]
+        while stack:
+            node = stack.pop()
+            stack.extend(node.get("Plans", []))
+            relation = node.get("Relation Name", "")
+            kind = node.get("Node Type", "")
+            if node.get("Schema") != schema or not kind.endswith("Scan") or not node.get("Actual Loops", 0):
+                continue
+            if relation != "totals" and not (relation.startswith("p") and relation[1:].isdigit()):
+                continue
+            rows = (node.get("Actual Rows", 0) + node.get("Rows Removed by Filter", 0)
+                    + node.get("Rows Removed by Index Recheck", 0)) * node.get("Actual Loops", 0)
+            scans.append({"relation": relation, "node": kind, "rows_examined": rows})
+            if relation == "totals":
+                output_rows += rows
+            else:
+                source_partitions.add(relation)
+                source_rows += rows
+        if scans:
+            relevant.append({"scans": scans, "plan": plan})
+    return {"captured_statements": len(plans), "source_partitions_scanned": sorted(source_partitions),
+            "source_rows_examined": source_rows, "output_rows_examined": output_rows,
+            "relevant_plans": relevant}
+
+
+def timed(db, sql, schema, instrument):
     start = time.perf_counter()
-    result = run(db, sql)
-    return result, (time.perf_counter() - start) * 1000
+    if not instrument:
+        result = run(db, sql)
+        return result, (time.perf_counter() - start) * 1000, None
+    settings = ("LOAD 'auto_explain'; SET client_min_messages = log; "
+                "SET auto_explain.log_min_duration = 0; SET auto_explain.log_analyze = on; "
+                "SET auto_explain.log_timing = off; SET auto_explain.log_nested_statements = on; "
+                "SET auto_explain.log_verbose = on; SET auto_explain.log_format = json; ")
+    result = subprocess.run(
+        ["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-d", db, "-c", settings + sql],
+        check=True, capture_output=True, text=True,
+    )
+    elapsed = (time.perf_counter() - start) * 1000
+    return result.stdout.strip(), elapsed, internal_plan_summary(result.stderr, schema)
 
 
 def workload(db, directory, sql):
@@ -54,7 +111,7 @@ def stop_workload(process, output, directory):
             "max_ms": latencies[-1]}
 
 
-def trial(db, schema, events, trim, directory):
+def trial(db, schema, events, trim, directory, instrument):
     old = datetime.date(2025, 1, 1)
     partitions = []
     for day in range(31):
@@ -85,8 +142,8 @@ def trial(db, schema, events, trim, directory):
     reader, reader_log = workload(db, reader_dir, f"SELECT sum(total) FROM {schema}.totals;\n")
     try:
         time.sleep(1)
-        _, drop_ms = timed(db, f"DROP TABLE {schema}.p0")
-        _, refresh_ms = timed(db, f"SELECT pgtrickle.refresh_stream_table('{schema}.totals')")
+        _, drop_ms, drop_internal = timed(db, f"DROP TABLE {schema}.p0", schema, instrument)
+        _, refresh_ms, refresh_internal = timed(db, f"SELECT pgtrickle.refresh_stream_table('{schema}.totals')", schema, instrument)
     finally:
         writer_latency = stop_workload(writer, writer_log, writer_dir)
         reader_latency = stop_workload(reader, reader_log, reader_dir)
@@ -101,7 +158,8 @@ def trial(db, schema, events, trim, directory):
     return {"mode": "TRIM" if trim else "baseline", "retained_events": events,
             "expired_events": expired, "drop_ms": drop_ms, "refresh_call_ms": refresh_ms,
             "writer": writer_latency, "reader": reader_latency, "refresh_history": history,
-            "result_mismatches": mismatch, "source_query_plan": source_plan,
+            "result_mismatches": mismatch, "drop_internal": drop_internal, "refresh_internal": refresh_internal,
+            "source_query_plan": source_plan,
             "output_range_query_plan": output_plan}
 
 
@@ -110,6 +168,8 @@ def main():
     parser.add_argument("--database", required=True, help="disposable PostgreSQL database connection string")
     parser.add_argument("--events", type=int, default=9_000_000)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--instrument-internal", action="store_true",
+                        help="capture nested PostgreSQL plans with auto_explain (adds measurement overhead)")
     args = parser.parse_args()
     if args.events < 30_000:
         parser.error("--events must be at least 30000")
@@ -120,7 +180,7 @@ def main():
             for schema, trim in zip(schemas, (False, True)):
                 directory = Path(tmp) / schema
                 directory.mkdir()
-                results.append(trial(args.database, schema, args.events, trim, directory))
+                results.append(trial(args.database, schema, args.events, trim, directory, args.instrument_internal))
                 args.output.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
         finally:
             for schema in schemas:

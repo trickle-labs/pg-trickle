@@ -36,6 +36,16 @@ Connection startup is included in wall times. Reader and writer latency
 samples cover the whole concurrent workload, not only the blocked interval;
 inspect the maximum and p95 as stall indicators, not precise lock wait times.
 
+For actual internal scans, repeat with `--instrument-internal`. This loads
+PostgreSQL's `auto_explain` module and captures analyzed nested plans during
+DROP and refresh, requiring permission to load that module. The JSON includes
+executed source partitions and rows examined in source and output scans,
+alongside the relevant plans. Counts sum plan-node observations and nested
+plans can overlap, so they are not necessarily unique physical reads. Timing
+with instrumentation includes plan logging and should not be compared directly
+with the uninstrumented times below. PostgreSQL reports per-loop averages, so
+counts can be approximate when a node executes more than once.
+
 The results depend on cache, storage, CPU, database settings, and concurrent
 load. Run several times and report the environment and individual results;
 do not compare a smoke run or proxy plan as a production measurement.
@@ -64,3 +74,15 @@ range plans used bitmap heap scans and returned 1,000 affected groups. These
 plans do not measure the internal DROP statement's scans. The higher maximum
 writer latencies in both TRIM runs are visible in the results; this
 single sample does not establish a latency distribution or isolate lock time.
+
+A separate 9M run with internal instrumentation captured no source partition
+scans during TRIM's DROP or following refresh; the baseline refresh scanned
+all 30 retained partitions and about 9,002,045 rows, including concurrent
+inserts. TRIM's DROP observed 125,001 output rows across nested scan plans,
+including several full scans of the 31,000-row output, and the following
+refresh observed 90,084 output rows. These sums can include overlapping plans.
+Thus the range deletion itself is indexed, but the existing differential
+catch-up can still scale with the complete materialized output rather than
+only affected groups. The instrumented 27M rerun did not complete: PostgreSQL
+reported a storage I/O error and restarted. The uninstrumented 27M run above
+completed successfully.
