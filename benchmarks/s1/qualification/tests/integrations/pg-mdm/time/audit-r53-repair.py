@@ -1117,8 +1117,11 @@ def main():
         rejection_lines = []
         end = time.monotonic() + 20
         while time.monotonic() < end:
-            logs = command("docker", "logs", "--tail", "200", container)
-            rejection_lines = [line for line in logs.splitlines()
+            logs = subprocess.run(["docker", "logs", "--tail", "200", container],
+                                  capture_output=True, text=True, timeout=30)
+            if logs.returncode:
+                raise RuntimeError("container log read failed: " + logs.stderr)
+            rejection_lines = [line for line in (logs.stdout + logs.stderr).splitlines()
                                if "managed worker role must be a unique SET-capable function grantee" in line]
             if rejection_lines:
                 break
