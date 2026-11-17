@@ -4563,7 +4563,7 @@ mod tests {
     #[test]
     fn test_cron_is_due_recently_refreshed() {
         // If refreshed just now, should not be due (unless cron fires every second)
-        let now_epoch = chrono::Utc::now().timestamp();
+        let now_epoch = jiff::Timestamp::now().as_second();
         // Cron = hourly → next occurrence is ~60 min from now
         assert!(!cron_is_due("@hourly", Some(now_epoch)));
     }
@@ -4571,7 +4571,7 @@ mod tests {
     #[test]
     fn test_cron_is_due_long_ago_refresh() {
         // If refreshed long ago, should be due
-        let old_epoch = chrono::Utc::now().timestamp() - 86400; // 24h ago
+        let old_epoch = jiff::Timestamp::now().as_second() - 86400; // 24h ago
         // Cron = hourly → should definitely be due
         assert!(cron_is_due("@hourly", Some(old_epoch)));
     }
@@ -4705,7 +4705,7 @@ mod tests {
 
     #[test]
     fn test_cron_is_due_every_minute_recently_refreshed() {
-        let now_epoch = chrono::Utc::now().timestamp();
+        let now_epoch = jiff::Timestamp::now().as_second();
         // Every-minute cron: next fire is ~60s away, so if refreshed
         // just now it should NOT be due (within the minute)
         // But if refreshed 2 minutes ago, should be due
@@ -4715,14 +4715,14 @@ mod tests {
 
     #[test]
     fn test_cron_is_due_yearly_recently_refreshed() {
-        let now_epoch = chrono::Utc::now().timestamp();
+        let now_epoch = jiff::Timestamp::now().as_second();
         // Yearly cron: next fire is ~1 year away
         assert!(!cron_is_due("@yearly", Some(now_epoch)));
     }
 
     #[test]
     fn test_cron_is_due_with_alias() {
-        let old_epoch = chrono::Utc::now().timestamp() - 7200; // 2 hours ago
+        let old_epoch = jiff::Timestamp::now().as_second() - 7200; // 2 hours ago
         assert!(cron_is_due("@hourly", Some(old_epoch)));
     }
 

@@ -1,4 +1,3 @@
-use chrono::Utc;
 use postgres::{Client, Config, NoTls};
 use std::collections::{BTreeMap, VecDeque};
 use std::env;
@@ -297,7 +296,7 @@ fn dollar_quote(input: &str) -> String {
 fn generate_restore_sql(stream_tables: &[StreamTableDumpRow]) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "-- pg_trickle_dump SQL export");
-    let _ = writeln!(out, "-- Generated at {}", Utc::now().to_rfc3339());
+    let _ = writeln!(out, "-- Generated at {}", jiff::Timestamp::now());
     let _ = writeln!(out, "-- Stream tables exported: {}", stream_tables.len());
     let _ = writeln!(
         out,

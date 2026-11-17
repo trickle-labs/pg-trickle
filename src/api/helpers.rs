@@ -1896,14 +1896,14 @@ pub(crate) fn cron_is_due(cron_expr: &str, last_refresh_epoch: Option<i64>) -> b
         Err(_) => return false,
     };
 
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC);
 
     match last_refresh_epoch {
         None => true, // never refreshed → always due
         Some(epoch) => {
-            let last = match chrono::DateTime::from_timestamp(epoch, 0) {
-                Some(st) => st,
-                None => return true,
+            let last = match jiff::Timestamp::from_second(epoch) {
+                Ok(timestamp) => timestamp.to_zoned(jiff::tz::TimeZone::UTC),
+                Err(_) => return true,
             };
             // Find the next occurrence after the last refresh
             match cron.find_next_occurrence(&last, false) {
