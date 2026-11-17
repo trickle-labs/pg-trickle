@@ -964,7 +964,7 @@ fn try_fused_chain_refresh(
         return Ok(vec![]);
     }
 
-    let _delta_stages = eligible
+    let delta_stages = eligible
         .iter()
         .map(|node| {
             crate::refresh::delta_stage::DeltaStage::prepare(
@@ -992,6 +992,9 @@ fn try_fused_chain_refresh(
         Ok(f) => f,
         Err(e) => {
             pgrx::debug1!("[pg_trickle] PERF-2: fuse_diff_batch failed: {}", e);
+            for stage in &delta_stages {
+                stage.cleanup_bounded_views()?;
+            }
             return Ok(vec![]);
         }
     };
@@ -1124,6 +1127,9 @@ fn try_fused_chain_refresh(
         fused_pgt_ids.push(nd.pgt_id);
     }
 
+    for stage in &delta_stages {
+        stage.cleanup_bounded_views()?;
+    }
     pgrx::log!(
         "[pg_trickle] PERF-2: fused refresh completed for {} node(s)",
         fused_pgt_ids.len(),
