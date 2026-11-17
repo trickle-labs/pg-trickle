@@ -858,6 +858,113 @@ async fn test_partition_nested_detach_rebuilds_root_and_downstream() {
 }
 
 #[tokio::test]
+async fn test_retention_concurrent_detach_captures_pending_child_writes() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE pending_retention_src (id integer NOT NULL, d date NOT NULL, amount integer NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE pending_retention_old PARTITION OF pending_retention_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE pending_retention_live PARTITION OF pending_retention_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO pending_retention_src VALUES (1,'2025-06-01',10), (2,'2026-06-01',20)")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table_with_retention('pending_retention_st', 'SELECT d, sum(amount) AS total, count(*) AS n FROM pending_retention_src GROUP BY d', 'TRIM', 'd', '2026-01-01', '1h')").await;
+
+    let mut reader = db.pool.begin().await.expect("begin old source snapshot");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *reader)
+        .await
+        .expect("set snapshot isolation");
+    let before: Vec<(i32, String, i32)> =
+        sqlx::query_as("SELECT id, d::text, amount FROM pending_retention_src ORDER BY id")
+            .fetch_all(&mut *reader)
+            .await
+            .expect("hold old partition snapshot");
+    assert_eq!(
+        before,
+        vec![(1, "2025-06-01".into(), 10), (2, "2026-06-01".into(), 20)]
+    );
+
+    let mut connection = db.pool.acquire().await.expect("acquire detach connection");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *connection)
+        .await
+        .expect("read detach backend PID");
+    let detach = tokio::spawn(async move {
+        sqlx::query(
+            "ALTER TABLE pending_retention_src DETACH PARTITION pending_retention_old CONCURRENTLY",
+        )
+        .execute(&mut *connection)
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let pending: bool = db.query_scalar("SELECT COALESCE((SELECT inhdetachpending FROM pg_catalog.pg_inherits WHERE inhrelid = 'pending_retention_old'::regclass), false)").await;
+            if pending { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }).await.expect("concurrent detach enters pending phase");
+
+    db.execute("INSERT INTO pending_retention_old VALUES (3,'2025-06-01',7)")
+        .await;
+    let source: Vec<(i32, String, i32)> =
+        sqlx::query_as("SELECT id, d::text, amount FROM pending_retention_src ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read source during pending detach");
+    assert_eq!(source, vec![(2, "2026-06-01".into(), 20)]);
+    let buffer: String = db.query_scalar("SELECT pg_catalog.format('%I.%I', 'pgtrickle_changes', 'changes_' || source_stable_name) FROM pgtrickle.pgt_change_tracking WHERE source_relid = 'pending_retention_src'::regclass").await;
+    let changes: Vec<(String, i32, String, i32)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT action::text, id, d::text, amount FROM {buffer} WHERE id = 3 ORDER BY id"
+    )))
+    .fetch_all(&db.pool)
+    .await
+    .expect("read pending child CDC");
+    assert_eq!(changes, vec![("I".into(), 3, "2025-06-01".into(), 7)]);
+
+    // Simulate the protected second-phase replay without using the public resume path.
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET status = 'ACTIVE' WHERE pgt_name = 'pending_retention_st'").await;
+    db.refresh_st_with_retry("pending_retention_st").await;
+    let replayed: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM pending_retention_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read pending CDC replay");
+    assert_eq!(
+        replayed,
+        vec![("2025-06-01".into(), 17, 2), ("2026-06-01".into(), 20, 1)]
+    );
+    let action: (String, String) = sqlx::query_as("SELECT h.action, h.status FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'pending_retention_st' AND h.initiated_by = 'MANUAL' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&db.pool).await.expect("read pending replay action");
+    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into()));
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET status = 'SUSPENDED' WHERE pgt_name = 'pending_retention_st'").await;
+
+    let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+        .bind(pid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("cancel concurrent detach");
+    assert!(cancelled);
+    assert!(detach.await.expect("join detach task").is_err());
+    reader.commit().await.expect("release old snapshot");
+    let pending: bool = db.query_scalar("SELECT inhdetachpending FROM pg_catalog.pg_inherits WHERE inhrelid = 'pending_retention_old'::regclass").await;
+    assert!(pending);
+    db.execute("ALTER TABLE pending_retention_src DETACH PARTITION pending_retention_old FINALIZE")
+        .await;
+    let attached: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = 'pending_retention_old'::regclass)").await;
+    assert!(!attached);
+    let child: Vec<(i32, String, i32)> =
+        sqlx::query_as("SELECT id, d::text, amount FROM pending_retention_old ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read detached partition");
+    assert_eq!(
+        child,
+        vec![(1, "2025-06-01".into(), 10), (3, "2025-06-01".into(), 7)]
+    );
+}
+
+#[tokio::test]
 async fn test_partition_nested_concurrent_detach_suspends_during_pending_phase() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
