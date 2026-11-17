@@ -674,13 +674,15 @@ impl DeltaStage {
                        WHERE t.lsn > '{new_lsn}'::pg_lsn AND t.action = 'T')"
                 )
             };
-            // nosemgrep: rust.spi.run.dynamic-format -- source and buffer
-            // relations are catalog-qualified/quoted, projected columns are
-            // identifier-quoted and the literal frontier was parsed as LSN.
-            Spi::run(&format!(
-                "CREATE TEMP TABLE {target} ON COMMIT DROP AS {select}"
-            )) // nosemgrep: rust.spi.run.dynamic-format
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            // The SQL contains only catalog-derived qualified relations,
+            // quote_ident-projected columns, a validated pg_lsn literal, and
+            // the extension-generated inverse query. DDL identifiers cannot
+            // be bound as SPI parameters. Keep the reviewed SQL in a named
+            // value for diagnostics and a single execution.
+            let create_bound_sql =
+                format!("CREATE TEMP TABLE {target} ON COMMIT DROP AS {select}");
+            Spi::run(&create_bound_sql)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             if !source_locked {
                 // Only rows from the CTAS snapshot affect this guard.
                 // nosemgrep: rust.spi.query.dynamic-format
