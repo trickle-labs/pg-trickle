@@ -632,9 +632,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         // DAG-2: Adaptive poll interval — exponential backoff (20ms → 200ms)
         // that resets to 20ms on worker completion, making parallel mode
         // competitive for cheap refreshes.
-        let mut base_interval_ms = config::pg_trickle_scheduler_interval_ms() as u64;
-        base_interval_ms =
-            base_interval_ms.saturating_mul(u64::from(pressure_state.deferral_factor()));
+        let scheduler_interval_ms = config::pg_trickle_scheduler_interval_ms() as u64;
+        let mut base_interval_ms =
+            scheduler_interval_ms.saturating_mul(u64::from(pressure_state.deferral_factor()));
 
         // OPS-6: Workload-aware poll — if df_scheduling_interference detects
         // heavy overlap, slightly increase the base interval to reduce
@@ -852,6 +852,8 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         let load_deferred = pressure_state.observe(
             load_snapshot.pressure(),
             config::pg_trickle_load_shed_threshold(),
+            now_ms,
+            scheduler_interval_ms,
         );
         shmem::record_scheduler_load(
             load_snapshot.pressure(),
@@ -1460,6 +1462,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         dispatch_tick_id,
                         tick_watermark.as_deref(),
                         load_deferred,
+                        pressure_state.deferred(),
                         load_shed_buffer_guards,
                     );
 
