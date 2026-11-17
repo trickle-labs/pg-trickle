@@ -252,3 +252,23 @@ between manual upstream refresh and a downstream rebuild. PostgreSQL aborted
 the manual transaction; automatic retry and lock ordering for this overlap
 remain unresolved. An additional high-cost run used a normal FULL fallback
 after the retention cut, which this benchmark rejected.
+
+After merging the 0.110.2 changes from `main`, single instrumented macOS
+PostgreSQL 18.7 debug-build runs with the scheduler disabled gave the
+following times in milliseconds:
+
+| Retained events | Mode | DROP | First refresh | Writer p95 / max | Reader p95 / max |
+|---:|---|---:|---:|---:|---:|
+| 9,000,000 | baseline | 41 | 3,814 | 0.12 / 3,769.87 | 2.08 / 7.17 |
+| 9,000,000 | TRIM | 289 | 57 | 0.13 / 244.68 | 2.01 / 6.32 |
+| 27,000,000 | baseline | 38 | 10,097 | 0.10 / 8.67 | 2.04 / 3.12 |
+| 27,000,000 | TRIM | 286 | 61 | 0.12 / 243.95 | 2.12 / 2.99 |
+
+Both complete-result oracles matched. The timed baseline refresh scanned all
+30 retained partitions, observing 9,012,353 or 27,013,237 source rows. TRIM
+DROP scanned no retained source partitions and observed 7,000 output rows;
+the upstream and downstream completed DIFFERENTIAL work. Each trial needed
+one post-writer drain refresh. These are single instrumented samples, and the
+writer and reader latency distributions cover the whole workload rather than
+isolating lock waits. A separate HASH-output backlog diagnostic on the merged
+candidate also passed both oracles with no retained-source scan.
