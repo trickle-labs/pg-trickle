@@ -411,59 +411,39 @@ impl DeltaStage {
         }
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-        // When the conditional SHARE lock succeeded, the live table
-        // cannot change through the refresh. A small staged CDC slice lets
-        // the common no-future case use an inexpensive temporary VIEW.
+        // When the nonblocking SHARE lock succeeds, the source cannot change
+        // during this refresh. The window CTAS above has already switched SPI
+        // to writable execution, so the probe below uses a fresh READ
+        // COMMITTED snapshot. We do not need to copy the entire post-frontier
+        // CDC buffer into another temporary table just to decide whether a
+        // stable source view is safe. One query probes both event categories.
         //
-        // A contended table cannot hold that lock without starving the
-        // scheduler. In that case do NOT probe CDC and then read the source
-        // in another statement: those SPI calls could use different MVCC
-        // snapshots, causing the very post-frontier race being fixed here.
-        // The contended branch instead always copies/reverses the source and
-        // post-frontier CDC within ONE CREATE TABLE AS SELECT statement.
-        let post_name = match self.centroid_nonce {
-            Some(nonce) => format!("__pgt_post_{}_{source_oid}_{nonce}", st.pgt_id),
-            None => format!("__pgt_post_{}_{source_oid}", st.pgt_id),
-        };
-        let post_stage = format!("pg_temp.{}", quote_ident(&post_name));
+        // When the source is contended, it is NOT safe to probe now and
+        // choose a view: another source transaction might commit before the
+        // next SPI statement. Always materialize the inverse in a single
+        // snapshot of source and post-frontier CDC in that case.
         let has_future = if source_locked {
-            // nosemgrep: rust.spi.run.dynamic-format
-            Spi::run(&format!("DROP TABLE IF EXISTS {post_stage}")) // nosemgrep: rust.spi.run.dynamic-format
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            // The CDC source is catalog-qualified and quote-escaped, and the
-            // validated LSN remains a separate SPI argument.
-            // nosemgrep: rust.spi.run_with_args.dynamic-format
-            Spi::run_with_args(
-                &format!(
-                    "CREATE TEMP TABLE {post_stage} ON COMMIT DROP AS \
-                     SELECT * FROM {buffer} WHERE lsn > $1::pg_lsn"
-                ),
-                &[new_lsn.into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-            // Both probes read the same immutable post-bound event slice.
-            // nosemgrep: rust.spi.query.dynamic-format
-            let future_truncate = Spi::get_one::<bool>(&format!(
-                "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action = 'T')"
-            )) // nosemgrep: rust.spi.query.dynamic-format
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-            .unwrap_or(false);
-            if future_truncate {
+            // buffer is a catalog-derived, quoted qualified identifier;
+            // the frontier is a bound $1::pg_lsn parameter, not SQL text.
+            let probe_sql = format!(
+                "SELECT \\
+                   EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action = 'T'), \\
+                   EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action IN ('I', 'D'))"
+            );
+            let (future_truncate, future_changes) =
+                Spi::get_two_with_args::<bool, bool>(&probe_sql, &[new_lsn.into()])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if future_truncate != Some(false) {
                 return Err(PgTrickleError::UnsupportedOperator(format!(
-                    "post-bound TRUNCATE for source OID {source_oid} requires FULL refresh"
+                    "post-bound TRUNCATE or unknown CDC status for source OID {source_oid} requires FULL refresh"
                 )));
             }
-
-            // nosemgrep: rust.spi.query.dynamic-format
-            Spi::get_one::<bool>(&format!(
-                "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action IN ('I', 'D'))"
-            )) // nosemgrep: rust.spi.query.dynamic-format
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-            .unwrap_or(false)
+            future_changes.ok_or_else(|| {
+                PgTrickleError::InternalError(format!(
+                    "post-bound CDC probe was NULL for source OID {source_oid}"
+                ))
+            })?
         } else {
-            // The source might change between any two SPI calls. Do not
-            // choose the VIEW fast path based on a separately observed count.
             true
         };
 
@@ -582,24 +562,14 @@ impl DeltaStage {
                 "SELECT DISTINCT ON (f.__pgt_event_identity) f.__pgt_event_identity AS __pgt_row_id, f.__pgt_event_action AS __pgt_future_action{selected} FROM __pgt_future f \
                  ORDER BY f.__pgt_event_identity, f.__pgt_event_sequence"
             );
-            // For a locked source, reuse the immutable future CDC slice.
-            // For a contended source, BOTH the live table and post-bound CDC
-            // are read in the CREATE TABLE AS SELECT snapshot below.
-            let future_source = if source_locked {
-                post_stage.as_str()
-            } else {
-                buffer
-            };
-            let future_predicate = if source_locked {
-                "c.action IN ('I', 'D')".to_string()
-            } else {
-                format!("c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')")
-            };
+            // The source lock protects direct CDC reads; without the lock,
+            // this CDC scan and live-source scan occur in the same CTAS
+            // statement and therefore share one PostgreSQL MVCC snapshot.
             let common = format!(
                 "WITH __pgt_future AS MATERIALIZED (\
                    SELECT c.__pgt_row_id AS __pgt_event_identity, c.action AS __pgt_event_action, c.change_id AS __pgt_event_sequence{future_cols} \
-                   FROM {future_source} c \
-                   WHERE {future_predicate}\
+                   FROM {buffer} c \
+                   WHERE c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')\
                  ), __pgt_first AS ({first})"
             );
             let select = if keyless {
