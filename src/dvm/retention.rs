@@ -1298,17 +1298,19 @@ pub(crate) fn validate_retention_storage(
              JOIN pg_catalog.pg_opclass op ON op.oid = i.indclass[0] \
              WHERE i.indrelid = $1 AND i.indisvalid AND i.indisready AND i.indpred IS NULL \
                AND am.amname = 'btree' AND op.opcdefault AND op.opcintype = a.atttypid \
-               AND (i.indkey[0] = a.attnum OR \
+               AND ((NOT $2 AND (i.indkey[0] = a.attnum OR \
                     (i.indkey[0] = 0 AND pg_catalog.pg_get_indexdef(i.indexrelid, 1, true) = \
-                     'pgtrickle.row_probe_v1(__pgt_row_id)')))",
-            &[st.pgt_relid.into()],
+                     'pgtrickle.row_probe_v1(__pgt_row_id)'))) OR \
+                    ($2 AND i.indisunique AND i.indimmediate AND i.indnkeyatts = 1 \
+                     AND i.indkey[0] = a.attnum)))",
+            &[st.pgt_relid.into(), (!st.has_keyless_source && st.st_partition_key.is_none()).into()],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))
         .map(|value| value.unwrap_or(false))
     })?;
     if !has_identity_index {
         return Err(PgTrickleError::InvalidArgument(
-            "partition retention requires a valid btree row-identity index on __pgt_row_id or pgtrickle.row_probe_v1(__pgt_row_id); restore the original stream table index, including its uniqueness if required, before retrying".into(),
+            "partition retention requires a valid btree row-identity index on __pgt_row_id or pgtrickle.row_probe_v1(__pgt_row_id); keyed, unpartitioned streams require an immediate unique index on __pgt_row_id alone. Restore the original stream table index before retrying".into(),
         ));
     }
     if mode == RetentionMode::Retain {

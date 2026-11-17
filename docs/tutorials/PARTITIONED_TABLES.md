@@ -181,7 +181,9 @@ The contract is intentionally narrow:
 - Keep the stream table's valid, non-partial btree row-identity index on `__pgt_row_id` or
   `pgtrickle.row_probe_v1(__pgt_row_id)`. A missing or invalid index rejects
   the retention cut; restore its original definition, including uniqueness
-  when required, before retrying.
+  when required, before retrying. Keyed, unpartitioned streams require an
+  immediate unique index whose only key is `__pgt_row_id`; keyless or
+  partitioned streams can use a non-unique identity index.
 - `RETAIN` rejects overlapping historical attachments, including empty
   partitions, and nonempty attachments that would require rebuilding sealed
   history. Late arrivals or backfills into a sealed range therefore require a

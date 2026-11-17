@@ -1629,6 +1629,8 @@ the configured CDC trigger mode.
 For an eligible expired partition, TRIM removes its groups and RETAIN preserves
 them. Both policies require the stream's valid btree row-identity index; if it
 is removed or invalid, restore its original definition before a retention cut.
+Keyed, unpartitioned streams require an immediate unique index with
+`__pgt_row_id` as its only key.
 RETAIN rejects operations that would rebuild sealed history from an
 incomplete source. `OFF` is allowed only while no history has been sealed and
 no retention cut is pending.

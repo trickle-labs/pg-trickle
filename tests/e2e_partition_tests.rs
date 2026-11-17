@@ -1946,6 +1946,119 @@ async fn test_retained_history_blocks_rebuild_query_change_and_restore() {
 }
 
 #[tokio::test]
+async fn test_retention_trim_requires_unique_index_for_keyed_stream() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE trim_unique_src (id INT NOT NULL, d DATE NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE trim_unique_old PARTITION OF trim_unique_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE trim_unique_live PARTITION OF trim_unique_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO trim_unique_src VALUES (1,'2025-06-01',10),(2,'2026-06-01',20)")
+        .await;
+    let query = "SELECT d, sum(amount) AS total, count(*) AS n FROM trim_unique_src GROUP BY d";
+    db.create_st("trim_unique_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('trim_unique_st', 'TRIM', 'd', '2026-01-01')").await;
+    db.execute("DROP INDEX trim_unique_st_row_id_idx").await;
+    db.execute("CREATE INDEX trim_unique_st_row_id_idx ON trim_unique_st (__pgt_row_id)")
+        .await;
+    db.execute("INSERT INTO trim_unique_src VALUES (3,'2026-06-01',7)")
+        .await;
+    let error = db
+        .try_execute("DROP TABLE trim_unique_old")
+        .await
+        .expect_err("reject non-unique row identity");
+    assert!(
+        error.to_string().contains("immediate unique index"),
+        "{error}"
+    );
+    let attached: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = 'trim_unique_old'::regclass AND inhparent = 'trim_unique_src'::regclass)").await;
+    assert!(attached);
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM trim_unique_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read unchanged stream");
+    assert_eq!(
+        rows,
+        vec![("2025-06-01".into(), 10, 1), ("2026-06-01".into(), 20, 1)]
+    );
+    db.execute("DROP INDEX trim_unique_st_row_id_idx").await;
+    db.execute("CREATE UNIQUE INDEX trim_unique_st_row_id_idx ON trim_unique_st (__pgt_row_id, d)")
+        .await;
+    let error = db
+        .try_execute("DROP TABLE trim_unique_old")
+        .await
+        .expect_err("reject a composite unique index");
+    assert!(
+        error.to_string().contains("immediate unique index"),
+        "{error}"
+    );
+    db.execute("DROP INDEX trim_unique_st_row_id_idx").await;
+    db.execute("CREATE INDEX trim_unique_st_row_id_idx ON trim_unique_st (pgtrickle.row_probe_v1(__pgt_row_id))").await;
+    let error = db
+        .try_execute("DROP TABLE trim_unique_old")
+        .await
+        .expect_err("reject a probe index for a keyed stream");
+    assert!(
+        error.to_string().contains("immediate unique index"),
+        "{error}"
+    );
+    db.execute("DROP INDEX trim_unique_st_row_id_idx").await;
+    db.execute("ALTER TABLE trim_unique_st ADD CONSTRAINT trim_unique_deferred UNIQUE (__pgt_row_id) DEFERRABLE").await;
+    let error = db
+        .try_execute("DROP TABLE trim_unique_old")
+        .await
+        .expect_err("reject a deferrable unique index");
+    assert!(
+        error.to_string().contains("immediate unique index"),
+        "{error}"
+    );
+    db.execute("ALTER TABLE trim_unique_st DROP CONSTRAINT trim_unique_deferred")
+        .await;
+    db.execute("CREATE UNIQUE INDEX trim_unique_st_row_id_idx ON trim_unique_st (__pgt_row_id)")
+        .await;
+    db.execute("DROP TABLE trim_unique_old").await;
+    db.assert_st_matches_query("trim_unique_st", query).await;
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM trim_unique_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read repaired stream");
+    assert_eq!(rows, vec![("2026-06-01".into(), 27, 2)]);
+}
+
+#[tokio::test]
+async fn test_retention_trim_accepts_keyless_nonunique_identity_index() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE trim_keyless_src (d DATE NOT NULL, amount INT NOT NULL) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE trim_keyless_old PARTITION OF trim_keyless_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE trim_keyless_live PARTITION OF trim_keyless_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO trim_keyless_src VALUES ('2025-06-01',10),('2026-06-01',20)")
+        .await;
+    let query = "SELECT d, sum(amount) AS total, count(*) AS n FROM trim_keyless_src GROUP BY d";
+    db.create_st("trim_keyless_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    let unique: bool = db.query_scalar("SELECT indisunique FROM pg_catalog.pg_index WHERE indexrelid = 'trim_keyless_st_row_id_idx'::regclass").await;
+    assert!(!unique);
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('trim_keyless_st', 'TRIM', 'd', '2026-01-01')").await;
+    db.execute("INSERT INTO trim_keyless_src VALUES ('2026-06-01',7)")
+        .await;
+    db.execute("DROP TABLE trim_keyless_old").await;
+    db.assert_st_matches_query("trim_keyless_st", query).await;
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM trim_keyless_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read keyless stream results");
+    assert_eq!(rows, vec![("2026-06-01".into(), 27, 2)]);
+}
+
+#[tokio::test]
 async fn test_retention_trim_partitioned_stream_storage() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
