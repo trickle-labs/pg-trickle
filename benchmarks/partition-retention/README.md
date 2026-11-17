@@ -45,6 +45,12 @@ plans can overlap, so they are not necessarily unique physical reads. Timing
 with instrumentation includes plan logging and should not be compared directly
 with the uninstrumented times below. PostgreSQL reports per-loop averages, so
 counts can be approximate when a node executes more than once.
+For this workload, an instrumented TRIM trial fails if its DROP scans a
+retained source partition or sequentially scans the output table. To exercise
+caller settings that disable indexed plans, add
+`PGOPTIONS='-c enable_indexscan=off -c enable_bitmapscan=off'` before the
+instrumented command. Retention temporarily enables those scan types and
+restores the caller's settings afterward.
 
 The results depend on cache, storage, CPU, database settings, and concurrent
 load. Run several times and report the environment and individual results;
@@ -94,3 +100,11 @@ planner preferences do not guarantee a particular plan, and ordinary refreshes
 can still scan the full output. Instrumented times include plan logging and
 should not be compared directly with the uninstrumented table. An earlier
 instrumented 27M attempt failed after a storage I/O error and restart.
+
+In a separate 30,000-event diagnostic with the caller's index and bitmap scans
+disabled, the earlier implementation's TRIM DROP took 13,362 ms and observed
+four sequential output scans (124,000 rows total). With scoped index scans it
+took 112 ms and observed 2,910 rows across indexed scans. Both results matched
+their source queries. This single small run tests the planner-setting edge case;
+it is not a production-scale timing comparison. The raw plans are in the
+`index-disabled-before` and `index-disabled-after` result files.

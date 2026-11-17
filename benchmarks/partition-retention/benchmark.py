@@ -65,6 +65,15 @@ def internal_plan_summary(log, schema):
             "relevant_plans": relevant}
 
 
+def validate_trim_drop_plan(summary):
+    retained = set(summary["source_partitions_scanned"]) - {"p0"}
+    if retained:
+        raise RuntimeError(f"TRIM scanned retained source partitions: {sorted(retained)}")
+    if any(scan["relation"] == "totals" and scan["node"] == "Seq Scan"
+           for plan in summary["relevant_plans"] for scan in plan["scans"]):
+        raise RuntimeError("TRIM scanned the entire output table")
+
+
 def timed(db, sql, schema, instrument):
     start = time.perf_counter()
     if not instrument:
@@ -155,6 +164,8 @@ def trial(db, schema, events, trim, directory, instrument):
     if trim and (not any(h["action"] == "DIFFERENTIAL" for h in history) or
                  any(h["action"] in ("FULL", "REINITIALIZE") or h["fallback"] for h in history)):
         raise RuntimeError(f"TRIM did not use differential maintenance: {history}")
+    if trim and instrument:
+        validate_trim_drop_plan(drop_internal)
     return {"mode": "TRIM" if trim else "baseline", "retained_events": events,
             "expired_events": expired, "drop_ms": drop_ms, "refresh_call_ms": refresh_ms,
             "writer": writer_latency, "reader": reader_latency, "refresh_history": history,

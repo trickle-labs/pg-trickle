@@ -43,6 +43,19 @@ class InternalPlanSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "did not emit"):
             benchmark.internal_plan_summary("no plans", "trial")
 
+    def test_trim_plan_rejects_retained_source_and_full_output_scans(self):
+        summary = {"source_partitions_scanned": ["p0"], "relevant_plans": [
+            {"scans": [{"relation": "totals", "node": "Index Scan"}]},
+        ]}
+        benchmark.validate_trim_drop_plan(summary)
+        summary["source_partitions_scanned"].append("p1")
+        with self.assertRaisesRegex(RuntimeError, "retained source partitions"):
+            benchmark.validate_trim_drop_plan(summary)
+        summary["source_partitions_scanned"].pop()
+        summary["relevant_plans"][0]["scans"][0]["node"] = "Seq Scan"
+        with self.assertRaisesRegex(RuntimeError, "entire output table"):
+            benchmark.validate_trim_drop_plan(summary)
+
 
 if __name__ == "__main__":
     unittest.main()
