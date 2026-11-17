@@ -1055,6 +1055,7 @@ fn install_partition_truncate_guards_inner(
         ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         match capture.as_deref() {
             Some("A") => {}
+            // nosemgrep: rust.spi.run.dynamic-format — table and trigger identifiers are quoted.
             Some("O") => Spi::run(&format!(
                 "ALTER TABLE ONLY {table} ENABLE ALWAYS TRIGGER {capture_trigger}"
             ))
@@ -1086,8 +1087,10 @@ fn install_partition_truncate_guards_inner(
             }
             None => {}
         }
+        // nosemgrep: rust.spi.run.dynamic-format — all identifiers are quoted.
         Spi::run(&format!("CREATE TRIGGER {trigger} BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON {table} FOR EACH STATEMENT EXECUTE FUNCTION {function}()"))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: rust.spi.run.dynamic-format — identifiers are catalog-quoted.
+        // nosemgrep: rust.spi.run.dynamic-format — table and trigger identifiers are quoted.
         Spi::run(&format!(
             "ALTER TABLE ONLY {table} ENABLE ALWAYS TRIGGER {trigger}"
         ))
@@ -1134,6 +1137,7 @@ fn drop_partition_truncate_guard_inner(
     );
     let function =
         crate::sql_builder::qualified(&crate::config::pg_trickle_change_buffer_schema(), &name);
+    // nosemgrep: rust.spi.run.dynamic-format — function is a quoted internal identifier.
     Spi::run(&format!("DROP FUNCTION IF EXISTS {function}() CASCADE"))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: rust.spi.run.dynamic-format — identifier is quoted from internal CDC metadata.
     Ok(())
@@ -1344,6 +1348,7 @@ pub fn prepare_retention_cut(
     if state.mode == RetentionMode::Trim {
         let table = crate::sql_builder::qualified(&st.pgt_schema, &st.pgt_name);
         crate::refresh::with_stream_owner(&st, || {
+            // nosemgrep: rust.spi.run.dynamic-format — table is a quoted catalog identifier.
             Spi::run(&format!("LOCK TABLE ONLY {table} IN ROW EXCLUSIVE MODE"))
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))
         })?;
@@ -1586,6 +1591,7 @@ fn finalize_trimmed_cut(cut: PreparedRetentionCut) -> Result<(), crate::error::P
         crate::cdc::set_sync_commit_for_buffer(&format!("changes_pgt_{}", st.pgt_id))?;
         crate::cdc::validate_st_change_buffer(st.pgt_id, &schema)?;
         let buffer = crate::sql_builder::qualified(&schema, &format!("changes_pgt_{}", st.pgt_id));
+        // nosemgrep: rust.spi.run.dynamic-format — buffer, columns and temporary table are quoted identifiers.
         Spi::run(&format!(
             "INSERT INTO {buffer} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {columns}) \
              SELECT pg_catalog.pg_current_wal_insert_lsn(), 'D', __pgt_row_id, NULL::xid, NULL::timestamptz, {columns} FROM {pre}"
@@ -1962,6 +1968,7 @@ pub fn validate_partition_layout(
     .ok_or_else(|| {
         PgTrickleError::InvalidArgument("retention source must be a partitioned table".into())
     })?;
+    // nosemgrep: rust.spi.run.dynamic-format — name is quoted by PostgreSQL format.
     Spi::run(&format!(
         "LOCK TABLE ONLY {name} IN SHARE UPDATE EXCLUSIVE MODE"
     ))

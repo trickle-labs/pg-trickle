@@ -245,6 +245,7 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_start_wrapper(
                 &[source.into()],
             ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .ok_or_else(|| PgTrickleError::InvalidArgument("partition source disappeared".into()))?;
+            // nosemgrep: rust.spi.run.dynamic-format — name is quoted by PostgreSQL format.
             Spi::run(&format!(
                 "LOCK TABLE ONLY {name} IN SHARE UPDATE EXCLUSIVE MODE"
             ))

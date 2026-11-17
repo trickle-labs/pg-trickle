@@ -3336,6 +3336,7 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
                 &[dep.source_relid.into()],
             ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             if let Some(source) = source {
+                // nosemgrep: rust.spi.run.dynamic-format — source is quoted by PostgreSQL format.
                 Spi::run(&format!(
                     "LOCK TABLE ONLY {source} IN SHARE UPDATE EXCLUSIVE MODE"
                 ))
