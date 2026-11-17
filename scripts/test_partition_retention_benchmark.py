@@ -2,6 +2,7 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 
 BENCHMARK = Path(__file__).resolve().parent.parent / "benchmarks/partition-retention/benchmark.py"
@@ -25,6 +26,7 @@ class InternalPlanSummaryTests(unittest.TestCase):
         output = {"Query Text": "output query", "Plan": {
             "Node Type": "Bitmap Heap Scan", "Schema": "trial", "Relation Name": "totals",
             "Actual Rows": 5, "Rows Removed by Index Recheck": 2, "Actual Loops": 1,
+            "Recheck Cond": "d >= boundary",
         }}
         log = "noise\nLOG: duration: 1 ms plan:\n" + json.dumps(source) + "\nLOG: duration: 2 ms plan:\n" + json.dumps(output)
         self.assertEqual(benchmark.internal_plan_summary(log, "trial"), {
@@ -33,9 +35,9 @@ class InternalPlanSummaryTests(unittest.TestCase):
             "source_rows_examined": 13,
             "output_rows_examined": 7,
             "relevant_plans": [
-                {"scans": [{"relation": "p2", "node": "Seq Scan", "rows_examined": 3},
-                           {"relation": "p1", "node": "Seq Scan", "rows_examined": 10}], "plan": source},
-                {"scans": [{"relation": "totals", "node": "Bitmap Heap Scan", "rows_examined": 7}], "plan": output},
+                {"scans": [{"relation": "p2", "node": "Seq Scan", "rows_examined": 3, "condition": None},
+                           {"relation": "p1", "node": "Seq Scan", "rows_examined": 10, "condition": None}], "plan": source},
+                {"scans": [{"relation": "totals", "node": "Bitmap Heap Scan", "rows_examined": 7, "condition": "d >= boundary"}], "plan": output},
             ],
         })
 
@@ -45,16 +47,22 @@ class InternalPlanSummaryTests(unittest.TestCase):
 
     def test_trim_plan_rejects_retained_source_and_full_output_scans(self):
         summary = {"source_partitions_scanned": ["p0"], "relevant_plans": [
-            {"scans": [{"relation": "totals", "node": "Index Scan"}]},
+            {"scans": [{"relation": "totals", "node": "Index Scan", "condition": "row_id = value"}]},
         ]}
         benchmark.validate_trim_drop_plan(summary)
         summary["source_partitions_scanned"].append("p1")
         with self.assertRaisesRegex(RuntimeError, "retained source partitions"):
             benchmark.validate_trim_drop_plan(summary)
         summary["source_partitions_scanned"].pop()
-        summary["relevant_plans"][0]["scans"][0]["node"] = "Seq Scan"
-        with self.assertRaisesRegex(RuntimeError, "entire output table"):
+        summary["relevant_plans"][0]["scans"][0]["condition"] = None
+        with self.assertRaisesRegex(RuntimeError, "unbounded output scan"):
             benchmark.validate_trim_drop_plan(summary)
+
+    def test_refresh_retries_until_the_full_oracle_matches(self):
+        with patch.object(benchmark, "run", side_effect=["", "2", "", "0"]) as run, \
+             patch.object(benchmark.time, "sleep"):
+            self.assertEqual(benchmark.refresh_until_consistent("db", "s.t", "SELECT * FROM source"), 2)
+        self.assertEqual(run.call_count, 4)
 
 
 if __name__ == "__main__":

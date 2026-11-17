@@ -21,8 +21,11 @@ stream without retention, which reinitializes after direct partition DROP,
 with an otherwise equivalent stream configured for TRIM. One pgbench writer
 inserts into a retained partition while one reader repeatedly aggregates the
 stream. They run during DROP and the first manual refresh. After the writer
-stops, a final refresh drains its changes and an `EXCEPT ALL` comparison checks
-the entire materialization against the source query in both directions.
+stops, the harness waits for its database sessions to exit and refreshes until
+an `EXCEPT ALL` comparison matches the entire source query in both directions.
+The number of drain refresh calls is recorded. A connection string that
+overrides `PGAPPNAME` cannot be used, because the harness must identify its
+writer and reader sessions.
 
 JSON output includes wall-clock DROP and refresh-call times, reader and writer
 transaction counts and p95/max latency, actual refresh-history actions and
@@ -46,11 +49,24 @@ with instrumentation includes plan logging and should not be compared directly
 with the uninstrumented times below. PostgreSQL reports per-loop averages, so
 counts can be approximate when a node executes more than once.
 For this workload, an instrumented TRIM trial fails if its DROP scans a
-retained source partition or sequentially scans the output table. To exercise
+retained source partition or uses an output scan without an index or TID
+condition. If this check fails, the captured plan is saved beside the output
+with a `.failed-plan.json` suffix. To exercise
 caller settings that disable indexed plans, add
 `PGOPTIONS='-c enable_indexscan=off -c enable_bitmapscan=off'` before the
 instrumented command. Retention temporarily enables those scan types and
 restores the caller's settings afterward.
+
+Add `--downstream` to create a dependent stream, verify its complete result
+against the source query after refresh, and record its effective refresh
+actions. The TRIM trial rejects a downstream FULL fallback or reinitialization.
+Use `--keyless` to exercise a source without a primary key. For example:
+
+```sh
+PGOPTIONS='-c random_page_cost=1000000' python3 benchmarks/partition-retention/benchmark.py \
+  --database 'postgresql://localhost/pgtrickle_benchmark' --events 30000 \
+  --instrument-internal --downstream --keyless --output /tmp/retention-keyless.json
+```
 
 The results depend on cache, storage, CPU, database settings, and concurrent
 load. Run several times and report the environment and individual results;
@@ -112,3 +128,39 @@ After adding the row-identity index check, the same diagnostic passed with
 zero mismatches and 2,880 observed output rows; see `identity-index-smoke`.
 After tightening keyed-index uniqueness validation, it passed with zero
 mismatches and 2,912 observed output rows; see `unique-identity-smoke`.
+
+In a 30,000-event diagnostic with `random_page_cost=1000000` and a downstream
+stream, the earlier capture path took 2,703 ms and observed 95,884 output
+rows, including unbounded scans. The scoped capture took 226 ms and observed
+5,680 output rows through bounded scans; upstream and downstream both matched
+the source query, and the downstream refresh was DIFFERENTIAL. These are
+single diagnostic runs with plan logging, not production-scale timings.
+Without a downstream stream at the same planner cost, the diagnostic changed
+from 12,587 ms and 124,000 observed output rows to 115 ms and 2,868 rows.
+The bounded-plan check also passed in separate runs with a keyless source and
+with the aggregate fast path disabled. These settings are planner tests, not
+production-scale measurements.
+One combined high-cost keyless/downstream diagnostic failed the unbounded-scan
+check; later repetitions, including ten on the final candidate, passed.
+PostgreSQL planner choices can therefore still violate the affected-groups
+performance target, even with these hints.
+
+Instrumented runs with `--downstream` on the final candidate produced these
+results (milliseconds):
+
+| Retained events | Mode | DROP | First refresh call | Writer p95 / max | Reader p95 / max |
+|---:|---|---:|---:|---:|---:|
+| 9,000,000 | baseline | 45 | 3,769 | 0.52 / 11.91 | 1.75 / 3.10 |
+| 9,000,000 | TRIM | 231 | 60 | 0.52 / 185.08 | 1.79 / 3.36 |
+| 27,000,000 | baseline | 50 | 9,948 | 0.45 / 10.34 | 1.77 / 2.76 |
+| 27,000,000 | TRIM | 233 | 630 | 0.63 / 183.14 | 1.91 / 2.88 |
+
+Both upstream and downstream results matched the source in each trial. The
+baseline reinitialized; TRIM and its downstream completed DIFFERENTIAL work
+without fallback. During TRIM DROP, no retained source partitions were scanned,
+and 5,760 or 5,665 output rows were observed across nested plans. Baseline
+refresh scanned 30 retained partitions and 9,003,154 or 27,003,453 rows,
+including concurrent inserts. Each baseline required two post-writer drain
+calls; each TRIM trial required one. At 27M the TRIM drain refresh itself took
+about 557 ms, outside the first-call time shown. Plan logging adds overhead;
+latency samples cover the entire concurrent workload and do not isolate locks.
