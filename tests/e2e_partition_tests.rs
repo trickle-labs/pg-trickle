@@ -912,6 +912,10 @@ async fn test_retention_concurrent_detach_captures_pending_child_writes() {
         }
     }).await.expect("concurrent detach enters pending phase");
 
+    db.execute("UPDATE pending_retention_old SET amount = 12 WHERE id = 1")
+        .await;
+    db.execute("DELETE FROM pending_retention_old WHERE id = 1")
+        .await;
     db.execute("INSERT INTO pending_retention_old VALUES (3,'2025-06-01',7)")
         .await;
     let source: Vec<(i32, String, i32)> =
@@ -953,7 +957,7 @@ async fn test_retention_concurrent_detach_captures_pending_child_writes() {
             .expect("read pending CDC replay");
     assert_eq!(
         replayed,
-        vec![("2025-06-01".into(), 17, 2), ("2026-06-01".into(), 20, 1)]
+        vec![("2025-06-01".into(), 7, 1), ("2026-06-01".into(), 20, 1)]
     );
     let action: (String, String) = sqlx::query_as("SELECT h.action, h.status FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'pending_retention_st' AND h.initiated_by = 'MANUAL' ORDER BY h.refresh_id DESC LIMIT 1")
         .fetch_one(&db.pool).await.expect("read pending replay action");
@@ -979,10 +983,7 @@ async fn test_retention_concurrent_detach_captures_pending_child_writes() {
             .fetch_all(&db.pool)
             .await
             .expect("read detached partition");
-    assert_eq!(
-        child,
-        vec![(1, "2025-06-01".into(), 10), (3, "2025-06-01".into(), 7)]
-    );
+    assert_eq!(child, vec![(3, "2025-06-01".into(), 7)]);
 }
 
 #[tokio::test]
