@@ -1,5 +1,15 @@
 # Partition retention benchmark
 
+For the full partition regression suite, build a test-only image with the same
+feature enabled in both the extension and test binary:
+
+```sh
+PGS_E2E_FEATURES=e2e-unsafe-test-hooks ./tests/build_e2e_image.sh
+cargo test --features e2e-unsafe-test-hooks --test e2e_partition_tests -- --test-threads=2
+```
+
+The default image omits these unsafe test helpers.
+
 Run against a disposable PostgreSQL database with pg_trickle installed and
 `psql`, `pgbench`, and Python 3 on `PATH`. The connection must be allowed to
 create schemas, tables, and stream tables. The script creates and drops two
@@ -252,8 +262,10 @@ between manual upstream refresh and a downstream rebuild. PostgreSQL aborted
 the manual transaction. Protected FULL baselines now try-lock upstream
 metadata before taking source storage locks; a two-session test confirmed a
 prompt retryable error, successful retry, and no replay after the FULL
-baseline. The isolated scheduler test did not reach the targeted overlap, so
-scheduler-specific verification remains outstanding. An additional high-cost
+baseline. A deterministic scheduler test also passed against PostgreSQL 18 in
+Testcontainers: it held the upstream catalog lock while the scheduler reached
+its upstream check, then verified the scheduled reinitialization and exact
+downstream rows after the upstream refresh committed. An additional high-cost
 run used a normal FULL fallback after the retention cut, which this benchmark
 rejected.
 

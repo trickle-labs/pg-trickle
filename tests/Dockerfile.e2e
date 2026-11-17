@@ -28,6 +28,7 @@
 # Override with BUILDER_IMAGE=postgres:18.6 for a self-contained build.
 ARG BUILDER_IMAGE=pg_trickle_builder:pg18
 FROM ${BUILDER_IMAGE} AS builder
+ARG E2E_FEATURES=""
 
 # ── Dependency caching layer ────────────────────────────────────────────────
 # Copy manifests + lockfile so dep downloads are cached separately from source.
@@ -67,7 +68,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/build/target,sharing=locked \
     cargo clean --release -p pg_trickle && \
-    cargo pgrx package --pg-config /usr/bin/pg_config && \
+    if [ -n "$E2E_FEATURES" ]; then \
+      cargo pgrx package --pg-config /usr/bin/pg_config --features "$E2E_FEATURES"; \
+    else cargo pgrx package --pg-config /usr/bin/pg_config; fi && \
     mkdir -p /artefacts && \
     cp -r target/release/pg_trickle-pg18 /artefacts/
 
