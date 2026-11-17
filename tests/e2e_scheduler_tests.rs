@@ -31,6 +31,139 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     );
 }
 
+#[tokio::test]
+async fn test_scheduler_retries_full_when_upstream_is_locked() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.enable_fused_refresh", "off", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+        .await;
+    db.execute("CREATE TABLE lock_src (id INT PRIMARY KEY, amount INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO lock_src VALUES (1, 10)").await;
+    db.create_st(
+        "lock_up",
+        "SELECT id, amount FROM lock_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st("lock_down", "SELECT id, amount FROM lock_up", "1h", "FULL")
+        .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['lock_up', 'lock_down'])")
+        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_phase",
+        "'before_upstream_lock'",
+        "before_upstream_lock",
+    )
+    .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_for_table",
+        "'lock_down'",
+        "lock_down",
+    )
+    .await;
+
+    let down_id: i32 = db
+        .query_scalar(
+            "SELECT pgt_id::int FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'lock_down'",
+        )
+        .await;
+    let before: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    let mut barrier = db.pool.acquire().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1, 5)")
+        .bind(down_id)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = true WHERE pgt_name = 'lock_down'",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['lock_down'])")
+        .await;
+    let blocked = format!(
+        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name LIKE 'pgt_atomicity:{down_id}:before_upstream_lock:%' AND wait_event_type = 'Lock' AND {blocker_pid} = ANY(pg_blocking_pids(pid)))"
+    );
+    assert!(
+        db.wait_for_condition(
+            "scheduler upstream lock barrier",
+            &blocked,
+            Duration::from_secs(60),
+            Duration::from_millis(50)
+        )
+        .await
+    );
+    let scheduler_pid: i32 = db.query_scalar(&format!("SELECT pid FROM pg_stat_activity WHERE application_name LIKE 'pgt_atomicity:{down_id}:before_upstream_lock:%' AND {blocker_pid} = ANY(pg_blocking_pids(pid)) LIMIT 1")).await;
+    db.execute("INSERT INTO lock_src VALUES (2, 20)").await;
+    let mut upstream = db.pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'lock_up' FOR UPDATE",
+    )
+    .execute(&mut *upstream)
+    .await
+    .unwrap();
+    sqlx::query("SELECT pg_advisory_unlock($1, 5)")
+        .bind(down_id)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    let cleared = format!(
+        "SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = {scheduler_pid} AND application_name LIKE 'pgt_atomicity:{down_id}:before_upstream_lock:%')"
+    );
+    assert!(
+        db.wait_for_condition(
+            "scheduler skips locked upstream",
+            &cleared,
+            Duration::from_secs(30),
+            Duration::from_millis(50)
+        )
+        .await
+    );
+    let completed: i64 = db.query_scalar(&format!("SELECT count(*) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'lock_down' AND h.refresh_id > {before} AND h.status = 'COMPLETED'")).await;
+    assert_eq!(completed, 0);
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('lock_up')")
+        .execute(&mut *upstream)
+        .await
+        .unwrap();
+    upstream.commit().await.unwrap();
+    db.alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "''", "")
+        .await;
+    let completed = format!(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'lock_down' AND h.refresh_id > {before} AND h.initiated_by = 'SCHEDULER' AND h.action = 'REINITIALIZE' AND h.status = 'COMPLETED')"
+    );
+    assert!(
+        db.wait_for_condition(
+            "scheduled reinitialization after upstream commit",
+            &completed,
+            Duration::from_secs(60),
+            Duration::from_millis(50)
+        )
+        .await
+    );
+    let rows: Vec<(i32, i32)> = sqlx::query_as("SELECT id, amount FROM lock_down ORDER BY id")
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![(1, 10), (2, 20)]);
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_phase",
+        "'before_apply'",
+        "before_apply",
+    )
+    .await;
+}
+
 async fn assert_clock_dependent_refresh(mode: &str, schedule_kind: &str) {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
     configure_fast_scheduler(&db).await;

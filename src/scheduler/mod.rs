@@ -3331,6 +3331,8 @@ fn refresh_single_st(
         return;
     }
 
+    let _ = refresh::test_atomicity_barrier(&st, "before_upstream_lock", 0);
+
     // ST-on-ST safety: skip this ST if any upstream STREAM_TABLE source is
     // currently being refreshed by another session.  When the scheduler does
     // a FULL refresh of a downstream calculated ST, it reads the current
