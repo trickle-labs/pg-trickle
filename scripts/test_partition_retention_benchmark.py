@@ -3,8 +3,9 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 BENCHMARK = Path(__file__).resolve().parent.parent / "benchmarks/partition-retention/benchmark.py"
@@ -14,6 +15,52 @@ spec.loader.exec_module(benchmark)
 
 
 class InternalPlanSummaryTests(unittest.TestCase):
+    def test_lock_samples_distinguish_consecutive_waits_and_missing_sessions(self):
+        lock = {"wait_event_type": "Lock", "wait_event": "relation"}
+        idle = {"wait_event_type": "Client", "wait_event": "ClientRead"}
+        samples = [
+            {"ts": 1, "writer": idle, "reader": idle},
+            {"ts": 2, "writer": lock, "reader": idle},
+            {"ts": 3, "writer": lock, "reader": None},
+            {"ts": 4, "writer": idle, "reader": lock},
+            {"ts": 5, "writer": lock, "reader": idle},
+        ]
+        self.assertEqual(benchmark.summarize_lock_samples(map(json.dumps, samples)), {
+            "samples": 5,
+            "writer": {"lock_samples": 3, "missing_samples": 0,
+                       "max_consecutive_sample_span_ms": 1000.0, "wait_events": {"relation": 3}},
+            "reader": {"lock_samples": 1, "missing_samples": 1,
+                       "max_consecutive_sample_span_ms": 0.0, "wait_events": {"relation": 1}},
+        })
+        with self.assertRaisesRegex(RuntimeError, "did not record"):
+            benchmark.summarize_lock_samples([])
+        with self.assertRaisesRegex(RuntimeError, "clock moved backwards"):
+            benchmark.summarize_lock_samples(map(json.dumps, samples[::-1]))
+
+    def test_lock_sampler_rejects_a_missing_workload_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "samples"
+            path.write_text(json.dumps({"ts": 1, "writer": None,
+                                        "reader": {"wait_event_type": None, "wait_event": None}}))
+            process = Mock()
+            process.poll.return_value = None
+            output = Mock()
+            with self.assertRaisesRegex(RuntimeError, "lost a workload session"):
+                benchmark.stop_lock_sampler(process, output, path)
+            process.terminate.assert_called_once()
+            process.stdin.close.assert_called_once()
+            output.close.assert_called_once()
+
+    def test_lock_sampler_closes_output_when_psql_cannot_start(self):
+        output = Mock()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(Path, "open", return_value=output), \
+             patch.object(benchmark.subprocess, "Popen", side_effect=OSError("no psql")):
+            path = Path(directory) / "sampler"
+            with self.assertRaisesRegex(OSError, "no psql"):
+                benchmark.start_lock_sampler("db", path, "writer", "reader")
+        output.close.assert_called_once()
+
     def test_database_error_reports_server_diagnostic(self):
         error = subprocess.CalledProcessError(1, ["psql"], stderr="ERROR: refresh failed\n")
         with patch.object(benchmark.subprocess, "run", side_effect=error):

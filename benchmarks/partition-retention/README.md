@@ -53,6 +53,25 @@ call.
 Connection startup is included in wall times. Reader and writer latency
 samples cover the whole concurrent workload, not only the blocked interval;
 inspect the maximum and p95 as stall indicators, not precise lock wait times.
+The pgbench log covers completed transactions; a transaction still blocked
+when the workload is stopped may be absent from its latency distribution.
+
+Add `--sample-lock-waits` to sample each workload session's PostgreSQL
+`wait_event_type` and `wait_event` approximately every 10 ms. The JSON records
+the number of heavyweight `Lock` samples, their event names, and the longest
+elapsed span between consecutive samples showing a lock wait. The sampler
+fails if either workload session disappears while sampling. Sampling runs
+throughout the workload, adds overhead, can miss short waits, and cannot prove
+that consecutive samples belong to one uninterrupted wait. A zero count is
+not proof that no blocking occurred. The connection must be able to inspect
+the workload sessions in `pg_stat_activity`.
+
+```sh
+python3 benchmarks/partition-retention/benchmark.py \
+  --database 'postgresql://localhost/pgtrickle_benchmark' \
+  --events 9000000 --downstream --instrument-internal --sample-lock-waits \
+  --output /tmp/retention-locks-9m.json
+```
 
 For actual internal scans, repeat with `--instrument-internal`. This loads
 PostgreSQL's `auto_explain` module and captures analyzed nested plans during
@@ -381,3 +400,28 @@ the workload and do not isolate lock waits; these samples are not a hard planner
 bound. The plans are in `results/2026-11-17-pg18-macos-head-9m.json`,
 `results/2026-11-17-pg18-macos-head-9m-repeat.json`, and
 `results/2026-11-17-pg18-macos-head-27m.json`.
+
+The same native PostgreSQL 18.7 arm64 debug setup was measured with the
+10 ms lock sampler, a downstream stream, and nested-plan instrumentation.
+Each row is one run; times are milliseconds.
+
+| Retained events | Mode | DROP | First refresh | Writer lock samples / longest sample span | Reader lock samples / longest sample span |
+|---:|---|---:|---:|---:|---:|
+| 9,000,000 | baseline | 39 | 3,693 | 366 / 3,639 | 363 / 3,619 |
+| 9,000,000 | TRIM | 169 | 57 | 13 / 120 | 0 / 0 |
+| 27,000,000 | baseline | 40 | 10,082 | 1,004 / 10,028 | 1,002 / 10,003 |
+| 27,000,000 | TRIM | 172 | 64 | 13 / 122 | 0 / 0 |
+
+All sampled heavyweight lock waits were relation locks, and both workload sessions
+were present in every sample. These observations cover the entire workload;
+consecutive samples do not prove a single continuous wait, and unsampled waits
+can be missed. The baseline completed-reader maxima were only 3.21 ms and
+2.97 ms, illustrating why completed pgbench latencies alone do not capture all
+blocking. Baseline reinitializations scanned all 30 retained partitions and
+9,012,895 or 27,013,488 source rows; TRIM DROP scanned no retained source
+partitions and observed 7,000 output rows. Both full-result oracles matched,
+and TRIM and downstream completed differential actions. The sampler startup
+wait was added after these measurements; the collection query and interval were
+the same. Results and plans are in
+`results/2026-11-17-pg18-macos-lock-sampled-9m.json` and
+`results/2026-11-17-pg18-macos-lock-sampled-27m.json`.
