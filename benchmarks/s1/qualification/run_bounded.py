@@ -68,6 +68,38 @@ def capture_logs(name, path, previous=None):
     return follower, stream
 
 
+def replay_logs(name, path):
+    replay_path = path.with_suffix(path.suffix + ".replay")
+    try:
+        with replay_path.open("w") as stream:
+            replay = subprocess.Popen(["docker", "logs", "--timestamps", name],
+                                      stdout=stream, stderr=subprocess.STDOUT)
+            try:
+                code = replay.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                replay.terminate()
+                replay.wait(timeout=15)
+                raise RuntimeError("container log replay did not finish")
+        if code != 0:
+            raise RuntimeError(f"container log replay failed: {code}")
+        replay_path.replace(path)
+    finally:
+        replay_path.unlink(missing_ok=True)
+
+
+def finish_log_capture(name, path, follower, stream):
+    try:
+        code = follower.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        follower.terminate()
+        follower.wait(timeout=15)
+        raise RuntimeError("container log capture did not finish")
+    finally:
+        stream.close()
+    if code != 0:
+        replay_logs(name, path)
+
+
 def disk_metrics(args):
     # Relation files and pg_internal.init can disappear during PostgreSQL
     # maintenance/restarts while du walks the data directory. Retry only these
@@ -119,17 +151,8 @@ def main(image, run_name, profile_cases=None):
             log_followers = {}
 
             def finish_logs():
-                for follower, stream in log_followers.values():
-                    try:
-                        code = follower.wait(timeout=30)
-                    except subprocess.TimeoutExpired:
-                        follower.terminate()
-                        follower.wait(timeout=15)
-                        raise RuntimeError("container log capture did not finish")
-                    finally:
-                        stream.close()
-                    if code != 0:
-                        raise RuntimeError(f"container log capture failed: {code}")
+                for name, (follower, stream) in log_followers.items():
+                    finish_log_capture(name, run / f"{name}-full.log", follower, stream)
 
             cleanup.callback(finish_logs)
 
