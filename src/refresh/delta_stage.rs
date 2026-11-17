@@ -648,10 +648,8 @@ impl DeltaStage {
             // the extension-generated inverse query. DDL identifiers cannot
             // be bound as SPI parameters. Keep the reviewed SQL in a named
             // value for diagnostics and a single execution.
-            let create_bound_sql =
-                format!("CREATE TEMP TABLE {target} ON COMMIT DROP AS {select}");
-            Spi::run(&create_bound_sql)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let create_bound_sql = format!("CREATE TEMP TABLE {target} ON COMMIT DROP AS {select}");
+            Spi::run(&create_bound_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             if !source_locked {
                 // Only rows from the CTAS snapshot affect this guard.
                 // nosemgrep: rust.spi.query.dynamic-format
