@@ -110,3 +110,5 @@ it is not a production-scale timing comparison. The raw plans are in the
 `index-disabled-before` and `index-disabled-after` result files.
 After adding the row-identity index check, the same diagnostic passed with
 zero mismatches and 2,880 observed output rows; see `identity-index-smoke`.
+After tightening keyed-index uniqueness validation, it passed with zero
+mismatches and 2,912 observed output rows; see `unique-identity-smoke`.
