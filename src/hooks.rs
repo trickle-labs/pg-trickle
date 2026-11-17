@@ -113,7 +113,7 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_start_wrapper(
                 stmt.relation,
                 pg_sys::AccessShareLock as pg_sys::LOCKMODE,
                 if stmt.missing_ok {
-                    pg_sys::RVROption::RVR_MISSING_OK
+                    pg_sys::RVROption::RVR_MISSING_OK as _
                 } else {
                     0
                 },
@@ -401,7 +401,7 @@ fn resolve_drop_table_targets(fcinfo: pg_sys::FunctionCallInfo) -> Option<Vec<pg
                 relation,
                 pg_sys::AccessShareLock as pg_sys::LOCKMODE,
                 if stmt.missing_ok {
-                    pg_sys::RVROption::RVR_MISSING_OK
+                    pg_sys::RVROption::RVR_MISSING_OK as _
                 } else {
                     0
                 },
