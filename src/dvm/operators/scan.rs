@@ -23,6 +23,22 @@ use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
 use crate::dvm::parser::{Expr, OpTree};
 use crate::error::PgTrickleError;
 
+fn comma_prefixed_columns(columns: &[String], indentation: &str) -> String {
+    if columns.is_empty() {
+        return String::new();
+    }
+
+    let line_prefix_len = indentation.len() + 2;
+    let capacity = line_prefix_len * columns.len() + columns.iter().map(String::len).sum::<usize>();
+    let mut result = String::with_capacity(capacity);
+    for column in columns {
+        result.push_str(",\n");
+        result.push_str(indentation);
+        result.push_str(column);
+    }
+    result
+}
+
 /// Differentiate a Scan node.
 ///
 /// Reads from the change buffer in a **single pass** and produces a delta
@@ -509,11 +525,7 @@ SELECT {pk_hash_expr} AS content_hash{payload_identity_select},
        -1 AS delta_sign{col_refs}
 FROM {change_table} c
 WHERE {lsn_filter} AND c.action = 'D'",
-            col_refs = if col_refs_raw.is_empty() {
-                String::new()
-            } else {
-                format!(",\n       {}", col_refs_raw.join(",\n       "))
-            },
+            col_refs = comma_prefixed_columns(&col_refs_raw, "       "),
         );
         ctx.add_cte(decomp_cte.clone(), decomp_sql);
 
@@ -546,16 +558,8 @@ FROM (
     HAVING SUM(delta_sign) < 0
 ) sub
 CROSS JOIN generate_series(1, -sub.net_count) gs",
-            sub_cols = if sub_col_refs.is_empty() {
-                String::new()
-            } else {
-                format!(",\n       {}", sub_col_refs.join(",\n       "))
-            },
-            max_cols = if max_col_refs.is_empty() {
-                String::new()
-            } else {
-                format!(",\n           {}", max_col_refs.join(",\n           "))
-            },
+            sub_cols = comma_prefixed_columns(&sub_col_refs, "       "),
+            max_cols = comma_prefixed_columns(&max_col_refs, "           "),
         );
         ctx.add_cte(cte_name.clone(), sql);
 
@@ -979,6 +983,15 @@ pub fn build_hash_expr_for_domain(domain: &str, exprs: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::dvm::operators::test_helpers::*;
+
+    #[test]
+    fn test_scan_comma_prefixed_columns_handles_empty_and_multiple_columns() {
+        assert_eq!(comma_prefixed_columns(&[], "  "), "");
+        assert_eq!(
+            comma_prefixed_columns(&["a".into(), "b".into()], "  "),
+            ",\n  a,\n  b"
+        );
+    }
 
     // ── diff_scan basic ─────────────────────────────────────────────
 
