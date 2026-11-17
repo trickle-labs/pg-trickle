@@ -1,5 +1,5 @@
 {
-  "version": "0.87.0",
+  "version": "0.87.1",
   "product_budgets": {
     "installed_no_st_tps_ratio_min": 0.99,
     "active_p99_latency_ratio_max": 2.0,

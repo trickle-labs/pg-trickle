@@ -134,7 +134,7 @@ def main() -> int:
     }
     result = {
         "schema_version": 2,
-        "version": budgets.get("version", "0.87.0"),
+        "version": budgets.get("version", "0.87.1"),
         "environment": {
             "commit": records[0].get("commit"),
             "postgres_version": records[0].get("postgres_version"),

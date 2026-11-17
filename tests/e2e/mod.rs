@@ -1,4 +1,4 @@
-//! E2E test harness that boots a PostgreSQL 18.6 container with
+//! E2E test harness that boots a PostgreSQL 18.7 container with
 //! the pg_trickle extension pre-installed.
 //!
 //! # Harness Selection
@@ -574,7 +574,7 @@ async fn shared_container() -> &'static SharedContainer {
         .await
 }
 
-/// A test database backed by a PostgreSQL 18.6 container with
+/// A test database backed by a PostgreSQL 18.7 container with
 /// the compiled pg_trickle extension installed and
 /// `shared_preload_libraries` configured.
 ///
@@ -591,7 +591,7 @@ pub struct E2eDb {
 #[cfg(not(feature = "light-e2e"))]
 #[allow(dead_code)]
 impl E2eDb {
-    /// Start a fresh PostgreSQL 18.6 container with the extension installed.
+    /// Start a fresh PostgreSQL 18.7 container with the extension installed.
     ///
     /// The container is ready to accept connections but the extension is NOT
     /// yet created. Call [`with_extension`] to run `CREATE EXTENSION`.
