@@ -130,7 +130,10 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_start_wrapper(
     if dropped.as_ref().is_some_and(Vec::is_empty) {
         return pg_sys::Datum::null();
     }
-    let target = if matches!(hint, AlterTableHint::DetachPartition) {
+    let target = if matches!(
+        hint,
+        AlterTableHint::DetachPartition | AlterTableHint::DetachPartitionConcurrent
+    ) {
         // SAFETY: classify_alter_table verified the single PartitionCmd parse node.
         unsafe {
             let event = &*((*fcinfo).context as *const pg_sys::EventTriggerData);
@@ -257,20 +260,92 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_start_wrapper(
                 ));
             }
         }
+        #[cfg(not(test))]
+        let mut prepared = HashSet::new();
+        #[cfg(not(test))]
+        for &source in &sources {
+            prepared.extend(
+                crate::dvm::retention::prepare_concurrent_retention_detaches(
+                    source, parent, target,
+                )?,
+            );
+        }
         ids.clear();
         for source in sources {
             ids.extend(find_downstream_pgt_ids(source)?);
         }
+        #[cfg(not(test))]
+        let direct_ids = ids.clone();
         ids.extend(find_transitive_downstream_sts(&ids)?);
         ids.sort_unstable();
         ids.dedup();
+        #[cfg(not(test))]
+        let retention_graph: HashSet<i64> = if prepared.is_empty() {
+            HashSet::new()
+        } else {
+            let roots: Vec<i64> = prepared.iter().copied().collect();
+            let mut graph: HashSet<i64> = roots.iter().copied().collect();
+            graph.extend(find_transitive_downstream_sts(&roots)?);
+            let unsafe_roots: Vec<i64> = direct_ids
+                .into_iter()
+                .filter(|id| !prepared.contains(id))
+                .collect();
+            if !unsafe_roots.is_empty() {
+                graph.retain(|id| !unsafe_roots.contains(id));
+                for id in find_transitive_downstream_sts(&unsafe_roots)? {
+                    graph.remove(&id);
+                }
+            }
+            graph
+        };
+        #[cfg(not(test))]
+        let reason =
+            crate::dvm::retention::concurrent_detach_reason(parent.to_u32(), target.to_u32());
+        #[cfg(not(test))]
+        if prepared.iter().any(|id| !retention_graph.contains(id)) {
+            return Err(PgTrickleError::InvalidArgument(
+                "concurrent retention detach has an unsafe overlapping dependency".into(),
+            ));
+        }
         for id in ids {
             crate::api::alter::lock_alter_target(id)?;
-            crate::dvm::retention::ensure_removal_prepared(id).map_err(|e| {
-                PgTrickleError::InvalidArgument(format!(
-                    "concurrent partition detach cannot proceed with retained history: {e}"
-                ))
-            })?;
+            #[cfg(not(test))]
+            if retention_graph.contains(&id) {
+                let marked = Spi::get_one_with_args::<i64>(
+                    "WITH marked AS (UPDATE pgtrickle.pgt_stream_tables SET status = 'SUSPENDED', \
+                     refresh_reason = $2, refresh_reason_detail = 'Partition retention detach is pending', \
+                     updated_at = now() WHERE pgt_id = $1 AND status = 'ACTIVE' RETURNING pgt_id) \
+                     SELECT (SELECT pgt_id FROM marked)",
+                    &[id.into(), reason.as_str().into()],
+                ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                if marked.is_none() && prepared.contains(&id) {
+                    let already_marked = Spi::get_one_with_args::<bool>(
+                        "SELECT status = 'SUSPENDED' AND refresh_reason = $2 \
+                         FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+                        &[id.into(), reason.as_str().into()],
+                    )
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(false);
+                    if !already_marked {
+                        return Err(PgTrickleError::InvalidArgument(
+                            "retention stream suspension changed during concurrent detach".into(),
+                        ));
+                    }
+                }
+                shmem::signal_dag_invalidation(id);
+                continue;
+            }
+            #[cfg(not(test))]
+            let retention_prepared = prepared.contains(&id);
+            #[cfg(test)]
+            let retention_prepared = false;
+            if !retention_prepared {
+                crate::dvm::retention::ensure_removal_prepared(id).map_err(|e| {
+                    PgTrickleError::InvalidArgument(format!(
+                        "concurrent partition detach cannot proceed with retained history: {e}"
+                    ))
+                })?;
+            }
             suspend_for_source_ddl_checked(
                 id,
                 AlterReasonCode::DependencyAmbiguous,
@@ -397,6 +472,17 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_end_wrapper(
 
     for cmd in &commands {
         #[cfg(not(test))]
+        if matches!(cmd.kind, DdlCommandKind::AlterTable)
+            && !matches!(alter_table_hint, AlterTableHint::DetachPartitionConcurrent)
+        {
+            ensure_no_pending_retention_source_ddl(cmd.objid).unwrap_or_else(|e| {
+                pgrx::error!(
+                    "pg_trickle: source DDL blocked during retention detach: {}",
+                    e
+                )
+            });
+        }
+        #[cfg(not(test))]
         if trigger_state_change && matches!(cmd.kind, DdlCommandKind::AlterTable) {
             validate_retention_trigger_state(cmd.objid).unwrap_or_else(|e| {
                 pgrx::error!("pg_trickle: cannot disable retention capture: {}", e)
@@ -407,6 +493,23 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_end_wrapper(
     #[cfg(test)]
     let _ = trigger_state_change;
     pg_sys::Datum::null()
+}
+
+#[cfg(not(test))]
+fn ensure_no_pending_retention_source_ddl(relation: pg_sys::Oid) -> Result<(), PgTrickleError> {
+    let pending = Spi::get_one_with_args::<bool>(
+        "WITH RECURSIVE ancestors(oid) AS (SELECT $1::oid UNION \
+         SELECT i.inhparent FROM pg_catalog.pg_inherits i JOIN ancestors a ON i.inhrelid = a.oid) \
+         SELECT EXISTS (SELECT 1 FROM ancestors a JOIN pgtrickle.pgt_dependencies d ON d.source_relid = a.oid \
+         WHERE d.source_type = 'TABLE' AND d.column_snapshot->'partition_retention' ? 'pending')",
+        &[relation.into()],
+    ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(true);
+    if pending {
+        return Err(PgTrickleError::InvalidArgument(
+            "source schema cannot change while a retention detach is pending".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn is_trigger_state_change(fcinfo: pg_sys::FunctionCallInfo) -> bool {
@@ -1398,9 +1501,29 @@ fn handle_alter_table(
     // Classify the schema change and only reinitialize for column-affecting
     // changes.  Benign DDL (adding indexes, comments, statistics) and
     // constraint-only changes skip reinit when column tracking is populated.
+    #[cfg(not(test))]
+    let mut finished_retention_detaches = Vec::new();
     let mut reinit_pgt_ids = Vec::new();
     let mut suspended_pgt_ids = Vec::new();
     for pgt_id in &affected_pgt_ids {
+        #[cfg(not(test))]
+        if matches!(alter_table_hint, AlterTableHint::DetachPartitionConcurrent)
+            && crate::dvm::retention::finish_concurrent_retention_detach(*pgt_id, objid)
+                .unwrap_or_else(|e| {
+                    pgrx::error!("pg_trickle: concurrent retention detach failed: {}", e)
+                })
+        {
+            crate::catalog::store_column_snapshot_for_pgt_id(*pgt_id, objid).unwrap_or_else(|e| {
+                pgrx::error!(
+                    "pg_trickle: cannot snapshot concurrent retention detach: {}",
+                    e
+                )
+            });
+            shmem::signal_dag_invalidation(*pgt_id);
+            shmem::bump_cache_generation();
+            finished_retention_detaches.push(*pgt_id);
+            continue;
+        }
         if matches!(alter_table_hint, AlterTableHint::DetachPartitionConcurrent) {
             crate::dvm::retention::ensure_removal_prepared(*pgt_id).unwrap_or_else(|e| {
                 pgrx::error!(
@@ -1663,6 +1786,13 @@ fn handle_alter_table(
         }
     }
 
+    #[cfg(not(test))]
+    if !finished_retention_detaches.is_empty() {
+        resume_retention_dependents(&finished_retention_detaches).unwrap_or_else(|e| {
+            pgrx::error!("pg_trickle: cannot resume retention dependents: {}", e)
+        });
+    }
+
     // Cascade: find STs that depend on the affected STs (transitive).
     // Only cascade from STs that were actually marked for reinit.
     let cascade_ids = if reinit_pgt_ids.is_empty() {
@@ -1785,6 +1915,45 @@ fn suspend_for_source_ddl(pgt_id: i64, code: AlterReasonCode, identity: &str) {
             identity,
             e
         );
+    }
+}
+
+#[cfg(not(test))]
+fn resume_retention_dependents(roots: &[i64]) -> Result<(), PgTrickleError> {
+    let mut dependents = find_transitive_downstream_sts(roots)?;
+    dependents.sort_unstable();
+    dependents.dedup();
+    for &id in &dependents {
+        crate::api::alter::lock_alter_target(id)?;
+    }
+    loop {
+        let mut resumed = false;
+        for &id in &dependents {
+            let updated = Spi::get_one_with_args::<i64>(
+                "WITH resumed AS (UPDATE pgtrickle.pgt_stream_tables st SET status = 'ACTIVE', \
+                 refresh_reason = NULL, refresh_reason_detail = NULL, updated_at = now() \
+                 WHERE st.pgt_id = $1 AND st.status = 'SUSPENDED' AND NOT st.needs_reinit \
+                   AND st.refresh_reason LIKE 'RETENTION_DETACH:%' \
+                   AND NOT EXISTS (WITH RECURSIVE upstream(pgt_id) AS ( \
+                     SELECT st.pgt_id UNION SELECT parent.pgt_id FROM upstream u \
+                     JOIN pgtrickle.pgt_dependencies d ON d.pgt_id = u.pgt_id \
+                     JOIN pgtrickle.pgt_stream_tables parent ON parent.pgt_relid = d.source_relid \
+                     WHERE d.source_type = 'STREAM_TABLE' \
+                   ) SELECT 1 FROM upstream u JOIN pgtrickle.pgt_stream_tables parent USING (pgt_id) \
+                     WHERE (u.pgt_id <> st.pgt_id AND parent.status <> 'ACTIVE') \
+                        OR EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies d \
+                          WHERE d.pgt_id = u.pgt_id AND d.column_snapshot->'partition_retention' ? 'pending') \
+                   ) RETURNING st.pgt_id) SELECT (SELECT pgt_id FROM resumed)",
+                &[id.into()],
+            ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if updated.is_some() {
+                resumed = true;
+                shmem::signal_dag_invalidation(id);
+            }
+        }
+        if !resumed {
+            return Ok(());
+        }
     }
 }
 

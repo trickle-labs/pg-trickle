@@ -61,6 +61,19 @@ pub struct SealedRange {
     pub upper: RetentionBound,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRetentionDetach {
+    pub parent_oid: u32,
+    pub target_oid: u32,
+    pub range: SealedRange,
+}
+
+#[cfg(not(test))]
+pub(crate) fn concurrent_detach_reason(parent_oid: u32, target_oid: u32) -> String {
+    format!("RETENTION_DETACH:{parent_oid}:{target_oid}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionState {
@@ -70,6 +83,8 @@ pub struct RetentionState {
     pub cutoff: RetentionBound,
     pub query_hash: i64,
     pub sealed: Vec<SealedRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PendingRetentionDetach>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +153,30 @@ impl RetentionState {
             }
             previous_upper = Some(bound_value(range.upper));
         }
+        if let Some(pending) = self.pending {
+            if pending.parent_oid == 0
+                || pending.target_oid == 0
+                || pending.parent_oid == pending.target_oid
+            {
+                return Err(RetentionStateError::InvalidState);
+            }
+            if !range_is_expired(
+                &self.candidate,
+                pending.range.lower,
+                pending.range.upper,
+                self.cutoff,
+            )
+            .map_err(RetentionStateError::InvalidRange)?
+            {
+                return Err(RetentionStateError::NotExpired);
+            }
+            if self.sealed.iter().any(|old| {
+                bound_value(pending.range.lower) < bound_value(old.upper)
+                    && bound_value(old.lower) < bound_value(pending.range.upper)
+            }) {
+                return Err(RetentionStateError::Overlap);
+            }
+        }
         Ok(())
     }
 
@@ -197,7 +236,10 @@ fn state_has_sealed_history(state: &serde_json::Value) -> Result<bool, &'static 
     state
         .validate()
         .map_err(|_| "invalid partition retention invariants")?;
-    Ok(state.mode == RetentionMode::Retain && !state.sealed.is_empty())
+    Ok(
+        state.pending.is_some()
+            || (state.mode == RetentionMode::Retain && !state.sealed.is_empty()),
+    )
 }
 
 /// Fail closed when a whole-query operation would discard retained history.
@@ -228,6 +270,11 @@ pub(crate) fn ensure_history_reconstructible(
                     "invalid partition retention state: {error}"
                 ))
             })? {
+                if state.0.get("pending").is_some_and(|value| !value.is_null()) {
+                    return Err(PgTrickleError::InvalidArgument(
+                        "a pending retention detach must finish before rebuilding or changing the policy; if interrupted, run DETACH PARTITION FINALIZE".into(),
+                    ));
+                }
                 return Err(PgTrickleError::InvalidArgument(
                     "retained partition history cannot be reconstructed from the current source; \
                      a whole-query rebuild or restore would discard it"
@@ -428,15 +475,13 @@ fn prepared_detach_exists(pgt_id: i64, source_oid: u32, target_oid: u32) -> bool
     })
 }
 
-/// Prepare eligible configured consumers before PostgreSQL detaches the child.
 #[cfg(not(test))]
-pub(crate) fn prepare_automatic_detaches(
+fn retention_policies_for_source(
     source_oid: pg_sys::Oid,
-    target_oid: pg_sys::Oid,
-) -> Result<(), crate::error::PgTrickleError> {
+) -> Result<Vec<(i64, RetentionState)>, crate::error::PgTrickleError> {
     use crate::error::PgTrickleError;
     use pgrx::prelude::*;
-    let policies = Spi::connect(|client| {
+    Spi::connect(|client| {
         let rows = client.select(
             "SELECT pgt_id, column_snapshot->'partition_retention' FROM pgtrickle.pgt_dependencies \
              WHERE source_relid = $1 AND source_type = 'TABLE' AND column_snapshot ? 'partition_retention' \
@@ -466,12 +511,261 @@ pub(crate) fn prepare_automatic_detaches(
             policies.push((id, state));
         }
         Ok::<_, PgTrickleError>(policies)
+    })
+}
+
+/// Persist a protected cut before PostgreSQL commits the first detach phase.
+#[cfg(not(test))]
+pub(crate) fn prepare_concurrent_retention_detaches(
+    source_oid: pg_sys::Oid,
+    parent_oid: pg_sys::Oid,
+    target_oid: pg_sys::Oid,
+) -> Result<Vec<i64>, crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let mut prepared = Vec::new();
+    for (pgt_id, mut state) in retention_policies_for_source(source_oid)? {
+        if let Some(pending) = state.pending {
+            if pending.parent_oid != parent_oid.to_u32()
+                || pending.target_oid != target_oid.to_u32()
+            {
+                return Err(PgTrickleError::InvalidArgument(
+                    "another retention detach is pending for this stream".into(),
+                ));
+            }
+            prepared.push(pgt_id);
+            continue;
+        }
+        let partition = match resolve_retention_partition(
+            source_oid,
+            target_oid,
+            &state.candidate,
+            state.cutoff,
+            None,
+        ) {
+            Ok(partition) => partition,
+            Err(PgTrickleError::InvalidArgument(_)) if state.mode == RetentionMode::Trim => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if partition.is_none_or(|partition| !partition.expired) {
+            if state.mode == RetentionMode::Trim {
+                continue;
+            }
+            return Err(PgTrickleError::InvalidArgument(
+                "RETAIN requires an aligned partition wholly below its retention cutoff".into(),
+            ));
+        }
+        let cut = prepare_retention_cut(pgt_id, target_oid)?;
+        let before = pgrx::JsonB(
+            serde_json::to_value(&state)
+                .map_err(|e| PgTrickleError::InternalError(e.to_string()))?,
+        );
+        state.pending = Some(PendingRetentionDetach {
+            parent_oid: parent_oid.to_u32(),
+            target_oid: target_oid.to_u32(),
+            range: cut.range,
+        });
+        state.validate().map_err(|e| {
+            PgTrickleError::InvalidArgument(format!("invalid pending retention detach: {e:?}"))
+        })?;
+        let after = pgrx::JsonB(
+            serde_json::to_value(&state)
+                .map_err(|e| PgTrickleError::InternalError(e.to_string()))?,
+        );
+        let updated = Spi::get_one_with_args::<i64>(
+            "UPDATE pgtrickle.pgt_dependencies SET column_snapshot = \
+             pg_catalog.jsonb_set(column_snapshot, '{partition_retention}', $3, true) \
+             WHERE pgt_id = $1 AND source_relid = $2 AND column_snapshot->'partition_retention' = $4 \
+             RETURNING pgt_id",
+            &[pgt_id.into(), source_oid.into(), after.into(), before.into()],
+        ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if updated != Some(pgt_id) {
+            return Err(PgTrickleError::InvalidArgument(
+                "retention state changed during concurrent detach preparation".into(),
+            ));
+        }
+        prepared.push(pgt_id);
+    }
+    Ok(prepared)
+}
+
+/// Replay the pending CDC and complete the cut in PostgreSQL's second transaction.
+#[cfg(not(test))]
+pub(crate) fn finish_concurrent_retention_detach(
+    pgt_id: i64,
+    source_oid: pg_sys::Oid,
+) -> Result<bool, crate::error::PgTrickleError> {
+    use crate::catalog::{StreamTableMeta, compute_defining_query_hash};
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+
+    let Some((_, mut state)) = retention_policies_for_source(source_oid)?
+        .into_iter()
+        .find(|(id, _)| *id == pgt_id)
+    else {
+        return Ok(false);
+    };
+    let Some(pending) = state.pending else {
+        return Ok(false);
+    };
+    let detached = Spi::get_one_with_args::<bool>(
+        "SELECT NOT EXISTS (WITH RECURSIVE ancestors(oid) AS ( \
+         SELECT inhparent FROM pg_catalog.pg_inherits WHERE inhrelid = $2 \
+         UNION ALL SELECT i.inhparent FROM pg_catalog.pg_inherits i JOIN ancestors a ON i.inhrelid = a.oid \
+         ) SELECT 1 FROM ancestors WHERE oid = $1)",
+        &[source_oid.into(), pg_sys::Oid::from(pending.target_oid).into()],
+    ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false);
+    if !detached {
+        return Err(PgTrickleError::InvalidArgument(
+            "pending retention partition is still attached".into(),
+        ));
+    }
+    crate::api::alter::lock_alter_target(pgt_id)?;
+    let mut st = StreamTableMeta::get_by_id(pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
+    if st.status != crate::dag::StStatus::Suspended
+        || st.needs_reinit
+        || state.query_hash != compute_defining_query_hash(&st.defining_query)
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "pending retention stream changed or requires reinitialization".into(),
+        ));
+    }
+    validate_retention_storage(&st, source_oid, &state.candidate, state.mode, false)?;
+    let candidate = crate::refresh::with_stream_owner(&st, || {
+        let tree = super::parser::parse_defining_query(&st.defining_query)?;
+        let candidate =
+            query_group_candidate(&tree, source_oid.to_u32(), &state.candidate.source_column)
+                .map_err(|e| {
+                    PgTrickleError::InvalidArgument(format!(
+                        "retention query is no longer eligible: {e:?}"
+                    ))
+                })?;
+        validate_builtin_aggregates(&st.defining_query, &tree)?;
+        Ok(candidate)
     })?;
+    if candidate != state.candidate {
+        return Err(PgTrickleError::InvalidArgument(
+            "retention group mapping changed during concurrent detach".into(),
+        ));
+    }
+    crate::cdc::lock_source_relations(&[source_oid])?;
+    ensure_durable_partition_tree(source_oid)?;
+    ensure_retention_capture(pgt_id)?;
+    ensure_no_live_sealed_overlap(source_oid, &state, None)?;
+    let reason = concurrent_detach_reason(pending.parent_oid, pending.target_oid);
+    let activated = Spi::get_one_with_args::<i64>(
+        "WITH activated AS (UPDATE pgtrickle.pgt_stream_tables SET status = 'ACTIVE' \
+         WHERE pgt_id = $1 AND status = 'SUSPENDED' AND refresh_reason = $2 RETURNING pgt_id) \
+         SELECT (SELECT pgt_id FROM activated)",
+        &[pgt_id.into(), reason.as_str().into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    if activated != Some(pgt_id) {
+        return Err(PgTrickleError::InvalidArgument(
+            "pending retention stream suspension changed during concurrent detach".into(),
+        ));
+    }
+    st.status = crate::dag::StStatus::Active;
+    let safe_bound = crate::cdc::get_current_wal_lsn()?;
+    let refresh = crate::refresh::with_refresh_context(
+        crate::refresh::RefreshContext::graph(&safe_bound, crate::refresh::FullPolicy::Error),
+        || {
+            crate::api::refresh_ops::execute_manual_refresh(
+                &st,
+                &st.pgt_schema,
+                &st.pgt_name,
+                &[source_oid],
+            )
+        },
+    )?;
+    if !matches!(refresh.action.as_str(), "DIFFERENTIAL" | "NO_DATA") {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "pending retention replay performed unexpected refresh mode {}",
+            refresh.action
+        )));
+    }
+    let before = pgrx::JsonB(
+        serde_json::to_value(&state).map_err(|e| PgTrickleError::InternalError(e.to_string()))?,
+    );
+    state.pending = None;
+    let after = pgrx::JsonB(
+        serde_json::to_value(&state).map_err(|e| PgTrickleError::InternalError(e.to_string()))?,
+    );
+    let updated = Spi::get_one_with_args::<i64>(
+        "UPDATE pgtrickle.pgt_dependencies SET column_snapshot = \
+         pg_catalog.jsonb_set(column_snapshot, '{partition_retention}', $3, true) \
+         WHERE pgt_id = $1 AND source_relid = $2 AND column_snapshot->'partition_retention' = $4 \
+         RETURNING pgt_id",
+        &[
+            pgt_id.into(),
+            source_oid.into(),
+            after.into(),
+            before.into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    if updated != Some(pgt_id) {
+        return Err(PgTrickleError::InvalidArgument(
+            "pending retention state changed during replay".into(),
+        ));
+    }
+    let mut after_removal = state.clone();
+    if state.mode == RetentionMode::Retain {
+        after_removal.seal(pending.range).map_err(|e| {
+            PgTrickleError::InvalidArgument(format!("cannot seal retained range: {e:?}"))
+        })?;
+    }
+    // SAFETY: PostgreSQL exposes these identifiers for the current backend transaction.
+    let (transaction_id, subtransaction_id) = unsafe {
+        (
+            pg_sys::GetTopFullTransactionId().value,
+            pg_sys::GetCurrentSubTransactionId(),
+        )
+    };
+    let cut = PreparedRetentionCut {
+        pgt_id,
+        source_oid: source_oid.to_u32(),
+        target_oid: pending.target_oid,
+        range: pending.range,
+        state_before_removal: state,
+        state_after_removal: after_removal,
+        safe_bound,
+        transaction_id,
+        subtransaction_id,
+    };
+    match cut.state_after_removal.mode {
+        RetentionMode::Retain => finalize_retained_cut(cut)?,
+        RetentionMode::Trim => finalize_trimmed_cut(cut)?,
+    }
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables SET refresh_reason = NULL, refresh_reason_detail = NULL \
+         WHERE pgt_id = $1 AND refresh_reason = $2",
+        &[pgt_id.into(), reason.as_str().into()],
+    ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Ok(true)
+}
+
+/// Prepare eligible configured consumers before PostgreSQL detaches the child.
+#[cfg(not(test))]
+pub(crate) fn prepare_automatic_detaches(
+    source_oid: pg_sys::Oid,
+    target_oid: pg_sys::Oid,
+) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    let policies = retention_policies_for_source(source_oid)?;
     // Refreshes and configuration take stream locks before source locks.
     for (pgt_id, _) in &policies {
         crate::api::alter::lock_alter_target(*pgt_id)?;
     }
     for (pgt_id, state) in policies {
+        if state.pending.is_some() {
+            return Err(PgTrickleError::InvalidArgument(
+                "cannot remove another partition while a retention detach is pending".into(),
+            ));
+        }
         if prepared_detach_exists(pgt_id, source_oid.to_u32(), target_oid.to_u32()) {
             continue;
         }
@@ -877,12 +1171,14 @@ pub(crate) fn ensure_retention_capture(pgt_id: i64) -> Result<(), crate::error::
         )
     );
     let valid = Spi::get_one_with_args::<bool>(
-        "WITH root AS (SELECT tgfoid FROM pg_catalog.pg_trigger \
+        "WITH RECURSIVE tree(relid) AS (SELECT $1::oid UNION \
+           SELECT i.inhrelid FROM pg_catalog.pg_inherits i JOIN tree p ON i.inhparent = p.relid), \
+         root AS (SELECT tgfoid FROM pg_catalog.pg_trigger \
            WHERE tgrelid = $1 AND tgname = $2 AND tgtype = 29 AND tgenabled = 'A' \
              AND tgfoid = pg_catalog.to_regprocedure($5) AND tgqual IS NULL AND tgnargs = 0 \
              AND tgconstraint = 0 AND NOT tgdeferrable) \
          SELECT EXISTS (SELECT 1 FROM root) AND NOT EXISTS ( \
-           SELECT 1 FROM pg_catalog.pg_partition_tree($1::regclass) p \
+           SELECT 1 FROM tree p \
            WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t, root r \
                      WHERE t.tgrelid = p.relid AND t.tgname = $2 AND t.tgfoid = r.tgfoid \
                        AND t.tgtype = 29 AND t.tgenabled = 'A' AND t.tgqual IS NULL AND t.tgnargs = 0 \
@@ -1414,6 +1710,11 @@ pub(crate) fn ensure_retained_attach_safe(
     state.validate().map_err(|e| {
         PgTrickleError::InvalidArgument(format!("invalid partition retention state: {e:?}"))
     })?;
+    if state.pending.is_some() {
+        return Err(PgTrickleError::InvalidArgument(
+            "cannot attach a partition while a retention detach is pending".into(),
+        ));
+    }
     if state.mode != RetentionMode::Retain || state.sealed.is_empty() {
         return Ok(());
     }
@@ -2583,7 +2884,35 @@ mod tests {
             cutoff: RetentionBound::Date(30),
             query_hash: 7,
             sealed: vec![],
+            pending: None,
         }
+    }
+
+    #[test]
+    fn pending_detach_is_durable_and_blocks_rebuilds() {
+        use RetentionBound::Date;
+        let mut state = sample_state(RetentionMode::Trim);
+        assert_eq!(serde_json::to_value(&state).unwrap().get("pending"), None);
+        state.pending = Some(PendingRetentionDetach {
+            parent_oid: 42,
+            target_oid: 43,
+            range: SealedRange {
+                lower: Date(10),
+                upper: Date(20),
+            },
+        });
+        let encoded = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RetentionState>(encoded.clone()).unwrap(),
+            state
+        );
+        assert_eq!(state.validate(), Ok(()));
+        assert_eq!(state_has_sealed_history(&encoded), Ok(true));
+        state.pending.as_mut().unwrap().range.upper = Date(31);
+        assert_eq!(state.validate(), Err(RetentionStateError::NotExpired));
+        state.pending.as_mut().unwrap().range.upper = Date(20);
+        state.pending.as_mut().unwrap().target_oid = 42;
+        assert_eq!(state.validate(), Err(RetentionStateError::InvalidState));
     }
 
     #[test]

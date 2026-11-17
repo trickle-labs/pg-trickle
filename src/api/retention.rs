@@ -127,6 +127,14 @@ fn set_policy(
     let cutoff = retention::parse_retention_cutoff(candidate.source_type_oid, cutoff)?;
     let query_hash = crate::catalog::compute_defining_query_hash(&st.defining_query);
     let previous = load_policy(st.pgt_id)?;
+    if previous
+        .as_ref()
+        .is_some_and(|(_, state)| state.pending.is_some())
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "partition retention cannot be changed while a concurrent detach is pending".into(),
+        ));
+    }
     let old_policy = previous.clone();
     let state = if let Some((previous_source, mut previous)) = previous {
         if !previous.sealed.is_empty() {
@@ -151,6 +159,7 @@ fn set_policy(
                 cutoff,
                 query_hash,
                 sealed: Vec::new(),
+                pending: None,
             }
         }
     } else {
@@ -161,6 +170,7 @@ fn set_policy(
             cutoff,
             query_hash,
             sealed: Vec::new(),
+            pending: None,
         }
     };
     state.validate().map_err(|error| {
@@ -331,11 +341,18 @@ fn get_stream_table_partition_retention(name: &str) -> pgrx::JsonB {
                 }))
             })
             .collect::<Result<Vec<_>, PgTrickleError>>()?;
-        Ok(pgrx::JsonB(serde_json::json!({
+        let mut result = serde_json::json!({
             "enabled": true, "policy": state.mode, "source": source_name,
             "source_column": state.candidate.source_column, "group_column": state.candidate.output_column,
             "bucket": state.candidate.bucket, "cutoff": display_bound(state.cutoff)?, "sealed_ranges": ranges,
-        })))
+        });
+        if let Some(pending) = state.pending {
+            result["pending_detach"] = serde_json::json!({
+                "parent_oid": pending.parent_oid, "target_oid": pending.target_oid,
+                "lower": display_bound(pending.range.lower)?, "upper": display_bound(pending.range.upper)?,
+            });
+        }
+        Ok(pgrx::JsonB(result))
     })();
     result.unwrap_or_else(|error| super::raise_error_with_context(error))
 }

@@ -84,8 +84,8 @@ SELECT * FROM regional_sales ORDER BY region;
 Retention is disabled by default. An eligible stream can opt into `TRIM` or
 `RETAIN` with an explicit cutoff. A partition is expired only when its entire
 half-open range `[lower, upper)` is at or below the cutoff. Advancing the
-cutoff does not remove a partition; it makes a subsequent ordinary `DETACH`
-or direct `DROP TABLE` eligible for retention processing.
+cutoff does not remove a partition; it makes a subsequent `DETACH`, concurrent
+`DETACH`, or direct `DROP TABLE` eligible for retention processing.
 
 This example uses the **same** `occurred` column for partitioning and hourly
 grouping. It does not infer any relationship between two timestamps. Run it in
@@ -169,13 +169,23 @@ The contract is intentionally narrow:
   rejected at configuration time.
 - The source workload may append rows, but grouped output rows are updated;
   this feature does not require the stream's append-only output fast path.
+- Retention cuts require the configured stream to be active and initialized
+  with no pending reinitialization. Resume and repair it before removing a
+  partition if it has been paused or suspended.
 - `RETAIN` rejects overlapping historical attachments, including empty
   partitions, and nonempty attachments that would require rebuilding sealed
   history. Late arrivals or backfills into a sealed range therefore require a
   deliberate external rebuild. Ordinary writes to still-attached ranges remain
-  supported. `DETACH PARTITION CONCURRENTLY` is rejected for RETAIN; for TRIM
-  it follows the normal safe suspension/reinitialization path. A nested child
-  can be removed when every intermediate partition level is RANGE-partitioned
+  supported. Eligible `DETACH PARTITION CONCURRENTLY` operations suspend the
+  affected streams while PostgreSQL's detach is pending, then replay captured
+  changes and apply the retention cut in its second transaction. If that
+  transaction is interrupted, run PostgreSQL's `DETACH PARTITION ... FINALIZE`
+  to complete the cut; the pending range is visible as `pending_detach` in the
+  policy JSON. Partition attachments and retention configuration changes are
+  blocked while the cut is pending. A dependent remains suspended if another
+  upstream still requires recovery; repair that upstream before resuming it.
+  A nested child can be removed when every
+  intermediate partition level is RANGE-partitioned
   on the same key with finite, bucket-aligned bounds; the effective range is
   the intersection of its bounds with all ancestor bounds. For other nested
   layouts, TRIM falls back and RETAIN rejects the removal. Removing an entire
@@ -425,4 +435,4 @@ SELECT pgtrickle.create_stream_table(
 | **Sub-partitioning** | Multi-level partitioning (partitions of partitions) works in principle because triggers propagate through the entire hierarchy, but it is not extensively tested. |
 | **pg_partman compatibility** | `pg_partman` dynamically creates and drops partitions. Since pg_trickle detects ATTACH/DETACH via DDL event triggers, it should work, but this combination is not yet tested. |
 | **Partitioned storage tables** | Using a partitioned table as the stream table's *storage* is not supported. This is tracked for a future release. |
-| **DETACH PARTITION CONCURRENTLY** | This is a two-phase operation. To avoid refreshing against an incomplete intermediate state, pg_trickle suspends dependent stream tables. After DETACH completes, explicitly run `pgtrickle.resume_stream_table('regional_sales')` and refresh. The resume action schedules a full reinitialization. |
+| **DETACH PARTITION CONCURRENTLY** | This is a two-phase operation. Without retention, dependent stream tables are suspended and must be resumed explicitly after detach; resume schedules a full reinitialization. Eligible retention-enabled streams replay CDC and complete their cut in the second phase. If interrupted, run `DETACH PARTITION ... FINALIZE`. |

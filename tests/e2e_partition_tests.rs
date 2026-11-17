@@ -858,6 +858,518 @@ async fn test_partition_nested_detach_rebuilds_root_and_downstream() {
 }
 
 #[tokio::test]
+async fn test_retention_concurrent_detach_preserves_retained_history() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE concurrent_retain_src (id integer NOT NULL, d date NOT NULL, amount integer NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE concurrent_retain_old PARTITION OF concurrent_retain_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE concurrent_retain_live PARTITION OF concurrent_retain_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO concurrent_retain_src VALUES (1,'2025-06-01',10), (2,'2026-06-01',20)")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table_with_retention('concurrent_retain_st', 'SELECT d, sum(amount) AS total, count(*) AS n FROM concurrent_retain_src GROUP BY d', 'RETAIN', 'd', '2026-01-01', '1h')").await;
+    db.create_st(
+        "concurrent_retain_downstream",
+        "SELECT d, total, n FROM concurrent_retain_st",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "concurrent_retain_paused",
+        "SELECT d, total, n FROM concurrent_retain_st",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.pause_stream_table('concurrent_retain_paused')")
+        .await;
+    let marker: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.execute(
+        "ALTER TABLE concurrent_retain_src DETACH PARTITION concurrent_retain_old CONCURRENTLY",
+    )
+    .await;
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM concurrent_retain_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read retained aggregates");
+    assert_eq!(
+        rows,
+        vec![("2025-06-01".into(), 10, 1), ("2026-06-01".into(), 20, 1)]
+    );
+    let policy: serde_json::Value = db
+        .query_scalar(
+            "SELECT pgtrickle.get_stream_table_partition_retention('concurrent_retain_st')",
+        )
+        .await;
+    assert_eq!(
+        policy["sealed_ranges"],
+        serde_json::json!([{"lower":"2025-01-01", "upper":"2026-01-01"}])
+    );
+    assert!(policy.get("pending_detach").is_none());
+    db.execute("INSERT INTO concurrent_retain_src VALUES (3,'2026-06-01',5)")
+        .await;
+    db.refresh_st_with_retry("concurrent_retain_st").await;
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM concurrent_retain_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read retained and live aggregates");
+    assert_eq!(
+        rows,
+        vec![("2025-06-01".into(), 10, 1), ("2026-06-01".into(), 25, 2)]
+    );
+    let downstream_status: String = db.query_scalar("SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'concurrent_retain_downstream'").await;
+    assert_eq!(downstream_status, "ACTIVE");
+    let paused_status: String = db.query_scalar("SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'concurrent_retain_paused'").await;
+    assert_eq!(paused_status, "SUSPENDED");
+    db.refresh_st_with_retry("concurrent_retain_downstream")
+        .await;
+    let downstream: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM concurrent_retain_downstream ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read downstream retained aggregates");
+    assert_eq!(downstream, rows);
+    let actions: Vec<(String, String, bool)> = sqlx::query_as("SELECT h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'concurrent_retain_st' AND h.refresh_id > $1 ORDER BY h.refresh_id")
+        .bind(marker).fetch_all(&db.pool).await.expect("read concurrent retention refresh actions");
+    assert!(!actions.is_empty());
+    assert!(
+        actions
+            .iter()
+            .all(
+                |(action, status, fallback)| (action == "DIFFERENTIAL" || action == "NO_DATA")
+                    && status == "COMPLETED"
+                    && !fallback
+            ),
+        "{actions:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_retention_concurrent_detach_as_source_owner() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE ROLE concurrent_retention_owner LOGIN")
+        .await;
+    db.execute(
+        "CREATE SCHEMA concurrent_retention_tenant AUTHORIZATION concurrent_retention_owner",
+    )
+    .await;
+    db.execute("CREATE TABLE concurrent_retention_tenant.events (d date NOT NULL, amount integer NOT NULL) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE concurrent_retention_tenant.events_old PARTITION OF concurrent_retention_tenant.events FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE concurrent_retention_tenant.events_live PARTITION OF concurrent_retention_tenant.events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute(
+        "ALTER TABLE concurrent_retention_tenant.events OWNER TO concurrent_retention_owner",
+    )
+    .await;
+    db.execute(
+        "ALTER TABLE concurrent_retention_tenant.events_old OWNER TO concurrent_retention_owner",
+    )
+    .await;
+    db.execute(
+        "ALTER TABLE concurrent_retention_tenant.events_live OWNER TO concurrent_retention_owner",
+    )
+    .await;
+    db.execute("INSERT INTO concurrent_retention_tenant.events VALUES ('2025-06-01',10), ('2026-06-01',20)").await;
+    db.execute("SELECT pgtrickle.create_stream_table_with_retention('concurrent_retention_owner_st', 'SELECT d, sum(amount) AS total, count(*) AS n FROM concurrent_retention_tenant.events GROUP BY d', 'RETAIN', 'd', '2026-01-01', '1h')").await;
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire source owner connection");
+    sqlx::query("SET ROLE concurrent_retention_owner")
+        .execute(&mut *conn)
+        .await
+        .expect("set source owner role");
+    sqlx::query("SET search_path = concurrent_retention_tenant, public, pg_catalog")
+        .execute(&mut *conn)
+        .await
+        .expect("set source owner search path");
+    sqlx::query("ALTER TABLE events DETACH PARTITION events_old CONCURRENTLY")
+        .execute(&mut *conn)
+        .await
+        .expect("detach as source owner");
+    sqlx::query("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("reset role");
+    drop(conn);
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM concurrent_retention_owner_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read retained rows");
+    assert_eq!(
+        rows,
+        vec![("2025-06-01".into(), 10, 1), ("2026-06-01".into(), 20, 1)]
+    );
+}
+
+#[tokio::test]
+async fn test_retention_concurrent_nested_range_with_both_policies() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE nested_concurrent_retention (d date NOT NULL, amount integer NOT NULL) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE nested_concurrent_year PARTITION OF nested_concurrent_retention FOR VALUES FROM ('2025-01-01') TO ('2026-01-01') PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE nested_concurrent_old PARTITION OF nested_concurrent_year FOR VALUES FROM ('2025-01-01') TO ('2025-07-01')").await;
+    db.execute("CREATE TABLE nested_concurrent_current PARTITION OF nested_concurrent_year FOR VALUES FROM ('2025-07-01') TO ('2026-01-01')").await;
+    db.execute(
+        "INSERT INTO nested_concurrent_retention VALUES ('2025-03-01',10), ('2025-09-01',20)",
+    )
+    .await;
+    let query =
+        "SELECT d, sum(amount) AS total, count(*) AS n FROM nested_concurrent_retention GROUP BY d";
+    for (name, mode) in [
+        ("nested_concurrent_trim", "TRIM"),
+        ("nested_concurrent_retain", "RETAIN"),
+    ] {
+        sqlx::query("SELECT pgtrickle.create_stream_table_with_retention($1, $2, $3, 'd', '2025-07-01', '1h')")
+            .bind(name).bind(query).bind(mode).execute(&db.pool).await.expect("configure nested retention");
+    }
+    let marker: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.execute(
+        "ALTER TABLE nested_concurrent_year DETACH PARTITION nested_concurrent_old CONCURRENTLY",
+    )
+    .await;
+    db.assert_st_matches_query("nested_concurrent_trim", query)
+        .await;
+    let retained: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM nested_concurrent_retain ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read nested retained history");
+    assert_eq!(
+        retained,
+        vec![("2025-03-01".into(), 10, 1), ("2025-09-01".into(), 20, 1)]
+    );
+    let states: Vec<(String,String)> = sqlx::query_as("SELECT pgt_name,status FROM pgtrickle.pgt_stream_tables WHERE pgt_name IN ('nested_concurrent_trim','nested_concurrent_retain') ORDER BY pgt_name")
+        .fetch_all(&db.pool).await.expect("read nested stream states");
+    assert_eq!(
+        states,
+        vec![
+            ("nested_concurrent_retain".into(), "ACTIVE".into()),
+            ("nested_concurrent_trim".into(), "ACTIVE".into())
+        ]
+    );
+    let rebuilds: Vec<String> = sqlx::query_scalar("SELECT h.action FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name IN ('nested_concurrent_trim','nested_concurrent_retain') AND h.refresh_id > $1 AND (h.action IN ('FULL','REINITIALIZE') OR h.was_full_fallback) ORDER BY h.refresh_id")
+        .bind(marker).fetch_all(&db.pool).await.expect("read nested refresh actions");
+    assert_eq!(rebuilds, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn test_retention_concurrent_retain_waits_for_live_writer() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE writer_pending_src (id integer NOT NULL, d date NOT NULL, amount integer NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE writer_pending_old PARTITION OF writer_pending_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE writer_pending_live PARTITION OF writer_pending_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO writer_pending_src VALUES (1,'2025-06-01',10), (2,'2026-06-01',20)")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table_with_retention('writer_pending_st', 'SELECT d, sum(amount) AS total, count(*) AS n FROM writer_pending_src GROUP BY d', 'RETAIN', 'd', '2026-01-01', '1h')").await;
+    let mut reader = db.pool.begin().await.expect("begin old source snapshot");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *reader)
+        .await
+        .expect("set isolation");
+    let before: Vec<(i32, i32)> =
+        sqlx::query_as("SELECT id, amount FROM writer_pending_src ORDER BY id")
+            .fetch_all(&mut *reader)
+            .await
+            .expect("hold source snapshot");
+    assert_eq!(before, vec![(1, 10), (2, 20)]);
+    let mut connection = db.pool.acquire().await.expect("acquire detach connection");
+    let detach_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *connection)
+        .await
+        .expect("read detach PID");
+    let detach = tokio::spawn(async move {
+        sqlx::query(
+            "ALTER TABLE writer_pending_src DETACH PARTITION writer_pending_old CONCURRENTLY",
+        )
+        .execute(&mut *connection)
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let pending: bool = db.query_scalar("SELECT COALESCE((SELECT inhdetachpending FROM pg_catalog.pg_inherits WHERE inhrelid = 'writer_pending_old'::regclass), false)").await;
+            if pending { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }).await.expect("detach enters pending phase");
+    let mut writer = db.pool.begin().await.expect("begin live writer");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("read writer PID");
+    sqlx::query("INSERT INTO writer_pending_src VALUES (3,'2026-06-01',5)")
+        .execute(&mut *writer)
+        .await
+        .expect("write live partition");
+    reader.commit().await.expect("release old snapshot");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: bool =
+                sqlx::query_scalar("SELECT $2 = ANY(pg_catalog.pg_blocking_pids($1))")
+                    .bind(detach_pid)
+                    .bind(writer_pid)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("inspect detach wait");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("detach waits for live writer");
+    let visible: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM writer_pending_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read stream during detach");
+    assert_eq!(
+        visible,
+        vec![("2025-06-01".into(), 10, 1), ("2026-06-01".into(), 20, 1)]
+    );
+    writer.commit().await.expect("commit live writer");
+    detach
+        .await
+        .expect("join detach")
+        .expect("complete concurrent detach");
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM writer_pending_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read retained and live rows");
+    assert_eq!(
+        rows,
+        vec![("2025-06-01".into(), 10, 1), ("2026-06-01".into(), 25, 2)]
+    );
+    db.refresh_st_with_retry("writer_pending_st").await;
+    let after: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM writer_pending_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read rows after next refresh");
+    assert_eq!(after, rows);
+    let actions: Vec<(String,String,bool)> = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name = 'writer_pending_st' ORDER BY h.refresh_id DESC LIMIT 2")
+        .fetch_all(&db.pool).await.expect("read concurrent refresh actions");
+    assert_eq!(
+        actions,
+        vec![
+            ("DIFFERENTIAL".into(), "COMPLETED".into(), false),
+            ("DIFFERENTIAL".into(), "COMPLETED".into(), false)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_retention_concurrent_retain_retries_failed_second_phase() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retry_pending_src (id integer NOT NULL, d date NOT NULL, amount integer NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE retry_pending_old PARTITION OF retry_pending_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE retry_pending_live PARTITION OF retry_pending_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO retry_pending_src VALUES (1,'2025-06-01',10), (2,'2026-06-01',20)")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table_with_retention('retry_pending_st', 'SELECT d, sum(amount) AS total, count(*) AS n FROM retry_pending_src GROUP BY d', 'RETAIN', 'd', '2026-01-01', '1h')").await;
+    db.execute("CREATE FUNCTION public.fail_retention_detach() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'intentional second-phase failure'; END $$").await;
+    db.execute("CREATE EVENT TRIGGER zz_fail_retention_detach ON ddl_command_end WHEN TAG IN ('ALTER TABLE') EXECUTE FUNCTION public.fail_retention_detach()").await;
+    let mut reader = db.pool.begin().await.expect("begin old source snapshot");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *reader)
+        .await
+        .expect("set isolation");
+    let before: Vec<(i32, i32)> =
+        sqlx::query_as("SELECT id,amount FROM retry_pending_src ORDER BY id")
+            .fetch_all(&mut *reader)
+            .await
+            .expect("hold old source snapshot");
+    assert_eq!(before, vec![(1, 10), (2, 20)]);
+    let pool = db.pool.clone();
+    let detach = tokio::spawn(async move {
+        sqlx::query("ALTER TABLE retry_pending_src DETACH PARTITION retry_pending_old CONCURRENTLY")
+            .execute(&pool)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let pending: bool = db.query_scalar("SELECT COALESCE((SELECT inhdetachpending FROM pg_catalog.pg_inherits WHERE inhrelid = 'retry_pending_old'::regclass), false)").await;
+            if pending { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }).await.expect("detach enters pending phase");
+    let frontier: serde_json::Value = db
+        .query_scalar(
+            "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retry_pending_st'",
+        )
+        .await;
+    db.execute("INSERT INTO retry_pending_old VALUES (3,'2025-06-01',7)")
+        .await;
+    reader.commit().await.expect("release old snapshot");
+    let error = detach
+        .await
+        .expect("join detach")
+        .expect_err("second phase must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("intentional second-phase failure"),
+        "{error}"
+    );
+    let pending: bool = db.query_scalar("SELECT inhdetachpending FROM pg_catalog.pg_inherits WHERE inhrelid = 'retry_pending_old'::regclass").await;
+    assert!(pending);
+    let after_frontier: serde_json::Value = db
+        .query_scalar(
+            "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retry_pending_st'",
+        )
+        .await;
+    assert_eq!(after_frontier, frontier);
+    let before_retry: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM retry_pending_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read rolled-back stream");
+    assert_eq!(
+        before_retry,
+        vec![("2025-06-01".into(), 10, 1), ("2026-06-01".into(), 20, 1)]
+    );
+    db.execute("ALTER EVENT TRIGGER zz_fail_retention_detach DISABLE")
+        .await;
+    db.execute("ALTER TABLE retry_pending_src DETACH PARTITION retry_pending_old FINALIZE")
+        .await;
+    let recovered: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM retry_pending_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read recovered stream");
+    assert_eq!(
+        recovered,
+        vec![("2025-06-01".into(), 17, 2), ("2026-06-01".into(), 20, 1)]
+    );
+    db.refresh_st_with_retry("retry_pending_st").await;
+    let after: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM retry_pending_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read stream after retry");
+    assert_eq!(after, recovered);
+}
+
+#[tokio::test]
+async fn test_retention_concurrent_retain_recovers_pending_after_restart() {
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE restart_pending_src (id integer NOT NULL, d date NOT NULL, amount integer NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE restart_pending_old PARTITION OF restart_pending_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE restart_pending_live PARTITION OF restart_pending_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO restart_pending_src VALUES (1,'2025-06-01',10), (2,'2026-06-01',20)")
+        .await;
+    db.execute("SELECT pgtrickle.create_stream_table_with_retention('restart_pending_st', 'SELECT d, sum(amount) AS total, count(*) AS n FROM restart_pending_src GROUP BY d', 'RETAIN', 'd', '2026-01-01', '1h')").await;
+    let mut reader = db.pool.begin().await.expect("begin old source snapshot");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *reader)
+        .await
+        .expect("set isolation");
+    let before: Vec<(i32, i32)> =
+        sqlx::query_as("SELECT id, amount FROM restart_pending_src ORDER BY id")
+            .fetch_all(&mut *reader)
+            .await
+            .expect("hold old source snapshot");
+    assert_eq!(before, vec![(1, 10), (2, 20)]);
+    let mut connection = db.pool.acquire().await.expect("acquire detach connection");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *connection)
+        .await
+        .expect("read detach PID");
+    let detach = tokio::spawn(async move {
+        sqlx::query(
+            "ALTER TABLE restart_pending_src DETACH PARTITION restart_pending_old CONCURRENTLY",
+        )
+        .execute(&mut *connection)
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let pending: bool = db.query_scalar("SELECT COALESCE((SELECT inhdetachpending FROM pg_catalog.pg_inherits WHERE inhrelid = 'restart_pending_old'::regclass), false)").await;
+            if pending { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }).await.expect("detach enters pending phase");
+    db.execute("INSERT INTO restart_pending_old VALUES (3,'2025-06-01',7)")
+        .await;
+    let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+        .bind(pid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("cancel detach");
+    assert!(cancelled);
+    assert!(detach.await.expect("join detach").is_err());
+    reader.commit().await.expect("release old snapshot");
+    db.pool.close().await;
+    let restart = tokio::process::Command::new("docker")
+        .args(["restart", db.container_id()])
+        .output()
+        .await
+        .expect("restart database");
+    assert!(
+        restart.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restart.stderr)
+    );
+    db.pool = db.reconnect_after_restart().await;
+    let policy: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('restart_pending_st')")
+        .await;
+    assert_eq!(policy["pending_detach"]["lower"], "2025-01-01");
+    assert_eq!(policy["pending_detach"]["upper"], "2026-01-01");
+    db.execute("ALTER TABLE restart_pending_src DETACH PARTITION restart_pending_old FINALIZE")
+        .await;
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM restart_pending_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read recovered history");
+    assert_eq!(
+        rows,
+        vec![("2025-06-01".into(), 17, 2), ("2026-06-01".into(), 20, 1)]
+    );
+    let action: (String,String,bool) = sqlx::query_as("SELECT h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'restart_pending_st' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&db.pool).await.expect("read recovered refresh action");
+    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    db.execute("INSERT INTO restart_pending_src VALUES (4,'2026-06-01',5)")
+        .await;
+    db.refresh_st_with_retry("restart_pending_st").await;
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM restart_pending_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read history after live insert");
+    assert_eq!(
+        rows,
+        vec![("2025-06-01".into(), 17, 2), ("2026-06-01".into(), 25, 2)]
+    );
+}
+
+#[tokio::test]
 async fn test_retention_concurrent_detach_captures_pending_child_writes() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
@@ -872,6 +1384,13 @@ async fn test_retention_concurrent_detach_captures_pending_child_writes() {
     db.create_st(
         "pending_retention_other",
         "SELECT d, sum(amount) AS total, count(*) AS n FROM pending_retention_src GROUP BY d",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "pending_retention_downstream",
+        "SELECT d, total, n FROM pending_retention_st",
         "1h",
         "DIFFERENTIAL",
     )
@@ -911,6 +1430,24 @@ async fn test_retention_concurrent_detach_captures_pending_child_writes() {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }).await.expect("concurrent detach enters pending phase");
+
+    let policy: serde_json::Value = db
+        .query_scalar(
+            "SELECT pgtrickle.get_stream_table_partition_retention('pending_retention_st')",
+        )
+        .await;
+    assert_eq!(policy["pending_detach"]["lower"], "2025-01-01");
+    assert_eq!(policy["pending_detach"]["upper"], "2026-01-01");
+    let error = db
+        .try_execute(
+            "SELECT pgtrickle.set_stream_table_partition_retention('pending_retention_st', 'OFF')",
+        )
+        .await
+        .expect_err("a pending retention cut must not be removed");
+    assert!(
+        error.to_string().contains("pending retention detach"),
+        "{error}"
+    );
 
     db.execute("UPDATE pending_retention_old SET amount = 12 WHERE id = 1")
         .await;
@@ -957,25 +1494,58 @@ async fn test_retention_concurrent_detach_captures_pending_child_writes() {
     reader.commit().await.expect("release old snapshot");
     let pending: bool = db.query_scalar("SELECT inhdetachpending FROM pg_catalog.pg_inherits WHERE inhrelid = 'pending_retention_old'::regclass").await;
     assert!(pending);
+    let error = db
+        .try_execute("DROP TABLE pending_retention_old")
+        .await
+        .expect_err("a pending retention partition must not be dropped");
+    assert!(error.to_string().contains("pending"), "{error}");
+    let drop_guard: String = db.query_scalar("SELECT pg_catalog.format('DROP TRIGGER %I ON %I.%I', t.tgname, n.nspname, c.relname) FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE t.tgrelid = 'pending_retention_old'::regclass AND t.tgname LIKE 'pg_trickle_retention_truncate_%'").await;
+    let error = db
+        .try_execute(&drop_guard)
+        .await
+        .expect_err("pending child CDC guard must remain installed");
+    assert!(
+        error.to_string().contains("cannot drop retention capture"),
+        "{error}"
+    );
+    let error = db
+        .try_execute("ALTER TABLE pending_retention_src ADD COLUMN extra integer")
+        .await
+        .expect_err("source schema must not change during a pending retention cut");
+    assert!(
+        error.to_string().contains("source schema cannot change"),
+        "{error}"
+    );
+    let extra: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'pending_retention_src'::regclass AND attname = 'extra' AND NOT attisdropped)").await;
+    assert!(!extra);
+    db.execute("CREATE TABLE pending_retention_attach (LIKE pending_retention_src INCLUDING ALL)")
+        .await;
+    let error = db.try_execute("ALTER TABLE pending_retention_src ATTACH PARTITION pending_retention_attach FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')")
+        .await.expect_err("a partition must not be attached during a pending retention cut");
+    assert!(error.to_string().contains("pending"), "{error}");
     db.execute("ALTER TABLE pending_retention_src DETACH PARTITION pending_retention_old FINALIZE")
         .await;
     let attached: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = 'pending_retention_old'::regclass)").await;
     assert!(!attached);
-    // Simulate the protected second-phase replay without using the public resume path.
-    db.execute("UPDATE pgtrickle.pgt_stream_tables SET status = 'ACTIVE' WHERE pgt_name = 'pending_retention_st'").await;
-    db.refresh_st_with_retry("pending_retention_st").await;
     let replayed: Vec<(String, i64, i64)> =
         sqlx::query_as("SELECT d::text, total, n FROM pending_retention_st ORDER BY d")
             .fetch_all(&db.pool)
             .await
             .expect("read post-detach CDC replay");
-    assert_eq!(
-        replayed,
-        vec![("2025-06-01".into(), 7, 1), ("2026-06-01".into(), 20, 1)]
-    );
+    assert_eq!(replayed, vec![("2026-06-01".into(), 20, 1)]);
     let action: (String, String) = sqlx::query_as("SELECT h.action, h.status FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'pending_retention_st' AND h.initiated_by = 'MANUAL' ORDER BY h.refresh_id DESC LIMIT 1")
         .fetch_one(&db.pool).await.expect("read post-detach replay action");
     assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into()));
+    let downstream_status: String = db.query_scalar("SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'pending_retention_downstream'").await;
+    assert_eq!(downstream_status, "ACTIVE");
+    db.refresh_st_with_retry("pending_retention_downstream")
+        .await;
+    let downstream: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM pending_retention_downstream ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read downstream trimmed aggregates");
+    assert_eq!(downstream, replayed);
     let child: Vec<(i32, String, i32)> =
         sqlx::query_as("SELECT id, d::text, amount FROM pending_retention_old ORDER BY id")
             .fetch_all(&db.pool)
@@ -1557,8 +2127,8 @@ async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
             "wholly below",
         ),
         (
-            "ALTER TABLE retention_cut_src DETACH PARTITION retention_cut_old CONCURRENTLY",
-            "retained partition history",
+            "ALTER TABLE retention_cut_src DETACH PARTITION retention_cut_live CONCURRENTLY",
+            "wholly below",
         ),
         ("DROP TABLE retention_cut_live", "wholly below"),
     ] {
@@ -1731,7 +2301,7 @@ async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
         ),
         (
             "ALTER TABLE retention_cut_src DETACH PARTITION retention_cut_live CONCURRENTLY",
-            "retained partition history",
+            "wholly below",
         ),
         ("DROP TABLE retention_cut_live", "wholly below"),
     ] {
@@ -2681,10 +3251,48 @@ async fn test_retention_scheduled_refresh_preserves_sealed_history() {
             .await,
         "scheduler did not start"
     );
-    let historical: Vec<(String, String, i64, i64)> = sqlx::query_as("SELECT d::text, account, sum(amount), count(*) FROM retention_scheduled_src GROUP BY d, account ORDER BY d, account")
+    let mut historical: Vec<(String, String, i64, i64)> = sqlx::query_as("SELECT d::text, account, sum(amount), count(*) FROM retention_scheduled_src GROUP BY d, account ORDER BY d, account")
         .fetch_all(&db.pool).await.expect("capture historical baseline");
-    db.execute("ALTER TABLE retention_scheduled_src DETACH PARTITION retention_scheduled_old")
+    let mut reader = db.pool.begin().await.expect("begin old source snapshot");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *reader)
+        .await
+        .expect("set isolation");
+    let rows: Vec<(String, String, i32)> = sqlx::query_as(
+        "SELECT d::text,account,amount FROM retention_scheduled_src ORDER BY d,account",
+    )
+    .fetch_all(&mut *reader)
+    .await
+    .expect("hold old source snapshot");
+    assert_eq!(
+        rows,
+        vec![
+            ("2025-06-01".into(), "a".into(), 10),
+            ("2026-06-01".into(), "a".into(), 20)
+        ]
+    );
+    let pool = db.pool.clone();
+    let detach = tokio::spawn(async move {
+        sqlx::query("ALTER TABLE retention_scheduled_src DETACH PARTITION retention_scheduled_old CONCURRENTLY").execute(&pool).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let pending: bool = db.query_scalar("SELECT COALESCE((SELECT inhdetachpending FROM pg_catalog.pg_inherits WHERE inhrelid = 'retention_scheduled_old'::regclass), false)").await;
+            if pending { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }).await.expect("scheduled detach enters pending phase");
+    db.execute("INSERT INTO retention_scheduled_old VALUES ('2025-06-01','a',3)")
         .await;
+    historical[0].2 += 3;
+    historical[0].3 += 1;
+    let status: String = db.query_scalar("SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retention_scheduled_st'").await;
+    assert_eq!(status, "SUSPENDED");
+    reader.commit().await.expect("release old source snapshot");
+    detach
+        .await
+        .expect("join concurrent detach")
+        .expect("complete concurrent detach");
     let marker: i64 = db
         .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
         .await;
@@ -2701,7 +3309,7 @@ async fn test_retention_scheduled_refresh_preserves_sealed_history() {
         .fetch_all(&db.pool)
         .await
         .expect("read scheduled results");
-        let completed: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name = 'retention_scheduled_st' AND h.refresh_id > $1 AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback)")
+        let completed: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name = 'retention_scheduled_st' AND h.refresh_id > $1 AND h.initiated_by = 'SCHEDULER' AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' AND NOT h.was_full_fallback)")
             .bind(marker).fetch_one(&db.pool).await.expect("read scheduler refresh history");
         if rows == expected && completed {
             break;
@@ -3246,9 +3854,11 @@ async fn test_retention_configuration_serializes_with_concurrent_detach() {
     let error = detach
         .await
         .expect("join detach")
-        .expect_err("configured RETAIN rejects unprepared detach");
+        .expect_err("incomplete retention capture rejects detach");
     assert!(
-        error.to_string().contains("retained partition history"),
+        error
+            .to_string()
+            .contains("partition retention CDC or source guards are incomplete"),
         "{error}"
     );
     let attached: (bool, bool) = sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhparent = 'retention_race_src'::regclass AND inhrelid = 'retention_race_old'::regclass), COALESCE((SELECT inhdetachpending FROM pg_catalog.pg_inherits WHERE inhrelid = 'retention_race_old'::regclass), false)")

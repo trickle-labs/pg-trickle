@@ -1628,10 +1628,14 @@ the configured CDC trigger mode.
 
 For an eligible expired partition, TRIM removes its groups and RETAIN preserves
 them. RETAIN rejects operations that would rebuild sealed history from an
-incomplete source. `OFF` is allowed only while no history has been sealed.
-Concurrent DETACH is rejected for RETAIN; a TRIM removal that does not qualify falls
-back to reinitialization. TRIM currently rejects user triggers and output-delta
-consumers. See the partitioned-table tutorial for the full contract.
+incomplete source. `OFF` is allowed only while no history has been sealed and
+no retention cut is pending.
+Eligible concurrent DETACH operations persist a pending cut, replay CDC, and
+finish the cut in PostgreSQL's second detach transaction. If interrupted,
+complete the detach with `ALTER TABLE ... DETACH PARTITION ... FINALIZE`.
+A TRIM removal that does not qualify falls back to reinitialization. TRIM
+currently rejects user triggers and output-delta consumers. See the
+partitioned-table tutorial for the full contract.
 
 ```sql
 SELECT pgtrickle.set_stream_table_partition_retention(
@@ -1646,8 +1650,10 @@ pgtrickle.get_stream_table_partition_retention(name TEXT) RETURNS jsonb
 ```
 
 Return whether retention is enabled and, when enabled, the policy, source and
-group columns, cutoff, and sealed ranges. The stream owner can call this
-function to inspect progress before changing the cutoff.
+group columns, cutoff, and sealed ranges. During a concurrent detach the
+`pending_detach` object reports the parent and target OIDs and the range.
+The stream owner can call this function to inspect progress before changing
+the cutoff.
 
 ### pgtrickle.set_stream_table_storage_policy
 
