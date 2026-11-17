@@ -426,7 +426,18 @@ async fn test_caller_context_pg_error_restores_state_and_continues() {
 
 #[tokio::test]
 async fn test_dispatch_worker_cancel_cleanup_and_restart_recovers() {
-    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    exercise_worker_cancel_recovery(false).await;
+}
+
+#[tokio::test]
+async fn test_dispatch_worker_resume_survives_delayed_reconciliation() {
+    exercise_worker_cancel_recovery(true).await;
+}
+
+async fn exercise_worker_cancel_recovery(pause_scheduler: bool) {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+        .await;
     configure_fast_scheduler(&db).await;
     db.execute_seq(&[
         "CREATE TABLE unsafe_worker_src (id INT PRIMARY KEY, val TEXT)",
@@ -496,6 +507,52 @@ async fn test_dispatch_worker_cancel_cleanup_and_restart_recovers() {
     .fetch_one(&db.pool)
     .await
     .expect("find durable scheduler job for the witnessed worker");
+    let paused = if pause_scheduler {
+        let scheduler: i32 = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE backend_type='pg_trickle scheduler' AND datname=current_database()")
+        .fetch_one(&db.pool).await.expect("find this database scheduler");
+        struct SchedulerPause {
+            container: String,
+            pid: String,
+        }
+        impl Drop for SchedulerPause {
+            fn drop(&mut self) {
+                let _ = docker_output(&[
+                    "exec",
+                    "-u",
+                    "0",
+                    &self.container,
+                    "sh",
+                    "-c",
+                    "kill -CONT \"$1\"",
+                    "signal",
+                    &self.pid,
+                ]);
+            }
+        }
+        let paused = SchedulerPause {
+            container: db.container_id().to_string(),
+            pid: scheduler.to_string(),
+        };
+        let stop = docker_output(&[
+            "exec",
+            "-u",
+            "0",
+            &paused.container,
+            "sh",
+            "-c",
+            "kill -STOP \"$1\"",
+            "signal",
+            &paused.pid,
+        ]);
+        assert!(
+            stop.status.success(),
+            "pause isolated test scheduler: {}",
+            String::from_utf8_lossy(&stop.stderr)
+        );
+        Some(paused)
+    } else {
+        None
+    };
     let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
         .bind(worker)
         .fetch_one(&db.pool)
@@ -569,6 +626,28 @@ async fn test_dispatch_worker_cancel_cleanup_and_restart_recovers() {
 
     db.execute("SELECT pgtrickle.resume_stream_table('unsafe_worker_st')")
         .await;
+    if let Some(paused) = paused {
+        let after_resume: (String, Option<String>) = sqlx::query_as("SELECT status, last_error_message FROM pgtrickle.pgt_stream_tables WHERE pgt_name='unsafe_worker_st'")
+        .fetch_one(&db.pool).await.expect("inspect resumed state before reconciliation");
+        assert_eq!(after_resume.0, "ACTIVE");
+        assert!(
+            docker_output(&[
+                "exec",
+                "-u",
+                "0",
+                &paused.container,
+                "sh",
+                "-c",
+                "kill -CONT \"$1\"",
+                "signal",
+                &paused.pid
+            ])
+            .status
+            .success(),
+            "resume isolated test scheduler"
+        );
+        drop(paused);
+    }
     db.nudge_launcher_rescan().await;
 
     let recovered = tokio::time::timeout(Duration::from_secs(60), async {

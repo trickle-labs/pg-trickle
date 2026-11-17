@@ -295,6 +295,7 @@ if [[ -n "$ARCHIVE_PATH" ]]; then
 
         if python3 - "$ARCHIVE_PATH" "$VERSION" <<'PY'
 import sys
+import re
 import tarfile
 import zipfile
 from pathlib import PurePosixPath
@@ -314,14 +315,22 @@ has_control = any(PurePosixPath(name).name == "pg_trickle.control" for name in n
 has_sql = any(PurePosixPath(name).name == f"pg_trickle--{version}.sql" for name in names)
 needs_meta = archive.endswith(".zip") and PurePosixPath(archive).name == f"pg_trickle-{version}.zip"
 has_meta = any(PurePosixPath(name).name == "META.json" for name in names)
+current = tuple(map(int, version.split(".")))
+future_migrations = []
+for name in names:
+    match = re.fullmatch(r"pg_trickle--\d+\.\d+\.\d+--(\d+\.\d+\.\d+)\.sql", PurePosixPath(name).name)
+    if match and tuple(map(int, match.group(1).split("."))) > current:
+        future_migrations.append(PurePosixPath(name).name)
 
-ok = has_control and has_sql and (not needs_meta or has_meta)
+if future_migrations:
+    print(f"ERROR: archive for v{version} contains future migration SQL: {', '.join(future_migrations)}", file=sys.stderr)
+ok = has_control and has_sql and not future_migrations and (not needs_meta or has_meta)
 raise SystemExit(0 if ok else 1)
 PY
         then
             check_pass "archive contents include packaged version surfaces"
         else
-            check_fail "archive contents are missing pg_trickle.control, pg_trickle--${VERSION}.sql, or META.json"
+            check_fail "archive contents have missing version surfaces or future migration SQL"
         fi
     fi
 fi

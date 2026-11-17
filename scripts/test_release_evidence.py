@@ -1,12 +1,16 @@
 import hashlib
+import io
 import json
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts import release_install_attestation
 from scripts.release_evidence import (
     archive_payload_manifest,
     canonical_digest,
@@ -16,13 +20,40 @@ from scripts.release_evidence import (
     validate_installation,
 )
 from scripts.stage_release_assets import stage_release_assets
-from scripts.run_release_suite import machine_case_attempts
+from scripts.run_release_suite import attempt_records, machine_case_attempts
 
 
 CASE = "e2e_example_tests::test_required_case"
 
 
 class ReleaseEvidenceTests(unittest.TestCase):
+    def test_failed_command_attempt_cannot_be_reported_as_passed(self) -> None:
+        cases = [[{"id": CASE, "status": "passed"}]]
+        self.assertEqual(attempt_records([], 1, {})[0]["status"], "failed")
+        self.assertEqual(attempt_records(cases, 1, {})[0]["status"], "failed")
+        self.assertEqual(attempt_records(cases, 0, {})[0]["status"], "passed")
+
+    def test_installation_attestation_fails_on_mismatch_and_keeps_evidence(self) -> None:
+        expected = [{"path": "extension", "bytes": 1, "sha256": "expected"}]
+        mismatch = [{"path": "extension", "bytes": 1, "sha256": "different"}]
+        messages = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "attestations.json"
+            args = ["attest", "--container", "test", "--candidate-root", directory, "--output", str(output)]
+            with (
+                patch.object(sys, "argv", args),
+                patch.object(release_install_attestation, "payload_files", return_value=expected),
+                patch.object(release_install_attestation, "server_observation", return_value={}),
+                patch.object(release_install_attestation, "installed_files", side_effect=[expected, mismatch]),
+                redirect_stderr(messages),
+            ):
+                self.assertEqual(release_install_attestation.main(), 0)
+                self.assertEqual(release_install_attestation.main(), 1)
+            observations = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(observations[0]["installed_files"], expected)
+            self.assertEqual(observations[1]["installed_files"], mismatch)
+            self.assertIn("payload differs", messages.getvalue())
+
     def test_machine_case_parser_preserves_full_test_identity(self) -> None:
         case = "e2e_sensitivity_baseline_tests::test_oracle_detects_schema_mismatch"
         self.assertEqual(

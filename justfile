@@ -656,12 +656,14 @@ check-upgrade from to:
 # Only validates scripts from v0.40.0 onward (the supported upgrade window).
 # Pre-v0.40.0 scripts remain in sql/ for PostgreSQL chain compatibility but
 # are not actively re-validated (they are stable historical scripts).
+# Migrations targeting versions newer than Cargo.toml remain for later releases.
 [group: "upgrade"]
 check-upgrade-all:
     #!/usr/bin/env bash
     set -euo pipefail
     SUPPORT_CUTOFF="0.40.0"
     version_ge() { printf '%s\n%s' "$2" "$1" | sort -V -C; }
+    version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
     current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
     pairs=()
     for f in sql/pg_trickle--*--*.sql; do
@@ -669,6 +671,9 @@ check-upgrade-all:
         from=${base#pg_trickle--}
         to=${from#*--}
         from=${from%%--*}
+        if ! version_le "$to" "$current_version"; then
+            continue
+        fi
         if version_ge "$from" "$SUPPORT_CUTOFF"; then
             pairs+=("$from $to")
         fi
@@ -718,12 +723,16 @@ test-upgrade-all: build-e2e-image
     #!/usr/bin/env bash
     set -euo pipefail
     current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
     pairs=()
     for f in sql/pg_trickle--*--*.sql; do
         base=$(basename "$f" .sql)
         from=${base#pg_trickle--}
         to=${from#*--}
         from=${from%%--*}
+        if ! version_le "$to" "$current_version"; then
+            continue
+        fi
         pairs+=("$from $to")
     done
     # Verify the chain reaches the current Cargo.toml version

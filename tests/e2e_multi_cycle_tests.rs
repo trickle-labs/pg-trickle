@@ -380,22 +380,25 @@ async fn test_multi_cycle_group_elimination_revival() {
     db.create_st("mc_grp_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("mc_grp_st", q).await;
 
+    // The scheduler can hold the refresh lock: a plain manual call may return
+    // a NOTICE without doing work. Require a completed refresh before each
+    // exact-oracle assertion, including elimination and revival.
     // Eliminate group 'a'
     db.execute("DELETE FROM mc_grp WHERE grp = 'a'").await;
-    db.refresh_st("mc_grp_st").await;
+    db.refresh_st_with_retry("mc_grp_st").await;
     db.assert_st_matches_query("mc_grp_st", q).await;
 
     // Revive group 'a'
     db.execute("INSERT INTO mc_grp (grp, val) VALUES ('a', 50)")
         .await;
-    db.refresh_st("mc_grp_st").await;
+    db.refresh_st_with_retry("mc_grp_st").await;
     db.assert_st_matches_query("mc_grp_st", q).await;
 
     // Eliminate again and add new group
     db.execute("DELETE FROM mc_grp WHERE grp = 'a'").await;
     db.execute("INSERT INTO mc_grp (grp, val) VALUES ('c', 99)")
         .await;
-    db.refresh_st("mc_grp_st").await;
+    db.refresh_st_with_retry("mc_grp_st").await;
     db.assert_st_matches_query("mc_grp_st", q).await;
 }
 

@@ -115,6 +115,20 @@ def machine_summary(output: str) -> tuple[int, int, int] | None:
     )
 
 
+def attempt_records(case_attempts: list[list[dict[str, str]]], returncode: int, log: dict) -> list[dict]:
+    attempts = case_attempts or [[]]
+    return [
+        {
+            "attempt": index,
+            "status": "passed" if index == len(attempts) and returncode == 0 and all(case["status"] == "passed" for case in cases) else "failed",
+            "exit_code": returncode if index == len(attempts) else 1,
+            "log": log,
+            "cases": cases,
+        }
+        for index, cases in enumerate(attempts, start=1)
+    ]
+
+
 def package_directory(artifact: Path, destination: Path) -> Path:
     extraction = destination / "archive"
     extraction.mkdir(parents=True)
@@ -379,16 +393,7 @@ def main() -> int:
             attempt_case_results = [[]]
         if required_cases:
             skipped = sum(case["status"] in {"skipped", "missing"} for case in observed_case_results)
-        attempts = [
-            {
-                "attempt": index,
-                "status": "passed" if all(case["status"] == "passed" for case in cases) else "failed",
-                "exit_code": completed.returncode if index == len(attempt_case_results) else 1,
-                "log": log,
-                "cases": cases,
-            }
-            for index, cases in enumerate(attempt_case_results, start=1)
-        ]
+        attempts = attempt_records(attempt_case_results, completed.returncode, log)
         retry_count = len(attempts) - 1
         record = {
             "suite_id": suite["id"],

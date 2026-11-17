@@ -1416,6 +1416,12 @@ pub fn take_effective_mode() -> &'static str {
     LAST_EFFECTIVE_MODE.with(|m| m.replace(""))
 }
 
+/// Inspect the mode selected by an executor without consuming the value
+/// needed by the outer refresh finalizer.
+pub(crate) fn current_effective_mode() -> &'static str {
+    LAST_EFFECTIVE_MODE.with(|m| m.get())
+}
+
 /// Clear per-thread execution output before starting a top-level refresh.
 ///
 /// Failed refreshes do not reach the common finalizer, so their output must

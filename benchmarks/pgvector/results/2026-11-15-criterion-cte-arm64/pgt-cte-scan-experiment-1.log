@@ -1,0 +1,12 @@
+Gnuplot not found, using plotters backend
+Benchmarking a44_7_scan_agg_delta/n_groups/1
+Benchmarking a44_7_scan_agg_delta/n_groups/1: Warming up for 1.0000 s
+Benchmarking a44_7_scan_agg_delta/n_groups/1: Collecting 100 samples in estimated 8.0462 s (803k iterations)
+Benchmarking a44_7_scan_agg_delta/n_groups/1: Analyzing
+a44_7_scan_agg_delta/n_groups/1
+                        time:   [9.9391 µs 9.9506 µs 9.9628 µs]
+                        change: [-5.5631% -5.3284% -5.1219%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+

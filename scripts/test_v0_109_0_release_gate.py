@@ -25,6 +25,12 @@ class RetirementContractTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             gate.check_pgvector_upgrade_script(script.replace("bool_and(pgt_id IS NULL)", "true"))
 
+    def test_published_upgrade_targets_v109_from_published_predecessor(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        suites = {suite["id"]: suite for suite in contract["required_suites"]}
+        for suite_id in ("upgrade-chain", "wal-retirement-upgrade"):
+            self.assertEqual(suites[suite_id]["command_argv"][-2:], ["0.108.3", "0.109.0"])
+
     def test_pgvector_runner_selects_declared_cases_and_version(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
         cases = next(s for s in contract["required_suites"] if s["id"] == "pgvector-0.8.7")["required_cases"]
@@ -93,6 +99,12 @@ class RetirementContractTests(unittest.TestCase):
         for section, identity in [("required_shards", "failure-recovery"), ("required_suites", "recovery")]:
             selected = next(item for item in contract[section] if item["id"] == identity)
             self.assertTrue(gate.PAUSE_CASES <= set(selected["required_cases"]))
+        recovery = next(item for item in contract["required_suites"] if item["id"] == "recovery")
+        selector_index = recovery["command_argv"].index("-E") + 1
+        name = "test_scheduler_pause_drain_protects_transitive_immediate_descendant"
+        recovery["command_argv"][selector_index] = recovery["command_argv"][selector_index].replace(name + "|", "")
+        with self.assertRaises(SystemExit):
+            gate.check_retirement_contract(contract)
 
     def test_requires_runtime_cases_and_published_predecessor(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())

@@ -1,4 +1,14 @@
 -- pg_trickle v0.108.4 -> v0.109.0
+ALTER TABLE pgtrickle.pgt_scheduler_jobs
+    ADD COLUMN member_failure_recorded BOOLEAN NOT NULL DEFAULT false;
+
+ALTER TABLE pgtrickle.pgt_stream_tables
+    ADD COLUMN IF NOT EXISTS recovery_generation BIGINT NOT NULL DEFAULT 0
+        CHECK (recovery_generation >= 0);
+
+ALTER TABLE pgtrickle.pgt_scheduler_jobs
+    ADD COLUMN IF NOT EXISTS member_recovery_generations BIGINT[] NOT NULL DEFAULT '{}'::BIGINT[];
+
 -- The WAL retirement table already exists in the 0.108.4 development candidate.
 
 -- Add the metric-aware embedding helper without changing legacy calls.

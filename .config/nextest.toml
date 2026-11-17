@@ -13,14 +13,14 @@ filter = 'test(test_soak_stability) | test(test_multi_database_isolation)'
 retries = 0
 
 [[profile.ci.overrides]]
-# TPC-H tests run for 10–90+ minutes each at high scale factors.
+# TPC-H tests run for 10–330 minutes at high scale factors.
 # retries = 2 would multiply the already-long runtime by 3×.
-# The 90-minute slow-timeout with terminate-after=1 kills any test that
-# hangs longer than 90 minutes (e.g., WAL/disk exhaustion during SF-10
-# bulk initial materialisation with 6M lineitems).
+# The two longest SF-1 tests are isolated in their own jobs; a 330-minute
+# slow-timeout leaves room for q05's measured long mutation cycles while still
+# failing a genuinely stuck test before the job limit.
 filter = 'binary(/^e2e_tpch_tests/)'
 retries = 0
-slow-timeout = { period = "90m", terminate-after = 1 }
+slow-timeout = { period = "330m", terminate-after = 1 }
 
 [[profile.ci.overrides]]
 # Each e2e test gets its own database, so moderate parallelism is safe.

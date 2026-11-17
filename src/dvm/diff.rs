@@ -128,6 +128,11 @@ pub struct DiffContext {
     /// recomputation to re-execute the query directly instead of
     /// reconstructing SQL from the OpTree.
     pub defining_query: Option<String>,
+    /// Exact FULL-refresh row-identity expression for the target, computed by
+    /// the outer code generator from its already-parsed root OpTree. Aggregate
+    /// operators compare this against their GROUP_KEY encoding before using
+    /// an indexed ID join. None is used by standalone SQL-generation tests.
+    pub st_full_row_identity_expr: Option<String>,
     /// Columns that the ST storage table has (outer projection columns),
     /// used by recursive CTE recomputation to match the storage schema.
     pub st_user_columns: Option<Vec<String>>,
@@ -587,20 +592,28 @@ impl OptimizationContext {
 
     fn next_cte_name(&mut self, prefix: &str) -> String {
         self.cte_counter += 1;
+        let digits = self.cte_counter.checked_ilog10().unwrap_or(0) as usize + 1;
+        let max_prefix = 63usize.saturating_sub("__pgt_cte_".len() + digits + 1);
+        if prefix.len() <= max_prefix
+            && prefix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return format!("__pgt_cte_{prefix}_{}", self.cte_counter);
+        }
         let suffix = format!("_{}", self.cte_counter);
-        let max_prefix = 63usize.saturating_sub("__pgt_cte_".len() + suffix.len());
-        let safe_prefix: String = prefix
-            .chars()
-            .take(max_prefix)
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        format!("__pgt_cte_{safe_prefix}{suffix}")
+        let mut name =
+            String::with_capacity("__pgt_cte_".len() + prefix.len().min(max_prefix) + suffix.len());
+        name.push_str("__pgt_cte_");
+        name.extend(prefix.chars().take(max_prefix).map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        }));
+        name.push_str(&suffix);
+        name
     }
 
     fn add_cte(&mut self, name: String, sql: String, is_recursive: bool, is_materialized: bool) {
@@ -689,6 +702,7 @@ impl DiffContext {
             setop_state_relation: None,
             window_state_row_relation: None,
             defining_query: None,
+            st_full_row_identity_expr: None,
             st_user_columns: None,
             merge_safe_dedup: false,
             st_scan_payload_identity: false,
@@ -1033,7 +1047,13 @@ impl DiffContext {
         let result = self.diff_node_inner(op);
         self.optimization.exit_diff();
         let result = result?;
-        if result.schema.names() != result.columns {
+        if !result
+            .schema
+            .0
+            .iter()
+            .map(|column| &column.name)
+            .eq(result.columns.iter())
+        {
             return Err(PgTrickleError::TypeMismatch(format!(
                 "{} at root declared columns {:?}, schema {:?}",
                 operator_name(op),
@@ -1265,6 +1285,13 @@ impl DiffContext {
 
 /// Helper: quote a SQL identifier.
 pub fn quote_ident(name: &str) -> String {
+    if !name.contains('"') {
+        let mut out = String::with_capacity(name.len() + 2);
+        out.push('"');
+        out.push_str(name);
+        out.push('"');
+        return out;
+    }
     let mut out =
         String::with_capacity(name.len() + 2 + name.bytes().filter(|&byte| byte == b'"').count());
     push_quoted_ident(&mut out, name);
@@ -1488,6 +1515,21 @@ mod tests {
             assert!(name.len() <= 63);
             assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
         }
+    }
+
+    #[test]
+    fn test_next_cte_name_preserves_encoding_and_counter_width() {
+        let mut ctx = test_ctx();
+        assert_eq!(ctx.next_cte_name("safe_foo"), "__pgt_cte_safe_foo_1");
+        assert_eq!(ctx.next_cte_name("é.x"), "__pgt_cte___x_2");
+        for _ in 3..10 {
+            ctx.next_cte_name("x");
+        }
+        assert_eq!(ctx.next_cte_name("safe"), "__pgt_cte_safe_10");
+        assert_eq!(
+            ctx.next_cte_name(&"x".repeat(100)),
+            format!("__pgt_cte_{}_11", "x".repeat(50))
+        );
     }
 
     // ── add_cte() + build_with_query() ──────────────────────────────

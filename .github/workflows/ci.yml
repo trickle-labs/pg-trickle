@@ -281,7 +281,7 @@ jobs:
     name: Unit tests (scheduled/manual, macos-arm64)
     needs: release-qualification-contract
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -612,6 +612,37 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
+  # Exercise real published storage across the extension SQL and binary upgrade.
+  # Ordinary same-version E2E tests cannot reproduce old physical SUM/AVG state.
+  legacy-aggregate-upgrade:
+    name: Published v0.108.3 SUM/AVG upgrade
+    needs: light-e2e-package
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prepare runner disk space
+        run: bash scripts/ci_prepare_disk.sh
+
+      - name: Download extension package
+        uses: actions/download-artifact@v8
+        with:
+          name: light-e2e-package
+          path: target/release/pg_trickle-pg18
+
+      - name: Pull PostgreSQL 18 base image
+        run: docker pull postgres:18.6
+
+      - name: Qualify published-source aggregate upgrade
+        env:
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
+        run: |
+          candidate="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          test -n "$candidate"
+          bash scripts/qualify_live_package_upgrade.sh 0.108.3 "$candidate"
+
   lsn-candidate-runtime:
     name: Checked LSN runtime against verified candidate package
     needs: [light-e2e-package, release-qualification-contract]
@@ -741,7 +772,7 @@ jobs:
           ./scripts/run_e2e_tests.sh \
             --test e2e_refresh_atomicity_tests \
             --test e2e_v108_conformance_tests \
-            -E 'test(=test_snapshot_metadata_and_rows_match_a_concurrent_refresh) | test(=test_v108_lagging_consumer_retains_exact_history_until_catch_up)' \
+            -E 'test(=test_snapshot_metadata_and_rows_match_a_concurrent_refresh) | test(=test_v108_lagging_consumer_retains_exact_history_until_catch_up) | test(=test_v108_restore_revokes_outstanding_resnapshot_token_and_allows_new_baseline) | test(=test_v108_rolled_back_restore_preserves_pending_resnapshot_token) | test(=test_v108_restore_keeps_unrelated_stream_resnapshot_token_valid)' \
             --test-threads 1 --retries 0
 
       - name: Run packaged lifecycle E2E and bind installed library
@@ -1040,6 +1071,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check live published-package regression syntax
+        run: |
+          bash -n scripts/qualify_live_package_upgrade.sh
+          python3 -m py_compile scripts/check_ci_results.py
+
       - name: Check version references are in sync
         run: ./scripts/check_version_sync.sh
 
@@ -1073,9 +1109,12 @@ jobs:
           # Scripts with a from-version older than SUPPORT_CUTOFF are kept in
           # sql/ for PostgreSQL chain compatibility but are not re-validated in
           # CI (they are stable, fully-tested historical scripts).
+          # Future-targeted migrations remain in the tree for later package versions.
           SUPPORT_CUTOFF="0.40.0"
           # Returns 0 if version $1 >= $2 (uses sort -V for correctness).
           version_ge() { printf '%s\n%s' "$2" "$1" | sort -V -C; }
+          # Returns 0 if version $1 <= $2.
+          version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
           current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           pairs=()
           for f in sql/pg_trickle--*--*.sql; do
@@ -1083,6 +1122,9 @@ jobs:
             from=${base#pg_trickle--}
             to=${from#*--}
             from=${from%%--*}
+            if ! version_le "$to" "$current_version"; then
+              continue
+            fi
             if version_ge "$from" "$SUPPORT_CUTOFF"; then
               pairs+=("$from $to")
             fi
@@ -1149,8 +1191,19 @@ jobs:
         if: steps.changes.outputs.run_upgrade_slice == 'true'
         id: pair
         run: |
-          # Find the most recent X→Y SQL upgrade script (highest Y).
-          latest=$(ls sql/pg_trickle--*--*.sql | sort -V | tail -1)
+          # Select the latest migration that belongs to this package version.
+          version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
+          current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          latest=$(for f in sql/pg_trickle--*--*.sql; do
+            base=$(basename "$f" .sql)
+            from=${base#pg_trickle--}
+            to=${from#*--}
+            if version_le "$to" "$current_version"; then echo "$f"; fi
+          done | sort -V | tail -1)
+          if [[ -z "$latest" ]]; then
+            echo "ERROR: no upgrade script targets v${current_version} or earlier"
+            exit 1
+          fi
           base=$(basename "$latest" .sql)
           from=${base#pg_trickle--}
           to=${from#*--}
@@ -1233,6 +1286,8 @@ jobs:
           SUPPORT_CUTOFF="0.40.0"
           # Returns 0 if version $1 >= $2 (sort -V for correctness).
           version_ge() { printf '%s\n%s' "$2" "$1" | sort -V -C; }
+          # Returns 0 if version $1 <= $2.
+          version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
           current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           items='['
           first=true
@@ -1241,6 +1296,9 @@ jobs:
             from=${base#pg_trickle--}
             to=${from#*--}
             from=${from%%--*}
+            if ! version_le "$to" "$current_version"; then
+              continue
+            fi
             # Skip pairs whose from-version predates the support cutoff.
             if ! version_ge "$from" "$SUPPORT_CUTOFF"; then
               continue
@@ -2168,6 +2226,7 @@ jobs:
       - windows-compile-gate
       - light-e2e-package
       - light-e2e-tests
+      - legacy-aggregate-upgrade
       - release-evidence-runtime
       - lsn-candidate-runtime
       - e2e-sensitive-gate

@@ -51,6 +51,153 @@ async fn assert_differential_mode(db: &E2eDb, st_name: &str) {
     );
 }
 
+// ── Issue #1405: indexed aggregate probe and multi-source fallback ────────
+
+#[tokio::test]
+async fn test_issue_1405_grouped_aggregate_probe_preserves_nullable_five_column_keys() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE pgt1405_movements ( \
+             id INT PRIMARY KEY, tenant TEXT, sku TEXT, bin_code TEXT, lot TEXT, day DATE, qty INT)"
+    ).await;
+    db.execute(
+        "INSERT INTO pgt1405_movements \
+         SELECT g, CASE WHEN g % 17 = 0 THEN NULL ELSE 'T' || (g % 7)::text END, \
+                'S' || g::text, 'B' || (g % 19)::text, \
+                CASE WHEN g % 11 = 0 THEN NULL ELSE 'L' || (g % 3)::text END, \
+                DATE '2026-11-01' + (g % 3), g % 21 \
+         FROM generate_series(1, 5000) g",
+    )
+    .await;
+
+    let query = "SELECT tenant, sku, bin_code, lot, day, \
+                        COUNT(*) AS n, SUM(qty) AS total \
+                 FROM pgt1405_movements \
+                 GROUP BY tenant, sku, bin_code, lot, day";
+    db.create_st("pgt1405_agg", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("pgt1405_agg", query).await;
+
+    // The target has unbounded TEXT group keys and should have the
+    // row_probe_v1 expression index. Force consideration of that index to
+    // verify the generated identity predicate is index-eligible on PG 18.
+    let probe_indexes: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM pg_indexes \
+         WHERE schemaname = 'public' AND tablename = 'pgt1405_agg' \
+           AND indexdef LIKE '%row_probe_v1%'",
+        )
+        .await;
+    assert!(
+        probe_indexes > 0,
+        "aggregate target lacks the row-probe index"
+    );
+
+    db.execute("ANALYZE pgt1405_agg").await;
+    let mut conn = db.pool.acquire().await.expect("acquire EXPLAIN connection");
+    sqlx::query("SET enable_seqscan = off")
+        .execute(&mut *conn)
+        .await
+        .expect("disable sequential scans for index probe");
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT st.__pgt_count FROM pgt1405_agg st \
+         WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = \
+               pgtrickle.row_probe_v1(pgtrickle.encode_row_id_v3('GROUP_KEY', \
+                 ROW('T1'::text, 'S1'::text, 'B1'::text, 'L1'::text, DATE '2026-11-02'))) \
+           AND st.__pgt_row_id = \
+               pgtrickle.encode_row_id_v3('GROUP_KEY', \
+                 ROW('T1'::text, 'S1'::text, 'B1'::text, 'L1'::text, DATE '2026-11-02'))",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .expect("EXPLAIN row-identity lookup");
+    sqlx::query("RESET enable_seqscan")
+        .execute(&mut *conn)
+        .await
+        .expect("restore planner setting");
+    drop(conn);
+    assert!(
+        plan.iter().any(|line| line.contains("Index Scan")
+            || line.contains("Bitmap Index Scan")
+            || line.contains("Index Only Scan")),
+        "expected an index-eligible identity probe, got:\n{}",
+        plan.join("\n")
+    );
+
+    // Change values, group keys (including NULLs), and group existence
+    // across a burst of rows. The count and SUM must match a fresh GROUP BY.
+    db.execute("UPDATE pgt1405_movements SET qty = qty + 4, lot = NULL WHERE id <= 150")
+        .await;
+    db.execute("UPDATE pgt1405_movements SET tenant = NULL WHERE id BETWEEN 151 AND 250")
+        .await;
+    db.execute("DELETE FROM pgt1405_movements WHERE id BETWEEN 251 AND 300")
+        .await;
+    db.execute(
+        "INSERT INTO pgt1405_movements VALUES \
+         (10001, 'T5', 'S5', 'B5', 'L2', DATE '2026-11-03', -5), \
+         (10002, NULL, 'NEW', 'B0', NULL, DATE '2026-11-01', 7)",
+    )
+    .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('pgt1405_agg')",
+    )
+    .await
+    .expect("differential aggregate refresh");
+    db.assert_st_matches_query("pgt1405_agg", query).await;
+    assert_differential_mode(&db, "pgt1405_agg").await;
+}
+
+#[tokio::test]
+async fn test_issue_1405_union_all_small_source_burst_stays_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE pgt1405_large (id INT PRIMARY KEY, amount INT)")
+        .await;
+    db.execute("CREATE TABLE pgt1405_small (id INT PRIMARY KEY, amount INT)")
+        .await;
+    db.execute(
+        "INSERT INTO pgt1405_large \
+         SELECT g, g % 100 FROM generate_series(1, 10000) g",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgt1405_small \
+         SELECT g, g % 100 FROM generate_series(1, 100) g",
+    )
+    .await;
+    db.execute("ANALYZE pgt1405_large").await;
+    db.execute("ANALYZE pgt1405_small").await;
+
+    let query = "SELECT id, amount FROM pgt1405_large \
+                 UNION ALL \
+                 SELECT id, amount FROM pgt1405_small";
+    db.create_st("pgt1405_union", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("pgt1405_union", query).await;
+
+    // 400 changes exceed 15% of the small source's minimum 1000-row
+    // estimate (150), but are below 15% of the combined 11k-row estimate.
+    db.execute(
+        "INSERT INTO pgt1405_small \
+         SELECT g, g % 100 FROM generate_series(101, 500) g",
+    )
+    .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy = 'auto'",
+            "SET pg_trickle.differential_max_change_ratio = 0.15",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('pgt1405_union')",
+    )
+    .await
+    .expect("refresh should not fall back for small UNION source");
+    db.assert_st_matches_query("pgt1405_union", query).await;
+    assert_differential_mode(&db, "pgt1405_union").await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // AGGREGATE FILTER
 // ═══════════════════════════════════════════════════════════════════════
