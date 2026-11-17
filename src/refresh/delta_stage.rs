@@ -9,6 +9,10 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone, Default)]
 pub struct DeltaStage {
     names: HashMap<u32, String>,
+    /// CREATE TEMP VIEW has no ON COMMIT DROP in PostgreSQL, so explicitly
+    /// remove these source-dependent views after the refresh has used them.
+    /// The actual materialized bounded sources are ON COMMIT DROP tables.
+    bounded_views: Vec<String>,
     centroid_nonce: Option<u64>,
 }
 
@@ -67,6 +71,7 @@ impl DeltaStage {
         let bypass_tables = crate::refresh::get_st_bypass_tables();
         let mut stage = Self {
             names: HashMap::new(),
+            bounded_views: Vec::new(),
             centroid_nonce,
         };
 
@@ -287,7 +292,7 @@ impl DeltaStage {
     /// Caller holds SHARE source locks from prepare_inner, so the live
     /// relations remain stable through the subsequent MERGE.
     pub(crate) fn use_live_sources_for_centroid_rescan(
-        &self,
+        &mut self,
         st: &StreamTableMeta,
         dependencies: &[StDependency],
     ) -> Result<(), PgTrickleError> {
@@ -332,6 +337,23 @@ impl DeltaStage {
             // nosemgrep: rust.spi.run.dynamic-format -- bound and owner are quoted identifiers.
             Spi::run(&format!("GRANT SELECT ON TABLE {bound} TO {owner}"))
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if !self.bounded_views.contains(&bound) {
+                self.bounded_views.push(bound);
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop source-dependent session-local views after the last DVM read.
+    /// Unlike CREATE TEMP TABLE ... ON COMMIT DROP, PostgreSQL temporary
+    /// views survive commit and can prevent DROP TABLE on the base source.
+    /// Explicit cleanup preserves the zero-copy fast path without leaking
+    /// dependencies into later transactions or tests.
+    pub(crate) fn cleanup_bounded_views(&self) -> Result<(), PgTrickleError> {
+        for view in &self.bounded_views {
+            // nosemgrep: rust.spi.run.dynamic-format -- internally-generated, quoted temp view.
+            Spi::run(&format!("DROP VIEW {view}")) // nosemgrep: rust.spi.run.dynamic-format
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         }
         Ok(())
     }
@@ -347,7 +369,7 @@ impl DeltaStage {
     /// for keyless tables signed multiplicities preserve duplicate rows.
     #[allow(clippy::too_many_arguments)]
     fn stage_bounded_source(
-        &self,
+        &mut self,
         st: &StreamTableMeta,
         dependency: &StDependency,
         buffer: &str,
@@ -455,6 +477,7 @@ impl DeltaStage {
                 "CREATE TEMP VIEW {target} AS SELECT * FROM {source_table}"
             ))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            self.bounded_views.push(target.clone());
         } else {
             let pk_columns = crate::cdc::resolve_pk_columns(dependency.source_relid)?;
             let is_st = dependency.source_type == "STREAM_TABLE";
