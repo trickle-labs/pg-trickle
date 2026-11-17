@@ -67,6 +67,15 @@ class InternalPlanSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unbounded output scan"):
             benchmark.validate_trim_drop_plan(summary)
 
+    def test_baseline_requires_reinitialization_in_the_timed_backend(self):
+        history = [{"action": "REINITIALIZE", "status": "COMPLETED"}]
+        summary = {"source_partitions_scanned": [f"p{i}" for i in range(1, 31)]}
+        benchmark.validate_baseline_refresh(history, summary)
+        with self.assertRaisesRegex(RuntimeError, "did not complete a reinitialization"):
+            benchmark.validate_baseline_refresh([{"action": "DIFFERENTIAL", "status": "COMPLETED"}], summary)
+        with self.assertRaisesRegex(RuntimeError, "did not scan every retained partition"):
+            benchmark.validate_baseline_refresh(history, {"source_partitions_scanned": []})
+
     def test_refresh_retries_until_the_full_oracle_matches(self):
         with patch.object(benchmark, "run", side_effect=["", "2", "", "0"]) as run, \
              patch.object(benchmark.time, "sleep"):

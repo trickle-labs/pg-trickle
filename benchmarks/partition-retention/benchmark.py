@@ -77,6 +77,13 @@ def validate_trim_drop_plan(summary):
         raise RuntimeError("TRIM used an unbounded output scan")
 
 
+def validate_baseline_refresh(history, summary):
+    if not any(h["action"] == "REINITIALIZE" and h["status"] == "COMPLETED" for h in history):
+        raise RuntimeError("baseline did not complete a reinitialization")
+    if summary is not None and set(summary["source_partitions_scanned"]) != {f"p{i}" for i in range(1, 31)}:
+        raise RuntimeError("timed baseline refresh did not scan every retained partition")
+
+
 def timed(db, sql, schema, instrument):
     start = time.perf_counter()
     if not instrument:
@@ -222,6 +229,8 @@ def trial(db, schema, events, trim, directory, instrument, downstream, keyless, 
     if trim and (not any(h["action"] == "DIFFERENTIAL" for h in history) or
                  any(h["action"] in ("FULL", "REINITIALIZE") or h["fallback"] for h in history)):
         raise RuntimeError(f"TRIM did not use differential maintenance: {history}")
+    if not trim:
+        validate_baseline_refresh(history, refresh_internal)
     if trim and instrument:
         try:
             validate_trim_drop_plan(drop_internal)

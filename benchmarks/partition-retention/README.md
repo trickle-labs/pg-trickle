@@ -35,6 +35,11 @@ the timed operation, including actual rows, partition scans, and buffers. These
 are diagnostic proxy plans, not instrumentation of the internal DROP itself.
 The script rejects mismatches, incomplete refreshes, or a TRIM trial that
 reinitialized, fell back to FULL, or never performed differential work.
+It also requires a completed baseline reinitialization. With instrumentation,
+it rejects a baseline if the timed refresh did not scan all retained
+partitions, which can happen when the scheduler reinitializes first. Without
+instrumentation, refresh history alone cannot attribute that work to the timed
+call.
 Connection startup is included in wall times. Reader and writer latency
 samples cover the whole concurrent workload, not only the blocked interval;
 inspect the maximum and p95 as stall indicators, not precise lock wait times.
@@ -205,3 +210,29 @@ needed two drain calls. TRIM and downstream completed DIFFERENTIAL work, with
 one drain call each. TRIM DROP scanned no retained source partitions and
 observed 5,660 or 6,000 output rows across nested plans. These single samples
 include instrumentation overhead and do not isolate lock waits.
+
+After scoping the unpartitioned output DML, a further single instrumented
+macOS debug-build run per size produced these times in milliseconds:
+
+| Retained events | Mode | DROP | First refresh | Writer p95 / max | Reader p95 / max |
+|---:|---|---:|---:|---:|---:|
+| 9,000,000 | baseline | 40 | 3,768 | 0.13 / 10.91 | 1.96 / 3.15 |
+| 9,000,000 | TRIM | 288 | 207 | 0.13 / 245.22 | 2.10 / 3.46 |
+| 27,000,000 | baseline | 40 | 10,032 | 0.10 / 9,988.44 | 2.04 / 3.20 |
+| 27,000,000 | TRIM | 377 | 238 | 1.93 / 270.66 | 8.72 / 34.26 |
+
+The timed baseline refresh scanned all 30 retained partitions, observing
+9,013,437 or 27,013,324 source rows. TRIM DROP scanned no retained source
+partitions and observed 7,000 or 6,202 output rows in nested plans. Both
+upstream and downstream matched their complete result oracles; TRIM and its
+downstream completed differential refreshes. The baseline needed two drain
+calls and TRIM one. The writer and reader samples cover the whole workload,
+not just the lock wait, and instrumentation adds overhead.
+
+For unpartitioned output, retention catch-up now correlates delete, update,
+and existence probes with the affected identities, and enables TID scans in
+its restored planner scope. A keyless insert/update/delete check and a
+duplicate-identity multiset check passed against PostgreSQL. Captured plans
+show indexed probes and TID scans; partitioned output retains the existing DML
+path. The planner can still choose other plans, so the hard performance bound
+remains unproven.
