@@ -63,7 +63,7 @@ actions. The TRIM trial rejects a downstream FULL fallback or reinitialization.
 Use `--keyless` to exercise a source without a primary key. For example:
 
 ```sh
-PGOPTIONS='-c random_page_cost=1000000' python3 benchmarks/partition-retention/benchmark.py \
+PGOPTIONS='-c random_page_cost=1000000 -c cpu_index_tuple_cost=100000000' python3 benchmarks/partition-retention/benchmark.py \
   --database 'postgresql://localhost/pgtrickle_benchmark' --events 30000 \
   --instrument-internal --downstream --keyless --pending-events 20000 \
   --output /tmp/retention-keyless.json
@@ -156,6 +156,12 @@ on PostgreSQL 18.7 arm64 on macOS with a debug build; they are not comparable
 to the Docker scale measurements. The captured before and after plans are in
 `results/`. PostgreSQL planner choices can still violate the affected-groups
 performance target, even with these hints.
+
+With only the page-cost fix, an extreme `cpu_index_tuple_cost` also caused
+the catch-up to scan all 31,000 output rows. After scoping that cost as well,
+a run with both extreme caller settings and 1,000 pending events observed
+7,000 output rows in bounded scans, no retained-source scans, and exact
+upstream and downstream results. Caller settings were restored after the cut.
 
 Instrumented runs with `--downstream` on the final candidate produced these
 results (milliseconds):

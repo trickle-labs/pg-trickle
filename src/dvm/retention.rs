@@ -1931,6 +1931,8 @@ fn with_retention_index_scans<T>(
         // shortcut: planner costs only prefer bounded scans; enforce plans for a hard bound.
         Spi::run("SET LOCAL random_page_cost = 1")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run("SET LOCAL cpu_index_tuple_cost = 0.005")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("SET LOCAL jit = off").map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         operation()
     })

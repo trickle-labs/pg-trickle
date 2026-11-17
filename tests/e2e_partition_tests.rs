@@ -3774,7 +3774,7 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
         "SELECT d::text, account, SUM(amount), COUNT(*) FROM retention_auto_src GROUP BY d, account ORDER BY d, account",
     ).fetch_all(&db.pool).await.expect("capture independent historical baseline");
     let mut tx = db.pool.begin().await.expect("begin detach transaction");
-    sqlx::query("SELECT set_config('enable_nestloop', 'off', true), set_config('enable_hashjoin', 'on', true), set_config('enable_mergejoin', 'on', true), set_config('enable_indexscan', 'off', true), set_config('enable_bitmapscan', 'off', true), set_config('enable_seqscan', 'on', true), set_config('jit', 'on', true), set_config('random_page_cost', '1000000', true)")
+    sqlx::query("SELECT set_config('enable_nestloop', 'off', true), set_config('enable_hashjoin', 'on', true), set_config('enable_mergejoin', 'on', true), set_config('enable_indexscan', 'off', true), set_config('enable_bitmapscan', 'off', true), set_config('enable_seqscan', 'on', true), set_config('jit', 'on', true), set_config('random_page_cost', '1000000', true), set_config('cpu_index_tuple_cost', '100000000', true)")
         .execute(&mut *tx).await.expect("set caller planner preferences");
     sqlx::query("SAVEPOINT before_detach")
         .execute(&mut *tx)
@@ -3784,8 +3784,8 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
         .execute(&mut *tx)
         .await
         .expect("automatic detach");
-    let planner_settings: (String, String, String, String, String, String, String, f64) = sqlx::query_as(
-        "SELECT current_setting('enable_nestloop'), current_setting('enable_hashjoin'), current_setting('enable_mergejoin'), current_setting('enable_indexscan'), current_setting('enable_bitmapscan'), current_setting('enable_seqscan'), current_setting('jit'), current_setting('random_page_cost')::float8",
+    let planner_settings: (String, String, String, String, String, String, String, f64, f64) = sqlx::query_as(
+        "SELECT current_setting('enable_nestloop'), current_setting('enable_hashjoin'), current_setting('enable_mergejoin'), current_setting('enable_indexscan'), current_setting('enable_bitmapscan'), current_setting('enable_seqscan'), current_setting('jit'), current_setting('random_page_cost')::float8, current_setting('cpu_index_tuple_cost')::float8",
     ).fetch_one(&mut *tx).await.expect("read planner preferences after retention");
     assert_eq!(
         planner_settings,
@@ -3797,7 +3797,8 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
             "off".into(),
             "on".into(),
             "on".into(),
-            1_000_000.0
+            1_000_000.0,
+            100_000_000.0
         )
     );
     sqlx::query("ROLLBACK TO SAVEPOINT before_detach")
