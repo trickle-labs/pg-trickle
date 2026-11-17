@@ -1686,13 +1686,13 @@ async fn test_upgrade_chain_stream_tables_survive() {
 #[ignore]
 async fn test_upgrade_partition_retention_on_existing_stream() {
     if !upgrade_image_available()
-        || std::env::var("PGS_UPGRADE_FROM").ok().as_deref() != Some("0.110.0")
+        || std::env::var("PGS_UPGRADE_FROM").ok().as_deref() != Some("0.110.1")
     {
-        eprintln!("SKIP: requires the 0.110.0 to 0.110.1 upgrade image");
+        eprintln!("SKIP: requires the 0.110.1 to 0.110.2 upgrade image");
         return;
     }
     let db = E2eDb::new_without_extension().await;
-    db.execute("CREATE EXTENSION pg_trickle VERSION '0.110.0' CASCADE")
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.110.1' CASCADE")
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
         .await;
@@ -1758,11 +1758,11 @@ async fn test_upgrade_partition_retention_on_existing_stream() {
         .expect("mark sealed fixture consistent");
     let before: bool = db.query_scalar("SELECT to_regprocedure('pgtrickle.set_stream_table_partition_retention(text,text,text,text)') IS NULL").await;
     assert!(before);
-    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.1'")
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.2'")
         .await;
     let installed: (String, bool) = sqlx::query_as("SELECT extversion, EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger WHERE evtname = 'pg_trickle_ddl_start_tracker' AND evtevent = 'ddl_command_start') FROM pg_catalog.pg_extension WHERE extname = 'pg_trickle'")
         .fetch_one(&db.pool).await.expect("inspect upgraded extension");
-    assert_eq!(installed, ("0.110.1".into(), true));
+    assert_eq!(installed, ("0.110.2".into(), true));
     let status: serde_json::Value = db
         .query_scalar(
             "SELECT pgtrickle.get_stream_table_partition_retention('upgrade_retention_st')",
