@@ -46,6 +46,7 @@ PGVECTOR_CASES = {
         "test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh",
         "test_centroid_unsafe_rebase_remains_unbound_without_retry_storm",
         "test_centroid_refresh_serializes_concurrent_source_writer",
+        "test_centroid_cost_model_accepts_real_refresh_history",
         "test_pgvector_compat_installed_version",
         "test_pgvector_distance_types_and_functions_differential",
         "test_embedding_stream_table_v2_metrics_and_options",
@@ -97,6 +98,18 @@ def check_pgvector_contract(contract: dict) -> None:
         and upgrade.get("runtime") is True and upgrade.get("upgrade") is True
         and upgrade.get("requires_postgresql") is True and upgrade.get("nextest_retries") == 0,
         "pgvector catalog upgrade must run every required case against the candidate package",
+    )
+    centroid_cost = suites.get("centroid-cost-matrix", {})
+    prior.shared.require(
+        centroid_cost.get("kind") == "measurement"
+        and centroid_cost.get("required") is True
+        and centroid_cost.get("runtime") is True
+        and centroid_cost.get("requires_postgresql") is True
+        and centroid_cost.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
+        and centroid_cost.get("command_argv") == ["python3", "scripts/run_release_centroid_cost.py"]
+        and centroid_cost.get("measurement_file") == "qualification-logs/raw/centroid-cost-matrix.json"
+        and centroid_cost.get("nextest_retries") == 0,
+        "centroid cost qualification must retain the required exact-package matrix",
     )
 
 
@@ -161,6 +174,7 @@ def main() -> None:
     prior.REQUIRED_SHARDS = prior.REQUIRED_SHARDS | {"wal-retirement"}
     prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {
         "wal-retirement", "wal-retirement-upgrade", "pgvector-0.8.1", "pgvector-0.8.7", "pgvector-catalog-upgrade",
+        "centroid-cost-matrix",
     }
     contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
     check_retirement_contract(contract)

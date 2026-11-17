@@ -24,6 +24,19 @@ Use `test_centroid_high_dimensional_drift_matches_native_avg` in the same
 command to run the 1,536-dimensional variant. It uses the same seed and a
 small corpus, so it does not establish a general numerical operating envelope.
 
+### Exact-package centroid cost matrix
+
+The `centroid-cost-matrix` v0.109.0 qualification suite runs the filtered
+workload against the candidate package copied into the PostgreSQL test image.
+It covers 5,000 rows at 384, 768 and 1,536 dimensions, with small, medium, large
+and skewed group distributions. For one-row and 2,500-row changes it discards
+three warmup rounds and retains 20 measured refreshes per strategy and group
+shape. The JSON reports refresh percentiles, source mutation time, source tuple
+visits, WAL, stream storage and logical auxiliary-state bytes; Docker samples
+retain CPU and memory observations. This is a single-runner comparison. It does
+not establish cold-cache behavior, concurrent-writer costs or natural rebase
+frequency, so the automatic selector remains experimental and opt-in.
+
 ### Controlled distance-subscription measurements
 
 The opt-in subscription workload accepts comma-separated `PGVECTOR_SUB_ROWS`
@@ -120,21 +133,21 @@ do not necessarily expose plans for statements executed through SPI. A separate
 affected-group query illustrates a possible rescan. Same-transaction PostgreSQL
 tuple counters record sequential returns and index fetches from the source during
 each refresh, including repeated visits; they are not counts of distinct rows.
-This is one observation per
-strategy in the order listed; EXPLAIN overhead and cache order affect timings.
-The workload also performs five repeated one-row changes by default, rotating
-the group and strategy order. Set `PGVECTOR_CENTROID_REWRITE_ROWS` to update
+This is one observation per strategy in the order listed; EXPLAIN overhead and
+cache order affect timings. The repeated comparison uses three excluded warmup
+rounds, then rotates group and strategy order. Set `PGVECTOR_CENTROID_REWRITE_ROWS` to update
 more rows per round, up to the surviving source rows less two fixed inputs.
 It checks each selected strategy and all affected groups against native AVG
 with an absolute bound of `1e-5` plus a relative bound of `1e-6`, rejects
 missing components, and records each round's maximum absolute component error,
-refresh time and percentiles without EXPLAIN. Set
+refresh time, WAL, tuple visits, storage and logical state bytes without EXPLAIN. Set
 `PGVECTOR_CENTROID_SAMPLES` from 1 to 50 to change the number of rounds; a
 small sample cannot establish tail latency. The algebraic measurement asserts
 that every round uses algebraic state, so batches that trigger a rebase fail
-the benchmark rather than being silently counted as algebraic. The workload does not
-measure source-write overhead or concurrent load. Use a dedicated host and
-more repetitions before drawing performance conclusions.
+the benchmark rather than being silently counted as algebraic. The workload
+records source mutation time but does not measure concurrent load or natural
+rebase frequency. Use a dedicated host and more repetitions before drawing
+performance conclusions.
 
 The scheduled run also measures distance subscriptions separately with 1,000
 and 10,000 rows and zero, one, or ten subscriptions. Five one-row changes per

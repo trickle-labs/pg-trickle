@@ -656,16 +656,36 @@ async fn test_pgvector_filtered_ann_workload() {
         )
         .await;
     }
-    db.execute(&format!("CREATE TABLE vector_centroid_source (id bigint PRIMARY KEY, small_group int NOT NULL, large_group int NOT NULL, embedding vector({dim}) NOT NULL)")).await;
-    db.execute("INSERT INTO vector_centroid_source SELECT id, (id % 100)::int, (id % 2)::int, embedding FROM vector_bench_source").await;
-    db.execute("CREATE INDEX vector_centroid_small_group ON vector_centroid_source (small_group)")
-        .await;
-    db.execute("CREATE INDEX vector_centroid_large_group ON vector_centroid_source (large_group)")
-        .await;
+    db.execute(&format!("CREATE TABLE vector_centroid_source (id bigint PRIMARY KEY, small_group int NOT NULL, medium_group int NOT NULL, large_group int NOT NULL, skewed_group int NOT NULL, embedding vector({dim}) NOT NULL)")).await;
+    db.execute(&format!("INSERT INTO vector_centroid_source SELECT id, (id % 100)::int, (id % 10)::int, (id % 2)::int, CASE WHEN id > {} THEN 0 ELSE (id % 10 + 1)::int END, embedding FROM vector_bench_source", rows / 5)).await;
+    db.execute_seq(&[
+        "CREATE INDEX vector_centroid_small_group ON vector_centroid_source (small_group)",
+        "CREATE INDEX vector_centroid_medium_group ON vector_centroid_source (medium_group)",
+        "CREATE INDEX vector_centroid_large_group ON vector_centroid_source (large_group)",
+        "CREATE INDEX vector_centroid_skewed_group ON vector_centroid_source (skewed_group)",
+    ])
+    .await;
     db.execute("ANALYZE vector_centroid_source").await;
-    for group in ["small", "large"] {
+    let (largest_skewed_group, smallest_skewed_group): (i64, i64) = sqlx::query_as(
+        "SELECT max(group_rows)::bigint, min(group_rows)::bigint FROM (SELECT count(*) AS group_rows FROM vector_centroid_source GROUP BY skewed_group) groups",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("measure skewed group sizes");
+    assert!(
+        largest_skewed_group >= (rows as i64 * 7 / 10)
+            && smallest_skewed_group * 10 < largest_skewed_group,
+        "centroid fixture does not contain a strongly skewed group: largest={largest_skewed_group}, smallest={smallest_skewed_group}"
+    );
+    let group_shapes = [
+        ("small", "small_group"),
+        ("medium", "medium_group"),
+        ("large", "large_group"),
+        ("skewed", "skewed_group"),
+    ];
+    for &(group, group_column) in &group_shapes {
         let query = format!(
-            "SELECT {group}_group, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group}_group"
+            "SELECT {group_column}, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group_column}"
         );
         for (label, mode, algebraic) in [
             ("differential", "DIFFERENTIAL", false),
@@ -691,7 +711,7 @@ async fn test_pgvector_filtered_ann_workload() {
             .await;
         }
     }
-    for group in ["small", "large"] {
+    for &(group, _) in &group_shapes {
         let stream = format!("vector_centroid_{group}_algebraic");
         let reset = format!(
             "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = '{stream}'::regclass"
@@ -708,15 +728,15 @@ async fn test_pgvector_filtered_ann_workload() {
             .bind(&stream).fetch_one(&db.pool).await.expect("inspect centroid benchmark baseline");
         assert!(bound, "centroid baseline was not bound for {stream}");
     }
-    let target = rows - 1;
+    let target = rows / 2;
     db.execute(&format!("UPDATE vector_centroid_source SET embedding = (SELECT embedding FROM vector_centroid_source WHERE id = {rows}) WHERE id = {target}")).await;
     let mut centroid = Vec::new();
-    for group in ["small", "large"] {
-        let group_value = if group == "small" {
-            target % 100
-        } else {
-            target % 2
-        };
+    for &(group, group_column) in &group_shapes {
+        let group_value: i32 = db
+            .query_scalar(&format!(
+                "SELECT {group_column} FROM vector_centroid_source WHERE id = {target}"
+            ))
+            .await;
         let explanation: String = db
             .query_scalar(&format!(
                 "SELECT pgtrickle.explain_stream_table('vector_centroid_{group}_differential')"
@@ -728,11 +748,11 @@ async fn test_pgvector_filtered_ann_workload() {
         );
         let group_rows: i64 = db
             .query_scalar(&format!(
-                "SELECT count(*) FROM vector_centroid_source WHERE {group}_group = {group_value}"
+                "SELECT count(*) FROM vector_centroid_source WHERE {group_column} = {group_value}"
             ))
             .await;
         let explain = format!(
-            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT avg(embedding) FROM vector_centroid_source WHERE {group}_group = {group_value}"
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT avg(embedding) FROM vector_centroid_source WHERE {group_column} = {group_value}"
         );
         let group_plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain))
             .fetch_one(&db.pool)
@@ -834,7 +854,7 @@ async fn test_pgvector_filtered_ann_workload() {
                 );
             }
             let numerical = format!(
-                "WITH native AS (SELECT {group}_group, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group}_group) SELECT COALESCE(max(abs(x.actual::float8 - x.expected::float8)), 0)::float8, COALESCE(bool_and({CENTROID_COMPONENT_WITHIN_BOUND}), false) AND count(*) = (SELECT count(*) FROM native) * {dim} AND (SELECT count(*) FROM {stream}) = (SELECT count(*) FROM native) AND count(DISTINCT s.{group}_group) = (SELECT count(*) FROM native) FROM {stream} s JOIN native n USING ({group}_group) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid::real[]) AS x(actual, expected)"
+                "WITH native AS (SELECT {group_column}, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group_column}) SELECT COALESCE(max(abs(x.actual::float8 - x.expected::float8)), 0)::float8, COALESCE(bool_and({CENTROID_COMPONENT_WITHIN_BOUND}), false) AND count(*) = (SELECT count(*) FROM native) * {dim} AND (SELECT count(*) FROM {stream}) = (SELECT count(*) FROM native) AND count(DISTINCT s.{group_column}) = (SELECT count(*) FROM native) FROM {stream} s JOIN native n USING ({group_column}) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid::real[]) AS x(actual, expected)"
             );
             let (max_error, within_bound): (f64, bool) =
                 sqlx::query_as(sqlx::AssertSqlSafe(numerical.as_str()))
@@ -851,7 +871,7 @@ async fn test_pgvector_filtered_ann_workload() {
                 } else {
                     format!("avg(embedding)::vector({dim})")
                 };
-                db.assert_st_matches_query(&stream, &format!("SELECT {group}_group, {centroid_expr} AS centroid FROM vector_centroid_source GROUP BY {group}_group")).await;
+                db.assert_st_matches_query(&stream, &format!("SELECT {group_column}, {centroid_expr} AS centroid FROM vector_centroid_source GROUP BY {group_column}")).await;
             }
             let storage_bytes: i64 =
                 sqlx::query_scalar("SELECT pg_total_relation_size($1::regclass)::bigint")
@@ -866,9 +886,9 @@ async fn test_pgvector_filtered_ann_workload() {
         centroid.push(serde_json::json!({"group_shape": group, "changed_rows": 1, "affected_group_rows": group_rows, "representative_group_query_plan": group_plan, "refresh": measurements}));
     }
     let mut repeated = Vec::new();
-    let mut timings = vec![vec![Vec::<f64>::new(); 3]; 2];
-    let groups = ["small", "large"];
+    let mut timings = vec![vec![Vec::<f64>::new(); 3]; group_shapes.len()];
     let variants = ["differential", "algebraic", "full"];
+    let warmup_rounds = 3;
     let mut conn = db
         .pool
         .acquire()
@@ -893,12 +913,13 @@ async fn test_pgvector_filtered_ann_workload() {
     .await
     .expect("check repeated centroid inputs");
     assert!(distinct_inputs, "repeated source vectors must be distinct");
-    for round in 0..centroid_samples {
+    for round in 0..warmup_rounds + centroid_samples {
         let source_id = if round % 2 == 0 {
             alternate_source
         } else {
             rows
         };
+        let mutation_start = Instant::now();
         let mutation = format!(
             "UPDATE vector_centroid_source SET embedding = (SELECT embedding FROM vector_centroid_source WHERE id = {source_id}) WHERE id >= {first_rewritten} AND id < {rows}"
         );
@@ -907,9 +928,10 @@ async fn test_pgvector_filtered_ann_workload() {
             .await
             .expect("mutate repeated centroid source");
         assert_eq!(updated.rows_affected(), centroid_rewrite_rows as u64);
-        for group_offset in 0..groups.len() {
-            let group_idx = (group_offset + round) % groups.len();
-            let group = groups[group_idx];
+        let mutation_ms = mutation_start.elapsed().as_secs_f64() * 1000.0;
+        for group_offset in 0..group_shapes.len() {
+            let group_idx = (group_offset + round) % group_shapes.len();
+            let (group, group_column) = group_shapes[group_idx];
             for offset in 0..variants.len() {
                 let variant_idx = (offset + round) % variants.len();
                 let variant = variants[variant_idx];
@@ -922,6 +944,22 @@ async fn test_pgvector_filtered_ann_workload() {
                 .execute(&mut *conn)
                 .await
                 .expect("select repeated centroid strategy");
+                sqlx::query("BEGIN")
+                    .execute(&mut *conn)
+                    .await
+                    .expect("begin repeated centroid measurement");
+                let before_lsn: String =
+                    sqlx::query_scalar("SELECT pg_current_wal_insert_lsn()::text")
+                        .fetch_one(&mut *conn)
+                        .await
+                        .expect("read centroid WAL start");
+                let before_source: (i64, i64) = sqlx::query_as(
+                    "SELECT COALESCE(pg_stat_get_xact_tuples_returned('vector_centroid_source'::regclass), 0)::bigint, \
+                            COALESCE(pg_stat_get_xact_tuples_fetched('vector_centroid_source'::regclass), 0)::bigint",
+                )
+                .fetch_one(&mut *conn)
+                .await
+                .expect("read centroid tuple counters before refresh");
                 let start = Instant::now();
                 sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
                     .bind(&stream)
@@ -929,7 +967,24 @@ async fn test_pgvector_filtered_ann_workload() {
                     .await
                     .expect("repeat centroid refresh");
                 let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                let history: (String, bool, String) = sqlx::query_as("SELECT h.action::text, h.was_full_fallback, h.merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = $1 AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+                let after_source: (i64, i64) = sqlx::query_as(
+                    "SELECT COALESCE(pg_stat_get_xact_tuples_returned('vector_centroid_source'::regclass), 0)::bigint, \
+                            COALESCE(pg_stat_get_xact_tuples_fetched('vector_centroid_source'::regclass), 0)::bigint",
+                )
+                .fetch_one(&mut *conn)
+                .await
+                .expect("read centroid tuple counters after refresh");
+                let source_sequential_tuples = after_source.0 - before_source.0;
+                let source_index_tuples = after_source.1 - before_source.1;
+                assert!(source_sequential_tuples >= 0 && source_index_tuples >= 0);
+                let wal_bytes: f64 = sqlx::query_scalar(
+                    "SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(), $1::text::pg_lsn)::float8",
+                )
+                .bind(&before_lsn)
+                .fetch_one(&mut *conn)
+                .await
+                .expect("measure repeated centroid WAL");
+                let history: (String, bool, String, Option<String>) = sqlx::query_as("SELECT h.action::text, h.was_full_fallback, h.merge_strategy_used, h.refresh_reason_detail::text FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = $1 AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
                     .bind(&stream).fetch_one(&mut *conn).await.expect("inspect repeated centroid strategy");
                 assert_eq!(
                     history.0,
@@ -948,13 +1003,18 @@ async fn test_pgvector_filtered_ann_workload() {
                         history.2
                     );
                 }
+                let detail = history
+                    .3
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .unwrap_or_default();
                 let comparison = format!(
-                    "WITH affected AS (SELECT DISTINCT {group}_group FROM vector_centroid_source WHERE id >= {first_rewritten} AND id < {rows}), \
-                     native AS (SELECT {group}_group, avg(embedding)::real[] AS centroid FROM vector_centroid_source WHERE {group}_group IN (SELECT {group}_group FROM affected) GROUP BY {group}_group) \
-                     SELECT count(*)::bigint, (SELECT count(*) FROM native)::bigint, count(DISTINCT s.{group}_group)::bigint, \
+                    "WITH affected AS (SELECT DISTINCT {group_column} FROM vector_centroid_source WHERE id >= {first_rewritten} AND id < {rows}), \
+                     native AS (SELECT {group_column}, avg(embedding)::real[] AS centroid FROM vector_centroid_source WHERE {group_column} IN (SELECT {group_column} FROM affected) GROUP BY {group_column}) \
+                     SELECT count(*)::bigint, (SELECT count(*) FROM native)::bigint, count(DISTINCT s.{group_column})::bigint, \
                        COALESCE(max(abs(x.actual::float8 - x.expected::float8)), 0)::float8, \
                        COALESCE(bool_and({CENTROID_COMPONENT_WITHIN_BOUND}), false) \
-                     FROM {stream} s JOIN native n USING ({group}_group) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid) x(actual, expected)"
+                     FROM {stream} s JOIN native n USING ({group_column}) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid) x(actual, expected)"
                 );
                 let (components, expected_groups, actual_groups, max_error, within_bound): (
                     i64,
@@ -972,15 +1032,54 @@ async fn test_pgvector_filtered_ann_workload() {
                         && within_bound,
                     "round {round} {group} {variant}: components={components}, expected_groups={expected_groups}, actual_groups={actual_groups}, max_error={max_error}"
                 );
-                timings[group_idx][variant_idx].push(elapsed_ms);
-                repeated.push(serde_json::json!({"round": round, "group_shape": group, "strategy": variant, "actual_strategy": history.2, "elapsed_ms": elapsed_ms, "max_absolute_component_error": max_error}));
+                let affected_source_rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM vector_centroid_source WHERE {group_column} IN (SELECT DISTINCT {group_column} FROM vector_centroid_source WHERE id >= {first_rewritten} AND id < {rows})"
+                )))
+                .fetch_one(&mut *conn)
+                .await
+                .expect("measure affected centroid source rows");
+                let storage_bytes: i64 =
+                    sqlx::query_scalar("SELECT pg_total_relation_size($1::regclass)::bigint")
+                        .bind(&stream)
+                        .fetch_one(&mut *conn)
+                        .await
+                        .expect("measure repeated centroid storage");
+                let state_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(sum(octet_length(g.row_id) + octet_length(pg_catalog.array_send(g.state)) + octet_length(g.state_checksum) + 16), 0)::bigint FROM pgtrickle.pgt_centroid_groups g JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = $1::regclass")
+                    .bind(&stream).fetch_one(&mut *conn).await.expect("measure repeated centroid state");
+                if round >= warmup_rounds {
+                    let sample = round - warmup_rounds;
+                    timings[group_idx][variant_idx].push(elapsed_ms);
+                    repeated.push(serde_json::json!({
+                        "sample": sample,
+                        "group_shape": group,
+                        "group_column": group_column,
+                        "strategy": variant,
+                        "actual_strategy": history.2,
+                        "changed_rows": centroid_rewrite_rows,
+                        "affected_source_rows": affected_source_rows,
+                        "source_mutation_ms": mutation_ms,
+                        "refresh_ms": elapsed_ms,
+                        "refresh_wal_bytes_cluster_wide": wal_bytes,
+                        "source_sequential_tuples_returned": source_sequential_tuples,
+                        "source_index_tuples_fetched": source_index_tuples,
+                        "storage_bytes_including_indexes": storage_bytes,
+                        "auxiliary_state_logical_bytes": state_bytes,
+                        "fallback_reason": detail.get("centroid_fallback").and_then(|value| value.get("reason")),
+                        "rebase": detail.get("centroid_rebase"),
+                        "max_absolute_component_error": max_error
+                    }));
+                }
+                sqlx::query("COMMIT")
+                    .execute(&mut *conn)
+                    .await
+                    .expect("commit repeated centroid measurement");
             }
         }
     }
-    let repeated_summary = groups
+    let repeated_summary = group_shapes
         .iter()
         .enumerate()
-        .flat_map(|(group_idx, group)| {
+        .flat_map(|(group_idx, (group, _))| {
             let timings = &timings;
             variants
                 .iter()
@@ -998,7 +1097,7 @@ async fn test_pgvector_filtered_ann_workload() {
         serde_json::json!({"schema": 1, "postgres": versions.0,
         "pgvector": versions.1, "pg_trickle": versions.2, "host_arch": std::env::consts::ARCH,
         "data": "md5(id:dimension), seedless deterministic", "rows": rows, "dimensions": dim,
-        "ann": results, "centroid_baseline": centroid, "centroid_repeated": {"rounds": centroid_samples, "changed_rows_per_round": centroid_rewrite_rows, "observations": repeated, "summary": repeated_summary, "notes": "Each round changes the configured number of source vectors; group and strategy order rotate. All affected groups are checked against native AVG. Times cover the refresh call without EXPLAIN, mutation or validation. No warmup, concurrent load, or repeated rebase measurements."}, "centroid_notes": "Each refresh is executed under EXPLAIN ANALYZE; SPI work may not be individually visible in the plan. Source tuple counters cover same-transaction sequential returns and index fetches, including repeated visits, during the refresh. Group rescan, algebraic and FULL run in that order. WAL excludes the source mutation; auxiliary bytes are logical payload estimates.", "refresh": {"operations": ["update embedding", "update embedding", "delete"],
+        "ann": results, "centroid_baseline": centroid, "centroid_repeated": {"warmup_rounds": warmup_rounds, "measured_rounds": centroid_samples, "changed_rows_per_round": centroid_rewrite_rows, "observations": repeated, "summary": repeated_summary, "notes": "Each measured round changes the configured number of source vectors; group and strategy order rotate after three warmup rounds. All affected groups are checked against native AVG. Refresh timings exclude mutation and validation; mutation time, WAL, tuple visits, storage, and state bytes are recorded separately. Concurrent load and rebase frequency are not measured."}, "centroid_notes": "The one-row baseline refreshes use EXPLAIN ANALYZE; SPI work may not be individually visible in the plan. Repeated samples record same-transaction source tuple returns and index fetches, including repeated visits. WAL is cluster-wide and excludes the source mutation; auxiliary bytes are logical payload estimates.", "refresh": {"operations": ["update embedding", "update embedding", "delete"],
         "changed_rows": [1, rows / 10, rows / 10], "elapsed_ms": refresh_ms,
         "wal_bytes_cluster_wide": wal_bytes,
         "full_elapsed_ms": full_refresh_ms, "full_wal_bytes_cluster_wide": full_wal_bytes,
