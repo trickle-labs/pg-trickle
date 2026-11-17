@@ -134,6 +134,7 @@ impl DeltaStage {
         Ok(stage)
     }
 
+    #[allow(clippy::too_many_arguments)] // Source stage needs both LSN cuts, owner, and conditional-lock state.
     fn stage_source(
         &mut self,
         st: &StreamTableMeta,
