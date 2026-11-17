@@ -164,12 +164,17 @@ correctness_check() {
 }
 
 wait_for_correctness() {
-    # Final row equality does not depend on when PostgreSQL assigned a refresh ID.
-    for _ in $(seq 1 36); do
-        if [[ "$(correctness_check)" == t ]]; then
-            return 0
+    local workload_finished_at="$1"
+    local refreshed
+    local deadline=$((SECONDS + 480))
+    # A checkpoint-bound refresh took 345s on the nightly runner.
+    while ((SECONDS < deadline)); do
+        refreshed="$(db_query "SELECT count(*) = 3 FROM pgtrickle.pgt_stream_tables s WHERE EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = s.pgt_id AND h.status = 'COMPLETED' AND h.start_time >= '$workload_finished_at'::timestamptz)")"
+        if [[ "$refreshed" == t ]]; then
+            [[ "$(correctness_check)" == t ]] && return 0
+            return 1
         fi
-        sleep 5
+        sleep 0.5
     done
     return 1
 }
@@ -182,10 +187,12 @@ run_one() {
     local stdout_file="$run_dir/pgbench.stdout"
     local log_dir="$run_dir/logs"
     local warmup_file="$run_dir/warmup.stdout"
-    local history_before refresh_count refresh_duration correct postgres_version postgres_settings
+    local history_before refresh_count refresh_duration correct workload_finished_at postgres_version postgres_settings
     local cpu_before cpu_after cpu_hz sampler_pid
+    # Avoid checkpoint interference from PostgreSQL's default 1 GB WAL limit.
     local postgres_args=(-c wal_level=logical -c track_commit_timestamp=on \
-        -c max_replication_slots=10 -c max_worker_processes=128)
+        -c max_replication_slots=10 -c max_worker_processes=128 \
+        -c max_wal_size=8GB)
 
     mkdir -p "$log_dir"
     chmod 777 "$run_dir" "$log_dir"
@@ -196,7 +203,7 @@ run_one() {
         -e POSTGRES_PASSWORD=postgres "$image" "${postgres_args[@]}" >/dev/null
     wait_for_postgres
     postgres_version="$(db_query 'SHOW server_version_num')"
-    postgres_settings="$(db_query "SELECT current_setting('wal_level') || '|' || current_setting('track_commit_timestamp') || '|' || current_setting('max_replication_slots') || '|' || current_setting('max_worker_processes')")"
+    postgres_settings="$(db_query "SELECT current_setting('wal_level') || '|' || current_setting('track_commit_timestamp') || '|' || current_setting('max_replication_slots') || '|' || current_setting('max_worker_processes') || '|' || current_setting('max_wal_size')")"
 
     if [[ "$config" != absent ]]; then
         db_query "CREATE EXTENSION IF NOT EXISTS pg_trickle;" >/dev/null
@@ -231,12 +238,23 @@ run_one() {
     cpu_after="$(cpu_total_sample)"
     touch "$run_dir/cpu.stop"
     wait "$sampler_pid"
+    workload_finished_at="$(db_query "SELECT clock_timestamp()")"
 
     if [[ "$config" == active ]]; then
-        if wait_for_correctness; then
+        if wait_for_correctness "$workload_finished_at"; then
             correct=true
         else
             correct=false
+            echo "[pgbench-v0.87] stream tables did not converge after workload; refresh state:" >&2
+            db_query "SELECT s.pgt_name,
+                count(h.refresh_id) FILTER (WHERE h.status = 'COMPLETED') AS completed,
+                count(h.refresh_id) FILTER (WHERE h.status = 'FAILED') AS failed,
+                max(h.error_message) FILTER (WHERE h.status = 'FAILED') AS last_error
+                FROM pgtrickle.pgt_stream_tables s
+                LEFT JOIN pgtrickle.pgt_refresh_history h
+                  ON h.pgt_id = s.pgt_id AND h.start_time >= '$workload_finished_at'::timestamptz
+                GROUP BY s.pgt_name ORDER BY s.pgt_name" >&2
+            docker logs "$container" >"$run_dir/postgres.log" 2>&1 || true
         fi
         IFS='|' read -r refresh_count refresh_duration <<<"$(db_query "SELECT count(*)::bigint, coalesce(sum(extract(epoch FROM end_time - start_time) * 1000), 0)::double precision FROM pgtrickle.pgt_refresh_history WHERE refresh_id > $history_before AND status = 'COMPLETED'")"
     else

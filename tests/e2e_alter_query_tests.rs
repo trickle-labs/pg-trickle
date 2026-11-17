@@ -11,6 +11,129 @@ mod e2e;
 use e2e::E2eDb;
 
 #[tokio::test]
+async fn test_storage_replacement_rejects_authorization_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE ROLE auth1423_reader NOLOGIN").await;
+    db.execute("GRANT USAGE ON SCHEMA public TO auth1423_reader")
+        .await;
+    db.execute("CREATE TABLE auth1423_src (id INT PRIMARY KEY, tenant_id INT)")
+        .await;
+    db.execute("INSERT INTO auth1423_src VALUES (1, 1), (2, 2)")
+        .await;
+    db.create_st(
+        "auth1423_st",
+        "SELECT id, tenant_id FROM auth1423_src",
+        "1d",
+        "FULL",
+    )
+    .await;
+    db.execute("GRANT SELECT ON auth1423_st TO auth1423_reader")
+        .await;
+    db.execute("GRANT UPDATE (tenant_id) ON auth1423_st TO auth1423_reader")
+        .await;
+    db.execute("ALTER TABLE auth1423_st ENABLE ROW LEVEL SECURITY")
+        .await;
+    db.execute("ALTER TABLE auth1423_st FORCE ROW LEVEL SECURITY")
+        .await;
+    db.execute("CREATE POLICY auth1423_tenant ON auth1423_st FOR SELECT TO auth1423_reader USING (tenant_id = 1)")
+        .await;
+    db.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO auth1423_reader",
+    )
+    .await;
+
+    let oid = db.table_oid("auth1423_st").await;
+    for alter in [
+        "query => $$SELECT id, tenant_id FROM auth1423_src WHERE id > 0$$",
+        "query => $$SELECT id FROM auth1423_src$$",
+        "partition_by => 'tenant_id'",
+    ] {
+        let result = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.alter_stream_table('auth1423_st', {alter})"
+            ))
+            .await;
+        let error = result.expect_err("replacement must reject authorization loss");
+        assert!(error.to_string().contains("cannot be preserved"), "{error}");
+        assert_eq!(db.table_oid("auth1423_st").await, oid);
+        let intact: bool = db.query_scalar(
+            "SELECT c.relrowsecurity AND c.relforcerowsecurity \
+             AND has_table_privilege('auth1423_reader', c.oid, 'SELECT') \
+             AND has_column_privilege('auth1423_reader', c.oid, 'tenant_id', 'UPDATE') \
+             AND EXISTS (SELECT 1 FROM pg_policy WHERE polrelid = c.oid AND polname = 'auth1423_tenant') \
+             FROM pg_class c WHERE c.oid = 'auth1423_st'::regclass",
+        ).await;
+        assert!(intact);
+        let mut tx = db.pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL ROLE auth1423_reader")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let visible: Vec<i32> = sqlx::query_scalar("SELECT tenant_id FROM auth1423_st")
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(visible, vec![1]);
+        tx.rollback().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_storage_replacement_rejects_individual_authorization_settings() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE ROLE auth1423_individual NOLOGIN").await;
+    db.execute("CREATE TABLE auth1423_cases_src (id INT PRIMARY KEY, tenant_id INT)")
+        .await;
+    for (setup, cleanup) in [
+        (
+            "GRANT SELECT ON auth1423_cases_st TO auth1423_individual",
+            "REVOKE ALL ON auth1423_cases_st FROM auth1423_individual",
+        ),
+        (
+            "GRANT SELECT (tenant_id) ON auth1423_cases_st TO auth1423_individual",
+            "REVOKE SELECT (tenant_id) ON auth1423_cases_st FROM auth1423_individual",
+        ),
+        (
+            "ALTER TABLE auth1423_cases_st ENABLE ROW LEVEL SECURITY",
+            "ALTER TABLE auth1423_cases_st DISABLE ROW LEVEL SECURITY",
+        ),
+        (
+            "ALTER TABLE auth1423_cases_st FORCE ROW LEVEL SECURITY",
+            "ALTER TABLE auth1423_cases_st NO FORCE ROW LEVEL SECURITY",
+        ),
+        (
+            "CREATE POLICY auth1423_policy ON auth1423_cases_st USING (tenant_id = 1)",
+            "DROP POLICY auth1423_policy ON auth1423_cases_st",
+        ),
+        (
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO auth1423_individual",
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT ON TABLES FROM auth1423_individual",
+        ),
+    ] {
+        db.create_st(
+            "auth1423_cases_st",
+            "SELECT id, tenant_id FROM auth1423_cases_src",
+            "1d",
+            "FULL",
+        )
+        .await;
+        db.execute(setup).await;
+        let result = db.try_execute("SELECT pgtrickle.alter_stream_table('auth1423_cases_st', query => $$SELECT id, tenant_id FROM auth1423_cases_src WHERE id > 0$$)").await;
+        assert!(
+            result
+                .expect_err(setup)
+                .to_string()
+                .contains("cannot be preserved"),
+            "{setup}"
+        );
+        db.execute(cleanup).await;
+        db.execute("SELECT pgtrickle.alter_stream_table('auth1423_cases_st', query => $$SELECT id, tenant_id FROM auth1423_cases_src WHERE id > 0$$)").await;
+        db.execute("SELECT pgtrickle.drop_stream_table('auth1423_cases_st')")
+            .await;
+    }
+}
+
+#[tokio::test]
 async fn test_explain_alter_is_read_only_and_classifies_changes() {
     let db = E2eDb::new().await.with_extension().await;
 

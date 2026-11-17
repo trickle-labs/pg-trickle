@@ -29,9 +29,11 @@ The blocking profile uses the pinned PostgreSQL base image from
 10-second warm-up, a 30-second measurement, and 3 paired repetitions. It
 matches PostgreSQL settings across the stock and extension images, then
 samples pgbench transaction logs at 10%, records p50/p95/p99, checks active
-stream-table correctness and refresh history, and samples worker `/proc`
-jiffies against container cgroup CPU time. The publication profile is a
-five-repetition, 60-second run.
+stream-table correctness after each table completes a post-workload refresh,
+and samples worker `/proc` jiffies against container cgroup CPU time. The
+correctness gate waits up to eight minutes for those refreshes because a
+checkpoint-bound refresh took 345 seconds on a nightly runner. The publication
+profile is a five-repetition, 60-second run.
 
 ```bash
 ./tests/build_e2e_image.sh

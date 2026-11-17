@@ -1,0 +1,87 @@
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/3cols
+Benchmarking diff_scan/3cols: Warming up for 1.0000 s
+Benchmarking diff_scan/3cols: Collecting 200 samples in estimated 10.003 s (2.7M iterations)
+Benchmarking diff_scan/3cols: Analyzing
+diff_scan/3cols         time:   [3.6338 µs 3.6613 µs 3.7009 µs]
+Found 4 outliers among 200 measurements (2.00%)
+  3 (1.50%) high mild
+  1 (0.50%) high severe
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/3cols
+Benchmarking diff_scan/3cols: Warming up for 1.0000 s
+Benchmarking diff_scan/3cols: Collecting 200 samples in estimated 10.022 s (2.8M iterations)
+Benchmarking diff_scan/3cols: Analyzing
+diff_scan/3cols         time:   [3.5878 µs 3.5982 µs 3.6100 µs]
+                        change: [-2.1136% -1.4902% -0.9167%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 7 outliers among 200 measurements (3.50%)
+  6 (3.00%) high mild
+  1 (0.50%) high severe
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/3cols
+Benchmarking diff_scan/3cols: Warming up for 1.0000 s
+Benchmarking diff_scan/3cols: Collecting 200 samples in estimated 10.012 s (2.8M iterations)
+Benchmarking diff_scan/3cols: Analyzing
+diff_scan/3cols         time:   [3.5862 µs 3.6005 µs 3.6161 µs]
+                        change: [-0.4458% +0.0411% +0.5736%] (p = 0.89 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 200 measurements (1.00%)
+  1 (0.50%) high mild
+  1 (0.50%) high severe
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/3cols
+Benchmarking diff_scan/3cols: Warming up for 1.0000 s
+Benchmarking diff_scan/3cols: Collecting 200 samples in estimated 10.033 s (2.8M iterations)
+Benchmarking diff_scan/3cols: Analyzing
+diff_scan/3cols         time:   [3.6192 µs 3.6307 µs 3.6427 µs]
+                        change: [+1.1238% +1.6919% +2.2441%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/10cols
+Benchmarking diff_scan/10cols: Warming up for 1.0000 s
+Benchmarking diff_scan/10cols: Collecting 200 samples in estimated 10.107 s (1.3M iterations)
+Benchmarking diff_scan/10cols: Analyzing
+diff_scan/10cols        time:   [7.8880 µs 7.9057 µs 7.9263 µs]
+Found 26 outliers among 200 measurements (13.00%)
+  11 (5.50%) high mild
+  15 (7.50%) high severe
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/10cols
+Benchmarking diff_scan/10cols: Warming up for 1.0000 s
+Benchmarking diff_scan/10cols: Collecting 200 samples in estimated 10.016 s (1.3M iterations)
+Benchmarking diff_scan/10cols: Analyzing
+diff_scan/10cols        time:   [7.6848 µs 7.7002 µs 7.7177 µs]
+                        change: [-3.1332% -2.8156% -2.4917%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/10cols
+Benchmarking diff_scan/10cols: Warming up for 1.0000 s
+Benchmarking diff_scan/10cols: Collecting 200 samples in estimated 10.021 s (1.3M iterations)
+Benchmarking diff_scan/10cols: Analyzing
+diff_scan/10cols        time:   [7.6577 µs 7.6652 µs 7.6740 µs]
+                        change: [-0.7807% -0.5492% -0.3095%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 21 outliers among 200 measurements (10.50%)
+  3 (1.50%) low mild
+  8 (4.00%) high mild
+  10 (5.00%) high severe
+
+Gnuplot not found, using plotters backend
+Benchmarking diff_scan/10cols
+Benchmarking diff_scan/10cols: Warming up for 1.0000 s
+Benchmarking diff_scan/10cols: Collecting 200 samples in estimated 10.081 s (1.3M iterations)
+Benchmarking diff_scan/10cols: Analyzing
+diff_scan/10cols        time:   [7.7971 µs 7.8046 µs 7.8139 µs]
+                        change: [+1.6152% +1.7707% +1.9142%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 19 outliers among 200 measurements (9.50%)
+  4 (2.00%) low mild
+  10 (5.00%) high mild
+  5 (2.50%) high severe

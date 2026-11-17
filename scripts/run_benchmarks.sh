@@ -89,24 +89,14 @@ ensure_stub() {
 # ── Helper: find bench binary ────────────────────────────────────────────
 find_bench_binary() {
     local bench_name="$1"
-    local profile_dir="$TARGET_DIR/release"
-
-    # Look for the exact benchmark binary in release/deps
-    if [[ "$OS" == "Darwin" ]]; then
-        find "$profile_dir/deps" \
-            -maxdepth 1 -name "${bench_name}-*" -type f -perm +111 \
-            ! -name '*.d' ! -name '*.dylib' \
-            2>/dev/null \
-        | xargs ls -t 2>/dev/null \
-        | head -1
-    else
-        find "$profile_dir/deps" \
-            -maxdepth 1 -name "${bench_name}-*" -type f -executable \
-            ! -name '*.d' ! -name '*.so' \
-            2>/dev/null \
-        | xargs ls -t 2>/dev/null \
-        | head -1
-    fi
+    python3 -c 'import json, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    message = json.loads(line)
+    if (message.get("reason") == "compiler-artifact"
+            and message.get("target", {}).get("name") == sys.argv[2]
+            and "bench" in message["target"].get("kind", [])
+            and message.get("executable")):
+        print(message["executable"])' "$CARGO_MESSAGES" "$bench_name"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────
@@ -122,8 +112,22 @@ done
 
 # Compile benchmarks without running them
 echo "Compiling benchmarks ..."
-CARGO_OUTPUT=$(cargo bench --features "$FEATURES" "${CARGO_BENCH_FLAGS[@]}" --no-run 2>&1)
-echo "$CARGO_OUTPUT"
+CARGO_MESSAGES=$(mktemp)
+trap 'rm -f "$CARGO_MESSAGES"' EXIT
+if cargo bench --features "$FEATURES" "${CARGO_BENCH_FLAGS[@]}" --no-run \
+    --message-format=json-render-diagnostics > "$CARGO_MESSAGES"; then
+    CARGO_STATUS=0
+else
+    CARGO_STATUS=$?
+fi
+python3 -c 'import json, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    message = json.loads(line)
+    if message.get("reason") == "compiler-message":
+        print(message["message"].get("rendered") or message["message"].get("message", ""), file=sys.stderr, end="")' "$CARGO_MESSAGES"
+if [[ "$CARGO_STATUS" != 0 ]]; then
+    exit "$CARGO_STATUS"
+fi
 
 # Run each benchmark binary with the stub preloaded
 EXIT_CODE=0

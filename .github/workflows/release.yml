@@ -158,7 +158,7 @@ jobs:
           - os: ubuntu-24.04-arm
             artifact_suffix: linux-arm64
             archive_ext: tar.gz
-          - os: macos-14
+          - os: macos-15
             artifact_suffix: macos-arm64
             archive_ext: tar.gz
           - os: windows-2022
@@ -166,6 +166,10 @@ jobs:
             archive_ext: zip
     steps:
       - uses: actions/checkout@v7
+
+      - name: Verify macOS ARM64 runner
+        if: matrix.artifact_suffix == 'macos-arm64'
+        run: test "$(uname -m)" = arm64
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -214,8 +218,27 @@ jobs:
             cp "$f" "dist/${ARCHIVE_NAME}/lib/"
           done
 
-          # Copy extension control + SQL files
+          # Keep future migration SQL out of an older version's release package.
+          version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
           find "${PKG_DIR}" -name '*.control' -o -name '*.sql' | while read f; do
+            base=${f##*/}
+            if [[ "$base" == pg_trickle--* ]]; then
+              version=${base#pg_trickle--}
+              if [[ "$version" == *--* ]]; then
+                version=${version#*--}
+                version=${version%.sql}
+              else
+                version=${version%.sql}
+                if [[ "$version" != "$VERSION" ]]; then
+                  echo "Excluding install SQL for v${version} from v${VERSION} package"
+                  continue
+                fi
+              fi
+              if ! version_le "$version" "$VERSION"; then
+                echo "Excluding future migration SQL $base from v${VERSION} package"
+                continue
+              fi
+            fi
             cp "$f" "dist/${ARCHIVE_NAME}/extension/"
           done
 
@@ -285,6 +308,15 @@ jobs:
 
           # Copy control + SQL
           Get-ChildItem -Path $pkgDir.FullName -Recurse -Include "*.control","*.sql" | ForEach-Object {
+            if ($_.Name -match '^pg_trickle--\d+\.\d+\.\d+--(\d+\.\d+\.\d+)\.sql$') {
+              if ([version]$Matches[1] -gt [version]$version) {
+                Write-Host "Excluding future migration SQL $($_.Name) from v${version} package"
+                return
+              }
+            } elseif ($_.Name -match '^pg_trickle--(\d+\.\d+\.\d+)\.sql$' -and $Matches[1] -ne $version) {
+              Write-Host "Excluding install SQL for v$($Matches[1]) from v${version} package"
+              return
+            }
             Copy-Item $_.FullName "dist\${archiveName}\extension\"
           }
 
@@ -639,7 +671,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3.0.3
+        uses: softprops/action-gh-release@v3.0.4
         with:
           body: ${{ steps.changelog.outputs.notes }}
           files: |

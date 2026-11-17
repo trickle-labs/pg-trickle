@@ -71,16 +71,19 @@ async fn test_keyless_multiset_duplicate_rows() {
     db.assert_st_matches_query("km_dup_st", "SELECT x FROM km_dup")
         .await;
 
-    // Insert more duplicates
+    // Insert more duplicates. A manual refresh may be skipped with a NOTICE
+    // when the background scheduler holds the table lock; require actual
+    // multiset convergence, not just a successful SQL function return.
     db.execute("INSERT INTO km_dup VALUES (1),(1),(2)").await;
-    db.refresh_st("km_dup_st").await;
+    db.refresh_st_until_converged("km_dup_st").await;
     db.assert_st_matches_query("km_dup_st", "SELECT x FROM km_dup")
         .await;
 
-    // Delete some (but not all) duplicates
+    // Delete some (but not all) duplicates, again requiring a completed
+    // refresh and exact multiplicity rather than a skipped no-op.
     db.execute("DELETE FROM km_dup WHERE ctid IN (SELECT ctid FROM km_dup WHERE x = 1 LIMIT 2)")
         .await;
-    db.refresh_st("km_dup_st").await;
+    db.refresh_st_until_converged("km_dup_st").await;
     db.assert_st_matches_query("km_dup_st", "SELECT x FROM km_dup")
         .await;
 }

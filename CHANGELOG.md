@@ -225,6 +225,36 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ### Fixes
 
+- Keep successful stream-table resumes from being undone by late refresh-worker
+  failures or the dispatcher's failure safety net, using per-member recovery
+  generation fences (#1438).
+
+- Detect `DROP TABLE` on partition children (including nested children)
+  without a preceding DETACH, reinitialize affected parent stream tables and
+  downstream materializations, and preserve the ability to detect drops when
+  upgrading existing dependencies (#1418).
+- Reinitialize automatically on ordinary ATTACH/DETACH while retaining
+  fail-closed suspension for two-phase `DETACH ... CONCURRENTLY` (#1418).
+- Explain blocked per-table WAL CDC requests in the health view and server
+  diagnostics, including missing REPLICA IDENTITY FULL and unsupported
+  partitioned-source cutover (#1418).
+
+- Prevent sustained application load from indefinitely deferring scheduled
+  refreshes. Due work resumes at the capped polling backoff while writers are
+  still active, in both parallel and sequential scheduling modes (#1412).
+- Keep scheduled refreshes progressing under concurrent writes when PostgreSQL
+  reports an active transaction without a start time. Missing age diagnostics
+  no longer block refreshes; uncommitted changes remain protected (#1412).
+- Recursive `UNION` reachability now removes rows after deletions in
+  recursive sources, preserves alternate paths, and handles cycle-closing
+  inserts in IMMEDIATE mode without type or duplicate-upsert errors (#1411).
+  Mixed DELETE/UPDATE batches recompute the fixed point and apply its delta;
+  insert-only batches remain incremental. Existing divergent stream tables
+  should be fully refreshed or rebuilt once after installing the fix.
+- The recursive depth guard now applies only to `UNION ALL` propagation.
+  `UNION` retains PostgreSQL set semantics, including finite cyclic and
+  deep graphs. Definitions producing infinitely many distinct tuples still
+  require a termination predicate or PostgreSQL `statement_timeout`.
 - Keep stream tables active after `REPLICA IDENTITY FULL` or an empty partition
   attach when auto CDC is still using triggers.
 - Switching a FULL stream table to DIFFERENTIAL or AUTO now initializes the

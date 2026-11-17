@@ -75,7 +75,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.history_prune_interval_seconds` | `int4` | `60` | Default: 60 seconds. |
 | `pg_trickle.history_retention_days` | `int4` | `90` | Default: 90 days. |
 | `pg_trickle.invalidation_ring_capacity` | `int4` | `1024` | Default: 1024. |
-| `pg_trickle.ivm_recursive_max_depth` | `int4` | `100` | Set to 0 to disable the depth guard (allow unlimited recursion). |
+| `pg_trickle.ivm_recursive_max_depth` | `int4` | `100` | Set to 0 to disable the UNION ALL depth guard. |
 | `pg_trickle.ivm_topk_max_limit` | `int4` | `1000` | TopK queries with `LIMIT > threshold` are rejected in IMMEDIATE mode because inline recomputation of large result sets adds unacceptable latency to the trigger path. |
 | `pg_trickle.ivm_use_enr` | `bool` | `false` | Transition ENRs are not available across the PL/pgSQL-to-Rust SPI boundary, so pg_trickle currently uses the temp-table path regardless of this value. |
 | `pg_trickle.l1_cache_max_entries` | `int4` | `256` | Note: `pg_trickle.template_cache_max_entries` caps the L2 (MERGE template) cache; this GUC caps the L0/L1 (delta-template / placeholder-resolver) caches that live in `src/dvm/mod.rs`. |

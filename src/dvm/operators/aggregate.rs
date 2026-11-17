@@ -166,7 +166,7 @@ fn build_group_filter(
 fn special_aggregate_delta_filter(aggregates: &[AggExpr], child: &OpTree) -> Option<String> {
     let filters: Vec<String> = aggregates
         .iter()
-        .filter(|agg| needs_special_value_rescan(agg))
+        .filter(|agg| needs_special_value_rescan(agg, child))
         .map(|agg| {
             let state_guard = if agg.uses_incremental_nonfinite_state(child) {
                 format!(
@@ -201,10 +201,59 @@ fn special_state_delta_exprs(
     (state_for("I"), state_for("D"))
 }
 
-fn needs_special_value_rescan(agg: &AggExpr) -> bool {
-    !agg.is_distinct
-        && (matches!(agg.function, AggFunc::Sum | AggFunc::Avg)
+fn needs_special_value_rescan(agg: &AggExpr, child: &OpTree) -> bool {
+    if agg.is_distinct
+        || !(matches!(agg.function, AggFunc::Sum | AggFunc::Avg)
             || agg.function.needs_sum_of_squares())
+    {
+        return false;
+    }
+
+    let type_oid = if let Some(argument) = agg.analyzed_argument.as_ref() {
+        Some(argument.type_oid)
+    } else if let Some(Expr::ColumnRef {
+        table_alias,
+        column_name,
+    }) = agg.argument.as_ref()
+    {
+        source_column_type_oid(child, table_alias.as_deref(), column_name)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    !type_oid.is_some_and(|type_oid| matches!(type_oid, 20 | 21 | 23))
+}
+
+/// Resolve a source column only through tree shapes where scan type metadata
+/// remains exact. Unsupported or ambiguous shapes retain the special-value
+/// rescan path.
+fn source_column_type_oid(
+    tree: &OpTree,
+    table_alias: Option<&str>,
+    column_name: &str,
+) -> Result<Option<u32>, ()> {
+    match tree {
+        OpTree::Scan { alias, columns, .. } => {
+            if table_alias.is_some_and(|table| table != alias) {
+                return Ok(None);
+            }
+            Ok(columns
+                .iter()
+                .find(|column| column.name == column_name)
+                .map(|column| column.type_oid))
+        }
+        OpTree::Filter { child, .. } => source_column_type_oid(child, table_alias, column_name),
+        OpTree::InnerJoin { left, right, .. } if table_alias.is_some() => {
+            let left = source_column_type_oid(left, table_alias, column_name)?;
+            let right = source_column_type_oid(right, table_alias, column_name)?;
+            match (left, right) {
+                (Some(_), Some(_)) => Err(()),
+                (left, right) => Ok(left.or(right)),
+            }
+        }
+        _ => Err(()),
+    }
 }
 
 fn internal_group_columns(group_output: &[String]) -> Vec<String> {
@@ -1416,7 +1465,7 @@ impl RescanConfig<'_> {
             || agg.function.is_group_rescan()
             || matches!(agg.function, AggFunc::Min | AggFunc::Max)
             || (self.include_special_aggs
-                && needs_special_value_rescan(agg)
+                && needs_special_value_rescan(agg, child)
                 && !agg.uses_incremental_nonfinite_state(child))
     }
 }
@@ -1602,7 +1651,7 @@ fn build_rescan_cte(
                 quote_ident(&format!("__pgt_rescan_special_{}", agg.alias)),
             ));
         }
-        if config.include_special_aggs && needs_special_value_rescan(agg) {
+        if config.include_special_aggs && needs_special_value_rescan(agg, child) {
             selects.push(format!(
                 "{} AS {}",
                 agg_sum_rescan_sql(agg),
@@ -2179,7 +2228,7 @@ fn generate_direct_agg_delta(
             quote_ident(&format!("__del_{}", agg.alias)),
         ));
 
-        if needs_special_value_rescan(agg) {
+        if needs_special_value_rescan(agg, scan) {
             let argument = case_rewrites
                 .get(&agg.alias)
                 .cloned()
@@ -2419,7 +2468,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             delta_selects.push(format!("{ins_expr} AS {}", quote_ident(&alias_i)));
             delta_selects.push(format!("{del_expr} AS {}", quote_ident(&alias_d)));
 
-            if needs_special_value_rescan(agg) {
+            if needs_special_value_rescan(agg, child) {
                 let argument = agg
                     .argument
                     .as_ref()
@@ -2589,7 +2638,9 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     };
     let rescan_config = RescanConfig {
         force_all_aggs: use_having_rescan,
-        include_special_aggs: aggregates.iter().any(needs_special_value_rescan),
+        include_special_aggs: aggregates
+            .iter()
+            .any(|agg| needs_special_value_rescan(agg, child)),
         special_value_filter: special_value_filter.as_deref(),
     };
     let rescan_cte = build_rescan_cte(
@@ -2676,6 +2727,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         // numeric values; ordinary changes keep the algebraic path.
         let agg_has_nonnull_aux = matches!(agg.function, AggFunc::Sum) && !agg.is_distinct;
         let agg_has_rescan = rescan_config.includes(agg, child);
+        let has_special_value_delta = needs_special_value_rescan(agg, child);
         let special_state = if agg.uses_incremental_nonfinite_state(child) {
             let state_col = quote_ident(&format!("__pgt_aux_special_{}", st_col_name(&agg.alias)));
             let inserts = quote_ident(&format!("__ins_special_{}", agg.alias));
@@ -2714,6 +2766,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         let algebraic_value = agg_merge_expr_mapped(
             agg,
             agg_has_rescan,
+            has_special_value_delta,
             use_having_rescan,
             agg_has_nonnull_aux,
             &st_col_name(&agg.alias),
@@ -2798,7 +2851,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                     &format!("({value})::numeric"),
                 );
                 format!("CASE WHEN {use_state} THEN {special_value} ELSE {aux_sum_value} END")
-            } else if needs_special_value_rescan(agg) && agg_has_rescan {
+            } else if needs_special_value_rescan(agg, child) && agg_has_rescan {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN COALESCE(r.{}, 0) ELSE {aux_sum_value} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
@@ -2837,7 +2890,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             let algebraic = format!(
                 "COALESCE(st.{aux_sum2}, 0) + COALESCE(d.{ins_sum2}, 0) - COALESCE(d.{del_sum2}, 0)"
             );
-            let value = if agg_has_rescan {
+            let value = if agg_has_rescan && has_special_value_delta {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {algebraic} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
@@ -2907,28 +2960,63 @@ END AS __pgt_meta_action"#
     };
     merge_selects.push(action_case);
 
-    // Join condition on group-by columns
+    // The indexed identity lookup is valid only when the FULL refresh used
+    // exactly the same ordered GROUP_KEY encoding as this delta. Unusual
+    // projections, type fallbacks, or legacy row-identity paths can store a
+    // different identity: preserve the original key-based join for those.
+    let stored_group_keys: Vec<String> = group_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let internal = format!("__pgt_group_{index}");
+            let storage_name = if column.starts_with("__pgt_group_") {
+                ctx.st_column_alias_map
+                    .as_ref()
+                    .and_then(|map| map.get(&internal))
+                    .cloned()
+                    .unwrap_or_else(|| st_col_name(column))
+            } else {
+                st_col_name(column)
+            };
+            format!("sub.{}", quote_ident(&storage_name))
+        })
+        .collect();
+    // FULL encoding does not parenthesize composite ROW elements; delta
+    // encoding does. The parentheses do not change values or types, but
+    // these SQL strings must be compared in FULL's exact canonical form.
+    // An unknown FULL identity (e.g. execution-harness state or legacy
+    // targets) must not assume that a GROUP_KEY probe will find the row.
+    let can_probe_row_identity = ctx
+        .st_full_row_identity_expr
+        .as_ref()
+        .is_some_and(|full_expr| {
+            full_expr == &crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys)
+        });
+
+    // PostgreSQL 18 cannot use a B-tree/hash join for a composite
+    // IS NOT DISTINCT FROM predicate; it scanned the stream table for every
+    // changed group (#1405). For matching V3 GROUP_KEY identities, use the
+    // row-probe expression index. The probe can collide, so always compare
+    // the complete bytea identity too. Typed encoding preserves NULL keys.
     let join_cond = if group_columns.is_empty() {
+        // Scalar aggregates have a single persistent row.
         "TRUE".to_string()
+    } else if can_probe_row_identity {
+        format!(
+            "pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1({row_id_expr}) \
+             AND st.__pgt_row_id = {row_id_expr}"
+        )
     } else {
+        // FULL refresh did not use the delta's group identity. A key-based
+        // fallback is necessary for correctness, even though it is slower.
         group_columns
             .iter()
-            .enumerate()
-            .map(|(index, c)| {
-                let internal = format!("__pgt_group_{index}");
-                let st_c = if c.starts_with("__pgt_group_") {
-                    ctx.st_column_alias_map
-                        .as_ref()
-                        .and_then(|map| map.get(&internal))
-                        .cloned()
-                        .unwrap_or_else(|| st_col_name(c))
-                } else {
-                    st_col_name(c)
-                };
+            .zip(&stored_group_keys)
+            .map(|(column, stored)| {
+                let storage_ref = stored.replacen("sub.", "st.", 1);
                 format!(
-                    "st.{st_qc} IS NOT DISTINCT FROM d.{d_qc}",
-                    st_qc = quote_ident(&st_c),
-                    d_qc = quote_ident(c),
+                    "{storage_ref} IS NOT DISTINCT FROM d.{}",
+                    quote_ident(column)
                 )
             })
             .collect::<Vec<_>>()
@@ -3566,6 +3654,7 @@ fn sum_nonnull_count_expr(alias: &str, st_col: &str, having_rescan: bool) -> Str
 fn agg_merge_expr_mapped(
     agg: &AggExpr,
     has_rescan: bool,
+    has_special_value_delta: bool,
     having_rescan: bool,
     has_nonnull_aux: bool,
     st_col: &str,
@@ -3617,7 +3706,7 @@ fn agg_merge_expr_mapped(
                     format!("COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)");
                 let value =
                     initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
-                let value = if has_rescan {
+                let value = if has_rescan && has_special_value_delta {
                     format!(
                         "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
                         quote_ident(&format!("__special_{alias}")),
@@ -3671,7 +3760,7 @@ fn agg_merge_expr_mapped(
                  / NULLIF(COALESCE(st.{aux_count_col}, 0) + COALESCE(d.{ins_cnt}, 0) - COALESCE(d.{del_cnt}, 0), 0)",
             );
             let value = initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
-            if has_rescan {
+            if has_rescan && has_special_value_delta {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
                     quote_ident(&format!("__special_{alias}")),
@@ -3724,7 +3813,7 @@ fn agg_merge_expr_mapped(
                 var_expr
             };
             let algebraic = format!("CASE WHEN {null_guard} THEN NULL ELSE {body} END");
-            if has_rescan {
+            if has_rescan && has_special_value_delta {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {algebraic} END",
                     quote_ident(&format!("__special_{alias}")),
@@ -3938,9 +4027,9 @@ fn agg_merge_expr_mapped(
 
 /// Convenience wrapper: uses the aggregate's own alias as the ST column name.
 ///
-/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, false, false, &agg.alias, None)`.
+/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, has_rescan, false, false, &agg.alias, None)`.
 pub fn agg_merge_expr(agg: &AggExpr, has_rescan: bool) -> String {
-    agg_merge_expr_mapped(agg, has_rescan, false, false, &agg.alias, None)
+    agg_merge_expr_mapped(agg, has_rescan, has_rescan, false, false, &agg.alias, None)
 }
 
 #[cfg(test)]
@@ -4117,6 +4206,8 @@ mod tests {
     #[test]
     fn test_diff_aggregate_standard_path_when_child_is_filter() {
         let mut ctx = test_ctx_with_st("public", "st");
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(sub.\"region\"))".into());
         let child = filter(
             binop(">", colref("amount"), lit("0")),
             scan(1, "t", "public", "t", &["id", "region", "amount"]),
@@ -4129,6 +4220,64 @@ mod tests {
         assert_sql_not_contains(&sql, "LATERAL");
         // Should use standard path with __pgt_action
         assert_sql_contains(&sql, "__pgt_action");
+        // The storage probe must use the GROUP_KEY identity instead of an
+        // unindexable null-safe join on the storage table's group columns.
+        assert_sql_contains(&sql, "pgtrickle.row_probe_v1(st.__pgt_row_id)");
+        assert_sql_contains(
+            &sql,
+            "st.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(d.\"region\"))",
+        );
+        assert_sql_not_contains(&sql, "st.\"region\" IS NOT DISTINCT FROM d.\"region\"");
+    }
+
+    #[test]
+    fn test_grouped_aggregate_probe_keeps_all_nullable_composite_key_parts() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        // This is exactly the canonical FULL-refresh row ID SQL, without
+        // the harmless extra parentheses in the DVM's composite ROW SQL.
+        ctx.st_full_row_identity_expr = Some(
+            "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(sub.\"region\", sub.\"day\"))".into(),
+        );
+        let child = filter(
+            binop(">", colref("amount"), lit("0")),
+            scan(1, "t", "public", "t", &["id", "region", "day", "amount"]),
+        );
+        let tree = aggregate(
+            vec![colref("region"), colref("day")],
+            vec![count_star("cnt")],
+            child,
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        let identity = "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW((d.\"region\"), (d.\"day\")))";
+        assert!(
+            sql.contains(&format!("pgtrickle.row_probe_v1({identity})")),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!("st.__pgt_row_id = {identity}")),
+            "{sql}"
+        );
+        assert!(!sql.contains("st.\"region\" IS NOT DISTINCT FROM"), "{sql}");
+    }
+
+    #[test]
+    fn test_grouped_aggregate_preserves_key_join_for_incompatible_full_identity() {
+        // Simulate a target whose FULL refresh used another identity domain.
+        // The storage lookup must preserve null-safe group matching instead
+        // of using a GROUP_KEY that would miss existing rows.
+        let mut ctx = test_ctx_with_st("public", "st");
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(sub.*))".into());
+        let tree = aggregate(
+            vec![colref("region")],
+            vec![count_star("cnt")],
+            scan(1, "t", "public", "t", &["id", "region"]),
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(&sql, "st.\"region\" IS NOT DISTINCT FROM d.\"region\"");
+        assert_sql_not_contains(&sql, "pgtrickle.row_probe_v1(st.__pgt_row_id)");
     }
 
     #[test]
@@ -4206,6 +4355,7 @@ mod tests {
 
         // G-S1: change detection guard should be present
         assert_sql_contains(&sql, "IS DISTINCT FROM");
+        assert!(!sql.contains("__special_total"));
     }
 
     // ── agg_delta_exprs tests ───────────────────────────────────────
@@ -4234,11 +4384,20 @@ mod tests {
         assert!(special_delta.contains("(amount)::text IN ('Infinity', '-Infinity', 'NaN')"));
 
         let mut child = scan(1, "t", "public", "t", &["amount"]);
+        let avg = avg_col("amount", "average");
+        let special_aggs = [sum_col("amount", "total"), avg.clone()];
+        assert!(
+            special_aggs
+                .iter()
+                .all(|agg| !needs_special_value_rescan(agg, &child))
+        );
+        assert!(special_aggregate_delta_filter(&special_aggs, &child).is_none());
+        let mut unknown_arg = sum_col("amount", "unknown");
+        unknown_arg.argument = Some(Expr::Raw("amount * 1.0".into()));
+        assert!(needs_special_value_rescan(&unknown_arg, &child));
         if let OpTree::Scan { columns, .. } = &mut child {
             columns[0].type_oid = 1700;
         }
-        let avg = avg_col("amount", "average");
-        let special_aggs = [sum_col("amount", "total"), avg.clone()];
         let special_filter = special_aggregate_delta_filter(&special_aggs, &child).unwrap();
         assert!(special_filter.contains("__special_total"));
         assert!(special_filter.contains("__special_average"));
@@ -4260,6 +4419,7 @@ mod tests {
         let merge = agg_merge_expr_mapped(
             &sum_col("amount", "total"),
             true,
+            true,
             false,
             true,
             "total",
@@ -4268,25 +4428,64 @@ mod tests {
         assert!(merge.contains("d.\"__special_total\""));
         assert!(merge.contains("r.\"total\""));
 
-        let avg_merge = agg_merge_expr_mapped(&avg, true, false, false, "average", None);
+        let avg_merge = agg_merge_expr_mapped(&avg, true, true, false, false, "average", None);
         assert!(avg_merge.contains("d.\"__special_average\""));
         assert!(avg_merge.contains("r.\"average\""));
     }
 
     #[test]
+    fn test_join_special_value_rescan_resolves_integer_argument_type() {
+        let make_join = |amount_type_oid| {
+            let mut orders = scan(1, "orders", "public", "o", &["id", "amount"]);
+            if let OpTree::Scan { columns, .. } = &mut orders {
+                columns[1].type_oid = amount_type_oid;
+            }
+            inner_join(
+                binop(
+                    "=",
+                    Expr::ColumnRef {
+                        table_alias: Some("o".into()),
+                        column_name: "id".into(),
+                    },
+                    Expr::ColumnRef {
+                        table_alias: Some("c".into()),
+                        column_name: "id".into(),
+                    },
+                ),
+                orders,
+                scan(2, "customers", "public", "c", &["id"]),
+            )
+        };
+        let mut sum = sum_col("amount", "total");
+        sum.argument = Some(Expr::ColumnRef {
+            table_alias: Some("o".into()),
+            column_name: "amount".into(),
+        });
+
+        assert!(!needs_special_value_rescan(&sum, &make_join(23)));
+        assert!(needs_special_value_rescan(&sum, &make_join(701)));
+
+        sum.argument = Some(colref("amount"));
+        assert!(needs_special_value_rescan(&sum, &make_join(23)));
+    }
+
+    #[test]
     fn test_statistical_special_values_rescan_auxiliaries() {
         let stddev = stddev_pop_col("amount", "stddev");
-        let child = scan(1, "t", "public", "t", &["amount"]);
+        let mut child = scan(1, "t", "public", "t", &["amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[0].type_oid = 1700;
+        }
         let filter = special_aggregate_delta_filter(std::slice::from_ref(&stddev), &child).unwrap();
         assert!(filter.contains("__special_stddev"));
-        assert!(needs_special_value_rescan(&stddev));
+        assert!(needs_special_value_rescan(&stddev, &child));
         assert_eq!(
             agg_sum2_rescan_sql(&stddev),
             "COALESCE(SUM((amount)::numeric * (amount)::numeric), 0)"
         );
         assert_eq!(agg_sum_rescan_sql(&stddev), "COALESCE(SUM(amount), 0)");
 
-        let merge = agg_merge_expr_mapped(&stddev, true, false, false, "stddev", None);
+        let merge = agg_merge_expr_mapped(&stddev, true, true, false, false, "stddev", None);
         assert!(merge.contains("d.\"__special_stddev\""));
         assert!(merge.contains("r.\"stddev\""));
     }
@@ -5965,6 +6164,10 @@ mod tests {
     #[test]
     fn test_diff_aggregate_mixed_with_statistical() {
         let mut ctx = test_ctx_with_st("public", "st");
+        let mut child = scan(1, "t", "public", "t", &["dept", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 1700;
+        }
         let agg = OpTree::Aggregate {
             group_by: vec![colref("dept")],
             aggregates: vec![
@@ -5972,7 +6175,7 @@ mod tests {
                 sum_col("amount", "total"),
                 stddev_pop_col("amount", "sd_pop"),
             ],
-            child: Box::new(scan(1, "t", "public", "t", &["dept", "amount"])),
+            child: Box::new(child),
         };
         let result = diff_aggregate(&mut ctx, &agg);
         assert!(
@@ -6265,7 +6468,10 @@ mod tests {
     #[test]
     fn test_sum_rescan_is_scoped_to_special_deltas() {
         let mut ctx = test_ctx_with_st("public", "st");
-        let child = scan(1, "t", "public", "t", &["region", "amount"]);
+        let mut child = scan(1, "t", "public", "t", &["region", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 99999;
+        }
         let tree = aggregate(
             vec![colref("region")],
             vec![sum_col("amount", "total")],
@@ -6304,9 +6510,12 @@ mod tests {
 
     #[test]
     fn test_combined_algebraic_aggs_scope_special_sum_rescan() {
-        // SUM, COUNT, AVG are algebraic; only special SUM deltas are rescanned.
+        // Unknown SUM inputs retain the conservative special-value rescan.
         let mut ctx = test_ctx_with_st("public", "st");
-        let child = scan(1, "t", "public", "t", &["region", "amount"]);
+        let mut child = scan(1, "t", "public", "t", &["region", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 99999;
+        }
         let tree = aggregate(
             vec![colref("region")],
             vec![
@@ -6430,12 +6639,12 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // No unrestricted rescan; only groups with special-value deltas rescan.
+        // Integer SUM inputs need no special-value rescan.
         assert!(
             !sql.contains("agg_rescan"),
             "SUM above plain scan should not use an unrestricted rescan CTE:\n{sql}"
         );
-        assert_sql_contains(&sql, "agg_special_groups");
+        assert_sql_not_contains(&sql, "agg_special_groups");
 
         assert_sql_contains(&sql, "__ins_nonnull_total");
         assert_sql_contains(&sql, "__del_nonnull_total");
@@ -6451,6 +6660,26 @@ mod tests {
                 .columns
                 .contains(&"__pgt_aux_nonnull_total".to_string())
         );
+    }
+
+    #[test]
+    fn test_having_integer_sum_does_not_reference_special_delta() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        ctx.having_filter = true;
+        let mut child = scan(1, "t", "public", "t", &["region", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 23;
+        }
+        let tree = aggregate(
+            vec![colref("region")],
+            vec![sum_col("amount", "total")],
+            child,
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "agg_rescan");
+        assert_sql_not_contains(&sql, "d.\"__special_total\"");
     }
 
     #[test]
@@ -7180,11 +7409,17 @@ mod tests {
                 && sql.contains("m.\"__pgt_group_1\" AS \"source_record_id\""),
             "{sql}"
         );
+        // Without a verified FULL identity, a projected/renamed aggregate
+        // must keep the null-safe key lookup (including its alias mapping).
         assert!(
             sql.contains("st.\"left_source_record_id\" IS NOT DISTINCT FROM d.\"__pgt_group_0\"")
                 && sql.contains(
                     "st.\"right_source_record_id\" IS NOT DISTINCT FROM d.\"__pgt_group_1\""
                 ),
+            "{sql}"
+        );
+        assert!(
+            !sql.contains("pgtrickle.row_probe_v1(st.__pgt_row_id)"),
             "{sql}"
         );
         assert!(!sql.contains("m.\"source_record_id\""), "{sql}");
