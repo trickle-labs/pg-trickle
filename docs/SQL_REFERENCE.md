@@ -1630,6 +1630,8 @@ For an eligible expired partition, TRIM removes its groups and RETAIN preserves
 them. RETAIN rejects operations that would rebuild sealed history from an
 incomplete source. `OFF` is allowed only while no history has been sealed and
 no retention cut is pending.
+After sealing, automatic cost-based FULL fallbacks continue as differential
+refreshes; explicit FULL requests and hard resource limits still fail closed.
 Eligible concurrent DETACH operations persist a pending cut, replay CDC, and
 finish the cut in PostgreSQL's second detach transaction. If interrupted,
 complete the detach with `ALTER TABLE ... DETACH PARTITION ... FINALIZE`.

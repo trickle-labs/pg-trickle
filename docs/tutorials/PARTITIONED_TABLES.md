@@ -147,6 +147,10 @@ to rebuild or correct historical aggregates; deleting and recreating the
 stream deliberately discards its retained history. The whole-table TRUNCATE
 refresh optimization is rejected once history has been sealed because it
 cannot distinguish live from retained groups.
+Automatic change-ratio and cost heuristics continue with DIFFERENTIAL instead
+of choosing an unreconstructible FULL refresh. Explicit FULL requests and
+hard buffer or delta-size limits can still reject refresh; inspect the error
+and adjust those limits or restore the source history before retrying.
 
 The contract is intentionally narrow:
 

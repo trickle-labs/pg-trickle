@@ -1746,6 +1746,79 @@ async fn test_partition_concurrent_detach_resolves_caller_search_path() {
 }
 
 #[tokio::test]
+async fn test_retained_history_uses_differential_above_auto_fallback_threshold() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE busy_retain_src (id INT NOT NULL, d DATE NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE busy_retain_old PARTITION OF busy_retain_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE busy_retain_live PARTITION OF busy_retain_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO busy_retain_src VALUES (1,'2025-06-01',10),(2,'2026-06-01',20)")
+        .await;
+    db.create_st(
+        "busy_retain_st",
+        "SELECT d, sum(amount) AS total, count(*) AS n FROM busy_retain_src GROUP BY d",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('busy_retain_st', 'RETAIN', 'd', '2026-01-01')").await;
+    db.execute("DROP TABLE busy_retain_old").await;
+    db.execute("INSERT INTO busy_retain_src SELECT g, '2026-06-01'::date, 1 FROM generate_series(3,12) AS g").await;
+    let mut tx = db.pool.begin().await.expect("begin refresh transaction");
+    sqlx::query("SET LOCAL pg_trickle.differential_max_change_ratio = 0.001")
+        .execute(&mut *tx)
+        .await
+        .expect("set low fallback threshold");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('busy_retain_st')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh without rebuilding sealed history");
+    tx.commit().await.expect("commit differential refresh");
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM busy_retain_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read historical and live results");
+    assert_eq!(
+        rows,
+        vec![("2025-06-01".into(), 10, 1), ("2026-06-01".into(), 30, 11)]
+    );
+    let action: (String, String, bool) = sqlx::query_as("SELECT h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'busy_retain_st' ORDER BY h.refresh_id DESC LIMIT 1").fetch_one(&db.pool).await.expect("read effective refresh action");
+    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+
+    db.execute("INSERT INTO busy_retain_src SELECT g, '2026-06-01'::date, 1 FROM generate_series(13,10012) AS g").await;
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET auto_threshold = NULL WHERE pgt_name = 'busy_retain_st'").await;
+    let mut tx = db.pool.begin().await.expect("begin capped refresh");
+    sqlx::query("SELECT set_config('pg_trickle.differential_max_change_ratio', '0', true), set_config('pg_trickle.merge_work_mem_mb', '64', true), set_config('pg_trickle.delta_work_mem_cap_mb', '8', true)")
+        .execute(&mut *tx).await.expect("set capped planner budget");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('busy_retain_st')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh at the work-memory cap");
+    tx.commit().await.expect("commit capped refresh");
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM busy_retain_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read results after capped refresh");
+    assert_eq!(
+        rows,
+        vec![
+            ("2025-06-01".into(), 10, 1),
+            ("2026-06-01".into(), 10030, 10011)
+        ]
+    );
+    let action: (String, String, bool) = sqlx::query_as("SELECT h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'busy_retain_st' ORDER BY h.refresh_id DESC LIMIT 1").fetch_one(&db.pool).await.expect("read capped refresh action");
+    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    let detail: String = sqlx::query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'busy_retain_st' ORDER BY h.refresh_id DESC LIMIT 1").fetch_one(&db.pool).await.expect("read capped planner evidence");
+    let evidence: serde_json::Value = serde_json::from_str(&detail)
+        .unwrap_or_else(|_| panic!("unexpected planner evidence: {detail}"));
+    assert_eq!(evidence["planner_hint_tier"], "nestloop+workmem");
+}
+
+#[tokio::test]
 async fn test_retained_history_blocks_rebuild_query_change_and_restore() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
@@ -3237,6 +3310,8 @@ async fn test_retention_scheduled_refresh_preserves_sealed_history() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
         .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.differential_max_change_ratio = 0.001")
+        .await;
     db.reload_config_and_wait().await;
     db.execute("CREATE TABLE retention_scheduled_src (d date NOT NULL, account text NOT NULL, amount integer NOT NULL) PARTITION BY RANGE (d)").await;
     db.execute("CREATE TABLE retention_scheduled_old PARTITION OF retention_scheduled_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
@@ -3296,11 +3371,11 @@ async fn test_retention_scheduled_refresh_preserves_sealed_history() {
     let marker: i64 = db
         .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
         .await;
-    db.execute("INSERT INTO retention_scheduled_src VALUES ('2026-06-01','a',7)")
+    db.execute("INSERT INTO retention_scheduled_src SELECT '2026-06-01'::date, 'a', 7 FROM generate_series(1,10)")
         .await;
     let mut expected = historical;
-    expected[1].2 += 7;
-    expected[1].3 += 1;
+    expected[1].2 += 70;
+    expected[1].3 += 10;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(

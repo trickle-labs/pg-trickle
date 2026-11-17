@@ -794,6 +794,7 @@ pub(crate) fn apply_planner_hints(
     st_relid: pg_sys::Oid,
     scan_count: usize,
     tuning: &crate::catalog::RefreshRuntimeTuning,
+    unreconstructible_history: bool,
 ) -> bool {
     if crate::refresh::is_retention_catchup() {
         // Prefer probing affected groups over scanning the materialized history.
@@ -917,8 +918,15 @@ pub(crate) fn apply_planner_hints(
         let requested_mb = tuning.merge_work_mem_mb;
 
         let cap = tuning.delta_work_mem_cap_mb;
-        let (mb, fallback_to_full) =
-            planner_work_mem(requested_mb, cap, crate::refresh::current_full_policy());
+        let (mb, fallback_to_full) = planner_work_mem(
+            requested_mb,
+            cap,
+            if unreconstructible_history {
+                crate::refresh::FullPolicy::Error
+            } else {
+                crate::refresh::current_full_policy()
+            },
+        );
         if fallback_to_full {
             pgrx::notice!(
                 "[pg_trickle] SCAL-3: large-delta work_mem ({requested_mb}MB) exceeds \

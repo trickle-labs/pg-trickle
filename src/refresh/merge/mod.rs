@@ -1728,9 +1728,12 @@ pub fn execute_differential_refresh_with_tuning(
     } else {
         None
     };
-    // Retention catch-up cannot rebuild and must not count every output group.
+    // Cost heuristics must not select a rebuild when historical rows are gone.
+    let unreconstructible_history =
+        crate::dvm::retention::has_unreconstructible_history(st.pgt_id)?;
     let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential
-        || crate::refresh::is_retention_catchup();
+        || crate::refresh::is_retention_catchup()
+        || unreconstructible_history;
     // Only additive UNION ALL scans can safely use one combined denominator.
     // In a join, a tiny changed dimension could affect most of the output,
     // so its independent per-source threshold must remain in force.
@@ -2833,8 +2836,13 @@ pub fn execute_differential_refresh_with_tuning(
     // SET LOCAL hints that are automatically reset at transaction end.
     // Deep joins (5+ tables) get aggressive hints to avoid pathological
     // plans that spill excessive temp files.
-    let work_mem_cap_exceeded =
-        apply_planner_hints(total_change_count, st.pgt_relid, scan_count, tuning);
+    let work_mem_cap_exceeded = apply_planner_hints(
+        total_change_count,
+        st.pgt_relid,
+        scan_count,
+        tuning,
+        unreconstructible_history,
+    );
 
     // ── SCAL-3: Work-mem cap exceeded — fall back to FULL ───────────
     if work_mem_cap_exceeded {

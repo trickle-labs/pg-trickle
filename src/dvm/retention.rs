@@ -263,11 +263,10 @@ fn state_has_sealed_history(state: &serde_json::Value) -> Result<bool, &'static 
     )
 }
 
-/// Fail closed when a whole-query operation would discard retained history.
 #[cfg(not(test))]
-pub(crate) fn ensure_history_reconstructible(
+fn unreconstructible_history_reason(
     pgt_id: i64,
-) -> Result<(), crate::error::PgTrickleError> {
+) -> Result<Option<&'static str>, crate::error::PgTrickleError> {
     use crate::error::PgTrickleError;
     use pgrx::prelude::*;
     Spi::connect(|client| {
@@ -292,19 +291,43 @@ pub(crate) fn ensure_history_reconstructible(
                 ))
             })? {
                 if state.0.get("pending").is_some_and(|value| !value.is_null()) {
-                    return Err(PgTrickleError::InvalidArgument(
-                        "a pending retention detach must finish before rebuilding or changing the policy; if interrupted, run DETACH PARTITION FINALIZE".into(),
+                    return Ok(Some(
+                        "a pending retention detach must finish before rebuilding or changing the policy; if interrupted, run DETACH PARTITION FINALIZE",
                     ));
                 }
-                return Err(PgTrickleError::InvalidArgument(
+                return Ok(Some(
                     "retained partition history cannot be reconstructed from the current source; \
-                     a whole-query rebuild or restore would discard it"
-                        .into(),
+                     a whole-query rebuild or restore would discard it",
                 ));
             }
         }
-        Ok(())
+        Ok(None)
     })
+}
+
+/// Fail closed when a whole-query operation would discard retained history.
+#[cfg(not(test))]
+pub(crate) fn ensure_history_reconstructible(
+    pgt_id: i64,
+) -> Result<(), crate::error::PgTrickleError> {
+    if let Some(reason) = unreconstructible_history_reason(pgt_id)? {
+        return Err(crate::error::PgTrickleError::InvalidArgument(reason.into()));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+pub(crate) fn has_unreconstructible_history(
+    pgt_id: i64,
+) -> Result<bool, crate::error::PgTrickleError> {
+    Ok(unreconstructible_history_reason(pgt_id)?.is_some())
+}
+
+#[cfg(test)]
+pub(crate) fn has_unreconstructible_history(
+    _pgt_id: i64,
+) -> Result<bool, crate::error::PgTrickleError> {
+    Ok(false)
 }
 
 #[cfg(test)]
