@@ -426,9 +426,8 @@ impl DeltaStage {
             // buffer is a catalog-derived, quoted qualified identifier;
             // the frontier is a bound $1::pg_lsn parameter, not SQL text.
             let probe_sql = format!(
-                "SELECT \\
-                   EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action = 'T'), \\
-                   EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action IN ('I', 'D'))"
+                "SELECT EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action = 'T'), \
+                 EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action IN ('I', 'D'))"
             );
             let (future_truncate, future_changes) =
                 Spi::get_two_with_args::<bool, bool>(&probe_sql, &[new_lsn.into()])
