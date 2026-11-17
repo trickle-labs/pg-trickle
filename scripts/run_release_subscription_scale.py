@@ -138,10 +138,9 @@ def validate_plan_log(output: str, rows: int, subscriptions: int, statistics: st
         raise ValueError("subscription plan log contains no auto_explain plan")
 
 
-def attach_plan_log(path: Path, rows: int, subscriptions: int, statistics: str, result: dict) -> str:
+def archive_plan_log(path: Path, result: dict) -> str:
     if not path.is_file() or path.stat().st_size == 0:
         raise ValueError(f"subscription plan log was not written: {path.name}")
-    validate_plan_log(path.read_text(encoding="utf-8", errors="replace"), rows, subscriptions, statistics)
     compressed_path = path.with_suffix(path.suffix + ".gz")
     with path.open("rb") as source, gzip.open(compressed_path, "wb") as target:
         shutil.copyfileobj(source, target)
@@ -149,6 +148,11 @@ def attach_plan_log(path: Path, rows: int, subscriptions: int, statistics: str, 
     relative_path = compressed_path.relative_to(ROOT).as_posix()
     result["raw_evidence_files"].append(relative_path)
     return relative_path
+
+
+def attach_plan_log(path: Path, rows: int, subscriptions: int, statistics: str, result: dict) -> str:
+    validate_plan_log(path.read_text(encoding="utf-8", errors="replace"), rows, subscriptions, statistics)
+    return archive_plan_log(path, result)
 
 
 def write_measurement(path: Path, result: dict) -> None:
@@ -211,7 +215,14 @@ def main() -> int:
                         report = run_case(rows, subscriptions, statistics, plan_path)
                     except (OSError, RuntimeError, ValueError):
                         if plan_path is not None and plan_path.is_file():
-                            attach_plan_log(plan_path, rows, subscriptions, statistics, result)
+                            try:
+                                archive_plan_log(plan_path, result)
+                            except (OSError, ValueError) as archive_error:
+                                print(
+                                    f"WARNING: could not retain partial plan log {plan_path.name}: {archive_error}",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
                         raise
                     postgres_version = report["postgres"]
                     case = {

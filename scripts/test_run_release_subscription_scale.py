@@ -1,4 +1,6 @@
+import gzip
 import json
+import tempfile
 import unittest
 
 import run_release_subscription_scale as scale
@@ -102,6 +104,17 @@ class SubscriptionScaleTests(unittest.TestCase):
                 0,
                 "unanalyzed",
             )
+
+    def test_partial_plan_log_can_be_archived_without_success_markers(self):
+        partial = "PGVECTOR_SUB_START rows=1000000 subscriptions=1000 analyzed=false round=0\npartial"
+        with tempfile.TemporaryDirectory(dir=scale.ROOT) as directory:
+            path = scale.Path(directory) / "partial.log"
+            path.write_text(partial, encoding="utf-8")
+            result = {"raw_evidence_files": []}
+            archived = scale.archive_plan_log(path, result)
+            with gzip.open(scale.ROOT / archived, "rt", encoding="utf-8") as compressed:
+                self.assertEqual(compressed.read(), partial)
+            self.assertEqual(result["raw_evidence_files"], [archived])
 
 
 if __name__ == "__main__":
