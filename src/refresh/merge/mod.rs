@@ -3521,10 +3521,7 @@ pub fn execute_differential_refresh_with_tuning(
         // source that the delta stage froze at this refresh's NEW LSN.
         let bounded_source = format!(
             "pg_temp.{}",
-            crate::refresh::delta_stage::DeltaStage::bounded_table_name(
-                st.pgt_id,
-                plan.source_oid
-            )
+            crate::refresh::delta_stage::DeltaStage::bounded_table_name(st.pgt_id, plan.source_oid)
         );
         let finalize = crate::refresh::vectorized_agg::algebraic_finalize_sql(
             &plan,
