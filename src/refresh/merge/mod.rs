@@ -2576,8 +2576,7 @@ pub fn execute_differential_refresh_with_tuning(
         // EC-06: Keyless storage uses counted DELETE + plain INSERT.
         // Delta deduplication does not make the target row-id index unique.
         let use_keyless = st.has_keyless_source;
-        let scoped_retention =
-            crate::refresh::is_retention_catchup() && st.st_partition_key.is_none();
+        let scoped_retention = crate::refresh::is_retention_catchup();
         let trigger_delete_template = if scoped_retention {
             build_retention_trigger_delete_sql(&quoted_table, st.pgt_id)
         } else {
@@ -2593,8 +2592,8 @@ pub fn execute_differential_refresh_with_tuning(
         };
 
         let trigger_insert_template = if scoped_retention
-            && use_keyless
-            && (is_dedup || user_cols.iter().any(|c| c == "__pgt_count"))
+            && ((use_keyless && (is_dedup || user_cols.iter().any(|c| c == "__pgt_count")))
+                || (st.st_partition_key.is_some() && !use_keyless))
         {
             build_retention_trigger_insert_sql(&quoted_table, st.pgt_id, &user_cols)
         } else {
@@ -3416,19 +3415,24 @@ pub fn execute_differential_refresh_with_tuning(
     let hash_merge_result: Option<(usize, &str)> = if let Some(ref pk) = st.st_partition_key {
         let method = crate::api::parse_partition_method(pk);
         if method == crate::api::PartitionMethod::Hash {
-            // A1-3b: Parent-level MERGE for HASH partitioned STs.
-            let count = with_stream_owner(st, || {
-                execute_hash_partitioned_merge(
-                    &resolved.merge_sql,
-                    &resolved.resolved_delta_sql,
-                    schema,
-                    name,
-                    st.pgt_relid,
-                    pk,
-                    st.pgt_id,
-                )
-            })?;
-            Some((count, "hash_merge"))
+            if use_explicit_dml {
+                // Downstream capture and trigger semantics require explicit DML.
+                None
+            } else {
+                // A1-3b: Parent-level MERGE for HASH partitioned STs.
+                let count = with_stream_owner(st, || {
+                    execute_hash_partitioned_merge(
+                        &resolved.merge_sql,
+                        &resolved.resolved_delta_sql,
+                        schema,
+                        name,
+                        st.pgt_relid,
+                        pk,
+                        st.pgt_id,
+                    )
+                })?;
+                Some((count, "hash_merge"))
+            }
         } else {
             // RANGE / LIST: extract bounds and inject predicate.
             match with_stream_owner(st, || {

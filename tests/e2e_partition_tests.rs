@@ -2077,6 +2077,38 @@ async fn test_retention_scoped_dml_preserves_duplicate_multiplicity() {
 }
 
 #[tokio::test]
+async fn test_retention_scoped_dml_distinguishes_partition_ctids() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("acquire partitioned DML session");
+    for (step, sql) in [
+        "CREATE TEMP TABLE scoped_partitioned (__pgt_row_id bytea NOT NULL, bucket int NOT NULL, val int NOT NULL) PARTITION BY RANGE(bucket)",
+        "CREATE TEMP TABLE scoped_partitioned_a PARTITION OF scoped_partitioned FOR VALUES FROM (0) TO (100)",
+        "CREATE TEMP TABLE scoped_partitioned_b PARTITION OF scoped_partitioned FOR VALUES FROM (100) TO (200)",
+        "CREATE INDEX ON scoped_partitioned (__pgt_row_id)",
+        "CREATE TEMP TABLE __pgt_delta_7 (__pgt_row_id bytea NOT NULL, __pgt_action text NOT NULL, bucket int NOT NULL, val int NOT NULL)",
+        "INSERT INTO scoped_partitioned VALUES (decode('01','hex'),1,10),(decode('02','hex'),101,20)",
+        "INSERT INTO __pgt_delta_7 VALUES (decode('01','hex'),'D',1,10),(decode('02','hex'),'I',2,21),(decode('03','hex'),'I',102,30)",
+        "DELETE FROM scoped_partitioned AS st USING (SELECT matched.tableoid, matched.ctid FROM (SELECT __pgt_row_id, COUNT(*) AS n FROM __pgt_delta_7 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id) d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM scoped_partitioned st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id ORDER BY st2.ctid LIMIT d.n) matched) target WHERE st.tableoid = target.tableoid AND st.ctid = target.ctid",
+        "UPDATE scoped_partitioned AS st SET bucket = d.bucket, val = d.val FROM __pgt_delta_7 AS d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM scoped_partitioned st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid AND d.__pgt_action = 'I' AND (st.bucket::text IS DISTINCT FROM d.bucket::text OR st.val::text IS DISTINCT FROM d.val::text)",
+        "INSERT INTO scoped_partitioned (__pgt_row_id, bucket, val) SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, d.bucket, d.val FROM __pgt_delta_7 AS d WHERE d.__pgt_action = 'I' AND NOT EXISTS (SELECT 1 FROM (SELECT 1 FROM scoped_partitioned AS st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched) ORDER BY d.__pgt_row_id",
+    ].into_iter().enumerate() {
+        sqlx::query(sql).execute(&mut *conn).await.expect("execute partitioned scoped DML");
+        if step == 5 {
+            let locations: Vec<(String, String)> = sqlx::query_as("SELECT tableoid::regclass::text, ctid::text FROM scoped_partitioned ORDER BY __pgt_row_id")
+                .fetch_all(&mut *conn).await.expect("read partition row locations");
+            assert_eq!(locations, vec![("scoped_partitioned_a".into(), "(0,1)".into()), ("scoped_partitioned_b".into(), "(0,1)".into())]);
+        }
+    }
+    let rows: Vec<(String, i32, i32)> = sqlx::query_as("SELECT encode(__pgt_row_id,'hex'), bucket, val FROM scoped_partitioned ORDER BY __pgt_row_id")
+        .fetch_all(&mut *conn).await.expect("read partitioned result");
+    assert_eq!(rows, vec![("02".into(), 2, 21), ("03".into(), 102, 30)]);
+}
+
+#[tokio::test]
 async fn test_retention_scoped_capture_preserves_duplicate_occurrences() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     let mut conn = db.pool.acquire().await.expect("acquire capture session");
@@ -2234,7 +2266,7 @@ async fn test_partitioned_stream_downstream_without_retention() {
         query,
         "1h",
         "DIFFERENTIAL",
-        "d",
+        "HASH:d",
     )
     .await;
     db.create_st(
@@ -2278,7 +2310,7 @@ async fn test_retention_trim_partitioned_stream_storage() {
     db.execute("CREATE TABLE trim_storage_src (id INT NOT NULL, d DATE NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
     db.execute("CREATE TABLE trim_storage_old PARTITION OF trim_storage_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
     db.execute("CREATE TABLE trim_storage_live PARTITION OF trim_storage_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
-    db.execute("INSERT INTO trim_storage_src VALUES (1,'2025-06-01',10),(2,'2026-06-01',20)")
+    db.execute("INSERT INTO trim_storage_src VALUES (1,'2025-06-01',10),(2,'2026-06-01',20),(4,'2026-06-02',9)")
         .await;
     let query = "SELECT d, sum(amount) AS total, count(*) AS n FROM trim_storage_src GROUP BY d";
     db.create_st_partitioned("trim_storage_st", query, "1h", "DIFFERENTIAL", "d")
@@ -2291,7 +2323,10 @@ async fn test_retention_trim_partitioned_stream_storage() {
     )
     .await;
     db.execute("SELECT pgtrickle.set_stream_table_partition_retention('trim_storage_st', 'TRIM', 'd', '2026-01-01')").await;
-    db.execute("INSERT INTO trim_storage_src VALUES (3,'2026-06-01',7)")
+    db.execute("UPDATE trim_storage_src SET amount=21 WHERE id=2")
+        .await;
+    db.execute("DELETE FROM trim_storage_src WHERE id=4").await;
+    db.execute("INSERT INTO trim_storage_src VALUES (3,'2026-06-01',7),(5,'2026-06-03',11)")
         .await;
     db.execute("DROP TABLE trim_storage_old").await;
     db.assert_st_matches_query("trim_storage_st", query).await;
@@ -2300,7 +2335,10 @@ async fn test_retention_trim_partitioned_stream_storage() {
             .fetch_all(&db.pool)
             .await
             .expect("read partitioned stream results");
-    assert_eq!(rows, vec![("2026-06-01".into(), 27, 2)]);
+    assert_eq!(
+        rows,
+        vec![("2026-06-01".into(), 28, 2), ("2026-06-03".into(), 11, 1)]
+    );
     db.refresh_st_until_converged("trim_storage_downstream")
         .await;
     db.assert_st_matches_query("trim_storage_downstream", query)
@@ -2310,9 +2348,71 @@ async fn test_retention_trim_partitioned_stream_storage() {
             .fetch_all(&db.pool)
             .await
             .expect("read partitioned stream downstream results");
-    assert_eq!(downstream, vec![("2026-06-01".into(), 27, 2)]);
+    assert_eq!(
+        downstream,
+        vec![("2026-06-01".into(), 28, 2), ("2026-06-03".into(), 11, 1)]
+    );
     let action: (String, String, bool) = sqlx::query_as("SELECT h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'trim_storage_st' ORDER BY h.refresh_id DESC LIMIT 1").fetch_one(&db.pool).await.expect("read retention refresh action");
     assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+}
+
+#[tokio::test]
+async fn test_retention_trim_keyless_partitioned_storage_maintains_changes() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE trim_partitioned_keyless_src (id INT NOT NULL, d DATE NOT NULL, amount INT NOT NULL) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE trim_partitioned_keyless_old PARTITION OF trim_partitioned_keyless_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE trim_partitioned_keyless_live PARTITION OF trim_partitioned_keyless_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO trim_partitioned_keyless_src VALUES (1,'2025-06-01',10),(2,'2026-06-01',20),(4,'2026-06-02',9)").await;
+    let query = "SELECT d, sum(amount) AS total, count(*) AS n FROM trim_partitioned_keyless_src GROUP BY d";
+    db.create_st_partitioned(
+        "trim_partitioned_keyless_st",
+        query,
+        "1h",
+        "DIFFERENTIAL",
+        "HASH:d",
+    )
+    .await;
+    db.create_st(
+        "trim_partitioned_keyless_downstream",
+        "SELECT d,total,n FROM trim_partitioned_keyless_st",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('trim_partitioned_keyless_st','TRIM','d','2026-01-01')").await;
+    db.execute("UPDATE trim_partitioned_keyless_src SET amount=21 WHERE id=2")
+        .await;
+    db.execute("DELETE FROM trim_partitioned_keyless_src WHERE id=4")
+        .await;
+    db.execute(
+        "INSERT INTO trim_partitioned_keyless_src VALUES (3,'2026-06-01',7),(5,'2026-06-03',11)",
+    )
+    .await;
+    db.execute("DROP TABLE trim_partitioned_keyless_old").await;
+    db.refresh_st_until_converged("trim_partitioned_keyless_downstream")
+        .await;
+    for name in [
+        "trim_partitioned_keyless_st",
+        "trim_partitioned_keyless_downstream",
+    ] {
+        db.assert_st_matches_query(name, query).await;
+        let action: (String, String, bool) = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name=$1 ORDER BY h.refresh_id DESC LIMIT 1")
+            .bind(name).fetch_one(&db.pool).await.expect("read completed refresh action");
+        assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    }
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT d::text,total,n FROM trim_partitioned_keyless_downstream ORDER BY d",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read partitioned downstream");
+    assert_eq!(
+        rows,
+        vec![("2026-06-01".into(), 28, 2), ("2026-06-03".into(), 11, 1)]
+    );
 }
 
 #[tokio::test]
