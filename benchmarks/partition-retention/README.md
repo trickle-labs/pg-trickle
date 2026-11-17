@@ -65,8 +65,13 @@ Use `--keyless` to exercise a source without a primary key. For example:
 ```sh
 PGOPTIONS='-c random_page_cost=1000000' python3 benchmarks/partition-retention/benchmark.py \
   --database 'postgresql://localhost/pgtrickle_benchmark' --events 30000 \
-  --instrument-internal --downstream --keyless --output /tmp/retention-keyless.json
+  --instrument-internal --downstream --keyless --pending-events 20000 \
+  --output /tmp/retention-keyless.json
 ```
+
+`--pending-events` inserts additional live-partition events immediately before
+DROP, so the protected catch-up must process a substantial CDC backlog. These
+events are additional to the requested retained event count.
 
 The results depend on cache, storage, CPU, database settings, and concurrent
 load. Run several times and report the environment and individual results;
@@ -141,8 +146,15 @@ The bounded-plan check also passed in separate runs with a keyless source and
 with the aggregate fast path disabled. These settings are planner tests, not
 production-scale measurements.
 One combined high-cost keyless/downstream diagnostic failed the unbounded-scan
-check; later repetitions, including ten on the final candidate, passed.
-PostgreSQL planner choices can therefore still violate the affected-groups
+check. Its captured plan read the entire 31,000-row output index in each of
+three statements; two join nodes each rejected about 31 million row pairs.
+After retention scoped `random_page_cost` to 1, 40 repetitions passed. An
+additional 30,000-event diagnostic with 20,000 deliberately pending events
+observed 7,000 output rows across bounded scans and no retained-source scans;
+upstream and downstream matched their independent query. These diagnostics ran
+on PostgreSQL 18.7 arm64 on macOS with a debug build; they are not comparable
+to the Docker scale measurements. The captured before and after plans are in
+`results/`. PostgreSQL planner choices can still violate the affected-groups
 performance target, even with these hints.
 
 Instrumented runs with `--downstream` on the final candidate produced these

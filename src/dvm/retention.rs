@@ -1928,6 +1928,9 @@ fn with_retention_index_scans<T>(
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("SET LOCAL enable_seqscan = off")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        // shortcut: planner costs only prefer bounded scans; enforce plans for a hard bound.
+        Spi::run("SET LOCAL random_page_cost = 1")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("SET LOCAL jit = off").map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         operation()
     })

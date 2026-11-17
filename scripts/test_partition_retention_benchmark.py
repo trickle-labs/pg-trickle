@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 from pathlib import Path
 import unittest
@@ -12,6 +13,14 @@ spec.loader.exec_module(benchmark)
 
 
 class InternalPlanSummaryTests(unittest.TestCase):
+    def test_pending_events_rejects_negative_values(self):
+        with patch("sys.argv", ["benchmark.py", "--database", "db", "--output", "out.json",
+                                "--pending-events", "-1"]), patch("sys.stderr", new_callable=io.StringIO) as err:
+            with self.assertRaises(SystemExit) as exit_error:
+                benchmark.main()
+        self.assertEqual(exit_error.exception.code, 2)
+        self.assertIn("--pending-events must be nonnegative", err.getvalue())
+
     def test_counts_actual_partition_and_output_scans(self):
         source = {"Query Text": "source query", "Plan": {"Node Type": "Append", "Plans": [
             {"Node Type": "Seq Scan", "Schema": "trial", "Relation Name": "p1",

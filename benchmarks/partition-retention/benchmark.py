@@ -151,7 +151,7 @@ def refresh_until_consistent(db, table, defining):
         time.sleep(.1)
 
 
-def trial(db, schema, events, trim, directory, instrument, downstream, keyless, failure_plan):
+def trial(db, schema, events, trim, directory, instrument, downstream, keyless, pending_events, failure_plan):
     old = datetime.date(2025, 1, 1)
     partitions = []
     for day in range(31):
@@ -189,6 +189,10 @@ def trial(db, schema, events, trim, directory, instrument, downstream, keyless, 
         wait_for_workload_sessions(db, writer_name, True)
         wait_for_workload_sessions(db, reader_name, True)
         time.sleep(1)
+        if pending_events:
+            run(db, f"INSERT INTO {schema}.events SELECT nextval('{schema}.ids'), "
+                "DATE '2025-01-31', ((g-1)%1000)::integer, 1 "
+                f"FROM generate_series(1,{pending_events}) g")
         _, drop_ms, drop_internal = timed(db, f"DROP TABLE {schema}.p0", schema, instrument)
         _, refresh_ms, refresh_internal = timed(db, f"SELECT pgtrickle.refresh_stream_table('{schema}.totals')", schema, instrument)
     finally:
@@ -225,6 +229,7 @@ def trial(db, schema, events, trim, directory, instrument, downstream, keyless, 
             failure_plan.write_text(json.dumps(drop_internal, indent=2) + "\n", encoding="utf-8")
             raise
     return {"mode": "TRIM" if trim else "baseline", "retained_events": events,
+            "pending_events": pending_events,
             "keyless_source": keyless,
             "expired_events": expired, "drop_ms": drop_ms, "refresh_call_ms": refresh_ms,
             "writer": writer_latency, "reader": reader_latency, "refresh_history": history,
@@ -246,9 +251,13 @@ def main():
                         help="add a dependent stream and verify its results after refresh")
     parser.add_argument("--keyless", action="store_true",
                         help="create the partitioned source without a primary key")
+    parser.add_argument("--pending-events", type=int, default=0,
+                        help="insert this many additional events immediately before DROP")
     args = parser.parse_args()
     if args.events < 30_000:
         parser.error("--events must be at least 30000")
+    if args.pending_events < 0:
+        parser.error("--pending-events must be nonnegative")
     schemas = ["retention_bench_" + uuid.uuid4().hex[:12] for _ in range(2)]
     results = []
     with tempfile.TemporaryDirectory(prefix="pgtrickle-retention-") as tmp:
@@ -257,7 +266,7 @@ def main():
                 directory = Path(tmp) / schema
                 directory.mkdir()
                 failure_plan = args.output.with_suffix(args.output.suffix + ".failed-plan.json")
-                results.append(trial(args.database, schema, args.events, trim, directory, args.instrument_internal, args.downstream, args.keyless, failure_plan))
+                results.append(trial(args.database, schema, args.events, trim, directory, args.instrument_internal, args.downstream, args.keyless, args.pending_events, failure_plan))
                 args.output.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
         finally:
             for schema in schemas:
