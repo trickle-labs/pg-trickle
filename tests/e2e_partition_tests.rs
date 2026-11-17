@@ -869,6 +869,13 @@ async fn test_retention_concurrent_detach_captures_pending_child_writes() {
     db.execute("INSERT INTO pending_retention_src VALUES (1,'2025-06-01',10), (2,'2026-06-01',20)")
         .await;
     db.execute("SELECT pgtrickle.create_stream_table_with_retention('pending_retention_st', 'SELECT d, sum(amount) AS total, count(*) AS n FROM pending_retention_src GROUP BY d', 'TRIM', 'd', '2026-01-01', '1h')").await;
+    db.create_st(
+        "pending_retention_other",
+        "SELECT d, sum(amount) AS total, count(*) AS n FROM pending_retention_src GROUP BY d",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
 
     let mut reader = db.pool.begin().await.expect("begin old source snapshot");
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -921,6 +928,20 @@ async fn test_retention_concurrent_detach_captures_pending_child_writes() {
     .await
     .expect("read pending child CDC");
     assert_eq!(changes, vec![("I".into(), 3, "2025-06-01".into(), 7)]);
+
+    // Another consumer must not clean up the suspended consumer's CDC.
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET status = 'ACTIVE' WHERE pgt_name = 'pending_retention_other'").await;
+    db.refresh_st_with_retry("pending_retention_other").await;
+    let retained_changes: Vec<(String, i32, String, i32)> = sqlx::query_as(sqlx::AssertSqlSafe(
+        format!("SELECT action::text, id, d::text, amount FROM {buffer} WHERE id = 3 ORDER BY id"),
+    ))
+    .fetch_all(&db.pool)
+    .await
+    .expect("read CDC after other consumer refresh");
+    assert_eq!(
+        retained_changes,
+        vec![("I".into(), 3, "2025-06-01".into(), 7)]
+    );
 
     // Simulate the protected second-phase replay without using the public resume path.
     db.execute("UPDATE pgtrickle.pgt_stream_tables SET status = 'ACTIVE' WHERE pgt_name = 'pending_retention_st'").await;
