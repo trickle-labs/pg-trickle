@@ -142,8 +142,16 @@ python3 benchmarks/pgvector/run_live_rag_batches.py \
   --rows 10000 --dimensions 384 --batch 10 --cycles 3 --tenant 1 \
   --candidate-commit "$CANDIDATE_COMMIT" --package-sha256 "$PACKAGE_SHA256" \
   --candidate-archive "$CANDIDATE_ARCHIVE" --attest-container "$CONTAINER" \
+  --checkpoint batch-progress.json \
   > batch-results.json
 ```
+
+For long runs, `--checkpoint` atomically records setup progress and each
+completed maintenance measurement. A completed run has `status: "complete"`;
+an error records `status: "failed"`, and an externally interrupted process
+leaves the last `status: "running"` checkpoint with its current phase and any
+completed samples. The checkpoint preserves evidence; it does not resume the
+database workload. Keep stdout redirected separately for the complete report.
 
 For Docker runs, `--candidate-archive` and `--attest-container` together check
 the archive digest and candidate manifest, the installed extension files, and
