@@ -78,6 +78,7 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
 pub(crate) fn execute_full_refresh_target(
     st: &StreamTableMeta,
 ) -> Result<(i64, i64), PgTrickleError> {
+    crate::dvm::retention::ensure_retention_capture(st.pgt_id)?;
     crate::refresh::ensure_full_policy(st, "full refresh")?;
     crate::cdc::validate_stream_table_row_identity(st)?;
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
@@ -446,7 +447,8 @@ pub fn poll_foreign_table_sources_for_st(st: &StreamTableMeta) -> Result<(), PgT
 }
 
 /// Execute a NO_DATA refresh: just advance the data timestamp.
-pub fn execute_no_data_refresh(_st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+pub fn execute_no_data_refresh(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+    crate::dvm::retention::ensure_retention_capture(st.pgt_id)?;
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("NO_DATA");
 
@@ -800,6 +802,7 @@ pub fn execute_differential_refresh_with_tuning(
     new_frontier: &Frontier,
     tuning: &crate::catalog::RefreshRuntimeTuning,
 ) -> Result<(i64, i64), PgTrickleError> {
+    crate::dvm::retention::ensure_retention_capture(st.pgt_id)?;
     crate::refresh::clear_last_cost_evidence();
     crate::refresh::set_last_ann_churn_operations(None);
     set_effective_mode("DIFFERENTIAL");

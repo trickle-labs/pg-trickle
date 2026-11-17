@@ -3321,6 +3321,28 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
     .ok_or_else(|| PgTrickleError::NotFound(qualified_name.to_string()))?;
     let st = StreamTableMeta::get_by_id(st.pgt_id)?
         .ok_or_else(|| PgTrickleError::NotFound(qualified_name.to_string()))?;
+    let deps = StDependency::get_for_st(st.pgt_id)?;
+    #[cfg(not(test))]
+    for dep in &deps {
+        if dep.source_type == "TABLE"
+            && dep
+                .column_snapshot
+                .as_ref()
+                .is_some_and(|value| value.get("partition_retention").is_some())
+        {
+            let source = Spi::get_one_with_args::<String>(
+                "SELECT (SELECT pg_catalog.format('%I.%I', n.nspname, c.relname) FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1)",
+                &[dep.source_relid.into()],
+            ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if let Some(source) = source {
+                Spi::run(&format!(
+                    "LOCK TABLE ONLY {source} IN SHARE UPDATE EXCLUSIVE MODE"
+                ))
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: rust.spi.run.dynamic-format — source is catalog-quoted.
+            }
+        }
+    }
     if let Some(validated) =
         publication::prepare_publication_binding(&st, pg_sys::AccessExclusiveLock as i32)?
     {
@@ -3361,6 +3383,36 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
 
     // Delete catalog entries (cascade handles pgt_dependencies)
     StreamTableMeta::delete(st.pgt_id)?;
+
+    #[cfg(not(test))]
+    for dep in &deps {
+        if dep.source_type == "TABLE"
+            && dep
+                .column_snapshot
+                .as_ref()
+                .is_some_and(|value| value.get("partition_retention").is_some())
+        {
+            crate::dvm::retention::remove_partition_truncate_guards_if_unused(dep.source_relid)?;
+            let configured = Spi::get_one_with_args::<bool>(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies WHERE source_relid = $1 \
+                 AND source_type = 'TABLE' AND column_snapshot ? 'partition_retention')",
+                &[dep.source_relid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(true);
+            if !configured
+                && StDependency::effective_cdc_mode_for_source(dep.source_relid)?.as_deref()
+                    == Some("trigger")
+                && !cdc::trigger_exists(dep.source_relid)?
+            {
+                cdc::lock_source_relations(&[dep.source_relid])?;
+                cdc::rebuild_cdc_trigger(
+                    dep.source_relid,
+                    &config::pg_trickle_change_buffer_schema(),
+                )?;
+            }
+        }
+    }
 
     // Remove this ST's pgt_id from the tracked_by_pgt_ids arrays in
     // pgt_change_tracking so consumer counts stay accurate after drop.
@@ -3968,8 +4020,17 @@ fn pause_stream_table(name: &str) {
 }
 
 fn pause_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
-    let (schema, table_name, st) =
+    let (schema, table_name, initial) =
         resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
+    lock_alter_target(initial.pgt_id)?;
+    let (_, _, st) =
+        resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
+    if st.pgt_id != initial.pgt_id {
+        return Err(PgTrickleError::InvalidArgument(
+            "stream table changed while acquiring its lock".into(),
+        ));
+    }
+    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
 
     if st.status != StStatus::Active {
         return Err(PgTrickleError::InvalidArgument(format!(

@@ -12,13 +12,12 @@ example one partition per month for an `orders` table. This is a common
 technique for managing very large datasets. pg_trickle handles partitioned
 source tables transparently:
 
-- **CDC triggers fire on all partitions.** pg_trickle installs statement-level
-  AFTER triggers directly on the partitioned root table. PostgreSQL routes all
-  DML — whether targeted at the root or at a child partition directly — through
-  the root's triggers. The trigger's `REFERENCING NEW TABLE / OLD TABLE`
-  transition tables contain all affected rows regardless of which partition was
-  written to. All captured changes are recorded in a single change buffer keyed
-  by the parent table's OID.
+- **CDC captures writes routed through the source.** With statement-level CDC,
+  PostgreSQL fires the trigger for the relation named by the statement; a
+  statement directed at a child does not fire its parent's statement trigger.
+  Retention-enabled sources use row-level capture, whose triggers PostgreSQL
+  clones to partitions, so direct child writes are captured as well. Changes
+  use a single change buffer keyed by the source table's OID.
 
 - **ATTACH PARTITION is detected automatically.** When you attach a
   partition with pre-existing data, pg_trickle marks affected stream tables
@@ -141,12 +140,13 @@ For `RETAIN`, removal seals the expired range and preserves its aggregate
 rows. Later differential refreshes continue to update live groups. Sealed
 history cannot be reconstructed from the surviving raw source: FULL refresh,
 reinitialization, policy removal, incompatible query changes and restore paths
-that would replace it are rejected. Save the raw events externally if you need
+that would replace it are rejected. Pausing a stream with sealed history is
+also rejected because the normal resume path requires reinitialization. Save
+the raw events externally if you need
 to rebuild or correct historical aggregates; deleting and recreating the
-stream deliberately discards its retained history. A source `TRUNCATE` can
-commit, but its next refresh is rejected once history has been sealed: the
-whole-table delete optimization cannot distinguish live from retained groups.
-Avoid truncating a source while its retained stream is in use.
+stream deliberately discards its retained history. The whole-table TRUNCATE
+refresh optimization is rejected once history has been sealed because it
+cannot distinguish live from retained groups.
 
 The contract is intentionally narrow:
 
@@ -154,8 +154,14 @@ The contract is intentionally narrow:
   non-null `date`, `timestamp`, or `timestamptz` partition column, the default
   btree operator class, finite bounds, and no default partition. Descendants
   must be durable local tables.
-- The defining query is a single-source grouped aggregate with `COUNT` and/or
-  `SUM`, without DISTINCT or aggregate filters. Its output includes either
+- The defining query is a single-source grouped aggregate with `COUNT(*)`,
+  `COUNT(column)` and/or `SUM(column)`, using PostgreSQL's built-in aggregates
+  without DISTINCT or aggregate filters. `SUM` accepts built-in integer,
+  floating-point, and numeric columns. Other grouping keys must be source
+  columns, and aggregate arguments cannot be arbitrary expressions. The
+  defining search path must leave `pg_catalog` ahead of other schemas, and the
+  stream owner must not be subject to source row-level security. Its output
+  includes either
   the exact partition key or an hourly bucket of that same key. Hourly
   `timestamp` buckets use `pg_catalog.date_trunc('hour', key)`; `timestamptz`
   buckets must use `pg_catalog.date_trunc('hour', key, 'UTC')`. Partition
@@ -174,6 +180,16 @@ The contract is intentionally narrow:
   the intersection of its bounds with all ancestor bounds. For other nested
   layouts, TRIM falls back and RETAIN rejects the removal. Removing an entire
   direct child that itself contains subpartitions is also supported.
+
+Enabling retention switches the shared source to row-level CDC and performs a
+protected baseline reinitialization. This captures any earlier direct-child
+writes that statement-level CDC could have missed. It may scan the full source
+once during configuration. Refreshes fail closed if the required capture
+triggers or partition TRUNCATE guards are missing or disabled. While retention
+is configured, TRUNCATE of an attached partition is rejected; use supported
+row-level DELETEs or partition retention instead. Writes are rejected while
+CDC is paused in discard mode, which would otherwise lose their changes. A
+detached table can be modified independently.
 
 The retention cutoff is parsed as the source column type. Include a timezone
 offset for `timestamptz` cutoffs to avoid dependence on the session timezone.

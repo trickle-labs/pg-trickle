@@ -1715,7 +1715,20 @@ async fn test_upgrade_partition_retention_on_existing_stream() {
     .fetch_all(&db.pool)
     .await
     .expect("capture retained baseline before upgrade");
+    // Model a prior retained installation with the capture guarantees it needs.
+    db.execute("CREATE FUNCTION pgtrickle.retention_upgrade_fixture(text,text,text,text) RETURNS void LANGUAGE c SECURITY DEFINER SET search_path TO pgtrickle, pg_catalog, pg_temp AS '$libdir/pg_trickle', 'set_stream_table_partition_retention_wrapper'").await;
+    db.execute("SELECT pgtrickle.retention_upgrade_fixture('upgrade_sealed_st', 'RETAIN', 'd', '2026-01-01')").await;
+    db.execute("DROP FUNCTION pgtrickle.retention_upgrade_fixture(text,text,text,text)")
+        .await;
+    db.execute("ALTER EVENT TRIGGER pg_trickle_ddl_tracker DISABLE")
+        .await;
+    db.execute("ALTER EVENT TRIGGER pg_trickle_drop_tracker DISABLE")
+        .await;
     db.execute("ALTER TABLE upgrade_sealed_src DETACH PARTITION upgrade_sealed_old")
+        .await;
+    db.execute("ALTER EVENT TRIGGER pg_trickle_ddl_tracker ENABLE")
+        .await;
+    db.execute("ALTER EVENT TRIGGER pg_trickle_drop_tracker ENABLE")
         .await;
     let (sealed_id, hash, source_oid, lower, upper): (i64, i64, i64, i32, i32) = sqlx::query_as("SELECT pgt_id, defining_query_hash, 'upgrade_sealed_src'::regclass::oid::bigint, DATE '2025-01-01' - DATE '2000-01-01', DATE '2026-01-01' - DATE '2000-01-01' FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'upgrade_sealed_st'")
         .fetch_one(&db.pool).await.expect("read sealed fixture identity");

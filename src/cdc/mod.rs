@@ -50,6 +50,33 @@ use crate::config;
 use crate::config::normalize_change_buffer_durability;
 use crate::error::PgTrickleError;
 
+#[cfg(not(test))]
+thread_local! {
+    static INTERNAL_TRIGGER_DDL: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(not(test))]
+pub(crate) fn internal_trigger_ddl_active() -> bool {
+    INTERNAL_TRIGGER_DDL.with(|depth| depth.get() != 0)
+}
+
+#[cfg(not(test))]
+pub(crate) fn with_internal_trigger_ddl<T>(
+    operation: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    INTERNAL_TRIGGER_DDL.with(|depth| depth.set(depth.get() + 1));
+    pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(operation))
+        .finally(|| INTERNAL_TRIGGER_DDL.with(|depth| depth.set(depth.get() - 1)))
+        .execute()
+}
+
+#[cfg(test)]
+pub(crate) fn with_internal_trigger_ddl<T>(
+    operation: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    operation()
+}
+
 // ── A45-7: Submodules extracted from this file ────────────────────────────
 
 /// Trigger rebuild and WAL availability helpers.
@@ -127,6 +154,25 @@ pub fn get_cdc_name_for_source(source_oid: pg_sys::Oid) -> String {
     )
     .unwrap_or(None)
     .unwrap_or_else(|| source_oid.to_u32().to_string())
+}
+
+/// Retention sources require row triggers so direct child writes are captured.
+pub(crate) fn trigger_mode_for_source(
+    source_oid: pg_sys::Oid,
+) -> Result<config::CdcTriggerMode, PgTrickleError> {
+    let retention = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies \
+         WHERE source_relid = $1 AND source_type = 'TABLE' \
+           AND column_snapshot ? 'partition_retention')",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    Ok(if retention {
+        config::CdcTriggerMode::Row
+    } else {
+        config::pg_trickle_cdc_trigger_mode()
+    })
 }
 
 fn resolve_relation_info(
@@ -831,7 +877,7 @@ pub fn create_change_trigger(
     // CORR-4: INSERT-only tables (e.g. pgt_refresh_history) must not receive
     // UPDATE or DELETE CDC triggers — only an INSERT trigger is registered.
     let insert_only = is_insert_only_table(source_oid);
-    let mode = config::pg_trickle_cdc_trigger_mode();
+    let mode = trigger_mode_for_source(source_oid)?;
     let buffer_key = format!("changes_{stable_name}");
     let sync_commit = buffer_uses_sync_commit(&buffer_key)?;
     match mode {
@@ -2802,9 +2848,7 @@ pub fn refresh_capture_body_for_source(
     let sync_commit = buffer_uses_sync_commit(&format!("changes_{name}"))?;
     let (row, insert, update, delete, truncate) =
         build_inactive_trigger_fn_sql(&change_schema, &name, sync_commit);
-    let functions = if crate::config::pg_trickle_cdc_trigger_mode()
-        == crate::config::CdcTriggerMode::Statement
-    {
+    let functions = if trigger_mode_for_source(source_oid)? == config::CdcTriggerMode::Statement {
         vec![insert, update, delete, truncate]
     } else {
         vec![row, truncate]
@@ -2830,7 +2874,8 @@ pub fn sync_capture_body_for_source(source_oid: pg_sys::Oid) -> Result<(), PgTri
                   FROM pgtrickle.pgt_dependencies d
                   JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id
                  WHERE d.source_relid = $1
-                   AND st.status IN ('ACTIVE', 'INITIALIZING')
+                   AND (st.status IN ('ACTIVE', 'INITIALIZING')
+                        OR d.column_snapshot ? 'partition_retention')
             )"#,
         &[source_oid.into()],
     )

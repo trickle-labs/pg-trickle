@@ -29,7 +29,7 @@ pub fn rebuild_cdc_trigger_function(
     let sync_commit = super::buffer_uses_sync_commit(&format!("changes_{cdc_name}"))?;
 
     // Rebuild the function body(ies) for the current CDC trigger mode GUC.
-    let mode = config::pg_trickle_cdc_trigger_mode();
+    let mode = super::trigger_mode_for_source(source_oid)?;
     match mode {
         config::CdcTriggerMode::Statement => {
             let (ins_fn, upd_fn, del_fn) = super::build_stmt_trigger_fn_sql(
@@ -194,6 +194,18 @@ pub fn rebuild_cdc_trigger(
     source_oid: pg_sys::Oid,
     change_schema: &str,
 ) -> Result<String, PgTrickleError> {
+    super::with_internal_trigger_ddl(|| {
+        let trigger = rebuild_cdc_trigger_inner(source_oid, change_schema)?;
+        #[cfg(not(test))]
+        crate::dvm::retention::install_partition_truncate_guards(source_oid)?;
+        Ok(trigger)
+    })
+}
+
+fn rebuild_cdc_trigger_inner(
+    source_oid: pg_sys::Oid,
+    change_schema: &str,
+) -> Result<String, PgTrickleError> {
     let pk_columns = super::resolve_pk_columns(source_oid)?;
     // F15: use the minimal column set (union of columns_used across all downstream STs,
     // always including PK columns). Falls back to full capture when any ST uses SELECT *.
@@ -213,7 +225,7 @@ pub fn rebuild_cdc_trigger(
         None => return Ok(String::new()),
     };
 
-    let mode = config::pg_trickle_cdc_trigger_mode();
+    let mode = super::trigger_mode_for_source(source_oid)?;
 
     // 1. Rebuild trigger function(s) for the current mode.
     match mode {
@@ -558,7 +570,7 @@ pub fn trigger_exists(source_oid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
     // for new tables) OR the legacy OID-based name ("pg_trickle_cdc_12345").
     // Resolve the stable_name so we check both naming conventions.
     let stable_name = super::get_cdc_name_for_source(source_oid);
-    let mut events = match config::pg_trickle_cdc_trigger_mode() {
+    let mut events = match super::trigger_mode_for_source(source_oid)? {
         config::CdcTriggerMode::Statement if super::is_insert_only_table(source_oid) => {
             vec!["ins"]
         }

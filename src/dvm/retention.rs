@@ -667,6 +667,256 @@ pub(crate) fn retention_source(
     Ok(dependency.source_relid)
 }
 
+/// Prevent untracked TRUNCATE and writes during lossy CDC pause.
+#[cfg(not(test))]
+pub(crate) fn install_partition_truncate_guards(
+    source_oid: pg_sys::Oid,
+) -> Result<(), crate::error::PgTrickleError> {
+    crate::cdc::with_internal_trigger_ddl(|| install_partition_truncate_guards_inner(source_oid))
+}
+
+#[cfg(not(test))]
+fn install_partition_truncate_guards_inner(
+    source_oid: pg_sys::Oid,
+) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let configured = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies WHERE source_relid = $1 \
+         AND source_type = 'TABLE' AND column_snapshot ? 'partition_retention')",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !configured {
+        return Ok(());
+    }
+    let name = crate::cdc::get_cdc_name_for_source(source_oid);
+    let schema = crate::config::pg_trickle_change_buffer_schema();
+    let function_name = format!("pg_trickle_retention_truncate_fn_{name}");
+    let function = crate::sql_builder::qualified(&schema, &function_name);
+    let trigger_name = format!("pg_trickle_retention_truncate_{name}");
+    let trigger = crate::sql_builder::ident(&trigger_name);
+    let capture_name = format!("pg_trickle_cdc_{name}");
+    let capture_trigger = crate::sql_builder::ident(&capture_name);
+    let capture_function = format!(
+        "{}()",
+        crate::sql_builder::qualified(&schema, &format!("pg_trickle_cdc_fn_{name}"))
+    );
+    let source = source_oid.to_u32();
+    let sql = format!(
+        "CREATE OR REPLACE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER \
+         SET search_path = pg_catalog, pgtrickle, pg_temp AS $pgt$ \
+         BEGIN \
+           IF TG_OP = 'TRUNCATE' OR (pg_catalog.current_setting('pg_trickle.cdc_paused', true) = 'on' \
+                  AND pg_catalog.current_setting('pg_trickle.cdc_capture_mode', true) IS DISTINCT FROM 'hold') THEN \
+             IF EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies WHERE source_relid = {source}::oid \
+                        AND source_type = 'TABLE' AND column_snapshot ? 'partition_retention') \
+                AND (TG_RELID = {source}::oid OR EXISTS (WITH RECURSIVE ancestors(oid) AS ( \
+                      SELECT inhparent FROM pg_catalog.pg_inherits WHERE inhrelid = TG_RELID \
+                      UNION ALL SELECT i.inhparent FROM pg_catalog.pg_inherits i JOIN ancestors a ON i.inhrelid = a.oid \
+                    ) SELECT 1 FROM ancestors WHERE oid = {source}::oid)) THEN \
+               IF TG_OP = 'TRUNCATE' THEN \
+                 RAISE EXCEPTION 'pg_trickle: TRUNCATE of a partition with retention is not supported' USING ERRCODE = '0A000'; \
+               END IF; \
+               RAISE EXCEPTION 'pg_trickle: writes to a retention source are blocked while CDC is paused in discard mode' USING ERRCODE = '0A000'; \
+             END IF; \
+           END IF; \
+           RETURN NULL; \
+         END; $pgt$"
+    );
+    Spi::run(&sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: rust.spi.run.dynamic-format — identifiers are quoted and source is a catalog OID.
+    let children: Vec<(pg_sys::Oid, String)> = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT c.oid, pg_catalog.format('%I.%I', n.nspname, c.relname) \
+             FROM pg_catalog.pg_partition_tree($1::regclass) t \
+             JOIN pg_catalog.pg_class c ON c.oid = t.relid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             ORDER BY c.oid",
+                None,
+                &[source_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        rows.map(|row| {
+            let oid = row
+                .get::<pg_sys::Oid>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("partition OID is missing".into()))?;
+            let name = row
+                .get::<String>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("partition name is missing".into()))?;
+            Ok::<_, PgTrickleError>((oid, name))
+        })
+        .collect::<Result<Vec<_>, PgTrickleError>>()
+    })?;
+    let signature = format!("{function}()");
+    for (oid, table) in children {
+        let capture = Spi::get_one_with_args::<String>(
+            "SELECT (SELECT tgenabled::text FROM pg_catalog.pg_trigger WHERE tgrelid = $1 AND tgname = $2 \
+             AND tgfoid = pg_catalog.to_regprocedure($3) AND tgtype = 29 AND tgqual IS NULL AND tgnargs = 0 \
+             AND tgconstraint = 0 AND NOT tgdeferrable AND tgenabled IN ('O','A'))",
+            &[oid.into(), capture_name.as_str().into(), capture_function.as_str().into()],
+        ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        match capture.as_deref() {
+            Some("A") => {}
+            Some("O") => Spi::run(&format!(
+                "ALTER TABLE ONLY {table} ENABLE ALWAYS TRIGGER {capture_trigger}"
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?, // nosemgrep: rust.spi.run.dynamic-format — identifiers are catalog-quoted.
+            _ => {
+                return Err(PgTrickleError::InvalidArgument(
+                    "partition retention row CDC trigger is incomplete".into(),
+                ));
+            }
+        }
+        let existing = Spi::get_one_with_args::<bool>(
+            "SELECT pg_catalog.bool_and(tgfoid = pg_catalog.to_regprocedure($3) \
+                     AND tgtype = 62 AND tgenabled = 'A' AND tgqual IS NULL AND tgnargs = 0 \
+                     AND tgconstraint = 0 AND NOT tgdeferrable) \
+             FROM pg_catalog.pg_trigger WHERE tgrelid = $1 AND tgname = $2",
+            &[
+                oid.into(),
+                trigger_name.as_str().into(),
+                signature.as_str().into(),
+            ],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        match existing {
+            Some(true) => continue,
+            Some(false) => {
+                return Err(PgTrickleError::InvalidArgument(
+                    "partition retention source guard was changed or disabled".into(),
+                ));
+            }
+            None => {}
+        }
+        Spi::run(&format!("CREATE TRIGGER {trigger} BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON {table} FOR EACH STATEMENT EXECUTE FUNCTION {function}()"))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: rust.spi.run.dynamic-format — identifiers are catalog-quoted.
+        Spi::run(&format!(
+            "ALTER TABLE ONLY {table} ENABLE ALWAYS TRIGGER {trigger}"
+        ))
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: rust.spi.run.dynamic-format — identifiers are catalog-quoted.
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+pub(crate) fn remove_partition_truncate_guards_if_unused(
+    source_oid: pg_sys::Oid,
+) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let configured = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies WHERE source_relid = $1 \
+         AND source_type = 'TABLE' AND column_snapshot ? 'partition_retention')",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(true);
+    if !configured {
+        drop_partition_truncate_guard(source_oid)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+pub(crate) fn drop_partition_truncate_guard(
+    source_oid: pg_sys::Oid,
+) -> Result<(), crate::error::PgTrickleError> {
+    crate::cdc::with_internal_trigger_ddl(|| drop_partition_truncate_guard_inner(source_oid))
+}
+
+#[cfg(not(test))]
+fn drop_partition_truncate_guard_inner(
+    source_oid: pg_sys::Oid,
+) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let name = format!(
+        "pg_trickle_retention_truncate_fn_{}",
+        crate::cdc::get_cdc_name_for_source(source_oid)
+    );
+    let function =
+        crate::sql_builder::qualified(&crate::config::pg_trickle_change_buffer_schema(), &name);
+    Spi::run(&format!("DROP FUNCTION IF EXISTS {function}() CASCADE"))
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: rust.spi.run.dynamic-format — identifier is quoted from internal CDC metadata.
+    Ok(())
+}
+
+/// Reject refresh when partition CDC or its TRUNCATE protection is incomplete.
+#[cfg(not(test))]
+pub(crate) fn ensure_retention_capture(pgt_id: i64) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let source = Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT (SELECT source_relid FROM pgtrickle.pgt_dependencies WHERE pgt_id = $1 \
+         AND source_type = 'TABLE' AND column_snapshot ? 'partition_retention' LIMIT 1)",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let Some(source) = source else {
+        return Ok(());
+    };
+    let name = crate::cdc::get_cdc_name_for_source(source);
+    let capture_name = format!("pg_trickle_cdc_{name}");
+    let guard_name = format!("pg_trickle_retention_truncate_{name}");
+    let guard_function = format!(
+        "{}()",
+        crate::sql_builder::qualified(
+            &crate::config::pg_trickle_change_buffer_schema(),
+            &format!("pg_trickle_retention_truncate_fn_{name}"),
+        )
+    );
+    let capture_function = format!(
+        "{}()",
+        crate::sql_builder::qualified(
+            &crate::config::pg_trickle_change_buffer_schema(),
+            &format!("pg_trickle_cdc_fn_{name}"),
+        )
+    );
+    let valid = Spi::get_one_with_args::<bool>(
+        "WITH root AS (SELECT tgfoid FROM pg_catalog.pg_trigger \
+           WHERE tgrelid = $1 AND tgname = $2 AND tgtype = 29 AND tgenabled = 'A' \
+             AND tgfoid = pg_catalog.to_regprocedure($5) AND tgqual IS NULL AND tgnargs = 0 \
+             AND tgconstraint = 0 AND NOT tgdeferrable) \
+         SELECT EXISTS (SELECT 1 FROM root) AND NOT EXISTS ( \
+           SELECT 1 FROM pg_catalog.pg_partition_tree($1::regclass) p \
+           WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t, root r \
+                     WHERE t.tgrelid = p.relid AND t.tgname = $2 AND t.tgfoid = r.tgfoid \
+                       AND t.tgtype = 29 AND t.tgenabled = 'A' AND t.tgqual IS NULL AND t.tgnargs = 0 \
+                       AND t.tgconstraint = 0 AND NOT t.tgdeferrable \
+                       AND (p.relid = $1 OR t.tgparentid <> 0)) \
+              OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t \
+                     WHERE t.tgrelid = p.relid AND t.tgname = $3 \
+                       AND t.tgfoid = pg_catalog.to_regprocedure($4) AND t.tgtype = 62 \
+                       AND t.tgenabled = 'A' AND t.tgqual IS NULL AND t.tgnargs = 0 \
+                       AND t.tgconstraint = 0 AND NOT t.tgdeferrable) \
+         )",
+        &[
+            source.into(),
+            capture_name.as_str().into(),
+            guard_name.as_str().into(),
+            guard_function.as_str().into(),
+            capture_function.as_str().into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !valid {
+        return Err(PgTrickleError::InvalidArgument(
+            "partition retention CDC or source guards are incomplete; restore capture before refresh or removal".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn ensure_retention_capture(_pgt_id: i64) -> Result<(), crate::error::PgTrickleError> {
+    Ok(())
+}
+
 /// Validate storage and CDC assumptions shared by configuration and cuts.
 #[cfg(not(test))]
 pub(crate) fn validate_retention_storage(
@@ -678,6 +928,12 @@ pub(crate) fn validate_retention_storage(
 ) -> Result<(), crate::error::PgTrickleError> {
     use crate::error::PgTrickleError;
     use pgrx::prelude::*;
+    let owner = crate::api::security_context::stream_execution_context(st)?.owner_oid;
+    if crate::cdc::first_rls_source_for_role(&[source_oid.to_u32()], owner)?.is_some() {
+        return Err(PgTrickleError::InvalidArgument(
+            "partition retention requires a stream owner that is not subject to source row-level security".into(),
+        ));
+    }
     let output_valid = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = $1 \
          AND attname = $2 AND attnum > 0 AND NOT attisdropped AND atttypid = $3)",
@@ -805,13 +1061,15 @@ pub fn prepare_retention_cut(
     }
     let candidate = crate::refresh::with_stream_owner(&st, || {
         let tree = super::parser::parse_defining_query(&st.defining_query)?;
-        query_group_candidate(&tree, source_oid.to_u32(), &state.candidate.source_column).map_err(
-            |e| {
-                PgTrickleError::InvalidArgument(format!(
-                    "retention query is no longer eligible: {e:?}"
-                ))
-            },
-        )
+        let candidate =
+            query_group_candidate(&tree, source_oid.to_u32(), &state.candidate.source_column)
+                .map_err(|e| {
+                    PgTrickleError::InvalidArgument(format!(
+                        "retention query is no longer eligible: {e:?}"
+                    ))
+                })?;
+        validate_builtin_aggregates(&st.defining_query, &tree)?;
+        Ok(candidate)
     })?;
     if candidate != state.candidate {
         return Err(PgTrickleError::InvalidArgument(
@@ -844,6 +1102,7 @@ pub fn prepare_retention_cut(
 
     crate::cdc::lock_source_relations(&[source_oid])?;
     ensure_durable_partition_tree(source_oid)?;
+    ensure_retention_capture(pgt_id)?;
     let safe_bound = crate::cdc::get_current_wal_lsn()?;
     let refresh = crate::refresh::with_refresh_context(
         crate::refresh::RefreshContext::graph(&safe_bound, crate::refresh::FullPolicy::Error),
@@ -1672,6 +1931,53 @@ fn bucket(expr: &Expr, alias: &str, key: &str, type_oid: u32) -> Option<Retentio
     }
 }
 
+/// Prove aggregates resolve to PostgreSQL built-ins under a safe function path.
+#[cfg(not(test))]
+pub(crate) fn validate_builtin_aggregates(
+    query: &str,
+    tree: &OpTree,
+) -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    let catalog_position = Spi::get_one::<i32>(
+        "SELECT pg_catalog.array_position(pg_catalog.current_schemas(false), 'pg_catalog'::pg_catalog.name)",
+    ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    if catalog_position.is_some_and(|position| position != 1) {
+        return Err(PgTrickleError::InvalidArgument(
+            "partition retention requires pg_catalog before other schemas in the defining search path".into(),
+        ));
+    }
+    let aggregate = match tree {
+        OpTree::Project { child, .. } => child.as_ref(),
+        other => other,
+    };
+    let OpTree::Aggregate { aggregates, .. } = aggregate else {
+        return Err(PgTrickleError::InvalidArgument(
+            "partition retention requires an aggregate query".into(),
+        ));
+    };
+    let analyzed = super::parser::collect_analyzed_aggregate_locations(query)?;
+    if analyzed.len() != aggregates.len() {
+        return Err(PgTrickleError::InvalidArgument(
+            "partition retention could not prove aggregate function identities".into(),
+        ));
+    }
+    for oid in analyzed.values() {
+        let builtin = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+             WHERE p.oid = $1 AND n.nspname = 'pg_catalog' AND p.prokind = 'a' AND p.proname IN ('sum','count'))",
+            &[(*oid).into()],
+        ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false);
+        if !builtin {
+            return Err(PgTrickleError::InvalidArgument(
+                "partition retention supports only PostgreSQL built-in SUM and COUNT aggregates"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Find a projected group key tied to the specified non-null source column.
 ///
 /// Hour candidates require separately verified hour-aligned RANGE bounds.
@@ -1712,6 +2018,22 @@ pub fn query_group_candidate(
         .filter(|column| matches!(column.type_oid, DATE_OID | TIMESTAMP_OID | TIMESTAMPTZ_OID))
         .filter(|_| *table_oid == source_oid)
         .ok_or(RetentionQueryError::InvalidSourceKey)?;
+    if group_by.iter().any(|group| match group {
+        Expr::ColumnRef {
+            table_alias,
+            column_name,
+        } => {
+            !table_alias.as_deref().is_none_or(|name| name == alias)
+                || !columns.iter().any(|column| column.name == *column_name)
+        }
+        _ => bucket(group, alias, key, column.type_oid).is_none(),
+    }) || projection.is_some_and(|(expressions, _)| {
+        expressions
+            .iter()
+            .any(|expr| !matches!(expr, Expr::ColumnRef { .. }))
+    }) {
+        return Err(RetentionQueryError::UnsupportedShape);
+    }
     if aggregates.is_empty()
         || aggregates.iter().any(|aggregate| {
             !matches!(
@@ -1721,6 +2043,23 @@ pub fn query_group_candidate(
                 || aggregate.filter.is_some()
                 || aggregate.second_arg.is_some()
                 || aggregate.order_within_group.is_some()
+                || match aggregate.function {
+                    AggFunc::CountStar => aggregate.argument.is_some(),
+                    AggFunc::Count | AggFunc::Sum => match aggregate.argument.as_ref() {
+                        Some(Expr::ColumnRef {
+                            table_alias,
+                            column_name,
+                        }) if table_alias.as_deref().is_none_or(|name| name == alias) => columns
+                            .iter()
+                            .find(|column| column.name == *column_name)
+                            .is_none_or(|column| {
+                                aggregate.function == AggFunc::Sum
+                                    && !matches!(column.type_oid, 20 | 21 | 23 | 700 | 701 | 1700)
+                            }),
+                        _ => true,
+                    },
+                    _ => true,
+                }
         })
     {
         return Err(RetentionQueryError::UnsupportedAggregate);
@@ -1998,7 +2337,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::MissingProjectedGroupKey)
+            Err(RetentionQueryError::UnsupportedShape)
         );
         let unqualified = Expr::FuncCall {
             func_name: "date_trunc".into(),
@@ -2010,7 +2349,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::MissingProjectedGroupKey)
+            Err(RetentionQueryError::UnsupportedShape)
         );
         assert_eq!(
             query_group_candidate(
@@ -2023,7 +2362,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::MissingProjectedGroupKey)
+            Err(RetentionQueryError::UnsupportedShape)
         );
         assert_eq!(
             query_group_candidate(
@@ -2052,7 +2391,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::MissingProjectedGroupKey)
+            Err(RetentionQueryError::UnsupportedShape)
         );
         assert_eq!(
             query_group_candidate(
@@ -2060,7 +2399,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::MissingProjectedGroupKey)
+            Err(RetentionQueryError::UnsupportedShape)
         );
     }
 
@@ -2104,6 +2443,38 @@ mod tests {
             name: conflicting_name,
             type_oid: TIMESTAMP_OID,
             is_nullable: false,
+        });
+        assert_eq!(
+            query_group_candidate(&tree, 42, "occurred"),
+            Err(RetentionQueryError::UnsupportedShape)
+        );
+    }
+
+    #[test]
+    fn rejects_unproven_group_and_aggregate_expressions() {
+        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
+        let OpTree::Project { child, .. } = &mut tree else {
+            unreachable!()
+        };
+        let OpTree::Aggregate { aggregates, .. } = child.as_mut() else {
+            unreachable!()
+        };
+        aggregates[0].function = AggFunc::Sum;
+        aggregates[0].argument = Some(Expr::Literal("random()".into()));
+        assert_eq!(
+            query_group_candidate(&tree, 42, "occurred"),
+            Err(RetentionQueryError::UnsupportedAggregate)
+        );
+        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
+        let OpTree::Project { child, .. } = &mut tree else {
+            unreachable!()
+        };
+        let OpTree::Aggregate { group_by, .. } = child.as_mut() else {
+            unreachable!()
+        };
+        group_by.push(Expr::FuncCall {
+            func_name: "random".into(),
+            args: vec![],
         });
         assert_eq!(
             query_group_candidate(&tree, 42, "occurred"),

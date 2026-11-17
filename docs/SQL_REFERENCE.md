@@ -1620,6 +1620,11 @@ aggregate grouping satisfy the retention eligibility checks. `policy` is
 `TRIM`, `RETAIN`, or `OFF`. The cutoff uses PostgreSQL input syntax for the
 source partition column's date or timestamp type. Include an explicit offset
 for `timestamptz` cutoffs when the session time zone should not determine it.
+Enabling retention switches the shared source to row-level CDC and performs a
+protected baseline reinitialization so direct writes to child partitions are
+captured. While enabled, source TRUNCATE and writes during lossy CDC discard
+mode are rejected. After the last policy is disabled, the source returns to
+the configured CDC trigger mode.
 
 For an eligible expired partition, TRIM removes its groups and RETAIN preserves
 them. RETAIN rejects operations that would rebuild sealed history from an

@@ -376,7 +376,12 @@ pub extern "C" fn pg_finfo_pg_trickle_on_ddl_start_wrapper() -> &'static pg_sys:
 pub extern "C-unwind" fn pg_trickle_on_ddl_end_wrapper(
     fcinfo: pg_sys::FunctionCallInfo,
 ) -> pg_sys::Datum {
+    #[cfg(not(test))]
+    if crate::cdc::internal_trigger_ddl_active() {
+        return pg_sys::Datum::null();
+    }
     let alter_table_hint = classify_alter_table(fcinfo);
+    let trigger_state_change = is_trigger_state_change(fcinfo);
     // Query the event trigger context for affected objects.
     // pg_event_trigger_ddl_commands() is only available inside an
     // event trigger context — calling it elsewhere will error.
@@ -391,9 +396,72 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_end_wrapper(
     };
 
     for cmd in &commands {
+        #[cfg(not(test))]
+        if trigger_state_change && matches!(cmd.kind, DdlCommandKind::AlterTable) {
+            validate_retention_trigger_state(cmd.objid).unwrap_or_else(|e| {
+                pgrx::error!("pg_trickle: cannot disable retention capture: {}", e)
+            });
+        }
         handle_ddl_command(cmd, &alter_table_hint);
     }
+    #[cfg(test)]
+    let _ = trigger_state_change;
     pg_sys::Datum::null()
+}
+
+fn is_trigger_state_change(fcinfo: pg_sys::FunctionCallInfo) -> bool {
+    // SAFETY: The parse tree and command list belong to this event trigger invocation.
+    unsafe {
+        let Some(call) = fcinfo.as_ref() else {
+            return false;
+        };
+        let Some(event) = (call.context as *const pg_sys::EventTriggerData).as_ref() else {
+            return false;
+        };
+        let Some(node) = event.parsetree.as_ref() else {
+            return false;
+        };
+        if node.type_ != pg_sys::NodeTag::T_AlterTableStmt {
+            return false;
+        }
+        let stmt = &*(event.parsetree as *const pg_sys::AlterTableStmt);
+        for index in 0..pg_sys::list_length(stmt.cmds) {
+            let Some(cmd) =
+                (pg_sys::list_nth(stmt.cmds, index) as *const pg_sys::AlterTableCmd).as_ref()
+            else {
+                continue;
+            };
+            if cmd.type_ == pg_sys::NodeTag::T_AlterTableCmd
+                && matches!(
+                    cmd.subtype,
+                    pg_sys::AlterTableType::AT_DisableTrig
+                        | pg_sys::AlterTableType::AT_DisableTrigAll
+                        | pg_sys::AlterTableType::AT_DisableTrigUser
+                        | pg_sys::AlterTableType::AT_EnableReplicaTrig
+                        | pg_sys::AlterTableType::AT_EnableTrig
+                        | pg_sys::AlterTableType::AT_EnableTrigAll
+                        | pg_sys::AlterTableType::AT_EnableTrigUser
+                )
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(test))]
+fn validate_retention_trigger_state(relation: pg_sys::Oid) -> Result<(), PgTrickleError> {
+    let mut sources = tracked_partition_ancestors(relation)?;
+    sources.push(relation);
+    sources.sort_unstable_by_key(|oid| oid.to_u32());
+    sources.dedup();
+    for source in sources {
+        for pgt_id in find_downstream_pgt_ids(source)? {
+            crate::dvm::retention::ensure_retention_capture(pgt_id)?;
+        }
+    }
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
@@ -664,6 +732,19 @@ fn collect_ddl_commands() -> Result<Vec<DdlCommand>, PgTrickleError> {
 /// A17 (v0.36.0): dispatches on `cmd.kind` (pre-classified typed enum) rather
 /// than calling `classify_ddl_event()` at dispatch time.
 fn handle_ddl_command(cmd: &DdlCommand, alter_table_hint: &AlterTableHint) {
+    #[cfg(not(test))]
+    if cmd.object_type == "trigger" && cmd.command_tag == "ALTER TRIGGER" {
+        let relation = Spi::get_one_with_args::<pg_sys::Oid>(
+            "SELECT (SELECT tgrelid FROM pg_catalog.pg_trigger WHERE oid = $1)",
+            &[cmd.objid.into()],
+        )
+        .unwrap_or_else(|e| pgrx::error!("pg_trickle: cannot resolve altered trigger: {}", e));
+        if let Some(relation) = relation {
+            validate_retention_trigger_state(relation).unwrap_or_else(|e| {
+                pgrx::error!("pg_trickle: cannot rename retention capture: {}", e)
+            });
+        }
+    }
     match cmd.kind {
         DdlCommandKind::AlterTable => {
             let identity = cmd.object_identity.as_deref().unwrap_or("unknown");
@@ -1336,6 +1417,9 @@ fn handle_alter_table(
                 empty_partition_attach,
             )
             .unwrap_or_else(|e| pgrx::error!("pg_trickle: partition attach blocked: {}", e));
+            crate::dvm::retention::install_partition_truncate_guards(objid).unwrap_or_else(|e| {
+                pgrx::error!("pg_trickle: cannot protect partition capture: {}", e)
+            });
         }
         // Only this exact subcommand can be proved harmless from the saved owner.
         // Older snapshots lack the owner and retain the conservative behavior.
@@ -1808,6 +1892,8 @@ fn snapshot_created_partition_ancestry(child_oid: pg_sys::Oid) -> Result<(), PgT
     for (pgt_id, source_oid) in ancestors {
         #[cfg(not(test))]
         crate::dvm::retention::ensure_retained_attach_safe(pgt_id, source_oid, true)?;
+        #[cfg(not(test))]
+        crate::dvm::retention::install_partition_truncate_guards(source_oid)?;
         crate::catalog::store_column_snapshot_for_pgt_id(pgt_id, source_oid)?;
     }
     Ok(())
@@ -1927,6 +2013,23 @@ fn handle_create_trigger(cmd: &DdlCommand) {
         _ => return, // Can't resolve — ignore silently
     };
 
+    #[cfg(not(test))]
+    if !crate::cdc::internal_trigger_ddl_active() {
+        let managed = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE oid = $1 \
+             AND (pg_catalog.starts_with(tgname::text, 'pg_trickle_cdc_') \
+                  OR pg_catalog.starts_with(tgname::text, 'pg_trickle_retention_truncate_')))",
+            &[cmd.objid.into()],
+        )
+        .unwrap_or_else(|e| pgrx::error!("pg_trickle: cannot inspect trigger identity: {}", e))
+        .unwrap_or(false);
+        if managed {
+            validate_retention_trigger_state(tgrelid).unwrap_or_else(|e| {
+                pgrx::error!("pg_trickle: cannot replace retention capture: {}", e)
+            });
+        }
+    }
+
     // F35 (G3.5): Block triggers on change buffer tables.
     // User triggers on pgtrickle_changes.changes_<oid> could corrupt CDC data.
     let change_schema = config::pg_trickle_change_buffer_schema();
@@ -2018,6 +2121,38 @@ fn pg_trickle_on_sql_drop() {
         }
     };
 
+    #[cfg(not(test))]
+    if !crate::cdc::internal_trigger_ddl_active()
+        && !dropped.iter().any(|obj| {
+            obj.object_type == "extension"
+                && (obj.object_name.as_deref() == Some("pg_trickle")
+                    || obj.object_identity.as_deref() == Some("pg_trickle"))
+        })
+    {
+        for obj in &dropped {
+            if obj.object_type != "trigger" {
+                continue;
+            }
+            let Some((schema, table, trigger)) = &obj.trigger_address else {
+                continue;
+            };
+            if !trigger.starts_with("pg_trickle_cdc_")
+                && !trigger.starts_with("pg_trickle_retention_truncate_")
+            {
+                continue;
+            }
+            let relation = Spi::get_one_with_args::<pg_sys::Oid>(
+                "SELECT pg_catalog.to_regclass(pg_catalog.format('%I.%I', $1::text, $2::text))::oid",
+                &[schema.as_str().into(), table.as_str().into()],
+            ).unwrap_or_else(|e| pgrx::error!("pg_trickle: cannot resolve dropped trigger relation: {}", e));
+            if let Some(relation) = relation {
+                validate_retention_trigger_state(relation).unwrap_or_else(|e| {
+                    pgrx::error!("pg_trickle: cannot drop retention capture: {}", e)
+                });
+            }
+        }
+    }
+
     let dropped_tables = dropped
         .iter()
         .filter(|obj| obj.object_type == "table")
@@ -2043,6 +2178,7 @@ struct DroppedObject {
     schema_name: Option<String>,
     object_name: Option<String>,
     object_identity: Option<String>,
+    trigger_address: Option<(String, String, String)>,
 }
 
 /// Collect dropped objects from the event trigger context.
@@ -2050,7 +2186,10 @@ fn collect_dropped_objects() -> Result<Vec<DroppedObject>, PgTrickleError> {
     Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT objid, object_type, schema_name::text, object_name::text, object_identity \
+                "SELECT objid, object_type, schema_name::text, object_name::text, object_identity, \
+                        CASE WHEN object_type = 'trigger' AND pg_catalog.cardinality(address_names) = 3 THEN address_names[1] END, \
+                        CASE WHEN object_type = 'trigger' AND pg_catalog.cardinality(address_names) = 3 THEN address_names[2] END, \
+                        CASE WHEN object_type = 'trigger' AND pg_catalog.cardinality(address_names) = 3 THEN address_names[3] END \
                  FROM pg_event_trigger_dropped_objects()",
                 None,
                 &[],
@@ -2069,6 +2208,12 @@ fn collect_dropped_objects() -> Result<Vec<DroppedObject>, PgTrickleError> {
             let schema_name = row.get::<String>(3).map_err(map_spi)?;
             let object_name = row.get::<String>(4).map_err(map_spi)?;
             let object_identity = row.get::<String>(5).map_err(map_spi)?;
+            let trigger_address = row
+                .get::<String>(6)
+                .map_err(map_spi)?
+                .zip(row.get::<String>(7).map_err(map_spi)?)
+                .zip(row.get::<String>(8).map_err(map_spi)?)
+                .map(|((schema, table), trigger)| (schema, table, trigger));
 
             objects.push(DroppedObject {
                 objid,
@@ -2076,6 +2221,7 @@ fn collect_dropped_objects() -> Result<Vec<DroppedObject>, PgTrickleError> {
                 schema_name,
                 object_name,
                 object_identity,
+                trigger_address,
             });
         }
         Ok(objects)
@@ -2127,6 +2273,28 @@ fn handle_dropped_table(obj: &DroppedObject, finalized: &HashSet<(i64, u32, u32)
             };
             crate::wal_decoder::retire_replication_slot(obj.objid, slot).unwrap_or_else(|e| {
                 pgrx::error!("pg_trickle: cannot queue WAL slot before dropping {identity}: {e}")
+            });
+        }
+    }
+
+    #[cfg(not(test))]
+    if local {
+        let retention = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies WHERE source_relid = $1 \
+             AND source_type = 'TABLE' AND column_snapshot ? 'partition_retention')",
+            &[obj.objid.into()],
+        )
+        .unwrap_or_else(|e| {
+            pgrx::error!(
+                "pg_trickle: cannot inspect retention before dropping {}: {}",
+                identity,
+                e
+            )
+        })
+        .unwrap_or(false);
+        if retention {
+            crate::dvm::retention::drop_partition_truncate_guard(obj.objid).unwrap_or_else(|e| {
+                pgrx::error!("pg_trickle: cannot remove source retention guards: {}", e)
             });
         }
     }
@@ -2937,8 +3105,10 @@ mod tests {
             schema_name: Some("public".to_string()),
             object_name: Some("orders".to_string()),
             object_identity: Some("public.orders".to_string()),
+            trigger_address: None,
         };
         let debug = format!("{:?}", obj);
+        assert!(obj.trigger_address.is_none());
         assert!(debug.contains("public.orders"));
     }
 

@@ -77,11 +77,22 @@ fn set_policy(
             ));
         }
         retention::ensure_history_reconstructible(st.pgt_id)?;
+        let previous = load_policy(st.pgt_id)?;
+        if let Some((source_oid, _)) = &previous {
+            crate::cdc::lock_source_relations(&[*source_oid])?;
+        }
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_dependencies SET column_snapshot = column_snapshot - 'partition_retention' \
              WHERE pgt_id = $1 AND column_snapshot ? 'partition_retention'",
             &[st.pgt_id.into()],
         ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if let Some((source_oid, _)) = previous {
+            crate::cdc::rebuild_cdc_trigger(
+                source_oid,
+                &crate::config::pg_trickle_change_buffer_schema(),
+            )?;
+            retention::remove_partition_truncate_guards_if_unused(source_oid)?;
+        }
         crate::shmem::signal_dag_invalidation(st.pgt_id);
         crate::shmem::bump_cache_generation();
         return Ok(());
@@ -104,9 +115,14 @@ fn set_policy(
     let source_oid = retention::retention_source(&st)?;
     let candidate = crate::refresh::with_stream_owner(&st, || {
         let tree = crate::dvm::parser::parse_defining_query(&st.defining_query)?;
-        retention::query_group_candidate(&tree, source_oid.to_u32(), key).map_err(|error| {
-            PgTrickleError::InvalidArgument(format!("retention query is not eligible: {error:?}"))
-        })
+        let candidate =
+            retention::query_group_candidate(&tree, source_oid.to_u32(), key).map_err(|error| {
+                PgTrickleError::InvalidArgument(format!(
+                    "retention query is not eligible: {error:?}"
+                ))
+            })?;
+        retention::validate_builtin_aggregates(&st.defining_query, &tree)?;
+        Ok(candidate)
     })?;
     let cutoff = retention::parse_retention_cutoff(candidate.source_type_oid, cutoff)?;
     let query_hash = crate::catalog::compute_defining_query_hash(&st.defining_query);
@@ -153,9 +169,30 @@ fn set_policy(
     retention::validate_partition_layout_trusted(source_oid, &state.candidate, state.cutoff)?;
     retention::ensure_no_live_sealed_overlap(source_oid, &state, None)?;
     retention::validate_retention_storage(&st, source_oid, &state.candidate, mode, true)?;
-    if old_policy
-        .as_ref()
-        .is_some_and(|(source, old)| *source == source_oid && *old == state)
+    let capture_valid = if old_policy.is_some() {
+        match retention::ensure_retention_capture(st.pgt_id) {
+            Ok(()) => true,
+            Err(PgTrickleError::InvalidArgument(_)) => false,
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
+    };
+    let needs_baseline = !capture_valid;
+    if needs_baseline
+        && old_policy
+            .as_ref()
+            .is_some_and(|(_, old)| !old.sealed.is_empty())
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "retained history cannot be reconfigured after partition CDC capture became incomplete"
+                .into(),
+        ));
+    }
+    if !needs_baseline
+        && old_policy
+            .as_ref()
+            .is_some_and(|(source, old)| *source == source_oid && *old == state)
     {
         return Ok(());
     }
@@ -173,6 +210,38 @@ fn set_policy(
         return Err(PgTrickleError::InvalidArgument(
             "retention source changed during configuration".into(),
         ));
+    }
+    if needs_baseline {
+        crate::cdc::lock_source_relations(&[source_oid])?;
+        crate::cdc::rebuild_cdc_trigger(
+            source_oid,
+            &crate::config::pg_trickle_change_buffer_schema(),
+        )?;
+        retention::install_partition_truncate_guards(source_oid)?;
+        retention::ensure_retention_capture(st.pgt_id)?;
+        StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;
+        let mut refreshed = StreamTableMeta::get_by_id(st.pgt_id)?
+            .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {}", st.pgt_id)))?;
+        // The catalog read can use the caller's snapshot before our SPI update.
+        refreshed.needs_reinit = true;
+        let safe_bound = crate::cdc::get_current_wal_lsn()?;
+        let result = crate::refresh::with_refresh_context(
+            crate::refresh::RefreshContext::graph(&safe_bound, crate::refresh::FullPolicy::Allow),
+            || {
+                super::refresh_ops::execute_manual_refresh(
+                    &refreshed,
+                    &st.pgt_schema,
+                    &st.pgt_name,
+                    &[source_oid],
+                )
+            },
+        )?;
+        if !matches!(result.action.as_str(), "FULL" | "REINITIALIZE") {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "retention CDC initialization performed unexpected refresh mode {}",
+                result.action
+            )));
+        }
     }
     crate::shmem::signal_dag_invalidation(st.pgt_id);
     crate::shmem::bump_cache_generation();

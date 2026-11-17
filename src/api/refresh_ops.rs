@@ -328,6 +328,7 @@ pub(crate) fn execute_manual_refresh(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<ManualRefreshResult, PgTrickleError> {
+    crate::dvm::retention::ensure_retention_capture(st.pgt_id)?;
     if matches!(st.status, StStatus::Suspended | StStatus::Error) {
         return Err(PgTrickleError::InvalidArgument(format!(
             "stream table {}.{} is {}; resume it before refreshing",
@@ -463,6 +464,8 @@ pub(crate) fn execute_manual_refresh(
         );
         Spi::run(&sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
+        // Rewriting can refresh another stream and overwrite the backend-local mode.
+        refresh::set_effective_mode("FULL");
         Ok(full_result)
     } else {
         match st.refresh_mode {
