@@ -684,44 +684,6 @@ def main():
         observations["checks"].append({"name": "callback-error-role-reset", "result": "passed"})
         assert json.loads(sql("SELECT jsonb_agg(to_jsonb(r) ORDER BY created_at,receipt_id) "
                               "FROM mdm_steward.policy_receipts_v1 r")) == retained_receipts
-        sql("CREATE ROLE mdm_s1_runtime_no_set LOGIN")
-        sql("GRANT CONNECT ON DATABASE s1_idle TO mdm_s1_runtime_no_set")
-        sql("GRANT USAGE ON SCHEMA pgreact_api TO mdm_s1_runtime_no_set")
-        sql("ALTER SYSTEM SET pg_react.worker_role = 'mdm_s1_runtime_no_set'")
-        sql("ALTER SYSTEM SET pg_react.databases = 's1_idle'")
-        command("docker", "restart", container)
-        end = time.monotonic() + 20
-        rejection_lines = []
-        while time.monotonic() < end:
-            ready = subprocess.run(["docker", "exec", container, "pg_isready", "-U", "postgres"],
-                                   capture_output=True)
-            if not ready.returncode:
-                logs = subprocess.run(["docker", "logs", "--tail", "200", container],
-                                      capture_output=True, text=True, timeout=30)
-                rejection_lines = [line for line in (logs.stdout + logs.stderr).splitlines()
-                                   if "managed worker role must be a unique SET-capable function grantee" in line]
-                if rejection_lines:
-                    break
-            time.sleep(0.2)
-        assert rejection_lines, "worker without SET membership was not rejected by the managed path"
-        assert sql("SELECT pg_catalog.pg_has_role('mdm_s1_runtime_no_set',"
-                   "'pgreact_mdm_worker','SET')") == "f"
-        assert sql("SELECT current_setting('pg_react.worker_role')") == "mdm_s1_runtime_no_set"
-        assert json.loads(sql("SELECT jsonb_agg(to_jsonb(r) ORDER BY created_at,receipt_id) "
-                              "FROM mdm_steward.policy_receipts_v1 r")) == retained_receipts
-        assert cases() == actual
-        assert json.loads(sql("SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) "
-                              "FROM public.policy_qualification_source s")) == source
-        assert json.loads(sql("SELECT jsonb_agg(to_jsonb(s) ORDER BY s.case_key) "
-                              "FROM s1_audit.source s")) == temporal_source
-        assert json.loads(sql("SELECT COALESCE(jsonb_agg(to_jsonb(w) ORDER BY work_id),'[]') "
-                              "FROM pgreact.work w WHERE name='s1-future-idle'")) == work
-        assert json.loads(sql("SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY execution_id),'[]') "
-                              "FROM pgreact.attempts a WHERE name='s1-future-idle'")) == attempts
-        observations["no_set_membership"] = {"worker_login": "mdm_s1_runtime_no_set",
-            "configured_role": "pgreact_mdm_worker", "set_membership": False,
-            "rejection": rejection_lines[-1], "public_state_unchanged": True}
-        observations["checks"].append({"name": "worker-missing-set-membership", "result": "passed"})
         observations.update(receipt_expected=expected_receipt, matches=matches, idle_binding=binding)
         observations.update(cases_actual=actual, receipts=receipts,
                             deadline_to_receipt_seconds=(delivered_at - deadline).total_seconds(),
@@ -1142,6 +1104,38 @@ def main():
                       "result": ("not_assessed_diagnostic_profile" if profile_case_count is not None
                                  else "passed" if observed_rate >= churn_per_minute else "failed")}
         observations["checks"].append(rate_check)
+        # This postmaster setting intentionally makes the disposable server fail
+        # the managed worker's role check; run the destructive case last.
+        sql("CREATE ROLE mdm_s1_runtime_no_set LOGIN")
+        sql("GRANT CONNECT ON DATABASE s1_idle TO mdm_s1_runtime_no_set")
+        sql("GRANT USAGE ON SCHEMA pgreact_api TO mdm_s1_runtime_no_set")
+        assert sql("SELECT pg_catalog.pg_has_role('mdm_s1_runtime_no_set',"
+                   "'pgreact_mdm_worker','SET')") == "f"
+        sql("ALTER SYSTEM SET pg_react.worker_role = 'mdm_s1_runtime_no_set'")
+        command("docker", "restart", container)
+        rejection_lines = []
+        end = time.monotonic() + 20
+        while time.monotonic() < end:
+            logs = subprocess.run(["docker", "logs", "--tail", "200", container],
+                                  capture_output=True, text=True, timeout=30)
+            if logs.returncode:
+                raise RuntimeError("container log read failed: " + logs.stderr)
+            rejection_lines = [line for line in (logs.stdout + logs.stderr).splitlines()
+                               if "managed worker role must be a unique SET-capable function grantee" in line]
+            if rejection_lines:
+                break
+            state = subprocess.run(["docker", "inspect", container,
+                                    "--format", "{{.State.Status}}"], capture_output=True, text=True)
+            if state.returncode:
+                raise RuntimeError("container inspection failed: " + state.stderr)
+            if state.stdout.strip() in ("exited", "dead", "removing"):
+                break
+            time.sleep(0.2)
+        assert rejection_lines, "worker without SET membership was not rejected by the managed path"
+        observations["no_set_membership"] = {"worker_login": "mdm_s1_runtime_no_set",
+            "configured_role": "pgreact_mdm_worker", "set_membership": False,
+            "rejection": rejection_lines[-1], "server_disposable": True}
+        observations["checks"].append({"name": "worker-missing-set-membership", "result": "passed"})
         if profile_case_count is None:
             assert observed_rate >= churn_per_minute, rate_check
         observations["entry_decision"] = ("DIAGNOSTIC_ONLY" if profile_case_count is not None

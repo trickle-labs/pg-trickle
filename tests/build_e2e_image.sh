@@ -4,7 +4,7 @@
 #
 # This script builds a multi-stage Docker image that:
 #   1. Compiles the extension from source (Rust + cargo-pgrx)
-#   2. Installs it into a clean postgres:18.6 image
+#   2. Installs it into a clean postgres:18.7 image
 #
 # The resulting image can be used by testcontainers-rs in the E2E tests.
 #

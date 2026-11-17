@@ -42,6 +42,9 @@ def read_latencies(log_dir: Path) -> list[float]:
                 continue
             try:
                 latency_us = float(fields[2])
+                if len(fields) >= 7:
+                    # Rate-limited logs include client-side schedule delay.
+                    latency_us -= float(fields[6])
             except ValueError:
                 continue
             if math.isfinite(latency_us) and latency_us >= 0:
