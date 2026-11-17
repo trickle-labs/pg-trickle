@@ -356,3 +356,28 @@ output rows; TRIM and downstream refreshes completed differentially. The
 raw plans and latency samples are in `results/2026-11-17-pg18-macos-collation-9m.json`
 and `results/2026-11-17-pg18-macos-collation-27m.json`. These are single
 instrumented debug-build runs, not a guaranteed planner bound.
+
+The following instrumented native PostgreSQL 18.7 arm64 debug-build runs were
+repeated after the floating-point eligibility guard. Each includes a concurrent
+writer, reader, and downstream stream. Times are milliseconds.
+
+| Retained events | Sample | Mode | DROP | First refresh | Writer p95 / max | Reader p95 / max |
+|---:|---|---|---:|---:|---:|---:|
+| 9,000,000 | 1 | baseline | 50 | 3,853 | 0.14 / 10.09 | 2.08 / 3.17 |
+| 9,000,000 | 1 | TRIM | 1,492 | 63 | 0.13 / 1,448.43 | 1.99 / 2.75 |
+| 9,000,000 | 2 | baseline | 40 | 3,726 | 0.10 / 3,682.42 | 1.99 / 3.10 |
+| 9,000,000 | 2 | TRIM | 166 | 205 | 0.11 / 123.71 | 2.05 / 3.29 |
+| 27,000,000 | 1 | baseline | 41 | 10,270 | 0.11 / 9.93 | 2.10 / 3.24 |
+| 27,000,000 | 1 | TRIM | 172 | 206 | 0.13 / 126.69 | 2.08 / 2.95 |
+
+Both result oracles matched in every sample. Baseline refreshes scanned all 30
+retained partitions and observed 9,013,205, 9,014,424, and 27,013,287 source
+rows respectively. TRIM DROP scanned no retained source partitions and observed
+7,000 output rows per sample; TRIM and downstream completed differential work.
+The first 9M TRIM DROP and the repeat baseline each showed a long writer latency.
+The server logged frequent WAL-driven checkpoints during the benchmark period,
+but the measurements do not establish the cause of either stall. Latencies cover
+the workload and do not isolate lock waits; these samples are not a hard planner
+bound. The plans are in `results/2026-11-17-pg18-macos-head-9m.json`,
+`results/2026-11-17-pg18-macos-head-9m-repeat.json`, and
+`results/2026-11-17-pg18-macos-head-27m.json`.
