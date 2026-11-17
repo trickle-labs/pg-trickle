@@ -813,6 +813,10 @@
       "nextest_retries": 0,
       "required_cases": [
         "e2e_pgvector_tests::test_centroid_randomized_refresh_churn_matches_native_avg",
+        "e2e_pgvector_tests::test_centroid_long_running_drift_matches_native_avg",
+        "e2e_pgvector_tests::test_centroid_diverse_384_dimensional_drift_matches_native_avg",
+        "e2e_pgvector_tests::test_centroid_diverse_768_dimensional_drift_matches_native_avg",
+        "e2e_pgvector_tests::test_centroid_diverse_high_dimensional_drift_matches_native_avg",
         "e2e_pgvector_tests::test_centroid_crash_recovers_committed_source_and_rolls_back_refresh",
         "e2e_pgvector_tests::test_centroid_opt_in_applies_and_falls_back_after_corruption",
         "e2e_pgvector_tests::test_centroid_missing_state_rebuilds_or_stays_unbound",
@@ -831,7 +835,7 @@
         "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
         "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components"
       ],
-      "workload": "candidate package with pgvector 0.8.1: corpus, index plans, notifications, authorization, revision safety and concurrent maintenance"
+      "workload": "candidate package with pgvector 0.8.1: 2,000-call centroid drift at 3/384/768/1536 dimensions, corpus, index plans, notifications and maintenance"
     },
     {
       "id": "pgvector-0.8.7",
@@ -852,6 +856,10 @@
       "nextest_retries": 0,
       "required_cases": [
         "e2e_pgvector_tests::test_centroid_randomized_refresh_churn_matches_native_avg",
+        "e2e_pgvector_tests::test_centroid_long_running_drift_matches_native_avg",
+        "e2e_pgvector_tests::test_centroid_diverse_384_dimensional_drift_matches_native_avg",
+        "e2e_pgvector_tests::test_centroid_diverse_768_dimensional_drift_matches_native_avg",
+        "e2e_pgvector_tests::test_centroid_diverse_high_dimensional_drift_matches_native_avg",
         "e2e_pgvector_tests::test_centroid_crash_recovers_committed_source_and_rolls_back_refresh",
         "e2e_pgvector_tests::test_centroid_opt_in_applies_and_falls_back_after_corruption",
         "e2e_pgvector_tests::test_centroid_missing_state_rebuilds_or_stays_unbound",
@@ -870,7 +878,7 @@
         "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
         "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components"
       ],
-      "workload": "candidate package with pgvector 0.8.7: corpus, index plans, notifications, authorization, revision safety and concurrent maintenance"
+      "workload": "candidate package with pgvector 0.8.7: 2,000-call centroid drift at 3/384/768/1536 dimensions, corpus, index plans, notifications and maintenance"
     },
     {
       "id": "pgvector-catalog-upgrade",
