@@ -1262,17 +1262,22 @@ fn build_intermediate_agg_delta(
             format!("{delta_cte} AS d({delta_group_aliases})")
         };
 
-        let old_presence = format!(
-            "\nWHERE {}",
-            crate::aggregate_lifecycle::group_presence_sql(group_columns.is_empty(), old_pgt_count,)
-        );
-        let new_presence = format!(
-            "\nWHERE {}",
-            crate::aggregate_lifecycle::group_presence_sql(
-                group_columns.is_empty(),
-                "n.__pgt_count",
+        let old_presence = if group_columns.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nWHERE {}",
+                crate::aggregate_lifecycle::group_presence_sql(false, old_pgt_count)
             )
-        );
+        };
+        let new_presence = if group_columns.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nWHERE {}",
+                crate::aggregate_lifecycle::group_presence_sql(false, "n.__pgt_count")
+            )
+        };
         let final_sql = format!(
             "\
 -- D events: old state (algebraic: old = new - ins + del)
