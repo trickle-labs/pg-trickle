@@ -178,6 +178,10 @@ The contract is intentionally narrow:
 - Retention cuts require the configured stream to be active and initialized
   with no pending reinitialization. Resume and repair it before removing a
   partition if it has been paused or suspended.
+- Keep the stream table's valid, non-partial btree row-identity index on `__pgt_row_id` or
+  `pgtrickle.row_probe_v1(__pgt_row_id)`. A missing or invalid index rejects
+  the retention cut; restore its original definition, including uniqueness
+  when required, before retrying.
 - `RETAIN` rejects overlapping historical attachments, including empty
   partitions, and nonempty attachments that would require rebuilding sealed
   history. Late arrivals or backfills into a sealed range therefore require a

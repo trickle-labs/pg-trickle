@@ -1946,6 +1946,35 @@ async fn test_retained_history_blocks_rebuild_query_change_and_restore() {
 }
 
 #[tokio::test]
+async fn test_retention_trim_partitioned_stream_storage() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE trim_storage_src (id INT NOT NULL, d DATE NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE trim_storage_old PARTITION OF trim_storage_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE trim_storage_live PARTITION OF trim_storage_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO trim_storage_src VALUES (1,'2025-06-01',10),(2,'2026-06-01',20)")
+        .await;
+    let query = "SELECT d, sum(amount) AS total, count(*) AS n FROM trim_storage_src GROUP BY d";
+    db.create_st_partitioned("trim_storage_st", query, "1h", "DIFFERENTIAL", "d")
+        .await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('trim_storage_st', 'TRIM', 'd', '2026-01-01')").await;
+    db.execute("INSERT INTO trim_storage_src VALUES (3,'2026-06-01',7)")
+        .await;
+    db.execute("DROP TABLE trim_storage_old").await;
+    db.assert_st_matches_query("trim_storage_st", query).await;
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM trim_storage_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read partitioned stream results");
+    assert_eq!(rows, vec![("2026-06-01".into(), 27, 2)]);
+    let action: (String, String, bool) = sqlx::query_as("SELECT h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'trim_storage_st' ORDER BY h.refresh_id DESC LIMIT 1").fetch_one(&db.pool).await.expect("read retention refresh action");
+    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+}
+
+#[tokio::test]
 #[cfg(feature = "e2e-unsafe-test-hooks")]
 async fn test_retention_trim_detach_preserves_live_groups_and_downstream() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
@@ -1967,7 +1996,40 @@ async fn test_retention_trim_detach_preserves_live_groups_and_downstream() {
         "DIFFERENTIAL",
     )
     .await;
+    db.execute("DROP INDEX trim_cut_st_row_id_idx").await;
+    let error = db.try_execute("SELECT pgtrickle.set_stream_table_partition_retention('trim_cut_st', 'TRIM', 'd', '2026-01-01')").await.expect_err("reject retention configuration without the row-identity index");
+    assert!(
+        error.to_string().contains("valid btree row-identity index"),
+        "{error}"
+    );
+    db.execute("CREATE INDEX trim_cut_st_row_id_idx ON trim_cut_st (pgtrickle.row_probe_v1(__pgt_row_id)) WHERE d >= DATE '2026-01-01'").await;
+    let error = db.try_execute("SELECT pgtrickle.set_stream_table_partition_retention('trim_cut_st', 'TRIM', 'd', '2026-01-01')").await.expect_err("reject a partial row-identity index");
+    assert!(
+        error.to_string().contains("valid btree row-identity index"),
+        "{error}"
+    );
+    db.execute("DROP INDEX trim_cut_st_row_id_idx").await;
+    db.execute(
+        "CREATE INDEX trim_cut_st_row_id_idx ON trim_cut_st (pgtrickle.row_probe_v1(__pgt_row_id))",
+    )
+    .await;
     db.execute("SELECT pgtrickle.set_stream_table_partition_retention('trim_cut_st', 'TRIM', 'd', '2026-01-01')").await;
+    db.execute("DROP INDEX trim_cut_st_row_id_idx").await;
+    let error = db
+        .try_execute("DROP TABLE trim_cut_old")
+        .await
+        .expect_err("reject removal without the row-identity index");
+    assert!(
+        error.to_string().contains("valid btree row-identity index"),
+        "{error}"
+    );
+    let attached: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = 'trim_cut_old'::regclass AND inhparent = 'trim_cut_src'::regclass)").await;
+    assert!(attached);
+    db.assert_st_matches_query("trim_cut_st", query).await;
+    db.execute(
+        "CREATE INDEX trim_cut_st_row_id_idx ON trim_cut_st (pgtrickle.row_probe_v1(__pgt_row_id))",
+    )
+    .await;
     let (pgt_id, query_hash): (i64, i64) = sqlx::query_as("SELECT pgt_id, defining_query_hash FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'trim_cut_st'")
         .fetch_one(&db.pool).await.expect("read stream identity");
     let (source_oid, target_oid, cutoff): (i64, i64, i32) = sqlx::query_as("SELECT 'trim_cut_src'::regclass::oid::bigint, 'trim_cut_old'::regclass::oid::bigint, DATE '2026-01-01' - DATE '2000-01-01'")

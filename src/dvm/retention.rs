@@ -1287,6 +1287,30 @@ pub(crate) fn validate_retention_storage(
             "retention requires local heap storage with the proven output group key".into(),
         ));
     }
+    let has_identity_index = with_retention_guc_scope(|| {
+        Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_index i \
+             JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid \
+             JOIN pg_catalog.pg_am am ON am.oid = idx.relam \
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attname = '__pgt_row_id' \
+             JOIN pg_catalog.pg_opclass op ON op.oid = i.indclass[0] \
+             WHERE i.indrelid = $1 AND i.indisvalid AND i.indisready AND i.indpred IS NULL \
+               AND am.amname = 'btree' AND op.opcdefault AND op.opcintype = a.atttypid \
+               AND (i.indkey[0] = a.attnum OR \
+                    (i.indkey[0] = 0 AND pg_catalog.pg_get_indexdef(i.indexrelid, 1, true) = \
+                     'pgtrickle.row_probe_v1(__pgt_row_id)')))",
+            &[st.pgt_relid.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        .map(|value| value.unwrap_or(false))
+    })?;
+    if !has_identity_index {
+        return Err(PgTrickleError::InvalidArgument(
+            "partition retention requires a valid btree row-identity index on __pgt_row_id or pgtrickle.row_probe_v1(__pgt_row_id); restore the original stream table index, including its uniqueness if required, before retrying".into(),
+        ));
+    }
     if mode == RetentionMode::Retain {
         if st.st_partition_key.is_some() {
             return Err(PgTrickleError::InvalidArgument(

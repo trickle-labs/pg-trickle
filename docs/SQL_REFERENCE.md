@@ -1627,7 +1627,9 @@ mode are rejected. After the last policy is disabled, the source returns to
 the configured CDC trigger mode.
 
 For an eligible expired partition, TRIM removes its groups and RETAIN preserves
-them. RETAIN rejects operations that would rebuild sealed history from an
+them. Both policies require the stream's valid btree row-identity index; if it
+is removed or invalid, restore its original definition before a retention cut.
+RETAIN rejects operations that would rebuild sealed history from an
 incomplete source. `OFF` is allowed only while no history has been sealed and
 no retention cut is pending.
 After sealing, automatic cost-based FULL fallbacks continue as differential
