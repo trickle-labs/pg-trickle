@@ -198,6 +198,32 @@ def check_retirement_contract(contract: dict) -> None:
     )
 
 
+def check_subscription_scale_contract(contract: dict) -> None:
+    suite = next(
+        (item for item in contract["required_suites"] if item["id"] == "subscription-scale-1m"),
+        None,
+    )
+    prior.shared.require(suite is not None, "the exact-package subscription matrix through one million rows is required")
+    if suite is None:
+        return
+    prior.shared.require(
+        suite.get("kind") == "measurement"
+        and suite.get("artifact_id") == "linux-amd64"
+        and suite.get("required") is True
+        and suite.get("runtime") is True
+        and suite.get("upgrade") is False
+        and suite.get("requires_postgresql") is True
+        and suite.get("suite_version") == "0.109.0"
+        and suite.get("command_argv") == ["python3", "scripts/run_release_subscription_scale.py"]
+        and suite.get("measurement_file") == "qualification-logs/raw/subscription-scale-1m.json"
+        and suite.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
+        and suite.get("nextest_retries") == 0
+        and suite.get("workload")
+        == "exact-package 384-dimensional 1k/10k/100k/1m source-row subscription matrix with 1m-row plan controls; not a RAG benchmark",
+        "subscription scale must measure the exact release package separately from RAG",
+    )
+
+
 def main() -> None:
     prior.VERSION = "0.109.0"
     prior.PREVIOUS_VERSION = "0.108.3"
@@ -207,13 +233,14 @@ def main() -> None:
     prior.REQUIRED_SHARDS = prior.REQUIRED_SHARDS | {"wal-retirement"}
     prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {
         "wal-retirement", "wal-retirement-upgrade", "pgvector-0.8.1", "pgvector-0.8.7",
-        "pgvector-catalog-upgrade", "live-rag-100k",
+        "pgvector-catalog-upgrade", "live-rag-100k", "subscription-scale-1m",
     }
     contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
     check_retirement_contract(contract)
     check_pgvector_contract(contract)
     check_ann_packaging_workflow((prior.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
     check_live_rag_contract(contract)
+    check_subscription_scale_contract(contract)
     check_pgvector_upgrade_script((prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8"))
     prior.main()
 
