@@ -1540,11 +1540,10 @@ async fn test_live_rag_wide_setup_and_worker_match() {
         )
         .await;
     assert_eq!(dimensions, expected);
-    db.execute_seq(&[
-        "SELECT live_rag.sync_application(ARRAY[1]::bigint[])",
-        "SELECT live_rag.recompute_full()",
-    ])
-    .await;
+    db.execute("SELECT live_rag.sync_application(ARRAY[1]::bigint[])")
+        .await;
+    db.execute(&format!("SELECT live_rag.recompute_full({expected})"))
+        .await;
     db.try_execute_with_config(
         &[
             "SET pg_trickle.refresh_strategy='differential'",
