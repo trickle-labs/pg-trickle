@@ -2429,6 +2429,375 @@ async fn test_alter_st_partition_by_invalid_column_error() {
     );
 }
 
+/// A partition-key migration changes the producer's OID. Until that path
+/// can rebind the graph like ALTER QUERY, reject a live downstream chain.
+#[tokio::test]
+async fn test_alter_st_partition_key_with_downstream_chain_rejects_before_replacement() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE guard_chain_src (
+            id INT PRIMARY KEY, event_day DATE NOT NULL, amount INT NOT NULL)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO guard_chain_src VALUES
+         (1, '2026-01-01', 10), (2, '2026-02-01', 20)",
+    )
+    .await;
+    db.create_st(
+        "guard_chain_up",
+        "SELECT id, event_day, amount FROM guard_chain_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "guard_chain_down",
+        "SELECT id, amount FROM guard_chain_up",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "guard_chain_leaf",
+        "SELECT id FROM guard_chain_down",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let original_oid: i64 = db
+        .query_scalar("SELECT 'guard_chain_up'::regclass::oid::bigint")
+        .await;
+    let dependency_oid: i64 = db
+        .query_scalar(
+            "SELECT source_relid::bigint FROM pgtrickle.pgt_dependencies
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                             WHERE pgt_name = 'guard_chain_down')
+               AND source_type = 'STREAM_TABLE'",
+        )
+        .await;
+    assert_eq!(dependency_oid, original_oid);
+
+    let err = db
+        .try_execute(
+            "SELECT pgtrickle.alter_stream_table(
+               'guard_chain_up', partition_by => 'event_day')",
+        )
+        .await
+        .expect_err("repartitioning must not leave downstream relations dangling");
+    assert!(
+        err.to_string().contains("downstream stream table")
+            && err.to_string().contains("partition_by"),
+        "unexpected partition-dependency error: {err}"
+    );
+    let current_oid: i64 = db
+        .query_scalar("SELECT 'guard_chain_up'::regclass::oid::bigint")
+        .await;
+    assert_eq!(
+        current_oid, original_oid,
+        "rejected ALTER replaced the parent"
+    );
+    let current_dependency_oid: i64 = db
+        .query_scalar(
+            "SELECT source_relid::bigint FROM pgtrickle.pgt_dependencies
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                             WHERE pgt_name = 'guard_chain_down')
+               AND source_type = 'STREAM_TABLE'",
+        )
+        .await;
+    assert_eq!(current_dependency_oid, original_oid);
+    let key: Option<String> = db
+        .query_scalar_opt(
+            "SELECT st_partition_key FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'guard_chain_up'",
+        )
+        .await;
+    assert!(key.is_none());
+
+    db.execute("INSERT INTO guard_chain_src VALUES (3, '2026-03-01', 30)")
+        .await;
+    db.refresh_st_with_retry("guard_chain_up").await;
+    db.refresh_st_with_retry("guard_chain_down").await;
+    db.refresh_st_with_retry("guard_chain_leaf").await;
+    db.assert_st_matches_query(
+        "guard_chain_up",
+        "SELECT id, event_day, amount FROM guard_chain_src",
+    )
+    .await;
+    db.assert_st_matches_query("guard_chain_down", "SELECT id, amount FROM guard_chain_src")
+        .await;
+    db.assert_st_matches_query("guard_chain_leaf", "SELECT id FROM guard_chain_src")
+        .await;
+}
+
+#[tokio::test]
+async fn test_alter_st_partition_key_change_and_remove_reject_with_downstream() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE guard_change_src (
+            id INT PRIMARY KEY, event_day DATE NOT NULL, category TEXT NOT NULL)",
+    )
+    .await;
+    db.execute("INSERT INTO guard_change_src VALUES (1, '2026-01-01', 'A')")
+        .await;
+    db.create_st_partitioned(
+        "guard_change_up",
+        "SELECT id, event_day, category FROM guard_change_src",
+        "1m",
+        "DIFFERENTIAL",
+        "event_day",
+    )
+    .await;
+    db.create_st(
+        "guard_change_down",
+        "SELECT id, category FROM guard_change_up",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let oid_before: i64 = db
+        .query_scalar("SELECT 'guard_change_up'::regclass::oid::bigint")
+        .await;
+    for new_key in ["category", ""] {
+        let err = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.alter_stream_table(
+                    'guard_change_up', partition_by => '{new_key}')"
+            ))
+            .await
+            .expect_err("both a changed key and removal must reject downstream graphs");
+        assert!(err.to_string().contains("downstream stream table"));
+        let oid_after: i64 = db
+            .query_scalar("SELECT 'guard_change_up'::regclass::oid::bigint")
+            .await;
+        assert_eq!(oid_after, oid_before);
+        let key: String = db
+            .query_scalar(
+                "SELECT st_partition_key FROM pgtrickle.pgt_stream_tables
+                 WHERE pgt_name = 'guard_change_up'",
+            )
+            .await;
+        assert_eq!(key, "event_day");
+    }
+    // The rejected ALTER must preserve the existing downstream dependency
+    // and materialized result. Incremental refresh of a partitioned producer
+    // with downstream consumers is an independent issue (#1439); the two
+    // unpartitioned and IMMEDIATE guard tests exercise post-rejection writes.
+    let dependent_source_oid: i64 = db
+        .query_scalar(
+            "SELECT source_relid::bigint FROM pgtrickle.pgt_dependencies
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                             WHERE pgt_name = 'guard_change_down')
+               AND source_type = 'STREAM_TABLE'",
+        )
+        .await;
+    assert_eq!(dependent_source_oid, oid_before);
+    db.assert_st_matches_query(
+        "guard_change_up",
+        "SELECT id, event_day, category FROM guard_change_src",
+    )
+    .await;
+    db.assert_st_matches_query(
+        "guard_change_down",
+        "SELECT id, category FROM guard_change_src",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_alter_st_partition_key_rejects_immediate_downstream_without_losing_triggers() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE guard_immediate_src (
+            id INT PRIMARY KEY, event_day DATE NOT NULL, amount INT NOT NULL)",
+    )
+    .await;
+    db.execute("INSERT INTO guard_immediate_src VALUES (1, '2026-01-01', 10)")
+        .await;
+    db.create_st(
+        "guard_immediate_up",
+        "SELECT id, event_day, amount FROM guard_immediate_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'guard_immediate_down',
+            query => 'SELECT id, amount FROM guard_immediate_up',
+            schedule => NULL, refresh_mode => 'IMMEDIATE')",
+    )
+    .await;
+    let parent_oid: i64 = db
+        .query_scalar("SELECT 'guard_immediate_up'::regclass::oid::bigint")
+        .await;
+    let triggers_before: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM pg_catalog.pg_trigger
+             WHERE tgrelid = 'guard_immediate_up'::regclass AND NOT tgisinternal",
+        )
+        .await;
+    assert!(
+        triggers_before > 0,
+        "downstream IVM must have source triggers"
+    );
+
+    let err = db
+        .try_execute(
+            "SELECT pgtrickle.alter_stream_table(
+               'guard_immediate_up', partition_by => 'event_day')",
+        )
+        .await
+        .expect_err("repartitioning must preserve downstream IVM trigger ownership");
+    assert!(err.to_string().contains("downstream stream table"));
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT 'guard_immediate_up'::regclass::oid::bigint")
+            .await,
+        parent_oid
+    );
+    assert_eq!(
+        db.query_scalar::<i64>(
+            "SELECT count(*) FROM pg_catalog.pg_trigger
+             WHERE tgrelid = 'guard_immediate_up'::regclass AND NOT tgisinternal"
+        )
+        .await,
+        triggers_before
+    );
+
+    db.execute("INSERT INTO guard_immediate_src VALUES (2, '2026-02-01', 20)")
+        .await;
+    db.refresh_st_with_retry("guard_immediate_up").await;
+    db.assert_st_matches_query(
+        "guard_immediate_down",
+        "SELECT id, amount FROM guard_immediate_src",
+    )
+    .await;
+}
+
+/// An uncommitted CREATE of a downstream stream holds a read lock on the
+/// upstream relation. Repartition must wait for that dependency to commit
+/// before deciding whether it may drop and replace the relation.
+#[tokio::test]
+async fn test_alter_st_partition_key_serializes_concurrent_downstream_registration() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE guard_race_src (
+            id INT PRIMARY KEY, event_day DATE NOT NULL)",
+    )
+    .await;
+    db.execute("INSERT INTO guard_race_src VALUES (1, '2026-01-01')")
+        .await;
+    db.create_st(
+        "guard_race_up",
+        "SELECT id, event_day FROM guard_race_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let upstream_oid: i64 = db
+        .query_scalar("SELECT 'guard_race_up'::regclass::oid::bigint")
+        .await;
+
+    // Complete downstream creation, but deliberately keep its transaction
+    // uncommitted while the repartition request begins.
+    let mut create_tx = db.pool.begin().await.expect("begin dependent creation");
+    sqlx::query(
+        "SELECT pgtrickle.create_stream_table(
+            'guard_race_down',
+            'SELECT id FROM guard_race_up',
+            '1m', 'DIFFERENTIAL')",
+    )
+    .execute(&mut *create_tx)
+    .await
+    .expect("create downstream stream table inside transaction");
+    let creator_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *create_tx)
+        .await
+        .expect("identify the connection holding the upstream read lock");
+
+    let pool = db.pool.clone();
+    let alter = tokio::spawn(async move {
+        let mut conn = pool.acquire().await.expect("acquire ALTER session");
+        sqlx::query("SET application_name = 'guard_repartition_wait'")
+            .execute(&mut *conn)
+            .await
+            .expect("identify ALTER backend for lock observation");
+        sqlx::query(
+            "SELECT pgtrickle.alter_stream_table(
+                'guard_race_up', partition_by => 'event_day')",
+        )
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+    });
+
+    // A witnessed lock wait, not a sleep alone, proves the race is exercised.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut observed_wait = false;
+    while std::time::Instant::now() < deadline {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_stat_activity a
+                WHERE a.application_name = 'guard_repartition_wait'
+                  AND a.wait_event_type = 'Lock'
+                  AND $1::integer = ANY(pg_catalog.pg_blocking_pids(a.pid)))",
+        )
+        .bind(creator_pid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("observe the creator blocking repartition");
+        if waiting {
+            observed_wait = true;
+            break;
+        }
+        if alter.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        observed_wait,
+        "repartition request did not wait for the concurrent downstream registration"
+    );
+
+    create_tx
+        .commit()
+        .await
+        .expect("publish downstream dependency before ALTER resumes");
+    let err = tokio::time::timeout(std::time::Duration::from_secs(20), alter)
+        .await
+        .expect("ALTER must finish after downstream commits")
+        .expect("ALTER task must not panic")
+        .expect_err("a committed downstream must block repartition");
+    assert!(
+        err.to_string().contains("downstream stream table"),
+        "unexpected post-wait ALTER result: {err}"
+    );
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT 'guard_race_up'::regclass::oid::bigint")
+            .await,
+        upstream_oid
+    );
+    assert_eq!(
+        db.query_scalar::<i64>(
+            "SELECT source_relid::bigint FROM pgtrickle.pgt_dependencies
+             WHERE source_type = 'STREAM_TABLE'
+               AND pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                             WHERE pgt_name = 'guard_race_down')"
+        )
+        .await,
+        upstream_oid,
+        "the waiting ALTER must not orphan the newly committed dependency"
+    );
+
+    db.execute("INSERT INTO guard_race_src VALUES (2, '2026-02-01')")
+        .await;
+    db.refresh_st_with_retry("guard_race_up").await;
+    db.refresh_st_with_retry("guard_race_down").await;
+    db.assert_st_matches_query("guard_race_down", "SELECT id FROM guard_race_src")
+        .await;
+}
+
 // ── A1-3b: HASH partitioned stream tables ───────────────────────────────
 
 #[tokio::test]
