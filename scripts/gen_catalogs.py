@@ -39,6 +39,7 @@ SQL_CATALOG_PATH = DOCS_DIR / "SQL_API_CATALOG.md"
 _TEST_ONLY_SQL_FUNCTIONS = frozenset({
     "e2e_catch_security_context_error",
     "retention_candidate_test",
+    "retention_capture_multiset_test",
     "retention_detach_test",
     "retention_layout_test",
     "retention_prepare_test",

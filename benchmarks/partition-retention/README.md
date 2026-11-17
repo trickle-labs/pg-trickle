@@ -195,7 +195,22 @@ plans are `results/2026-11-17-pg18-macos-operator-cost-before-100m.json` and
 `results/2026-11-17-pg18-macos-operator-cost-fixed.json`. The benchmark now
 rejects repeated sequential scans of the delta in downstream capture. Two
 earlier post-change attempts produced no reader latency samples and were
-discarded. This check does not make PostgreSQL's planner choices a hard bound.
+discarded. Both plans still compared 999,000 row pairs in each downstream
+capture join, which the earlier scan-only guard did not detect.
+
+Retention capture now compares its affected pre- and post-refresh multisets
+with `EXCEPT ALL`. In a 30,000-event diagnostic with 1,000 pending events and
+hash joins, merge joins, materialization, memoization, sorting, hash aggregation,
+and index-only scans disabled by the caller, the previous plan examined
+1,007,000 output rows and repeatedly compared affected rows. The new plan
+examined 8,000 output rows, scanned no retained source partitions, and matched
+both full-result oracles. Its instrumented DROP took 254 ms in one debug-build
+run. The diagnostic restored normal planner settings for follow-up refreshes;
+the concurrent reader and writer retained the restrictive settings. Raw plans
+are `results/2026-11-17-pg18-macos-join-flags-before.json` and
+`results/2026-11-17-pg18-macos-multiset-after.json`. The benchmark also rejects
+nested capture joins that discard more than 100 times their output rows, with
+a 1,000-row floor. This heuristic does not prove a hard planner bound.
 
 Instrumented runs with `--downstream` on the final candidate produced these
 results (milliseconds):
@@ -300,3 +315,26 @@ one post-writer drain refresh. These are single instrumented samples, and the
 writer and reader latency distributions cover the whole workload rather than
 isolating lock waits. A separate HASH-output backlog diagnostic on the merged
 candidate also passed both oracles with no retained-source scan.
+Those earlier large-run plans also used quadratic downstream capture joins;
+the following runs use the multiset capture and the stronger plan guard.
+
+After replacing the downstream capture join with multiset differences, a new
+single instrumented run per size used the same 30,000 retained groups and
+concurrent writer and reader. Times are milliseconds:
+
+| Retained events | Mode | DROP | First refresh | Writer p95 / max | Reader p95 / max |
+|---:|---|---:|---:|---:|---:|
+| 9,000,000 | baseline | 52 | 3,743 | 0.10 / 16.84 | 2.09 / 3.39 |
+| 9,000,000 | TRIM | 169 | 56 | 0.10 / 126.38 | 2.05 / 3.46 |
+| 27,000,000 | baseline | 63 | 11,471 | 0.19 / 11.86 | 2.74 / 4.20 |
+| 27,000,000 | TRIM | 163 | 59 | 0.11 / 120.57 | 2.16 / 3.08 |
+
+Both upstream and downstream oracles matched. Baseline reinitialization
+scanned all 30 retained partitions and observed 9,014,091 or 27,009,576 source
+rows; TRIM DROP scanned no retained source partitions and observed 7,000
+output rows. TRIM and downstream completed differential actions. The new
+join-amplification guard passed. Results and executed plans are in
+`results/2026-11-17-pg18-macos-multiset-9m.json` and
+`results/2026-11-17-pg18-macos-multiset-27m.json`. These debug-build samples
+include plan-logging overhead; latencies span the workload and do not isolate
+lock waits.

@@ -1251,6 +1251,7 @@ pub fn capture_delta_to_bypass_table(
             pgt_id,
             buffer_lsn.as_deref(),
             true,
+            false,
         )?
     } else {
         let source_commit_at =
@@ -1329,6 +1330,7 @@ pub(crate) fn retention_scoped_rows_sql(
 /// `pg_current_wal_lsn()`. Bypass capture needs it because catalog writes can
 /// advance the current LSN past the downstream frontier; Graph V1 needs it so
 /// later members can consume deltas produced earlier in the same graph pass.
+/// `retention_pre_scoped` requires a pre-snapshot containing only delta identities.
 pub(crate) fn capture_diff_to_table(
     st: &StreamTableMeta,
     user_cols: &[String],
@@ -1336,6 +1338,7 @@ pub(crate) fn capture_diff_to_table(
     pgt_id: i64,
     lsn_override: Option<&str>,
     delta_scoped: bool,
+    retention_pre_scoped: bool,
 ) -> Result<i64, PgTrickleError> {
     if user_cols.is_empty() {
         return Ok(0);
@@ -1445,6 +1448,41 @@ pub(crate) fn capture_diff_to_table(
     // DAG-4: When an LSN override is provided (bypass tables), use the
     // literal value so the rows fall within the downstream frontier range.
     let lsn_expr = change_capture_lsn_expr(lsn_override);
+
+    if retention_pre_scoped {
+        if !vector_senders.is_empty() {
+            return Err(PgTrickleError::InvalidArgument(
+                "retention capture does not support vector output columns".into(),
+            ));
+        }
+        let columns = format!("__pgt_row_id, {flat_col_list}");
+        let before = format!("SELECT {columns} FROM __pgt_pre_{pgt_id}");
+        let after = format!(
+            "SELECT {columns} FROM ({}) scoped",
+            retention_scoped_rows_sql(
+                &quoted_table,
+                &format!("pg_temp.__pgt_delta_{pgt_id}"),
+                user_cols,
+                false,
+            )
+        );
+        let mut total = 0;
+        for (action, left, right) in [('D', &before, &after), ('I', &after, &before)] {
+            let sql = format!(
+                "INSERT INTO {target_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+                 SELECT {lsn_expr}, '{action}', __pgt_row_id, NULL::xid, {source_commit_at}, {flat_col_list} \
+                 FROM ({left} EXCEPT ALL {right}) difference"
+            );
+            total += Spi::connect_mut(|c| {
+                Ok::<i64, PgTrickleError>(
+                    c.update(&sql, None, &[])
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .len() as i64,
+                )
+            })?;
+        }
+        return Ok(total);
+    }
 
     let mut total: i64 = 0;
 
@@ -1561,6 +1599,7 @@ pub(crate) fn capture_incremental_diff_to_st_buffer(
         pgt_id,
         graph_lsn.as_deref(),
         true,
+        crate::refresh::is_retention_catchup(),
     )?;
     if total > 0 {
         pgrx::debug1!(
@@ -1572,6 +1611,24 @@ pub(crate) fn capture_incremental_diff_to_st_buffer(
         );
     }
     Ok(total)
+}
+
+#[cfg(all(feature = "e2e-unsafe-test-hooks", not(test)))]
+#[pgrx::pg_extern(schema = "pgtrickle")]
+fn retention_capture_multiset_test(pgt_id: i64) -> i64 {
+    let st = StreamTableMeta::get_by_id(pgt_id)
+        .unwrap_or_else(|error| pgrx::error!("test stream lookup: {}", error))
+        .unwrap_or_else(|| pgrx::error!("test stream not found"));
+    capture_diff_to_table(
+        &st,
+        &["val".to_string()],
+        "pg_temp.__pgt_capture_test",
+        pgt_id,
+        None,
+        true,
+        true,
+    )
+    .unwrap_or_else(|error| pgrx::error!("test capture: {}", error))
 }
 
 /// Capture the full-refresh diff into the ST's change buffer.
@@ -1596,6 +1653,7 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
         &target_table,
         pgt_id,
         graph_lsn.as_deref(),
+        false,
         false,
     )
 }

@@ -2195,6 +2195,69 @@ async fn test_retention_scoped_dml_distinguishes_partition_ctids() {
 }
 
 #[tokio::test]
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+async fn test_retention_capture_multiset_preserves_duplicate_deltas() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE capture_multiset_src (val INT NOT NULL)")
+        .await;
+    db.create_st(
+        "capture_multiset_st",
+        "SELECT val FROM capture_multiset_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'capture_multiset_st'",
+        )
+        .await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    sqlx::query("SET pg_trickle.internal_refresh = 'true'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO capture_multiset_st (__pgt_row_id,val) VALUES (decode('01','hex'),10),(decode('01','hex'),11),(decode('01','hex'),11),(decode('03','hex'),30),(decode('04','hex'),40)").execute(&mut *conn).await.unwrap();
+    sqlx::query("RESET pg_trickle.internal_refresh")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    for sql in [
+        format!("CREATE TEMP TABLE __pgt_pre_{id} (__pgt_row_id bytea NOT NULL, val int NOT NULL)"),
+        format!("INSERT INTO __pgt_pre_{id} VALUES (decode('01','hex'),10),(decode('01','hex'),10),(decode('01','hex'),11),(decode('02','hex'),20)"),
+        format!("CREATE TEMP TABLE __pgt_delta_{id} (__pgt_row_id bytea NOT NULL)"),
+        format!("INSERT INTO __pgt_delta_{id} VALUES (decode('01','hex')),(decode('01','hex')),(decode('02','hex')),(decode('04','hex'))"),
+        "CREATE TEMP TABLE __pgt_capture_test (lsn pg_lsn, action \"char\", __pgt_row_id bytea, source_xid xid, source_commit_at timestamptz, val int)".to_string(),
+    ] {
+        // The only interpolated identifier component is the catalog's integer ID.
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let captured: i64 = sqlx::query_scalar("SELECT pgtrickle.retention_capture_multiset_test($1)")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .expect("capture actual multiset difference");
+    assert_eq!(captured, 4);
+    let changes: Vec<(String, String, i32)> = sqlx::query_as("SELECT action::text, encode(__pgt_row_id,'hex'), val FROM __pgt_capture_test ORDER BY action::text, __pgt_row_id, val")
+        .fetch_all(&mut *conn).await.expect("read captured changes");
+    assert_eq!(
+        changes,
+        vec![
+            ("D".into(), "01".into(), 10),
+            ("D".into(), "02".into(), 20),
+            ("I".into(), "01".into(), 11),
+            ("I".into(), "04".into(), 40)
+        ]
+    );
+}
+
+#[tokio::test]
 async fn test_retention_scoped_capture_preserves_duplicate_occurrences() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     let mut conn = db.pool.acquire().await.expect("acquire capture session");
@@ -3112,6 +3175,114 @@ async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
 }
 
 #[tokio::test]
+async fn test_retention_downstream_capture_preserves_null_groups() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.refresh_strategy = 'differential'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE null_retention_src (id INT NOT NULL, d DATE NOT NULL, account INT, amount INT, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE null_retention_old PARTITION OF null_retention_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE null_retention_live PARTITION OF null_retention_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO null_retention_src VALUES (1,'2025-06-01',NULL,NULL),(2,'2025-06-01',1,7),(3,'2026-06-01',NULL,NULL),(4,'2026-06-01',1,10)").await;
+    let query = "SELECT d, account, sum(amount) AS total, count(*) AS n FROM null_retention_src GROUP BY d, account";
+    for (name, policy) in [("null_trim", "TRIM"), ("null_keep", "RETAIN")] {
+        db.create_st(name, query, "1h", "DIFFERENTIAL").await;
+        sqlx::query(
+            "SELECT pgtrickle.set_stream_table_partition_retention($1,$2,'d','2026-01-01')",
+        )
+        .bind(name)
+        .bind(policy)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    db.create_st(
+        "null_down",
+        "SELECT d, account, total, n FROM null_keep",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO null_retention_src VALUES (5,'2025-06-01',NULL,2),(6,'2026-06-01',NULL,3)",
+    )
+    .await;
+    let baseline: Vec<(String, Option<i32>, Option<i64>, i64)> = sqlx::query_as("SELECT d::text, account, sum(amount), count(*) FROM null_retention_src GROUP BY d,account ORDER BY d,account NULLS FIRST").fetch_all(&db.pool).await.unwrap();
+    assert_eq!(
+        baseline,
+        vec![
+            ("2025-06-01".into(), None, Some(2), 2),
+            ("2025-06-01".into(), Some(1), Some(7), 1),
+            ("2026-06-01".into(), None, Some(3), 2),
+            ("2026-06-01".into(), Some(1), Some(10), 1)
+        ]
+    );
+    db.execute("ALTER TABLE null_retention_src DETACH PARTITION null_retention_old")
+        .await;
+    db.refresh_st("null_down").await;
+    let downstream: Vec<(String, Option<i32>, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT d::text, account, total, n FROM null_down ORDER BY d,account NULLS FIRST",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(downstream, baseline);
+    db.assert_st_matches_query("null_trim", query).await;
+    db.execute("UPDATE null_retention_src SET amount = NULL WHERE id = 6")
+        .await;
+    db.refresh_st("null_trim").await;
+    db.refresh_st("null_keep").await;
+    db.refresh_st("null_down").await;
+    let expected = vec![
+        ("2025-06-01".into(), None, Some(2), 2),
+        ("2025-06-01".into(), Some(1), Some(7), 1),
+        ("2026-06-01".into(), None, None, 2),
+        ("2026-06-01".into(), Some(1), Some(10), 1),
+    ];
+    let keep: Vec<(String, Option<i32>, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT d::text, account, total, n FROM null_keep ORDER BY d,account NULLS FIRST",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let downstream: Vec<(String, Option<i32>, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT d::text, account, total, n FROM null_down ORDER BY d,account NULLS FIRST",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(keep, expected);
+    assert_eq!(downstream, expected);
+    db.assert_st_matches_query("null_trim", query).await;
+    let actions: Vec<(String, String, String, bool)> = sqlx::query_as("SELECT DISTINCT ON (s.pgt_name) s.pgt_name,h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name IN ('null_keep','null_trim','null_down') ORDER BY s.pgt_name,h.refresh_id DESC").fetch_all(&db.pool).await.unwrap();
+    assert_eq!(
+        actions,
+        vec![
+            (
+                "null_down".into(),
+                "DIFFERENTIAL".into(),
+                "COMPLETED".into(),
+                false
+            ),
+            (
+                "null_keep".into(),
+                "DIFFERENTIAL".into(),
+                "COMPLETED".into(),
+                false
+            ),
+            (
+                "null_trim".into(),
+                "DIFFERENTIAL".into(),
+                "COMPLETED".into(),
+                false
+            )
+        ]
+    );
+}
+
+#[tokio::test]
 async fn test_retention_preserves_nonfinite_numeric_aggregates() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
@@ -3136,13 +3307,23 @@ async fn test_retention_preserves_nonfinite_numeric_aggregates() {
         .await
         .expect("configure retention");
     }
+    db.create_st(
+        "special_down",
+        "SELECT d, account, total FROM special_keep",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("INSERT INTO special_retention_src VALUES (6,'2025-06-01',2,'NaN'), (7,'2026-06-01',3,'Infinity')").await;
     let baseline: Vec<(String, i32, String)> = sqlx::query_as("SELECT d::text, account, sum(amount)::text FROM special_retention_src GROUP BY d, account ORDER BY d, account").fetch_all(&db.pool).await.unwrap();
     assert_eq!(
         baseline,
         vec![
             ("2025-06-01".into(), 1, "Infinity".into()),
+            ("2025-06-01".into(), 2, "NaN".into()),
             ("2026-06-01".into(), 1, "Infinity".into()),
-            ("2026-06-01".into(), 2, "NaN".into())
+            ("2026-06-01".into(), 2, "NaN".into()),
+            ("2026-06-01".into(), 3, "Infinity".into())
         ]
     );
     db.execute("ALTER TABLE special_retention_src DETACH PARTITION special_retention_old")
@@ -3154,6 +3335,14 @@ async fn test_retention_preserves_nonfinite_numeric_aggregates() {
     .await
     .unwrap();
     assert_eq!(keep, baseline);
+    db.refresh_st("special_down").await;
+    let downstream: Vec<(String, i32, String)> = sqlx::query_as(
+        "SELECT d::text, account, total::text FROM special_down ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(downstream, baseline);
     db.assert_st_matches_query("special_trim", query).await;
     db.execute("DELETE FROM special_retention_src WHERE id = 3")
         .await;
@@ -3161,6 +3350,7 @@ async fn test_retention_preserves_nonfinite_numeric_aggregates() {
         .await;
     db.refresh_st("special_trim").await;
     db.refresh_st("special_keep").await;
+    db.refresh_st("special_down").await;
     let trim: Vec<(String, i32, String)> = sqlx::query_as(
         "SELECT d::text, account, total::text FROM special_trim ORDER BY d, account",
     )
@@ -3177,17 +3367,27 @@ async fn test_retention_preserves_nonfinite_numeric_aggregates() {
         trim,
         vec![
             ("2026-06-01".into(), 1, "1".into()),
-            ("2026-06-01".into(), 2, "4".into())
+            ("2026-06-01".into(), 2, "4".into()),
+            ("2026-06-01".into(), 3, "Infinity".into())
         ]
     );
     assert_eq!(
         keep,
         vec![
             ("2025-06-01".into(), 1, "Infinity".into()),
+            ("2025-06-01".into(), 2, "NaN".into()),
             ("2026-06-01".into(), 1, "1".into()),
-            ("2026-06-01".into(), 2, "4".into())
+            ("2026-06-01".into(), 2, "4".into()),
+            ("2026-06-01".into(), 3, "Infinity".into())
         ]
     );
+    let downstream: Vec<(String, i32, String)> = sqlx::query_as(
+        "SELECT d::text, account, total::text FROM special_down ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(downstream, keep);
     db.assert_st_matches_query("special_trim", query).await;
     let actions: Vec<(String, String, String, bool)> = sqlx::query_as("SELECT DISTINCT ON (s.pgt_name) s.pgt_name, h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name IN ('special_trim', 'special_keep') ORDER BY s.pgt_name, h.refresh_id DESC").fetch_all(&db.pool).await.unwrap();
     assert_eq!(

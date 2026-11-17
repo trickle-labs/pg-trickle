@@ -79,6 +79,7 @@ def validate_trim_drop_plan(summary):
     if any((scan["relation"] == "totals" or scan["relation"].startswith("totals_")) and not scan.get("condition")
            for plan in summary["relevant_plans"] for scan in plan["scans"]):
         raise RuntimeError("TRIM used an unbounded output scan")
+    excessive_pairs = False
     for entry in summary["relevant_plans"]:
         plan = entry.get("plan", {})
         if "changes_pgt_" not in plan.get("Query Text", ""):
@@ -91,6 +92,12 @@ def validate_trim_drop_plan(summary):
                     and node.get("Relation Name", "").startswith("__pgt_delta_")
                     and node.get("Actual Loops", 0) > 1):
                 raise RuntimeError("TRIM repeatedly scanned the affected delta during downstream capture")
+            if (node.get("Node Type") == "Nested Loop"
+                    and node.get("Rows Removed by Join Filter", 0)
+                    > max(1000, 100 * node.get("Actual Rows", 0))):
+                excessive_pairs = True
+    if excessive_pairs:
+        raise RuntimeError("TRIM compared excessive row pairs during downstream capture")
 
 
 def validate_baseline_refresh(history, summary):

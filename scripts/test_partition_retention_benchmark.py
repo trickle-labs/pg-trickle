@@ -101,7 +101,17 @@ class InternalPlanSummaryTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as raised:
             benchmark.validate_trim_drop_plan(before[1]["drop_internal"])
         self.assertEqual(str(raised.exception), "TRIM repeatedly scanned the affected delta during downstream capture")
-        benchmark.validate_trim_drop_plan(after[1]["drop_internal"])
+        with self.assertRaises(RuntimeError) as raised:
+            benchmark.validate_trim_drop_plan(after[1]["drop_internal"])
+        self.assertEqual(str(raised.exception), "TRIM compared excessive row pairs during downstream capture")
+
+    def test_trim_multiset_capture_avoids_quadratic_pairing(self):
+        results = BENCHMARK.parent / "results"
+        before = json.loads((results / "2026-11-17-pg18-macos-join-flags-before.json").read_text())
+        after = json.loads((results / "2026-11-17-pg18-macos-multiset-after.json").read_text())
+        with self.assertRaisesRegex(RuntimeError, "repeatedly scanned the affected delta"):
+            benchmark.validate_trim_drop_plan(before)
+        benchmark.validate_trim_drop_plan(after["drop_internal"])
 
     def test_refresh_retries_until_the_full_oracle_matches(self):
         with patch.object(benchmark, "run", side_effect=["", "2", "", "0"]) as run, \
