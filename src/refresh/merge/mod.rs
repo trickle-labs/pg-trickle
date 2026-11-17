@@ -2576,22 +2576,37 @@ pub fn execute_differential_refresh_with_tuning(
         // EC-06: Keyless storage uses counted DELETE + plain INSERT.
         // Delta deduplication does not make the target row-id index unique.
         let use_keyless = st.has_keyless_source;
-        let trigger_delete_template =
-            build_trigger_delete_sql(&quoted_table, st.pgt_id, use_keyless);
+        let scoped_retention =
+            crate::refresh::is_retention_catchup() && st.st_partition_key.is_none();
+        let trigger_delete_template = if scoped_retention {
+            build_retention_trigger_delete_sql(&quoted_table, st.pgt_id)
+        } else {
+            build_trigger_delete_sql(&quoted_table, st.pgt_id, use_keyless)
+        };
 
         // EC-06: Use normal UPDATE template for keyless sources — see
         // prewarm_merge_cache comment for full rationale.
-        let trigger_update_template =
-            build_trigger_update_sql(&quoted_table, st.pgt_id, &user_cols);
+        let trigger_update_template = if scoped_retention {
+            build_retention_trigger_update_sql(&quoted_table, st.pgt_id, &user_cols)
+        } else {
+            build_trigger_update_sql(&quoted_table, st.pgt_id, &user_cols)
+        };
 
-        let trigger_insert_template = build_trigger_insert_for_storage(
-            &quoted_table,
-            st.pgt_id,
-            &user_cols,
-            use_keyless,
-            is_dedup,
-            st.st_partition_key.is_some(),
-        );
+        let trigger_insert_template = if scoped_retention
+            && use_keyless
+            && (is_dedup || user_cols.iter().any(|c| c == "__pgt_count"))
+        {
+            build_retention_trigger_insert_sql(&quoted_table, st.pgt_id, &user_cols)
+        } else {
+            build_trigger_insert_for_storage(
+                &quoted_table,
+                st.pgt_id,
+                &user_cols,
+                use_keyless,
+                is_dedup,
+                st.st_partition_key.is_some(),
+            )
+        };
 
         // Store templates in the cache for subsequent refreshes.
         if !concrete_delta {

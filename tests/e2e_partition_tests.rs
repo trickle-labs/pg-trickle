@@ -1994,6 +1994,89 @@ async fn test_retention_catchup_updates_filtered_downstream() {
 }
 
 #[tokio::test]
+async fn test_retention_catchup_applies_keyless_inserts_updates_and_deletes() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE trim_dml_src (id INT NOT NULL, d DATE NOT NULL, account TEXT NOT NULL, amount INT NOT NULL) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE trim_dml_old PARTITION OF trim_dml_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE trim_dml_live PARTITION OF trim_dml_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO trim_dml_src VALUES (1,'2025-06-01','old',5),(2,'2026-06-01','a',10),(3,'2026-06-01','a',20),(4,'2026-06-01','b',4)").await;
+    db.create_st("trim_dml_upstream", "SELECT d, account, sum(amount) AS total, count(*) AS n FROM trim_dml_src GROUP BY d, account", "1h", "DIFFERENTIAL").await;
+    db.create_st(
+        "trim_dml_downstream",
+        "SELECT d, account, total, n FROM trim_dml_upstream",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('trim_dml_upstream','TRIM','d','2026-01-01')").await;
+    db.execute("UPDATE trim_dml_src SET amount=11 WHERE id=2")
+        .await;
+    db.execute("DELETE FROM trim_dml_src WHERE id=4").await;
+    db.execute("INSERT INTO trim_dml_src VALUES (5,'2026-06-01','a',7),(6,'2026-06-01','c',3)")
+        .await;
+    db.execute("DROP TABLE trim_dml_old").await;
+    db.refresh_st_until_converged("trim_dml_downstream").await;
+    let expected = vec![
+        ("2026-06-01".to_string(), "a".to_string(), 38_i64, 3_i64),
+        ("2026-06-01".to_string(), "c".to_string(), 3_i64, 1_i64),
+    ];
+    for (table, query) in [
+        (
+            "trim_dml_upstream",
+            "SELECT d::text, account, total, n FROM trim_dml_upstream ORDER BY d,account",
+        ),
+        (
+            "trim_dml_downstream",
+            "SELECT d::text, account, total, n FROM trim_dml_downstream ORDER BY d,account",
+        ),
+    ] {
+        let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(query)
+            .fetch_all(&db.pool)
+            .await
+            .expect("read maintained groups");
+        assert_eq!(rows, expected);
+        let action: (String, String, bool) = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name=$1 ORDER BY h.refresh_id DESC LIMIT 1")
+            .bind(table).fetch_one(&db.pool).await.expect("read completed refresh action");
+        assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    }
+    db.assert_st_matches_query("trim_dml_upstream", "SELECT d, account, sum(amount) AS total, count(*) AS n FROM trim_dml_src GROUP BY d, account").await;
+}
+
+#[tokio::test]
+async fn test_retention_scoped_dml_preserves_duplicate_multiplicity() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    let mut conn = db.pool.acquire().await.expect("acquire DML session");
+    for sql in [
+        "CREATE TEMP TABLE scoped_target (__pgt_row_id bytea NOT NULL, val int NOT NULL)",
+        "CREATE INDEX ON scoped_target (__pgt_row_id)",
+        "CREATE TEMP TABLE __pgt_delta_7 (__pgt_row_id bytea NOT NULL, __pgt_action text NOT NULL, val int NOT NULL)",
+        "INSERT INTO scoped_target VALUES (decode('01','hex'),10),(decode('01','hex'),11),(decode('02','hex'),20)",
+        "INSERT INTO __pgt_delta_7 VALUES (decode('01','hex'),'D',10),(decode('02','hex'),'I',21),(decode('03','hex'),'I',30)",
+        "DELETE FROM scoped_target AS st USING (SELECT matched.tableoid, matched.ctid FROM (SELECT __pgt_row_id, COUNT(*) AS n FROM __pgt_delta_7 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id) d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM scoped_target st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id ORDER BY st2.ctid LIMIT d.n) matched) target WHERE st.tableoid = target.tableoid AND st.ctid = target.ctid",
+        "UPDATE scoped_target AS st SET val = d.val FROM __pgt_delta_7 AS d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM scoped_target st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid AND d.__pgt_action = 'I' AND (st.val::text IS DISTINCT FROM d.val::text)",
+        "INSERT INTO scoped_target (__pgt_row_id, val) SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, d.val FROM __pgt_delta_7 AS d WHERE d.__pgt_action = 'I' AND NOT EXISTS (SELECT 1 FROM (SELECT 1 FROM scoped_target AS st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched) ORDER BY d.__pgt_row_id",
+    ] {
+        sqlx::query(sql)
+            .execute(&mut *conn)
+            .await
+            .expect("execute scoped DML");
+    }
+    let rows: Vec<(String, i32)> = sqlx::query_as(
+        "SELECT encode(__pgt_row_id,'hex'), val FROM scoped_target ORDER BY __pgt_row_id,val",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .expect("read resulting multiset");
+    assert_eq!(
+        rows,
+        vec![("01".into(), 11), ("02".into(), 21), ("03".into(), 30)]
+    );
+}
+
+#[tokio::test]
 async fn test_retention_scoped_capture_preserves_duplicate_occurrences() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     let mut conn = db.pool.acquire().await.expect("acquire capture session");
@@ -3774,7 +3857,7 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
         "SELECT d::text, account, SUM(amount), COUNT(*) FROM retention_auto_src GROUP BY d, account ORDER BY d, account",
     ).fetch_all(&db.pool).await.expect("capture independent historical baseline");
     let mut tx = db.pool.begin().await.expect("begin detach transaction");
-    sqlx::query("SELECT set_config('enable_nestloop', 'off', true), set_config('enable_hashjoin', 'on', true), set_config('enable_mergejoin', 'on', true), set_config('enable_indexscan', 'off', true), set_config('enable_bitmapscan', 'off', true), set_config('enable_seqscan', 'on', true), set_config('jit', 'on', true), set_config('random_page_cost', '1000000', true), set_config('cpu_index_tuple_cost', '100000000', true)")
+    sqlx::query("SELECT set_config('enable_nestloop', 'off', true), set_config('enable_hashjoin', 'on', true), set_config('enable_mergejoin', 'on', true), set_config('enable_indexscan', 'off', true), set_config('enable_bitmapscan', 'off', true), set_config('enable_seqscan', 'on', true), set_config('enable_tidscan', 'off', true), set_config('jit', 'on', true), set_config('random_page_cost', '1000000', true), set_config('cpu_index_tuple_cost', '100000000', true)")
         .execute(&mut *tx).await.expect("set caller planner preferences");
     sqlx::query("SAVEPOINT before_detach")
         .execute(&mut *tx)
@@ -3784,8 +3867,8 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
         .execute(&mut *tx)
         .await
         .expect("automatic detach");
-    let planner_settings: (String, String, String, String, String, String, String, f64, f64) = sqlx::query_as(
-        "SELECT current_setting('enable_nestloop'), current_setting('enable_hashjoin'), current_setting('enable_mergejoin'), current_setting('enable_indexscan'), current_setting('enable_bitmapscan'), current_setting('enable_seqscan'), current_setting('jit'), current_setting('random_page_cost')::float8, current_setting('cpu_index_tuple_cost')::float8",
+    let planner_settings: (String, String, String, String, String, String, String, String, f64, f64) = sqlx::query_as(
+        "SELECT current_setting('enable_nestloop'), current_setting('enable_hashjoin'), current_setting('enable_mergejoin'), current_setting('enable_indexscan'), current_setting('enable_bitmapscan'), current_setting('enable_seqscan'), current_setting('enable_tidscan'), current_setting('jit'), current_setting('random_page_cost')::float8, current_setting('cpu_index_tuple_cost')::float8",
     ).fetch_one(&mut *tx).await.expect("read planner preferences after retention");
     assert_eq!(
         planner_settings,
@@ -3796,6 +3879,7 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
             "off".into(),
             "off".into(),
             "on".into(),
+            "off".into(),
             "on".into(),
             1_000_000.0,
             100_000_000.0

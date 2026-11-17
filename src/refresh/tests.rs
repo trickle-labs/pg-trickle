@@ -1307,6 +1307,23 @@ fn test_build_trigger_update_sql_basic() {
 }
 
 #[test]
+fn test_retention_dml_probes_affected_rows() {
+    let cols = vec!["val".to_string()];
+    assert_eq!(
+        build_retention_trigger_delete_sql("\"public\".\"t\"", 7),
+        "DELETE FROM \"public\".\"t\" AS st USING (SELECT matched.tableoid, matched.ctid FROM (SELECT __pgt_row_id, COUNT(*) AS n FROM __pgt_delta_7 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id) d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"public\".\"t\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id ORDER BY st2.ctid LIMIT d.n) matched) target WHERE st.tableoid = target.tableoid AND st.ctid = target.ctid"
+    );
+    assert_eq!(
+        build_retention_trigger_update_sql("\"public\".\"t\"", 7, &cols),
+        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"public\".\"t\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid AND d.__pgt_action = 'I' AND (st.\"val\"::text IS DISTINCT FROM d.\"val\"::text)"
+    );
+    assert_eq!(
+        build_retention_trigger_insert_sql("\"public\".\"t\"", 7, &cols),
+        "INSERT INTO \"public\".\"t\" (__pgt_row_id, \"val\") SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, d.\"val\" FROM __pgt_delta_7 AS d WHERE d.__pgt_action = 'I' AND NOT EXISTS (SELECT 1 FROM (SELECT 1 FROM \"public\".\"t\" AS st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched) ORDER BY d.__pgt_row_id"
+    );
+}
+
+#[test]
 fn test_partitioned_keyed_insert_avoids_unique_conflict_target() {
     let cols = vec!["a".to_string()];
     let sql = build_trigger_insert_for_storage("\"public\".\"t\"", 10, &cols, false, true, true);

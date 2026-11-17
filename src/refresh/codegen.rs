@@ -2378,6 +2378,20 @@ pub(crate) fn build_trigger_delete_sql(
     }
 }
 
+/// Delete only the requested number of rows for each affected identity.
+pub(crate) fn build_retention_trigger_delete_sql(quoted_table: &str, pgt_id: i64) -> String {
+    format!(
+        "DELETE FROM {quoted_table} AS st USING (\
+           SELECT matched.tableoid, matched.ctid \
+           FROM (SELECT __pgt_row_id, COUNT(*) AS n FROM __pgt_delta_{pgt_id} \
+                 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id) d \
+           CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM {quoted_table} st2 \
+             WHERE {row_id_match} ORDER BY st2.ctid LIMIT d.n) matched\
+         ) target WHERE st.tableoid = target.tableoid AND st.ctid = target.ctid",
+        row_id_match = build_row_id_match("st2.__pgt_row_id", "d.__pgt_row_id"),
+    )
+}
+
 /// Build the trigger-path UPDATE template.
 ///
 /// Updates existing rows where the delta action is 'I' and values changed
@@ -2397,6 +2411,25 @@ pub(crate) fn build_trigger_update_sql(
            AND d.__pgt_action = 'I' \
            AND ({is_distinct_clause})",
         row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
+    )
+}
+
+/// Probe changed identities before updating their physical rows.
+pub(crate) fn build_retention_trigger_update_sql(
+    quoted_table: &str,
+    pgt_id: i64,
+    user_cols: &[String],
+) -> String {
+    let update_set_clause = format_update_set(user_cols);
+    let is_distinct_clause = build_is_distinct_clause(user_cols);
+    format!(
+        "UPDATE {quoted_table} AS st SET {update_set_clause} \
+         FROM __pgt_delta_{pgt_id} AS d CROSS JOIN LATERAL \
+           (SELECT st2.tableoid, st2.ctid FROM {quoted_table} st2 \
+            WHERE {row_id_match} OFFSET 0) matched \
+         WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid \
+           AND d.__pgt_action = 'I' AND ({is_distinct_clause})",
+        row_id_match = build_row_id_match("st2.__pgt_row_id", "d.__pgt_row_id"),
     )
 }
 
@@ -2488,6 +2521,24 @@ pub(crate) fn build_trigger_insert_sql_no_conflict(
              WHERE {row_id_match}\
            ) \
          ORDER BY d.__pgt_row_id",
+        row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
+    )
+}
+
+/// Keep the existence probe correlated with each incoming identity.
+pub(crate) fn build_retention_trigger_insert_sql(
+    quoted_table: &str,
+    pgt_id: i64,
+    user_cols: &[String],
+) -> String {
+    let user_col_list = format_col_list(user_cols);
+    let d_user_col_list = format_prefixed_col_list("d", user_cols);
+    format!(
+        "INSERT INTO {quoted_table} (__pgt_row_id, {user_col_list}) \
+         SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, {d_user_col_list} \
+         FROM __pgt_delta_{pgt_id} AS d WHERE d.__pgt_action = 'I' \
+           AND NOT EXISTS (SELECT 1 FROM (SELECT 1 FROM {quoted_table} AS st \
+             WHERE {row_id_match} OFFSET 0) matched) ORDER BY d.__pgt_row_id",
         row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
     )
 }
