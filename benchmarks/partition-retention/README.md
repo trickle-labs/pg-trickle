@@ -84,6 +84,13 @@ instrumented 9M run. The following ordinary differential refresh observed
 120,000 output rows across its nested plans. These sums can include overlapping
 plans. The indexed catch-up uses PostgreSQL planner preferences, which do not
 guarantee a particular plan; ordinary refreshes can still scan the full output.
-The instrumented 27M rerun before this change did not complete: PostgreSQL
-reported a storage I/O error and restarted. The uninstrumented 27M run above
-completed before the indexed catch-up change.
+An instrumented 27M run after the change also had zero mismatches: baseline
+refresh scanned all 30 retained partitions and 27,002,901 rows, while TRIM
+DROP scanned no source partitions and observed 2,882 output rows. Its next
+ordinary refresh observed 120,000 output rows across nested plans. Instrumented
+DROP / refresh-call times were 40 / 9,713 ms for baseline and 113 / 572 ms for
+TRIM; writer p95 / max were 0.48 / 8.07 ms and 0.54 / 69.10 ms, and reader
+p95 / max were 1.91 / 2.92 ms and 1.95 / 2.76 ms, respectively. Instrumented
+timings include plan logging and should not be compared directly with the
+uninstrumented table. An earlier instrumented 27M attempt before the change
+failed after PostgreSQL reported a storage I/O error and restarted.
