@@ -1237,11 +1237,17 @@ pgtrickle.alter_stream_table(
 | `fuse` | `text` | `NULL` | Fuse (circuit breaker) mode: `'off'`, `'on'`, or `'auto'`. `'auto'` blows the fuse when FULL would be cheaper than DIFFERENTIAL. Pass `NULL` to leave unchanged. |
 | `fuse_ceiling` | `bigint` | `NULL` | Change-count threshold that triggers the fuse. `NULL` uses the global `pg_trickle.fuse_default_ceiling`. |
 | `fuse_sensitivity` | `integer` | `NULL` | Number of consecutive over-ceiling cycles before the fuse blows. `NULL` means 1 (blow immediately). |
-| `partition_by` | `text` | `NULL` | Partition key column for the storage table. Pass `NULL` to leave unchanged. Changing the key rebuilds storage and is rejected if external objects depend on it. |
+| `partition_by` | `text` | `NULL` | Partition key column for the storage table. Pass `NULL` to leave unchanged. Changing the key rebuilds storage and is rejected if external objects or downstream stream tables depend on it. |
 | `max_differential_joins` | `integer` | `NULL` | Per-stream-table cap on join combinations during differential refresh. Pass `NULL` to leave unchanged. |
 | `max_delta_fraction` | `float8` | `NULL` | Per-stream-table AUTO cost model threshold (0.0–1.0). Pass `NULL` to leave unchanged. |
 | `post_refresh_action` | `text` | `NULL` | Set to `'none'`, `'analyze'`, `'reindex'` after each changed refresh, or `'reindex_if_drift'` when the changed-row ratio reaches its threshold. `NULL` leaves the existing setting unchanged. |
 | `reindex_drift_threshold` | `float8` | `NULL` | Changed-row ratio threshold for `post_refresh_action = 'reindex_if_drift'`. Pass `NULL` to leave unchanged. This is a churn estimate, not measured recall or semantic drift. |
+
+Partition-key changes that would replace an upstream stream table with
+downstream stream-table consumers are rejected **before** storage is modified.
+To repartition, remove those downstream stream tables first, change the
+upstream's partition key, and recreate the downstream materializations. This
+prevents dangling relation OIDs and loss of synchronous downstream triggers.
 
 The current `reindex` actions run non-concurrent `REINDEX TABLE` in the refresh
 transaction after applying the data changes. They rebuild all indexes on the

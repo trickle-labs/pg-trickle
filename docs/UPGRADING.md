@@ -2,6 +2,20 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.110.1 to 0.110.2
+
+Install the v0.110.2 library and extension migration files, then run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.110.2';
+```
+
+This adds durable per-stream recovery generations and per-job enqueue-time
+member snapshots. A successful `resume_stream_table()` fences off late error
+updates from jobs dispatched before that resume. Pre-upgrade scheduler jobs
+with unknown generation snapshots cannot overwrite newer operator recovery;
+normal subsequent scheduler jobs capture the new generation automatically.
+
 ## 0.110.0 to 0.110.1
 
 Install the v0.110.1 library and extension SQL files, then run:
