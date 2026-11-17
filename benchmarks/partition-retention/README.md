@@ -162,6 +162,11 @@ the catch-up to scan all 31,000 output rows. After scoping that cost as well,
 a run with both extreme caller settings and 1,000 pending events observed
 7,000 output rows in bounded scans, no retained-source scans, and exact
 upstream and downstream results. Caller settings were restored after the cut.
+Retention catch-up now also uses a correlated aggregate lookup so the delta
+group drives the storage probe. A 20,000-event backlog with both extreme costs
+and a separate 1,000-event backlog with `cpu_operator_cost=1000000` each passed
+the bounded-scan check and both result oracles; the nested plans are retained
+in `results/`. Other catch-up statements still depend on planner choices.
 
 Instrumented runs with `--downstream` on the final candidate produced these
 results (milliseconds):
@@ -182,3 +187,21 @@ including concurrent inserts. Each baseline required two post-writer drain
 calls; each TRIM trial required one. At 27M the TRIM drain refresh itself took
 about 557 ms, outside the first-call time shown. Plan logging adds overhead;
 latency samples cover the entire concurrent workload and do not isolate locks.
+
+After the correlated aggregate change, one instrumented run per size on
+PostgreSQL 18.7 arm64 macOS with a debug build produced the following times
+in milliseconds. These runs are separate from the Docker measurements above.
+
+| Retained events | Mode | DROP | First refresh | Writer p95 / max | Reader p95 / max |
+|---:|---|---:|---:|---:|---:|
+| 9,000,000 | baseline | 41 | 3,824 | 0.11 / 10.69 | 2.04 / 3.26 |
+| 9,000,000 | TRIM | 582 | 234 | 1.95 / 437.22 | 10.72 / 27.89 |
+| 27,000,000 | baseline | 41 | 10,587 | 0.12 / 9.71 | 2.04 / 3.36 |
+| 27,000,000 | TRIM | 1,294 | 207 | 0.13 / 1,249.30 | 2.13 / 2.99 |
+
+Both oracles matched. Baseline reinitialized and scanned 30 retained
+partitions with 9,012,813 or 27,012,605 observed source rows; each baseline
+needed two drain calls. TRIM and downstream completed DIFFERENTIAL work, with
+one drain call each. TRIM DROP scanned no retained source partitions and
+observed 5,660 or 6,000 output rows across nested plans. These single samples
+include instrumentation overhead and do not isolate lock waits.
