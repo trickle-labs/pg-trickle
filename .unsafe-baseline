@@ -24,6 +24,7 @@ src/explain_hook.rs 10
 src/hooks.rs 3
 src/lib.rs 1
 src/monitor/alert.rs 1
+src/refresh/delta_stage.rs 1
 src/refresh/pipeline.rs 10
 src/refresh/vectorized_agg.rs 10
 src/scheduler/citus.rs 1
