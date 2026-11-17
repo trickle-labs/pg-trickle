@@ -19,6 +19,20 @@ use crate::refresh::merge::columns::{
 use crate::refresh::merge::delete::should_warn_amplification;
 
 #[test]
+fn test_retention_scoped_rows_preserves_occurrence_order() {
+    let sql = retention_scoped_rows_sql(
+        "\"public\".\"target\"",
+        "pg_temp.delta",
+        &["d".into(), "value".into()],
+        true,
+    );
+    assert_eq!(
+        sql,
+        "SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id FROM pg_temp.delta) affected CROSS JOIN LATERAL (SELECT st.__pgt_row_id, st.\"d\", st.\"value\", row_number() OVER (PARTITION BY st.__pgt_row_id ORDER BY st.tableoid, st.ctid) AS __pgt_occurrence FROM \"public\".\"target\" st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(affected.__pgt_row_id) AND st.__pgt_row_id = affected.__pgt_row_id OFFSET 0) scoped"
+    );
+}
+
+#[test]
 fn test_differential_cost_evidence_reports_output_amplification() {
     let evidence = build_differential_cost_evidence(4, 20);
     assert_eq!(evidence["schema_version"], 1);
@@ -1290,6 +1304,16 @@ fn test_build_trigger_update_sql_basic() {
     assert!(sql.contains("FROM __pgt_delta_7 AS d"));
     assert!(sql.contains("d.__pgt_action = 'I'"));
     assert!(sql.contains("IS DISTINCT FROM"));
+}
+
+#[test]
+fn test_partitioned_keyed_insert_avoids_unique_conflict_target() {
+    let cols = vec!["a".to_string()];
+    let sql = build_trigger_insert_for_storage("\"public\".\"t\"", 10, &cols, false, true, true);
+    assert_eq!(
+        sql,
+        "INSERT INTO \"public\".\"t\" (__pgt_row_id, \"a\") SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, d.\"a\" FROM __pgt_delta_10 AS d WHERE d.__pgt_action = 'I' AND NOT EXISTS (SELECT 1 FROM \"public\".\"t\" AS st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id) ORDER BY d.__pgt_row_id"
+    );
 }
 
 #[test]

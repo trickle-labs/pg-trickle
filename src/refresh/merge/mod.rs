@@ -2320,7 +2320,7 @@ pub fn execute_differential_refresh_with_tuning(
     let query_hash: u64 = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        "v0.108.3-deferred-history:nonfinite-state:raw-aggregate-columns-v1:join-endpoints-v1"
+        "v0.108.3-deferred-history:nonfinite-state:raw-aggregate-columns-v1:join-endpoints-v1:partitioned-insert-v2"
             .hash(&mut hasher);
         if std::ptr::eq(
             effective_defining_query.as_ref() as *const str,
@@ -2584,12 +2584,14 @@ pub fn execute_differential_refresh_with_tuning(
         let trigger_update_template =
             build_trigger_update_sql(&quoted_table, st.pgt_id, &user_cols);
 
-        let trigger_insert_template =
-            if use_keyless && (is_dedup || user_cols.iter().any(|c| c == "__pgt_count")) {
-                build_trigger_insert_sql_no_conflict(&quoted_table, st.pgt_id, &user_cols)
-            } else {
-                build_trigger_insert_sql(&quoted_table, st.pgt_id, &user_cols, use_keyless)
-            };
+        let trigger_insert_template = build_trigger_insert_for_storage(
+            &quoted_table,
+            st.pgt_id,
+            &user_cols,
+            use_keyless,
+            is_dedup,
+            st.st_partition_key.is_some(),
+        );
 
         // Store templates in the cache for subsequent refreshes.
         if !concrete_delta {
@@ -3957,13 +3959,20 @@ pub fn execute_differential_refresh_with_tuning(
                     name.replace('"', "\"\""),
                 );
                 let pre_table = format!("__pgt_pre_{}", st.pgt_id);
-                let snapshot_sql = format!(
-                    "INSERT INTO {pre_table} \
-                     SELECT st.__pgt_row_id, {col_list} FROM {qt} st \
-                     WHERE EXISTS (SELECT 1 FROM {delta_table} d \
-                       WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
-                         AND st.__pgt_row_id = d.__pgt_row_id)"
-                );
+                let snapshot_sql = if crate::refresh::is_retention_catchup() {
+                    format!(
+                        "INSERT INTO {pre_table} {}",
+                        retention_scoped_rows_sql(&qt, &delta_table, &cols, false)
+                    )
+                } else {
+                    format!(
+                        "INSERT INTO {pre_table} \
+                         SELECT st.__pgt_row_id, {col_list} FROM {qt} st \
+                         WHERE EXISTS (SELECT 1 FROM {delta_table} d \
+                           WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
+                             AND st.__pgt_row_id = d.__pgt_row_id)"
+                    )
+                };
                 if cols.is_empty() {
                     Vec::new()
                 } else if let Err(e) = Spi::run(&snapshot_sql) {

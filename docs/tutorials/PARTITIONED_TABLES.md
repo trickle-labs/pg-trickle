@@ -136,7 +136,8 @@ removal, including a partition that crosses the cutoff, falls back to normal
 reinitialization. A stream with user triggers or output-delta consumers cannot
 currently enable TRIM.
 During retention catch-up and TRIM deletion, pg_trickle temporarily enables
-index and bitmap scans, then restores the caller's planner settings.
+index and bitmap scans, discourages sequential scans, and disables JIT. It
+then restores the caller's planner settings.
 
 For `RETAIN`, removal seals the expired range and preserves its aggregate
 rows. Later differential refreshes continue to update live groups. Sealed

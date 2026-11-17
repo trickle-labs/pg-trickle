@@ -1926,6 +1926,9 @@ fn with_retention_index_scans<T>(
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("SET LOCAL enable_bitmapscan = on")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run("SET LOCAL enable_seqscan = off")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run("SET LOCAL jit = off").map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         operation()
     })
 }

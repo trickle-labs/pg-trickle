@@ -1285,6 +1285,36 @@ pub fn capture_delta_to_bypass_table(
     Ok(count)
 }
 
+/// Select only identities present in the retention delta before probing storage.
+pub(crate) fn retention_scoped_rows_sql(
+    table: &str,
+    delta: &str,
+    user_cols: &[String],
+    numbered: bool,
+) -> String {
+    let columns = user_cols
+        .iter()
+        .map(|column| format!("st.{}", crate::sql_builder::ident(column)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let columns = if columns.is_empty() {
+        String::new()
+    } else {
+        format!(", {columns}")
+    };
+    let occurrence = if numbered {
+        ", row_number() OVER (PARTITION BY st.__pgt_row_id ORDER BY st.tableoid, st.ctid) AS __pgt_occurrence"
+    } else {
+        ""
+    };
+    format!(
+        "SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id FROM {delta}) affected \
+         CROSS JOIN LATERAL (SELECT st.__pgt_row_id{columns}{occurrence} FROM {table} st \
+         WHERE {} OFFSET 0) scoped",
+        build_row_id_match("st.__pgt_row_id", "affected.__pgt_row_id"),
+    )
+}
+
 /// Shared pre/post diff logic for capturing D+I pairs into a target table.
 ///
 /// Used by both `capture_delta_to_bypass_table` (FusedChain path) and
@@ -1394,6 +1424,22 @@ pub(crate) fn capture_diff_to_table(
     } else {
         String::new()
     };
+    let post_numbered = if delta_scoped && crate::refresh::is_retention_catchup() {
+        format!(
+            "({}) post",
+            retention_scoped_rows_sql(
+                &quoted_table,
+                &format!("pg_temp.__pgt_delta_{pgt_id}"),
+                user_cols,
+                true,
+            )
+        )
+    } else {
+        format!(
+            "(SELECT post.*, row_number() OVER (PARTITION BY post.__pgt_row_id ORDER BY post.tableoid, post.ctid) AS __pgt_occurrence \
+             FROM {quoted_table} post {post_delta_filter}) post"
+        )
+    };
     let source_commit_at = crate::catalog::RefreshRecord::source_commit_at_sql_for_refresh(pgt_id)?;
 
     // DAG-4: When an LSN override is provided (bypass tables), use the
@@ -1410,8 +1456,7 @@ pub(crate) fn capture_diff_to_table(
          SELECT {lsn_expr}, 'D', pre.__pgt_row_id, NULL::xid, {source_commit_at}, {pre_col_refs} \
          FROM (SELECT pre.*, row_number() OVER (PARTITION BY pre.__pgt_row_id ORDER BY pre.tableoid, pre.ctid) AS __pgt_occurrence \
                FROM __pgt_pre_{pgt_id} pre {pre_delta_filter}) pre \
-         LEFT JOIN (SELECT post.*, row_number() OVER (PARTITION BY post.__pgt_row_id ORDER BY post.tableoid, post.ctid) AS __pgt_occurrence \
-                    FROM {quoted_table} post {post_delta_filter}) post ON {pre_post_match} \
+         LEFT JOIN {post_numbered} ON {pre_post_match} \
          WHERE post.__pgt_occurrence IS NULL OR ({is_distinct_pairs})"
     );
     total += Spi::connect_mut(|c| {
@@ -1427,8 +1472,7 @@ pub(crate) fn capture_diff_to_table(
     let ins_sql = format!(
         "INSERT INTO {target_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
          SELECT {lsn_expr}, 'I', post.__pgt_row_id, NULL::xid, {source_commit_at}, {post_col_refs} \
-         FROM (SELECT post.*, row_number() OVER (PARTITION BY post.__pgt_row_id ORDER BY post.tableoid, post.ctid) AS __pgt_occurrence \
-               FROM {quoted_table} post {post_delta_filter}) post \
+         FROM {post_numbered} \
          LEFT JOIN (SELECT pre.*, row_number() OVER (PARTITION BY pre.__pgt_row_id ORDER BY pre.tableoid, pre.ctid) AS __pgt_occurrence \
                     FROM __pgt_pre_{pgt_id} pre {pre_delta_filter}) pre ON {pre_post_match} \
          WHERE pre.__pgt_occurrence IS NULL OR ({is_distinct_pairs})"
@@ -2404,6 +2448,25 @@ pub(crate) fn build_trigger_insert_sql(
     }
 }
 
+pub(crate) fn build_trigger_insert_for_storage(
+    quoted_table: &str,
+    pgt_id: i64,
+    user_cols: &[String],
+    has_keyless_source: bool,
+    is_deduplicated: bool,
+    is_partitioned: bool,
+) -> String {
+    // Partitioned storage has no global unique row-identity constraint.
+    if (has_keyless_source
+        && (is_deduplicated || user_cols.iter().any(|column| column == "__pgt_count")))
+        || (is_partitioned && !has_keyless_source)
+    {
+        build_trigger_insert_sql_no_conflict(quoted_table, pgt_id, user_cols)
+    } else {
+        build_trigger_insert_sql(quoted_table, pgt_id, user_cols, has_keyless_source)
+    }
+}
+
 /// Build an INSERT for a deduplicated delta when the target row-id index is
 /// non-unique. The preceding UPDATE handles an existing row; this exact
 /// `NOT EXISTS` guard prevents the INSERT from duplicating it without relying
@@ -2555,7 +2618,7 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // that existed before the v0.59.0 upgrade and haven't been ALTERed yet).
     let query_hash = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        "v0.108.3-deferred-history:nonfinite-state:raw-aggregate-columns-v1:join-endpoints-v1"
+        "v0.108.3-deferred-history:nonfinite-state:raw-aggregate-columns-v1:join-endpoints-v1:partitioned-insert-v2"
             .hash(&mut hasher);
         if st.defining_query_hash != 0 {
             st.defining_query_hash.hash(&mut hasher);
@@ -2586,13 +2649,14 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // cases correctly.
     let trigger_update_template = build_trigger_update_sql(&quoted_table, st.pgt_id, user_cols);
 
-    let trigger_insert_template = if st.has_keyless_source
-        && (delta_result.is_deduplicated || user_cols.iter().any(|column| column == "__pgt_count"))
-    {
-        build_trigger_insert_sql_no_conflict(&quoted_table, st.pgt_id, user_cols)
-    } else {
-        build_trigger_insert_sql(&quoted_table, st.pgt_id, user_cols, st.has_keyless_source)
-    };
+    let trigger_insert_template = build_trigger_insert_for_storage(
+        &quoted_table,
+        st.pgt_id,
+        user_cols,
+        st.has_keyless_source,
+        delta_result.is_deduplicated,
+        st.st_partition_key.is_some(),
+    );
 
     // Cache the MERGE template with LSN placeholder tokens.
     // Each refresh resolves the tokens to concrete LSN values
