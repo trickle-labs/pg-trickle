@@ -685,6 +685,22 @@ impl DeltaStage {
     }
 }
 
+// Standalone Rust unit-test executables do not load PostgreSQL's dynamic
+// backend symbols. Keep the real conditional lock in extension builds; E2E
+// tests against a PostgreSQL server exercise the actual locking branch.
+#[cfg(test)]
+fn conditional_source_share_lock(_oid: pg_sys::Oid) -> bool {
+    false
+}
+
+#[cfg(not(test))]
+fn conditional_source_share_lock(oid: pg_sys::Oid) -> bool {
+    // SAFETY: The relation OID was verified in pg_class by this backend and
+    // this API is called on the PostgreSQL backend thread. It fails without
+    // waiting when another transaction holds a conflicting lock.
+    unsafe { pg_sys::ConditionalLockRelationOid(oid, pg_sys::ShareLock as i32) }
+}
+
 /// Try to fence a source and all partition descendants without ever waiting
 /// behind a continuously active writer. A failed attempt is not an error:
 /// callers must instead materialize an as-of source from a single MVCC
@@ -728,10 +744,7 @@ fn try_share_lock_source(source_oid: pg_sys::Oid) -> Result<bool, PgTrickleError
         return Ok(false);
     }
     for oid in relations {
-        // SAFETY: OIDs came from pg_class in this backend, and PostgreSQL's
-        // conditional relation lock API is called on its own backend thread.
-        // On contention it returns false without an ERROR or a lock wait.
-        if !unsafe { pg_sys::ConditionalLockRelationOid(oid, pg_sys::ShareLock as i32) } {
+        if !conditional_source_share_lock(oid) {
             return Ok(false);
         }
     }
