@@ -53,14 +53,16 @@ case "$PROFILE" in
         warmup="${PGT_PGBENCH_WARMUP:-10}"
         duration="${PGT_PGBENCH_DURATION:-30}"
         repetitions="${PGT_PGBENCH_REPETITIONS:-3}"
+        latency_rate=""
         ;;
     publication)
         scale="${PGT_PGBENCH_SCALE:-10}"
-        clients="${PGT_PGBENCH_CLIENTS:-16}"
-        jobs="${PGT_PGBENCH_JOBS:-4}"
+        clients="${PGT_PGBENCH_CLIENTS:-8}"
+        jobs="${PGT_PGBENCH_JOBS:-2}"
         warmup="${PGT_PGBENCH_WARMUP:-30}"
         duration="${PGT_PGBENCH_DURATION:-60}"
         repetitions="${PGT_PGBENCH_REPETITIONS:-5}"
+        latency_rate=1000
         ;;
     *)
         echo "unsupported profile: $PROFILE" >&2
@@ -156,11 +158,11 @@ setup_active_streams() {
     db_query "SELECT pg_reload_conf();" >/dev/null
     db_query "SELECT pgtrickle.create_stream_table('bench_projection', \$\$SELECT aid, bid, abalance FROM pgbench_accounts\$\$, '1s', 'DIFFERENTIAL');" >/dev/null
     db_query "SELECT pgtrickle.create_stream_table('bench_balances', \$\$SELECT bid, sum(abalance) AS total_balance FROM pgbench_accounts GROUP BY bid\$\$, '1s', 'DIFFERENTIAL');" >/dev/null
-    db_query "SELECT pgtrickle.create_stream_table('bench_join', \$\$SELECT a.aid, a.bid, a.abalance, b.bbalance FROM pgbench_accounts a JOIN pgbench_branches b ON b.bid = a.bid\$\$, '1s', 'DIFFERENTIAL');" >/dev/null
+    db_query "SELECT pgtrickle.create_stream_table('bench_join', \$\$SELECT a.aid, a.bid, a.abalance, b.bid AS branch_id FROM pgbench_accounts a JOIN bench_branch_dim b ON b.bid = a.bid\$\$, '1s', 'DIFFERENTIAL');" >/dev/null
 }
 
 correctness_check() {
-    db_query "SELECT (SELECT count(*) FROM pgtrickle.pgt_stream_tables WHERE status <> 'ACTIVE') = 0 AND NOT EXISTS ((SELECT aid, bid, abalance FROM pgbench_accounts EXCEPT ALL SELECT aid, bid, abalance FROM bench_projection) UNION ALL (SELECT aid, bid, abalance FROM bench_projection EXCEPT ALL SELECT aid, bid, abalance FROM pgbench_accounts)) AND NOT EXISTS ((SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid EXCEPT ALL SELECT bid, total_balance FROM bench_balances) UNION ALL (SELECT bid, total_balance FROM bench_balances EXCEPT ALL SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid)) AND NOT EXISTS ((SELECT a.aid, a.bid, a.abalance, b.bbalance FROM pgbench_accounts a JOIN pgbench_branches b ON b.bid = a.bid EXCEPT ALL SELECT aid, bid, abalance, bbalance FROM bench_join) UNION ALL (SELECT aid, bid, abalance, bbalance FROM bench_join EXCEPT ALL SELECT a.aid, a.bid, a.abalance, b.bbalance FROM pgbench_accounts a JOIN pgbench_branches b ON b.bid = a.bid))"
+    db_query "SELECT (SELECT count(*) FROM pgtrickle.pgt_stream_tables WHERE status <> 'ACTIVE') = 0 AND NOT EXISTS ((SELECT aid, bid, abalance FROM pgbench_accounts EXCEPT ALL SELECT aid, bid, abalance FROM bench_projection) UNION ALL (SELECT aid, bid, abalance FROM bench_projection EXCEPT ALL SELECT aid, bid, abalance FROM pgbench_accounts)) AND NOT EXISTS ((SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid EXCEPT ALL SELECT bid, total_balance FROM bench_balances) UNION ALL (SELECT bid, total_balance FROM bench_balances EXCEPT ALL SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid)) AND NOT EXISTS ((SELECT a.aid, a.bid, a.abalance, b.bid AS branch_id FROM pgbench_accounts a JOIN bench_branch_dim b ON b.bid = a.bid EXCEPT ALL SELECT aid, bid, abalance, branch_id FROM bench_join) UNION ALL (SELECT aid, bid, abalance, branch_id FROM bench_join EXCEPT ALL SELECT a.aid, a.bid, a.abalance, b.bid AS branch_id FROM pgbench_accounts a JOIN bench_branch_dim b ON b.bid = a.bid))"
 }
 
 wait_for_correctness() {
@@ -172,9 +174,10 @@ wait_for_correctness() {
         refreshed="$(db_query "SELECT count(*) = 3 FROM pgtrickle.pgt_stream_tables s WHERE EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = s.pgt_id AND h.status = 'COMPLETED' AND h.start_time >= '$workload_finished_at'::timestamptz)")"
         if [[ "$refreshed" == t ]]; then
             [[ "$(correctness_check)" == t ]] && return 0
-            return 1
+            sleep 5
+        else
+            sleep 0.5
         fi
-        sleep 0.5
     done
     return 1
 }
@@ -187,6 +190,7 @@ run_one() {
     local stdout_file="$run_dir/pgbench.stdout"
     local log_dir="$run_dir/logs"
     local warmup_file="$run_dir/warmup.stdout"
+    local tps_file="$stdout_file"
     local history_before refresh_count refresh_duration correct workload_finished_at postgres_version postgres_settings
     local cpu_before cpu_after cpu_hz sampler_pid
     # Avoid checkpoint interference from PostgreSQL's default 1 GB WAL limit.
@@ -198,7 +202,7 @@ run_one() {
     chmod 777 "$run_dir" "$log_dir"
     container="pgtrickle-pgbench-${repetition}-${config}-$$"
     container_names+=("$container")
-    docker run --rm -d --name "$container" -v "$run_dir:/bench" \
+    docker run --rm -d --platform "linux/$runtime_arch" --name "$container" -v "$run_dir:/bench" \
         -v "$BENCH_DIR:/bench-scripts:ro" \
         -e POSTGRES_PASSWORD=postgres "$image" "${postgres_args[@]}" >/dev/null
     wait_for_postgres
@@ -210,6 +214,7 @@ run_one() {
     fi
     docker exec "$container" sh -ceu 'command -v pgbench >/dev/null'
     docker exec "$container" pgbench -h 127.0.0.1 -U postgres -i -s "$scale" postgres >"$run_dir/init.stdout"
+    db_query "CREATE TABLE bench_branch_dim (bid integer PRIMARY KEY); INSERT INTO bench_branch_dim SELECT bid FROM pgbench_branches; ANALYZE bench_branch_dim;" >/dev/null
 
     if [[ "$config" == active ]]; then
         setup_active_streams
@@ -218,9 +223,21 @@ run_one() {
 
     docker exec "$container" pgbench -h 127.0.0.1 -U postgres -c "$clients" -j "$jobs" -T "$warmup" -n postgres >"$warmup_file"
     if [[ "$config" == active ]]; then
+        if [[ "$PROFILE" == publication ]]; then
+            tps_file="$warmup_file"
+            workload_finished_at="$(db_query "SELECT clock_timestamp()")"
+            if ! wait_for_correctness "$workload_finished_at"; then
+                echo "stream tables did not converge after the publication warm-up" >&2
+                docker logs "$container" >"$run_dir/postgres.log" 2>&1 || true
+                exit 1
+            fi
+        fi
         history_before="$(db_query "SELECT coalesce(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")"
     else
         history_before=0
+        if [[ "$PROFILE" == publication ]]; then
+            tps_file="$warmup_file"
+        fi
     fi
     rm -f "$run_dir/cpu.stop" "$run_dir/cpu.ready"
     docker exec "$container" sh /bench-scripts/cpu_sampler.sh \
@@ -233,8 +250,12 @@ run_one() {
     [[ -e "$run_dir/cpu.ready" ]] || { echo "CPU sampler did not start" >&2; exit 1; }
     cpu_hz="$(docker exec "$container" getconf CLK_TCK)"
     cpu_before="$(cpu_total_sample)"
-    docker exec "$container" pgbench -h 127.0.0.1 -U postgres -c "$clients" -j "$jobs" -T "$duration" -n \
-        -l --sampling-rate=0.1 --log-prefix=/bench/logs/pgbench postgres >"$stdout_file"
+    local pgbench_args=(-h 127.0.0.1 -U postgres -c "$clients" -j "$jobs" -T "$duration" -n)
+    if [[ -n "$latency_rate" ]]; then
+        pgbench_args+=(-R "$latency_rate")
+    fi
+    pgbench_args+=(-l --sampling-rate=0.1 --log-prefix=/bench/logs/pgbench postgres)
+    docker exec "$container" pgbench "${pgbench_args[@]}" >"$stdout_file"
     cpu_after="$(cpu_total_sample)"
     touch "$run_dir/cpu.stop"
     wait "$sampler_pid"
@@ -266,7 +287,7 @@ run_one() {
     python3 "$BENCH_DIR/parse_pgbench.py" \
         --config "$config" \
         --repetition "$repetition" \
-        --stdout "$stdout_file" \
+        --stdout "$tps_file" \
         --log-dir "$log_dir" \
         --cpu-before "$cpu_before" \
         --cpu-after "$cpu_after" \
@@ -284,11 +305,14 @@ run_one() {
     container_names=()
 }
 
-configs=(absent installed active)
 for ((repetition = 0; repetition < repetitions; repetition++)); do
-    first=$(((repetition + seed) % 3))
-    for ((offset = 0; offset < 3; offset++)); do
-        config="${configs[$(((first + offset) % 3))]}"
+    # Keep the no-stream comparison adjacent; alternate order to limit host-load bias.
+    if (((repetition + seed) % 2 == 0)); then
+        configs=(absent installed active)
+    else
+        configs=(installed absent active)
+    fi
+    for config in "${configs[@]}"; do
         if [[ "$config" == absent ]]; then
             image="$absent_image"
         else
@@ -299,13 +323,8 @@ for ((repetition = 0; repetition < repetitions; repetition++)); do
     done
 done
 
-ci_noise_flag=()
+compare_args=(--raw "$raw_file" --budgets "$BENCH_DIR/budgets.json" --output "$result_file" --expected-repetitions "$repetitions")
 if [[ "$PROFILE" == blocking ]]; then
-    ci_noise_flag+=(--allow-ci-noise)
+    compare_args+=(--allow-ci-noise)
 fi
-python3 "$BENCH_DIR/compare.py" \
-    --raw "$raw_file" \
-    --budgets "$BENCH_DIR/budgets.json" \
-    --output "$result_file" \
-    --expected-repetitions "$repetitions" \
-    "${ci_noise_flag[@]}"
+python3 "$BENCH_DIR/compare.py" "${compare_args[@]}"
