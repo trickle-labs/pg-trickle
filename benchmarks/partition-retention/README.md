@@ -185,6 +185,18 @@ and a separate 1,000-event backlog with `cpu_operator_cost=1000000` each passed
 the bounded-scan check and both result oracles; the nested plans are retained
 in `results/`. Other catch-up statements still depend on planner choices.
 
+With `cpu_operator_cost=100000000`, a separate 1,000-change keyless backlog
+caused each of two downstream capture statements to revisit 500,500 delta rows.
+After scoping that planner cost to its default during retention, each visited
+1,000 delta rows; neither run scanned retained source partitions, and both
+upstream and downstream results matched their oracles. The instrumented TRIM
+DROP times were 318 ms and 289 ms in these single debug-build runs. The raw
+plans are `results/2026-11-17-pg18-macos-operator-cost-before-100m.json` and
+`results/2026-11-17-pg18-macos-operator-cost-fixed.json`. The benchmark now
+rejects repeated sequential scans of the delta in downstream capture. Two
+earlier post-change attempts produced no reader latency samples and were
+discarded. This check does not make PostgreSQL's planner choices a hard bound.
+
 Instrumented runs with `--downstream` on the final candidate produced these
 results (milliseconds):
 

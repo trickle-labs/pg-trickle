@@ -79,6 +79,18 @@ def validate_trim_drop_plan(summary):
     if any((scan["relation"] == "totals" or scan["relation"].startswith("totals_")) and not scan.get("condition")
            for plan in summary["relevant_plans"] for scan in plan["scans"]):
         raise RuntimeError("TRIM used an unbounded output scan")
+    for entry in summary["relevant_plans"]:
+        plan = entry.get("plan", {})
+        if "changes_pgt_" not in plan.get("Query Text", ""):
+            continue
+        stack = [plan["Plan"]]
+        while stack:
+            node = stack.pop()
+            stack.extend(node.get("Plans", []))
+            if (node.get("Node Type") == "Seq Scan"
+                    and node.get("Relation Name", "").startswith("__pgt_delta_")
+                    and node.get("Actual Loops", 0) > 1):
+                raise RuntimeError("TRIM repeatedly scanned the affected delta during downstream capture")
 
 
 def validate_baseline_refresh(history, summary):

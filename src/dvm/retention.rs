@@ -1935,6 +1935,8 @@ fn with_retention_index_scans<T>(
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("SET LOCAL cpu_index_tuple_cost = 0.005")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run("SET LOCAL cpu_operator_cost = 0.0025")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("SET LOCAL jit = off").map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         operation()
     })
