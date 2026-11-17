@@ -3594,6 +3594,7 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_stream_tables \
          SET status = 'ACTIVE', consecutive_errors = 0, \
+         recovery_generation = recovery_generation + 1, \
          last_error_message = NULL, last_error_at = NULL, updated_at = now() \
          WHERE pgt_id = $1",
         &[st.pgt_id.into()],
