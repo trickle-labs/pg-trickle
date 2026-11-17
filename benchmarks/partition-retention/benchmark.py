@@ -72,17 +72,22 @@ def internal_plan_summary(log, schema):
             "relevant_plans": relevant}
 
 
-def validate_trim_drop_plan(summary):
+def validate_trim_drop_plan(summary, affected_group_limit=None):
     retained = set(summary["source_partitions_scanned"]) - {"p0"}
     if retained:
         raise RuntimeError(f"TRIM scanned retained source partitions: {sorted(retained)}")
     if any((scan["relation"] == "totals" or scan["relation"].startswith("totals_")) and not scan.get("condition")
            for plan in summary["relevant_plans"] for scan in plan["scans"]):
         raise RuntimeError("TRIM used an unbounded output scan")
+    if affected_group_limit is not None and any(
+            (scan["relation"] == "totals" or scan["relation"].startswith("totals_"))
+            and scan["rows_examined"] > 2 * affected_group_limit
+            for plan in summary["relevant_plans"] for scan in plan["scans"]):
+        raise RuntimeError("TRIM output scan exceeded twice the affected-group bound")
     excessive_pairs = False
     for entry in summary["relevant_plans"]:
         plan = entry.get("plan", {})
-        if "changes_pgt_" not in plan.get("Query Text", ""):
+        if "Plan" not in plan:
             continue
         stack = [plan["Plan"]]
         while stack:
@@ -91,13 +96,13 @@ def validate_trim_drop_plan(summary):
             if (node.get("Node Type") == "Seq Scan"
                     and node.get("Relation Name", "").startswith("__pgt_delta_")
                     and node.get("Actual Loops", 0) > 1):
-                raise RuntimeError("TRIM repeatedly scanned the affected delta during downstream capture")
+                raise RuntimeError("TRIM repeatedly scanned the affected delta")
             if (node.get("Node Type") == "Nested Loop"
                     and node.get("Rows Removed by Join Filter", 0)
                     > max(1000, 100 * node.get("Actual Rows", 0))):
                 excessive_pairs = True
     if excessive_pairs:
-        raise RuntimeError("TRIM compared excessive row pairs during downstream capture")
+        raise RuntimeError("TRIM compared excessive row pairs")
 
 
 def validate_baseline_refresh(history, summary):
@@ -318,6 +323,8 @@ def trial(db, schema, events, trim, directory, instrument, downstream, keyless, 
             f"$$ SELECT d, account, total, n FROM {schema}.totals $$, '1h', 'DIFFERENTIAL')")
     source_plan = json.loads(run(db, f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {defining}"))
     output_plan = json.loads(run(db, f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM {schema}.totals WHERE d >= DATE '2025-01-01' AND d < DATE '2025-01-02'"))
+    # Only the expired day and the writer's live day can change in this workload.
+    affected_group_limit = int(run(db, f"SELECT count(*) FROM {schema}.totals WHERE d IN (DATE '2025-01-01', DATE '2025-01-31')"))
     history_start = int(run(db, "SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history"))
     writer_dir, reader_dir = directory / "writer", directory / "reader"
     writer_name, reader_name = f"{schema}_writer", f"{schema}_reader"
@@ -372,15 +379,17 @@ def trial(db, schema, events, trim, directory, instrument, downstream, keyless, 
         validate_baseline_refresh(history, refresh_internal)
     if trim and instrument:
         try:
-            validate_trim_drop_plan(drop_internal)
+            validate_trim_drop_plan(drop_internal, affected_group_limit)
         except RuntimeError:
-            failure_plan.write_text(json.dumps(drop_internal, indent=2) + "\n", encoding="utf-8")
+            failure_plan.write_text(json.dumps({"affected_group_limit": affected_group_limit,
+                                                "drop_internal": drop_internal}, indent=2) + "\n", encoding="utf-8")
             raise
     return {"mode": "TRIM" if trim else "baseline", "retained_events": events,
             "pending_events": pending_events,
             "partitioned_output": partitioned_output,
             "keyless_source": keyless,
             "expired_events": expired, "drop_ms": drop_ms, "refresh_call_ms": refresh_ms,
+            "affected_group_limit": affected_group_limit,
             "writer": writer_latency, "reader": reader_latency, "refresh_history": history,
             "lock_samples": lock_samples,
             "result_mismatches": mismatch, "drop_internal": drop_internal, "refresh_internal": refresh_internal,

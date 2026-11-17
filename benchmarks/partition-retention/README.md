@@ -84,7 +84,13 @@ with the uninstrumented times below. PostgreSQL reports per-loop averages, so
 counts can be approximate when a node executes more than once.
 For this workload, an instrumented TRIM trial fails if its DROP scans a
 retained source partition or uses an output scan without an index or TID
-condition. If this check fails, the captured plan is saved beside the output
+condition. It also rejects any individual output scan that observes more than
+twice the number of groups in the expired and writer days, the only days this
+workload changes. The factor allows for per-loop reporting and scan overhead;
+it is a workload-specific check, not a general planner guarantee. Repeated
+delta scans and excessive nested-loop filtering are checked in every captured
+statement that scans the output, not only downstream capture. If a check fails,
+the captured plan is saved beside the output
 with a `.failed-plan.json` suffix. To exercise
 caller settings that disable indexed plans, add
 `PGOPTIONS='-c enable_indexscan=off -c enable_bitmapscan=off'` before the

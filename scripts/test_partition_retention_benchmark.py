@@ -132,6 +132,32 @@ class InternalPlanSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unbounded output scan"):
             benchmark.validate_trim_drop_plan(summary)
 
+    def test_trim_plan_rejects_excessive_index_scan_work(self):
+        summary = {"source_partitions_scanned": [], "relevant_plans": [
+            {"scans": [{"relation": "totals", "node": "Index Scan", "condition": "d >= lower", "rows_examined": 30000}],
+             "plan": {"Plan": {"Node Type": "Index Scan"}}},
+        ]}
+        with self.assertRaisesRegex(RuntimeError, "exceeded twice the affected-group bound"):
+            benchmark.validate_trim_drop_plan(summary, affected_group_limit=2000)
+        summary["relevant_plans"][0]["scans"][0]["rows_examined"] = 2000
+        benchmark.validate_trim_drop_plan(summary, affected_group_limit=2000)
+
+    def test_trim_plan_detects_repeated_delta_scans_outside_downstream_capture(self):
+        summary = {"source_partitions_scanned": [], "relevant_plans": [
+            {"scans": [], "plan": {"Query Text": "UPDATE totals", "Plan": {
+                "Node Type": "Seq Scan", "Relation Name": "__pgt_delta_1", "Actual Loops": 2}}},
+        ]}
+        with self.assertRaisesRegex(RuntimeError, "repeatedly scanned the affected delta"):
+            benchmark.validate_trim_drop_plan(summary)
+
+    def test_trim_plan_detects_excessive_pairs_outside_downstream_capture(self):
+        summary = {"source_partitions_scanned": [], "relevant_plans": [
+            {"scans": [], "plan": {"Query Text": "UPDATE totals", "Plan": {
+                "Node Type": "Nested Loop", "Actual Rows": 1, "Rows Removed by Join Filter": 5000}}},
+        ]}
+        with self.assertRaisesRegex(RuntimeError, "excessive row pairs"):
+            benchmark.validate_trim_drop_plan(summary)
+
     def test_baseline_requires_reinitialization_in_the_timed_backend(self):
         history = [{"action": "REINITIALIZE", "status": "COMPLETED"}]
         summary = {"source_partitions_scanned": [f"p{i}" for i in range(1, 31)]}
@@ -147,10 +173,10 @@ class InternalPlanSummaryTests(unittest.TestCase):
         after = json.loads((results / "2026-11-17-pg18-macos-operator-cost-fixed.json").read_text())
         with self.assertRaises(RuntimeError) as raised:
             benchmark.validate_trim_drop_plan(before[1]["drop_internal"])
-        self.assertEqual(str(raised.exception), "TRIM repeatedly scanned the affected delta during downstream capture")
+        self.assertEqual(str(raised.exception), "TRIM repeatedly scanned the affected delta")
         with self.assertRaises(RuntimeError) as raised:
             benchmark.validate_trim_drop_plan(after[1]["drop_internal"])
-        self.assertEqual(str(raised.exception), "TRIM compared excessive row pairs during downstream capture")
+        self.assertEqual(str(raised.exception), "TRIM compared excessive row pairs")
 
     def test_trim_multiset_capture_avoids_quadratic_pairing(self):
         results = BENCHMARK.parent / "results"
