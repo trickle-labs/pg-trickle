@@ -489,7 +489,7 @@ The practical concern: **write latency stacking.** When the scheduler refreshes 
 
 ### How do cron schedules handle timezones? What does `@daily` really mean?
 
-pg_trickle evaluates cron expressions in **UTC**. The underlying `croner` crate computes the next occurrence from a UTC timestamp, and the scheduler compares this against `chrono::Utc::now()`. There is no per-stream-table timezone setting.
+pg_trickle evaluates cron expressions in **UTC**. The scheduler computes the next occurrence from a UTC timestamp and compares it against the current UTC time. There is no per-stream-table timezone setting.
 
 This means:
 - `@daily` (equivalent to `0 0 * * *`) fires at **midnight UTC**, not midnight in your local timezone.
