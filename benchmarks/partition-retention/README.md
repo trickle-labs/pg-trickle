@@ -75,22 +75,22 @@ plans do not measure the internal DROP statement's scans. The higher maximum
 writer latencies in both TRIM runs are visible in the results; this
 single sample does not establish a latency distribution or isolate lock time.
 
-A separate instrumented 9M run after the indexed catch-up change captured no
-source scans during TRIM's DROP or following refresh; the baseline refresh
-scanned all 30 retained partitions and 9,002,974 rows including concurrent
-inserts. DROP observed 2,898 output rows across two indexed lookups and the
-range deletion, versus 125,001 output rows including full scans in the earlier
-instrumented 9M run. The following ordinary differential refresh observed
-120,000 output rows across its nested plans. These sums can include overlapping
-plans. The indexed catch-up uses PostgreSQL planner preferences, which do not
-guarantee a particular plan; ordinary refreshes can still scan the full output.
-An instrumented 27M run after the change also had zero mismatches: baseline
-refresh scanned all 30 retained partitions and 27,002,901 rows, while TRIM
-DROP scanned no source partitions and observed 2,882 output rows. Its next
-ordinary refresh observed 120,000 output rows across nested plans. Instrumented
-DROP / refresh-call times were 40 / 9,713 ms for baseline and 113 / 572 ms for
-TRIM; writer p95 / max were 0.48 / 8.07 ms and 0.54 / 69.10 ms, and reader
-p95 / max were 1.91 / 2.92 ms and 1.95 / 2.76 ms, respectively. Instrumented
-timings include plan logging and should not be compared directly with the
-uninstrumented table. An earlier instrumented 27M attempt before the change
-failed after PostgreSQL reported a storage I/O error and restarted.
+Instrumented runs after the sealed-history fallback fix produced these results:
+
+| Retained events | Mode | DROP | Refresh call | Writer p95 / max | Reader p95 / max |
+|---:|---|---:|---:|---:|---:|
+| 9,000,000 | baseline | 41 | 3,465 | 0.39 / 10.95 | 1.64 / 3.79 |
+| 9,000,000 | TRIM | 120 | 55 | 0.51 / 75.27 | 1.70 / 5.93 |
+| 27,000,000 | baseline | 65 | 9,731 | 4.55 / 18.05 | 5.84 / 12.51 |
+| 27,000,000 | TRIM | 144 | 576 | 0.50 / 86.72 | 1.82 / 6.27 |
+
+Both comparisons had zero mismatches. Baseline refresh scanned all 30 retained
+partitions and 9,003,254 or 27,000,679 rows including concurrent inserts.
+TRIM's DROP and following refresh scanned no source partitions; DROP observed
+2,858 or 2,882 output rows across indexed lookups and range deletion. At 27M,
+the following ordinary differential refresh observed 120,000 output rows
+across nested plans. These sums can include overlapping plans. PostgreSQL
+planner preferences do not guarantee a particular plan, and ordinary refreshes
+can still scan the full output. Instrumented times include plan logging and
+should not be compared directly with the uninstrumented table. An earlier
+instrumented 27M attempt failed after a storage I/O error and restart.
