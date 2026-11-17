@@ -41,10 +41,33 @@ BEGIN
         embedding = EXCLUDED.embedding;
 END $$;
 
-CREATE FUNCTION live_rag.recompute_full() RETURNS void LANGUAGE plpgsql AS $$
+CREATE FUNCTION live_rag.recompute_full(p_dimensions integer DEFAULT 3) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    rebuild_ann boolean := to_regclass('live_rag.periodic_full_ann') IS NOT NULL;
+    rebuild_fts boolean := to_regclass('live_rag.periodic_full_fts') IS NOT NULL;
 BEGIN
+    IF p_dimensions NOT BETWEEN 1 AND 1536 THEN
+        RAISE EXCEPTION 'vector dimensions must be between 1 and 1536';
+    END IF;
+    IF rebuild_ann THEN
+        DROP INDEX live_rag.periodic_full_ann;
+    END IF;
+    IF rebuild_fts THEN
+        DROP INDEX live_rag.periodic_full_fts;
+    END IF;
     TRUNCATE live_rag.periodic_full;
     INSERT INTO live_rag.periodic_full SELECT * FROM live_rag.truth;
+    -- A full corpus rebuild is faster with one bulk ANN/text index build.
+    IF rebuild_ann THEN
+        EXECUTE format(
+            'CREATE INDEX periodic_full_ann ON live_rag.periodic_full USING hnsw ((embedding::vector(%s)) vector_cosine_ops)',
+            p_dimensions
+        );
+    END IF;
+    IF rebuild_fts THEN
+        CREATE INDEX periodic_full_fts ON live_rag.periodic_full USING gin (to_tsvector('simple', body));
+    END IF;
+    ANALYZE live_rag.periodic_full;
 END $$;
 
 -- Search rechecks the authoritative revision, visibility and embedding while refresh lags.

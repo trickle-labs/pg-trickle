@@ -9,6 +9,9 @@ The setup and worker support `--dimensions` up to 1536; both must use the same
 dimension. The example below uses three dimensions.
 The fixture CI exercises setup, generation and corpus convergence at 384 and
 1536 dimensions; those small tests do not establish scale or retrieval quality.
+The periodic-full baseline bulk-loads the rebuilt corpus, then rebuilds its
+HNSW and text indexes; index creation is included in maintenance latency and
+can block readers during the full refresh.
 
 Use a disposable database with the packaged v0.109.0 candidate, PostgreSQL 18
 and pgvector installed. Record the candidate commit, package digest, image,

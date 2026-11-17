@@ -63,7 +63,7 @@ COMMIT;
 
 MAINTENANCE = {
     "application": "SELECT live_rag.sync_application(ARRAY({changed_ids})::bigint[]);",
-    "periodic_full": "SELECT live_rag.recompute_full();",
+    "periodic_full": "SELECT live_rag.recompute_full(:'dimensions'::integer);",
     "differential": "SELECT pgtrickle.refresh_stream_table('live_rag.differential');",
 }
 SCHEDULER_STREAMS = "ARRAY['embedding_demo.corpus_v1', 'embedding_demo.corpus_v2', 'live_rag.differential']"
@@ -300,10 +300,12 @@ SELECT json_build_object('postgres', current_setting('server_version'),
     atexit.register(resume_scheduler)
     checkpoint.update({"phase": "initial_setup", "step": "seed"})
     worker.psql(SEED, rows=str(args.rows), dimensions=str(args.dimensions))
-    variables = {"rows": str(args.rows), "batch": str(args.batch), "cycle": "0"}
+    variables = {"rows": str(args.rows), "batch": str(args.batch), "cycle": "0",
+                 "dimensions": str(args.dimensions)}
     checkpoint.update({"phase": "initial_maintenance", "state": "started"})
     worker.psql("SELECT live_rag.sync_application(ARRAY(SELECT id FROM live_rag.truth)::bigint[]); "
-                "SELECT live_rag.recompute_full(); SELECT pgtrickle.refresh_stream_table('live_rag.differential');")
+                "SELECT live_rag.recompute_full(:'dimensions'::integer); "
+                "SELECT pgtrickle.refresh_stream_table('live_rag.differential');", **variables)
     checkpoint.update({"phase": "initial_maintenance", "state": "complete"})
     checkpoint.update({"phase": "initial_setup", "step": "create_indexes"})
     worker.psql(setup_live_rag.index_sql(args.dimensions))

@@ -61,6 +61,9 @@ class BenchmarkTests(unittest.TestCase):
             "ARRAY['embedding_demo.corpus_v1', 'embedding_demo.corpus_v2', 'live_rag.differential']",
         )
 
+    def test_periodic_full_rebuild_receives_configured_vector_dimensions(self):
+        self.assertIn(":'dimensions'::integer", benchmark.MAINTENANCE["periodic_full"])
+
     def test_reader_overlap_and_timeout_windows_are_reported_separately(self):
         reads = [
             {"server_started": 1, "server_finished": 2, "client_seconds": 0.2},
