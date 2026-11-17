@@ -2370,6 +2370,146 @@ async fn test_retention_utc_hour_fall_back_keeps_distinct_buckets() {
 }
 
 #[tokio::test]
+async fn test_retention_partitioned_output_with_different_key_keeps_all_groups() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE different_key_src (id INT NOT NULL, d DATE NOT NULL, account TEXT, amount INT NOT NULL) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE different_key_old PARTITION OF different_key_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE different_key_live PARTITION OF different_key_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO different_key_src VALUES (1,'2025-06-01','a',10),(2,'2026-06-01','a',20),(3,'2026-06-01',NULL,7)").await;
+    let query = "SELECT d AS day,account,sum(amount) AS total,count(*) AS n FROM different_key_src GROUP BY d,account";
+    db.create_st_partitioned(
+        "different_key_up",
+        query,
+        "1h",
+        "DIFFERENTIAL",
+        "HASH:account",
+    )
+    .await;
+    db.create_st(
+        "different_key_down",
+        "SELECT day,account,total,n FROM different_key_up",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st_partitioned("aligned_key_up", query, "1h", "DIFFERENTIAL", "HASH:day")
+        .await;
+    db.create_st(
+        "aligned_key_down",
+        "SELECT day,account,total,n FROM aligned_key_up",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('different_key_up','TRIM','d','2026-01-01')").await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('aligned_key_up','TRIM','d','2026-01-01')").await;
+    db.execute(
+        "INSERT INTO different_key_src VALUES (4,'2026-06-01','a',3),(5,'2026-06-01',NULL,4)",
+    )
+    .await;
+    db.execute("DROP TABLE different_key_old").await;
+    db.refresh_st_until_converged("different_key_down").await;
+    db.refresh_st_until_converged("aligned_key_down").await;
+    let expected = vec![
+        (
+            "2026-06-01".to_string(),
+            Some("a".to_string()),
+            23_i64,
+            2_i64,
+        ),
+        ("2026-06-01".to_string(), None, 11_i64, 2_i64),
+    ];
+    for (name, sql) in [
+        (
+            "different_key_up",
+            "SELECT day::text,account,total,n FROM different_key_up ORDER BY day,account NULLS LAST",
+        ),
+        (
+            "different_key_down",
+            "SELECT day::text,account,total,n FROM different_key_down ORDER BY day,account NULLS LAST",
+        ),
+        (
+            "aligned_key_up",
+            "SELECT day::text,account,total,n FROM aligned_key_up ORDER BY day,account NULLS LAST",
+        ),
+        (
+            "aligned_key_down",
+            "SELECT day::text,account,total,n FROM aligned_key_down ORDER BY day,account NULLS LAST",
+        ),
+    ] {
+        let rows: Vec<(String, Option<String>, i64, i64)> =
+            sqlx::query_as(sql).fetch_all(&db.pool).await.unwrap();
+        assert_eq!(rows, expected);
+        db.assert_st_matches_query(name, query).await;
+        let action: (String,String,bool) = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name=$1 ORDER BY h.refresh_id DESC LIMIT 1").bind(name).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    }
+}
+
+#[tokio::test]
+async fn test_concurrent_retention_detach_with_partitioned_output_and_downstream() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE concurrent_output_src (id INT NOT NULL, d DATE NOT NULL, amount INT NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE concurrent_output_old PARTITION OF concurrent_output_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE concurrent_output_live PARTITION OF concurrent_output_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO concurrent_output_src VALUES (1,'2025-06-01',10),(2,'2026-06-01',20)")
+        .await;
+    let query = "SELECT d,sum(amount) AS total,count(*) AS n FROM concurrent_output_src GROUP BY d";
+    db.create_st_partitioned(
+        "concurrent_output_up",
+        query,
+        "1h",
+        "DIFFERENTIAL",
+        "HASH:d",
+    )
+    .await;
+    db.create_st(
+        "concurrent_output_down",
+        "SELECT d,total,n FROM concurrent_output_up",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('concurrent_output_up','TRIM','d','2026-01-01')").await;
+    db.execute("INSERT INTO concurrent_output_src VALUES (3,'2026-06-01',7)")
+        .await;
+    db.execute(
+        "ALTER TABLE concurrent_output_src DETACH PARTITION concurrent_output_old CONCURRENTLY",
+    )
+    .await;
+    db.refresh_st_until_converged("concurrent_output_down")
+        .await;
+    for (name, sql) in [
+        (
+            "concurrent_output_up",
+            "SELECT d::text,total,n FROM concurrent_output_up ORDER BY d",
+        ),
+        (
+            "concurrent_output_down",
+            "SELECT d::text,total,n FROM concurrent_output_down ORDER BY d",
+        ),
+    ] {
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(sql).fetch_all(&db.pool).await.unwrap();
+        assert_eq!(rows, vec![("2026-06-01".into(), 27, 2)]);
+        db.assert_st_matches_query(name, query).await;
+        let action: (String,String,bool) = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name=$1 ORDER BY h.refresh_id DESC LIMIT 1").bind(name).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    }
+    let state: serde_json::Value = db
+        .query_scalar(
+            "SELECT pgtrickle.get_stream_table_partition_retention('concurrent_output_up')",
+        )
+        .await;
+    assert!(state.get("pending_detach").is_none(), "{state}");
+}
+
+#[tokio::test]
 #[cfg(feature = "e2e-unsafe-test-hooks")]
 async fn test_retention_capture_multiset_preserves_duplicate_deltas() {
     let db = E2eDb::new_dedicated().await.with_extension().await;

@@ -158,6 +158,16 @@ class InternalPlanSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "excessive row pairs"):
             benchmark.validate_trim_drop_plan(summary)
 
+    def test_partitioned_capture_prunes_only_the_writer_partition(self):
+        results = BENCHMARK.parent / "results"
+        before = json.loads((results / "2026-11-17-pg18-macos-output-prune-before.json").read_text())
+        after = json.loads((results / "2026-11-17-pg18-macos-output-prune-after.json").read_text())
+        with self.assertRaisesRegex(RuntimeError, "did not prune"):
+            benchmark.validate_partitioned_capture_pruning(before[1]["drop_internal"], "totals_p1")
+        benchmark.validate_partitioned_capture_pruning(after[1]["drop_internal"], "totals_p1")
+        with self.assertRaisesRegex(RuntimeError, "did not prune"):
+            benchmark.validate_partitioned_capture_pruning(after[1]["drop_internal"], "totals_p0")
+
     def test_baseline_requires_reinitialization_in_the_timed_backend(self):
         history = [{"action": "REINITIALIZE", "status": "COMPLETED"}]
         summary = {"source_partitions_scanned": [f"p{i}" for i in range(1, 31)]}

@@ -1292,6 +1292,7 @@ pub(crate) fn retention_scoped_rows_sql(
     delta: &str,
     user_cols: &[String],
     numbered: bool,
+    partition_key: Option<&str>,
 ) -> String {
     let columns = user_cols
         .iter()
@@ -1308,10 +1309,20 @@ pub(crate) fn retention_scoped_rows_sql(
     } else {
         ""
     };
+    let key = partition_key.filter(|key| user_cols.iter().any(|column| column.as_str() == *key));
+    let selected_key = key
+        .map(|key| format!(", {}", crate::sql_builder::ident(key)))
+        .unwrap_or_default();
+    let partition_match = key
+        .map(|key| {
+            let key = crate::sql_builder::ident(key);
+            format!(" AND st.{key} OPERATOR(pg_catalog.=) affected.{key}")
+        })
+        .unwrap_or_default();
     format!(
-        "SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id FROM {delta}) affected \
+        "SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id{selected_key} FROM {delta}) affected \
          CROSS JOIN LATERAL (SELECT st.__pgt_row_id{columns}{occurrence} FROM {table} st \
-         WHERE {} OFFSET 0) scoped",
+         WHERE {}{partition_match} OFFSET 0) scoped",
         build_row_id_match("st.__pgt_row_id", "affected.__pgt_row_id"),
     )
 }
@@ -1435,6 +1446,7 @@ pub(crate) fn capture_diff_to_table(
                 &format!("pg_temp.__pgt_delta_{pgt_id}"),
                 user_cols,
                 true,
+                crate::refresh::retention_partition_key(pgt_id).as_deref(),
             )
         )
     } else {
@@ -1464,6 +1476,7 @@ pub(crate) fn capture_diff_to_table(
                 &format!("pg_temp.__pgt_delta_{pgt_id}"),
                 user_cols,
                 false,
+                crate::refresh::retention_partition_key(pgt_id).as_deref(),
             )
         );
         let mut total = 0;

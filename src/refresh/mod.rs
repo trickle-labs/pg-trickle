@@ -89,6 +89,7 @@ pub(crate) struct RefreshContext {
     pub(crate) graph_refresh_id: Option<i64>,
     pub(crate) source_boundary_digest: Option<Vec<u8>>,
     pub(crate) retention_catchup: bool,
+    pub(crate) retention_partition_key: Option<(i64, String)>,
 }
 
 impl RefreshContext {
@@ -99,6 +100,7 @@ impl RefreshContext {
             graph_refresh_id: None,
             source_boundary_digest: None,
             retention_catchup: false,
+            retention_partition_key: None,
         }
     }
 
@@ -109,12 +111,14 @@ impl RefreshContext {
             graph_refresh_id: None,
             source_boundary_digest: None,
             retention_catchup: false,
+            retention_partition_key: None,
         }
     }
 
-    pub(crate) fn retention(safe_bound: &str) -> Self {
+    pub(crate) fn retention(safe_bound: &str, partition_key: Option<(i64, String)>) -> Self {
         Self {
             retention_catchup: true,
+            retention_partition_key: partition_key,
             ..Self::graph(safe_bound, FullPolicy::Error)
         }
     }
@@ -131,6 +135,7 @@ impl RefreshContext {
             graph_refresh_id: Some(graph_refresh_id),
             source_boundary_digest: Some(source_boundary_digest),
             retention_catchup: false,
+            retention_partition_key: None,
         }
     }
 }
@@ -182,6 +187,16 @@ pub(crate) fn is_retention_catchup() -> bool {
             .borrow()
             .as_ref()
             .is_some_and(|c| c.retention_catchup)
+    })
+}
+
+pub(crate) fn retention_partition_key(pgt_id: i64) -> Option<String> {
+    ACTIVE_CONTEXT.with(|context| {
+        context.borrow().as_ref().and_then(|c| {
+            c.retention_partition_key
+                .as_ref()
+                .and_then(|(id, key)| (*id == pgt_id).then(|| key.clone()))
+        })
     })
 }
 

@@ -138,6 +138,10 @@ currently enable TRIM.
 During retention catch-up and TRIM deletion, pg_trickle temporarily enables
 index and bitmap scans, discourages sequential scans, and disables JIT. It
 then restores the caller's planner settings.
+If stream storage is partitioned solely by the proven retention group key,
+downstream capture includes that key in its probes so PostgreSQL can prune
+output partitions. Other storage keys use the ordinary identity probe, and
+other maintenance steps may still visit multiple output partitions.
 
 For `RETAIN`, removal seals the expired range and preserves its aggregate
 rows. Later differential refreshes continue to update live groups. Sealed

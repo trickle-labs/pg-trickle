@@ -112,6 +112,24 @@ def validate_baseline_refresh(history, summary):
         raise RuntimeError("timed baseline refresh did not scan every retained partition")
 
 
+def validate_partitioned_capture_pruning(summary, expected_partition):
+    observed = set()
+    statements = set()
+    for entry in summary["relevant_plans"]:
+        query = entry.get("plan", {}).get("Query Text", "")
+        kind = "pre" if "INSERT INTO __pgt_pre_" in query else (
+            "capture" if "changes_pgt_" in query else None)
+        if kind is None:
+            continue
+        scans = [scan for scan in entry["scans"] if scan["relation"].startswith("totals_")]
+        if scans:
+            statements.add(kind)
+            observed.update(scan["relation"] for scan in scans)
+    if statements != {"pre", "capture"} or observed != {expected_partition}:
+        raise RuntimeError(f"partitioned retention capture did not prune to {expected_partition}: "
+                           f"{statements=}, {observed=}")
+
+
 def timed(db, sql, schema, instrument):
     start = time.perf_counter()
     if not instrument:
@@ -325,6 +343,11 @@ def trial(db, schema, events, trim, directory, instrument, downstream, keyless, 
     output_plan = json.loads(run(db, f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM {schema}.totals WHERE d >= DATE '2025-01-01' AND d < DATE '2025-01-02'"))
     # Only the expired day and the writer's live day can change in this workload.
     affected_group_limit = int(run(db, f"SELECT count(*) FROM {schema}.totals WHERE d IN (DATE '2025-01-01', DATE '2025-01-31')"))
+    expected_capture_partition = None
+    if trim and downstream and partitioned_output:
+        expected_capture_partition = run(db, f"SELECT c.relname FROM {schema}.totals t JOIN pg_catalog.pg_class c ON c.oid=t.tableoid WHERE t.d=DATE '2025-01-31' LIMIT 1")
+        if not expected_capture_partition:
+            raise RuntimeError("could not identify the writer's output partition")
     history_start = int(run(db, "SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history"))
     writer_dir, reader_dir = directory / "writer", directory / "reader"
     writer_name, reader_name = f"{schema}_writer", f"{schema}_reader"
@@ -380,6 +403,8 @@ def trial(db, schema, events, trim, directory, instrument, downstream, keyless, 
     if trim and instrument:
         try:
             validate_trim_drop_plan(drop_internal, affected_group_limit)
+            if expected_capture_partition is not None:
+                validate_partitioned_capture_pruning(drop_internal, expected_capture_partition)
         except RuntimeError:
             failure_plan.write_text(json.dumps({"affected_group_limit": affected_group_limit,
                                                 "drop_internal": drop_internal}, indent=2) + "\n", encoding="utf-8")
@@ -390,6 +415,7 @@ def trial(db, schema, events, trim, directory, instrument, downstream, keyless, 
             "keyless_source": keyless,
             "expired_events": expired, "drop_ms": drop_ms, "refresh_call_ms": refresh_ms,
             "affected_group_limit": affected_group_limit,
+            "expected_capture_partition": expected_capture_partition,
             "writer": writer_latency, "reader": reader_latency, "refresh_history": history,
             "lock_samples": lock_samples,
             "result_mismatches": mismatch, "drop_internal": drop_internal, "refresh_internal": refresh_internal,

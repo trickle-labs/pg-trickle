@@ -25,10 +25,31 @@ fn test_retention_scoped_rows_preserves_occurrence_order() {
         "pg_temp.delta",
         &["d".into(), "value".into()],
         true,
+        None,
     );
     assert_eq!(
         sql,
         "SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id FROM pg_temp.delta) affected CROSS JOIN LATERAL (SELECT st.__pgt_row_id, st.\"d\", st.\"value\", row_number() OVER (PARTITION BY st.__pgt_row_id ORDER BY st.tableoid, st.ctid) AS __pgt_occurrence FROM \"public\".\"target\" st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(affected.__pgt_row_id) AND st.__pgt_row_id = affected.__pgt_row_id OFFSET 0) scoped"
+    );
+}
+
+#[test]
+fn test_retention_scoped_rows_prunes_proven_partition_key() {
+    let sql = retention_scoped_rows_sql(
+        "\"public\".\"target\"",
+        "pg_temp.delta",
+        &["d".into(), "value".into()],
+        false,
+        Some("d"),
+    );
+    assert_eq!(
+        sql,
+        "SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id, \"d\" FROM pg_temp.delta) affected CROSS JOIN LATERAL (SELECT st.__pgt_row_id, st.\"d\", st.\"value\" FROM \"public\".\"target\" st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(affected.__pgt_row_id) AND st.__pgt_row_id = affected.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) affected.\"d\" OFFSET 0) scoped"
+    );
+    let fallback = retention_scoped_rows_sql("t", "d", &["value".into()], false, Some("missing"));
+    assert_eq!(
+        fallback,
+        "SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id FROM d) affected CROSS JOIN LATERAL (SELECT st.__pgt_row_id, st.\"value\" FROM t st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(affected.__pgt_row_id) AND st.__pgt_row_id = affected.__pgt_row_id OFFSET 0) scoped"
     );
 }
 
@@ -216,12 +237,18 @@ fn test_refresh_context_restores_nested_state_on_error() {
             assert_eq!(current_safe_bound().as_deref(), Some("0/10"));
             assert_eq!(current_full_policy(), FullPolicy::Error);
 
-            with_refresh_context(RefreshContext::retention("0/10"), || {
-                assert!(is_retention_catchup());
-                assert_eq!(current_full_policy(), FullPolicy::Error);
-                Ok::<_, PgTrickleError>(())
-            })?;
+            with_refresh_context(
+                RefreshContext::retention("0/10", Some((7, "d".into()))),
+                || {
+                    assert!(is_retention_catchup());
+                    assert_eq!(current_full_policy(), FullPolicy::Error);
+                    assert_eq!(retention_partition_key(7).as_deref(), Some("d"));
+                    assert_eq!(retention_partition_key(8), None);
+                    Ok::<_, PgTrickleError>(())
+                },
+            )?;
             assert!(!is_retention_catchup());
+            assert_eq!(retention_partition_key(7), None);
 
             with_refresh_context(RefreshContext::manual(), || {
                 assert_eq!(current_safe_bound(), None);

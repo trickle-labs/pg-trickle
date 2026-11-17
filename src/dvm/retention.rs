@@ -92,10 +92,14 @@ fn retention_catchup(
     st: &crate::catalog::StreamTableMeta,
     source_oid: pg_sys::Oid,
     safe_bound: &str,
+    candidate: &RetentionGroupCandidate,
 ) -> Result<crate::api::refresh_ops::ManualRefreshResult, crate::error::PgTrickleError> {
+    let partition_key =
+        retention_pruning_key(st.st_partition_key.as_deref(), &candidate.output_column)
+            .map(|key| (st.pgt_id, key));
     with_retention_index_scans(|| {
         crate::refresh::with_refresh_context(
-            crate::refresh::RefreshContext::retention(safe_bound),
+            crate::refresh::RefreshContext::retention(safe_bound, partition_key),
             || {
                 crate::api::refresh_ops::execute_manual_refresh(
                     st,
@@ -106,6 +110,12 @@ fn retention_catchup(
             },
         )
     })
+}
+
+fn retention_pruning_key(partition_spec: Option<&str>, group_column: &str) -> Option<String> {
+    // The validated retention group key is non-null and immutable for a group identity.
+    let keys = crate::api::parse_partition_key_columns(partition_spec?);
+    (keys.len() == 1 && keys[0] == group_column).then(|| group_column.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -728,7 +738,7 @@ pub(crate) fn finish_concurrent_retention_detach(
     }
     st.status = crate::dag::StStatus::Active;
     let safe_bound = crate::cdc::get_current_wal_lsn()?;
-    let refresh = retention_catchup(&st, source_oid, &safe_bound)?;
+    let refresh = retention_catchup(&st, source_oid, &safe_bound, &candidate)?;
     if !matches!(refresh.action.as_str(), "DIFFERENTIAL" | "NO_DATA") {
         return Err(PgTrickleError::InvalidArgument(format!(
             "pending retention replay performed unexpected refresh mode {}",
@@ -1538,7 +1548,7 @@ pub fn prepare_retention_cut(
     ensure_durable_partition_tree(source_oid)?;
     ensure_retention_capture(pgt_id)?;
     let safe_bound = crate::cdc::get_current_wal_lsn()?;
-    let refresh = retention_catchup(&st, source_oid, &safe_bound)?;
+    let refresh = retention_catchup(&st, source_oid, &safe_bound, &candidate)?;
     if !matches!(refresh.action.as_str(), "DIFFERENTIAL" | "NO_DATA") {
         return Err(PgTrickleError::InvalidArgument(format!(
             "retention preparation performed unexpected refresh mode {}",
@@ -2764,6 +2774,28 @@ mod tests {
                 }),
             }),
         }
+    }
+
+    #[test]
+    fn output_pruning_requires_the_proven_single_group_key() {
+        assert_eq!(
+            retention_pruning_key(Some("HASH:bucket:16"), "bucket"),
+            Some("bucket".into())
+        );
+        assert_eq!(
+            retention_pruning_key(Some("LIST:bucket"), "bucket"),
+            Some("bucket".into())
+        );
+        assert_eq!(
+            retention_pruning_key(Some("bucket"), "bucket"),
+            Some("bucket".into())
+        );
+        assert_eq!(retention_pruning_key(Some("HASH:account"), "bucket"), None);
+        assert_eq!(
+            retention_pruning_key(Some("bucket,account"), "bucket"),
+            None
+        );
+        assert_eq!(retention_pruning_key(None, "bucket"), None);
     }
 
     #[test]

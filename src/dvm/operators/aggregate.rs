@@ -4225,7 +4225,7 @@ mod tests {
             scan(1, "t", "public", "t", &["id", "region"]),
         );
         let result = crate::refresh::with_refresh_context(
-            crate::refresh::RefreshContext::retention("0/10"),
+            crate::refresh::RefreshContext::retention("0/10", None),
             || diff_aggregate(&mut ctx, &tree),
         )
         .unwrap();
@@ -4267,7 +4267,7 @@ mod tests {
             scan(1, "t", "public", "t", &["id", "region"]),
         );
         let result = crate::refresh::with_refresh_context(
-            crate::refresh::RefreshContext::retention("0/10"),
+            crate::refresh::RefreshContext::retention("0/10", None),
             || diff_aggregate(&mut ctx, &tree),
         )
         .unwrap();

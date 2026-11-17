@@ -113,7 +113,10 @@ PGOPTIONS='-c random_page_cost=1000000 -c cpu_index_tuple_cost=100000000' python
 DROP, so the protected catch-up must process a substantial CDC backlog. These
 events are additional to the requested retained event count.
 Add `--partitioned-output` to use four hash partitions for stream storage;
-instrumentation includes scans of their child tables.
+instrumentation includes scans of their child tables. When combined with
+`--downstream` and `--instrument-internal`, the TRIM trial also requires the
+pre-snapshot and downstream capture probes to visit only the writer's output
+partition. This check applies to this workload's proven non-null group key.
 
 The results depend on cache, storage, CPU, database settings, and concurrent
 load. Run several times and report the environment and individual results;
@@ -431,3 +434,43 @@ wait was added after these measurements; the collection query and interval were
 the same. Results and plans are in
 `results/2026-11-17-pg18-macos-lock-sampled-9m.json` and
 `results/2026-11-17-pg18-macos-lock-sampled-27m.json`.
+
+A 30,000-event diagnostic with a keyless source, 1,000 pending events, four
+hash-partitioned output partitions, and a downstream stream compared capture
+plans before and after adding the proven group key to the probes. For each of
+the pre-snapshot and two downstream capture statements, the old plan executed
+1,000 index probes in each of four output partitions; the new plan executed
+1,000 probes in one partition and zero in the other three. Both upstream and
+downstream result oracles matched in both runs. These are plan observations,
+not throughput measurements. The runs used the same PostgreSQL 18.7 arm64
+debug environment; raw plans are
+`results/2026-11-17-pg18-macos-output-prune-before.json` and
+`results/2026-11-17-pg18-macos-output-prune-after.json`. This optimization
+only covers capture probes when the storage partition key is the proven
+retention group key; other maintenance steps and planner choices still limit
+any general work bound.
+
+The partition-pruned capture path was also measured once at each issue scale
+on the native PostgreSQL 18.7 arm64 debug setup, using a keyed source, four
+hash-partitioned output partitions, a downstream stream, nested-plan
+instrumentation, and lock sampling. Times are milliseconds.
+
+| Retained events | Mode | DROP | First refresh | Writer p95 / max | Reader p95 / max |
+|---:|---|---:|---:|---:|---:|
+| 9,000,000 | baseline | 39 | 3,708 | 0.10 / 3,663.87 | 2.28 / 4.20 |
+| 9,000,000 | TRIM | 269 | 58 | 0.10 / 227.08 | 2.29 / 4.12 |
+| 27,000,000 | baseline | 40 | 10,653 | 0.11 / 10,607.72 | 2.35 / 3.64 |
+| 27,000,000 | TRIM | 269 | 236 | 0.11 / 226.25 | 2.52 / 3.80 |
+
+Both result oracles matched, and TRIM and downstream refreshes completed
+differentially. Baseline reinitialization scanned 30 retained partitions and
+9,014,595 or 27,014,081 source rows; TRIM DROP scanned no retained source
+partitions and observed 11,000 output rows in each run. Capture pre-snapshot
+and downstream probes visited only the writer output partition. The longest
+spans between consecutive sampled relation-lock waits were 3,650 ms writer /
+3,630 ms reader and 10,602 ms writer / 10,581 ms reader for baseline, versus
+220 ms writer and no reader lock samples for both TRIM runs. These are sampled
+workload-wide spans, not exact continuous wait durations; short waits can be
+missed. Raw plans and sampled summaries are
+`results/2026-11-17-pg18-macos-output-prune-9m.json` and
+`results/2026-11-17-pg18-macos-output-prune-27m.json`.

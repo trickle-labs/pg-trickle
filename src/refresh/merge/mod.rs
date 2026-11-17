@@ -3981,7 +3981,13 @@ pub fn execute_differential_refresh_with_tuning(
                 let snapshot_sql = if crate::refresh::is_retention_catchup() {
                     format!(
                         "INSERT INTO {pre_table} {}",
-                        retention_scoped_rows_sql(&qt, &delta_table, &cols, false)
+                        retention_scoped_rows_sql(
+                            &qt,
+                            &delta_table,
+                            &cols,
+                            false,
+                            crate::refresh::retention_partition_key(st.pgt_id).as_deref(),
+                        )
                     )
                 } else {
                     format!(
