@@ -1355,11 +1355,11 @@ fn test_retention_dml_prunes_by_proven_partition_key() {
     let cols = vec!["val".to_string()];
     assert_eq!(
         build_retention_trigger_delete_sql("\"public\".\"t\"", 7, Some("d")),
-        "DELETE FROM \"public\".\"t\" AS st USING (SELECT matched.tableoid, matched.ctid, d.\"d\" FROM (SELECT __pgt_row_id, \"d\", COUNT(*) AS n FROM __pgt_delta_7 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id, \"d\") d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"public\".\"t\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id AND st2.\"d\" OPERATOR(pg_catalog.=) d.\"d\" ORDER BY st2.ctid LIMIT d.n) matched) target WHERE st.tableoid = target.tableoid AND st.ctid = target.ctid AND st.\"d\" OPERATOR(pg_catalog.=) target.\"d\""
+        "DELETE FROM \"public\".\"t\" AS st USING (SELECT __pgt_row_id, \"d\" FROM __pgt_delta_7 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id, \"d\") d WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\""
     );
     assert_eq!(
         build_retention_trigger_update_sql("\"public\".\"t\"", 7, &cols, Some("d")),
-        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"public\".\"t\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id AND st2.\"d\" OPERATOR(pg_catalog.=) d.\"d\" OFFSET 0) matched WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\" AND d.__pgt_action = 'I' AND (st.\"val\"::text IS DISTINCT FROM d.\"val\"::text)"
+        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\" AND d.__pgt_action = 'I' AND (st.\"val\"::text IS DISTINCT FROM d.\"val\"::text)"
     );
     assert_eq!(
         build_retention_trigger_insert_sql("\"public\".\"t\"", 7, &cols, Some("d")),

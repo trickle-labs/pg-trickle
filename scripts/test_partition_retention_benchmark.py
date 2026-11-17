@@ -171,23 +171,26 @@ class InternalPlanSummaryTests(unittest.TestCase):
     def test_partitioned_maintenance_prunes_correlated_probes(self):
         results = BENCHMARK.parent / "results"
         before = json.loads((results / "2026-11-17-pg18-macos-output-prune-after.json").read_text())
-        after = json.loads((results / "2026-11-17-pg18-macos-maintenance-prune-after.json").read_text())
-        with self.assertRaisesRegex(RuntimeError, "maintenance probes did not prune"):
+        after = json.loads((results / "2026-11-17-pg18-linux-amd64-maintenance-prune-after.json").read_text())
+        with self.assertRaisesRegex(RuntimeError, "outer TID scan|maintenance probes did not prune"):
             benchmark.validate_partitioned_maintenance_pruning(before[1]["drop_internal"], "totals_p1")
         benchmark.validate_partitioned_maintenance_pruning(after[1]["drop_internal"], "totals_p1")
 
-    def test_delete_probe_prunes_inner_but_outer_tid_scans_remain(self):
-        path = BENCHMARK.parent / "results/2026-11-17-pg18-macos-maintenance-delete.json"
+    def test_delete_and_update_prune_outer_target_scans(self):
+        path = BENCHMARK.parent / "results/2026-11-17-pg18-linux-amd64-maintenance-delete.json"
         summary = json.loads(path.read_text())
         delete = next(entry for entry in summary["relevant_plans"]
                       if entry["plan"]["Query Text"].startswith('DELETE FROM "retention_delete_probe"."totals"'))
+        update = next(entry for entry in summary["relevant_plans"]
+                      if entry["plan"]["Query Text"].startswith('UPDATE "retention_delete_probe"."totals"'))
         self.assertEqual(sorted((scan["relation"], scan["node"], scan["rows_examined"])
                                 for scan in delete["scans"]), [
-            ("totals_p0", "Tid Scan", 0.0),
-            ("totals_p1", "Tid Scan", 0.0),
-            ("totals_p2", "Tid Scan", 0.0),
             ("totals_p3", "Bitmap Heap Scan", 1.0),
-            ("totals_p3", "Tid Scan", 1.0),
+        ])
+        self.assertEqual(sorted((scan["relation"], scan["node"], scan["rows_examined"])
+                                for scan in update["scans"]), [
+            ("totals_p0", "Bitmap Heap Scan", 0.0),
+            ("totals_p2", "Bitmap Heap Scan", 1.0),
         ])
 
     def test_baseline_requires_reinitialization_in_the_timed_backend(self):

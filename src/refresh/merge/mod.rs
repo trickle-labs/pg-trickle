@@ -2579,8 +2579,14 @@ pub fn execute_differential_refresh_with_tuning(
         let scoped_retention = crate::refresh::is_retention_catchup();
         let retention_key = crate::refresh::retention_partition_key(st.pgt_id)
             .filter(|key| user_cols.contains(key));
+        // shortcut: row-level DML pruning only works when output partitions use the validated retention key.
+        let retention_output_key = retention_key.as_deref().filter(|key| {
+            st.st_partition_key.as_deref().is_some_and(|partition_by| {
+                crate::api::helpers::parse_partition_key_columns(partition_by) == [key.to_string()]
+            })
+        });
         let trigger_delete_template = if scoped_retention {
-            build_retention_trigger_delete_sql(&quoted_table, st.pgt_id, retention_key.as_deref())
+            build_retention_trigger_delete_sql(&quoted_table, st.pgt_id, retention_output_key)
         } else {
             build_trigger_delete_sql(&quoted_table, st.pgt_id, use_keyless)
         };
@@ -2592,7 +2598,7 @@ pub fn execute_differential_refresh_with_tuning(
                 &quoted_table,
                 st.pgt_id,
                 &user_cols,
-                retention_key.as_deref(),
+                retention_output_key,
             )
         } else {
             build_trigger_update_sql(&quoted_table, st.pgt_id, &user_cols)
@@ -2606,7 +2612,7 @@ pub fn execute_differential_refresh_with_tuning(
                 &quoted_table,
                 st.pgt_id,
                 &user_cols,
-                retention_key.as_deref(),
+                retention_output_key,
             )
         } else {
             build_trigger_insert_for_storage(

@@ -140,8 +140,10 @@ partition pruning, index and bitmap scans, discourages sequential scans, and dis
 then restores the caller's planner settings.
 If stream storage is partitioned solely by the proven retention group key,
 aggregate, DML, and downstream capture lookups include that key so PostgreSQL
-can prune output partitions. Other storage keys use the ordinary identity
-probe, and outer DML TID lookups may still visit multiple output partitions.
+can prune output partitions. The retention planner scope forces parameterized
+nested-loop index probes for this DML and restores the caller's planner
+settings on success or error. Other storage keys keep the ordinary identity
+probe and may visit more output partitions.
 
 For `RETAIN`, removal seals the expired range and preserves its aggregate
 rows. Later differential refreshes continue to update live groups. Sealed

@@ -5097,11 +5097,12 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
             100_000_000.0
         )
     );
-    let pruning: String = sqlx::query_scalar("SELECT current_setting('enable_partition_pruning')")
-        .fetch_one(&mut *tx)
-        .await
-        .expect("read caller partition-pruning preference");
-    assert_eq!(pruning, "off");
+    let restored: bool = sqlx::query_scalar("SELECT current_setting('enable_nestloop') = 'off' AND current_setting('enable_hashjoin') = 'on' AND current_setting('enable_mergejoin') = 'on' AND current_setting('enable_indexscan') = 'off' AND current_setting('enable_bitmapscan') = 'off' AND current_setting('enable_seqscan') = 'on' AND current_setting('enable_tidscan') = 'off' AND current_setting('enable_partition_pruning') = 'off' AND current_setting('jit') = 'on' AND current_setting('random_page_cost')::numeric = 1000000 AND current_setting('cpu_index_tuple_cost')::numeric = 100000000 AND current_setting('cpu_operator_cost')::numeric = 100000000")
+        .fetch_one(&mut *tx).await.expect("read caller planner preferences");
+    assert!(
+        restored,
+        "retention did not restore caller planner preferences"
+    );
     sqlx::query("ROLLBACK TO SAVEPOINT before_detach")
         .execute(&mut *tx)
         .await
@@ -5113,11 +5114,12 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
         .execute(&mut *tx)
         .await
         .expect("retry automatic detach");
-    let pruning: String = sqlx::query_scalar("SELECT current_setting('enable_partition_pruning')")
-        .fetch_one(&mut *tx)
-        .await
-        .expect("read caller preference after retry");
-    assert_eq!(pruning, "off");
+    let restored: bool = sqlx::query_scalar("SELECT current_setting('enable_nestloop') = 'off' AND current_setting('enable_hashjoin') = 'on' AND current_setting('enable_mergejoin') = 'on' AND current_setting('enable_indexscan') = 'off' AND current_setting('enable_bitmapscan') = 'off' AND current_setting('enable_seqscan') = 'on' AND current_setting('enable_tidscan') = 'off' AND current_setting('enable_partition_pruning') = 'off' AND current_setting('jit') = 'on' AND current_setting('random_page_cost')::numeric = 1000000 AND current_setting('cpu_index_tuple_cost')::numeric = 100000000 AND current_setting('cpu_operator_cost')::numeric = 100000000")
+        .fetch_one(&mut *tx).await.expect("read caller planner preferences after retry");
+    assert!(
+        restored,
+        "retention retry did not restore caller planner preferences"
+    );
     tx.commit().await.expect("commit automatic detach");
     db.assert_st_matches_query("retention_auto_trim", query)
         .await;

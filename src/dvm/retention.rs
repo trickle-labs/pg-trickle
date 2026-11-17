@@ -2015,7 +2015,13 @@ fn with_retention_index_scans<T>(
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("SET LOCAL enable_seqscan = off")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        // shortcut: planner costs only prefer bounded scans; enforce plans for a hard bound.
+        Spi::run("SET LOCAL enable_nestloop = on")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run("SET LOCAL enable_hashjoin = off")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run("SET LOCAL enable_mergejoin = off")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        // shortcut: nested-loop parameterized lookups bound retention DML to affected keys.
         Spi::run("SET LOCAL random_page_cost = 1")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("SET LOCAL cpu_index_tuple_cost = 0.005")

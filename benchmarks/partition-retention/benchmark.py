@@ -139,12 +139,15 @@ def validate_partitioned_maintenance_pruning(summary, expected_partition):
             kind = "aggregate"
         elif query.startswith("UPDATE "):
             kind = "update"
+        elif query.startswith("DELETE FROM "):
+            kind = "delete"
         elif query.startswith("INSERT INTO ") and '."totals"' in query:
             kind = "insert"
         else:
             continue
-        scans = [scan for scan in entry["scans"]
-                 if scan["relation"].startswith("totals_") and scan["node"] != "Tid Scan"]
+        scans = [scan for scan in entry["scans"] if scan["relation"].startswith("totals_")]
+        if any(scan["node"] == "Tid Scan" for scan in scans):
+            raise RuntimeError(f"partitioned retention {kind} used an outer TID scan")
         if scans:
             statements.add(kind)
             observed.update(scan["relation"] for scan in scans)

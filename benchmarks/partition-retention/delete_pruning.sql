@@ -20,7 +20,30 @@ SET auto_explain.log_timing=off;
 SET auto_explain.log_nested_statements=on;
 SET auto_explain.log_verbose=on;
 SET auto_explain.log_format=json;
+SET enable_nestloop=off;
+SET enable_hashjoin=on;
+SET enable_mergejoin=on;
+SET enable_indexscan=off;
+SET enable_bitmapscan=off;
+SET enable_partition_pruning=off;
+SET random_page_cost=1000000;
+SET cpu_index_tuple_cost=100000000;
+SET cpu_operator_cost=100000000;
 ALTER TABLE events DETACH PARTITION old;
+DO $$
+BEGIN
+  IF current_setting('enable_nestloop') <> 'off'
+     OR current_setting('enable_hashjoin') <> 'on'
+     OR current_setting('enable_mergejoin') <> 'on'
+     OR current_setting('enable_indexscan') <> 'off'
+     OR current_setting('enable_bitmapscan') <> 'off'
+     OR current_setting('enable_partition_pruning') <> 'off'
+     OR current_setting('random_page_cost')::float8 <> 1000000
+     OR current_setting('cpu_index_tuple_cost')::float8 <> 100000000
+     OR current_setting('cpu_operator_cost')::float8 <> 100000000 THEN
+    RAISE EXCEPTION 'retention did not restore caller planner settings: index=%, bitmap=%, pruning=%, random=%, tuple=%, operator=%', current_setting('enable_indexscan'), current_setting('enable_bitmapscan'), current_setting('enable_partition_pruning'), current_setting('random_page_cost'), current_setting('cpu_index_tuple_cost'), current_setting('cpu_operator_cost');
+  END IF;
+END $$;
 SET auto_explain.log_min_duration=-1;
 SELECT pgtrickle.refresh_stream_table('downstream');
 DO $$

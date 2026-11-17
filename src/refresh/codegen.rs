@@ -2449,13 +2449,22 @@ pub(crate) fn build_trigger_delete_sql(
     }
 }
 
-/// Delete only the requested number of rows for each affected identity.
+/// Grouped retention identities are unique; the fallback preserves counted deletes otherwise.
 pub(crate) fn build_retention_trigger_delete_sql(
     quoted_table: &str,
     pgt_id: i64,
     partition_key: Option<&str>,
 ) -> String {
     let key = partition_key.map(crate::sql_builder::ident);
+    if let Some(key) = key.as_ref() {
+        return format!(
+            "DELETE FROM {quoted_table} AS st USING (\
+               SELECT __pgt_row_id, {key} FROM __pgt_delta_{pgt_id} \
+               WHERE __pgt_action = 'D' GROUP BY __pgt_row_id, {key}\
+             ) d WHERE {row_id_match} AND st.{key} OPERATOR(pg_catalog.=) d.{key}",
+            row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
+        );
+    }
     let grouped_key = key
         .as_ref()
         .map(|key| format!(", {key}"))
@@ -2516,6 +2525,15 @@ pub(crate) fn build_retention_trigger_update_sql(
     let update_set_clause = format_update_set(user_cols);
     let is_distinct_clause = build_is_distinct_clause(user_cols);
     let key = partition_key.map(crate::sql_builder::ident);
+    if let Some(key) = key.as_ref() {
+        return format!(
+            "UPDATE {quoted_table} AS st SET {update_set_clause} \
+             FROM __pgt_delta_{pgt_id} AS d WHERE {row_id_match} \
+               AND st.{key} OPERATOR(pg_catalog.=) d.{key} \
+               AND d.__pgt_action = 'I' AND ({is_distinct_clause})",
+            row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
+        );
+    }
     let lookup_key = key
         .as_ref()
         .map(|key| format!(" AND st2.{key} OPERATOR(pg_catalog.=) d.{key}"))
