@@ -2577,8 +2577,10 @@ pub fn execute_differential_refresh_with_tuning(
         // Delta deduplication does not make the target row-id index unique.
         let use_keyless = st.has_keyless_source;
         let scoped_retention = crate::refresh::is_retention_catchup();
+        let retention_key = crate::refresh::retention_partition_key(st.pgt_id)
+            .filter(|key| user_cols.contains(key));
         let trigger_delete_template = if scoped_retention {
-            build_retention_trigger_delete_sql(&quoted_table, st.pgt_id)
+            build_retention_trigger_delete_sql(&quoted_table, st.pgt_id, retention_key.as_deref())
         } else {
             build_trigger_delete_sql(&quoted_table, st.pgt_id, use_keyless)
         };
@@ -2586,7 +2588,12 @@ pub fn execute_differential_refresh_with_tuning(
         // EC-06: Use normal UPDATE template for keyless sources — see
         // prewarm_merge_cache comment for full rationale.
         let trigger_update_template = if scoped_retention {
-            build_retention_trigger_update_sql(&quoted_table, st.pgt_id, &user_cols)
+            build_retention_trigger_update_sql(
+                &quoted_table,
+                st.pgt_id,
+                &user_cols,
+                retention_key.as_deref(),
+            )
         } else {
             build_trigger_update_sql(&quoted_table, st.pgt_id, &user_cols)
         };
@@ -2595,7 +2602,12 @@ pub fn execute_differential_refresh_with_tuning(
             && ((use_keyless && (is_dedup || user_cols.iter().any(|c| c == "__pgt_count")))
                 || (st.st_partition_key.is_some() && !use_keyless))
         {
-            build_retention_trigger_insert_sql(&quoted_table, st.pgt_id, &user_cols)
+            build_retention_trigger_insert_sql(
+                &quoted_table,
+                st.pgt_id,
+                &user_cols,
+                retention_key.as_deref(),
+            )
         } else {
             build_trigger_insert_for_storage(
                 &quoted_table,

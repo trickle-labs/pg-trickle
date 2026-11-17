@@ -2005,6 +2005,8 @@ fn with_retention_index_scans<T>(
     use crate::error::PgTrickleError;
     use pgrx::prelude::*;
     with_retention_guc_scope(|| {
+        Spi::run("SET LOCAL enable_partition_pruning = on")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("SET LOCAL enable_indexscan = on")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("SET LOCAL enable_bitmapscan = on")

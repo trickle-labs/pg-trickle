@@ -130,6 +130,29 @@ def validate_partitioned_capture_pruning(summary, expected_partition):
                            f"{statements=}, {observed=}")
 
 
+def validate_partitioned_maintenance_pruning(summary, expected_partition):
+    observed = set()
+    statements = set()
+    for entry in summary["relevant_plans"]:
+        query = entry.get("plan", {}).get("Query Text", "")
+        if query.startswith("INSERT INTO pg_temp.") and "__pgt_delta_" in query:
+            kind = "aggregate"
+        elif query.startswith("UPDATE "):
+            kind = "update"
+        elif query.startswith("INSERT INTO ") and '."totals"' in query:
+            kind = "insert"
+        else:
+            continue
+        scans = [scan for scan in entry["scans"]
+                 if scan["relation"].startswith("totals_") and scan["node"] != "Tid Scan"]
+        if scans:
+            statements.add(kind)
+            observed.update(scan["relation"] for scan in scans)
+    if statements != {"aggregate", "update", "insert"} or observed != {expected_partition}:
+        raise RuntimeError(f"partitioned retention maintenance probes did not prune to {expected_partition}: "
+                           f"{statements=}, {observed=}")
+
+
 def timed(db, sql, schema, instrument):
     start = time.perf_counter()
     if not instrument:
@@ -405,6 +428,7 @@ def trial(db, schema, events, trim, directory, instrument, downstream, keyless, 
             validate_trim_drop_plan(drop_internal, affected_group_limit)
             if expected_capture_partition is not None:
                 validate_partitioned_capture_pruning(drop_internal, expected_capture_partition)
+                validate_partitioned_maintenance_pruning(drop_internal, expected_capture_partition)
         except RuntimeError:
             failure_plan.write_text(json.dumps({"affected_group_limit": affected_group_limit,
                                                 "drop_internal": drop_internal}, indent=2) + "\n", encoding="utf-8")

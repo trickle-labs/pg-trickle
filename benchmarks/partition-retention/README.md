@@ -93,9 +93,9 @@ statement that scans the output, not only downstream capture. If a check fails,
 the captured plan is saved beside the output
 with a `.failed-plan.json` suffix. To exercise
 caller settings that disable indexed plans, add
-`PGOPTIONS='-c enable_indexscan=off -c enable_bitmapscan=off'` before the
-instrumented command. Retention temporarily enables those scan types and
-restores the caller's settings afterward.
+`PGOPTIONS='-c enable_indexscan=off -c enable_bitmapscan=off -c enable_partition_pruning=off'`
+before the instrumented command. Retention temporarily enables those scan
+types and partition pruning, then restores the caller's settings.
 
 Add `--downstream` to create a dependent stream, verify its complete result
 against the source query after refresh, and record its effective refresh
@@ -115,8 +115,22 @@ events are additional to the requested retained event count.
 Add `--partitioned-output` to use four hash partitions for stream storage;
 instrumentation includes scans of their child tables. When combined with
 `--downstream` and `--instrument-internal`, the TRIM trial also requires the
-pre-snapshot and downstream capture probes to visit only the writer's output
-partition. This check applies to this workload's proven non-null group key.
+aggregate, DML, pre-snapshot, and downstream capture probes to visit only the
+writer's output partition. Outer DML TID scans are not covered by this check
+and may still visit other partitions. This check applies to this workload's proven
+non-null group key.
+
+To inspect a pending DELETE as well as an UPDATE and INSERT, disable the
+scheduler in the disposable database and run:
+
+```sh
+psql -X -d 'postgresql://localhost/pgtrickle_benchmark' \
+  -f benchmarks/partition-retention/delete_pruning.sql \
+  2> /tmp/retention-delete-plans.log
+```
+
+The script checks the exact source and downstream results and completed
+differential actions. Its JSON plans are written to standard error.
 
 The results depend on cache, storage, CPU, database settings, and concurrent
 load. Run several times and report the environment and individual results;
@@ -447,8 +461,8 @@ debug environment; raw plans are
 `results/2026-11-17-pg18-macos-output-prune-before.json` and
 `results/2026-11-17-pg18-macos-output-prune-after.json`. This optimization
 only covers capture probes when the storage partition key is the proven
-retention group key; other maintenance steps and planner choices still limit
-any general work bound.
+retention group key. The later maintenance experiment below extends this to
+additional probes; outer row lookups and planner choices still limit the bound.
 
 The partition-pruned capture path was also measured once at each issue scale
 on the native PostgreSQL 18.7 arm64 debug setup, using a keyed source, four
@@ -474,3 +488,29 @@ workload-wide spans, not exact continuous wait durations; short waits can be
 missed. Raw plans and sampled summaries are
 `results/2026-11-17-pg18-macos-output-prune-9m.json` and
 `results/2026-11-17-pg18-macos-output-prune-27m.json`.
+
+The later maintenance-pruning build was measured with the same partitioned-output
+workload. Times are milliseconds; each is one instrumented run.
+
+| Retained events | Mode | DROP | First refresh | Writer p95 / max | Reader p95 / max |
+|---:|---|---:|---:|---:|---:|
+| 9,000,000 | baseline | 81 | 4,497 | 1.34 / 19.13 | 10.62 / 34.13 |
+| 9,000,000 | TRIM | 334 | 236 | 0.13 / 289.17 | 2.31 / 4.37 |
+| 27,000,000 | baseline | 39 | 10,370 | 0.11 / 9.24 | 2.54 / 3.84 |
+| 27,000,000 | TRIM | 328 | 62 | 0.11 / 285.22 | 2.42 / 3.76 |
+
+Both result oracles matched. Baseline scanned all 30 retained partitions and
+9,002,605 or 27,013,210 source rows; TRIM scanned no retained source partitions
+during DROP and observed 11,000 output scan rows. Its aggregate, inner DML and
+capture probes visited only the writer output partition. Consecutive reader /
+writer lock-sample spans were 4,398 / 4,428 ms and 10,299 / 10,319 ms for
+baseline; TRIM had no sampled reader locks and writer spans of 281 and 280 ms.
+Samples can miss waits and do not establish uninterrupted wait duration. The
+raw plans are `results/2026-11-17-pg18-macos-maintenance-prune-9m.json` and
+`results/2026-11-17-pg18-macos-maintenance-prune-27m.json`.
+
+The 30,000-event `maintenance-prune-after.json` diagnostic and
+`maintenance-delete.json` fixture verify pruned aggregate, inner DML and capture
+probes even when the caller disables pruning and index scans. The DELETE fixture
+compares exact upstream and downstream results. Its outer TID scans still visit
+all four output partitions, so the strict affected-group bound remains open.

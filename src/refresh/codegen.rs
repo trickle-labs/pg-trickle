@@ -2450,15 +2450,36 @@ pub(crate) fn build_trigger_delete_sql(
 }
 
 /// Delete only the requested number of rows for each affected identity.
-pub(crate) fn build_retention_trigger_delete_sql(quoted_table: &str, pgt_id: i64) -> String {
+pub(crate) fn build_retention_trigger_delete_sql(
+    quoted_table: &str,
+    pgt_id: i64,
+    partition_key: Option<&str>,
+) -> String {
+    let key = partition_key.map(crate::sql_builder::ident);
+    let grouped_key = key
+        .as_ref()
+        .map(|key| format!(", {key}"))
+        .unwrap_or_default();
+    let target_key = key
+        .as_ref()
+        .map(|key| format!(", d.{key}"))
+        .unwrap_or_default();
+    let lookup_key = key
+        .as_ref()
+        .map(|key| format!(" AND st2.{key} OPERATOR(pg_catalog.=) d.{key}"))
+        .unwrap_or_default();
+    let outer_key = key
+        .as_ref()
+        .map(|key| format!(" AND st.{key} OPERATOR(pg_catalog.=) target.{key}"))
+        .unwrap_or_default();
     format!(
         "DELETE FROM {quoted_table} AS st USING (\
-           SELECT matched.tableoid, matched.ctid \
-           FROM (SELECT __pgt_row_id, COUNT(*) AS n FROM __pgt_delta_{pgt_id} \
-                 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id) d \
+           SELECT matched.tableoid, matched.ctid{target_key} \
+           FROM (SELECT __pgt_row_id{grouped_key}, COUNT(*) AS n FROM __pgt_delta_{pgt_id} \
+                 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id{grouped_key}) d \
            CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM {quoted_table} st2 \
-             WHERE {row_id_match} ORDER BY st2.ctid LIMIT d.n) matched\
-         ) target WHERE st.tableoid = target.tableoid AND st.ctid = target.ctid",
+             WHERE {row_id_match}{lookup_key} ORDER BY st2.ctid LIMIT d.n) matched\
+         ) target WHERE st.tableoid = target.tableoid AND st.ctid = target.ctid{outer_key}",
         row_id_match = build_row_id_match("st2.__pgt_row_id", "d.__pgt_row_id"),
     )
 }
@@ -2490,15 +2511,25 @@ pub(crate) fn build_retention_trigger_update_sql(
     quoted_table: &str,
     pgt_id: i64,
     user_cols: &[String],
+    partition_key: Option<&str>,
 ) -> String {
     let update_set_clause = format_update_set(user_cols);
     let is_distinct_clause = build_is_distinct_clause(user_cols);
+    let key = partition_key.map(crate::sql_builder::ident);
+    let lookup_key = key
+        .as_ref()
+        .map(|key| format!(" AND st2.{key} OPERATOR(pg_catalog.=) d.{key}"))
+        .unwrap_or_default();
+    let outer_key = key
+        .as_ref()
+        .map(|key| format!(" AND st.{key} OPERATOR(pg_catalog.=) d.{key}"))
+        .unwrap_or_default();
     format!(
         "UPDATE {quoted_table} AS st SET {update_set_clause} \
          FROM __pgt_delta_{pgt_id} AS d CROSS JOIN LATERAL \
            (SELECT st2.tableoid, st2.ctid FROM {quoted_table} st2 \
-            WHERE {row_id_match} OFFSET 0) matched \
-         WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid \
+            WHERE {row_id_match}{lookup_key} OFFSET 0) matched \
+         WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid{outer_key} \
            AND d.__pgt_action = 'I' AND ({is_distinct_clause})",
         row_id_match = build_row_id_match("st2.__pgt_row_id", "d.__pgt_row_id"),
     )
@@ -2601,15 +2632,22 @@ pub(crate) fn build_retention_trigger_insert_sql(
     quoted_table: &str,
     pgt_id: i64,
     user_cols: &[String],
+    partition_key: Option<&str>,
 ) -> String {
     let user_col_list = format_col_list(user_cols);
     let d_user_col_list = format_prefixed_col_list("d", user_cols);
+    let partition_match = partition_key
+        .map(|key| {
+            let key = crate::sql_builder::ident(key);
+            format!(" AND st.{key} OPERATOR(pg_catalog.=) d.{key}")
+        })
+        .unwrap_or_default();
     format!(
         "INSERT INTO {quoted_table} (__pgt_row_id, {user_col_list}) \
          SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, {d_user_col_list} \
          FROM __pgt_delta_{pgt_id} AS d WHERE d.__pgt_action = 'I' \
            AND NOT EXISTS (SELECT 1 FROM (SELECT 1 FROM {quoted_table} AS st \
-             WHERE {row_id_match} OFFSET 0) matched) ORDER BY d.__pgt_row_id",
+             WHERE {row_id_match}{partition_match} OFFSET 0) matched) ORDER BY d.__pgt_row_id",
         row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
     )
 }

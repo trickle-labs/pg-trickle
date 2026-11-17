@@ -2378,7 +2378,7 @@ async fn test_retention_partitioned_output_with_different_key_keeps_all_groups()
     db.execute("CREATE TABLE different_key_src (id INT NOT NULL, d DATE NOT NULL, account TEXT, amount INT NOT NULL) PARTITION BY RANGE(d)").await;
     db.execute("CREATE TABLE different_key_old PARTITION OF different_key_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
     db.execute("CREATE TABLE different_key_live PARTITION OF different_key_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
-    db.execute("INSERT INTO different_key_src VALUES (1,'2025-06-01','a',10),(2,'2026-06-01','a',20),(3,'2026-06-01',NULL,7)").await;
+    db.execute("INSERT INTO different_key_src VALUES (1,'2025-06-01','a',10),(2,'2026-06-01','a',20),(3,'2026-06-01',NULL,7),(6,'2026-06-02',NULL,9)").await;
     let query = "SELECT d AS day,account,sum(amount) AS total,count(*) AS n FROM different_key_src GROUP BY d,account";
     db.create_st_partitioned(
         "different_key_up",
@@ -2406,6 +2406,7 @@ async fn test_retention_partitioned_output_with_different_key_keeps_all_groups()
     .await;
     db.execute("SELECT pgtrickle.set_stream_table_partition_retention('different_key_up','TRIM','d','2026-01-01')").await;
     db.execute("SELECT pgtrickle.set_stream_table_partition_retention('aligned_key_up','TRIM','d','2026-01-01')").await;
+    db.execute("DELETE FROM different_key_src WHERE id=6").await;
     db.execute(
         "INSERT INTO different_key_src VALUES (4,'2026-06-01','a',3),(5,'2026-06-01',NULL,4)",
     )
@@ -5065,6 +5066,10 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
     let mut tx = db.pool.begin().await.expect("begin detach transaction");
     sqlx::query("SELECT set_config('enable_nestloop', 'off', true), set_config('enable_hashjoin', 'on', true), set_config('enable_mergejoin', 'on', true), set_config('enable_indexscan', 'off', true), set_config('enable_bitmapscan', 'off', true), set_config('enable_seqscan', 'on', true), set_config('enable_tidscan', 'off', true), set_config('jit', 'on', true), set_config('random_page_cost', '1000000', true), set_config('cpu_index_tuple_cost', '100000000', true), set_config('cpu_operator_cost', '100000000', true)")
         .execute(&mut *tx).await.expect("set caller planner preferences");
+    sqlx::query("SET LOCAL enable_partition_pruning = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable caller partition pruning");
     sqlx::query("SAVEPOINT before_detach")
         .execute(&mut *tx)
         .await
@@ -5092,6 +5097,11 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
             100_000_000.0
         )
     );
+    let pruning: String = sqlx::query_scalar("SELECT current_setting('enable_partition_pruning')")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read caller partition-pruning preference");
+    assert_eq!(pruning, "off");
     sqlx::query("ROLLBACK TO SAVEPOINT before_detach")
         .execute(&mut *tx)
         .await
@@ -5103,6 +5113,11 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
         .execute(&mut *tx)
         .await
         .expect("retry automatic detach");
+    let pruning: String = sqlx::query_scalar("SELECT current_setting('enable_partition_pruning')")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read caller preference after retry");
+    assert_eq!(pruning, "off");
     tx.commit().await.expect("commit automatic detach");
     db.assert_st_matches_query("retention_auto_trim", query)
         .await;
