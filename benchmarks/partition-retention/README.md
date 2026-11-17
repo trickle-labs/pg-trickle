@@ -249,9 +249,13 @@ source scans. This is a small diagnostic, not a scale comparison.
 
 With the scheduler enabled, a separate repetition hit a PostgreSQL deadlock
 between manual upstream refresh and a downstream rebuild. PostgreSQL aborted
-the manual transaction; automatic retry and lock ordering for this overlap
-remain unresolved. An additional high-cost run used a normal FULL fallback
-after the retention cut, which this benchmark rejected.
+the manual transaction. Protected FULL baselines now try-lock upstream
+metadata before taking source storage locks; a two-session test confirmed a
+prompt retryable error, successful retry, and no replay after the FULL
+baseline. The isolated scheduler test did not reach the targeted overlap, so
+scheduler-specific verification remains outstanding. An additional high-cost
+run used a normal FULL fallback after the retention cut, which this benchmark
+rejected.
 
 After merging the 0.110.2 changes from `main`, single instrumented macOS
 PostgreSQL 18.7 debug-build runs with the scheduler disabled gave the

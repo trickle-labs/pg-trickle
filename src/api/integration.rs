@@ -1067,10 +1067,10 @@ pub fn refresh_graph_strict(
             .into_iter()
             .map(pg_sys::Oid::from)
             .collect::<Vec<_>>();
-        crate::cdc::lock_source_relations(&source_oids)?;
         for (relid, meta) in &member_ids {
-            crate::cdc::lock_stream_table_sources(meta.pgt_id, dependencies_for(*relid)?)?;
+            crate::cdc::lock_stream_table_source_catalogs(meta.pgt_id, dependencies_for(*relid)?)?;
         }
+        crate::cdc::lock_source_relations(&source_oids)?;
         let safe_bound = crate::cdc::get_current_wal_lsn()?;
         let graph_refresh_id =
             Spi::get_one::<i64>("SELECT nextval('pgtrickle.pgt_graph_refresh_id_seq')::bigint")

@@ -2046,6 +2046,92 @@ async fn test_retention_catchup_applies_keyless_inserts_updates_and_deletes() {
 }
 
 #[tokio::test]
+async fn test_protected_downstream_full_retries_locked_upstream_without_deadlock() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retention_lock_src (id INT PRIMARY KEY, amount INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO retention_lock_src VALUES (1,10)")
+        .await;
+    db.create_st(
+        "retention_lock_upstream",
+        "SELECT id,amount FROM retention_lock_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "retention_lock_downstream",
+        "SELECT id,amount FROM retention_lock_upstream",
+        "1h",
+        "FULL",
+    )
+    .await;
+    db.execute("INSERT INTO retention_lock_src VALUES (2,20)")
+        .await;
+    let before: i64 = db.query_scalar("SELECT COALESCE(max(h.refresh_id),0) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='retention_lock_downstream'").await;
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin upstream refresh transaction");
+    sqlx::query("SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name='retention_lock_upstream' FOR UPDATE")
+        .execute(&mut *tx).await.expect("hold upstream catalog row");
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        db.try_execute("SELECT pgtrickle.refresh_stream_table('retention_lock_downstream')"),
+    )
+    .await
+    .expect("downstream refresh must not wait on the locked row")
+    .expect_err("locked upstream must return a retryable error");
+    assert!(
+        error.to_string().contains("locked; retry the refresh"),
+        "{error}"
+    );
+    let completed: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='retention_lock_downstream' AND h.refresh_id>$1 AND h.status='COMPLETED'")
+        .bind(before).fetch_one(&db.pool).await.expect("inspect skipped refresh history");
+    assert_eq!(completed, 0);
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('retention_lock_upstream')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh upstream while holding its catalog row");
+    tx.commit().await.expect("commit upstream refresh");
+    db.refresh_st("retention_lock_downstream").await;
+    let rows: Vec<(i32, i32)> =
+        sqlx::query_as("SELECT id,amount FROM retention_lock_downstream ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read downstream output");
+    assert_eq!(rows, vec![(1, 10), (2, 20)]);
+    let action: (String, String) = sqlx::query_as("SELECT h.action,h.status FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='retention_lock_downstream' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&db.pool).await.expect("inspect completed downstream refresh");
+    assert_eq!(action, ("FULL".into(), "COMPLETED".into()));
+    db.execute("SELECT pgtrickle.alter_stream_table('retention_lock_downstream', refresh_mode => 'DIFFERENTIAL')").await;
+    db.refresh_st("retention_lock_downstream").await;
+    let unchanged: Vec<(i32, i32)> =
+        sqlx::query_as("SELECT id,amount FROM retention_lock_downstream ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read downstream after protected FULL");
+    assert_eq!(unchanged, vec![(1, 10), (2, 20)]);
+    db.execute("INSERT INTO retention_lock_src VALUES (3,30)")
+        .await;
+    db.refresh_st("retention_lock_upstream").await;
+    db.refresh_st("retention_lock_downstream").await;
+    let after: Vec<(i32, i32)> =
+        sqlx::query_as("SELECT id,amount FROM retention_lock_downstream ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read downstream after later insert");
+    assert_eq!(after, vec![(1, 10), (2, 20), (3, 30)]);
+    let last: (String, String, bool) = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='retention_lock_downstream' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&db.pool).await.expect("inspect later differential refresh");
+    assert_eq!(last, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+}
+
+#[tokio::test]
 async fn test_retention_scoped_dml_preserves_duplicate_multiplicity() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     let mut conn = db.pool.acquire().await.expect("acquire DML session");

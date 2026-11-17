@@ -3891,6 +3891,39 @@ fn execute_scheduled_refresh(
         }
     };
 
+    // Compute frontier information for this refresh. FULL-like work locks
+    // sources before collecting positions so its baseline is protected.
+    let source_oids = get_source_oids_for_st(st.pgt_id);
+    let full_baseline = matches!(action, RefreshAction::Full | RefreshAction::Reinitialize)
+        || st.frontier.as_ref().is_none_or(version::Frontier::is_empty);
+    if full_baseline {
+        let mut full_lock_oids = source_oids.clone();
+        full_lock_oids.extend(
+            dependencies
+                .iter()
+                .filter(|dep| dep.source_type == "STREAM_TABLE")
+                .map(|dep| dep.source_relid),
+        );
+        if let Err(e) = cdc::lock_stream_table_source_catalogs(st.pgt_id, &dependencies) {
+            log!(
+                "pg_trickle: upstream stream-table lock failed for FULL baseline {}.{}: {}",
+                st.pgt_schema,
+                st.pgt_name,
+                e
+            );
+            return RefreshOutcome::RetryableFailure;
+        }
+        if let Err(e) = cdc::lock_source_relations(&full_lock_oids) {
+            log!(
+                "pg_trickle: source lock failed for FULL baseline {}.{}: {}",
+                st.pgt_schema,
+                st.pgt_name,
+                e
+            );
+            return RefreshOutcome::RetryableFailure;
+        }
+    }
+
     // Record refresh start
     // Compute freshness_deadline for duration-based schedules:
     // deadline = data_timestamp + schedule_seconds (when data becomes stale)
@@ -3967,38 +4000,6 @@ fn execute_scheduled_refresh(
         return RefreshOutcome::RetryableFailure;
     }
 
-    // Compute frontier information for this refresh. FULL-like work locks
-    // sources before collecting positions so its baseline is protected.
-    let source_oids = get_source_oids_for_st(st.pgt_id);
-    let full_baseline = matches!(action, RefreshAction::Full | RefreshAction::Reinitialize)
-        || st.frontier.as_ref().is_none_or(version::Frontier::is_empty);
-    if full_baseline {
-        let mut full_lock_oids = source_oids.clone();
-        full_lock_oids.extend(
-            dependencies
-                .iter()
-                .filter(|dep| dep.source_type == "STREAM_TABLE")
-                .map(|dep| dep.source_relid),
-        );
-        if let Err(e) = cdc::lock_source_relations(&full_lock_oids) {
-            log!(
-                "pg_trickle: source lock failed for FULL baseline {}.{}: {}",
-                st.pgt_schema,
-                st.pgt_name,
-                e
-            );
-            return RefreshOutcome::RetryableFailure;
-        }
-        if let Err(e) = cdc::lock_stream_table_sources(st.pgt_id, &dependencies) {
-            log!(
-                "pg_trickle: upstream stream-table lock failed for FULL baseline {}.{}: {}",
-                st.pgt_schema,
-                st.pgt_name,
-                e
-            );
-            return RefreshOutcome::RetryableFailure;
-        }
-    }
     // A FULL/REINITIALIZE evaluates the source *after* acquiring SHARE locks.
     // Writers may have committed while those locks were being acquired, after
     // the scheduler captured its immutable tick watermark.  Using that older

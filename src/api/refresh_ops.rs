@@ -366,6 +366,8 @@ pub(crate) fn execute_manual_refresh(
 
     if manual_requires_whole_query_full(st) {
         refresh::ensure_full_policy(st, "manual refresh")?;
+        let dependencies = StDependency::get_for_st(st.pgt_id)?;
+        crate::cdc::lock_stream_table_source_catalogs(st.pgt_id, &dependencies)?;
     }
 
     // ERG-D: Determine the action label for history recording.
