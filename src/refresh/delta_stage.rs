@@ -404,7 +404,7 @@ impl DeltaStage {
         };
         let post_stage = format!("pg_temp.{}", quote_ident(&post_name));
         let has_future = if source_locked {
-            // nosemgrep: rust.spi.run.dynamic-format -- quoted numeric internal temp relation.
+            // nosemgrep: rust.spi.run.dynamic-format
             Spi::run(&format!("DROP TABLE IF EXISTS {post_stage}"))
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             // The CDC source is catalog-qualified and quote-escaped, and the
@@ -420,7 +420,7 @@ impl DeltaStage {
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
             // Both probes read the same immutable post-bound event slice.
-            // nosemgrep: rust.spi.query.dynamic-format -- quoted internal temp relation.
+            // nosemgrep: rust.spi.query.dynamic-format
             let future_truncate = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action = 'T')"
             ))
@@ -432,7 +432,7 @@ impl DeltaStage {
                 )));
             }
 
-            // nosemgrep: rust.spi.query.dynamic-format -- quoted internal temp relation.
+            // nosemgrep: rust.spi.query.dynamic-format
             Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action IN ('I', 'D'))"
             ))
@@ -569,9 +569,7 @@ impl DeltaStage {
             let future_predicate = if source_locked {
                 "c.action IN ('I', 'D')".to_string()
             } else {
-                format!(
-                    "c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')"
-                )
+                format!("c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')")
             };
             let common = format!(
                 "WITH __pgt_future AS MATERIALIZED (\
@@ -661,7 +659,7 @@ impl DeltaStage {
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             if !source_locked {
                 // Only rows from the CTAS snapshot affect this guard.
-                // nosemgrep: rust.spi.query.dynamic-format -- quoted internal temp relation.
+                // nosemgrep: rust.spi.query.dynamic-format
                 let future_truncate = Spi::get_one::<bool>(&format!(
                     "SELECT EXISTS (SELECT 1 FROM {target} WHERE {guard})"
                 ))
@@ -673,7 +671,7 @@ impl DeltaStage {
                     )));
                 }
                 // Remove the internal marker before the DVM uses this table.
-                // nosemgrep: rust.spi.run.dynamic-format -- quoted numeric temp relation and column.
+                // nosemgrep: rust.spi.run.dynamic-format
                 Spi::run(&format!("ALTER TABLE {target} DROP COLUMN {guard}"))
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             }
