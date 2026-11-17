@@ -70,18 +70,11 @@ impl DeltaStage {
             centroid_nonce,
         };
 
-        // A SHARE lock blocks source writers but not ordinary readers. Take it
-        // before inspecting post-bound CDC and keep it through the refresh
-        // transaction: otherwise a commit after snapshot staging but before
-        // MERGE would create another gap. The stage therefore freezes BOTH
-        // sides of the logical frontier, not just the consumed CDC window.
-        let locked_sources = dependencies
-            .iter()
-            .filter(|d| matches!(d.source_type.as_str(), "TABLE" | "MATVIEW" | "STREAM_TABLE"))
-            .map(|d| d.source_relid)
-            .collect::<Vec<_>>();
-        crate::cdc::lock_source_relations(&locked_sources)?;
-
+        // Never queue a blocking SHARE lock behind continuously active
+        // writers. For an uncontended source, a conditional SHARE lock permits
+        // the cheap no-future VIEW fast path. Under contention, reconstruct
+        // the bounded source by copying live rows and future CDC in ONE SQL
+        // statement/MVCC snapshot without waiting for source writers.
         for dependency in dependencies {
             let source_oid = dependency.source_relid.to_u32();
             let (buffer, prev_lsn, new_lsn) = if dependency.source_type == "STREAM_TABLE" {
@@ -119,7 +112,23 @@ impl DeltaStage {
                 continue;
             };
 
-            stage.stage_source(st, dependency, &buffer, &prev_lsn, &new_lsn, &owner)?;
+            let source_locked = if matches!(
+                dependency.source_type.as_str(),
+                "TABLE" | "MATVIEW" | "STREAM_TABLE"
+            ) {
+                try_share_lock_source(dependency.source_relid)?
+            } else {
+                false
+            };
+            stage.stage_source(
+                st,
+                dependency,
+                &buffer,
+                &prev_lsn,
+                &new_lsn,
+                &owner,
+                source_locked,
+            )?;
         }
 
         Ok(stage)
@@ -133,6 +142,7 @@ impl DeltaStage {
         prev_lsn: &str,
         new_lsn: &str,
         owner: &str,
+        source_locked: bool,
     ) -> Result<(), PgTrickleError> {
         let pgt_id = st.pgt_id;
         let source_oid = dependency.source_relid.to_u32();
@@ -250,9 +260,8 @@ impl DeltaStage {
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         }
         // Stage the logical source at new_lsn as well as the bounded delta.
-        // This is intentionally done under the source lock acquired above.
-        // The materialized case reads source and future CDC in ONE statement,
-        // so both sides share a PostgreSQL MVCC snapshot.
+        // The contended path reads the live relation and future CDC in ONE
+        // statement, so both sides share exactly one MVCC snapshot.
         self.stage_bounded_source(
             st,
             dependency,
@@ -261,6 +270,7 @@ impl DeltaStage {
             owner,
             &source_table,
             &hash_columns,
+            source_locked,
         )?;
         self.names.insert(source_oid, qualified_name);
         Ok(())
@@ -327,7 +337,9 @@ impl DeltaStage {
 
     /// Build a source snapshot at the NEW logical frontier. If no post-bound
     /// changes are visible, a temporary view avoids copying a large relation.
-    /// SHARE locks from prepare_inner keep that view stable until MERGE ends.
+    /// When a conditional SHARE lock succeeds, the view is stable until
+    /// MERGE ends. Under contention we materialize the complete relation
+    /// against a single MVCC snapshot, without blocking source writers.
     ///
     /// With post-bound changes, materialize a snapshot that reverses them.
     /// For keyed tables the earliest event per identity gives the old row;
@@ -342,6 +354,7 @@ impl DeltaStage {
         owner: &str,
         source_table: &str,
         hash_columns: &[String],
+        source_locked: bool,
     ) -> Result<(), PgTrickleError> {
         let source_oid = dependency.source_relid.to_u32();
         let name = self.bounded_name(st.pgt_id, source_oid);
@@ -615,6 +628,59 @@ impl DeltaStage {
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Ok(())
     }
+}
+
+/// Try to fence a source and all partition descendants without ever waiting
+/// behind a continuously active writer. A failed attempt is not an error:
+/// callers must instead materialize an as-of source from a single MVCC
+/// snapshot of the live relation and its post-frontier CDC.
+fn try_share_lock_source(source_oid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
+    let relations = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "WITH RECURSIVE rels(oid) AS (
+                    SELECT $1::oid
+                    UNION ALL
+                    SELECT i.inhrelid FROM pg_catalog.pg_inherits i
+                    JOIN rels r ON r.oid = i.inhparent
+                 )
+                 SELECT r.oid::text, c.relkind::text FROM rels r
+                 JOIN pg_catalog.pg_class c ON c.oid = r.oid
+                 ORDER BY r.oid",
+                None,
+                &[source_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut oids = Vec::new();
+        for row in rows {
+            let oid = row
+                .get::<String>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("source OID was NULL".into()))?
+                .parse::<u32>()
+                .map_err(|e| PgTrickleError::SpiError(format!("invalid source OID: {e}")))?;
+            let relkind = row
+                .get::<String>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("source relkind was NULL".into()))?;
+            if relkind != "f" {
+                oids.push(pg_sys::Oid::from(oid));
+            }
+        }
+        Ok::<_, PgTrickleError>(oids)
+    })?;
+    if relations.is_empty() {
+        return Ok(false);
+    }
+    for oid in relations {
+        // SAFETY: OIDs came from pg_class in this backend, and PostgreSQL's
+        // conditional relation lock API is called on its own backend thread.
+        // On contention it returns false without an ERROR or a lock wait.
+        if !unsafe { pg_sys::ConditionalLockRelationOid(oid, pg_sys::ShareLock as i32) } {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn frontier_lsn(frontier: &Frontier, key: &str) -> String {
