@@ -2132,6 +2132,89 @@ async fn test_protected_downstream_full_retries_locked_upstream_without_deadlock
 }
 
 #[tokio::test]
+async fn test_retention_cut_and_multisource_full_refresh_do_not_replay() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE mixed_cut_src (id INT NOT NULL, d DATE NOT NULL, account TEXT NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE mixed_cut_old PARTITION OF mixed_cut_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE mixed_cut_live PARTITION OF mixed_cut_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("CREATE TABLE mixed_cut_lookup (account TEXT PRIMARY KEY, factor INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO mixed_cut_src VALUES (1,'2025-06-01','a',10),(2,'2026-06-01','a',20)")
+        .await;
+    db.execute("INSERT INTO mixed_cut_lookup VALUES ('a',2),('b',3)")
+        .await;
+    db.create_st(
+        "mixed_cut_up",
+        "SELECT d,account,sum(amount) AS total,count(*) AS n FROM mixed_cut_src GROUP BY d,account",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st("mixed_cut_down", "SELECT u.d,u.account,u.total,u.n,l.factor FROM mixed_cut_up u JOIN mixed_cut_lookup l ON u.account=l.account", "1h", "FULL").await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('mixed_cut_up','TRIM','d','2026-01-01')").await;
+    db.execute("INSERT INTO mixed_cut_src VALUES (3,'2026-06-01','a',7)")
+        .await;
+
+    let mut cut = db.pool.begin().await.expect("begin retention cut");
+    sqlx::query("DROP TABLE mixed_cut_old")
+        .execute(&mut *cut)
+        .await
+        .expect("prepare uncommitted cut");
+    db.execute("UPDATE mixed_cut_lookup SET factor=4 WHERE account='a'")
+        .await;
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        db.try_execute("SELECT pgtrickle.refresh_stream_table('mixed_cut_down')"),
+    )
+    .await
+    .expect("downstream refresh must not deadlock")
+    .expect_err("uncommitted upstream cut must be retried");
+    assert!(
+        error.to_string().contains("locked; retry the refresh"),
+        "{error}"
+    );
+    cut.commit().await.expect("commit retention cut");
+
+    db.refresh_st("mixed_cut_down").await;
+    let full_action: (String,String) = sqlx::query_as("SELECT h.action,h.status FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='mixed_cut_down' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&db.pool).await.expect("read completed FULL action");
+    assert_eq!(full_action, ("FULL".into(), "COMPLETED".into()));
+    db.assert_st_matches_query("mixed_cut_down", "SELECT s.d,s.account,sum(s.amount) AS total,count(*) AS n,l.factor FROM mixed_cut_src s JOIN mixed_cut_lookup l ON s.account=l.account GROUP BY s.d,s.account,l.factor").await;
+
+    db.execute(
+        "SELECT pgtrickle.alter_stream_table('mixed_cut_down', refresh_mode => 'DIFFERENTIAL')",
+    )
+    .await;
+    db.refresh_st("mixed_cut_down").await;
+    db.execute("INSERT INTO mixed_cut_src VALUES (4,'2026-06-01','a',3),(5,'2026-06-01','b',9)")
+        .await;
+    db.execute("UPDATE mixed_cut_lookup SET factor=5 WHERE account='a'")
+        .await;
+    db.refresh_st("mixed_cut_up").await;
+    db.refresh_st_until_converged("mixed_cut_down").await;
+    let rows: Vec<(String, String, i64, i64, i32)> = sqlx::query_as(
+        "SELECT d::text,account,total,n,factor FROM mixed_cut_down ORDER BY d,account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read maintained join");
+    assert_eq!(
+        rows,
+        vec![
+            ("2026-06-01".into(), "a".into(), 30, 3, 5),
+            ("2026-06-01".into(), "b".into(), 9, 1, 3)
+        ]
+    );
+    db.assert_st_matches_query("mixed_cut_down", "SELECT s.d,s.account,sum(s.amount) AS total,count(*) AS n,l.factor FROM mixed_cut_src s JOIN mixed_cut_lookup l ON s.account=l.account GROUP BY s.d,s.account,l.factor").await;
+    let action: (String,String,bool) = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='mixed_cut_down' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&db.pool).await.expect("read completed differential action");
+    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+}
+
+#[tokio::test]
 async fn test_retention_scoped_dml_preserves_duplicate_multiplicity() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     let mut conn = db.pool.acquire().await.expect("acquire DML session");
