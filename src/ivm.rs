@@ -646,12 +646,7 @@ fn run_immediate_phantom_cleanup(
     }
 
     let cleanup_result = crate::refresh::with_stream_owner(st, || {
-        crate::refresh::phd1::cleanup_cross_cycle_phantoms(
-            st,
-            st_qualified,
-            &st.defining_query,
-            10_000,
-        )
+        crate::refresh::phd1::cleanup_cross_cycle_phantoms(st, st_qualified, &st.defining_query)
     });
     crate::refresh::drop_owner_temp_table(st, &format!("__pgt_recon_{}", st.pgt_id));
     let phantom_cleanup_count = cleanup_result?;

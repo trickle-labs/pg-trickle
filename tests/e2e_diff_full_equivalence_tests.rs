@@ -393,6 +393,42 @@ async fn test_diff_full_equivalence_inner_join() {
     assert_differential_mode(&db, "dfe_ij_st").await;
 }
 
+#[tokio::test]
+async fn test_diff_phantom_cleanup_removes_surplus_beyond_batch() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE dfe_phantom_a (id INT PRIMARY KEY, v INT)")
+        .await;
+    db.execute("CREATE TABLE dfe_phantom_b (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO dfe_phantom_a SELECT g, g FROM generate_series(1, 10001) g")
+        .await;
+    db.execute("INSERT INTO dfe_phantom_b SELECT g FROM generate_series(1, 10001) g")
+        .await;
+
+    let query = "SELECT a.id, a.v FROM dfe_phantom_a a \
+                 JOIN dfe_phantom_b b ON b.id = a.id";
+    db.create_st("dfe_phantom_st", query, "1m", "DIFFERENTIAL")
+        .await;
+
+    db.execute("ALTER TABLE dfe_phantom_st DISABLE TRIGGER USER")
+        .await;
+    db.execute(
+        "INSERT INTO dfe_phantom_st (__pgt_row_id, id, v) \
+         SELECT decode(md5('phantom-' || g::text), 'hex'), 100000 + g, -1 \
+         FROM generate_series(1, 10001) g",
+    )
+    .await;
+    db.execute("ALTER TABLE dfe_phantom_st ENABLE TRIGGER USER")
+        .await;
+
+    db.execute("INSERT INTO dfe_phantom_a VALUES (10002, 10002)")
+        .await;
+    db.execute("INSERT INTO dfe_phantom_b VALUES (10002)").await;
+    db.refresh_st("dfe_phantom_st").await;
+    db.assert_st_matches_query("dfe_phantom_st", query).await;
+    assert_differential_mode(&db, "dfe_phantom_st").await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // LEFT JOIN
 // ═══════════════════════════════════════════════════════════════════════
