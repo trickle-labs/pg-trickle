@@ -75,14 +75,15 @@ plans do not measure the internal DROP statement's scans. The higher maximum
 writer latencies in both TRIM runs are visible in the results; this
 single sample does not establish a latency distribution or isolate lock time.
 
-A separate 9M run with internal instrumentation captured no source partition
-scans during TRIM's DROP or following refresh; the baseline refresh scanned
-all 30 retained partitions and about 9,002,045 rows, including concurrent
-inserts. TRIM's DROP observed 125,001 output rows across nested scan plans,
-including several full scans of the 31,000-row output, and the following
-refresh observed 90,084 output rows. These sums can include overlapping plans.
-Thus the range deletion itself is indexed, but the existing differential
-catch-up can still scale with the complete materialized output rather than
-only affected groups. The instrumented 27M rerun did not complete: PostgreSQL
+A separate instrumented 9M run after the indexed catch-up change captured no
+source scans during TRIM's DROP or following refresh; the baseline refresh
+scanned all 30 retained partitions and 9,002,974 rows including concurrent
+inserts. DROP observed 2,898 output rows across two indexed lookups and the
+range deletion, versus 125,001 output rows including full scans in the earlier
+instrumented 9M run. The following ordinary differential refresh observed
+120,000 output rows across its nested plans. These sums can include overlapping
+plans. The indexed catch-up uses PostgreSQL planner preferences, which do not
+guarantee a particular plan; ordinary refreshes can still scan the full output.
+The instrumented 27M rerun before this change did not complete: PostgreSQL
 reported a storage I/O error and restarted. The uninstrumented 27M run above
-completed successfully.
+completed before the indexed catch-up change.

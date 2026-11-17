@@ -195,11 +195,19 @@ fn test_reset_execution_state_discards_failed_refresh_output() {
 fn test_refresh_context_restores_nested_state_on_error() {
     assert_eq!(current_safe_bound(), None);
     assert_eq!(current_full_policy(), FullPolicy::Allow);
+    assert!(!is_retention_catchup());
 
     let result: Result<(), PgTrickleError> =
         with_refresh_context(RefreshContext::graph("0/10", FullPolicy::Error), || {
             assert_eq!(current_safe_bound().as_deref(), Some("0/10"));
             assert_eq!(current_full_policy(), FullPolicy::Error);
+
+            with_refresh_context(RefreshContext::retention("0/10"), || {
+                assert!(is_retention_catchup());
+                assert_eq!(current_full_policy(), FullPolicy::Error);
+                Ok::<_, PgTrickleError>(())
+            })?;
+            assert!(!is_retention_catchup());
 
             with_refresh_context(RefreshContext::manual(), || {
                 assert_eq!(current_safe_bound(), None);
@@ -214,6 +222,7 @@ fn test_refresh_context_restores_nested_state_on_error() {
     assert!(result.is_err());
     assert_eq!(current_safe_bound(), None);
     assert_eq!(current_full_policy(), FullPolicy::Allow);
+    assert!(!is_retention_catchup());
 }
 
 #[test]

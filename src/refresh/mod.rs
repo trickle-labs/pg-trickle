@@ -88,6 +88,7 @@ pub(crate) struct RefreshContext {
     pub(crate) full_policy: FullPolicy,
     pub(crate) graph_refresh_id: Option<i64>,
     pub(crate) source_boundary_digest: Option<Vec<u8>>,
+    pub(crate) retention_catchup: bool,
 }
 
 impl RefreshContext {
@@ -97,6 +98,7 @@ impl RefreshContext {
             full_policy: FullPolicy::Allow,
             graph_refresh_id: None,
             source_boundary_digest: None,
+            retention_catchup: false,
         }
     }
 
@@ -106,6 +108,14 @@ impl RefreshContext {
             full_policy,
             graph_refresh_id: None,
             source_boundary_digest: None,
+            retention_catchup: false,
+        }
+    }
+
+    pub(crate) fn retention(safe_bound: &str) -> Self {
+        Self {
+            retention_catchup: true,
+            ..Self::graph(safe_bound, FullPolicy::Error)
         }
     }
 
@@ -120,6 +130,7 @@ impl RefreshContext {
             full_policy,
             graph_refresh_id: Some(graph_refresh_id),
             source_boundary_digest: Some(source_boundary_digest),
+            retention_catchup: false,
         }
     }
 }
@@ -162,6 +173,15 @@ pub(crate) fn current_full_policy() -> FullPolicy {
             .borrow()
             .as_ref()
             .map_or(FullPolicy::Allow, |context| context.full_policy)
+    })
+}
+
+pub(crate) fn is_retention_catchup() -> bool {
+    ACTIVE_CONTEXT.with(|context| {
+        context
+            .borrow()
+            .as_ref()
+            .is_some_and(|c| c.retention_catchup)
     })
 }
 

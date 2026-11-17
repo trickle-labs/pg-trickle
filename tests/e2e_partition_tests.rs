@@ -3378,6 +3378,8 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
         "SELECT d::text, account, SUM(amount), COUNT(*) FROM retention_auto_src GROUP BY d, account ORDER BY d, account",
     ).fetch_all(&db.pool).await.expect("capture independent historical baseline");
     let mut tx = db.pool.begin().await.expect("begin detach transaction");
+    sqlx::query("SELECT set_config('enable_nestloop', 'off', true), set_config('enable_hashjoin', 'on', true), set_config('enable_mergejoin', 'on', true)")
+        .execute(&mut *tx).await.expect("set caller planner preferences");
     sqlx::query("SAVEPOINT before_detach")
         .execute(&mut *tx)
         .await
@@ -3386,6 +3388,10 @@ async fn test_retention_automatic_detach_multiple_streams_and_savepoint_retry() 
         .execute(&mut *tx)
         .await
         .expect("automatic detach");
+    let planner_settings: (String, String, String) = sqlx::query_as(
+        "SELECT current_setting('enable_nestloop'), current_setting('enable_hashjoin'), current_setting('enable_mergejoin')",
+    ).fetch_one(&mut *tx).await.expect("read planner preferences after retention");
+    assert_eq!(planner_settings, ("off".into(), "on".into(), "on".into()));
     sqlx::query("ROLLBACK TO SAVEPOINT before_detach")
         .execute(&mut *tx)
         .await

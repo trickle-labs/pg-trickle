@@ -74,6 +74,27 @@ pub(crate) fn concurrent_detach_reason(parent_oid: u32, target_oid: u32) -> Stri
     format!("RETENTION_DETACH:{parent_oid}:{target_oid}")
 }
 
+#[cfg(not(test))]
+fn retention_catchup(
+    st: &crate::catalog::StreamTableMeta,
+    source_oid: pg_sys::Oid,
+    safe_bound: &str,
+) -> Result<crate::api::refresh_ops::ManualRefreshResult, crate::error::PgTrickleError> {
+    with_retention_guc_scope(|| {
+        crate::refresh::with_refresh_context(
+            crate::refresh::RefreshContext::retention(safe_bound),
+            || {
+                crate::api::refresh_ops::execute_manual_refresh(
+                    st,
+                    &st.pgt_schema,
+                    &st.pgt_name,
+                    &[source_oid],
+                )
+            },
+        )
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionState {
@@ -670,17 +691,7 @@ pub(crate) fn finish_concurrent_retention_detach(
     }
     st.status = crate::dag::StStatus::Active;
     let safe_bound = crate::cdc::get_current_wal_lsn()?;
-    let refresh = crate::refresh::with_refresh_context(
-        crate::refresh::RefreshContext::graph(&safe_bound, crate::refresh::FullPolicy::Error),
-        || {
-            crate::api::refresh_ops::execute_manual_refresh(
-                &st,
-                &st.pgt_schema,
-                &st.pgt_name,
-                &[source_oid],
-            )
-        },
-    )?;
+    let refresh = retention_catchup(&st, source_oid, &safe_bound)?;
     if !matches!(refresh.action.as_str(), "DIFFERENTIAL" | "NO_DATA") {
         return Err(PgTrickleError::InvalidArgument(format!(
             "pending retention replay performed unexpected refresh mode {}",
@@ -1405,17 +1416,7 @@ pub fn prepare_retention_cut(
     ensure_durable_partition_tree(source_oid)?;
     ensure_retention_capture(pgt_id)?;
     let safe_bound = crate::cdc::get_current_wal_lsn()?;
-    let refresh = crate::refresh::with_refresh_context(
-        crate::refresh::RefreshContext::graph(&safe_bound, crate::refresh::FullPolicy::Error),
-        || {
-            crate::api::refresh_ops::execute_manual_refresh(
-                &st,
-                &st.pgt_schema,
-                &st.pgt_name,
-                &[source_oid],
-            )
-        },
-    )?;
+    let refresh = retention_catchup(&st, source_oid, &safe_bound)?;
     if !matches!(refresh.action.as_str(), "DIFFERENTIAL" | "NO_DATA") {
         return Err(PgTrickleError::InvalidArgument(format!(
             "retention preparation performed unexpected refresh mode {}",
@@ -1849,8 +1850,22 @@ pub(crate) fn ensure_no_live_sealed_overlap(
     Ok(())
 }
 
-/// Validate under a trusted catalog path without changing the caller's settings.
+/// Restore caller settings after a retention operation.
 #[cfg(not(test))]
+fn with_retention_guc_scope<T>(
+    operation: impl FnOnce() -> Result<T, crate::error::PgTrickleError>,
+) -> Result<T, crate::error::PgTrickleError> {
+    // SAFETY: The GUC nest is restored even if PostgreSQL reports an error.
+    unsafe {
+        let level = pg_sys::NewGUCNestLevel();
+        pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(operation))
+            .finally(move || pg_sys::AtEOXact_GUC(false, level))
+            .execute()
+    }
+}
+
+#[cfg(not(test))]
+/// Validate under a trusted catalog path without changing the caller's settings.
 pub(crate) fn validate_partition_layout_trusted(
     source_oid: pg_sys::Oid,
     candidate: &RetentionGroupCandidate,
@@ -1858,17 +1873,11 @@ pub(crate) fn validate_partition_layout_trusted(
 ) -> Result<Vec<RetentionPartition>, crate::error::PgTrickleError> {
     use crate::error::PgTrickleError;
     use pgrx::prelude::*;
-    // SAFETY: The GUC nest is restored even if PostgreSQL reports an error.
-    unsafe {
-        let level = pg_sys::NewGUCNestLevel();
-        pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-            Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            validate_partition_layout(source_oid, &candidate.source_column, candidate, cutoff)
-        }))
-        .finally(move || pg_sys::AtEOXact_GUC(false, level))
-        .execute()
-    }
+    with_retention_guc_scope(|| {
+        Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        validate_partition_layout(source_oid, &candidate.source_column, candidate, cutoff)
+    })
 }
 
 #[cfg(not(test))]

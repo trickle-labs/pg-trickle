@@ -1728,7 +1728,9 @@ pub fn execute_differential_refresh_with_tuning(
     } else {
         None
     };
-    let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential;
+    // Retention catch-up cannot rebuild and must not count every output group.
+    let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential
+        || crate::refresh::is_retention_catchup();
     // Only additive UNION ALL scans can safely use one combined denominator.
     // In a join, a tiny changed dimension could affect most of the output,
     // so its independent per-source threshold must remain in force.
@@ -3080,7 +3082,11 @@ pub fn execute_differential_refresh_with_tuning(
     // ── B-3: Strategy selection ──────────────────────────────────────
     // PH-D1: Choose between MERGE and DELETE+INSERT based on the
     // merge_strategy GUC and the delta-to-target ratio heuristic.
-    let merge_strategy = crate::config::pg_trickle_merge_strategy();
+    let merge_strategy = if crate::refresh::is_retention_catchup() {
+        crate::config::MergeStrategy::Merge
+    } else {
+        crate::config::pg_trickle_merge_strategy()
+    };
     let use_delete_insert = match merge_strategy {
         crate::config::MergeStrategy::Merge => false,
         crate::config::MergeStrategy::Auto => {

@@ -795,6 +795,11 @@ pub(crate) fn apply_planner_hints(
     scan_count: usize,
     tuning: &crate::catalog::RefreshRuntimeTuning,
 ) -> bool {
+    if crate::refresh::is_retention_catchup() {
+        // Prefer probing affected groups over scanning the materialized history.
+        apply_fixed_join_strategy(crate::config::MergeJoinStrategy::NestedLoop, tuning);
+        return false;
+    }
     if !crate::config::pg_trickle_merge_planner_hints() {
         return false;
     }
