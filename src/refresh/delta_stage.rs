@@ -388,59 +388,61 @@ impl DeltaStage {
         }
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-        // Materialize *all* post-bound CDC in one writable SPI statement
-        // while holding the source relation lock. A separate read-only
-        // EXISTS probe can use the caller's older SPI snapshot, while the
-        // later CREATE TABLE AS / MERGE sees freshly committed source rows.
-        // Reconstructing against those different snapshots silently loses
-        // the old row images for post-bound DELETE and UPDATE (#1437).
+        // When the conditional SHARE lock succeeded, the live table
+        // cannot change through the refresh. A small staged CDC slice lets
+        // the common no-future case use an inexpensive temporary VIEW.
         //
-        // A temp relation also guarantees the TRUNCATE check, no-future fast
-        // path, and keyed/keyless inverse calculations see identical events.
+        // A contended table cannot hold that lock without starving the
+        // scheduler. In that case do NOT probe CDC and then read the source
+        // in another statement: those SPI calls could use different MVCC
+        // snapshots, causing the very post-frontier race being fixed here.
+        // The contended branch instead always copies/reverses the source and
+        // post-frontier CDC within ONE CREATE TABLE AS SELECT statement.
         let post_name = match self.centroid_nonce {
             Some(nonce) => format!("__pgt_post_{}_{source_oid}_{nonce}", st.pgt_id),
             None => format!("__pgt_post_{}_{source_oid}", st.pgt_id),
         };
         let post_stage = format!("pg_temp.{}", quote_ident(&post_name));
-        // nosemgrep: rust.spi.run.dynamic-format -- generated numeric-scoped temporary name.
-        Spi::run(&format!("DROP TABLE IF EXISTS {post_stage}"))
+        let has_future = if source_locked {
+            // nosemgrep: rust.spi.run.dynamic-format -- quoted numeric internal temp relation.
+            Spi::run(&format!("DROP TABLE IF EXISTS {post_stage}"))
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            // The CDC source is catalog-qualified and quote-escaped, and the
+            // validated LSN remains a separate SPI argument.
+            // nosemgrep: rust.spi.run_with_args.dynamic-format
+            Spi::run_with_args(
+                &format!(
+                    "CREATE TEMP TABLE {post_stage} ON COMMIT DROP AS \
+                     SELECT * FROM {buffer} WHERE lsn > $1::pg_lsn"
+                ),
+                &[new_lsn.into()],
+            )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        // Buffer and temporary-stage identifiers are quoted catalog-derived
-        // names; the frontier LSN is parameterized as $1.
-        // nosemgrep: rust.spi.run_with_args.dynamic-format
-        Spi::run_with_args(
-            &format!(
-                "CREATE TEMP TABLE {post_stage} ON COMMIT DROP AS \
-                 SELECT * FROM {buffer} WHERE lsn > $1::pg_lsn"
-            ),
-            &[new_lsn.into()],
-        )
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-        // Both checks read our own materialized rows (not the possibly stale
-        // snapshot of a separate SPI read-only query).
-        // post_stage is a quoted, numeric-ID-scoped pg_temp table created above.
-        // nosemgrep: rust.spi.query.dynamic-format
-        let is_future_truncate = Spi::get_one::<bool>(&format!(
-            "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action = 'T')"
-        ))
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-        .unwrap_or(false);
-        if is_future_truncate {
-            // TRUNCATE has no D-images to replay backwards. Fail closed:
-            // treating a post-TRUNCATE source as an as-of source loses rows.
-            return Err(PgTrickleError::UnsupportedOperator(format!(
-                "post-bound TRUNCATE for source OID {source_oid} requires FULL refresh"
-            )));
-        }
+            // Both probes read the same immutable post-bound event slice.
+            // nosemgrep: rust.spi.query.dynamic-format -- quoted internal temp relation.
+            let future_truncate = Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action = 'T')"
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(false);
+            if future_truncate {
+                return Err(PgTrickleError::UnsupportedOperator(format!(
+                    "post-bound TRUNCATE for source OID {source_oid} requires FULL refresh"
+                )));
+            }
 
-        // post_stage is a quoted, numeric-ID-scoped pg_temp table created above.
-        // nosemgrep: rust.spi.query.dynamic-format
-        let has_future = Spi::get_one::<bool>(&format!(
-            "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action IN ('I', 'D'))"
-        ))
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-        .unwrap_or(false);
+            // nosemgrep: rust.spi.query.dynamic-format -- quoted internal temp relation.
+            Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action IN ('I', 'D'))"
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(false)
+        } else {
+            // The source might change between any two SPI calls. Do not
+            // choose the VIEW fast path based on a separately observed count.
+            true
+        };
 
         if !has_future {
             // The source lock makes the live source identical to its bounded
@@ -556,11 +558,26 @@ impl DeltaStage {
                 "SELECT DISTINCT ON (f.__pgt_event_identity) f.__pgt_event_identity AS __pgt_row_id, f.__pgt_event_action AS __pgt_future_action{selected} FROM __pgt_future f \
                  ORDER BY f.__pgt_event_identity, f.__pgt_event_sequence"
             );
+            // For a locked source, reuse the immutable future CDC slice.
+            // For a contended source, BOTH the live table and post-bound CDC
+            // are read in the CREATE TABLE AS SELECT snapshot below.
+            let future_source = if source_locked {
+                post_stage.as_str()
+            } else {
+                buffer
+            };
+            let future_predicate = if source_locked {
+                "c.action IN ('I', 'D')".to_string()
+            } else {
+                format!(
+                    "c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')"
+                )
+            };
             let common = format!(
                 "WITH __pgt_future AS MATERIALIZED (\
                    SELECT c.__pgt_row_id AS __pgt_event_identity, c.action AS __pgt_event_action, c.change_id AS __pgt_event_sequence{future_cols} \
-                   FROM {post_stage} c \
-                   WHERE c.action IN ('I', 'D')\
+                   FROM {future_source} c \
+                   WHERE {future_predicate}\
                  ), __pgt_first AS ({first})"
             );
             let select = if keyless {
@@ -611,16 +628,55 @@ impl DeltaStage {
                 )
             };
 
-            // Single statement: live rows and post-bound change images share
-            // the same MVCC snapshot. Afterwards the temp table is immutable.
-            // nosemgrep: rust.spi.run.dynamic-format -- target and source
-            // names are quoted, columns use quote_ident, and new_lsn was
-            // parsed as a pg_lsn before constructing this SQL.
-            // nosemgrep: rust.spi.run.dynamic-format -- identifiers quoted and LSN checked.
+            // PostgreSQL's statement snapshot is shared by the live source
+            // and CDC scans in the same CTAS, even while writers commit.
+            // A future TRUNCATE has no D-images. For a contended source
+            // materialize a sentinel row *in the same snapshot* so it can
+            // be detected reliably; a separate preflight query could miss it.
+            let guard = quote_ident(&format!(
+                "__pgt_future_truncate_guard_{}_{}",
+                st.pgt_id, source_oid
+            ));
+            let select = if source_locked {
+                select
+            } else {
+                let null_cols = cols
+                    .iter()
+                    .map(|col| format!("NULL AS {}", quote_ident(col)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "SELECT b.*, FALSE AS {guard} FROM ({select}) b \
+                     UNION ALL SELECT {null_cols}, TRUE AS {guard} \
+                     WHERE EXISTS (SELECT 1 FROM {buffer} t \
+                       WHERE t.lsn > '{new_lsn}'::pg_lsn AND t.action = 'T')"
+                )
+            };
+            // nosemgrep: rust.spi.run.dynamic-format -- source and buffer
+            // relations are catalog-qualified/quoted, projected columns are
+            // identifier-quoted and the literal frontier was parsed as LSN.
             Spi::run(&format!(
                 "CREATE TEMP TABLE {target} ON COMMIT DROP AS {select}"
-            ))
+            )) // nosemgrep: rust.spi.run.dynamic-format
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if !source_locked {
+                // Only rows from the CTAS snapshot affect this guard.
+                // nosemgrep: rust.spi.query.dynamic-format -- quoted internal temp relation.
+                let future_truncate = Spi::get_one::<bool>(&format!(
+                    "SELECT EXISTS (SELECT 1 FROM {target} WHERE {guard})"
+                ))
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or(false);
+                if future_truncate {
+                    return Err(PgTrickleError::UnsupportedOperator(format!(
+                        "post-bound TRUNCATE for source OID {source_oid} requires FULL refresh"
+                    )));
+                }
+                // Remove the internal marker before the DVM uses this table.
+                // nosemgrep: rust.spi.run.dynamic-format -- quoted numeric temp relation and column.
+                Spi::run(&format!("ALTER TABLE {target} DROP COLUMN {guard}"))
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            }
         }
         // nosemgrep: rust.spi.run.dynamic-format -- temp relation is
         // numeric-ID-scoped and the owner is identifier-quoted.
