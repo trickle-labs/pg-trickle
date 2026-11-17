@@ -2282,7 +2282,7 @@ pub fn execute_differential_refresh_with_tuning(
     // CDC staging precedes t0, so it was absent from the existing per-node
     // timing report even though it can issue several SQL statements per source.
     let staging_start = Instant::now();
-    let delta_stage = match early_stage {
+    let mut delta_stage = match early_stage {
         Some(stage) => stage,
         None => crate::refresh::delta_stage::DeltaStage::prepare(
             st,
@@ -2849,6 +2849,7 @@ pub fn execute_differential_refresh_with_tuning(
                 "The differential plan exceeded the configured work-memory cap.",
             ),
         )?;
+        delta_stage.cleanup_bounded_views()?;
         let t_full_start = Instant::now();
         let result = execute_full_refresh(st);
         let full_ms = t_full_start.elapsed().as_secs_f64() * 1000.0;
@@ -2898,6 +2899,7 @@ pub fn execute_differential_refresh_with_tuning(
                 ),
             ),
         )?;
+        delta_stage.cleanup_bounded_views()?;
         let t_full_start = Instant::now();
         let result = execute_full_refresh(st);
         let full_ms = t_full_start.elapsed().as_secs_f64() * 1000.0;
@@ -3038,6 +3040,7 @@ pub fn execute_differential_refresh_with_tuning(
             // so we must record it here before returning.
             crate::shmem::record_diff_refresh(crate::dvm::is_delta_deduplicated(st.pgt_id));
 
+            delta_stage.cleanup_bounded_views()?;
             return Ok((rows_inserted, 0));
         }
     }
@@ -3416,6 +3419,7 @@ pub fn execute_differential_refresh_with_tuning(
                         schema,
                         name,
                     );
+                    delta_stage.cleanup_bounded_views()?;
                     return Ok((0, 0));
                 }
                 Some(bounds) => {
@@ -4643,6 +4647,10 @@ pub fn execute_differential_refresh_with_tuning(
         }
     }
 
+    // CREATE TEMP VIEW has no ON COMMIT DROP. Clean the fast-path views
+    // after the final DVM read so they cannot pin source table DDL across
+    // transactions or pooled backend reuse.
+    delta_stage.cleanup_bounded_views()?;
     Ok((effective_count, 0))
 }
 
