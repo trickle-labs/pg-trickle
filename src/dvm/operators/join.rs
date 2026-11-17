@@ -1126,11 +1126,9 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     //
     // Resolve nested output names before extracting keys, using the same
     // mapping as the join condition and snapshots.
-    let equi_keys = extract_equijoin_keys(
-        &rewrite_expr_for_join(condition, left, "__pgt_left", right, "__pgt_right"),
-        "__pgt_left",
-        "__pgt_right",
-    );
+    let rewritten_condition =
+        rewrite_expr_for_join(condition, left, "__pgt_left", right, "__pgt_right");
+    let equi_keys = extract_equijoin_keys(&rewritten_condition, "__pgt_left", "__pgt_right");
 
     if ctx.endpoint_join_required && nested_endpoint_join_recompute_is_eligible(op) {
         if !nested_endpoint_operators_are_builtin(op, &|oid| ctx.has_builtin_equality(oid)) {
@@ -1159,8 +1157,6 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     // evaluates the join predicate, before their signed rows cancel. For
     // anything beyond direct cross-side equality keys, compare only affected
     // old and new endpoint joins instead.
-    let rewritten_condition =
-        rewrite_expr_for_join(condition, left, "__pgt_left", right, "__pgt_right");
     if !is_safe_equi_join_condition(
         &rewritten_condition,
         &left_result.schema,
