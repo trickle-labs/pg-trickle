@@ -90,7 +90,7 @@ class DockerStatsSampler:
                 self.stopped.wait(1)
 
 
-def run_case(dimensions: int, changed_rows: int, measurement_path: Path) -> tuple[dict, list[Path]]:
+def run_case(dimensions: int, changed_rows: int, measurement_path: Path) -> dict:
     stem = f"centroid-cost-{dimensions}-batch-{changed_rows}"
     log_path = measurement_path.with_name(f"{stem}.log")
     stats_path = measurement_path.with_name(f"{stem}-docker-stats.jsonl")
@@ -151,18 +151,15 @@ def run_case(dimensions: int, changed_rows: int, measurement_path: Path) -> tupl
         f"{sampler.samples} resource samples retained at {stats_path.relative_to(ROOT)}",
         flush=True,
     )
-    return (
-        {
-            "dimensions": dimensions,
-            "rows": ROWS,
-            "changed_rows_per_round": changed_rows,
-            "measurement": report,
-            "resource_samples": sampler.samples,
-            "resource_file": stats_path.relative_to(ROOT).as_posix(),
-            "test_log": log_path.relative_to(ROOT).as_posix(),
-        },
-        [log_path, stats_path],
-    )
+    return {
+        "dimensions": dimensions,
+        "rows": ROWS,
+        "changed_rows_per_round": changed_rows,
+        "measurement": report,
+        "resource_samples": sampler.samples,
+        "resource_file": stats_path.relative_to(ROOT).as_posix(),
+        "test_log": log_path.relative_to(ROOT).as_posix(),
+    }
 
 
 def write_measurement(path: Path, report: dict) -> None:
@@ -196,10 +193,18 @@ def main() -> int:
                     f"{changed_rows} changed rows ===",
                     flush=True,
                 )
-                case, raw_files = run_case(dimensions, changed_rows, measurement_path)
+                stem = f"centroid-cost-{dimensions}-batch-{changed_rows}"
+                evidence.extend(
+                    [
+                        measurement_path.with_name(f"{stem}.log"),
+                        measurement_path.with_name(f"{stem}-docker-stats.jsonl"),
+                    ]
+                )
+                case = run_case(dimensions, changed_rows, measurement_path)
                 cases.append(case)
-                evidence.extend(raw_files)
-                result["raw_evidence_files"] = sorted(path.relative_to(ROOT).as_posix() for path in evidence)
+                result["raw_evidence_files"] = sorted(
+                    path.relative_to(ROOT).as_posix() for path in evidence if path.is_file()
+                )
                 write_measurement(measurement_path, result)
         result["status"] = "complete"
         result["candidate_commit"] = os.environ["PGT_RELEASE_CANDIDATE_COMMIT"]
