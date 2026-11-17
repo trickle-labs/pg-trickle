@@ -947,23 +947,6 @@ async fn test_retention_concurrent_detach_captures_pending_child_writes() {
         vec![("I".into(), 3, "2025-06-01".into(), 7)]
     );
 
-    // Simulate the protected second-phase replay without using the public resume path.
-    db.execute("UPDATE pgtrickle.pgt_stream_tables SET status = 'ACTIVE' WHERE pgt_name = 'pending_retention_st'").await;
-    db.refresh_st_with_retry("pending_retention_st").await;
-    let replayed: Vec<(String, i64, i64)> =
-        sqlx::query_as("SELECT d::text, total, n FROM pending_retention_st ORDER BY d")
-            .fetch_all(&db.pool)
-            .await
-            .expect("read pending CDC replay");
-    assert_eq!(
-        replayed,
-        vec![("2025-06-01".into(), 7, 1), ("2026-06-01".into(), 20, 1)]
-    );
-    let action: (String, String) = sqlx::query_as("SELECT h.action, h.status FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'pending_retention_st' AND h.initiated_by = 'MANUAL' ORDER BY h.refresh_id DESC LIMIT 1")
-        .fetch_one(&db.pool).await.expect("read pending replay action");
-    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into()));
-    db.execute("UPDATE pgtrickle.pgt_stream_tables SET status = 'SUSPENDED' WHERE pgt_name = 'pending_retention_st'").await;
-
     let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
         .bind(pid)
         .fetch_one(&db.pool)
@@ -978,6 +961,21 @@ async fn test_retention_concurrent_detach_captures_pending_child_writes() {
         .await;
     let attached: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = 'pending_retention_old'::regclass)").await;
     assert!(!attached);
+    // Simulate the protected second-phase replay without using the public resume path.
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET status = 'ACTIVE' WHERE pgt_name = 'pending_retention_st'").await;
+    db.refresh_st_with_retry("pending_retention_st").await;
+    let replayed: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM pending_retention_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read post-detach CDC replay");
+    assert_eq!(
+        replayed,
+        vec![("2025-06-01".into(), 7, 1), ("2026-06-01".into(), 20, 1)]
+    );
+    let action: (String, String) = sqlx::query_as("SELECT h.action, h.status FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'pending_retention_st' AND h.initiated_by = 'MANUAL' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&db.pool).await.expect("read post-detach replay action");
+    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into()));
     let child: Vec<(i32, String, i32)> =
         sqlx::query_as("SELECT id, d::text, amount FROM pending_retention_old ORDER BY id")
             .fetch_all(&db.pool)
