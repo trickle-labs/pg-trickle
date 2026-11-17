@@ -34,8 +34,21 @@ pub struct RetentionGroupCandidate {
 pub enum RetentionQueryError {
     UnsupportedShape,
     UnsupportedAggregate,
+    FloatingPointSum,
     InvalidSourceKey,
     MissingProjectedGroupKey,
+}
+
+impl std::fmt::Display for RetentionQueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FloatingPointSum => write!(
+                f,
+                "floating-point SUM is unsupported; restore complete raw history and use a numeric aggregate"
+            ),
+            other => write!(f, "{other:?}"),
+        }
+    }
 }
 
 /// PostgreSQL's internal date days or timestamp microseconds since its epoch.
@@ -684,7 +697,7 @@ pub(crate) fn finish_concurrent_retention_detach(
             query_group_candidate(&tree, source_oid.to_u32(), &state.candidate.source_column)
                 .map_err(|e| {
                     PgTrickleError::InvalidArgument(format!(
-                        "retention query is no longer eligible: {e:?}"
+                        "retention query is no longer eligible: {e}"
                     ))
                 })?;
         validate_retention_group_collations(&tree, source_oid)?;
@@ -1242,7 +1255,13 @@ pub(crate) fn ensure_retention_capture(pgt_id: i64) -> Result<(), crate::error::
         .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
     crate::refresh::with_stream_owner(&st, || {
         let tree = super::parser::parse_defining_query(&st.defining_query)?;
-        validate_retention_group_collations(&tree, source)
+        validate_retention_group_collations(&tree, source)?;
+        if has_floating_sum(&tree) {
+            return Err(PgTrickleError::InvalidArgument(
+                "partition retention does not support floating-point SUM; restore complete raw history and use a numeric aggregate before configuring or refreshing retention".into(),
+            ));
+        }
+        Ok(())
     })?;
     let name = crate::cdc::get_cdc_name_for_source(source);
     let capture_name = format!("pg_trickle_cdc_{name}");
@@ -1479,7 +1498,7 @@ pub fn prepare_retention_cut(
             query_group_candidate(&tree, source_oid.to_u32(), &state.candidate.source_column)
                 .map_err(|e| {
                     PgTrickleError::InvalidArgument(format!(
-                        "retention query is no longer eligible: {e:?}"
+                        "retention query is no longer eligible: {e}"
                     ))
                 })?;
         validate_retention_group_collations(&tree, source_oid)?;
@@ -2427,6 +2446,28 @@ pub(crate) fn validate_builtin_aggregates(
     Ok(())
 }
 
+// Floating-point addition changes with batching, so a differential SUM is not exact.
+fn has_floating_sum(tree: &OpTree) -> bool {
+    let aggregate = match tree {
+        OpTree::Project { child, .. } => child.as_ref(),
+        tree => tree,
+    };
+    let OpTree::Aggregate {
+        aggregates, child, ..
+    } = aggregate
+    else {
+        return false;
+    };
+    let OpTree::Scan { columns, .. } = child.as_ref() else {
+        return false;
+    };
+    aggregates.iter().any(|aggregate| {
+        aggregate.function == AggFunc::Sum
+            && matches!(&aggregate.argument, Some(Expr::ColumnRef { column_name, .. })
+                if columns.iter().any(|column| column.name == *column_name && matches!(column.type_oid, 700 | 701)))
+    })
+}
+
 /// Find a projected group key tied to the specified non-null source column.
 ///
 /// Hour candidates require separately verified hour-aligned RANGE bounds.
@@ -2461,6 +2502,9 @@ pub fn query_group_candidate(
     else {
         return Err(RetentionQueryError::UnsupportedShape);
     };
+    if has_floating_sum(tree) {
+        return Err(RetentionQueryError::FloatingPointSum);
+    }
     let column = columns
         .iter()
         .find(|column| column.name == key && !column.is_nullable)
@@ -2503,7 +2547,7 @@ pub fn query_group_candidate(
                             .find(|column| column.name == *column_name)
                             .is_none_or(|column| {
                                 aggregate.function == AggFunc::Sum
-                                    && !matches!(column.type_oid, 20 | 21 | 23 | 700 | 701 | 1700)
+                                    && !matches!(column.type_oid, 20 | 21 | 23 | 1700)
                             }),
                         _ => true,
                     },
@@ -2850,6 +2894,50 @@ mod tests {
             ),
             Err(RetentionQueryError::UnsupportedShape)
         );
+    }
+
+    #[test]
+    fn floating_sum_is_rejected_but_count_and_exact_sum_are_supported() {
+        for (type_oid, function, expected) in [
+            (
+                700,
+                AggFunc::Sum,
+                Err(RetentionQueryError::FloatingPointSum),
+            ),
+            (
+                701,
+                AggFunc::Sum,
+                Err(RetentionQueryError::FloatingPointSum),
+            ),
+            (701, AggFunc::Count, Ok(())),
+            (1700, AggFunc::Sum, Ok(())),
+            (23, AggFunc::Sum, Ok(())),
+        ] {
+            let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
+            let OpTree::Project { child, .. } = &mut tree else {
+                unreachable!()
+            };
+            let OpTree::Aggregate {
+                aggregates, child, ..
+            } = child.as_mut()
+            else {
+                unreachable!()
+            };
+            let OpTree::Scan { columns, .. } = child.as_mut() else {
+                unreachable!()
+            };
+            columns.push(Column {
+                name: "value".into(),
+                type_oid,
+                is_nullable: true,
+            });
+            aggregates[0].function = function;
+            aggregates[0].argument = Some(col("value"));
+            assert_eq!(
+                query_group_candidate(&tree, 42, "occurred").map(|_| ()),
+                expected
+            );
+        }
     }
 
     #[test]

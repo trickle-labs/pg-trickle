@@ -1622,6 +1622,10 @@ source partition column's date or timestamp type. Include an explicit offset
 for `timestamptz` cutoffs when the session time zone should not determine it.
 Grouping columns with nondeterministic collations are rejected because their
 equality semantics do not match the typed row identity used for maintenance.
+Floating-point `SUM` is rejected because incremental batching can change its
+rounded result; use integer or numeric inputs for `SUM`. Existing policies
+using floating-point `SUM` fail closed on refresh and may require recovery from
+complete raw history.
 Enabling retention switches the shared source to row-level CDC and performs a
 protected baseline reinitialization so direct writes to child partitions are
 captured. While enabled, source TRUNCATE and writes during lossy CDC discard

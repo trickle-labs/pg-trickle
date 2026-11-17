@@ -3509,6 +3509,137 @@ async fn test_retention_preserves_nonfinite_numeric_aggregates() {
 }
 
 #[tokio::test]
+async fn test_retention_rejects_inexact_floating_sum() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retention_float_src (id INT NOT NULL, d DATE NOT NULL, val DOUBLE PRECISION, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE retention_float_old PARTITION OF retention_float_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE retention_float_live PARTITION OF retention_float_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO retention_float_src VALUES (1,'2026-06-01',1e16)")
+        .await;
+    let query = "SELECT d,sum(val) AS total,count(*) AS n FROM retention_float_src GROUP BY d";
+    for (name, policy) in [("float_trim", "TRIM"), ("float_keep", "RETAIN")] {
+        let error = sqlx::query(
+            "SELECT pgtrickle.create_stream_table_with_retention($1,$2,$3,'d','2026-01-01','1h')",
+        )
+        .bind(name)
+        .bind(query)
+        .bind(policy)
+        .execute(&db.pool)
+        .await
+        .expect_err("floating SUM must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("does not support floating-point SUM"),
+            "{error}"
+        );
+        let relation: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+            .bind(name)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(relation, None);
+    }
+    db.create_st("float_legacy", query, "1h", "DIFFERENTIAL")
+        .await;
+    let error = db.try_execute("SELECT pgtrickle.set_stream_table_partition_retention('float_legacy','RETAIN','d','2026-01-01')").await.expect_err("existing floating SUM must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("does not support floating-point SUM"),
+        "{error}"
+    );
+    db.execute("UPDATE pgtrickle.pgt_dependencies dep SET column_snapshot = jsonb_set(COALESCE(dep.column_snapshot,'{}'::jsonb), '{partition_retention}', jsonb_build_object('version',1,'mode','RETAIN','candidate',jsonb_build_object('output_column','d','bucket','EXACT','source_type_oid',1082,'source_oid',dep.source_relid::oid::bigint,'source_column','d'),'cutoff',jsonb_build_object('kind','DATE','value',DATE '2026-01-01' - DATE '2000-01-01'),'query_hash',st.defining_query_hash,'sealed','[]'::jsonb)) FROM pgtrickle.pgt_stream_tables st WHERE st.pgt_id=dep.pgt_id AND st.pgt_name='float_legacy' AND dep.source_relid='retention_float_src'::regclass").await;
+    db.execute("INSERT INTO retention_float_src VALUES (2,'2026-06-01',-1e16),(3,'2026-06-01',1)")
+        .await;
+    let error = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('float_legacy')")
+        .await
+        .expect_err("unsafe legacy policy must fail before refresh");
+    assert!(
+        error
+            .to_string()
+            .contains("does not support floating-point SUM"),
+        "{error}"
+    );
+    let actual: Vec<(String, f64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM float_legacy ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(actual, vec![("2026-06-01".into(), 1e16, 1)]);
+    let expected: Vec<(String, f64, i64)> = sqlx::query_as(
+        "SELECT d::text,sum(val),count(*) FROM retention_float_src GROUP BY d ORDER BY d",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(expected, vec![("2026-06-01".into(), 1.0, 3)]);
+    let error = db
+        .try_execute("DROP TABLE retention_float_old")
+        .await
+        .expect_err("unsafe legacy policy must block removal");
+    assert!(
+        error
+            .to_string()
+            .contains("floating-point SUM is unsupported"),
+        "{error}"
+    );
+    let attached: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent='retention_float_src'::regclass AND inhrelid='retention_float_old'::regclass)").await;
+    assert!(attached);
+
+    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+        .await;
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name = 'float_legacy'").await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = true")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    assert!(
+        db.wait_for_scheduler(std::time::Duration::from_secs(90))
+            .await
+    );
+    assert!(db.wait_for_condition(
+        "scheduled refresh rejects floating-point SUM",
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='float_legacy' AND h.initiated_by='SCHEDULER' AND h.status='FAILED' AND h.error_message LIKE '%does not support floating-point SUM%')",
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_millis(50),
+    ).await);
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    let after_scheduler: Vec<(String, f64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM float_legacy ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(after_scheduler, actual);
+    db.execute("UPDATE pgtrickle.pgt_dependencies dep SET column_snapshot=dep.column_snapshot-'partition_retention' FROM pgtrickle.pgt_stream_tables st WHERE st.pgt_id=dep.pgt_id AND st.pgt_name='float_legacy'").await;
+    db.execute("SELECT pgtrickle.create_stream_table_with_retention('float_count','SELECT d,count(val) AS n FROM retention_float_src GROUP BY d','TRIM','d','2026-01-01','1h')").await;
+    db.execute("INSERT INTO retention_float_src VALUES (4,'2026-06-01',NULL)")
+        .await;
+    db.execute("DROP TABLE retention_float_old").await;
+    let count: Vec<(String, i64)> = sqlx::query_as("SELECT d::text,n FROM float_count ORDER BY d")
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, vec![("2026-06-01".into(), 3)]);
+    db.assert_st_matches_query(
+        "float_count",
+        "SELECT d,count(val) AS n FROM retention_float_src GROUP BY d",
+    )
+    .await;
+    let action: (String, String, bool) = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='float_count' ORDER BY h.refresh_id DESC LIMIT 1").fetch_one(&db.pool).await.unwrap();
+    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+}
+
+#[tokio::test]
 async fn test_retention_rejects_nondeterministic_group_collations() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")

@@ -117,6 +117,11 @@ fn set_policy(
         let tree = crate::dvm::parser::parse_defining_query(&st.defining_query)?;
         let candidate =
             retention::query_group_candidate(&tree, source_oid.to_u32(), key).map_err(|error| {
+                if error == retention::RetentionQueryError::FloatingPointSum {
+                    return PgTrickleError::InvalidArgument(
+                        "partition retention does not support floating-point SUM; use a numeric aggregate".into(),
+                    );
+                }
                 PgTrickleError::InvalidArgument(format!(
                     "retention query is not eligible: {error:?}"
                 ))
