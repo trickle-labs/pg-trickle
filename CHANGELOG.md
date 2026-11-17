@@ -225,6 +225,10 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ### Fixes
 
+- Keep successful stream-table resumes from being undone by late refresh-worker
+  failures or the dispatcher's failure safety net, using per-member recovery
+  generation fences (#1438).
+
 - Detect `DROP TABLE` on partition children (including nested children)
   without a preceding DETACH, reinitialize affected parent stream tables and
   downstream materializations, and preserve the ability to detect drops when

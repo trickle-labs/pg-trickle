@@ -71,7 +71,7 @@ OLD_VERSION="$(psql 'SELECT pgtrickle.version()')"
 # Exercise upgrade of actual stream-table storage created by the published
 # v0.108.3 binary (not a freshly created stream under the candidate binary).
 AGGREGATE_UPGRADE=false
-if [[ "$FROM_VERSION" == "0.108.3" && ( "$TO_VERSION" == "0.109.0" || "$TO_VERSION" == "0.110.0" || "$TO_VERSION" == "0.110.1" ) ]]; then
+if [[ "$FROM_VERSION" == "0.108.3" && ( "$TO_VERSION" == "0.109.0" || "$TO_VERSION" == "0.110.0" || "$TO_VERSION" == "0.110.1" || "$TO_VERSION" == "0.110.2" ) ]]; then
     AGGREGATE_UPGRADE=true
     psql "CREATE TABLE public.upgrade_agg_orders(
               id int PRIMARY KEY, customer text, amt numeric)" >/dev/null
