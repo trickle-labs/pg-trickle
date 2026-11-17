@@ -3112,6 +3112,147 @@ async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
 }
 
 #[tokio::test]
+async fn test_retention_rejects_array_group_identity() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("CREATE TABLE alias_array_src (d DATE NOT NULL, account INT[] NOT NULL, amount INT NOT NULL) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE alias_array_old PARTITION OF alias_array_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    let error = db.try_execute("SELECT pgtrickle.create_stream_table_with_retention('alias_array_st', 'SELECT d, account, sum(amount) AS total FROM alias_array_src GROUP BY d, account', 'TRIM', 'd', '2026-01-01', '1h')")
+        .await.expect_err("array group identity must be rejected");
+    assert!(
+        error.to_string().contains("unsupported structural type"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("array"), "{error}");
+    let stream: Option<String> = db
+        .query_scalar("SELECT to_regclass('alias_array_st')::text")
+        .await;
+    assert_eq!(stream, None);
+}
+
+#[tokio::test]
+async fn test_retention_reordered_aliased_group_keys() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.refresh_strategy = 'differential'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE alias_retention_src (id INT NOT NULL, d DATE NOT NULL, account INT NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE alias_retention_old PARTITION OF alias_retention_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE alias_retention_live PARTITION OF alias_retention_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO alias_retention_src VALUES (1,'2025-06-01',1,10), (2,'2025-06-01',2,5), (3,'2026-06-01',1,20), (4,'2026-06-01',2,8)").await;
+    let query = "SELECT account AS acct, d AS day, sum(amount) AS total FROM alias_retention_src GROUP BY d, account";
+    for (name, policy) in [("alias_trim", "TRIM"), ("alias_keep", "RETAIN")] {
+        db.create_st(name, query, "1h", "DIFFERENTIAL").await;
+        sqlx::query(
+            "SELECT pgtrickle.set_stream_table_partition_retention($1, $2, 'd', '2026-01-01')",
+        )
+        .bind(name)
+        .bind(policy)
+        .execute(&db.pool)
+        .await
+        .expect("configure retention");
+    }
+    let before: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.execute("INSERT INTO alias_retention_src VALUES (5,'2025-06-01',1,5), (6,'2026-06-01',1,7)")
+        .await;
+    db.execute("ALTER TABLE alias_retention_src DETACH PARTITION alias_retention_old")
+        .await;
+    let actions: Vec<(String, String, String, bool)> = sqlx::query_as("SELECT s.pgt_name, h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE h.refresh_id > $1 AND s.pgt_name IN ('alias_trim', 'alias_keep') ORDER BY s.pgt_name, h.refresh_id")
+        .bind(before).fetch_all(&db.pool).await.expect("read cut refresh actions");
+    assert_eq!(
+        actions,
+        vec![
+            (
+                "alias_keep".into(),
+                "DIFFERENTIAL".into(),
+                "COMPLETED".into(),
+                false
+            ),
+            (
+                "alias_trim".into(),
+                "DIFFERENTIAL".into(),
+                "COMPLETED".into(),
+                false
+            )
+        ]
+    );
+    let trim: Vec<(i32, String, i64)> =
+        sqlx::query_as("SELECT acct, day::text, total FROM alias_trim ORDER BY day, acct")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    let keep: Vec<(i32, String, i64)> =
+        sqlx::query_as("SELECT acct, day::text, total FROM alias_keep ORDER BY day, acct")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        trim,
+        vec![(1, "2026-06-01".into(), 27), (2, "2026-06-01".into(), 8)]
+    );
+    assert_eq!(
+        keep,
+        vec![
+            (1, "2025-06-01".into(), 15),
+            (2, "2025-06-01".into(), 5),
+            (1, "2026-06-01".into(), 27),
+            (2, "2026-06-01".into(), 8)
+        ]
+    );
+    db.assert_st_matches_query("alias_trim", query).await;
+    db.execute("INSERT INTO alias_retention_src VALUES (7,'2026-06-01',1,3)")
+        .await;
+    db.refresh_st("alias_trim").await;
+    db.refresh_st("alias_keep").await;
+    let trim: Vec<(i32, String, i64)> =
+        sqlx::query_as("SELECT acct, day::text, total FROM alias_trim ORDER BY day, acct")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    let keep: Vec<(i32, String, i64)> =
+        sqlx::query_as("SELECT acct, day::text, total FROM alias_keep ORDER BY day, acct")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        trim,
+        vec![(1, "2026-06-01".into(), 30), (2, "2026-06-01".into(), 8)]
+    );
+    assert_eq!(
+        keep,
+        vec![
+            (1, "2025-06-01".into(), 15),
+            (2, "2025-06-01".into(), 5),
+            (1, "2026-06-01".into(), 30),
+            (2, "2026-06-01".into(), 8)
+        ]
+    );
+    db.assert_st_matches_query("alias_trim", query).await;
+    let actions: Vec<(String, String, String, bool)> = sqlx::query_as("SELECT DISTINCT ON (s.pgt_name) s.pgt_name, h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name IN ('alias_trim', 'alias_keep') ORDER BY s.pgt_name, h.refresh_id DESC")
+        .fetch_all(&db.pool).await.expect("read subsequent refresh actions");
+    assert_eq!(
+        actions,
+        vec![
+            (
+                "alias_keep".into(),
+                "DIFFERENTIAL".into(),
+                "COMPLETED".into(),
+                false
+            ),
+            (
+                "alias_trim".into(),
+                "DIFFERENTIAL".into(),
+                "COMPLETED".into(),
+                false
+            )
+        ]
+    );
+}
+
+#[tokio::test]
 #[cfg(feature = "e2e-unsafe-test-hooks")]
 async fn test_retention_hourly_tutorial_policies() {
     let db = E2eDb::new_dedicated().await.with_extension().await;

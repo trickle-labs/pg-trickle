@@ -165,7 +165,9 @@ The contract is intentionally narrow:
   `COUNT(column)` and/or `SUM(column)`, using PostgreSQL's built-in aggregates
   without DISTINCT or aggregate filters. `SUM` accepts built-in integer,
   floating-point, and numeric columns. Other grouping keys must be source
-  columns, and aggregate arguments cannot be arbitrary expressions. The
+  columns supported by the stream table's typed row identity; for example,
+  array-valued grouping keys are rejected. Aggregate arguments cannot be
+  arbitrary expressions. The
   defining search path must leave `pg_catalog` ahead of other schemas, and the
   stream owner must not be subject to source row-level security. Its output
   includes either
