@@ -1,11 +1,40 @@
 import unittest
 import subprocess
 import sys
+import json
+import tempfile
+from pathlib import Path
 
 import run_live_rag_batches as benchmark
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_checkpoint_retains_completed_measurements_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nested" / "progress.json"
+            checkpoint = benchmark.CheckpointWriter(path)
+            checkpoint.update(
+                {"phase": "maintenance", "approach": "application", "state": "complete"},
+                samples=[{"cycle": 0, "maintenance": {"application": {"duration_seconds": 1.0}}}],
+            )
+            checkpoint.fail(ValueError("periodic full stopped"))
+
+            report = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "failed")
+            self.assertEqual(report["error"], "ValueError: periodic full stopped")
+            self.assertEqual(report["progress"]["approach"], "application")
+            self.assertEqual(report["samples"][0]["maintenance"]["application"]["duration_seconds"], 1.0)
+            self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+
+    def test_checkpoint_marks_a_complete_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "progress.json"
+            benchmark.CheckpointWriter(path).complete({"rows": 100, "samples": []})
+
+            report = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "complete")
+            self.assertEqual(report["progress"], {"phase": "complete"})
+
     def test_nearest_rank_summary(self):
         self.assertEqual(benchmark.summary([3.0, 1.0, 2.0]),
                          {"samples": 3, "p50": 2.0, "p95": 3.0, "p99": 3.0})
@@ -31,6 +60,9 @@ class BenchmarkTests(unittest.TestCase):
             benchmark.SCHEDULER_STREAMS,
             "ARRAY['embedding_demo.corpus_v1', 'embedding_demo.corpus_v2', 'live_rag.differential']",
         )
+
+    def test_periodic_full_rebuild_receives_configured_vector_dimensions(self):
+        self.assertIn(":'dimensions'::integer", benchmark.MAINTENANCE["periodic_full"])
 
     def test_reader_overlap_and_timeout_windows_are_reported_separately(self):
         reads = [

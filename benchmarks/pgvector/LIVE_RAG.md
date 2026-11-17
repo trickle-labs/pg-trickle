@@ -9,6 +9,9 @@ The setup and worker support `--dimensions` up to 1536; both must use the same
 dimension. The example below uses three dimensions.
 The fixture CI exercises setup, generation and corpus convergence at 384 and
 1536 dimensions; those small tests do not establish scale or retrieval quality.
+The periodic-full baseline bulk-loads the rebuilt corpus, then rebuilds its
+HNSW and text indexes; index creation is included in maintenance latency and
+can block readers during the full refresh.
 
 Use a disposable database with the packaged v0.109.0 candidate, PostgreSQL 18
 and pgvector installed. Record the candidate commit, package digest, image,
@@ -142,8 +145,16 @@ python3 benchmarks/pgvector/run_live_rag_batches.py \
   --rows 10000 --dimensions 384 --batch 10 --cycles 3 --tenant 1 \
   --candidate-commit "$CANDIDATE_COMMIT" --package-sha256 "$PACKAGE_SHA256" \
   --candidate-archive "$CANDIDATE_ARCHIVE" --attest-container "$CONTAINER" \
+  --checkpoint batch-progress.json \
   > batch-results.json
 ```
+
+For long runs, `--checkpoint` atomically records setup progress and each
+completed maintenance measurement. A completed run has `status: "complete"`;
+an error records `status: "failed"`, and an externally interrupted process
+leaves the last `status: "running"` checkpoint with its current phase and any
+completed samples. The checkpoint preserves evidence; it does not resume the
+database workload. Keep stdout redirected separately for the complete report.
 
 For Docker runs, `--candidate-archive` and `--attest-container` together check
 the archive digest and candidate manifest, the installed extension files, and
