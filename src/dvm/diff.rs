@@ -1298,13 +1298,17 @@ pub fn quote_ident(name: &str) -> String {
     out
 }
 
-fn push_quoted_ident(out: &mut String, name: &str) {
+pub(crate) fn push_quoted_ident(out: &mut String, name: &str) {
     out.push('"');
-    for (index, part) in name.split('"').enumerate() {
-        if index > 0 {
-            out.push_str("\"\"");
+    if name.contains('"') {
+        for (index, part) in name.split('"').enumerate() {
+            if index > 0 {
+                out.push_str("\"\"");
+            }
+            out.push_str(part);
         }
-        out.push_str(part);
+    } else {
+        out.push_str(name);
     }
     out.push('"');
 }

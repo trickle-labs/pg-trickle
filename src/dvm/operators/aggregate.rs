@@ -9,13 +9,31 @@
 //! - Vanishes (new_count ≤ 0, was > 0) → DELETE
 //! - Changes value → UPDATE (emitted as DELETE + INSERT pair)
 
-use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
+use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, push_quoted_ident, quote_ident};
 use crate::dvm::operators::join_common::{
     build_snapshot_inline_from, build_snapshot_sql, snapshot_join_column_name,
 };
 use crate::dvm::operators::scan::build_hash_expr_for_domain;
 use crate::dvm::parser::{AggExpr, AggFunc, CteRegistry, Expr, OpTree, apply_column_aliases};
 use crate::error::PgTrickleError;
+
+fn qualified_column(prefix: &str, name: &str) -> String {
+    let mut result = String::with_capacity(prefix.len() + name.len() + 3);
+    result.push_str(prefix);
+    result.push('.');
+    push_quoted_ident(&mut result, name);
+    result
+}
+
+fn qualified_column_with_alias(prefix: &str, name: &str) -> String {
+    let mut result = String::with_capacity(prefix.len() + 2 * name.len() + 9);
+    result.push_str(prefix);
+    result.push('.');
+    push_quoted_ident(&mut result, name);
+    result.push_str(" AS ");
+    push_quoted_ident(&mut result, name);
+    result
+}
 
 /// Resolve a column reference expression against child CTE column names.
 ///
@@ -479,7 +497,7 @@ pub(crate) fn centroid_signed_delta_sql(
     };
     let keys = names
         .iter()
-        .map(|name| format!("d.{}", quote_ident(name)))
+        .map(|name| qualified_column("d", name))
         .collect::<Vec<_>>();
     let row_id = build_hash_expr_for_domain("GROUP_KEY", &keys);
     let sql = format!(
@@ -1188,7 +1206,7 @@ fn build_intermediate_agg_delta(
         // make the DELETE half of a D+I update miss the stored row.
         let group_hash_d: Vec<String> = group_columns
             .iter()
-            .map(|c| format!("d.{}", quote_ident(c)))
+            .map(|c| qualified_column("d", c))
             .collect();
         let group_hash_n: Vec<String> = group_columns
             .iter()
@@ -2120,26 +2138,6 @@ fn generate_direct_agg_delta(
     group_by: &[Expr],
     aggregates: &[AggExpr],
 ) -> Result<(String, Vec<String>), PgTrickleError> {
-    let nonnull_uses_row_count: Vec<bool> = aggregates
-        .iter()
-        .map(|agg| direct_sum_uses_row_count(agg, scan))
-        .collect();
-    generate_direct_agg_delta_with_row_count(
-        ctx,
-        scan,
-        group_by,
-        aggregates,
-        &nonnull_uses_row_count,
-    )
-}
-
-fn generate_direct_agg_delta_with_row_count(
-    ctx: &mut DiffContext,
-    scan: &OpTree,
-    group_by: &[Expr],
-    aggregates: &[AggExpr],
-    nonnull_uses_row_count: &[bool],
-) -> Result<(String, Vec<String>), PgTrickleError> {
     let OpTree::Scan { table_oid, .. } = scan else {
         return Err(PgTrickleError::InternalError(
             "generate_direct_agg_delta called on non-Scan".into(),
@@ -2245,7 +2243,7 @@ fn generate_direct_agg_delta_with_row_count(
     // Group columns: c."region" AS "region"
     // A44-10: direct CB reference — same value on both I and D rows within a group
     for name in &group_output {
-        select_exprs.push(format!("c.{} AS {}", quote_ident(name), quote_ident(name),));
+        select_exprs.push(qualified_column_with_alias("c", name));
     }
 
     // __ins_count, __del_count (total row counts per group)
@@ -2255,7 +2253,7 @@ fn generate_direct_agg_delta_with_row_count(
         .push("SUM(CASE WHEN c.action = 'D' THEN 1 ELSE 0 END)::bigint AS __del_count".to_string());
 
     // Per-aggregate delta expressions
-    for (index, agg) in aggregates.iter().enumerate() {
+    for agg in aggregates {
         // A44-2: If this aggregate has a rewritten CASE expression, use it
         // directly with I/D action filtering instead of the generic helper.
         let (ins_expr, del_expr) = if let Some(rewritten) = case_rewrites.get(&agg.alias) {
@@ -2308,7 +2306,7 @@ fn generate_direct_agg_delta_with_row_count(
         // restore PostgreSQL's NULL result when the last value disappears.
         if matches!(agg.function, AggFunc::Sum)
             && !agg.is_distinct
-            && !nonnull_uses_row_count[index]
+            && !direct_sum_uses_row_count(agg, scan)
         {
             let argument = case_rewrites
                 .get(&agg.alias)
@@ -2332,7 +2330,7 @@ fn generate_direct_agg_delta_with_row_count(
     } else {
         let refs: Vec<String> = group_output
             .iter()
-            .map(|name| format!("c.{}", quote_ident(name)))
+            .map(|name| qualified_column("c", name))
             .collect();
         format!("\nGROUP BY {}", refs.join(", "))
     };
@@ -2380,7 +2378,7 @@ fn direct_agg_delta_exprs(agg: &AggExpr, _has_value_only: bool) -> (String, Stri
             let col = agg
                 .argument
                 .as_ref()
-                .map(|e| format!("c.{}", quote_ident(&e.output_name())))
+                .map(|e| qualified_column("c", &e.output_name()))
                 .unwrap_or_else(|| "1".to_string());
             (
                 // COUNT checks the datum null flag; IS NOT NULL tests composite fields.
@@ -2394,7 +2392,7 @@ fn direct_agg_delta_exprs(agg: &AggExpr, _has_value_only: bool) -> (String, Stri
             let col = agg
                 .argument
                 .as_ref()
-                .map(|e| format!("c.{}", quote_ident(&e.output_name())))
+                .map(|e| qualified_column("c", &e.output_name()))
                 .unwrap_or_else(|| "0".to_string());
             (
                 format!("SUM(CASE WHEN c.action = 'I' THEN {col} ELSE 0 END)"),
@@ -2416,7 +2414,7 @@ fn direct_agg_argument_expr(agg: &AggExpr) -> String {
     agg.argument
         .as_ref()
         .map(|expr| match expr {
-            Expr::ColumnRef { .. } => format!("c.{}", quote_ident(&expr.output_name())),
+            Expr::ColumnRef { column_name, .. } => qualified_column("c", column_name),
             _ => expr.to_sql(),
         })
         .unwrap_or_else(|| "1".to_string())
@@ -2459,18 +2457,8 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // reads from the trigger transition temp tables via diff_scan.
     let use_p5 = matches!(ctx.delta_source(), DeltaSource::ChangeBuffer)
         && is_direct_agg_eligible(child, group_by, aggregates, ctx);
-    let nonnull_uses_row_count: Vec<bool> = aggregates
-        .iter()
-        .map(|agg| use_p5 && direct_sum_uses_row_count(agg, child))
-        .collect();
     let (delta_cte, group_output) = if use_p5 {
-        generate_direct_agg_delta_with_row_count(
-            ctx,
-            child,
-            group_by,
-            aggregates,
-            &nonnull_uses_row_count,
-        )?
+        generate_direct_agg_delta(ctx, child, group_by, aggregates)?
     } else {
         // ── Standard path: differentiate child first ───────────────────
         let child_result = ctx.diff_node_in_intermediate(child)?;
@@ -2735,7 +2723,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // Row ID from group-by columns (using output names)
     let group_hash_exprs: Vec<String> = group_columns
         .iter()
-        .map(|c| format!("d.{}", quote_ident(c)))
+        .map(|c| qualified_column("d", c))
         .collect();
     let row_id_expr = if group_hash_exprs.is_empty() {
         "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
@@ -2756,7 +2744,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     // Group columns
     for col in &group_columns {
-        merge_selects.push(format!("d.{}", quote_ident(col)));
+        merge_selects.push(qualified_column("d", col));
     }
 
     // New count = old + inserts - deletes
@@ -2783,11 +2771,11 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     merge_selects.push("COALESCE(st.__pgt_count, 0) AS old_count".to_string());
 
     // Per-aggregate new values + old values for G-S1 change detection
-    for (index, agg) in aggregates.iter().enumerate() {
+    for agg in aggregates {
         // SUM and AVG use rescan values only when deltas contain special
         // numeric values; ordinary changes keep the algebraic path.
         let agg_has_nonnull_aux = matches!(agg.function, AggFunc::Sum) && !agg.is_distinct;
-        let sum_nonnull_from_row_count = nonnull_uses_row_count[index];
+        let sum_nonnull_from_row_count = use_p5 && direct_sum_uses_row_count(agg, child);
         let agg_has_rescan = rescan_config.includes(agg, child);
         let has_special_value_delta = needs_special_value_rescan(agg, child);
         let special_state = if agg.uses_incremental_nonfinite_state(child) {
@@ -3043,7 +3031,7 @@ END AS __pgt_meta_action"#
             } else {
                 st_col_name(column)
             };
-            format!("sub.{}", quote_ident(&storage_name))
+            qualified_column("sub", &storage_name)
         })
         .collect();
     // FULL encoding does not parenthesize composite ROW elements; delta
@@ -7971,6 +7959,15 @@ mod tests {
                 std::slice::from_ref(&hashed)
             ),
             hashed
+        );
+    }
+
+    #[test]
+    fn test_qualified_column_helpers_escape_identifiers() {
+        assert_eq!(qualified_column("c", "a\"b"), "c.\"a\"\"b\"");
+        assert_eq!(
+            qualified_column_with_alias("c", "region"),
+            "c.\"region\" AS \"region\""
         );
     }
 }
