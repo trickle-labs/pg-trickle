@@ -108,3 +108,5 @@ took 112 ms and observed 2,910 rows across indexed scans. Both results matched
 their source queries. This single small run tests the planner-setting edge case;
 it is not a production-scale timing comparison. The raw plans are in the
 `index-disabled-before` and `index-disabled-after` result files.
+After adding the row-identity index check, the same diagnostic passed with
+zero mismatches and 2,880 observed output rows; see `identity-index-smoke`.
