@@ -84,6 +84,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("refresh_tier", "text"),
         ("requested_cdc_mode", "text"),
         ("refresh_mode", "text"),
+        ("recovery_generation", "bigint"),
         ("requested_refresh_mode", "text"),
         ("refresh_reason", "text"),
         ("refresh_reason_detail", "text"),
@@ -231,7 +232,15 @@ async fn test_upgrade_migration_era_catalog_tables_and_config_dump_policy_presen
 /// functional (create ST, refresh, verify).
 #[tokio::test]
 async fn test_upgrade_drop_recreate_roundtrip() {
-    let db = E2eDb::new().await.with_extension().await;
+    // This test deliberately drops the entire extension. Under the full E2E
+    // harness, isolate it from other tests and disable scheduler activity so
+    // DROP EXTENSION cannot deadlock with an overlapping background refresh.
+    // The light harness has no scheduler and shares its server across tests,
+    // so do not modify a server-wide GUC in that configuration.
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    #[cfg(not(feature = "light-e2e"))]
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
 
     // Create a source + ST to have data in the system
     db.execute("CREATE TABLE lr_src (id INT PRIMARY KEY, val TEXT)")

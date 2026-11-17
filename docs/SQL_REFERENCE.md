@@ -1237,11 +1237,17 @@ pgtrickle.alter_stream_table(
 | `fuse` | `text` | `NULL` | Fuse (circuit breaker) mode: `'off'`, `'on'`, or `'auto'`. `'auto'` blows the fuse when FULL would be cheaper than DIFFERENTIAL. Pass `NULL` to leave unchanged. |
 | `fuse_ceiling` | `bigint` | `NULL` | Change-count threshold that triggers the fuse. `NULL` uses the global `pg_trickle.fuse_default_ceiling`. |
 | `fuse_sensitivity` | `integer` | `NULL` | Number of consecutive over-ceiling cycles before the fuse blows. `NULL` means 1 (blow immediately). |
-| `partition_by` | `text` | `NULL` | Partition key column for the storage table. Pass `NULL` to leave unchanged. Changing the key rebuilds storage and is rejected if external objects depend on it. |
+| `partition_by` | `text` | `NULL` | Partition key column for the storage table. Pass `NULL` to leave unchanged. Changing the key rebuilds storage and is rejected if external objects or downstream stream tables depend on it. |
 | `max_differential_joins` | `integer` | `NULL` | Per-stream-table cap on join combinations during differential refresh. Pass `NULL` to leave unchanged. |
 | `max_delta_fraction` | `float8` | `NULL` | Per-stream-table AUTO cost model threshold (0.0–1.0). Pass `NULL` to leave unchanged. |
 | `post_refresh_action` | `text` | `NULL` | Set to `'none'`, `'analyze'`, `'reindex'` after each changed refresh, or `'reindex_if_drift'` when the changed-row ratio reaches its threshold. `NULL` leaves the existing setting unchanged. |
 | `reindex_drift_threshold` | `float8` | `NULL` | Changed-row ratio threshold for `post_refresh_action = 'reindex_if_drift'`. Pass `NULL` to leave unchanged. This is a churn estimate, not measured recall or semantic drift. |
+
+Partition-key changes that would replace an upstream stream table with
+downstream stream-table consumers are rejected **before** storage is modified.
+To repartition, remove those downstream stream tables first, change the
+upstream's partition key, and recreate the downstream materializations. This
+prevents dangling relation OIDs and loss of synchronous downstream triggers.
 
 The current `reindex` actions run non-concurrent `REINDEX TABLE` in the refresh
 transaction after applying the data changes. They rebuild all indexes on the
@@ -1260,7 +1266,7 @@ compatibility alias `'auto'`) before retrying.
 **Examples:**
 
 ```sql
--- Change the defining query (same output schema — fast path)
+-- Change the defining query (same output schema)
 SELECT pgtrickle.alter_stream_table('order_totals',
     query => 'SELECT customer_id, SUM(amount) AS total FROM orders WHERE status = ''active'' GROUP BY customer_id');
 
@@ -1312,8 +1318,8 @@ SELECT pgtrickle.alter_stream_table('order_totals', status => 'ACTIVE');
 - When `query` is provided, the function runs the full query rewrite pipeline (view inlining, DISTINCT ON, GROUPING SETS, etc.) and validates the new query before applying changes.
 - The entire ALTER QUERY operation runs within a single transaction. If any step fails, the stream table is left unchanged.
 - If a query change requires a shadow-table rebuild and the stream table has an expression or ANN index, the change is rejected to prevent silently losing that index. Drop the index explicitly, perform the change, and recreate it.
-- For same-schema and compatible-schema changes, the storage table OID is preserved — views, policies, and publications referencing the stream table remain valid.
-- For incompatible schema changes (e.g., changing a column from `integer` to `text`), the storage table is rebuilt and the OID changes. A `WARNING` is emitted.
+- An identical compatible query retains the storage table and its OID. A semantic query change, including one with the same output schema, rebuilds storage and changes its OID. Dependent objects can prevent the rebuild.
+- Query rebuilds and `partition_by` changes reject storage with table or column grants, row-security flags, or policies (including on partitions), and reject applicable default table privileges for the creating role. Remove these explicitly before the change and reapply them afterward in the same transaction. Attached downstream publications also prevent replacement.
 - The stream table is temporarily suspended during query migration to prevent concurrent scheduler refreshes.
 
 ---
@@ -6222,6 +6228,12 @@ SELECT pgtrickle.snapshot_stream_table(
 ### `pgtrickle.restore_from_snapshot(name, source)`
 
 Restore a stream table from an archival snapshot and realign its frontier.
+
+**IMMEDIATE streams cannot be restored from archival snapshots.** They use
+synchronous triggers rather than replayable CDC history, so restoring a
+historical image would make future deltas accumulate on an incorrect baseline.
+The API rejects an IMMEDIATE destination without changing its data or state.
+Use a protected reinitialization from the current sources instead.
 
 ```sql
 pgtrickle.restore_from_snapshot(

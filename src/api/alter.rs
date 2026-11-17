@@ -609,6 +609,52 @@ fn resume_or_rollback_shadow_build(pgt_id: i64, schema: &str) -> Result<(), PgTr
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))
 }
 
+/// Reject replacement when relation-local authorization cannot be retained.
+fn ensure_storage_authorization_is_replaceable(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+    let table = format!(
+        "{}.{}",
+        quote_identifier(&st.pgt_schema),
+        quote_identifier(&st.pgt_name)
+    );
+    // Lock descendants too, so their authorization cannot change before the drop.
+    // nosemgrep: rust.spi.run.dynamic-format — both identifiers are quote_identifier-escaped.
+    Spi::run(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"))
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let protected = Spi::get_one_with_args::<bool>(
+        "WITH RECURSIVE relations(oid) AS (\
+             SELECT $1::oid UNION ALL \
+             SELECT i.inhrelid FROM pg_catalog.pg_inherits i \
+             JOIN relations r ON i.inhparent = r.oid\
+         ) \
+         SELECT EXISTS (\
+             SELECT 1 FROM relations r JOIN pg_catalog.pg_class c ON c.oid = r.oid \
+             WHERE (c.relacl IS NOT NULL AND (\
+                    EXISTS (SELECT * FROM pg_catalog.aclexplode(c.relacl) \
+                            EXCEPT SELECT * FROM pg_catalog.aclexplode(pg_catalog.acldefault('r', c.relowner))) \
+                 OR EXISTS (SELECT * FROM pg_catalog.aclexplode(pg_catalog.acldefault('r', c.relowner)) \
+                            EXCEPT SELECT * FROM pg_catalog.aclexplode(c.relacl)))) \
+                OR c.relrowsecurity OR c.relforcerowsecurity \
+                OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a \
+                           WHERE a.attrelid = c.oid AND a.attacl IS NOT NULL AND a.attacl <> '{}'::aclitem[]) \
+                OR EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid)\
+         ) OR EXISTS (\
+             SELECT 1 FROM pg_catalog.pg_default_acl d \
+             WHERE d.defaclrole = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user) \
+               AND d.defaclobjtype = 'r' \
+               AND d.defaclnamespace IN (0, (SELECT relnamespace FROM pg_catalog.pg_class WHERE oid = $1))\
+         )",
+        &[st.pgt_relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(true);
+    if protected {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "cannot replace storage for {table}: table or partition grants, row security, policies, or default table privileges cannot be preserved; remove them explicitly before ALTER and reapply them afterward"
+        )));
+    }
+    Ok(())
+}
+
 /// Publish a fully populated shadow relation under the stream-table name.
 /// RESTRICT keeps unexpected external dependencies from being dropped.
 fn atomic_swap_shadow_table(
@@ -1025,6 +1071,7 @@ fn alter_stream_table_query(
 
     // ── Phase 3: Build isolated shadow storage ──
     publication::ensure_storage_replacement_allowed(&st)?;
+    ensure_storage_authorization_is_replaceable(&st)?;
     pgrx::warning!("pg_trickle: ALTER QUERY requires a protected shadow rebuild: {rebuild_reason}");
     let shadow_name = format!("__pgt_shadow_{}", st.pgt_id);
     let original_owner = relation_owner(st.pgt_relid)?;
@@ -1383,6 +1430,45 @@ fn alter_stream_table_partition_key(
     let st = &locked_st;
     check_stream_table_ownership(st.pgt_relid, schema, table_name)?;
     publication::ensure_storage_replacement_allowed(st)?;
+    ensure_storage_authorization_is_replaceable(st)?;
+
+    // Lock the *existing* relation before inspecting dependent stream tables.
+    // A concurrent CREATE may still hold an ACCESS SHARE lock while adding
+    // its STREAM_TABLE dependency. Without this lock a new dependent can
+    // commit after our check but before DROP obtains ACCESS EXCLUSIVE.
+    // No catalog/storage changes have happened at this point.
+    let storage_name = format!(
+        "{}.{}",
+        quote_identifier(schema),
+        quote_identifier(table_name)
+    );
+    // nosemgrep: rust.spi.run.dynamic-format — both identifiers are escaped and ownership was checked above.
+    Spi::run(&format!(
+        "LOCK TABLE {storage_name} IN ACCESS EXCLUSIVE MODE"
+    ))
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "cannot lock {schema}.{table_name} for repartitioning: {e}"
+        ))
+    })?;
+
+    // Repartitioning drops and recreates the storage relation. Unlike the
+    // ALTER QUERY shadow swap, this path cannot rebind downstream dependency
+    // OIDs, ST change buffers, and synchronous IVM triggers. Fail closed
+    // *before* changing storage or catalog identity to preserve the graph.
+    let downstream_ids = StDependency::get_downstream_pgt_ids(st.pgt_relid)?;
+    if !downstream_ids.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            concat!(
+                "cannot change partition_by on {}.{}: ",
+                "{} downstream stream table(s) depend on this storage relation; ",
+                "remove dependent stream tables before repartitioning, then recreate them"
+            ),
+            schema,
+            table_name,
+            downstream_ids.len()
+        )));
+    }
 
     // Get current storage columns for validation.
     let columns = get_storage_table_columns(schema, table_name)?;
@@ -3415,11 +3501,18 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_stream_tables \
          SET status = 'ACTIVE', consecutive_errors = 0, \
+         recovery_generation = recovery_generation + 1, \
          last_error_message = NULL, last_error_at = NULL, updated_at = now() \
          WHERE pgt_id = $1",
         &[st.pgt_id.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    // The scheduler may still hold a DAG snapshot that excludes the ERROR or
+    // SUSPENDED node. Publishing ACTIVE in the catalog is not sufficient:
+    // invalidate its cached eligibility so it can enqueue the protected
+    // reinitialization (including after a cancelled dispatcher job).
+    shmem::signal_dag_invalidation(st.pgt_id);
 
     crate::monitor::alert_resumed(&schema, &table_name, st.pooler_compatibility_mode);
 

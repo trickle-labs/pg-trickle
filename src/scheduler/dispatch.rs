@@ -329,6 +329,20 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
                 let subtxn = super::SubTransaction::begin();
                 let result = (|| -> Result<(), crate::error::PgTrickleError> {
                     for &pgt_id in &job.member_pgt_ids {
+                        let Some(member_generation) = job.generation_for_member(pgt_id) else {
+                            warning!(
+                                "pg_trickle: job {} has no recovery fence for member {}, skipping stale failure",
+                                job_id,
+                                pgt_id,
+                            );
+                            continue;
+                        };
+                        match StreamTableMeta::lock_for_scheduled_failure(pgt_id, member_generation)
+                        {
+                            Ok(true) => {}
+                            Ok(false) => continue,
+                            Err(error) => return Err(error),
+                        }
                         if failure.retryable && failure.counts_toward_suspension {
                             let tuning = load_st_by_id(pgt_id)
                                 .map(|st| st.runtime_tuning())
@@ -930,11 +944,25 @@ pub(super) fn parallel_dispatch_tick(
                             .as_deref()
                             .unwrap_or("Refresh failed permanently");
                         for &pgt_id in &unit.member_pgt_ids {
-                            // Only set ERROR if not already in ERROR state.
-                            if let Some(st) = load_st_by_id(pgt_id)
-                                && st.status != StStatus::Error
-                            {
-                                let _ = StreamTableMeta::set_error_state(pgt_id, error_detail);
+                            let Some(generation) = job.generation_for_member(pgt_id) else {
+                                warning!(
+                                    "pg_trickle: failed job {} lacks recovery fence for member {}",
+                                    job_id,
+                                    pgt_id,
+                                );
+                                continue;
+                            };
+                            if let Err(e) = StreamTableMeta::set_error_state_if_generation(
+                                pgt_id,
+                                error_detail,
+                                generation,
+                            ) {
+                                warning!(
+                                    "pg_trickle: failed job {} could not mark member {} ERROR: {}",
+                                    job_id,
+                                    pgt_id,
+                                    e,
+                                );
                             }
                         }
                     }

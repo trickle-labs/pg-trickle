@@ -1097,6 +1097,21 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
     let stream_name = resolve_name_as_caller(name, &caller.search_path)?;
     let meta = lock_snapshot_stream(&stream_name, SnapshotStreamLockMode::Update)?;
 
+    // An IMMEDIATE stream has no deferred CDC history. Restoring older rows
+    // would leave its synchronous triggers applying new deltas to a stale
+    // baseline, with no scheduler to repair intervening source changes.
+    // Reject before any storage, frontier, or consumer state is modified.
+    if meta.refresh_mode.is_immediate() {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            concat!(
+                "cannot restore a snapshot into IMMEDIATE stream table {}: ",
+                "intervening source changes cannot be replayed; ",
+                "reinitialize the stream table from its sources instead"
+            ),
+            stream_name.quoted()
+        )));
+    }
+
     let snapshot_name = resolve_name_as_caller(source, &caller.search_path)?;
     let snapshot_catalog = load_snapshot_catalog_row(&snapshot_name)?;
     validate_snapshot_version(&snapshot_catalog.snapshot_version)?;

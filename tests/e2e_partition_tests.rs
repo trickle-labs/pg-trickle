@@ -300,19 +300,16 @@ async fn test_partition_attach_triggers_reinit() {
     )
     .await;
 
-    // Partition changes suspend the stream table until it is explicitly repaired.
-    let status: String = db
+    // A normal ATTACH is automatically repaired by the next full rebuild.
+    let state: String = db
         .query_scalar(
-            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+            "SELECT status || ':' || needs_reinit::text FROM pgtrickle.pgt_stream_tables \
              WHERE pgt_name = 'attach_st'",
         )
         .await;
-    assert_eq!(status, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
+    assert_eq!(state, "ACTIVE:true");
 
-    db.execute("SELECT pgtrickle.reinitialize_stream_table('attach_st')")
-        .await;
-
-    // Refresh after repair should pick up all data including the newly attached partition.
+    // Refresh should pick up pre-existing rows in the newly attached partition.
     db.refresh_st("attach_st").await;
 
     db.assert_st_matches_query(
@@ -515,19 +512,16 @@ async fn test_partition_detach_triggers_reinit() {
     db.execute("ALTER TABLE detach_orders DETACH PARTITION detach_orders_2026")
         .await;
 
-    // Partition changes suspend the stream table until it is explicitly repaired.
-    let status: String = db
+    // A normal DETACH is automatically repaired by the next refresh.
+    let state: String = db
         .query_scalar(
-            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+            "SELECT status || ':' || needs_reinit::text FROM pgtrickle.pgt_stream_tables \
              WHERE pgt_name = 'detach_st'",
         )
         .await;
-    assert_eq!(status, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
+    assert_eq!(state, "ACTIVE:true");
 
-    db.execute("SELECT pgtrickle.reinitialize_stream_table('detach_st')")
-        .await;
-
-    // After repair, only the remaining partition's data should be visible.
+    // After automatic repair, only the remaining partition's data is visible.
     db.refresh_st("detach_st").await;
 
     let count: i64 = db.count("detach_st").await;
@@ -535,6 +529,450 @@ async fn test_partition_detach_triggers_reinit() {
         count, 1,
         "After reinit, only remaining partition data should be visible"
     );
+}
+
+// ── #1418: Partition removal must never leave silent stale aggregates ──
+
+#[tokio::test]
+async fn test_partition_direct_drop_marks_parent_reinit_and_rebuilds_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE drop_orders (
+            id INT, d DATE NOT NULL, amount INT,
+            PRIMARY KEY (id, d)
+        ) PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE drop_orders_old PARTITION OF drop_orders
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE drop_orders_new PARTITION OF drop_orders
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO drop_orders VALUES
+         (1, '2025-01-01', 10), (2, '2025-06-01', 20),
+         (3, '2026-01-01', 30)",
+    )
+    .await;
+    let query = "SELECT COUNT(*) AS n, SUM(amount) AS total FROM drop_orders";
+    db.create_st("drop_totals", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.refresh_st("drop_totals").await;
+    db.assert_st_matches_query("drop_totals", query).await;
+
+    // No DETACH and no row-level DELETEs: sql_drop must trace the dropped
+    // child's OID through the parent's saved ancestry snapshot.
+    db.execute("DROP TABLE drop_orders_old").await;
+    let state: String = db
+        .query_scalar(
+            "SELECT status || ':' || needs_reinit::text
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'drop_totals'",
+        )
+        .await;
+    assert_eq!(state, "ACTIVE:true");
+
+    db.refresh_st("drop_totals").await;
+    db.assert_st_matches_query("drop_totals", query).await;
+    let remaining: i64 = db.query_scalar("SELECT n FROM drop_totals").await;
+    assert_eq!(remaining, 1);
+}
+
+#[tokio::test]
+async fn test_partition_create_child_after_stream_then_direct_drop() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE create_part_root (
+            id INT, d DATE NOT NULL, PRIMARY KEY (id,d)
+        ) PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE create_part_old PARTITION OF create_part_root
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute("INSERT INTO create_part_root VALUES (1,'2025-02-01')")
+        .await;
+    let query = "SELECT COUNT(*) AS n FROM create_part_root";
+    db.create_st("create_part_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.refresh_st("create_part_st").await;
+
+    // Unlike ALTER TABLE ATTACH, CREATE TABLE ... PARTITION OF only issues
+    // CREATE TABLE on the child. It must still update the parent snapshot.
+    db.execute(
+        "CREATE TABLE create_part_new PARTITION OF create_part_root
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    db.execute("INSERT INTO create_part_root VALUES (2,'2026-03-01')")
+        .await;
+    db.refresh_st("create_part_st").await;
+    db.assert_st_matches_query("create_part_st", query).await;
+
+    db.execute("DROP TABLE create_part_new").await;
+    let state: String = db
+        .query_scalar(
+            "SELECT status || ':' || needs_reinit::text
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'create_part_st'",
+        )
+        .await;
+    assert_eq!(state, "ACTIVE:true");
+    db.refresh_st("create_part_st").await;
+    db.assert_st_matches_query("create_part_st", query).await;
+}
+
+#[tokio::test]
+async fn test_partition_nested_drop_invalidates_grandparent() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE nest_source (id INT, d DATE NOT NULL, region TEXT NOT NULL,
+         PRIMARY KEY (id, d, region)) PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE nest_year PARTITION OF nest_source
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')
+         PARTITION BY LIST (region)",
+    )
+    .await;
+    db.execute("CREATE TABLE nest_leaf PARTITION OF nest_year FOR VALUES IN ('EU')")
+        .await;
+    db.execute(
+        "CREATE TABLE nest_other PARTITION OF nest_source
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO nest_source VALUES
+         (1,'2025-02-01','EU'),(2,'2026-02-01','US')",
+    )
+    .await;
+    let query = "SELECT COUNT(*) AS n FROM nest_source";
+    db.create_st("nest_st", query, "1m", "DIFFERENTIAL").await;
+    db.refresh_st("nest_st").await;
+
+    db.execute("DROP TABLE nest_leaf").await;
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'nest_st'",
+        )
+        .await;
+    assert!(needs_reinit, "grandparent dependency must be invalidated");
+    db.refresh_st("nest_st").await;
+    db.assert_st_matches_query("nest_st", query).await;
+    let remaining: i64 = db.query_scalar("SELECT n FROM nest_st").await;
+    assert_eq!(remaining, 1);
+}
+
+#[tokio::test]
+async fn test_partition_empty_attach_then_drop_updates_ancestry() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE late_source (id INT, d DATE NOT NULL,
+         PRIMARY KEY (id, d)) PARTITION BY RANGE(d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE late_first PARTITION OF late_source
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute("INSERT INTO late_source VALUES (1,'2025-03-01')")
+        .await;
+    let query = "SELECT COUNT(*) AS n FROM late_source";
+    db.create_st("late_st", query, "1m", "DIFFERENTIAL").await;
+    db.refresh_st("late_st").await;
+
+    db.execute("CREATE TABLE late_second (LIKE late_source INCLUDING ALL)")
+        .await;
+    db.execute(
+        "ALTER TABLE late_source ATTACH PARTITION late_second
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    let active: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'late_st'",
+        )
+        .await;
+    assert_eq!(active, "ACTIVE", "empty attach should not suspend the ST");
+
+    db.execute("INSERT INTO late_source VALUES (2,'2026-03-01')")
+        .await;
+    db.refresh_st("late_st").await;
+    db.execute("DROP TABLE late_second").await;
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'late_st'",
+        )
+        .await;
+    assert!(needs_reinit, "the newly attached child must be tracked");
+    db.refresh_st("late_st").await;
+    db.assert_st_matches_query("late_st", query).await;
+}
+
+#[tokio::test]
+async fn test_partition_drop_rollback_preserves_materialization() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE rollback_source (id INT, d DATE NOT NULL,
+         PRIMARY KEY (id, d)) PARTITION BY RANGE(d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE rollback_leaf PARTITION OF rollback_source
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute("INSERT INTO rollback_source VALUES (1,'2025-01-01')")
+        .await;
+    let query = "SELECT COUNT(*) AS n FROM rollback_source";
+    db.create_st("rollback_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.refresh_st("rollback_st").await;
+
+    let mut connection = db.pool.acquire().await.expect("acquire connection");
+    sqlx::query("BEGIN")
+        .execute(&mut *connection)
+        .await
+        .expect("begin transaction");
+    sqlx::query("DROP TABLE rollback_leaf")
+        .execute(&mut *connection)
+        .await
+        .expect("drop partition within transaction");
+    let marked: bool = sqlx::query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables
+         WHERE pgt_name = 'rollback_st'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .expect("read transactional invalidation");
+    assert!(marked);
+    sqlx::query("ROLLBACK")
+        .execute(&mut *connection)
+        .await
+        .expect("rollback");
+    drop(connection);
+
+    let marked_after: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'rollback_st'",
+        )
+        .await;
+    assert!(!marked_after, "invalidations must roll back with DROP");
+    db.assert_st_matches_query("rollback_st", query).await;
+}
+
+#[tokio::test]
+async fn test_partition_concurrent_detach_stays_suspended_until_resume() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE concurrent_root (id INT, d DATE NOT NULL,
+         PRIMARY KEY (id,d)) PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE concurrent_old PARTITION OF concurrent_root
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE concurrent_new PARTITION OF concurrent_root
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO concurrent_root VALUES
+         (1,'2025-01-01'),(2,'2026-01-01')",
+    )
+    .await;
+    let query = "SELECT COUNT(*) AS n FROM concurrent_root";
+    db.create_st("concurrent_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.refresh_st("concurrent_st").await;
+
+    // Two-phase DETACH cannot be reinitialized before its final commit.
+    db.execute("ALTER TABLE concurrent_root DETACH PARTITION concurrent_old CONCURRENTLY")
+        .await;
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'concurrent_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED");
+
+    db.execute("SELECT pgtrickle.resume_stream_table('concurrent_st')")
+        .await;
+    db.refresh_st("concurrent_st").await;
+    db.assert_st_matches_query("concurrent_st", query).await;
+}
+
+#[tokio::test]
+async fn test_partition_append_only_pk_survives_insert_only_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE app_source (id INT, d DATE NOT NULL, region TEXT NOT NULL,
+         PRIMARY KEY (id,d)) PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE app_p1 PARTITION OF app_source
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute("INSERT INTO app_source VALUES (1,'2025-05-01','EU')")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'app_st',
+            query => 'SELECT id, d, region FROM app_source',
+            schedule => '1m',
+            refresh_mode => 'DIFFERENTIAL',
+            append_only => true
+        )",
+    )
+    .await;
+    db.refresh_st_with_retry("app_st").await;
+    db.execute("INSERT INTO app_source VALUES (2,'2025-06-01','EU')")
+        .await;
+    db.refresh_st_with_retry("app_st").await;
+    // The append-only INSERT fast path is valid for a monotonic row
+    // projection; an aggregate would legitimately revert to MERGE because
+    // inserting source rows can UPDATE an existing output group.
+    let append_only: bool = db
+        .query_scalar(
+            "SELECT is_append_only FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'app_st'",
+        )
+        .await;
+    assert!(
+        append_only,
+        "insert-only batches must not disable the explicit flag"
+    );
+    db.assert_st_matches_query("app_st", "SELECT id, d, region FROM app_source")
+        .await;
+}
+
+#[tokio::test]
+async fn test_partition_direct_drop_suspends_immediate_until_protected_resume() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE immediate_part_source (
+            id INT, d DATE NOT NULL, PRIMARY KEY (id,d)
+        ) PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE immediate_part_old PARTITION OF immediate_part_source
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE immediate_part_new PARTITION OF immediate_part_source
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO immediate_part_source VALUES
+         (1,'2025-02-01'),(2,'2026-02-01')",
+    )
+    .await;
+    let query = "SELECT id, d FROM immediate_part_source";
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'immediate_part_st',
+            query => 'SELECT id, d FROM immediate_part_source',
+            refresh_mode => 'IMMEDIATE'
+        )",
+    )
+    .await;
+    db.assert_st_matches_query("immediate_part_st", query).await;
+
+    // IMMEDIATE has no scheduler to process a pending reinitialization.
+    db.execute("DROP TABLE immediate_part_old").await;
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'immediate_part_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED");
+    db.execute("SELECT pgtrickle.resume_stream_table('immediate_part_st')")
+        .await;
+    db.assert_st_matches_query("immediate_part_st", query).await;
+}
+
+#[tokio::test]
+async fn test_partition_and_plain_wal_requests_report_eligibility_blockers() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE requested_wal_plain (id INT PRIMARY KEY, v INT)")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'requested_wal_plain_st',
+            query => 'SELECT id, v FROM requested_wal_plain',
+            refresh_mode => 'DIFFERENTIAL',
+            cdc_mode => 'wal'
+        )",
+    )
+    .await;
+
+    db.execute(
+        "CREATE TABLE requested_wal_root (
+            id INT, d DATE NOT NULL, PRIMARY KEY (id,d)
+        ) PARTITION BY RANGE (d)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE requested_wal_leaf PARTITION OF requested_wal_root
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'requested_wal_root_st',
+            query => 'SELECT id, d FROM requested_wal_root',
+            refresh_mode => 'DIFFERENTIAL',
+            cdc_mode => 'wal'
+        )",
+    )
+    .await;
+
+    // Neither source is currently safe to adopt into WAL: the regular table
+    // has default replica identity, and the partitioned source has relkind p.
+    // The requested CDC mode must be visible, not silently treated as TRIGGER.
+    for source in ["requested_wal_plain", "requested_wal_root"] {
+        let alert: Option<String> = db
+            .query_scalar(&format!(
+                "SELECT alert FROM pgtrickle.check_cdc_health()
+                 WHERE source_relid = '{source}'::regclass::oid::bigint",
+            ))
+            .await;
+        let alert = alert.expect("explicit WAL request needs a health explanation");
+        assert!(
+            alert.contains("WAL CDC requested"),
+            "unexpected {source} eligibility alert: {alert}",
+        );
+        assert!(
+            alert.contains("REPLICA IDENTITY FULL")
+                || alert.contains("partitioned parent")
+                || alert.contains("wal_level")
+                || alert.contains("replication slot"),
+            "alert must identify the prerequisite: {alert}",
+        );
+    }
 }
 
 // ── PT4: Foreign table source restriction ──────────────────────────────
@@ -1989,6 +2427,375 @@ async fn test_alter_st_partition_by_invalid_column_error() {
         msg.contains("nonexistent"),
         "Error should mention the invalid column: {msg}"
     );
+}
+
+/// A partition-key migration changes the producer's OID. Until that path
+/// can rebind the graph like ALTER QUERY, reject a live downstream chain.
+#[tokio::test]
+async fn test_alter_st_partition_key_with_downstream_chain_rejects_before_replacement() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE guard_chain_src (
+            id INT PRIMARY KEY, event_day DATE NOT NULL, amount INT NOT NULL)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO guard_chain_src VALUES
+         (1, '2026-01-01', 10), (2, '2026-02-01', 20)",
+    )
+    .await;
+    db.create_st(
+        "guard_chain_up",
+        "SELECT id, event_day, amount FROM guard_chain_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "guard_chain_down",
+        "SELECT id, amount FROM guard_chain_up",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "guard_chain_leaf",
+        "SELECT id FROM guard_chain_down",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let original_oid: i64 = db
+        .query_scalar("SELECT 'guard_chain_up'::regclass::oid::bigint")
+        .await;
+    let dependency_oid: i64 = db
+        .query_scalar(
+            "SELECT source_relid::bigint FROM pgtrickle.pgt_dependencies
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                             WHERE pgt_name = 'guard_chain_down')
+               AND source_type = 'STREAM_TABLE'",
+        )
+        .await;
+    assert_eq!(dependency_oid, original_oid);
+
+    let err = db
+        .try_execute(
+            "SELECT pgtrickle.alter_stream_table(
+               'guard_chain_up', partition_by => 'event_day')",
+        )
+        .await
+        .expect_err("repartitioning must not leave downstream relations dangling");
+    assert!(
+        err.to_string().contains("downstream stream table")
+            && err.to_string().contains("partition_by"),
+        "unexpected partition-dependency error: {err}"
+    );
+    let current_oid: i64 = db
+        .query_scalar("SELECT 'guard_chain_up'::regclass::oid::bigint")
+        .await;
+    assert_eq!(
+        current_oid, original_oid,
+        "rejected ALTER replaced the parent"
+    );
+    let current_dependency_oid: i64 = db
+        .query_scalar(
+            "SELECT source_relid::bigint FROM pgtrickle.pgt_dependencies
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                             WHERE pgt_name = 'guard_chain_down')
+               AND source_type = 'STREAM_TABLE'",
+        )
+        .await;
+    assert_eq!(current_dependency_oid, original_oid);
+    let key: Option<String> = db
+        .query_scalar_opt(
+            "SELECT st_partition_key FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'guard_chain_up'",
+        )
+        .await;
+    assert!(key.is_none());
+
+    db.execute("INSERT INTO guard_chain_src VALUES (3, '2026-03-01', 30)")
+        .await;
+    db.refresh_st_with_retry("guard_chain_up").await;
+    db.refresh_st_with_retry("guard_chain_down").await;
+    db.refresh_st_with_retry("guard_chain_leaf").await;
+    db.assert_st_matches_query(
+        "guard_chain_up",
+        "SELECT id, event_day, amount FROM guard_chain_src",
+    )
+    .await;
+    db.assert_st_matches_query("guard_chain_down", "SELECT id, amount FROM guard_chain_src")
+        .await;
+    db.assert_st_matches_query("guard_chain_leaf", "SELECT id FROM guard_chain_src")
+        .await;
+}
+
+#[tokio::test]
+async fn test_alter_st_partition_key_change_and_remove_reject_with_downstream() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE guard_change_src (
+            id INT PRIMARY KEY, event_day DATE NOT NULL, category TEXT NOT NULL)",
+    )
+    .await;
+    db.execute("INSERT INTO guard_change_src VALUES (1, '2026-01-01', 'A')")
+        .await;
+    db.create_st_partitioned(
+        "guard_change_up",
+        "SELECT id, event_day, category FROM guard_change_src",
+        "1m",
+        "DIFFERENTIAL",
+        "event_day",
+    )
+    .await;
+    db.create_st(
+        "guard_change_down",
+        "SELECT id, category FROM guard_change_up",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let oid_before: i64 = db
+        .query_scalar("SELECT 'guard_change_up'::regclass::oid::bigint")
+        .await;
+    for new_key in ["category", ""] {
+        let err = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.alter_stream_table(
+                    'guard_change_up', partition_by => '{new_key}')"
+            ))
+            .await
+            .expect_err("both a changed key and removal must reject downstream graphs");
+        assert!(err.to_string().contains("downstream stream table"));
+        let oid_after: i64 = db
+            .query_scalar("SELECT 'guard_change_up'::regclass::oid::bigint")
+            .await;
+        assert_eq!(oid_after, oid_before);
+        let key: String = db
+            .query_scalar(
+                "SELECT st_partition_key FROM pgtrickle.pgt_stream_tables
+                 WHERE pgt_name = 'guard_change_up'",
+            )
+            .await;
+        assert_eq!(key, "event_day");
+    }
+    // The rejected ALTER must preserve the existing downstream dependency
+    // and materialized result. Incremental refresh of a partitioned producer
+    // with downstream consumers is an independent issue (#1439); the two
+    // unpartitioned and IMMEDIATE guard tests exercise post-rejection writes.
+    let dependent_source_oid: i64 = db
+        .query_scalar(
+            "SELECT source_relid::bigint FROM pgtrickle.pgt_dependencies
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                             WHERE pgt_name = 'guard_change_down')
+               AND source_type = 'STREAM_TABLE'",
+        )
+        .await;
+    assert_eq!(dependent_source_oid, oid_before);
+    db.assert_st_matches_query(
+        "guard_change_up",
+        "SELECT id, event_day, category FROM guard_change_src",
+    )
+    .await;
+    db.assert_st_matches_query(
+        "guard_change_down",
+        "SELECT id, category FROM guard_change_src",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_alter_st_partition_key_rejects_immediate_downstream_without_losing_triggers() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE guard_immediate_src (
+            id INT PRIMARY KEY, event_day DATE NOT NULL, amount INT NOT NULL)",
+    )
+    .await;
+    db.execute("INSERT INTO guard_immediate_src VALUES (1, '2026-01-01', 10)")
+        .await;
+    db.create_st(
+        "guard_immediate_up",
+        "SELECT id, event_day, amount FROM guard_immediate_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'guard_immediate_down',
+            query => 'SELECT id, amount FROM guard_immediate_up',
+            schedule => NULL, refresh_mode => 'IMMEDIATE')",
+    )
+    .await;
+    let parent_oid: i64 = db
+        .query_scalar("SELECT 'guard_immediate_up'::regclass::oid::bigint")
+        .await;
+    let triggers_before: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM pg_catalog.pg_trigger
+             WHERE tgrelid = 'guard_immediate_up'::regclass AND NOT tgisinternal",
+        )
+        .await;
+    assert!(
+        triggers_before > 0,
+        "downstream IVM must have source triggers"
+    );
+
+    let err = db
+        .try_execute(
+            "SELECT pgtrickle.alter_stream_table(
+               'guard_immediate_up', partition_by => 'event_day')",
+        )
+        .await
+        .expect_err("repartitioning must preserve downstream IVM trigger ownership");
+    assert!(err.to_string().contains("downstream stream table"));
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT 'guard_immediate_up'::regclass::oid::bigint")
+            .await,
+        parent_oid
+    );
+    assert_eq!(
+        db.query_scalar::<i64>(
+            "SELECT count(*) FROM pg_catalog.pg_trigger
+             WHERE tgrelid = 'guard_immediate_up'::regclass AND NOT tgisinternal"
+        )
+        .await,
+        triggers_before
+    );
+
+    db.execute("INSERT INTO guard_immediate_src VALUES (2, '2026-02-01', 20)")
+        .await;
+    db.refresh_st_with_retry("guard_immediate_up").await;
+    db.assert_st_matches_query(
+        "guard_immediate_down",
+        "SELECT id, amount FROM guard_immediate_src",
+    )
+    .await;
+}
+
+/// An uncommitted CREATE of a downstream stream holds a read lock on the
+/// upstream relation. Repartition must wait for that dependency to commit
+/// before deciding whether it may drop and replace the relation.
+#[tokio::test]
+async fn test_alter_st_partition_key_serializes_concurrent_downstream_registration() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE guard_race_src (
+            id INT PRIMARY KEY, event_day DATE NOT NULL)",
+    )
+    .await;
+    db.execute("INSERT INTO guard_race_src VALUES (1, '2026-01-01')")
+        .await;
+    db.create_st(
+        "guard_race_up",
+        "SELECT id, event_day FROM guard_race_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let upstream_oid: i64 = db
+        .query_scalar("SELECT 'guard_race_up'::regclass::oid::bigint")
+        .await;
+
+    // Complete downstream creation, but deliberately keep its transaction
+    // uncommitted while the repartition request begins.
+    let mut create_tx = db.pool.begin().await.expect("begin dependent creation");
+    sqlx::query(
+        "SELECT pgtrickle.create_stream_table(
+            'guard_race_down',
+            'SELECT id FROM guard_race_up',
+            '1m', 'DIFFERENTIAL')",
+    )
+    .execute(&mut *create_tx)
+    .await
+    .expect("create downstream stream table inside transaction");
+    let creator_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *create_tx)
+        .await
+        .expect("identify the connection holding the upstream read lock");
+
+    let pool = db.pool.clone();
+    let alter = tokio::spawn(async move {
+        let mut conn = pool.acquire().await.expect("acquire ALTER session");
+        sqlx::query("SET application_name = 'guard_repartition_wait'")
+            .execute(&mut *conn)
+            .await
+            .expect("identify ALTER backend for lock observation");
+        sqlx::query(
+            "SELECT pgtrickle.alter_stream_table(
+                'guard_race_up', partition_by => 'event_day')",
+        )
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+    });
+
+    // A witnessed lock wait, not a sleep alone, proves the race is exercised.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut observed_wait = false;
+    while std::time::Instant::now() < deadline {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_stat_activity a
+                WHERE a.application_name = 'guard_repartition_wait'
+                  AND a.wait_event_type = 'Lock'
+                  AND $1::integer = ANY(pg_catalog.pg_blocking_pids(a.pid)))",
+        )
+        .bind(creator_pid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("observe the creator blocking repartition");
+        if waiting {
+            observed_wait = true;
+            break;
+        }
+        if alter.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        observed_wait,
+        "repartition request did not wait for the concurrent downstream registration"
+    );
+
+    create_tx
+        .commit()
+        .await
+        .expect("publish downstream dependency before ALTER resumes");
+    let err = tokio::time::timeout(std::time::Duration::from_secs(20), alter)
+        .await
+        .expect("ALTER must finish after downstream commits")
+        .expect("ALTER task must not panic")
+        .expect_err("a committed downstream must block repartition");
+    assert!(
+        err.to_string().contains("downstream stream table"),
+        "unexpected post-wait ALTER result: {err}"
+    );
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT 'guard_race_up'::regclass::oid::bigint")
+            .await,
+        upstream_oid
+    );
+    assert_eq!(
+        db.query_scalar::<i64>(
+            "SELECT source_relid::bigint FROM pgtrickle.pgt_dependencies
+             WHERE source_type = 'STREAM_TABLE'
+               AND pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                             WHERE pgt_name = 'guard_race_down')"
+        )
+        .await,
+        upstream_oid,
+        "the waiting ALTER must not orphan the newly committed dependency"
+    );
+
+    db.execute("INSERT INTO guard_race_src VALUES (2, '2026-02-01')")
+        .await;
+    db.refresh_st_with_retry("guard_race_up").await;
+    db.refresh_st_with_retry("guard_race_down").await;
+    db.assert_st_matches_query("guard_race_down", "SELECT id FROM guard_race_src")
+        .await;
 }
 
 // ── A1-3b: HASH partitioned stream tables ───────────────────────────────

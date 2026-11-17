@@ -225,6 +225,20 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ### Fixes
 
+- Keep successful stream-table resumes from being undone by late refresh-worker
+  failures or the dispatcher's failure safety net, using per-member recovery
+  generation fences (#1438).
+
+- Detect `DROP TABLE` on partition children (including nested children)
+  without a preceding DETACH, reinitialize affected parent stream tables and
+  downstream materializations, and preserve the ability to detect drops when
+  upgrading existing dependencies (#1418).
+- Reinitialize automatically on ordinary ATTACH/DETACH while retaining
+  fail-closed suspension for two-phase `DETACH ... CONCURRENTLY` (#1418).
+- Explain blocked per-table WAL CDC requests in the health view and server
+  diagnostics, including missing REPLICA IDENTITY FULL and unsupported
+  partitioned-source cutover (#1418).
+
 - Prevent sustained application load from indefinitely deferring scheduled
   refreshes. Due work resumes at the capped polling backoff while writers are
   still active, in both parallel and sequential scheduling modes (#1412).

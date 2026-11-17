@@ -190,6 +190,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     last_refresh_at TIMESTAMPTZ,
     consecutive_errors INT NOT NULL DEFAULT 0,
     needs_reinit    BOOLEAN NOT NULL DEFAULT FALSE,
+    -- #1438: fence stale scheduled failure writes after recovery.
+    recovery_generation BIGINT NOT NULL DEFAULT 0 CHECK (recovery_generation >= 0),
     auto_threshold  DOUBLE PRECISION,
     last_full_ms    DOUBLE PRECISION,
     functions_used  TEXT[],
@@ -763,6 +765,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_scheduler_jobs (
     unit_kind       TEXT NOT NULL
                      CHECK (unit_kind IN ('singleton', 'atomic_group', 'immediate_closure', 'cyclic_scc', 'repeatable_read_group', 'fused_chain')),
     member_pgt_ids  BIGINT[] NOT NULL,
+    -- Empty for legacy jobs whose dispatch generation cannot be reconstructed.
+    member_recovery_generations BIGINT[] NOT NULL DEFAULT '{}'::BIGINT[],
     root_pgt_id     BIGINT NOT NULL,
     status          TEXT NOT NULL DEFAULT 'QUEUED'
                      CHECK (status IN ('QUEUED', 'RUNNING', 'SUCCEEDED',

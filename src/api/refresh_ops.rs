@@ -670,6 +670,18 @@ fn execute_manual_full_refresh_target(
         crate::cdc::lock_source_relations(source_oids)?;
         crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
     }
+    // An extension upgrade may introduce private aggregate columns absent from
+    // the existing relation. Reconcile them before TRUNCATE/INSERT, but only
+    // when a protected FULL reinitialization will populate their state.
+    if st.refresh_mode == RefreshMode::Differential && st.needs_reinit {
+        refresh::with_stream_owner(st, || {
+            super::helpers::ensure_differential_storage_auxiliary_columns(
+                schema,
+                table_name,
+                &st.defining_query,
+            )
+        })?;
+    }
     if !distance_snapshot_prepared && schema == st.pgt_schema && table_name == st.pgt_name {
         crate::api::prepare_distance_snapshot(st);
     }
@@ -1051,6 +1063,28 @@ fn execute_manual_full_refresh_target(
     Ok((rows_inserted as i64, 0i64))
 }
 
+/// Recreate the frontier for a manual differential-to-FULL fallback.
+///
+/// The differential frontier was captured before the fallback took source
+/// SHARE locks.  A writer can commit in between, and the FULL recompute will
+/// then contain changes beyond that stale frontier.  After FULL succeeds the
+/// source and upstream-ST locks are still held until transaction commit, so
+/// the current WAL bound and change buffers describe its protected baseline.
+/// Never replace the frontier before the FULL executor actually holds locks.
+fn locked_manual_full_frontier(
+    st: &StreamTableMeta,
+    source_oids: &[pg_sys::Oid],
+    data_ts: &str,
+) -> Result<version::Frontier, PgTrickleError> {
+    let bound = cdc::get_current_wal_lsn()?;
+    let positions = cdc::get_slot_positions_at_bound(source_oids, &bound, true)?;
+    let mut frontier = version::compute_initial_frontier(&positions, data_ts);
+    for (upstream_pgt_id, lsn) in upstream_st_source_positions(st, &bound)? {
+        frontier.set_st_source(upstream_pgt_id, lsn, data_ts.to_string());
+    }
+    Ok(frontier)
+}
+
 /// Execute a DIFFERENTIAL manual refresh using the DVM engine.
 ///
 /// If no previous frontier exists (first refresh), falls back to FULL.
@@ -1208,7 +1242,8 @@ fn execute_manual_differential_refresh(
                     msg
                 );
                 let (ins, del) = refresh::execute_full_refresh(st)?;
-                StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)?;
+                let full_frontier = locked_manual_full_frontier(st, source_oids, &data_ts)?;
+                StreamTableMeta::store_frontier(st.pgt_id, &full_frontier)?;
                 pgrx::info!(
                     "Stream table {}.{} refreshed (FULL fallback: +{} -{})",
                     schema,
@@ -1225,6 +1260,14 @@ fn execute_manual_differential_refresh(
         refresh::test_atomicity_barrier(st, "after_apply", rows_inserted + rows_deleted)
     {
         pgrx::error!("{}", message);
+    }
+
+    // The differential executor may internally fall back to FULL (adaptive
+    // strategy, RLS, set-operation state, etc.).  Such a rebuild reads the
+    // source after acquiring SHARE locks, not at the differential's earlier
+    // cut.  Persist the protected FULL frontier instead (#1417).
+    if refresh::current_effective_mode() == "FULL" {
+        new_frontier = locked_manual_full_frontier(st, source_oids, &data_ts)?;
     }
 
     // Store the new frontier and mark refresh complete in a single SPI call (S3).

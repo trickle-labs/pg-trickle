@@ -149,6 +149,14 @@ pub(crate) fn execute_full_refresh_target(
         let name = &st.pgt_name;
         let query = &st.defining_query;
 
+        // The scheduler and graph paths must repair the same legacy storage
+        // contract as manual reinitialization before any FULL materialization.
+        if st.refresh_mode == crate::dag::RefreshMode::Differential && st.needs_reinit {
+            crate::api::helpers::ensure_differential_storage_auxiliary_columns(
+                schema, name, query,
+            )?;
+        }
+
         // WP2 bounded subset: incremental INTERSECT/EXCEPT remains guarded, so
         // FULL refreshes use direct defining-query storage rather than exposing
         // branch multiplicity columns left by older versions.
@@ -269,7 +277,33 @@ pub(crate) fn execute_full_refresh_target(
             format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
         };
 
-        let insert_sql = format!("INSERT INTO {quoted_table} {insert_body}");
+        // Existing storage can have auxiliary columns in an older physical
+        // order. Name the targets explicitly instead of relying on SELECT
+        // position (the manual FULL path already does this).
+        let insert_sql = if st.refresh_mode == crate::dag::RefreshMode::Differential
+            && centroid_insert.is_none()
+            && !crate::dvm::query_needs_dual_count(query)
+        {
+            let mut target_columns = vec!["__pgt_row_id".to_string()];
+            target_columns.extend(
+                crate::cdc::resolve_st_output_columns(st.pgt_relid)?
+                    .into_iter()
+                    .map(|(name, _)| name),
+            );
+            target_columns.extend(
+                crate::api::helpers::differential_storage_auxiliary_columns(query)?
+                    .into_iter()
+                    .map(|(name, _)| name),
+            );
+            let target_columns = target_columns
+                .iter()
+                .map(|column| crate::api::helpers::quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("INSERT INTO {quoted_table} ({target_columns}) {insert_body}")
+        } else {
+            format!("INSERT INTO {quoted_table} {insert_body}")
+        };
 
         let rows_inserted = Spi::connect_mut(|client| {
             let result = client

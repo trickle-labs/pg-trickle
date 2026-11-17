@@ -51,8 +51,9 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # shortcut: SQLx 0.9 locks an unused SQLite; remove this exception when a patched SQLx is available.
-          # The preceding graph check rejects active SQLite; cargo-deny does not ignore this advisory.
+          # SEC-001: Advisory ignores are centralized in deny.toml.
+          # This list must stay in sync with the [advisories] ignore list in deny.toml.
+          # See deny.toml for the rationale comment on each advisory.
           ignore: RUSTSEC-2021-0127,RUSTSEC-2026-0459
 
       - name: Install cargo-deny
@@ -86,6 +87,6 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # shortcut: SQLx 0.9 locks an unused SQLite; remove this exception when a patched SQLx is available.
-          # The preceding graph check rejects active SQLite.
+          # Match the annotated, reviewed exceptions in deny.toml: serde_cbor
+          # unmaintained and SQLx's unselected optional SQLite backend.
           ignore: RUSTSEC-2021-0127,RUSTSEC-2026-0459

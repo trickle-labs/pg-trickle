@@ -1041,6 +1041,46 @@ impl StreamTableMeta {
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
     }
 
+    /// A failed job may only modify the recovery generation present at enqueue.
+    /// PostgreSQL rechecks this predicate if a concurrent resume touched the row.
+    pub fn set_error_state_if_generation(
+        pgt_id: i64,
+        error_message: &str,
+        recovery_generation: i64,
+    ) -> Result<bool, PgTrickleError> {
+        Spi::get_one_with_args::<i64>(
+            "UPDATE pgtrickle.pgt_stream_tables \
+             SET status = 'ERROR', last_error_message = $1, last_error_at = now(), \
+                 updated_at = now() \
+             WHERE pgt_id = $2 AND recovery_generation = $3 \
+               AND status IN ('ACTIVE', 'INITIALIZING') \
+             RETURNING pgt_id",
+            &[
+                error_message.into(),
+                pgt_id.into(),
+                recovery_generation.into(),
+            ],
+        )
+        .map(|updated| updated.is_some())
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
+    /// The worker performs several bookkeeping SPI writes. Keep the row locked
+    /// in the same transaction through all of them, so resume cannot interleave.
+    pub fn lock_for_scheduled_failure(
+        pgt_id: i64,
+        recovery_generation: i64,
+    ) -> Result<bool, PgTrickleError> {
+        Spi::get_one_with_args::<i64>(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_id = $1 AND recovery_generation = $2 \
+               AND status IN ('ACTIVE', 'INITIALIZING') FOR UPDATE",
+            &[pgt_id.into(), recovery_generation.into()],
+        )
+        .map(|row| row.is_some())
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
     pub fn set_typed_error(
         pgt_id: i64,
         error_message: &str,
@@ -2155,10 +2195,11 @@ impl StDependency {
 /// This ensures the snapshot matches the columns tracked in the change
 /// buffer table, preventing false schema-change alerts.
 ///
-/// The snapshot is a JSON array of objects:
-/// ```json
-/// [{"name":"id","type_oid":23,"ordinal":1},{"name":"val","type_oid":25,"ordinal":2}]
-/// ```
+/// The snapshot is a JSON object containing column metadata, RLS state,
+/// partition child count, and the OIDs of all partition descendants. The OID
+/// list is deliberately excluded from the schema fingerprint: it is a durable
+/// pre-DROP lookup for the sql_drop event trigger, and does not change the
+/// existing fingerprint contract used by installed stream tables.
 ///
 /// Used at creation time to record the source schema in `pgt_dependencies`
 /// so `detect_schema_change_kind()` can compare against the current catalog.
@@ -2212,7 +2253,7 @@ pub fn build_column_snapshot(
     let partition_child_count = query_partition_child_count(source_oid)?;
     let owner = query_source_owner(source_oid)?;
 
-    let snapshot_obj = serde_json::json!({
+    let mut snapshot_obj = serde_json::json!({
         "columns": entries,
         "rls_enabled": rls_enabled,
         "rls_forced": rls_forced,
@@ -2220,6 +2261,8 @@ pub fn build_column_snapshot(
         "owner": owner,
     });
 
+    // Keep the schema fingerprint byte-for-byte compatible with prior
+    // releases. Descendant OIDs are checked separately by the DDL tracker.
     let json_str = serde_json::to_string(&snapshot_obj)
         .map_err(|e| PgTrickleError::InternalError(format!("JSON serialization failed: {e}")))?;
 
@@ -2232,6 +2275,11 @@ pub fn build_column_snapshot(
         s
     });
 
+    // PostgreSQL has already deleted pg_inherits rows by the time sql_drop
+    // fires. Persist the ancestry before that DDL so a dropped child can be
+    // traced to the still-live partitioned source, including nested children.
+    snapshot_obj["partition_descendant_oids"] =
+        serde_json::json!(query_partition_descendant_oids(source_oid)?);
     let snapshot = pgrx::JsonB(snapshot_obj);
     Ok((snapshot, fingerprint))
 }
@@ -2319,6 +2367,42 @@ pub fn query_partition_child_count(source_oid: pg_sys::Oid) -> Result<i64, PgTri
 #[cfg(test)]
 pub fn query_partition_child_count(_source_oid: pg_sys::Oid) -> Result<i64, PgTrickleError> {
     Ok(0)
+}
+
+/// Return all inherited descendants, including subpartitions, ordered by OID.
+///
+/// This must be captured before child relations disappear: sql_drop fires
+/// after PostgreSQL removes the relevant pg_inherits rows.
+#[cfg(not(test))]
+pub fn query_partition_descendant_oids(
+    source_oid: pg_sys::Oid,
+) -> Result<Vec<i64>, PgTrickleError> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "WITH RECURSIVE descendants(relid) AS (                      SELECT inhrelid FROM pg_catalog.pg_inherits WHERE inhparent = $1                      UNION ALL                      SELECT i.inhrelid FROM pg_catalog.pg_inherits i                      JOIN descendants d ON i.inhparent = d.relid                  ) SELECT DISTINCT relid::bigint FROM descendants ORDER BY 1",
+                None,
+                &[source_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut oids = Vec::new();
+        for row in rows {
+            if let Some(oid) = row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            {
+                oids.push(oid);
+            }
+        }
+        Ok(oids)
+    })
+}
+
+#[cfg(test)]
+pub fn query_partition_descendant_oids(
+    _source_oid: pg_sys::Oid,
+) -> Result<Vec<i64>, PgTrickleError> {
+    Ok(Vec::new())
 }
 
 /// Get the stored column snapshot for a dependency pair.
@@ -3950,6 +4034,7 @@ pub struct SchedulerJob {
     pub unit_key: String,
     pub unit_kind: String,
     pub member_pgt_ids: Vec<i64>,
+    pub member_recovery_generations: Vec<i64>,
     pub root_pgt_id: i64,
     pub status: JobStatus,
     pub scheduler_pid: i32,
@@ -3968,7 +4053,27 @@ pub struct SchedulerJob {
     pub member_failure_recorded: bool,
 }
 
+/// Legacy jobs and malformed per-member snapshots must fail closed.
+fn matching_job_generation(member_ids: &[i64], generations: &[i64], id: i64) -> Option<i64> {
+    if member_ids.len() != generations.len() {
+        return None;
+    }
+    member_ids
+        .iter()
+        .position(|&member_id| member_id == id)
+        .and_then(|index| generations.get(index).copied())
+        .filter(|generation| *generation >= 0)
+}
+
 impl SchedulerJob {
+    pub fn generation_for_member(&self, pgt_id: i64) -> Option<i64> {
+        matching_job_generation(
+            &self.member_pgt_ids,
+            &self.member_recovery_generations,
+            pgt_id,
+        )
+    }
+
     /// Enqueue a new job in QUEUED status. Returns the assigned `job_id`.
     #[allow(clippy::too_many_arguments)]
     pub fn enqueue(
@@ -3987,8 +4092,13 @@ impl SchedulerJob {
                 .update(
                     "INSERT INTO pgtrickle.pgt_scheduler_jobs \
                      (dag_version, unit_key, unit_kind, member_pgt_ids, root_pgt_id, \
-                      scheduler_pid, attempt_no, dispatch_tick_id, tick_watermark_lsn) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::pg_lsn) \
+                      scheduler_pid, attempt_no, dispatch_tick_id, tick_watermark_lsn, \
+                      member_recovery_generations) \
+                     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9::pg_lsn, \
+                         ARRAY(SELECT COALESCE(st.recovery_generation, -1::bigint) \
+                               FROM unnest($4::bigint[]) WITH ORDINALITY AS m(pgt_id, ord) \
+                               LEFT JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = m.pgt_id \
+                               ORDER BY m.ord) \
                      RETURNING job_id",
                     None,
                     &[
@@ -4136,7 +4246,8 @@ impl SchedulerJob {
                      root_pgt_id, status, scheduler_pid, worker_pid, attempt_no, \
                      enqueued_at, started_at, finished_at, outcome_detail, retryable, \
                      dispatch_tick_id, tick_watermark_lsn::text, \
-                     outcome_code, outcome_sqlstate, worker_slot_generation, member_failure_recorded \
+                     outcome_code, outcome_sqlstate, worker_slot_generation, \
+                     member_failure_recorded, member_recovery_generations \
                      FROM pgtrickle.pgt_scheduler_jobs \
                      WHERE job_id = $1",
                     None,
@@ -4253,7 +4364,8 @@ impl SchedulerJob {
     /// 6=root_pgt_id, 7=status, 8=scheduler_pid, 9=worker_pid, 10=attempt_no,
     /// 11=enqueued_at, 12=started_at, 13=finished_at, 14=outcome_detail, 15=retryable,
     /// 16=dispatch_tick_id, 17=tick_watermark_lsn, 18=outcome_code,
-    /// 19=outcome_sqlstate, 20=worker_slot_generation, 21=member_failure_recorded.
+    /// 19=outcome_sqlstate, 20=worker_slot_generation,
+    /// 21=member_failure_recorded, 22=member_recovery_generations.
     fn from_spi_table_row(table: &SpiTupleTable<'_>) -> Result<Self, PgTrickleError> {
         let map_spi = |e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string());
 
@@ -4287,6 +4399,10 @@ impl SchedulerJob {
             outcome_sqlstate: table.get::<String>(19).map_err(map_spi)?,
             worker_slot_generation: table.get::<i64>(20).map_err(map_spi)?,
             member_failure_recorded: table.get::<bool>(21).map_err(map_spi)?.unwrap_or(false),
+            member_recovery_generations: table
+                .get::<Vec<i64>>(22)
+                .map_err(map_spi)?
+                .unwrap_or_default(),
         })
     }
 }
@@ -4621,5 +4737,111 @@ mod tests {
                 i64,
                 bool,
             ) -> Result<pgrx::datum::TimestampWithTimeZone, PgTrickleError>;
+    }
+}
+
+#[cfg(test)]
+mod recovery_generation_unit_tests {
+    use super::matching_job_generation;
+
+    #[test]
+    fn test_generation_snapshot_maps_multi_member_jobs_by_position() {
+        assert_eq!(matching_job_generation(&[9, 4, 7], &[2, 5, 3], 4), Some(5));
+        assert_eq!(matching_job_generation(&[9, 4, 7], &[2, 5, 3], 7), Some(3));
+        assert_eq!(matching_job_generation(&[9, 4, 7], &[2, 5, 3], 12), None);
+    }
+
+    #[test]
+    fn test_generation_snapshot_rejects_missing_and_invalid_epochs() {
+        assert_eq!(matching_job_generation(&[9], &[], 9), None);
+        assert_eq!(matching_job_generation(&[9], &[0, 1], 9), None);
+        assert_eq!(matching_job_generation(&[9], &[-1], 9), None);
+    }
+}
+
+#[cfg(feature = "pg_test")]
+#[pgrx::pg_schema]
+mod pg_tests {
+    use super::*;
+
+    #[pg_test]
+    fn test_recovery_epoch_rejects_stale_worker_and_dispatcher_writes() {
+        Spi::run("CREATE TABLE public.fence_source (id INT PRIMARY KEY)").expect("create source");
+        Spi::run("INSERT INTO public.fence_source VALUES (1)").expect("seed source");
+        Spi::run(
+            "SELECT pgtrickle.create_stream_table(
+                 'public.fence_st', 'SELECT id FROM public.fence_source',
+                 schedule => '1h', refresh_mode => 'FULL')",
+        )
+        .expect("create stream table");
+        let pgt_id = Spi::get_one::<i64>(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fence_st'",
+        )
+        .expect("read id")
+        .expect("stream exists");
+        let first_generation = Spi::get_one::<i64>(
+            "SELECT recovery_generation FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fence_st'",
+        )
+        .expect("read first generation")
+        .expect("generation exists");
+        Spi::run(
+            "UPDATE pgtrickle.pgt_stream_tables SET status = 'ERROR' WHERE pgt_name = 'fence_st'",
+        )
+        .expect("simulate worker failure");
+        Spi::run("SELECT pgtrickle.resume_stream_table('public.fence_st')").expect("resume");
+        let resumed_generation = Spi::get_one::<i64>(
+            "SELECT recovery_generation FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fence_st'",
+        )
+        .expect("read resumed generation")
+        .expect("generation exists");
+        assert_eq!(resumed_generation, first_generation + 1);
+
+        assert!(
+            !StreamTableMeta::lock_for_scheduled_failure(pgt_id, first_generation)
+                .expect("reject late worker failure")
+        );
+        assert!(
+            !StreamTableMeta::set_error_state_if_generation(pgt_id, "stale", first_generation)
+                .expect("reject late dispatcher failure")
+        );
+        assert!(
+            StreamTableMeta::lock_for_scheduled_failure(pgt_id, resumed_generation)
+                .expect("accept current worker failure")
+        );
+        assert!(
+            StreamTableMeta::set_error_state_if_generation(pgt_id, "current", resumed_generation)
+                .expect("accept current dispatcher failure")
+        );
+        let status = Spi::get_one::<String>(
+            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fence_st'",
+        )
+        .expect("read status")
+        .expect("status exists");
+        assert_eq!(status, "ERROR");
+
+        Spi::run("SELECT pgtrickle.resume_stream_table('public.fence_st')").expect("resume again");
+        let job_id = SchedulerJob::enqueue(
+            1,
+            "fence-test",
+            "singleton",
+            &[pgt_id],
+            pgt_id,
+            1,
+            1,
+            1,
+            "0/0",
+        )
+        .expect("enqueue after resume");
+        let job = SchedulerJob::get_by_id(job_id)
+            .expect("read job")
+            .expect("job exists");
+        assert_eq!(
+            job.generation_for_member(pgt_id),
+            Some(resumed_generation + 1)
+        );
+        assert!(
+            !StreamTableMeta::set_error_state_if_generation(pgt_id, "stale", resumed_generation)
+                .expect("previous generation still fenced")
+        );
     }
 }
