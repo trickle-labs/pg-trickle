@@ -8,6 +8,15 @@ import v0_109_0_release_gate as gate
 
 
 class RetirementContractTests(unittest.TestCase):
+    def test_live_rag_contract_requires_exact_capped_package_matrix(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        gate.check_live_rag_contract(contract)
+        broken = copy.deepcopy(contract)
+        suite = next(s for s in broken["required_suites"] if s["id"] == "live-rag-100k")
+        suite["command_argv"][3] = "1000000"
+        with self.assertRaises(SystemExit):
+            gate.check_live_rag_contract(broken)
+
     def test_published_vector_upgrade_checks_cannot_be_removed(self):
         script = (gate.prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text()
         gate.check_pgvector_upgrade_script(script)
