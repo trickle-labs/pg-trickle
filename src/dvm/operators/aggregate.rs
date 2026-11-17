@@ -209,27 +209,51 @@ fn needs_special_value_rescan(agg: &AggExpr, child: &OpTree) -> bool {
         return false;
     }
 
-    let Some(Expr::ColumnRef {
+    let type_oid = if let Some(argument) = agg.analyzed_argument.as_ref() {
+        Some(argument.type_oid)
+    } else if let Some(Expr::ColumnRef {
         table_alias,
         column_name,
     }) = agg.argument.as_ref()
-    else {
-        return true;
+    {
+        source_column_type_oid(child, table_alias.as_deref(), column_name)
+            .ok()
+            .flatten()
+    } else {
+        None
     };
-    let mut source = child;
-    while let OpTree::Filter { child, .. } = source {
-        source = child;
+    !type_oid.is_some_and(|type_oid| matches!(type_oid, 20 | 21 | 23))
+}
+
+/// Resolve a source column only through tree shapes where scan type metadata
+/// remains exact. Unsupported or ambiguous shapes retain the special-value
+/// rescan path.
+fn source_column_type_oid(
+    tree: &OpTree,
+    table_alias: Option<&str>,
+    column_name: &str,
+) -> Result<Option<u32>, ()> {
+    match tree {
+        OpTree::Scan { alias, columns, .. } => {
+            if table_alias.is_some_and(|table| table != alias) {
+                return Ok(None);
+            }
+            Ok(columns
+                .iter()
+                .find(|column| column.name == column_name)
+                .map(|column| column.type_oid))
+        }
+        OpTree::Filter { child, .. } => source_column_type_oid(child, table_alias, column_name),
+        OpTree::InnerJoin { left, right, .. } if table_alias.is_some() => {
+            let left = source_column_type_oid(left, table_alias, column_name)?;
+            let right = source_column_type_oid(right, table_alias, column_name)?;
+            match (left, right) {
+                (Some(_), Some(_)) => Err(()),
+                (left, right) => Ok(left.or(right)),
+            }
+        }
+        _ => Err(()),
     }
-    let OpTree::Scan { alias, columns, .. } = source else {
-        return true;
-    };
-    if table_alias.as_ref().is_some_and(|table| table != alias) {
-        return true;
-    }
-    !columns
-        .iter()
-        .find(|column| column.name == *column_name)
-        .is_some_and(|column| matches!(column.type_oid, 20 | 21 | 23))
 }
 
 fn internal_group_columns(group_output: &[String]) -> Vec<String> {
@@ -4407,6 +4431,42 @@ mod tests {
         let avg_merge = agg_merge_expr_mapped(&avg, true, true, false, false, "average", None);
         assert!(avg_merge.contains("d.\"__special_average\""));
         assert!(avg_merge.contains("r.\"average\""));
+    }
+
+    #[test]
+    fn test_join_special_value_rescan_resolves_integer_argument_type() {
+        let make_join = |amount_type_oid| {
+            let mut orders = scan(1, "orders", "public", "o", &["id", "amount"]);
+            if let OpTree::Scan { columns, .. } = &mut orders {
+                columns[1].type_oid = amount_type_oid;
+            }
+            inner_join(
+                binop(
+                    "=",
+                    Expr::ColumnRef {
+                        table_alias: Some("o".into()),
+                        column_name: "id".into(),
+                    },
+                    Expr::ColumnRef {
+                        table_alias: Some("c".into()),
+                        column_name: "id".into(),
+                    },
+                ),
+                orders,
+                scan(2, "customers", "public", "c", &["id"]),
+            )
+        };
+        let mut sum = sum_col("amount", "total");
+        sum.argument = Some(Expr::ColumnRef {
+            table_alias: Some("o".into()),
+            column_name: "amount".into(),
+        });
+
+        assert!(!needs_special_value_rescan(&sum, &make_join(23)));
+        assert!(needs_special_value_rescan(&sum, &make_join(701)));
+
+        sum.argument = Some(colref("amount"));
+        assert!(needs_special_value_rescan(&sum, &make_join(23)));
     }
 
     #[test]
