@@ -1106,7 +1106,6 @@ def main():
         observations["checks"].append(rate_check)
         # This postmaster setting intentionally makes the disposable server fail
         # the managed worker's role check; run the destructive case last.
-        churn_phase_started = False
         sql("CREATE ROLE mdm_s1_runtime_no_set LOGIN")
         sql("GRANT CONNECT ON DATABASE s1_idle TO mdm_s1_runtime_no_set")
         sql("GRANT USAGE ON SCHEMA pgreact_api TO mdm_s1_runtime_no_set")
