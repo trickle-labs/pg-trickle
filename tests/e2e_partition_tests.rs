@@ -3112,6 +3112,120 @@ async fn test_retention_prepare_drains_writer_before_choosing_cdc_cut() {
 }
 
 #[tokio::test]
+async fn test_retention_preserves_nonfinite_numeric_aggregates() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.refresh_strategy = 'differential'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE special_retention_src (id INT NOT NULL, d DATE NOT NULL, account INT NOT NULL, amount NUMERIC NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE special_retention_old PARTITION OF special_retention_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE special_retention_live PARTITION OF special_retention_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO special_retention_src VALUES (1,'2025-06-01',1,'Infinity'), (2,'2025-06-01',1,5), (3,'2026-06-01',1,'Infinity'), (4,'2026-06-01',1,1), (5,'2026-06-01',2,'NaN')").await;
+    let query =
+        "SELECT d, account, sum(amount) AS total FROM special_retention_src GROUP BY d, account";
+    for (name, policy) in [("special_trim", "TRIM"), ("special_keep", "RETAIN")] {
+        db.create_st(name, query, "1h", "DIFFERENTIAL").await;
+        sqlx::query(
+            "SELECT pgtrickle.set_stream_table_partition_retention($1, $2, 'd', '2026-01-01')",
+        )
+        .bind(name)
+        .bind(policy)
+        .execute(&db.pool)
+        .await
+        .expect("configure retention");
+    }
+    let baseline: Vec<(String, i32, String)> = sqlx::query_as("SELECT d::text, account, sum(amount)::text FROM special_retention_src GROUP BY d, account ORDER BY d, account").fetch_all(&db.pool).await.unwrap();
+    assert_eq!(
+        baseline,
+        vec![
+            ("2025-06-01".into(), 1, "Infinity".into()),
+            ("2026-06-01".into(), 1, "Infinity".into()),
+            ("2026-06-01".into(), 2, "NaN".into())
+        ]
+    );
+    db.execute("ALTER TABLE special_retention_src DETACH PARTITION special_retention_old")
+        .await;
+    let keep: Vec<(String, i32, String)> = sqlx::query_as(
+        "SELECT d::text, account, total::text FROM special_keep ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(keep, baseline);
+    db.assert_st_matches_query("special_trim", query).await;
+    db.execute("DELETE FROM special_retention_src WHERE id = 3")
+        .await;
+    db.execute("UPDATE special_retention_src SET amount = 4 WHERE id = 5")
+        .await;
+    db.refresh_st("special_trim").await;
+    db.refresh_st("special_keep").await;
+    let trim: Vec<(String, i32, String)> = sqlx::query_as(
+        "SELECT d::text, account, total::text FROM special_trim ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let keep: Vec<(String, i32, String)> = sqlx::query_as(
+        "SELECT d::text, account, total::text FROM special_keep ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        trim,
+        vec![
+            ("2026-06-01".into(), 1, "1".into()),
+            ("2026-06-01".into(), 2, "4".into())
+        ]
+    );
+    assert_eq!(
+        keep,
+        vec![
+            ("2025-06-01".into(), 1, "Infinity".into()),
+            ("2026-06-01".into(), 1, "1".into()),
+            ("2026-06-01".into(), 2, "4".into())
+        ]
+    );
+    db.assert_st_matches_query("special_trim", query).await;
+    let actions: Vec<(String, String, String, bool)> = sqlx::query_as("SELECT DISTINCT ON (s.pgt_name) s.pgt_name, h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name IN ('special_trim', 'special_keep') ORDER BY s.pgt_name, h.refresh_id DESC").fetch_all(&db.pool).await.unwrap();
+    assert_eq!(
+        actions,
+        vec![
+            (
+                "special_keep".into(),
+                "DIFFERENTIAL".into(),
+                "COMPLETED".into(),
+                false
+            ),
+            (
+                "special_trim".into(),
+                "DIFFERENTIAL".into(),
+                "COMPLETED".into(),
+                false
+            )
+        ]
+    );
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET refresh_mode = 'FULL' WHERE pgt_name = 'special_keep'").await;
+    let error = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('special_keep')")
+        .await
+        .expect_err("FULL must not replace sealed non-finite history");
+    assert!(
+        error.to_string().contains("retained partition history"),
+        "{error}"
+    );
+    let after_full: Vec<(String, i32, String)> = sqlx::query_as(
+        "SELECT d::text, account, total::text FROM special_keep ORDER BY d, account",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(after_full, keep);
+}
+
+#[tokio::test]
 async fn test_retention_rejects_array_group_identity() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("CREATE TABLE alias_array_src (d DATE NOT NULL, account INT[] NOT NULL, amount INT NOT NULL) PARTITION BY RANGE (d)").await;
