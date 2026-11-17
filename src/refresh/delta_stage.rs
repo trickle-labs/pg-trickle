@@ -406,7 +406,7 @@ impl DeltaStage {
         let post_stage = format!("pg_temp.{}", quote_ident(&post_name));
         let has_future = if source_locked {
             // nosemgrep: rust.spi.run.dynamic-format
-            Spi::run(&format!("DROP TABLE IF EXISTS {post_stage}"))
+            Spi::run(&format!("DROP TABLE IF EXISTS {post_stage}")) // nosemgrep: rust.spi.run.dynamic-format
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             // The CDC source is catalog-qualified and quote-escaped, and the
             // validated LSN remains a separate SPI argument.
@@ -424,7 +424,7 @@ impl DeltaStage {
             // nosemgrep: rust.spi.query.dynamic-format
             let future_truncate = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action = 'T')"
-            ))
+            )) // nosemgrep: rust.spi.query.dynamic-format
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .unwrap_or(false);
             if future_truncate {
@@ -436,7 +436,7 @@ impl DeltaStage {
             // nosemgrep: rust.spi.query.dynamic-format
             Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS (SELECT 1 FROM {post_stage} WHERE action IN ('I', 'D'))"
-            ))
+            )) // nosemgrep: rust.spi.query.dynamic-format
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .unwrap_or(false)
         } else {
@@ -663,7 +663,7 @@ impl DeltaStage {
                 // nosemgrep: rust.spi.query.dynamic-format
                 let future_truncate = Spi::get_one::<bool>(&format!(
                     "SELECT EXISTS (SELECT 1 FROM {target} WHERE {guard})"
-                ))
+                )) // nosemgrep: rust.spi.query.dynamic-format
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap_or(false);
                 if future_truncate {
@@ -673,7 +673,7 @@ impl DeltaStage {
                 }
                 // Remove the internal marker before the DVM uses this table.
                 // nosemgrep: rust.spi.run.dynamic-format
-                Spi::run(&format!("ALTER TABLE {target} DROP COLUMN {guard}"))
+                Spi::run(&format!("ALTER TABLE {target} DROP COLUMN {guard}")) // nosemgrep: rust.spi.run.dynamic-format
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             }
         }
