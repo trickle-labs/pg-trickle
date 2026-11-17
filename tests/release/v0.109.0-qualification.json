@@ -883,6 +883,25 @@
         "e2e_upgrade_tests::test_upgrade_ann_epoch_handles_old_catalog_and_rollback"
       ],
       "workload": "v0.108.3 catalog snapshot on candidate binary: vector helpers, legacy subscriptions, index identity and transactional rollback"
+    },
+    {
+      "id": "subscription-scale-1m",
+      "kind": "measurement",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.109.0",
+      "command": "python3 scripts/run_release_subscription_scale.py",
+      "command_argv": [
+        "python3",
+        "scripts/run_release_subscription_scale.py"
+      ],
+      "measurement_file": "qualification-logs/raw/subscription-scale-1m.json",
+      "e2e_image": "pg_trickle_e2e_pgvector:0.8.7",
+      "nextest_retries": 0,
+      "workload": "exact-package 384-dimensional 1k/10k/100k/1m source-row subscription matrix; not a RAG benchmark"
     }
   ],
   "artifacts": [
