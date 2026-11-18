@@ -31,11 +31,22 @@ workload against the candidate package copied into the PostgreSQL test image.
 It covers 5,000 rows at 384, 768 and 1,536 dimensions, with small, medium, large
 and skewed group distributions. For one-row and 2,500-row changes it discards
 three warmup rounds and retains 20 measured refreshes per strategy and group
-shape. The JSON reports refresh percentiles, source mutation time, source tuple
-visits, WAL, stream storage and logical auxiliary-state bytes; Docker samples
-retain CPU and memory observations. This is a single-runner comparison. It does
-not establish cold-cache behavior, concurrent-writer costs or natural rebase
-frequency, so the automatic selector remains experimental and opt-in.
+shape in three modes: explicitly warmed pages, cold PostgreSQL and Linux host
+page caches, and warmed pages with a controlled source writer. Cold samples
+stop PostgreSQL, clear host page caches, and start the isolated container; this
+mode runs only on the disposable Linux GitHub Actions runner. The writer case
+toggles an unprojected source key while refresh runs, preserving centroid
+values. It samples writer lock waits at 1 ms intervals and holds the writer
+transaction open for at least 10 ms. This is a controlled single-writer overlap
+case, not sustained writer throughput.
+
+The JSON reports p50/p95/p99 refresh, writer transaction, and lock-wait timings,
+shared buffer counts, source tuple visits, WAL, stream storage and logical
+auxiliary-state bytes.
+Docker samples retain CPU and memory observations, and cold-cache reset time is
+reported separately. These are single-runner synthetic measurements; they do
+not establish natural rebase frequency or a general operating envelope, so the
+automatic selector remains experimental and opt-in.
 
 ### Controlled distance-subscription measurements
 
