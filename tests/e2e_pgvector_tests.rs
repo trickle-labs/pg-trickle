@@ -4137,6 +4137,12 @@ async fn test_ann_churn_preserves_concurrent_work_and_unknown_rewrites() {
         "DIFFERENTIAL",
     )
     .await;
+    // This test manually controls each refresh and validates exact ANN request
+    // identity across snapshot restore. Prevent the scheduler from running a
+    // concurrent refresh/rewrite that invalidates the index filenode between
+    // request_ann_maintenance and claim_ann_maintenance.
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.ann_churn_stream'])")
+        .await;
     db.execute(
         "CREATE INDEX ann_churn_idx ON ann_churn_stream USING hnsw (embedding vector_l2_ops)",
     )
