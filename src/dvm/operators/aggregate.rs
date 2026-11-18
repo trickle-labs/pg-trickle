@@ -691,6 +691,29 @@ fn child_to_from_sql_in_context(
     project_scan_columns: bool,
 ) -> Option<String> {
     match child {
+        OpTree::Scan {
+            table_oid,
+            alias,
+            columns,
+            ..
+        } if ctx.bounded_source_table(*table_oid).is_some() => {
+            // Prefer constructing rescans directly against their bounded
+            // relation. Some query paths (especially optimized aggregates)
+            // never visit diff_scan, so a late SQL-text rewrite alone is not
+            // a sufficient correctness boundary.
+            let source = ctx.bounded_source_table(*table_oid)?;
+            let from = if project_scan_columns {
+                let cols = columns
+                    .iter()
+                    .map(|column| quote_ident(&column.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("(SELECT {cols} FROM {source})")
+            } else {
+                source.to_string()
+            };
+            Some(format!("{from} AS {}", quote_ident(alias)))
+        }
         OpTree::Filter { predicate, child } => {
             let inner = child_to_from_sql_in_context(child, ctx, project_scan_columns)?;
             Some(format!("{inner} WHERE {}", predicate.to_sql()))
@@ -6938,6 +6961,23 @@ mod tests {
         assert!(sql.contains("UNION ALL"), "{sql}");
         assert!(sql.contains("WHERE __pgt_action = 'I'"), "{sql}");
         assert!(sql.contains("CROSS JOIN LATERAL"), "{sql}");
+    }
+
+    #[test]
+    fn test_aggregate_rescan_uses_bounded_source_directly() {
+        let op = scan(10, "bound_source", "public", "src", &["id", "v"]);
+        let mut ctx = test_ctx();
+        ctx.set_source_bound_tables(std::collections::HashMap::from([(
+            10,
+            "pg_temp.\"__pgt_bound_99_10\"".into(),
+        )]));
+        let direct = child_to_from_sql_in_context(&op, &ctx, false).unwrap();
+        assert_eq!(direct, "pg_temp.\"__pgt_bound_99_10\" AS \"src\"");
+        let projected = child_to_from_sql_in_context(&op, &ctx, true).unwrap();
+        assert_eq!(
+            projected,
+            "(SELECT \"id\", \"v\" FROM pg_temp.\"__pgt_bound_99_10\") AS \"src\""
+        );
     }
 
     #[test]

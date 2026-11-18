@@ -2281,7 +2281,7 @@ pub fn execute_differential_refresh_with_tuning(
     // CDC staging precedes t0, so it was absent from the existing per-node
     // timing report even though it can issue several SQL statements per source.
     let staging_start = Instant::now();
-    let delta_stage = match early_stage {
+    let mut delta_stage = match early_stage {
         Some(stage) => stage,
         None => crate::refresh::delta_stage::DeltaStage::prepare(
             st,
@@ -2290,6 +2290,15 @@ pub fn execute_differential_refresh_with_tuning(
             new_frontier,
         )?,
     };
+    // A centroid SOURCE_AHEAD fallback is a current-source group rescan,
+    // not a bounded delta evaluation. If the CDC cut splits one UPDATE's
+    // D/I images, reversing only the later D image would resurrect an old
+    // vector value and make the fallback incorrect. Keep the existing
+    // live-rescan contract for this exceptional, unbound centroid path;
+    // ordinary DVM plans continue to use frontier-aligned source stages.
+    if centroid_fallback == Some("SOURCE_AHEAD_OF_FRONTIER") {
+        delta_stage.use_live_sources_for_centroid_rescan(st, &dependencies)?;
+    }
     let t_staging = staging_start.elapsed();
     let t0 = Instant::now();
 
@@ -2839,6 +2848,7 @@ pub fn execute_differential_refresh_with_tuning(
                 "The differential plan exceeded the configured work-memory cap.",
             ),
         )?;
+        delta_stage.cleanup_bounded_views()?;
         let t_full_start = Instant::now();
         let result = execute_full_refresh(st);
         let full_ms = t_full_start.elapsed().as_secs_f64() * 1000.0;
@@ -2888,6 +2898,7 @@ pub fn execute_differential_refresh_with_tuning(
                 ),
             ),
         )?;
+        delta_stage.cleanup_bounded_views()?;
         let t_full_start = Instant::now();
         let result = execute_full_refresh(st);
         let full_ms = t_full_start.elapsed().as_secs_f64() * 1000.0;
@@ -3028,6 +3039,7 @@ pub fn execute_differential_refresh_with_tuning(
             // so we must record it here before returning.
             crate::shmem::record_diff_refresh(crate::dvm::is_delta_deduplicated(st.pgt_id));
 
+            delta_stage.cleanup_bounded_views()?;
             return Ok((rows_inserted, 0));
         }
     }
@@ -3406,6 +3418,7 @@ pub fn execute_differential_refresh_with_tuning(
                         schema,
                         name,
                     );
+                    delta_stage.cleanup_bounded_views()?;
                     return Ok((0, 0));
                 }
                 Some(bounds) => {
@@ -3506,12 +3519,20 @@ pub fn execute_differential_refresh_with_tuning(
         let accumulator = format!("pg_temp.{accumulator_basename}");
         let raw_delta = format!("pg_temp.{delta_table_basename}");
         let target = format!("{schema}.{name}");
+        // The MT-8 fast path has its own MIN/MAX rescan SQL, outside the
+        // regular DVM source-rewrite machinery. Pass the same bounded
+        // source that the delta stage froze at this refresh's NEW LSN.
+        let bounded_source = format!(
+            "pg_temp.{}",
+            crate::refresh::delta_stage::DeltaStage::bounded_table_name(st.pgt_id, plan.source_oid)
+        );
         let finalize = crate::refresh::vectorized_agg::algebraic_finalize_sql(
             &plan,
             &target,
             &accumulator,
             &raw_delta,
             insert_only_minmax,
+            Some(&bounded_source),
         )?;
         Some((plan, accumulator, raw_delta, finalize, insert_only_minmax))
     } else {
@@ -4620,6 +4641,10 @@ pub fn execute_differential_refresh_with_tuning(
         }
     }
 
+    // CREATE TEMP VIEW has no ON COMMIT DROP. Clean the fast-path views
+    // after the final DVM read so they cannot pin source table DDL across
+    // transactions or pooled backend reuse.
+    delta_stage.cleanup_bounded_views()?;
     Ok((effective_count, 0))
 }
 
