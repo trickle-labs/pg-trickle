@@ -3149,6 +3149,40 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
         .execute(&mut *conn)
         .await
         .expect("commit source change after crash recovery");
+    let (catchup_frontier, next_frontier): (String, String) = sqlx::query_as(
+        "SELECT frontier::text, jsonb_set(frontier, ARRAY['sources', 'centroid_crash_src'::regclass::oid::text, 'lsn'], to_jsonb(pg_current_wal_insert_lsn()::text))::text FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_crash_st'::regclass",
+    )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("read post-update frontiers");
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin centroid candidate check");
+    let candidate_table: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_stage_candidates('centroid_crash_st'::regclass::oid, $1, $2)",
+    )
+    .bind(&catchup_frontier)
+    .bind(&next_frontier)
+    .fetch_one(&mut *conn)
+    .await
+    .expect("stage recovered centroid candidate");
+    let candidate_sql = format!(
+        "SELECT COALESCE(jsonb_agg(jsonb_build_object('action', __pgt_action, 'grp', grp, 'centroid', centroid::text, 'group_count', __pgt_count)), '[]'::jsonb) FROM {candidate_table}"
+    );
+    let candidate: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(candidate_sql))
+        .fetch_one(&mut *conn)
+        .await
+        .expect("read staged centroid candidate");
+    assert_eq!(candidate.as_array().map(Vec::len), Some(1), "{candidate}");
+    assert_eq!(candidate[0]["action"], "I", "{candidate}");
+    assert_eq!(candidate[0]["grp"], 1, "{candidate}");
+    assert_eq!(candidate[0]["centroid"], "[8,9]", "{candidate}");
+    assert_eq!(candidate[0]["group_count"], 2, "{candidate}");
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("rollback centroid candidate check");
     sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_crash_st')")
         .execute(&mut *conn)
         .await
