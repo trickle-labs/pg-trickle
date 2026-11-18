@@ -4406,7 +4406,7 @@ mod tests {
             &["grp".to_string()],
             Some(&special_filter),
         );
-        assert!(group_filter.contains("grp IS NOT DISTINCT FROM __pgt_d2.\"__pgt_group_0\""));
+        assert!(group_filter.contains("\"grp\" IS NOT DISTINCT FROM __pgt_d2.\"__pgt_group_0\""));
         assert!(group_filter.contains("__pgt_d2.\"__special_total\""));
 
         let merge = agg_merge_expr_mapped(
@@ -4434,9 +4434,9 @@ mod tests {
         assert!(needs_special_value_rescan(&stddev));
         assert_eq!(
             agg_sum2_rescan_sql(&stddev),
-            "COALESCE(SUM((amount)::numeric * (amount)::numeric), 0)"
+            "COALESCE(SUM((\"amount\")::numeric * (\"amount\")::numeric), 0)"
         );
-        assert_eq!(agg_sum_rescan_sql(&stddev), "COALESCE(SUM(amount), 0)");
+        assert_eq!(agg_sum_rescan_sql(&stddev), "COALESCE(SUM(\"amount\"), 0)");
 
         let merge = agg_merge_expr_mapped(&stddev, true, false, false, "stddev", None);
         assert!(merge.contains("d.\"__special_stddev\""));
@@ -4450,11 +4450,11 @@ mod tests {
         let (ins, del) = agg_delta_exprs(&agg, &child_cols);
         assert_eq!(
             ins,
-            "COUNT(CASE WHEN __pgt_action = 'I' THEN name ELSE NULL END)"
+            "COUNT(CASE WHEN __pgt_action = 'I' THEN \"name\" ELSE NULL END)"
         );
         assert_eq!(
             del,
-            "COUNT(CASE WHEN __pgt_action = 'D' THEN name ELSE NULL END)"
+            "COUNT(CASE WHEN __pgt_action = 'D' THEN \"name\" ELSE NULL END)"
         );
     }
 
@@ -5021,7 +5021,7 @@ mod tests {
             for arg in initial_args {
                 for part in arg.split('|') {
                     assert!(
-                        part.starts_with("CASE WHEN keep THEN ("),
+                        part.starts_with("CASE WHEN \"keep\" THEN ("),
                         "initial auxiliary must guard argument evaluation: {part}"
                     );
                 }
@@ -5030,11 +5030,11 @@ mod tests {
                 for (action, sql) in [("I", ins), ("D", del)] {
                     assert!(
                         sql.contains(&format!(
-                            "CASE WHEN __pgt_action = '{action}' AND keep THEN "
+                            "CASE WHEN __pgt_action = '{action}' AND \"keep\" THEN "
                         )),
                         "FILTER must guard every argument-dependent expression: {sql}"
                     );
-                    assert!(sql.contains("100 / v"), "missing argument: {sql}");
+                    assert!(sql.contains("100 / \"v\""), "missing argument: {sql}");
                 }
             }
         }
@@ -5052,7 +5052,7 @@ mod tests {
             "Insert expr should check action: {ins}",
         );
         assert!(
-            ins.contains("(status = 'active')"),
+            ins.contains("(\"status\" = 'active')"),
             "Insert expr should contain filter: {ins}",
         );
         assert!(
@@ -5060,7 +5060,7 @@ mod tests {
             "Delete expr should check action: {del}",
         );
         assert!(
-            del.contains("(status = 'active')"),
+            del.contains("(\"status\" = 'active')"),
             "Delete expr should contain filter: {del}",
         );
     }
@@ -5073,11 +5073,11 @@ mod tests {
         );
         let (ins, _del) = agg_delta_exprs(&agg, &["amount".to_string()]);
         assert!(
-            ins.contains("(amount > 0)"),
+            ins.contains("(\"amount\" > 0)"),
             "Insert expr should contain filter: {ins}",
         );
         assert!(
-            ins.contains("THEN amount"),
+            ins.contains("THEN \"amount\""),
             "Insert expr should reference amount column: {ins}",
         );
     }
@@ -5104,7 +5104,7 @@ mod tests {
         );
         let (ins, _del) = agg_delta_exprs(&agg, &["val".to_string(), "active".to_string()]);
         assert!(
-            ins.contains("(active = true)"),
+            ins.contains("(\"active\" = true)"),
             "MIN insert delta should contain filter: {ins}",
         );
         assert!(ins.contains("MIN("), "Should use MIN function: {ins}");
@@ -5126,7 +5126,7 @@ mod tests {
         let dr = result.unwrap();
         let sql = ctx.build_with_query(&dr.cte_name);
         assert!(
-            sql.contains("(status = 'active')"),
+            sql.contains("(\"status\" = 'active')"),
             "Generated SQL should contain FILTER condition: {sql}",
         );
     }
@@ -5330,7 +5330,7 @@ mod tests {
             "BOOL_AND insert delta should check action: {ins}",
         );
         assert!(
-            ins.contains("active IS NOT NULL"),
+            ins.contains("\"active\" IS NOT NULL"),
             "BOOL_AND insert delta should check NOT NULL: {ins}",
         );
     }
@@ -5350,7 +5350,7 @@ mod tests {
         let agg = string_agg_col("name", "', '", "members");
         let (ins, _del) = agg_delta_exprs(&agg, &["name".to_string()]);
         assert!(
-            ins.contains("name IS NOT NULL"),
+            ins.contains("\"name\" IS NOT NULL"),
             "STRING_AGG insert delta should check NOT NULL: {ins}",
         );
     }
@@ -5525,7 +5525,7 @@ mod tests {
         );
         let (ins, _del) = agg_delta_exprs(&agg, &["active".to_string(), "dept".to_string()]);
         assert!(
-            ins.contains("(dept = 'eng')"),
+            ins.contains("(\"dept\" = 'eng')"),
             "Filtered BOOL_AND should include filter: {ins}",
         );
     }
@@ -5536,7 +5536,7 @@ mod tests {
     fn test_resolve_expr_for_child_simple_column() {
         let expr = colref("amount");
         let result = resolve_expr_for_child(&expr, &["amount".to_string()]);
-        assert_eq!(result, "amount");
+        assert_eq!(result, "\"amount\"");
     }
 
     #[test]
@@ -5544,14 +5544,14 @@ mod tests {
         let expr = qcolref("o", "amount");
         let result =
             resolve_expr_for_child(&expr, &["o__amount".to_string(), "c__name".to_string()]);
-        assert_eq!(result, "o__amount");
+        assert_eq!(result, "\"o__amount\"");
     }
 
     #[test]
     fn test_resolve_expr_for_child_binary_op() {
         let expr = binop("=", colref("status"), lit("'active'"));
         let result = resolve_expr_for_child(&expr, &["status".to_string()]);
-        assert_eq!(result, "(status = 'active')");
+        assert_eq!(result, "(\"status\" = 'active')");
     }
 
     #[test]
@@ -5563,13 +5563,91 @@ mod tests {
         );
         let result = resolve_expr_for_child(&expr, &["status".to_string(), "amount".to_string()]);
         assert!(
-            result.contains("status = 'active'"),
+            result.contains("\"status\" = 'active'"),
             "Should resolve left: {result}"
         );
         assert!(
-            result.contains("amount > 0"),
+            result.contains("\"amount\" > 0"),
             "Should resolve right: {result}"
         );
+    }
+
+    #[test]
+    fn test_resolve_expr_for_child_quotes_unusual_identifiers_once() {
+        let columns = vec![
+            "Amount".to_string(),
+            "select".to_string(),
+            "line item".to_string(),
+            "quote\"val".to_string(),
+            "metric(x)".to_string(),
+        ];
+        for column in &columns {
+            let expr = colref(column);
+            assert_eq!(resolve_col_for_child(&expr, &columns), *column);
+            assert_eq!(resolve_expr_for_child(&expr, &columns), quote_ident(column));
+        }
+
+        let joined = qcolref("a", "metric(x)");
+        let joined_cols = vec!["a__metric(x)".to_string()];
+        assert_eq!(resolve_col_for_child(&joined, &joined_cols), "a__metric(x)");
+        assert_eq!(
+            resolve_expr_for_child(&joined, &joined_cols),
+            "\"a__metric(x)\""
+        );
+    }
+
+    #[test]
+    fn test_resolve_expr_for_child_quotes_joined_compound_group_and_filter() {
+        let columns = vec![
+            "l__Group(key)".to_string(),
+            "r__Group(key)".to_string(),
+            "r__line item".to_string(),
+            "l__quote\"val".to_string(),
+            "l__Amount".to_string(),
+        ];
+        let group = Expr::FuncCall {
+            func_name: "COALESCE".to_string(),
+            args: vec![qcolref("l", "Group(key)"), qcolref("r", "Group(key)")],
+        };
+        assert_eq!(
+            resolve_group_col(&group, &columns),
+            "COALESCE(\"l__Group(key)\", \"r__Group(key)\")"
+        );
+        assert_eq!(
+            resolve_expr_for_child(&qcolref("l", "quote\"val"), &columns),
+            "\"l__quote\"\"val\""
+        );
+
+        let mut avg = with_filter(
+            avg_col("Amount", "mean"),
+            binop(">", qcolref("r", "line item"), lit("0")),
+        );
+        avg.argument = Some(qcolref("l", "Amount"));
+        let (ins, del) = agg_delta_exprs(&avg, &columns);
+        assert!(
+            ins.contains(r#"AND ("r__line item" > 0) THEN "l__Amount""#),
+            "{ins}"
+        );
+        assert!(
+            del.contains(r#"AND ("r__line item" > 0) THEN "l__Amount""#),
+            "{del}"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_group_identifier_with_parenthesis_remains_a_column() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        let tree = aggregate(
+            vec![colref("metric(x)")],
+            vec![avg_col("Amount", "mean")],
+            scan(1, "events", "public", "e", &["metric(x)", "Amount"]),
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert!(sql.contains("\"metric(x)\" AS \"metric(x)\""), "{sql}");
+        assert!(sql.contains("GROUP BY \"metric(x)\""), "{sql}");
+        assert!(sql.contains("THEN \"Amount\" ELSE 0 END"), "{sql}");
+        assert!(!sql.contains("GROUP BY metric(x)"), "{sql}");
     }
 
     // ── BIT_AND / BIT_OR / BIT_XOR tests ────────────────────────────
@@ -5583,7 +5661,7 @@ mod tests {
             "BIT_AND insert delta should check action: {ins}",
         );
         assert!(
-            ins.contains("flags IS NOT NULL"),
+            ins.contains("\"flags\" IS NOT NULL"),
             "BIT_AND insert delta should check NOT NULL: {ins}",
         );
         assert!(
@@ -5597,7 +5675,7 @@ mod tests {
         let agg = bit_or_col("flags", "any_flags");
         let (ins, _del) = agg_delta_exprs(&agg, &["flags".to_string()]);
         assert!(
-            ins.contains("flags IS NOT NULL"),
+            ins.contains("\"flags\" IS NOT NULL"),
             "BIT_OR insert delta should check NOT NULL: {ins}",
         );
     }
@@ -5716,7 +5794,7 @@ mod tests {
             "JSON_OBJECT_AGG insert delta should check action: {ins}",
         );
         assert!(
-            ins.contains("name IS NOT NULL"),
+            ins.contains("\"name\" IS NOT NULL"),
             "JSON_OBJECT_AGG insert delta should check NOT NULL: {ins}",
         );
         assert!(
@@ -5730,7 +5808,7 @@ mod tests {
         let agg = jsonb_object_agg_col("key", "val", "obj");
         let (ins, _del) = agg_delta_exprs(&agg, &["key".to_string(), "val".to_string()]);
         assert!(
-            ins.contains("key IS NOT NULL"),
+            ins.contains("\"key\" IS NOT NULL"),
             "JSONB_OBJECT_AGG insert delta should check NOT NULL on key arg: {ins}",
         );
     }
@@ -6394,7 +6472,7 @@ mod tests {
         );
         let (ins, _del) = agg_delta_exprs(&agg, &["category".to_string(), "active".to_string()]);
         assert!(
-            ins.contains("(active = true)"),
+            ins.contains("(\"active\" = true)"),
             "Filtered MODE should include filter: {ins}",
         );
     }
@@ -6407,7 +6485,7 @@ mod tests {
         );
         let (ins, _del) = agg_delta_exprs(&agg, &["amount".to_string()]);
         assert!(
-            ins.contains("(amount > 0)"),
+            ins.contains("(\"amount\" > 0)"),
             "Filtered PERCENTILE_CONT should include filter: {ins}",
         );
     }
@@ -6627,8 +6705,8 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        assert!(sql.contains("AND active THEN CASE WHEN amount IS NOT NULL"));
-        assert!(!sql.contains("amount IS NOT NULL AND active"));
+        assert!(sql.contains("AND \"active\" THEN CASE WHEN \"amount\" IS NOT NULL"));
+        assert!(!sql.contains("\"amount\" IS NOT NULL AND \"active\""));
         assert!(sql.contains("__pgt_aux_nonnull_total"));
     }
 
