@@ -485,8 +485,10 @@ def main() -> None:
     args = parser.parse_args()
     if bool(args.candidate_archive) != bool(args.attest_container):
         parser.error("--candidate-archive and --attest-container must be supplied together")
-    if not 1 <= args.rows <= 1_000_000 or not 1 <= args.batch <= min(args.rows, 1000) or not 1 <= args.cycles <= 1000 or not 0 <= args.delay_seconds <= 10 or not math.isfinite(args.delay_seconds) or not 1 <= args.tenant <= 20 or not 0 <= args.concurrent_readers <= 4:
-        parser.error("rows, batch, cycles, delay or tenant is outside the supported range")
+    if not 1 <= args.rows <= 100_000:
+        parser.error("--rows must be between 1 and 100000; larger RAG corpora are out of scope")
+    if not 1 <= args.batch <= min(args.rows, 1000) or not 1 <= args.cycles <= 1000 or not 0 <= args.delay_seconds <= 10 or not math.isfinite(args.delay_seconds) or not 1 <= args.tenant <= 20 or not 0 <= args.concurrent_readers <= 4:
+        parser.error("batch, cycles, delay, tenant or readers is outside the supported range")
     if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_commit) or not re.fullmatch(r"[0-9a-f]{64}", args.package_sha256):
         parser.error("candidate commit and package SHA-256 must be lowercase hexadecimal")
     if args.workload == "mixed" and (args.batch < 4 or args.batch * args.cycles > args.rows):

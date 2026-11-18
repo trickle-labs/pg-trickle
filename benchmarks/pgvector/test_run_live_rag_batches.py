@@ -88,6 +88,15 @@ class BenchmarkTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("deleted IDs are not reused", result.stderr)
 
+    def test_rag_runner_rejects_corpora_above_100k_before_connecting(self):
+        result = subprocess.run(
+            [sys.executable, benchmark.__file__, "--rows", "100001", "--dimensions", "384",
+             "--candidate-commit", "0" * 40, "--package-sha256", "0" * 64],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("larger RAG corpora are out of scope", result.stderr)
+
     def test_availability_reports_searchable_absent_and_stale_rows(self):
         sql = benchmark.availability_sql("SELECT 1 AS id")
         for approach in ("application", "periodic_full", "differential"):
