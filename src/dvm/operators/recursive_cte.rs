@@ -274,14 +274,7 @@ fn dred_cascade_is_safe(base: &OpTree, recursive: &OpTree, columns: &[String]) -
                     pk_columns,
                     ..
                 },
-            ) => (
-                table_oid,
-                alias,
-                columns,
-                pk_columns,
-                self_alias,
-                self_cols,
-            ),
+            ) => (table_oid, alias, columns, pk_columns, self_alias, self_cols),
             _ => return false,
         };
 
@@ -327,7 +320,10 @@ fn dred_cascade_is_safe(base: &OpTree, recursive: &OpTree, columns: &[String]) -
                     },
                 ) if scan_alias == source_alias
                     && rec_alias == self_alias
-                    && key == &pk_cols[0] => Some(parent.to_string()),
+                    && key == &pk_cols[0] =>
+                {
+                    Some(parent.to_string())
+                }
                 _ => None,
             };
             parent_from(left, right).or_else(|| parent_from(right, left))
@@ -534,9 +530,10 @@ fn generate_recomputation_delta(
         .iter()
         .map(|c| format!("sub.{}", quote_ident(c)))
         .collect();
-    let row_id_hash = ctx.st_full_row_identity_expr.clone().unwrap_or_else(|| {
-        crate::dvm::operators::scan::build_hash_expr(&hash_exprs)
-    });
+    let row_id_hash = ctx
+        .st_full_row_identity_expr
+        .clone()
+        .unwrap_or_else(|| crate::dvm::operators::scan::build_hash_expr(&hash_exprs));
 
     let recomp_cte = ctx.next_cte_name(&format!("rc_recomp_{alias}"));
     let recomp_sql = format!(
@@ -3932,7 +3929,11 @@ mod tests {
         )
         .unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
-        assert_eq!(sql.matches("row_number() OVER (PARTITION BY __pgt_row_id").count(), 4);
+        assert_eq!(
+            sql.matches("row_number() OVER (PARTITION BY __pgt_row_id")
+                .count(),
+            4
+        );
         assert_eq!(sql.matches("__pgt_occurrence =").count(), 2);
         assert!(sql.contains("pgtrickle.encode_row_id_v3('SCAN_KEY'"));
         assert!(!result.is_deduplicated);
