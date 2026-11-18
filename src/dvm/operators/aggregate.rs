@@ -79,29 +79,14 @@ fn resolve_group_col(expr: &Expr, child_cols: &[String]) -> String {
     resolve_expr_for_child(expr, child_cols)
 }
 
-/// Return a SQL fragment that can be safely embedded in a SELECT list or
-/// GROUP BY clause.
-///
-/// Simple column names (no parentheses) are double-quoted as identifiers.
-/// Compound SQL expressions (containing `(`) are returned as-is — quoting
-/// them as identifiers would cause PostgreSQL to look for a column whose
-/// name is literally the expression string.
-fn col_ref_or_sql_expr(s: &str) -> String {
-    if s.contains('(') {
-        s.to_string()
-    } else {
-        quote_ident(s)
-    }
-}
-
 /// Resolve an entire expression tree against child CTE column names.
 ///
-/// Recursively rewrites `ColumnRef` nodes using `resolve_col_for_child`
-/// and rebuilds the surrounding expression in SQL syntax. Used for FILTER
-/// clauses where the predicate may contain arbitrary expressions.
+/// Recursively rewrites `ColumnRef` nodes using `resolve_col_for_child`,
+/// quotes their resolved names once, and rebuilds compound SQL expressions.
+/// Used for aggregate arguments, FILTER predicates, and GROUP BY keys.
 fn resolve_expr_for_child(expr: &Expr, child_cols: &[String]) -> String {
     match expr {
-        Expr::ColumnRef { .. } => resolve_col_for_child(expr, child_cols),
+        Expr::ColumnRef { .. } => quote_ident(&resolve_col_for_child(expr, child_cols)),
         Expr::BinaryOp { op, left, right } => {
             format!(
                 "({} {op} {})",
@@ -381,13 +366,10 @@ pub(crate) fn centroid_signed_delta_sql(
     if !matches!(aggregate.function, AggFunc::VectorAvg) {
         return None;
     }
-    let argument = col_ref_or_sql_expr(&resolve_expr_for_child(
-        aggregate.argument.as_ref()?,
-        child_columns,
-    ));
+    let argument = resolve_expr_for_child(aggregate.argument.as_ref()?, child_columns);
     let resolved = group_by
         .iter()
-        .map(|group| col_ref_or_sql_expr(&resolve_group_col(group, child_columns)))
+        .map(|group| resolve_group_col(group, child_columns))
         .collect::<Vec<_>>();
     let names = group_by.iter().map(Expr::output_name).collect::<Vec<_>>();
     let selections = resolved
@@ -2399,33 +2381,18 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         let group_by_clause = if group_resolved.is_empty() {
             String::new()
         } else {
-            let gb_cols: Vec<String> = group_resolved
-                .iter()
-                .map(|c| col_ref_or_sql_expr(c))
-                .collect();
-            format!("\nGROUP BY {}", gb_cols.join(", "))
+            format!("\nGROUP BY {}", group_resolved.join(", "))
         };
 
         let delta_cte = ctx.next_cte_name("agg_delta");
         let mut delta_selects = Vec::new();
 
-        // Group by columns — alias to output name for consistent downstream refs.
-        // When the output name is a SQL expression (contains '('), always add an
-        // explicit alias so the delta CTE column is named by the full expression
-        // as a quoted identifier. Without this guard, `split_part(x, y, z)` would
-        // be implicitly named `split_part` by PostgreSQL, causing the merge CTE's
-        // `d."split_part(x, y, z)"` reference to fail with "column does not exist".
-        // build_rescan_cte uses the same `&& !expr_sql.contains('(')` guard.
+        // Always alias group keys to their output column names. This preserves
+        // compound expression names and identifiers that themselves contain '('.
+        // The resolved SQL already quotes each ColumnRef; never quote the
+        // entire expression or infer its kind by examining its text.
         for (resolved, output) in group_resolved.iter().zip(group_output.iter()) {
-            if resolved == output && !output.contains('(') {
-                delta_selects.push(col_ref_or_sql_expr(resolved));
-            } else {
-                delta_selects.push(format!(
-                    "{} AS {}",
-                    col_ref_or_sql_expr(resolved),
-                    quote_ident(output)
-                ));
-            }
+            delta_selects.push(format!("{resolved} AS {}", quote_ident(output)));
         }
 
         // Always track insert/delete counts
