@@ -1004,7 +1004,14 @@
       "measurement_file": "qualification-logs/raw/centroid-cost-matrix.json",
       "e2e_image": "pg_trickle_e2e_pgvector:0.8.7",
       "nextest_retries": 0,
-      "workload": "exact package: 5,000 rows, 384/768/1536 dimensions, small/mid/large/skewed groups, three warmups and 20 measured refreshes for one-row and 2,500-row changes, with CPU/memory, WAL, tuple visits, storage and state bytes"
+      "required_modes": [
+        {"cache_mode": "warm", "concurrent_writer": false},
+        {"cache_mode": "cold", "concurrent_writer": false},
+        {"cache_mode": "warm", "concurrent_writer": true}
+      ],
+      "measured_rounds_per_case": 20,
+      "controlled_writer_hold_ms": 10,
+      "workload": "exact package: 5,000 rows, 384/768/1536 dimensions, small/mid/large/skewed groups, three warmups and 20 measured refreshes for one-row and 2,500-row changes in warm, cold, and controlled-writer modes, with CPU/memory, WAL, tuple visits, buffer counts, lock waits, storage, and state bytes"
     }
   ],
   "artifacts": [

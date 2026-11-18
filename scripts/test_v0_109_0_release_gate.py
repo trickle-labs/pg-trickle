@@ -197,6 +197,9 @@ class RetirementContractTests(unittest.TestCase):
             ("e2e_image", "pg_trickle_e2e:latest"),
             ("command_argv", ["true"]),
             ("measurement_file", "qualification-logs/raw/other.json"),
+            ("required_modes", []),
+            ("measured_rounds_per_case", 1),
+            ("controlled_writer_hold_ms", 0),
         ]:
             broken = copy.deepcopy(contract)
             next(s for s in broken["required_suites"] if s["id"] == "centroid-cost-matrix")[field] = value

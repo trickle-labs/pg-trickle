@@ -17,13 +17,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DIMENSIONS = (384, 768, 1536)
 REWRITES = (1, 2500)
+MODES = (("warm", False), ("cold", False), ("warm", True))
 ROWS = 5000
 SAMPLES = 20
 WARMUP = 3
 MARKER = "PGVECTOR_BENCHMARK_JSON="
 
 
-def parse_measurement(output: str, dimensions: int) -> dict:
+def parse_measurement(
+    output: str,
+    dimensions: int,
+    cache_mode: str = "warm",
+    concurrent_writer: bool = False,
+) -> dict:
     records = [line.partition(MARKER)[2] for line in output.splitlines() if MARKER in line]
     if len(records) != 1:
         raise ValueError(f"expected one {MARKER} result, found {len(records)}")
@@ -35,8 +41,35 @@ def parse_measurement(output: str, dimensions: int) -> dict:
         raise ValueError("benchmark output has the wrong warmup or sample count")
     if repeated.get("changed_rows_per_round") not in REWRITES:
         raise ValueError("benchmark output has an unexpected rewrite size")
-    if len(repeated.get("observations", [])) != 4 * 3 * SAMPLES:
+    observations = repeated.get("observations", [])
+    if len(observations) != 4 * 3 * SAMPLES:
         raise ValueError("benchmark output is missing centroid observations")
+    if repeated.get("cache_mode") != cache_mode:
+        raise ValueError("benchmark output has the wrong cache mode")
+    if repeated.get("concurrent_writer") is not concurrent_writer:
+        raise ValueError("benchmark output has the wrong concurrent-writer mode")
+    if any(
+        item.get("cache_mode") != cache_mode or item.get("concurrent_writer") is not concurrent_writer
+        for item in observations
+    ):
+        raise ValueError("centroid observations do not match the requested cache/writer mode")
+    if concurrent_writer:
+        waits = [item.get("writer_lock_wait_ms") for item in observations]
+        transactions = [item.get("writer_transaction_ms") for item in observations]
+        if (
+            not isinstance(repeated.get("lock_wait_ms"), dict)
+            or len(waits) != 4 * 3 * SAMPLES
+            or any(not isinstance(wait, (int, float)) or wait < 0 for wait in waits)
+            or any(not isinstance(duration, (int, float)) or duration < 0 for duration in transactions)
+        ):
+            raise ValueError("concurrent-writer output is missing lock-wait or transaction evidence")
+    if cache_mode == "cold":
+        resets = [item.get("cache_reset_ms") for item in observations]
+        if (
+            not isinstance(repeated.get("cache_reset_ms"), dict)
+            or any(not isinstance(duration, (int, float)) or duration < 0 for duration in resets)
+        ):
+            raise ValueError("cold-cache output is missing reset-time evidence")
     return report
 
 
@@ -90,8 +123,11 @@ class DockerStatsSampler:
                 self.stopped.wait(1)
 
 
-def run_case(dimensions: int, changed_rows: int, measurement_path: Path) -> dict:
-    stem = f"centroid-cost-{dimensions}-batch-{changed_rows}"
+def run_case(dimensions: int, changed_rows: int, cache_mode: str, concurrent_writer: bool, measurement_path: Path) -> dict:
+    if cache_mode == "cold" and os.environ.get("GITHUB_ACTIONS") != "true":
+        raise RuntimeError("cold-cache mode clears host page caches and is limited to GitHub Actions runners")
+    writer_mode = "concurrent" if concurrent_writer else "serial"
+    stem = f"centroid-cost-{cache_mode}-{writer_mode}-{dimensions}-batch-{changed_rows}"
     log_path = measurement_path.with_name(f"{stem}.log")
     stats_path = measurement_path.with_name(f"{stem}-docker-stats.jsonl")
     log_path.unlink(missing_ok=True)
@@ -105,6 +141,8 @@ def run_case(dimensions: int, changed_rows: int, measurement_path: Path) -> dict
             "PGVECTOR_BENCH_SAMPLES": "1",
             "PGVECTOR_CENTROID_SAMPLES": str(SAMPLES),
             "PGVECTOR_CENTROID_REWRITE_ROWS": str(changed_rows),
+            "PGVECTOR_CENTROID_CACHE_MODE": cache_mode,
+            "PGVECTOR_CENTROID_CONCURRENT_WRITER": "1" if concurrent_writer else "0",
             "PGVECTOR_EXPECTED_VERSION": "0.8.7",
         }
     )
@@ -138,7 +176,7 @@ def run_case(dimensions: int, changed_rows: int, measurement_path: Path) -> dict
     log_path.write_text(completed.stdout, encoding="utf-8")
     if completed.returncode != 0:
         raise RuntimeError(f"{stem} test failed; see {log_path}:\n{completed.stdout[-4000:]}")
-    report = parse_measurement(completed.stdout, dimensions)
+    report = parse_measurement(completed.stdout, dimensions, cache_mode, concurrent_writer)
     if report.get("pgvector") != "0.8.7" or not report.get("postgres", "").startswith("PostgreSQL 18."):
         raise ValueError(f"{stem} ran against an unsupported database image")
     if sampler.samples == 0:
@@ -155,6 +193,8 @@ def run_case(dimensions: int, changed_rows: int, measurement_path: Path) -> dict
         "dimensions": dimensions,
         "rows": ROWS,
         "changed_rows_per_round": changed_rows,
+        "cache_mode": cache_mode,
+        "concurrent_writer": concurrent_writer,
         "measurement": report,
         "resource_samples": sampler.samples,
         "resource_file": stats_path.relative_to(ROOT).as_posix(),
@@ -180,6 +220,10 @@ def main() -> int:
         "dimensions": list(DIMENSIONS),
         "warmup_rounds": WARMUP,
         "measured_rounds": SAMPLES,
+        "modes": [
+            {"cache_mode": cache_mode, "concurrent_writer": concurrent_writer}
+            for cache_mode, concurrent_writer in MODES
+        ],
         "workloads": cases,
         "cases": cases,
         "raw_evidence_files": [],
@@ -188,28 +232,30 @@ def main() -> int:
     try:
         for dimensions in DIMENSIONS:
             for changed_rows in REWRITES:
-                print(
-                    f"=== Exact-package centroid cost: {dimensions} dimensions, "
-                    f"{changed_rows} changed rows ===",
-                    flush=True,
-                )
-                stem = f"centroid-cost-{dimensions}-batch-{changed_rows}"
-                evidence.extend(
-                    [
-                        measurement_path.with_name(f"{stem}.log"),
-                        measurement_path.with_name(f"{stem}-docker-stats.jsonl"),
-                    ]
-                )
-                case = run_case(dimensions, changed_rows, measurement_path)
-                cases.append(case)
-                result["raw_evidence_files"] = sorted(
-                    path.relative_to(ROOT).as_posix() for path in evidence if path.is_file()
-                )
-                write_measurement(measurement_path, result)
+                for cache_mode, concurrent_writer in MODES:
+                    writer_mode = "concurrent" if concurrent_writer else "serial"
+                    print(
+                        f"=== Exact-package centroid cost: {dimensions} dimensions, "
+                        f"{changed_rows} changed rows, {cache_mode} cache, {writer_mode} writer ===",
+                        flush=True,
+                    )
+                    stem = f"centroid-cost-{cache_mode}-{writer_mode}-{dimensions}-batch-{changed_rows}"
+                    evidence.extend(
+                        [
+                            measurement_path.with_name(f"{stem}.log"),
+                            measurement_path.with_name(f"{stem}-docker-stats.jsonl"),
+                        ]
+                    )
+                    case = run_case(dimensions, changed_rows, cache_mode, concurrent_writer, measurement_path)
+                    cases.append(case)
+                    result["raw_evidence_files"] = sorted(
+                        path.relative_to(ROOT).as_posix() for path in evidence if path.is_file()
+                    )
+                    write_measurement(measurement_path, result)
         result["status"] = "complete"
         result["candidate_commit"] = os.environ["PGT_RELEASE_CANDIDATE_COMMIT"]
         result["artifact_sha256"] = os.environ["PGT_RELEASE_ARTIFACT_SHA256"]
-        result["workload"] = "5,000-row centroid comparison across 384/768/1536 dimensions, four group shapes, warmups, repeated one-row and group-scale rewrites"
+        result["workload"] = "5,000-row centroid comparison across 384/768/1536 dimensions, four group shapes, warmups, repeated one-row and group-scale rewrites, warm/cold cache, and a controlled writer-lock case"
         write_measurement(measurement_path, result)
         return 0
     except Exception as error:

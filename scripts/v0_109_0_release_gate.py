@@ -131,7 +131,14 @@ def check_pgvector_contract(contract: dict) -> None:
         and centroid_cost.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
         and centroid_cost.get("command_argv") == ["python3", "scripts/run_release_centroid_cost.py"]
         and centroid_cost.get("measurement_file") == "qualification-logs/raw/centroid-cost-matrix.json"
-        and centroid_cost.get("nextest_retries") == 0,
+        and centroid_cost.get("nextest_retries") == 0
+        and centroid_cost.get("required_modes") == [
+            {"cache_mode": "warm", "concurrent_writer": False},
+            {"cache_mode": "cold", "concurrent_writer": False},
+            {"cache_mode": "warm", "concurrent_writer": True},
+        ]
+        and centroid_cost.get("measured_rounds_per_case") == 20
+        and centroid_cost.get("controlled_writer_hold_ms") == 10,
         "centroid cost qualification must retain the required exact-package matrix",
     )
 
