@@ -3824,35 +3824,38 @@ async fn test_retention_rejects_inexact_floating_sum() {
     let attached: bool = db.query_scalar("SELECT EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent='retention_float_src'::regclass AND inhrelid='retention_float_old'::regclass)").await;
     assert!(attached);
 
-    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
-        .await;
-    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
-        .await;
-    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
-        .await;
-    db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name = 'float_legacy'").await;
-    db.execute("ALTER SYSTEM SET pg_trickle.enabled = true")
-        .await;
-    db.execute("SELECT pg_reload_conf()").await;
-    assert!(
-        db.wait_for_scheduler(std::time::Duration::from_secs(90))
-            .await
-    );
-    assert!(db.wait_for_condition(
-        "scheduled refresh rejects floating-point SUM",
-        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='float_legacy' AND h.initiated_by='SCHEDULER' AND h.status='FAILED' AND h.error_message LIKE '%does not support floating-point SUM%')",
-        std::time::Duration::from_secs(60),
-        std::time::Duration::from_millis(50),
-    ).await);
-    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
-        .await;
-    db.execute("SELECT pg_reload_conf()").await;
-    let after_scheduler: Vec<(String, f64, i64)> =
-        sqlx::query_as("SELECT d::text,total,n FROM float_legacy ORDER BY d")
-            .fetch_all(&db.pool)
-            .await
-            .unwrap();
-    assert_eq!(after_scheduler, actual);
+    #[cfg(not(feature = "light-e2e"))]
+    {
+        db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
+            .await;
+        db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
+            .await;
+        db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+            .await;
+        db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name = 'float_legacy'").await;
+        db.execute("ALTER SYSTEM SET pg_trickle.enabled = true")
+            .await;
+        db.execute("SELECT pg_reload_conf()").await;
+        assert!(
+            db.wait_for_scheduler(std::time::Duration::from_secs(90))
+                .await
+        );
+        assert!(db.wait_for_condition(
+            "scheduled refresh rejects floating-point SUM",
+            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='float_legacy' AND h.initiated_by='SCHEDULER' AND h.status='FAILED' AND h.error_message LIKE '%does not support floating-point SUM%')",
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(50),
+        ).await);
+        db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+            .await;
+        db.execute("SELECT pg_reload_conf()").await;
+        let after_scheduler: Vec<(String, f64, i64)> =
+            sqlx::query_as("SELECT d::text,total,n FROM float_legacy ORDER BY d")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(after_scheduler, actual);
+    }
     db.execute("UPDATE pgtrickle.pgt_dependencies dep SET column_snapshot=dep.column_snapshot-'partition_retention' FROM pgtrickle.pgt_stream_tables st WHERE st.pgt_id=dep.pgt_id AND st.pgt_name='float_legacy'").await;
     db.execute("SELECT pgtrickle.create_stream_table_with_retention('float_count','SELECT d,count(val) AS n FROM retention_float_src GROUP BY d','TRIM','d','2026-01-01','1h')").await;
     db.execute("INSERT INTO retention_float_src VALUES (4,'2026-06-01',NULL)")
@@ -3963,32 +3966,36 @@ async fn test_retention_rejects_nondeterministic_group_collations() {
     let action: (String, String, bool) = sqlx::query_as("SELECT h.action,h.status,h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='collation_count_st' ORDER BY h.refresh_id DESC LIMIT 1").fetch_one(&db.pool).await.unwrap();
     assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
 
-    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
-        .await;
-    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
-        .await;
-    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
-        .await;
-    db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name = 'collation_legacy'").await;
-    db.execute("ALTER SYSTEM SET pg_trickle.enabled = true")
-        .await;
-    db.execute("SELECT pg_reload_conf()").await;
-    assert!(
-        db.wait_for_scheduler(std::time::Duration::from_secs(90))
-            .await
-    );
-    assert!(db.wait_for_condition(
-        "scheduled refresh rejects unsafe collation",
-        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name = 'collation_legacy' AND h.initiated_by = 'SCHEDULER' AND h.status = 'FAILED' AND h.error_message LIKE '%nondeterministic collation%')",
-        std::time::Duration::from_secs(60),
-        std::time::Duration::from_millis(50),
-    ).await);
-    let rows: Vec<(String, String, i64)> =
-        sqlx::query_as("SELECT d::text, account, total FROM collation_legacy ORDER BY d, account")
-            .fetch_all(&db.pool)
-            .await
-            .unwrap();
-    assert_eq!(rows, Vec::new());
+    #[cfg(not(feature = "light-e2e"))]
+    {
+        db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
+            .await;
+        db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
+            .await;
+        db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+            .await;
+        db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name = 'collation_legacy'").await;
+        db.execute("ALTER SYSTEM SET pg_trickle.enabled = true")
+            .await;
+        db.execute("SELECT pg_reload_conf()").await;
+        assert!(
+            db.wait_for_scheduler(std::time::Duration::from_secs(90))
+                .await
+        );
+        assert!(db.wait_for_condition(
+            "scheduled refresh rejects unsafe collation",
+            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name = 'collation_legacy' AND h.initiated_by = 'SCHEDULER' AND h.status = 'FAILED' AND h.error_message LIKE '%nondeterministic collation%')",
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(50),
+        ).await);
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT d::text, account, total FROM collation_legacy ORDER BY d, account",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, Vec::new());
+    }
 }
 
 #[tokio::test]
