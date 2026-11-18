@@ -74,8 +74,12 @@ async fn test_semantic_sql_controls_reject_predicate_count_payload_and_join_muta
         ('I',ROW(1,NULL)::control_pair),('I',ROW(1,2)::control_pair), \
         ('D',ROW(NULL,NULL)::control_pair))";
     let generated = format!("{input} SELECT {inserts} AS inserted,{deletes} AS deleted FROM t");
-    assert!(generated.contains("COUNT(CASE WHEN __pgt_action = 'I' THEN \"payload\" ELSE NULL END)"));
-    assert!(generated.contains("COUNT(CASE WHEN __pgt_action = 'D' THEN \"payload\" ELSE NULL END)"));
+    assert!(
+        generated.contains("COUNT(CASE WHEN __pgt_action = 'I' THEN \"payload\" ELSE NULL END)")
+    );
+    assert!(
+        generated.contains("COUNT(CASE WHEN __pgt_action = 'D' THEN \"payload\" ELSE NULL END)")
+    );
     controls.push(Control {
         name:"wrong-nonnull-count", phase:"count_argument_nullability",
         source:("src/dvm/operators/aggregate.rs",include_str!("../src/dvm/operators/aggregate.rs")),
