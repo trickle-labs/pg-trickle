@@ -255,8 +255,9 @@ benchmark: it does not measure ANN recall or per-document freshness and runs
 the three databases serially. The batch runner substitutes the configured
 vector dimensions into the hybrid query; the standalone SQL example above
 remains three-dimensional. The retained candidate-bounded results cover
-10k rows at 384/768/1536 dimensions and 100k rows at 384 dimensions, but not
-the higher-dimensional 100k cases or 1m-row corpus. Larger-load
-recovery-to-searchability and final integrated-package reruns remain
+10k rows at 384/768/1536 dimensions and 100k rows at 384 dimensions. They are
+not final-package qualification. The release gate reruns both 10k and 100k at
+384/768/1536 against the exact package; the 1m-row RAG case is out of scope.
+Larger-load recovery-to-searchability and final integrated-package reruns remain
 outstanding. The report records a scoped comparison and limitations; do not
 infer a universal performance advantage from these synthetic cases.
