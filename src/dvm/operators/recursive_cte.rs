@@ -234,7 +234,7 @@ fn dred_cascade_is_safe(base: &OpTree, recursive: &OpTree, columns: &[String]) -
     else {
         return false;
     };
-    if aliases != columns {
+    if aliases.as_slice() != columns {
         return false;
     }
     let OpTree::InnerJoin {
@@ -285,11 +285,11 @@ fn dred_cascade_is_safe(base: &OpTree, recursive: &OpTree, columns: &[String]) -
             _ => return false,
         };
 
-    if pk_cols.len() != 1 || self_cols != columns {
+    if pk_cols.len() != 1 || self_cols.as_slice() != columns {
         return false;
     }
     let source_names: Vec<String> = source_cols.iter().map(|c| c.name.clone()).collect();
-    if source_names != columns {
+    if source_names.as_slice() != columns {
         return false;
     }
 
@@ -297,7 +297,7 @@ fn dred_cascade_is_safe(base: &OpTree, recursive: &OpTree, columns: &[String]) -
     // name and value in the stream table. No renames or computed values.
     let direct_projection = |exprs: &[Expr], names: &[String], scan_alias: &str| {
         exprs.len() == source_names.len()
-            && names == source_names
+            && names == source_names.as_slice()
             && exprs.iter().zip(names).all(|(expr, name)| {
                 matches!(
                     expr,
@@ -327,7 +327,7 @@ fn dred_cascade_is_safe(base: &OpTree, recursive: &OpTree, columns: &[String]) -
                     },
                 ) if scan_alias == source_alias
                     && rec_alias == self_alias
-                    && key == &pk_cols[0] => Some(parent.as_str()),
+                    && key == &pk_cols[0] => Some(parent.to_string()),
                 _ => None,
             };
             parent_from(left, right).or_else(|| parent_from(right, left))
@@ -337,7 +337,7 @@ fn dred_cascade_is_safe(base: &OpTree, recursive: &OpTree, columns: &[String]) -
     let Some(parent) = join_parent else {
         return false;
     };
-    if parent == pk_cols[0] || !source_names.iter().any(|name| name == parent) {
+    if parent == pk_cols[0] || !source_names.iter().any(|name| name == &parent) {
         return false;
     }
 
@@ -3817,6 +3817,69 @@ mod tests {
         assert!(sql.contains("\"public\".\"st\" AS \"t\""));
         assert!(sql.contains("JOIN"));
         assert!(!sql.contains("__p"));
+    }
+
+    // ── Issue #1427: source provenance and bag-preserving SQL ───────
+
+    #[test]
+    fn test_dred_rejects_recursive_edge_scan_outside_stream_projection() {
+        let base = make_scan(1, "roots", "public", "r", &["node"]);
+        let mut edges = make_scan(2, "edges", "public", "e", &["src", "dst"]);
+        if let OpTree::Scan { pk_columns, .. } = &mut edges {
+            *pk_columns = vec!["src".into(), "dst".into()];
+        }
+        let recursive = OpTree::Project {
+            expressions: vec![Expr::ColumnRef {
+                table_alias: Some("e".into()),
+                column_name: "dst".into(),
+            }],
+            aliases: vec!["node".into()],
+            child: Box::new(OpTree::InnerJoin {
+                condition: Expr::BinaryOp {
+                    op: "=".into(),
+                    left: Box::new(Expr::ColumnRef {
+                        table_alias: Some("e".into()),
+                        column_name: "src".into(),
+                    }),
+                    right: Box::new(Expr::ColumnRef {
+                        table_alias: Some("d".into()),
+                        column_name: "node".into(),
+                    }),
+                },
+                left: Box::new(edges),
+                right: Box::new(make_self_ref("d", "d", &["node"])),
+            }),
+        };
+        // CTE columns match storage, yet e.src/e.dst do not exist there.
+        assert!(!dred_cascade_is_safe(&base, &recursive, &["node".into()]));
+    }
+
+    #[test]
+    fn test_recursive_recomputation_delta_counts_all_bag_occurrences() {
+        let mut ctx = test_ctx();
+        ctx.st_qualified_name = Some("\"public\".\"reach\"".into());
+        ctx.defining_query = Some(
+            "WITH RECURSIVE d AS (SELECT 0 AS node UNION ALL SELECT node + 1 FROM d WHERE node < 3) \
+             SELECT node FROM d"
+                .into(),
+        );
+        ctx.st_user_columns = Some(vec!["node".into()]);
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(sub.\"node\"))".into());
+        let result = generate_recomputation_delta(
+            &mut ctx,
+            "d",
+            &["node".into()],
+            &make_scan(1, "roots", "public", "r", &["node"]),
+            &make_self_ref("d", "d", &["node"]),
+            true,
+        )
+        .unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_eq!(sql.matches("row_number() OVER (PARTITION BY __pgt_row_id").count(), 4);
+        assert_eq!(sql.matches("__pgt_occurrence =").count(), 2);
+        assert!(sql.contains("pgtrickle.encode_row_id_v3('SCAN_KEY'"));
+        assert!(!result.is_deduplicated);
     }
 
     // ── Strategy selection: column matching ──────────────────────────
