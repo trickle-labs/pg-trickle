@@ -901,6 +901,7 @@ run:
 # Package the extension for distribution
 [group: "pgrx"]
 package:
+    rm -rf target/release/pg_trickle-pg{{pg}}
     cargo pgrx package --features pg{{pg}}
 
 # ── Release ───────────────────────────────────────────────────────────────
