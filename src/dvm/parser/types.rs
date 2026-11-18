@@ -254,7 +254,10 @@ mod expr_sql_tests {
                 column_name: name.into(),
             };
 
-            assert_eq!(expression.to_sql(), format!("\"{}\"", name.replace('"', "\"\"")));
+            assert_eq!(
+                expression.to_sql(),
+                format!("\"{}\"", name.replace('"', "\"\""))
+            );
         }
     }
 }
