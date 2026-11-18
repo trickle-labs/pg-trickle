@@ -3142,6 +3142,31 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
         ),
         "algebraic refresh must apply the committed source change after crash recovery: {details}"
     );
+
+    sqlx::query("UPDATE centroid_crash_src SET v = '[9,10]' WHERE id = 1")
+        .execute(&mut *conn)
+        .await
+        .expect("commit source change after crash recovery");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_crash_st')")
+        .execute(&mut *conn)
+        .await
+        .expect("refresh after crash recovery catch-up");
+    let recovered_state_still_applies_deltas: (bool, String, Option<bool>, bool, Option<String>) =
+        sqlx::query_as("SELECT public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)), s.centroid::text, c.baseline_frontier = t.frontier, c.materialized_xid IS NULL, h.merge_strategy_used FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("check post-recovery incremental refresh");
+    assert_eq!(
+        recovered_state_still_applies_deltas,
+        (
+            true,
+            "[8,9]".into(),
+            Some(true),
+            true,
+            Some("centroid_algebraic".into())
+        ),
+        "recovered centroid state must remain valid for later deltas"
+    );
 }
 
 #[tokio::test]
