@@ -16,6 +16,11 @@ updates from jobs dispatched before that resume. Pre-upgrade scheduler jobs
 with unknown generation snapshots cannot overwrite newer operator recovery;
 normal subsequent scheduler jobs capture the new generation automatically.
 
+The upgrade also installs the partition-retention API and its DDL hook.
+Retention stays disabled for existing stream tables until explicitly
+configured. See [Partitioned Tables](tutorials/PARTITIONED_TABLES.md) for
+eligibility, configuration, and the safeguards for retained history.
+
 ## 0.110.0 to 0.110.1
 
 Install the v0.110.1 library and extension SQL files, then run:

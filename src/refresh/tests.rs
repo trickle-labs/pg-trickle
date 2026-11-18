@@ -19,6 +19,41 @@ use crate::refresh::merge::columns::{
 use crate::refresh::merge::delete::should_warn_amplification;
 
 #[test]
+fn test_retention_scoped_rows_preserves_occurrence_order() {
+    let sql = retention_scoped_rows_sql(
+        "\"public\".\"target\"",
+        "pg_temp.delta",
+        &["d".into(), "value".into()],
+        true,
+        None,
+    );
+    assert_eq!(
+        sql,
+        "SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id FROM pg_temp.delta) affected CROSS JOIN LATERAL (SELECT st.__pgt_row_id, st.\"d\", st.\"value\", row_number() OVER (PARTITION BY st.__pgt_row_id ORDER BY st.tableoid, st.ctid) AS __pgt_occurrence FROM \"public\".\"target\" st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(affected.__pgt_row_id) AND st.__pgt_row_id = affected.__pgt_row_id OFFSET 0) scoped"
+    );
+}
+
+#[test]
+fn test_retention_scoped_rows_prunes_proven_partition_key() {
+    let sql = retention_scoped_rows_sql(
+        "\"public\".\"target\"",
+        "pg_temp.delta",
+        &["d".into(), "value".into()],
+        false,
+        Some("d"),
+    );
+    assert_eq!(
+        sql,
+        "SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id, \"d\" FROM pg_temp.delta) affected CROSS JOIN LATERAL (SELECT st.__pgt_row_id, st.\"d\", st.\"value\" FROM \"public\".\"target\" st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(affected.__pgt_row_id) AND st.__pgt_row_id = affected.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) affected.\"d\" OFFSET 0) scoped"
+    );
+    let fallback = retention_scoped_rows_sql("t", "d", &["value".into()], false, Some("missing"));
+    assert_eq!(
+        fallback,
+        "SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id FROM d) affected CROSS JOIN LATERAL (SELECT st.__pgt_row_id, st.\"value\" FROM t st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(affected.__pgt_row_id) AND st.__pgt_row_id = affected.__pgt_row_id OFFSET 0) scoped"
+    );
+}
+
+#[test]
 fn test_differential_cost_evidence_reports_output_amplification() {
     let evidence = build_differential_cost_evidence(4, 20);
     assert_eq!(evidence["schema_version"], 1);
@@ -195,11 +230,25 @@ fn test_reset_execution_state_discards_failed_refresh_output() {
 fn test_refresh_context_restores_nested_state_on_error() {
     assert_eq!(current_safe_bound(), None);
     assert_eq!(current_full_policy(), FullPolicy::Allow);
+    assert!(!is_retention_catchup());
 
     let result: Result<(), PgTrickleError> =
         with_refresh_context(RefreshContext::graph("0/10", FullPolicy::Error), || {
             assert_eq!(current_safe_bound().as_deref(), Some("0/10"));
             assert_eq!(current_full_policy(), FullPolicy::Error);
+
+            with_refresh_context(
+                RefreshContext::retention("0/10", Some((7, "d".into()))),
+                || {
+                    assert!(is_retention_catchup());
+                    assert_eq!(current_full_policy(), FullPolicy::Error);
+                    assert_eq!(retention_partition_key(7).as_deref(), Some("d"));
+                    assert_eq!(retention_partition_key(8), None);
+                    Ok::<_, PgTrickleError>(())
+                },
+            )?;
+            assert!(!is_retention_catchup());
+            assert_eq!(retention_partition_key(7), None);
 
             with_refresh_context(RefreshContext::manual(), || {
                 assert_eq!(current_safe_bound(), None);
@@ -214,6 +263,7 @@ fn test_refresh_context_restores_nested_state_on_error() {
     assert!(result.is_err());
     assert_eq!(current_safe_bound(), None);
     assert_eq!(current_full_policy(), FullPolicy::Allow);
+    assert!(!is_retention_catchup());
 }
 
 #[test]
@@ -1281,6 +1331,50 @@ fn test_build_trigger_update_sql_basic() {
     assert!(sql.contains("FROM __pgt_delta_7 AS d"));
     assert!(sql.contains("d.__pgt_action = 'I'"));
     assert!(sql.contains("IS DISTINCT FROM"));
+}
+
+#[test]
+fn test_retention_dml_probes_affected_rows() {
+    let cols = vec!["val".to_string()];
+    assert_eq!(
+        build_retention_trigger_delete_sql("\"public\".\"t\"", 7, None),
+        "DELETE FROM \"public\".\"t\" AS st USING (SELECT matched.tableoid, matched.ctid FROM (SELECT __pgt_row_id, COUNT(*) AS n FROM __pgt_delta_7 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id) d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"public\".\"t\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id ORDER BY st2.ctid LIMIT d.n) matched) target WHERE st.tableoid = target.tableoid AND st.ctid = target.ctid"
+    );
+    assert_eq!(
+        build_retention_trigger_update_sql("\"public\".\"t\"", 7, &cols, None),
+        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"public\".\"t\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid AND d.__pgt_action = 'I' AND (st.\"val\"::text IS DISTINCT FROM d.\"val\"::text)"
+    );
+    assert_eq!(
+        build_retention_trigger_insert_sql("\"public\".\"t\"", 7, &cols, None),
+        "INSERT INTO \"public\".\"t\" (__pgt_row_id, \"val\") SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, d.\"val\" FROM __pgt_delta_7 AS d WHERE d.__pgt_action = 'I' AND NOT EXISTS (SELECT 1 FROM (SELECT 1 FROM \"public\".\"t\" AS st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched) ORDER BY d.__pgt_row_id"
+    );
+}
+
+#[test]
+fn test_retention_dml_prunes_by_proven_partition_key() {
+    let cols = vec!["val".to_string()];
+    assert_eq!(
+        build_retention_trigger_delete_sql("\"public\".\"t\"", 7, Some("d")),
+        "DELETE FROM \"public\".\"t\" AS st USING (SELECT __pgt_row_id, \"d\" FROM __pgt_delta_7 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id, \"d\") d WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\""
+    );
+    assert_eq!(
+        build_retention_trigger_update_sql("\"public\".\"t\"", 7, &cols, Some("d")),
+        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\" AND d.__pgt_action = 'I' AND (st.\"val\"::text IS DISTINCT FROM d.\"val\"::text)"
+    );
+    assert_eq!(
+        build_retention_trigger_insert_sql("\"public\".\"t\"", 7, &cols, Some("d")),
+        "INSERT INTO \"public\".\"t\" (__pgt_row_id, \"val\") SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, d.\"val\" FROM __pgt_delta_7 AS d WHERE d.__pgt_action = 'I' AND NOT EXISTS (SELECT 1 FROM (SELECT 1 FROM \"public\".\"t\" AS st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\" OFFSET 0) matched) ORDER BY d.__pgt_row_id"
+    );
+}
+
+#[test]
+fn test_partitioned_keyed_insert_avoids_unique_conflict_target() {
+    let cols = vec!["a".to_string()];
+    let sql = build_trigger_insert_for_storage("\"public\".\"t\"", 10, &cols, false, true, true);
+    assert_eq!(
+        sql,
+        "INSERT INTO \"public\".\"t\" (__pgt_row_id, \"a\") SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, d.\"a\" FROM __pgt_delta_10 AS d WHERE d.__pgt_action = 'I' AND NOT EXISTS (SELECT 1 FROM \"public\".\"t\" AS st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id) ORDER BY d.__pgt_row_id"
+    );
 }
 
 #[test]

@@ -1682,6 +1682,164 @@ async fn test_upgrade_chain_stream_tables_survive() {
         .await;
 }
 
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_partition_retention_on_existing_stream() {
+    if !upgrade_image_available()
+        || std::env::var("PGS_UPGRADE_FROM").ok().as_deref() != Some("0.110.1")
+    {
+        eprintln!("SKIP: requires the 0.110.1 to 0.110.2 upgrade image");
+        return;
+    }
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.110.1' CASCADE")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE upgrade_retention_src (id INT NOT NULL, d DATE NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE upgrade_retention_old PARTITION OF upgrade_retention_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE upgrade_retention_live PARTITION OF upgrade_retention_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO upgrade_retention_src VALUES (1,'2025-06-01',10), (2,'2026-06-01',20)")
+        .await;
+    let query =
+        "SELECT d, SUM(amount) AS total, COUNT(*) AS n FROM upgrade_retention_src GROUP BY d";
+    db.create_st("upgrade_retention_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("CREATE TABLE upgrade_sealed_src (id INT NOT NULL, d DATE NOT NULL, amount INT NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE upgrade_sealed_old PARTITION OF upgrade_sealed_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE upgrade_sealed_live PARTITION OF upgrade_sealed_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO upgrade_sealed_src VALUES (1,'2025-06-01',7), (2,'2026-06-01',11)")
+        .await;
+    db.create_st(
+        "upgrade_sealed_st",
+        "SELECT d, SUM(amount) AS total, COUNT(*) AS n FROM upgrade_sealed_src GROUP BY d",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let baseline: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT d::text, SUM(amount), COUNT(*) FROM upgrade_sealed_src GROUP BY d ORDER BY d",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("capture retained baseline before upgrade");
+    // Model a prior retained installation with the capture guarantees it needs.
+    db.execute("CREATE FUNCTION pgtrickle.retention_upgrade_fixture(text,text,text,text) RETURNS void LANGUAGE c SECURITY DEFINER SET search_path TO pgtrickle, pg_catalog, pg_temp AS '$libdir/pg_trickle', 'set_stream_table_partition_retention_wrapper'").await;
+    db.execute("SELECT pgtrickle.retention_upgrade_fixture('upgrade_sealed_st', 'RETAIN', 'd', '2026-01-01')").await;
+    db.execute("DROP FUNCTION pgtrickle.retention_upgrade_fixture(text,text,text,text)")
+        .await;
+    db.execute("ALTER EVENT TRIGGER pg_trickle_ddl_tracker DISABLE")
+        .await;
+    db.execute("ALTER EVENT TRIGGER pg_trickle_drop_tracker DISABLE")
+        .await;
+    db.execute("ALTER TABLE upgrade_sealed_src DETACH PARTITION upgrade_sealed_old")
+        .await;
+    db.execute("ALTER EVENT TRIGGER pg_trickle_ddl_tracker ENABLE")
+        .await;
+    db.execute("ALTER EVENT TRIGGER pg_trickle_drop_tracker ENABLE")
+        .await;
+    let (sealed_id, hash, source_oid, lower, upper): (i64, i64, i64, i32, i32) = sqlx::query_as("SELECT pgt_id, defining_query_hash, 'upgrade_sealed_src'::regclass::oid::bigint, DATE '2025-01-01' - DATE '2000-01-01', DATE '2026-01-01' - DATE '2000-01-01' FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'upgrade_sealed_st'")
+        .fetch_one(&db.pool).await.expect("read sealed fixture identity");
+    // Simulate a prior installation with already-sealed aggregate history.
+    let sealed = serde_json::json!({
+        "version": 1, "mode": "RETAIN", "candidate": {
+            "output_column": "d", "bucket": "EXACT", "source_type_oid": 1082,
+            "source_oid": source_oid, "source_column": "d"
+        }, "cutoff": {"kind": "DATE", "value": upper}, "query_hash": hash,
+        "sealed": [{"lower": {"kind": "DATE", "value": lower}, "upper": {"kind": "DATE", "value": upper}}]
+    });
+    sqlx::query("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_retention}', $1::jsonb) WHERE pgt_id = $2")
+        .bind(sealed).bind(sealed_id).execute(&db.pool).await.expect("install sealed upgrade fixture");
+    sqlx::query("UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = false WHERE pgt_id = $1")
+        .bind(sealed_id)
+        .execute(&db.pool)
+        .await
+        .expect("mark sealed fixture consistent");
+    let before: bool = db.query_scalar("SELECT to_regprocedure('pgtrickle.set_stream_table_partition_retention(text,text,text,text)') IS NULL").await;
+    assert!(before);
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.110.2'")
+        .await;
+    let installed: (String, bool) = sqlx::query_as("SELECT extversion, EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger WHERE evtname = 'pg_trickle_ddl_start_tracker' AND evtevent = 'ddl_command_start') FROM pg_catalog.pg_extension WHERE extname = 'pg_trickle'")
+        .fetch_one(&db.pool).await.expect("inspect upgraded extension");
+    assert_eq!(installed, ("0.110.2".into(), true));
+    let status: serde_json::Value = db
+        .query_scalar(
+            "SELECT pgtrickle.get_stream_table_partition_retention('upgrade_retention_st')",
+        )
+        .await;
+    assert_eq!(status, serde_json::json!({"enabled": false}));
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('upgrade_retention_st', 'TRIM', 'd', '2026-01-01')").await;
+    db.execute("INSERT INTO upgrade_retention_src VALUES (3,'2025-06-01',3)")
+        .await;
+    db.execute("ALTER TABLE upgrade_retention_src DETACH PARTITION upgrade_retention_old")
+        .await;
+    db.assert_st_matches_query("upgrade_retention_st", query)
+        .await;
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM upgrade_retention_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read upgraded stream output");
+    assert_eq!(rows, vec![("2026-06-01".into(), 20, 1)]);
+    let action: (String, String, bool) = sqlx::query_as("SELECT h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'upgrade_retention_st' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&db.pool).await.expect("read upgraded refresh action");
+    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    let status: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('upgrade_sealed_st')")
+        .await;
+    assert_eq!(
+        status["sealed_ranges"],
+        serde_json::json!([{"lower":"2025-01-01", "upper":"2026-01-01"}])
+    );
+    let retained: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM upgrade_sealed_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read retained output after upgrade");
+    assert_eq!(retained, baseline);
+    db.execute("INSERT INTO upgrade_sealed_src VALUES (3,'2026-06-01',4)")
+        .await;
+    let mut expected = baseline;
+    expected[1].1 += 4;
+    expected[1].2 += 1;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        db.refresh_st_with_retry("upgrade_sealed_st").await;
+        let rows: Vec<(String, i64, i64)> =
+            sqlx::query_as("SELECT d::text, total, n FROM upgrade_sealed_st ORDER BY d")
+                .fetch_all(&db.pool)
+                .await
+                .expect("read post-upgrade differential output");
+        if rows == expected {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "upgraded retained output did not converge: {rows:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let action: (String, String, bool) = sqlx::query_as("SELECT h.action, h.status, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'upgrade_sealed_st' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&db.pool).await.expect("read retained post-upgrade refresh action");
+    assert_eq!(action, ("DIFFERENTIAL".into(), "COMPLETED".into(), false));
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET refresh_mode = 'FULL' WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'upgrade_sealed_st')").await;
+    let error = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('upgrade_sealed_st')")
+        .await
+        .expect_err("FULL must not erase retained data after upgrade");
+    assert!(
+        error.to_string().contains("retained partition history"),
+        "{error}"
+    );
+    let retained: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM upgrade_sealed_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read retained output after rejected FULL");
+    assert_eq!(retained, expected);
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // L10 — Views queryable after upgrade
 // ══════════════════════════════════════════════════════════════════════

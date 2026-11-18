@@ -274,6 +274,8 @@ mod window_plan;
 
 // Re-export everything from sub-modules so external callers are unaffected.
 pub use rewrites::*;
+#[cfg(any(not(test), feature = "pg_test"))]
+pub(crate) use sublinks::collect_analyzed_aggregate_locations;
 pub use sublinks::*;
 pub use types::*;
 pub use validation::*;

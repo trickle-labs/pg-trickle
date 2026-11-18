@@ -2968,7 +2968,7 @@ END AS __pgt_meta_action"#
     // changed group (#1405). For matching V3 GROUP_KEY identities, use the
     // row-probe expression index. The probe can collide, so always compare
     // the complete bytea identity too. Typed encoding preserves NULL keys.
-    let join_cond = if group_columns.is_empty() {
+    let mut join_cond = if group_columns.is_empty() {
         // Scalar aggregates have a single persistent row.
         "TRUE".to_string()
     } else if can_probe_row_identity {
@@ -2992,6 +2992,19 @@ END AS __pgt_meta_action"#
             .collect::<Vec<_>>()
             .join(" AND ")
     };
+    if crate::refresh::is_retention_catchup()
+        && can_probe_row_identity
+        && let Some(key) = ctx.retention_partition_key.as_deref()
+        && let Some(index) = stored_group_keys
+            .iter()
+            .position(|column| *column == format!("sub.{}", quote_ident(key)))
+    {
+        join_cond.push_str(&format!(
+            " AND st.{} OPERATOR(pg_catalog.=) d.{}",
+            quote_ident(key),
+            quote_ident(&group_columns[index]),
+        ));
+    }
 
     // Optional LEFT JOIN to the rescan CTE for group-rescan aggregates
     let rescan_join = if let Some(ref rc) = rescan_cte {
@@ -3019,8 +3032,15 @@ END AS __pgt_meta_action"#
     } else {
         format!("{delta_cte} AS d({delta_group_aliases})")
     };
+    let storage_join = if crate::refresh::is_retention_catchup() && can_probe_row_identity {
+        format!(
+            "LEFT JOIN LATERAL (SELECT st.* FROM {st_table} st WHERE {join_cond} OFFSET 0) st ON TRUE"
+        )
+    } else {
+        format!("LEFT JOIN {st_table} st ON {join_cond}")
+    };
     let merge_sql = format!(
-        "SELECT {selects}\nFROM {delta_from}\nLEFT JOIN {st_table} st ON {join_cond}{rescan_join}",
+        "SELECT {selects}\nFROM {delta_from}\n{storage_join}{rescan_join}",
         selects = merge_selects.join(",\n       "),
     );
     ctx.add_cte(merge_cte.clone(), merge_sql);
@@ -4231,6 +4251,31 @@ mod tests {
     }
 
     #[test]
+    fn test_retention_catchup_scopes_aggregate_storage_probe_to_each_delta_group() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(sub.\"region\"))".into());
+        ctx.retention_partition_key = Some("region".into());
+        let tree = aggregate(
+            vec![colref("region")],
+            vec![count_star("cnt")],
+            scan(1, "t", "public", "t", &["id", "region"]),
+        );
+        let result = crate::refresh::with_refresh_context(
+            crate::refresh::RefreshContext::retention("0/10", None),
+            || diff_aggregate(&mut ctx, &tree),
+        )
+        .unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(
+            &sql,
+            "LEFT JOIN LATERAL (SELECT st.* FROM \"public\".\"st\" st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id)",
+        );
+        assert_sql_contains(&sql, "OFFSET 0) st ON TRUE");
+        assert_sql_contains(&sql, "st.\"region\" OPERATOR(pg_catalog.=) d.\"region\"");
+    }
+
+    #[test]
     fn test_grouped_aggregate_preserves_key_join_for_incompatible_full_identity() {
         // Simulate a target whose FULL refresh used another identity domain.
         // The storage lookup must preserve null-safe group matching instead
@@ -4247,6 +4292,28 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
         assert_sql_contains(&sql, "st.\"region\" IS NOT DISTINCT FROM d.\"region\"");
         assert_sql_not_contains(&sql, "pgtrickle.row_probe_v1(st.__pgt_row_id)");
+    }
+
+    #[test]
+    fn test_retention_catchup_preserves_key_join_for_incompatible_identity() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(sub.*))".into());
+        ctx.retention_partition_key = Some("region".into());
+        let tree = aggregate(
+            vec![colref("region")],
+            vec![count_star("cnt")],
+            scan(1, "t", "public", "t", &["id", "region"]),
+        );
+        let result = crate::refresh::with_refresh_context(
+            crate::refresh::RefreshContext::retention("0/10", None),
+            || diff_aggregate(&mut ctx, &tree),
+        )
+        .unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(&sql, "st.\"region\" IS NOT DISTINCT FROM d.\"region\"");
+        assert_sql_not_contains(&sql, "LEFT JOIN LATERAL (SELECT st.*");
+        assert_sql_not_contains(&sql, "st.\"region\" OPERATOR(pg_catalog.=) d.\"region\"");
     }
 
     #[test]

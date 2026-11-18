@@ -55,6 +55,7 @@ pub mod diff;
 pub mod operators;
 pub mod parser;
 pub mod planner;
+pub mod retention;
 pub mod row_id;
 pub mod row_id_v2;
 pub mod schema;
@@ -838,6 +839,7 @@ fn generate_delta_query_impl(
     }
     ctx.st_user_columns = Some(st_user_cols);
     ctx.st_full_row_identity_expr = Some(full_identity_expr);
+    ctx.retention_partition_key = stage_pgt_id.and_then(crate::refresh::retention_partition_key);
     ctx.window_state_row_relation = window_state_row_relation.map(str::to_owned);
     ctx.merge_safe_dedup = is_scan_chain;
     ctx.st_scan_payload_identity = st_scan_payload_identity;

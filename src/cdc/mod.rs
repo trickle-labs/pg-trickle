@@ -50,6 +50,33 @@ use crate::config;
 use crate::config::normalize_change_buffer_durability;
 use crate::error::PgTrickleError;
 
+#[cfg(not(test))]
+thread_local! {
+    static INTERNAL_TRIGGER_DDL: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(not(test))]
+pub(crate) fn internal_trigger_ddl_active() -> bool {
+    INTERNAL_TRIGGER_DDL.with(|depth| depth.get() != 0)
+}
+
+#[cfg(not(test))]
+pub(crate) fn with_internal_trigger_ddl<T>(
+    operation: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    INTERNAL_TRIGGER_DDL.with(|depth| depth.set(depth.get() + 1));
+    pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(operation))
+        .finally(|| INTERNAL_TRIGGER_DDL.with(|depth| depth.set(depth.get() - 1)))
+        .execute()
+}
+
+#[cfg(test)]
+pub(crate) fn with_internal_trigger_ddl<T>(
+    operation: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    operation()
+}
+
 // ── A45-7: Submodules extracted from this file ────────────────────────────
 
 /// Trigger rebuild and WAL availability helpers.
@@ -127,6 +154,25 @@ pub fn get_cdc_name_for_source(source_oid: pg_sys::Oid) -> String {
     )
     .unwrap_or(None)
     .unwrap_or_else(|| source_oid.to_u32().to_string())
+}
+
+/// Retention sources require row triggers so direct child writes are captured.
+pub(crate) fn trigger_mode_for_source(
+    source_oid: pg_sys::Oid,
+) -> Result<config::CdcTriggerMode, PgTrickleError> {
+    let retention = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies \
+         WHERE source_relid = $1 AND source_type = 'TABLE' \
+           AND column_snapshot ? 'partition_retention')",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    Ok(if retention {
+        config::CdcTriggerMode::Row
+    } else {
+        config::pg_trickle_cdc_trigger_mode()
+    })
 }
 
 fn resolve_relation_info(
@@ -216,11 +262,9 @@ pub fn lock_source_relations(source_oids: &[pg_sys::Oid]) -> Result<(), PgTrickl
     Ok(())
 }
 
-/// Lock upstream stream-table storage and catalog rows for a protected FULL
-/// baseline.  The storage lock closes the data-read window; the catalog lock
-/// prevents the upstream frontier and buffer high-water mark from changing
-/// while the downstream baseline is established.
-pub fn lock_stream_table_sources(
+/// Lock upstream metadata before storage so a competing refresh cannot wait
+/// for a storage lock while holding the catalog row needed by this baseline.
+pub fn lock_stream_table_source_catalogs(
     pgt_id: i64,
     dependencies: &[crate::catalog::StDependency],
 ) -> Result<(), PgTrickleError> {
@@ -231,12 +275,10 @@ pub fn lock_stream_table_sources(
         .collect();
     relation_oids.sort_unstable_by_key(|oid| oid.to_u32());
     relation_oids.dedup();
-    lock_source_relations(&relation_oids)?;
-
     for source_oid in relation_oids {
         let upstream_id = Spi::get_one_with_args::<i64>(
-            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
-             WHERE pgt_relid = $1 FOR UPDATE",
+            "SELECT (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_relid = $1 FOR UPDATE SKIP LOCKED)",
             &[source_oid.into()],
         )
         .map_err(|e| PgTrickleError::CdcStateInvalid {
@@ -244,16 +286,45 @@ pub fn lock_stream_table_sources(
             source_name: format!("OID {}", source_oid.to_u32()),
             buffer: "stream-table catalog row".to_string(),
             reason: format!("could not lock upstream catalog row: {e}"),
-        })?
-        .ok_or_else(|| PgTrickleError::CdcStateInvalid {
-            pgt_id,
-            source_name: format!("OID {}", source_oid.to_u32()),
-            buffer: "stream-table catalog row".to_string(),
-            reason: "upstream stream-table metadata is missing".to_string(),
         })?;
-        let _ = upstream_id;
+        if upstream_id.is_none() {
+            let exists = Spi::get_one_with_args::<bool>(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = $1)",
+                &[source_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(false);
+            if exists {
+                return Err(PgTrickleError::LockTimeout(format!(
+                    "upstream stream-table metadata for OID {} is locked; retry the refresh",
+                    source_oid.to_u32()
+                )));
+            }
+            return Err(PgTrickleError::CdcStateInvalid {
+                pgt_id,
+                source_name: format!("OID {}", source_oid.to_u32()),
+                buffer: "stream-table catalog row".to_string(),
+                reason: "upstream stream-table metadata is missing".to_string(),
+            });
+        }
     }
     Ok(())
+}
+
+/// Protect the upstream frontier and storage throughout a FULL baseline.
+pub fn lock_stream_table_sources(
+    pgt_id: i64,
+    dependencies: &[crate::catalog::StDependency],
+) -> Result<(), PgTrickleError> {
+    lock_stream_table_source_catalogs(pgt_id, dependencies)?;
+    let mut relation_oids: Vec<pg_sys::Oid> = dependencies
+        .iter()
+        .filter(|dep| dep.source_type == "STREAM_TABLE")
+        .map(|dep| dep.source_relid)
+        .collect();
+    relation_oids.sort_unstable_by_key(|oid| oid.to_u32());
+    relation_oids.dedup();
+    lock_source_relations(&relation_oids)
 }
 
 /// Returns true when the source table is INSERT-only by design and therefore
@@ -831,7 +902,7 @@ pub fn create_change_trigger(
     // CORR-4: INSERT-only tables (e.g. pgt_refresh_history) must not receive
     // UPDATE or DELETE CDC triggers — only an INSERT trigger is registered.
     let insert_only = is_insert_only_table(source_oid);
-    let mode = config::pg_trickle_cdc_trigger_mode();
+    let mode = trigger_mode_for_source(source_oid)?;
     let buffer_key = format!("changes_{stable_name}");
     let sync_commit = buffer_uses_sync_commit(&buffer_key)?;
     match mode {
@@ -2802,9 +2873,7 @@ pub fn refresh_capture_body_for_source(
     let sync_commit = buffer_uses_sync_commit(&format!("changes_{name}"))?;
     let (row, insert, update, delete, truncate) =
         build_inactive_trigger_fn_sql(&change_schema, &name, sync_commit);
-    let functions = if crate::config::pg_trickle_cdc_trigger_mode()
-        == crate::config::CdcTriggerMode::Statement
-    {
+    let functions = if trigger_mode_for_source(source_oid)? == config::CdcTriggerMode::Statement {
         vec![insert, update, delete, truncate]
     } else {
         vec![row, truncate]
@@ -2830,7 +2899,8 @@ pub fn sync_capture_body_for_source(source_oid: pg_sys::Oid) -> Result<(), PgTri
                   FROM pgtrickle.pgt_dependencies d
                   JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id
                  WHERE d.source_relid = $1
-                   AND st.status IN ('ACTIVE', 'INITIALIZING')
+                   AND (st.status IN ('ACTIVE', 'INITIALIZING')
+                        OR d.column_snapshot ? 'partition_retention')
             )"#,
         &[source_oid.into()],
     )

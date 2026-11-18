@@ -137,6 +137,8 @@ pub struct DiffContext {
     /// operators compare this against their GROUP_KEY encoding before using
     /// an indexed ID join. None is used by standalone SQL-generation tests.
     pub st_full_row_identity_expr: Option<String>,
+    /// Proven non-null group key matching the target storage partition key.
+    pub(crate) retention_partition_key: Option<String>,
     /// Columns that the ST storage table has (outer projection columns),
     /// used by recursive CTE recomputation to match the storage schema.
     pub st_user_columns: Option<Vec<String>>,
@@ -701,6 +703,7 @@ impl DiffContext {
             window_state_row_relation: None,
             defining_query: None,
             st_full_row_identity_expr: None,
+            retention_partition_key: None,
             st_user_columns: None,
             merge_safe_dedup: false,
             st_scan_payload_identity: false,

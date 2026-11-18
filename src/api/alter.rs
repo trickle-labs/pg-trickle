@@ -531,7 +531,7 @@ fn diff_dependencies(
 
 // ── Core ALTER QUERY implementation ──────────────────────────────────────
 
-fn lock_alter_target(pgt_id: i64) -> Result<(), PgTrickleError> {
+pub(crate) fn lock_alter_target(pgt_id: i64) -> Result<(), PgTrickleError> {
     Spi::run_with_args(
         "SELECT pg_catalog.pg_advisory_xact_lock($1)",
         &[pgt_id.into()],
@@ -838,6 +838,7 @@ fn alter_stream_table_query(
     caller_search_path: &str,
 ) -> Result<(), PgTrickleError> {
     lock_alter_target(st.pgt_id)?;
+    crate::dvm::retention::ensure_query_change_allowed(st.pgt_id)?;
     resume_or_rollback_shadow_build(st.pgt_id, schema)?;
     let st = StreamTableMeta::get_by_id(st.pgt_id)?
         .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={}", st.pgt_id)))?;
@@ -1425,6 +1426,7 @@ fn alter_stream_table_partition_key(
     new_partition_key: Option<&str>,
 ) -> Result<(), PgTrickleError> {
     lock_alter_target(st.pgt_id)?;
+    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
     let locked_st = StreamTableMeta::get_by_id(st.pgt_id)?
         .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={}", st.pgt_id)))?;
     let st = &locked_st;
@@ -3319,6 +3321,29 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
     .ok_or_else(|| PgTrickleError::NotFound(qualified_name.to_string()))?;
     let st = StreamTableMeta::get_by_id(st.pgt_id)?
         .ok_or_else(|| PgTrickleError::NotFound(qualified_name.to_string()))?;
+    let deps = StDependency::get_for_st(st.pgt_id)?;
+    #[cfg(not(test))]
+    for dep in &deps {
+        if dep.source_type == "TABLE"
+            && dep
+                .column_snapshot
+                .as_ref()
+                .is_some_and(|value| value.get("partition_retention").is_some())
+        {
+            let source = Spi::get_one_with_args::<String>(
+                "SELECT (SELECT pg_catalog.format('%I.%I', n.nspname, c.relname) FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1)",
+                &[dep.source_relid.into()],
+            ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if let Some(source) = source {
+                // nosemgrep: rust.spi.run.dynamic-format — source is quoted by PostgreSQL format.
+                Spi::run(&format!(
+                    "LOCK TABLE ONLY {source} IN SHARE UPDATE EXCLUSIVE MODE"
+                ))
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: rust.spi.run.dynamic-format — source is catalog-quoted.
+            }
+        }
+    }
     if let Some(validated) =
         publication::prepare_publication_binding(&st, pg_sys::AccessExclusiveLock as i32)?
     {
@@ -3359,6 +3384,36 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
 
     // Delete catalog entries (cascade handles pgt_dependencies)
     StreamTableMeta::delete(st.pgt_id)?;
+
+    #[cfg(not(test))]
+    for dep in &deps {
+        if dep.source_type == "TABLE"
+            && dep
+                .column_snapshot
+                .as_ref()
+                .is_some_and(|value| value.get("partition_retention").is_some())
+        {
+            crate::dvm::retention::remove_partition_truncate_guards_if_unused(dep.source_relid)?;
+            let configured = Spi::get_one_with_args::<bool>(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies WHERE source_relid = $1 \
+                 AND source_type = 'TABLE' AND column_snapshot ? 'partition_retention')",
+                &[dep.source_relid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(true);
+            if !configured
+                && StDependency::effective_cdc_mode_for_source(dep.source_relid)?.as_deref()
+                    == Some("trigger")
+                && !cdc::trigger_exists(dep.source_relid)?
+            {
+                cdc::lock_source_relations(&[dep.source_relid])?;
+                cdc::rebuild_cdc_trigger(
+                    dep.source_relid,
+                    &config::pg_trickle_change_buffer_schema(),
+                )?;
+            }
+        }
+    }
 
     // Remove this ST's pgt_id from the tracked_by_pgt_ids arrays in
     // pgt_change_tracking so consumer counts stay accurate after drop.
@@ -3454,6 +3509,15 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     let (schema, table_name, st) =
         resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
 
+    // Serialize resume with DDL's pre-detach suspension before checking state.
+    Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR UPDATE",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {schema}.{table_name}")))?;
+    let st = StreamTableMeta::get_by_id(st.pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {schema}.{table_name}")))?;
     if st.status != StStatus::Suspended && st.status != StStatus::Error {
         return Err(PgTrickleError::InvalidArgument(format!(
             "stream table {}.{} is not suspended or in error state (current status: {})",
@@ -3462,6 +3526,35 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
             st.status.as_str(),
         )));
     }
+
+    let pending_detach = Spi::get_one_with_args::<bool>(
+        "WITH RECURSIVE upstream(pgt_id) AS ( \
+           SELECT $1::bigint UNION \
+           SELECT parent.pgt_id FROM upstream u \
+           JOIN pgtrickle.pgt_dependencies d ON d.pgt_id = u.pgt_id \
+           JOIN pgtrickle.pgt_stream_tables parent ON parent.pgt_relid = d.source_relid \
+           WHERE d.source_type = 'STREAM_TABLE' \
+         ), sources(oid) AS ( \
+           SELECT d.source_relid FROM upstream u \
+           JOIN pgtrickle.pgt_dependencies d ON d.pgt_id = u.pgt_id \
+           WHERE d.source_type = 'TABLE' UNION \
+           SELECT i.inhrelid FROM sources s \
+           JOIN pg_catalog.pg_inherits i ON i.inhparent = s.oid \
+         ) \
+         SELECT EXISTS (SELECT 1 FROM sources s \
+           JOIN pg_catalog.pg_inherits i ON i.inhparent = s.oid \
+           WHERE i.inhdetachpending)",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(true);
+    if pending_detach {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "cannot resume {schema}.{table_name} while a source partition detach is pending; \
+             finish DETACH PARTITION CONCURRENTLY or FINALIZE first"
+        )));
+    }
+    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
 
     let deps = StDependency::get_for_st(st.pgt_id)?;
     let source_oids: Vec<_> = deps
@@ -3929,8 +4022,17 @@ fn pause_stream_table(name: &str) {
 }
 
 fn pause_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
-    let (schema, table_name, st) =
+    let (schema, table_name, initial) =
         resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
+    lock_alter_target(initial.pgt_id)?;
+    let (_, _, st) =
+        resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
+    if st.pgt_id != initial.pgt_id {
+        return Err(PgTrickleError::InvalidArgument(
+            "stream table changed while acquiring its lock".into(),
+        ));
+    }
+    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
 
     if st.status != StStatus::Active {
         return Err(PgTrickleError::InvalidArgument(format!(
