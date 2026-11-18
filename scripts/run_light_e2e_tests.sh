@@ -262,6 +262,7 @@ package_extension() {
     pg_config_path="$(resolve_pg_config)"
 
     echo "Packaging extension with pg_config: $pg_config_path"
+    rm -rf "${PROJECT_DIR}/target/release/pg_trickle-pg18"
     cargo pgrx package --pg-config "$pg_config_path"
     export PGT_EXTENSION_DIR="${PROJECT_DIR}/target/release/pg_trickle-pg18"
 }
