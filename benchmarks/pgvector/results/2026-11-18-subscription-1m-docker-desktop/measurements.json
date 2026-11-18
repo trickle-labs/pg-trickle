@@ -1,0 +1,118 @@
+{
+  "benchmark": "test_pgvector_subscription_scaling_workload",
+  "date": "2026-11-18",
+  "corpus_rows": 1000000,
+  "dimensions": 384,
+  "analyzed": true,
+  "rounds": 2,
+  "updated_rows_per_round": 1,
+  "distinct_pivots": 10,
+  "software": {
+    "postgres": "PostgreSQL 18.7",
+    "pgvector": "0.8.7",
+    "pg_trickle": "0.109.0",
+    "runtime_source_commit": "cfb965df",
+    "benchmark_harness_commit": "fafc6af9",
+    "docker_image_id": "sha256:3fa654fab411194eb6b9102eecac0ceb115030d5199fcb66237e2db1ee4ee3b8"
+  },
+  "environment": {
+    "host": "Apple Silicon, 32 GiB RAM",
+    "docker_desktop": "29.9.2",
+    "container_platform": "linux/amd64",
+    "docker_cpus": 10,
+    "docker_memory_bytes": 8319504384
+  },
+  "instrumentation": {
+    "nested_auto_explain": true,
+    "log_analyze": true,
+    "log_buffers": true,
+    "log_timing": false,
+    "timings_include_instrumentation_overhead": true
+  },
+  "notes": [
+    "This is the one-million-source-row subscription benchmark, not the RAG benchmark.",
+    "The 1,000-subscription case used 10 distinct pivots; other subscribed cases used one pivot.",
+    "Forced explicit-DML cases added a no-op row trigger.",
+    "Each run asserted differential refresh, changed-row propagation, and expected notifications.",
+    "There was no controlled concurrent load, randomized run order, CPU or WAL collection, percentile estimate, or reliable peak-memory measurement.",
+    "Only analyzed 384-dimensional vectors were measured."
+  ],
+  "runs": [
+    {
+      "trigger_path": "trigger_free",
+      "forced_noop_trigger": false,
+      "subscriptions": 0,
+      "merge_strategy": "delete_insert",
+      "samples": [
+        {"round": 0, "refresh_ms": 567.113, "commit_ms": 5.970, "notification_wait_ms": null, "snapshot_kind": "none", "snapshot_rows": null, "affected_identities": null, "stream_sequential_tuples_returned": 0, "source_sequential_tuples_returned": 0},
+        {"round": 1, "refresh_ms": 95.106, "commit_ms": 2.520, "notification_wait_ms": null, "snapshot_kind": "none", "snapshot_rows": null, "affected_identities": null, "stream_sequential_tuples_returned": 0, "source_sequential_tuples_returned": 0}
+      ],
+      "plan_log": {
+        "path": "plans/trigger-free-0-subscriptions.log.gz",
+        "raw_sha256": "065cc4b023dac341ee9f5abe5d11da63c4d0319013d2af48f55913a50cc629ca",
+        "archive_sha256": "d1ab8765e7a046ce8d4a20b4f39f23299b72f52e3be81ad3774e370c5c0c450f"
+      }
+    },
+    {
+      "trigger_path": "trigger_free",
+      "forced_noop_trigger": false,
+      "subscriptions": 1,
+      "merge_strategy": "explicit_dml",
+      "samples": [
+        {"round": 0, "refresh_ms": 576.889, "commit_ms": 6.408, "notification_wait_ms": 0.131, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "source_sequential_tuples_returned": 0},
+        {"round": 1, "refresh_ms": 105.470, "commit_ms": 4.310, "notification_wait_ms": 0.049, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "source_sequential_tuples_returned": 0}
+      ],
+      "plan_log": {
+        "path": "plans/trigger-free-1-subscription.log.gz",
+        "raw_sha256": "75fdf36036fb5955d9ed5ef0f8c252ac7bcb4f756462658db85f7c64ba826e9b",
+        "archive_sha256": "ef3fd70248839311efabe8384c05126a1cc25de260f585a12b72bb657acc7e12"
+      }
+    },
+    {
+      "trigger_path": "trigger_free",
+      "forced_noop_trigger": false,
+      "subscriptions": 1000,
+      "distinct_pivots": 10,
+      "merge_strategy": "explicit_dml",
+      "samples": [
+        {"round": 0, "refresh_ms": 1254.591, "commit_ms": 6.844, "notification_wait_ms": 11.739, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "source_sequential_tuples_returned": 0},
+        {"round": 1, "refresh_ms": 866.062, "commit_ms": 5.318, "notification_wait_ms": 8.921, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "source_sequential_tuples_returned": 0}
+      ],
+      "plan_log": {
+        "path": "plans/trigger-free-1000-subscriptions-10-pivots.log.gz",
+        "raw_sha256": "1ad1bc0e63c8f18cb49d8d7d952e1b8f27132cca1f91c652510bd95fcccf7008",
+        "archive_sha256": "e2aed59e51f83cbbf3e656adb5edbf7ef10e46fa5822e31da96b21f8ca54fecb"
+      }
+    },
+    {
+      "trigger_path": "forced_explicit_dml",
+      "forced_noop_trigger": true,
+      "subscriptions": 0,
+      "merge_strategy": "explicit_dml",
+      "samples": [
+        {"round": 0, "refresh_ms": 623.085, "commit_ms": 7.030, "notification_wait_ms": null, "snapshot_kind": "none", "snapshot_rows": null, "affected_identities": null, "stream_sequential_tuples_returned": 0, "source_sequential_tuples_returned": 0},
+        {"round": 1, "refresh_ms": 165.441, "commit_ms": 4.709, "notification_wait_ms": null, "snapshot_kind": "none", "snapshot_rows": null, "affected_identities": null, "stream_sequential_tuples_returned": 0, "source_sequential_tuples_returned": 0}
+      ],
+      "plan_log": {
+        "path": "plans/forced-0-subscriptions.log.gz",
+        "raw_sha256": "adae5c7d7418a50bd253b2f34aefaaf529f263dbb87800f81d94403a05932bf5",
+        "archive_sha256": "b1d27a7f1a8cd903619e1b79629f407976648090561517391d6dd3e4d38bfe14"
+      }
+    },
+    {
+      "trigger_path": "forced_explicit_dml",
+      "forced_noop_trigger": true,
+      "subscriptions": 1,
+      "merge_strategy": "explicit_dml",
+      "samples": [
+        {"round": 0, "refresh_ms": 10386.820, "commit_ms": 124.024, "notification_wait_ms": 0.140, "snapshot_kind": "full", "snapshot_rows": 1000000, "affected_identities": null, "stream_sequential_tuples_returned": 1000000, "source_sequential_tuples_returned": 0},
+        {"round": 1, "refresh_ms": 6628.518, "commit_ms": 121.399, "notification_wait_ms": 0.057, "snapshot_kind": "full", "snapshot_rows": 1000000, "affected_identities": null, "stream_sequential_tuples_returned": 1000000, "source_sequential_tuples_returned": 0}
+      ],
+      "plan_log": {
+        "path": "plans/forced-1-subscription.log.gz",
+        "raw_sha256": "459dc8ce65d0bbcc4d530f07f28f25c1d0ed2593c1dbdd09d6ca0f393c6180fa",
+        "archive_sha256": "4c4f003d4284fe7f87325412c8f71ffdf258e645fe61f216a51734ea8db39f01"
+      }
+    }
+  ]
+}
