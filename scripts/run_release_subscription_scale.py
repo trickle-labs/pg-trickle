@@ -132,7 +132,15 @@ def run_case(rows: int, subscriptions: int, statistics: str, plan_path: Path | N
 def validate_plan_log(output: str, rows: int, subscriptions: int, statistics: str) -> None:
     analyzed = statistics == "analyzed"
     case = f"rows={rows} subscriptions={subscriptions} analyzed={str(analyzed).lower()} round=0"
-    if any(output.count(f"PGVECTOR_SUB_{stage} {case}") != 1 for stage in ("START", "END")):
+    if any(
+        sum(
+            re.search(rf"\bLOG:\s+PGVECTOR_SUB_{stage} {re.escape(case)}(?:\s|$)", line)
+            is not None
+            for line in output.splitlines()
+        )
+        != 1
+        for stage in ("START", "END")
+    ):
         raise ValueError("subscription plan log is missing the expected case markers")
     if '"Plan":' not in output:
         raise ValueError("subscription plan log contains no auto_explain plan")

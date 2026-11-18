@@ -89,14 +89,23 @@ class SubscriptionScaleTests(unittest.TestCase):
             scale.parse_case(output, 1_000_000, 10, False)
 
     def test_plan_log_requires_case_markers_and_an_explain_plan(self):
+        case = "rows=1000000 subscriptions=0 analyzed=false round=0"
         plan = (
-            "PGVECTOR_SUB_START rows=1000000 subscriptions=0 analyzed=false round=0\n"
+            f"2026-11-18 18:11:32 UTC [1975] LOG:  PGVECTOR_SUB_START {case}\n"
+            f"2026-11-18 18:11:32 UTC [1975] STATEMENT: DO $marker$ BEGIN RAISE LOG 'PGVECTOR_SUB_START {case}'; END; $marker$\n"
             '{"Plan":{"Node Type":"Seq Scan"}}\n'
-            "PGVECTOR_SUB_END rows=1000000 subscriptions=0 analyzed=false round=0\n"
+            f"2026-11-18 18:11:39 UTC [1975] LOG:  PGVECTOR_SUB_END {case}\n"
+            f"2026-11-18 18:11:39 UTC [1975] STATEMENT: DO $marker$ BEGIN RAISE LOG 'PGVECTOR_SUB_END {case}'; END; $marker$\n"
         )
         scale.validate_plan_log(plan, 1_000_000, 0, "unanalyzed")
         with self.assertRaisesRegex(ValueError, "case markers"):
             scale.validate_plan_log(plan.replace("PGVECTOR_SUB_END", "OTHER"), 1_000_000, 0, "unanalyzed")
+        duplicate_start = plan.replace(
+            f"LOG:  PGVECTOR_SUB_START {case}\n",
+            f"LOG:  PGVECTOR_SUB_START {case}\nLOG:  PGVECTOR_SUB_START {case}\n",
+        )
+        with self.assertRaisesRegex(ValueError, "case markers"):
+            scale.validate_plan_log(duplicate_start, 1_000_000, 0, "unanalyzed")
         with self.assertRaisesRegex(ValueError, "no auto_explain plan"):
             scale.validate_plan_log(
                 plan.replace('{"Plan":{"Node Type":"Seq Scan"}}\n', ""),

@@ -2886,6 +2886,15 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
     let bound: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL)")
         .fetch_one(&mut *conn).await.expect("inspect initial churn state");
     assert!(bound, "churn fixture must initialize centroid state");
+    let cdc_buffer: String = sqlx::query_scalar(
+        "SELECT format('%I.%I', current_setting('pg_trickle.change_buffer_schema'), \
+         'changes_' || COALESCE((SELECT source_stable_name FROM pgtrickle.pgt_change_tracking \
+         WHERE source_relid = 'centroid_churn_src'::regclass), \
+         'centroid_churn_src'::regclass::oid::text))",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("resolve churn CDC buffer");
 
     let mut seed = 0x7a13_9465_u64;
     let mut algebraic = 0;
@@ -2936,6 +2945,20 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
             sqlx::query("INSERT INTO centroid_churn_src VALUES ($1, $2, $3::text::vector) ON CONFLICT (id) DO UPDATE SET grp = EXCLUDED.grp, v = EXCLUDED.v")
                 .bind(id).bind(group).bind(vector).execute(&mut *conn).await.expect("upsert churn row");
         }
+        let cdc_window_sql = format!(
+            "WITH f AS (SELECT frontier->'sources'->('centroid_churn_src'::regclass::oid::text)->>'lsn' AS lsn \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_churn_st'::regclass) \
+             SELECT jsonb_build_object('frontier_lsn', f.lsn, 'events', \
+               COALESCE((SELECT jsonb_agg(jsonb_build_object('change_id', c.change_id, 'lsn', c.lsn::text, \
+                 'action', c.action, 'id', c.id, 'grp', c.grp, 'changed_cols', c.changed_cols::text, \
+                 'vector_is_null', c.v IS NULL) ORDER BY c.change_id) FROM {cdc_buffer} c \
+                 WHERE c.lsn >= f.lsn::pg_lsn), '[]'::jsonb)) FROM f"
+        );
+        let cdc_window: serde_json::Value =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(cdc_window_sql.as_str()))
+                .fetch_one(&mut *conn)
+                .await
+                .expect("inspect centroid CDC window");
         sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_churn_st')")
             .execute(&mut *conn)
             .await
@@ -2954,7 +2977,10 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
                 .fetch_one(&mut *conn).await.expect("inspect centroid mismatch");
             let groups: serde_json::Value = sqlx::query_scalar("WITH native AS (SELECT grp, count(*) AS n, avg(v) IS NULL AS null_centroid FROM centroid_churn_src GROUP BY grp), actual AS (SELECT grp, __pgt_count AS n, centroid IS NULL AS null_centroid FROM centroid_churn_st) SELECT jsonb_build_object('native', (SELECT jsonb_agg(to_jsonb(native)) FROM native), 'actual', (SELECT jsonb_agg(to_jsonb(actual)) FROM actual))")
                 .fetch_one(&mut *conn).await.expect("inspect centroid groups");
-            panic!("centroid diverged from native AVG at step {step}: {details}; groups={groups}");
+            panic!(
+                "centroid diverged from native AVG at step {step}: {details}; \
+                 groups={groups}; cdc_window={cdc_window}"
+            );
         }
         let (error, bound_fraction): (f64, f64) = sqlx::query_as(
             "WITH native AS (SELECT grp, avg(v)::real[] AS v FROM centroid_churn_src GROUP BY grp), \

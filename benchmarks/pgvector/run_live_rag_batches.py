@@ -221,6 +221,16 @@ def json_result(output: str) -> dict:
     return json.loads(output.splitlines()[-1])
 
 
+def database_metadata() -> dict:
+    worker.psql("CREATE EXTENSION IF NOT EXISTS vector")
+    return json_result(worker.psql("""
+SELECT json_build_object('postgres', current_setting('server_version'),
+ 'pgvector', (SELECT extversion FROM pg_extension WHERE extname='vector'),
+ 'pg_trickle', (SELECT extversion FROM pg_extension WHERE extname='pg_trickle'),
+ 'occupied', EXISTS (SELECT 1 FROM pg_namespace WHERE nspname IN ('live_rag', 'embedding_demo')))::text;
+"""))
+
+
 def reader_sql(dimensions: int) -> str:
     hybrid = recall.HYBRID_SQL.read_text(encoding="utf-8").strip()
     if not hybrid.endswith(";"):
@@ -247,16 +257,15 @@ def reader_summary(reads, client_window, begin, end, readers):
 
 def _run(args: argparse.Namespace, checkpoint: CheckpointWriter) -> dict:
     checkpoint.update({"phase": "metadata"})
-    metadata = json_result(worker.psql("""
-SELECT json_build_object('postgres', current_setting('server_version'),
- 'pgvector', (SELECT extversion FROM pg_extension WHERE extname='vector'),
- 'pg_trickle', (SELECT extversion FROM pg_extension WHERE extname='pg_trickle'),
- 'occupied', EXISTS (SELECT 1 FROM pg_namespace WHERE nspname IN ('live_rag', 'embedding_demo')))::text;
-"""))
+    metadata = database_metadata()
     if metadata["occupied"]:
         raise ValueError("live_rag or embedding_demo schema already exists; use an empty disposable database")
     if metadata["pg_trickle"] != "0.109.0" or metadata["pgvector"] not in ("0.8.1", "0.8.7") or not re.match(r"^18(?:\.|$)", metadata["postgres"]):
-        raise ValueError("expected pg_trickle 0.109.0, PostgreSQL 18 and pgvector 0.8.1 or 0.8.7")
+        raise ValueError(
+            "expected pg_trickle 0.109.0, PostgreSQL 18 and pgvector 0.8.1 or 0.8.7; "
+            f"got pg_trickle={metadata['pg_trickle']!r}, pgvector={metadata['pgvector']!r}, "
+            f"PostgreSQL={metadata['postgres']!r}"
+        )
 
     def attest():
         identity = json_result(worker.psql(attestation.IDENTITY_SQL))
