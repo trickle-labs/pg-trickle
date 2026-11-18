@@ -1053,7 +1053,6 @@ async fn test_agg_mixed_dml_stress() {
     db.assert_st_matches_query("agg_stress_st", q).await;
 }
 
-
 // ── Regression: quoted aggregate column resolution (#1428) ─────────────
 
 async fn assert_quoted_aggregate_row(db: &E2eDb, stream_table: &str, predicate: &str) {
@@ -1062,7 +1061,10 @@ async fn assert_quoted_aggregate_row(db: &E2eDb, stream_table: &str, predicate: 
             "SELECT EXISTS (SELECT 1 FROM {stream_table} WHERE {predicate})"
         ))
         .await;
-    assert!(matches, "{stream_table}: expected row satisfying {predicate}");
+    assert!(
+        matches,
+        "{stream_table}: expected row satisfying {predicate}"
+    );
 }
 
 #[tokio::test]
@@ -1125,10 +1127,8 @@ async fn test_agg_quoted_joined_aliases_and_compound_group_differential() {
              "line item" NUMERIC, "quote""val" TEXT)"#,
     )
     .await;
-    db.execute(
-        "INSERT INTO qa_join_left VALUES (1, 'A', 10), (2, NULL, 30), (3, 'B', 20)",
-    )
-    .await;
+    db.execute("INSERT INTO qa_join_left VALUES (1, 'A', 10), (2, NULL, 30), (3, 'B', 20)")
+        .await;
     db.execute(
         "INSERT INTO qa_join_right VALUES
          (1, 'A', 2, 1, 'x'), (2, 'A', 4, 2, 'y'), (3, 'B', 8, 0, NULL)",
@@ -1181,10 +1181,8 @@ async fn test_agg_quoted_columns_immediate_insert_update_delete() {
              id INT PRIMARY KEY, grp TEXT, "Amount" NUMERIC, "keep me" BOOLEAN)"#,
     )
     .await;
-    db.execute(
-        "INSERT INTO qa_immediate_source VALUES (1, 'g', 10, true), (2, 'g', 20, false)",
-    )
-    .await;
+    db.execute("INSERT INTO qa_immediate_source VALUES (1, 'g', 10, true), (2, 'g', 20, false)")
+        .await;
     let query = r#"SELECT q.grp, AVG(q."Amount") AS mean,
                        COUNT(*) FILTER (WHERE q."keep me") AS kept
                     FROM qa_immediate_source q GROUP BY q.grp"#;
