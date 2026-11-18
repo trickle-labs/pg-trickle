@@ -44,6 +44,12 @@ async fn test_refresh_cost_evidence_marks_unaccounted_stream_changes() {
         "SELECT pgtrickle.create_stream_table('rf_cost_chain_child', 'SELECT id FROM rf_cost_chain_parent', '1h', 'DIFFERENTIAL')",
         "INSERT INTO rf_cost_chain_src VALUES (2)",
     ]).await;
+    // Keep the scheduler from racing the manual parent/child refresh sequence.
+    // FULL baseline protection now locks upstream stream-table metadata, so a
+    // concurrent scheduler refresh can legitimately return LockTimeout here.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['rf_cost_chain_parent', 'rf_cost_chain_child'])")
+        .await;
     db.refresh_st_until_converged("rf_cost_chain_parent").await;
     db.refresh_st_until_converged("rf_cost_chain_child").await;
     let detail: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'rf_cost_chain_child'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
