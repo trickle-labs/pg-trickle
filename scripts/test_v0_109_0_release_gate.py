@@ -179,3 +179,17 @@ class RetirementContractTests(unittest.TestCase):
             next(s for s in broken["required_suites"] if s["id"] == "subscription-scale-1m")[field] = value
             with self.assertRaises(SystemExit):
                 gate.check_subscription_scale_contract(broken)
+
+    def test_centroid_cost_matrix_is_required_and_package_bound(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        gate.check_pgvector_contract(contract)
+        for field, value in [
+            ("required", False),
+            ("e2e_image", "pg_trickle_e2e:latest"),
+            ("command_argv", ["true"]),
+            ("measurement_file", "qualification-logs/raw/other.json"),
+        ]:
+            broken = copy.deepcopy(contract)
+            next(s for s in broken["required_suites"] if s["id"] == "centroid-cost-matrix")[field] = value
+            with self.assertRaises(SystemExit):
+                gate.check_pgvector_contract(broken)
