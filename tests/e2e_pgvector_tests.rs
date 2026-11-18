@@ -3033,6 +3033,7 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
         "CREATE TABLE centroid_crash_src (id int PRIMARY KEY, grp int, v vector(2))",
         "INSERT INTO centroid_crash_src VALUES (1, 1, '[1,2]'), (2, 1, '[3,4]')",
         "SELECT pgtrickle.create_stream_table('centroid_crash_st', $$SELECT grp, avg(v) AS centroid FROM centroid_crash_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.centroid_crash_st'])",
         "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_crash_st'::regclass",
         "SELECT pgtrickle.refresh_stream_table('centroid_crash_st')",
         "UPDATE centroid_crash_src SET v = '[5,6]' WHERE id = 1",
@@ -3115,6 +3116,7 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
         "SET pg_trickle.enable_vector_agg = on",
         "SET pg_trickle.enable_centroid_state = on",
         "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.centroid_crash_st'])",
         "SELECT pgtrickle.refresh_stream_table('centroid_crash_st')",
     ] {
         sqlx::query(sql)
