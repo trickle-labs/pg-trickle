@@ -242,7 +242,9 @@ def main() -> int:
                 print(f"=== Exact-package live RAG: {rows} rows, {dimensions} dimensions ===", flush=True)
                 report = run_case(rows, dimensions, measurement_path)
                 reports.append(report)
-                result["raw_evidence_files"] = sorted(path.relative_to(ROOT).as_posix() for path in evidence)
+                result["raw_evidence_files"] = sorted(
+                    path.relative_to(ROOT).as_posix() for path in evidence if path.is_file()
+                )
                 write_measurement(measurement_path, result)
         result["status"] = "complete"
         result["candidate_commit"] = os.environ["PGT_RELEASE_CANDIDATE_COMMIT"]
