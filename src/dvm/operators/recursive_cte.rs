@@ -3855,6 +3855,62 @@ mod tests {
     }
 
     #[test]
+    fn test_dred_accepts_verbatim_single_parent_tree_and_rejects_computed_columns() {
+        let mut seed = make_scan(10, "nodes", "public", "root", &["id", "parent_id"]);
+        let mut nodes = make_scan(10, "nodes", "public", "n", &["id", "parent_id"]);
+        for source in [&mut seed, &mut nodes] {
+            if let OpTree::Scan { pk_columns, .. } = source {
+                *pk_columns = vec!["id".into()];
+            }
+        }
+        let columns: Vec<String> = vec!["id".into(), "parent_id".into()];
+        let base = OpTree::Project {
+            expressions: ["id", "parent_id"]
+                .iter()
+                .map(|name| Expr::ColumnRef {
+                    table_alias: Some("root".into()),
+                    column_name: (*name).into(),
+                })
+                .collect(),
+            aliases: columns.clone(),
+            child: Box::new(OpTree::Filter {
+                predicate: Expr::Raw("root.parent_id IS NULL".into()),
+                child: Box::new(seed),
+            }),
+        };
+        let mut recursive = OpTree::Project {
+            expressions: ["id", "parent_id"]
+                .iter()
+                .map(|name| Expr::ColumnRef {
+                    table_alias: Some("n".into()),
+                    column_name: (*name).into(),
+                })
+                .collect(),
+            aliases: columns.clone(),
+            child: Box::new(OpTree::InnerJoin {
+                condition: Expr::BinaryOp {
+                    op: "=".into(),
+                    left: Box::new(Expr::ColumnRef {
+                        table_alias: Some("n".into()),
+                        column_name: "parent_id".into(),
+                    }),
+                    right: Box::new(Expr::ColumnRef {
+                        table_alias: Some("t".into()),
+                        column_name: "id".into(),
+                    }),
+                },
+                left: Box::new(nodes),
+                right: Box::new(make_self_ref("t", "t", &["id", "parent_id"])),
+            }),
+        };
+        assert!(dred_cascade_is_safe(&base, &recursive, &columns));
+        if let OpTree::Project { expressions, .. } = &mut recursive {
+            expressions[1] = Expr::Raw("n.parent_id + 1".into());
+        }
+        assert!(!dred_cascade_is_safe(&base, &recursive, &columns));
+    }
+
+    #[test]
     fn test_recursive_recomputation_delta_counts_all_bag_occurrences() {
         let mut ctx = test_ctx();
         ctx.st_qualified_name = Some("\"public\".\"reach\"".into());
