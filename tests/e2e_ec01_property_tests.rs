@@ -46,7 +46,7 @@ async fn assert_full_diff_equal(db: &E2eDb, full_st: &str, diff_st: &str, seed: 
             "SELECT string_agg(column_name, ', ' ORDER BY ordinal_position) \
              FROM information_schema.columns \
              WHERE table_schema = 'public' AND table_name = '{diff_st}' \
-               AND column_name NOT LIKE '__pgt_%'"
+               AND NOT starts_with(column_name, '__pgt_')"
         ))
         .await;
 

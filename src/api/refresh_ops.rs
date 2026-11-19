@@ -328,6 +328,15 @@ pub(crate) fn execute_manual_refresh(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<ManualRefreshResult, PgTrickleError> {
+    crate::dvm::retention::ensure_retention_capture(st.pgt_id)?;
+    if matches!(st.status, StStatus::Suspended | StStatus::Error) {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "stream table {}.{} is {}; resume it before refreshing",
+            schema,
+            table_name,
+            st.status.as_str(),
+        )));
+    }
     refresh::reset_execution_state();
 
     // EC-25/EC-26: Set the internal_refresh flag so DML guard triggers
@@ -357,6 +366,8 @@ pub(crate) fn execute_manual_refresh(
 
     if manual_requires_whole_query_full(st) {
         refresh::ensure_full_policy(st, "manual refresh")?;
+        let dependencies = StDependency::get_for_st(st.pgt_id)?;
+        crate::cdc::lock_stream_table_source_catalogs(st.pgt_id, &dependencies)?;
     }
 
     // ERG-D: Determine the action label for history recording.
@@ -455,6 +466,8 @@ pub(crate) fn execute_manual_refresh(
         );
         Spi::run(&sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
+        // Rewriting can refresh another stream and overwrite the backend-local mode.
+        refresh::set_effective_mode("FULL");
         Ok(full_result)
     } else {
         match st.refresh_mode {

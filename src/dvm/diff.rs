@@ -87,6 +87,8 @@ pub struct CdcContext {
     st_source_pgt_ids: HashMap<u32, i64>,
     source_buffer_names: HashMap<u32, String>,
     source_stage_tables: HashMap<u32, String>,
+    /// Logical source states aligned to the NEW frontier for live reads.
+    source_bound_tables: HashMap<u32, String>,
 }
 
 /// Reusable differentiation state and snapshot caches.
@@ -97,6 +99,8 @@ pub struct CacheContext {
     st_bypass_tables: HashMap<i64, String>,
     scan_delta_ctes: HashMap<(u32, String), String>,
     scan_delta_ctes_by_oid: HashMap<u32, String>,
+    /// Qualified base relations used by Scan nodes in generated live reads.
+    source_scan_relations: HashMap<u32, String>,
     snapshot_cte_cache: HashMap<String, (String, String)>,
     snapshot_fingerprint_cache: HashMap<usize, (String, String)>,
     fallback_leaf_oids: HashSet<u32>,
@@ -133,6 +137,8 @@ pub struct DiffContext {
     /// operators compare this against their GROUP_KEY encoding before using
     /// an indexed ID join. None is used by standalone SQL-generation tests.
     pub st_full_row_identity_expr: Option<String>,
+    /// Proven non-null group key matching the target storage partition key.
+    pub(crate) retention_partition_key: Option<String>,
     /// Columns that the ST storage table has (outer projection columns),
     /// used by recursive CTE recomputation to match the storage schema.
     pub st_user_columns: Option<Vec<String>>,
@@ -678,6 +684,7 @@ impl DiffContext {
                 st_source_pgt_ids: HashMap::new(),
                 source_buffer_names: HashMap::new(),
                 source_stage_tables: HashMap::new(),
+                source_bound_tables: HashMap::new(),
             },
             cache: CacheContext {
                 cte_registry: CteRegistry::default(),
@@ -686,6 +693,7 @@ impl DiffContext {
                 st_bypass_tables: HashMap::new(),
                 scan_delta_ctes: HashMap::new(),
                 scan_delta_ctes_by_oid: HashMap::new(),
+                source_scan_relations: HashMap::new(),
                 snapshot_cte_cache: HashMap::new(),
                 snapshot_fingerprint_cache: HashMap::new(),
                 fallback_leaf_oids: HashSet::new(),
@@ -703,6 +711,7 @@ impl DiffContext {
             window_state_row_relation: None,
             defining_query: None,
             st_full_row_identity_expr: None,
+            retention_partition_key: None,
             st_user_columns: None,
             merge_safe_dedup: false,
             st_scan_payload_identity: false,
@@ -833,6 +842,61 @@ impl DiffContext {
 
     pub(crate) fn set_source_stage_tables(&mut self, tables: HashMap<u32, String>) {
         self.cdc.source_stage_tables = tables;
+    }
+
+    /// Install stable temp source names whose contents represent NEW frontier.
+    /// The staging phase must create them before any DIFFERENTIAL MERGE.
+    pub(crate) fn set_source_bound_tables(&mut self, tables: HashMap<u32, String>) {
+        self.cdc.source_bound_tables = tables;
+    }
+
+    /// Record the exact qualified source spelling for a Scan leaf. Rewriting
+    /// only recorded leaf relations avoids replacing similarly named tables
+    /// in expressions or source SQL from an unrelated scope.
+    pub(crate) fn register_source_scan(&mut self, oid: u32, schema: &str, table: &str) {
+        self.cache.source_scan_relations.insert(
+            oid,
+            format!("{}.{}", quote_ident(schema), quote_ident(table)),
+        );
+    }
+
+    /// Register every parsed source, including leaves optimized away by P5
+    /// direct aggregate delta generation. Those scans still appear in join
+    /// snapshots and group rescans, even though diff_scan is never called.
+    pub(crate) fn register_all_source_scans(
+        &mut self,
+        source_oids: &[u32],
+    ) -> Result<(), PgTrickleError> {
+        if self.cdc.source_bound_tables.is_empty() {
+            return Ok(());
+        }
+        for &oid in source_oids {
+            // Generated DVM SQL always quotes BOTH components, even for
+            // ordinary lowercase names. PostgreSQL format('%I') omits
+            // optional quotes, so its result would silently fail to match
+            // the generated FROM/JOIN reference. Force the same canonical
+            // spelling here, escaping embedded identifier quotes.
+            let source = pgrx::Spi::get_one_with_args::<String>(
+                "SELECT pg_catalog.format('\"%s\".\"%s\"', \
+                    pg_catalog.replace(n.nspname::text, '\"', '\"\"'), \
+                    pg_catalog.replace(c.relname::text, '\"', '\"\"')) \
+                 FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.oid = $1",
+                &[pgrx::pg_sys::Oid::from(oid).into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::NotFound(format!("source relation with OID {oid}")))?;
+            self.cache.source_scan_relations.insert(oid, source);
+        }
+        Ok(())
+    }
+
+    /// The source relation in an aggregate's rescan must be constructed
+    /// against its NEW frontier, not replaced after SQL generation. Direct
+    /// construction also covers cases where the scanner is bypassed.
+    pub(crate) fn bounded_source_table(&self, oid: u32) -> Option<&str> {
+        self.cdc.source_bound_tables.get(&oid).map(String::as_str)
     }
 
     pub(crate) fn cte_registry(&self) -> &CteRegistry {
@@ -1279,8 +1343,135 @@ impl DiffContext {
 
     /// Build the final WITH query from accumulated CTEs.
     pub(crate) fn build_with_query(&self, final_cte: &str) -> String {
-        self.optimization.build_with_query(final_cte)
+        let mut sql = self.optimization.build_with_query(final_cte);
+        // A live read at the MERGE snapshot may include rows committed after
+        // this refresh's NEW LSN. All FROM/JOIN uses of a source must instead
+        // see the logically bounded state staged before the MERGE.
+        for (oid, source) in &self.cache.source_scan_relations {
+            if let Some(bound) = self.cdc.source_bound_tables.get(oid) {
+                sql = rewrite_bounded_source_reads(&sql, source, bound);
+            }
+        }
+        sql
     }
+}
+
+/// Substitute generated FROM / JOIN leaf references with their bounded
+/// source stages, while preserving SQL quoted strings, identifier interiors,
+/// comments, and dollar-quoted expressions. We intentionally avoid a global
+/// .replace() because a user expression may contain source SQL as text.
+fn rewrite_bounded_source_reads(sql: &str, source: &str, bounded: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut result = String::with_capacity(sql.len());
+    let mut i = 0;
+    let mut previous = 0;
+    while i < bytes.len() {
+        // Literal strings, including doubled single-quote escapes.
+        if bytes[i] == b'\'' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    i += 1;
+                    if i < bytes.len() && bytes[i] == b'\'' {
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // Quoted identifiers can themselves contain SQL keyword text.
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'"' {
+                    i += 1;
+                    if i < bytes.len() && bytes[i] == b'"' {
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i..].starts_with(b"--") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i..].starts_with(b"/*") {
+            i += 2;
+            let mut depth = 1_usize;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i..].starts_with(b"/*") {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i..].starts_with(b"*/") {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        // PostgreSQL dollar-quoted bodies (including tagged delimiters).
+        if bytes[i] == b'$'
+            && let Some(relative) = bytes[i + 1..].iter().position(|&b| b == b'$')
+        {
+            let end = i + relative + 2;
+            if bytes[i + 1..end - 1]
+                .iter()
+                .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                let delimiter = &sql[i..end];
+                if let Some(close) = sql[end..].find(delimiter) {
+                    i = end + close + delimiter.len();
+                    continue;
+                }
+            }
+        }
+
+        let after_keyword = [b"FROM".as_slice(), b"JOIN".as_slice()]
+            .into_iter()
+            .find_map(|keyword| {
+                let end = i + keyword.len();
+                (end < bytes.len()
+                    && bytes[i..].starts_with(keyword)
+                    && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+                    && bytes[end].is_ascii_whitespace())
+                .then_some(end)
+            });
+        if let Some(mut at) = after_keyword {
+            while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+                at += 1;
+            }
+            if sql[at..].starts_with(source) {
+                let end = at + source.len();
+                if end == bytes.len()
+                    || !(bytes[end].is_ascii_alphanumeric()
+                        || bytes[end] == b'_'
+                        || bytes[end] == b'.'
+                        || bytes[end] == b'"')
+                {
+                    result.push_str(&sql[previous..at]);
+                    result.push_str(bounded);
+                    previous = end;
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    result.push_str(&sql[previous..]);
+    result
 }
 
 /// Helper: quote a SQL identifier.
@@ -2057,5 +2248,35 @@ pub mod test_helpers {
     /// Wrapper around `agg_delta_exprs` for external property tests.
     pub fn agg_delta_exprs_for_test(agg: &AggExpr, child_cols: &[String]) -> (String, String) {
         agg_delta_exprs(agg, child_cols)
+    }
+}
+
+#[cfg(test)]
+mod bounded_source_tests {
+    use super::rewrite_bounded_source_reads;
+
+    #[test]
+    fn rewrites_generated_live_reads_without_touching_literals_or_comments() {
+        let sql = "WITH t AS (SELECT * FROM \"public\".\"a\" a \
+                   JOIN \"public\".\"b\" b ON a.id = b.id) \
+                   SELECT 'FROM \"public\".\"a\"' AS literal FROM t \
+                   -- JOIN \"public\".\"a\"\n";
+        let replaced =
+            rewrite_bounded_source_reads(sql, "\"public\".\"a\"", "pg_temp.\"__pgt_bound_4_7\"");
+        assert!(replaced.contains("FROM pg_temp.\"__pgt_bound_4_7\" a"));
+        assert!(replaced.contains("JOIN \"public\".\"b\" b"));
+        assert!(replaced.contains("'FROM \"public\".\"a\"'"));
+        assert!(replaced.contains("-- JOIN \"public\".\"a\""));
+    }
+
+    #[test]
+    fn does_not_replace_partial_names_or_quoted_expressions() {
+        let sql = "SELECT * FROM \"public\".\"a_more\" x \
+                   JOIN \"public\".\"a\" a ON true \
+                   WHERE a.txt = $$FROM \"public\".\"a\"$$";
+        let replaced = rewrite_bounded_source_reads(sql, "\"public\".\"a\"", "pg_temp.\"bounded\"");
+        assert!(replaced.contains("FROM \"public\".\"a_more\" x"));
+        assert!(replaced.contains("JOIN pg_temp.\"bounded\" a"));
+        assert!(replaced.contains("$$FROM \"public\".\"a\"$$"));
     }
 }

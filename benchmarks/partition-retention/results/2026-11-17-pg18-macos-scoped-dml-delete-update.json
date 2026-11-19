@@ -1,0 +1,513 @@
+{
+  "captured_statements": 1014,
+  "source_partitions_scanned": [],
+  "source_rows_examined": 0,
+  "output_rows_examined": 30.05,
+  "relevant_plans": [
+    {
+      "scans": [
+        {
+          "relation": "totals",
+          "node": "Tid Scan",
+          "rows_examined": 1.0,
+          "condition": "(st.ctid = matched.ctid)"
+        },
+        {
+          "relation": "totals",
+          "node": "Index Scan",
+          "rows_examined": 1.0,
+          "condition": "(pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id))"
+        }
+      ],
+      "plan": {
+        "Query Text": "DELETE FROM \"scoped_dml_check\".\"totals\" AS st USING (SELECT matched.tableoid, matched.ctid FROM (SELECT __pgt_row_id, COUNT(*) AS n FROM __pgt_delta_292 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id) d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"scoped_dml_check\".\"totals\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id ORDER BY st2.ctid LIMIT d.n) matched) target WHERE st.tableoid = target.tableoid AND st.ctid = target.ctid",
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Delete",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "totals",
+          "Schema": "scoped_dml_check",
+          "Alias": "st",
+          "Startup Cost": 5.27,
+          "Total Cost": 6.33,
+          "Plan Rows": 0,
+          "Plan Width": 0,
+          "Actual Rows": 0.0,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Plans": [
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Startup Cost": 5.27,
+              "Total Cost": 6.33,
+              "Plan Rows": 1,
+              "Plan Width": 91,
+              "Actual Rows": 1.0,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": [
+                "st.ctid",
+                "d.*",
+                "matched.*"
+              ],
+              "Inner Unique": false,
+              "Plans": [
+                {
+                  "Node Type": "Subquery Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Alias": "d",
+                  "Startup Cost": 1.04,
+                  "Total Cost": 1.06,
+                  "Plan Rows": 1,
+                  "Plan Width": 78,
+                  "Actual Rows": 1.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": [
+                    "d.*",
+                    "d.__pgt_row_id",
+                    "d.n"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Aggregate",
+                      "Strategy": "Hashed",
+                      "Partial Mode": "Simple",
+                      "Parent Relationship": "Subquery",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1.04,
+                      "Total Cost": 1.05,
+                      "Plan Rows": 1,
+                      "Plan Width": 27,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "__pgt_delta_292.__pgt_row_id",
+                        "count(*)"
+                      ],
+                      "Group Key": [
+                        "__pgt_delta_292.__pgt_row_id"
+                      ],
+                      "Planned Partitions": 0,
+                      "HashAgg Batches": 1,
+                      "Peak Memory Usage": 32,
+                      "Disk Usage": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Relation Name": "__pgt_delta_292",
+                          "Schema": "pg_temp",
+                          "Alias": "__pgt_delta_292",
+                          "Startup Cost": 0.0,
+                          "Total Cost": 1.04,
+                          "Plan Rows": 1,
+                          "Plan Width": 19,
+                          "Actual Rows": 1.0,
+                          "Actual Loops": 1,
+                          "Disabled": true,
+                          "Output": [
+                            "__pgt_delta_292.__pgt_row_id",
+                            "__pgt_delta_292.__pgt_action",
+                            "__pgt_delta_292.d",
+                            "__pgt_delta_292.account",
+                            "__pgt_delta_292.__pgt_count",
+                            "__pgt_delta_292.total",
+                            "__pgt_delta_292.__pgt_aux_nonnull_total",
+                            "__pgt_delta_292.n"
+                          ],
+                          "Filter": "(__pgt_delta_292.__pgt_action = 'D'::text)",
+                          "Rows Removed by Filter": 2
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Nested Loop",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Startup Cost": 4.22,
+                  "Total Cost": 5.26,
+                  "Plan Rows": 1,
+                  "Plan Width": 40,
+                  "Actual Rows": 1.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": [
+                    "st.ctid",
+                    "matched.*"
+                  ],
+                  "Inner Unique": false,
+                  "Plans": [
+                    {
+                      "Node Type": "Subquery Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Alias": "matched",
+                      "Startup Cost": 4.22,
+                      "Total Cost": 4.23,
+                      "Plan Rows": 1,
+                      "Plan Width": 44,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "matched.*",
+                        "matched.tableoid",
+                        "matched.ctid"
+                      ],
+                      "Plans": [
+                        {
+                          "Node Type": "Limit",
+                          "Parent Relationship": "Subquery",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 4.22,
+                          "Total Cost": 4.22,
+                          "Plan Rows": 1,
+                          "Plan Width": 10,
+                          "Actual Rows": 1.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Output": [
+                            "st2.tableoid",
+                            "st2.ctid"
+                          ],
+                          "Plans": [
+                            {
+                              "Node Type": "Sort",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Startup Cost": 4.22,
+                              "Total Cost": 4.22,
+                              "Plan Rows": 1,
+                              "Plan Width": 10,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": [
+                                "st2.tableoid",
+                                "st2.ctid"
+                              ],
+                              "Sort Key": [
+                                "st2.ctid"
+                              ],
+                              "Sort Method": "quicksort",
+                              "Sort Space Used": 25,
+                              "Sort Space Type": "Memory",
+                              "Plans": [
+                                {
+                                  "Node Type": "Index Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Scan Direction": "Forward",
+                                  "Index Name": "totals_row_id_idx",
+                                  "Relation Name": "totals",
+                                  "Schema": "scoped_dml_check",
+                                  "Alias": "st2",
+                                  "Startup Cost": 0.15,
+                                  "Total Cost": 4.21,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 10,
+                                  "Actual Rows": 1.0,
+                                  "Actual Loops": 1,
+                                  "Disabled": false,
+                                  "Output": [
+                                    "st2.tableoid",
+                                    "st2.ctid"
+                                  ],
+                                  "Index Cond": "(pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id))",
+                                  "Rows Removed by Index Recheck": 0,
+                                  "Filter": "(st2.__pgt_row_id = d.__pgt_row_id)",
+                                  "Rows Removed by Filter": 0,
+                                  "Index Searches": 1
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Tid Scan",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals",
+                      "Schema": "scoped_dml_check",
+                      "Alias": "st",
+                      "Startup Cost": 0.0,
+                      "Total Cost": 1.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 10,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st.ctid",
+                        "st.tableoid"
+                      ],
+                      "TID Cond": "(st.ctid = matched.ctid)",
+                      "Filter": "(matched.tableoid = st.tableoid)",
+                      "Rows Removed by Filter": 0
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scans": [
+        {
+          "relation": "totals",
+          "node": "Tid Scan",
+          "rows_examined": 1.0,
+          "condition": "(st.ctid = matched.ctid)"
+        },
+        {
+          "relation": "totals",
+          "node": "Index Scan",
+          "rows_examined": 1.0,
+          "condition": "(pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id))"
+        }
+      ],
+      "plan": {
+        "Query Text": "UPDATE \"scoped_dml_check\".\"totals\" AS st SET \"d\" = d.\"d\", \"account\" = d.\"account\", \"__pgt_count\" = d.\"__pgt_count\", \"total\" = d.\"total\", \"__pgt_aux_nonnull_total\" = d.\"__pgt_aux_nonnull_total\", \"n\" = d.\"n\" FROM __pgt_delta_292 AS d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"scoped_dml_check\".\"totals\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid AND d.__pgt_action = 'I' AND (st.\"d\"::text IS DISTINCT FROM d.\"d\"::text OR st.\"account\"::text IS DISTINCT FROM d.\"account\"::text OR st.\"__pgt_count\"::text IS DISTINCT FROM d.\"__pgt_count\"::text OR st.\"total\"::text IS DISTINCT FROM d.\"total\"::text OR st.\"__pgt_aux_nonnull_total\"::text IS DISTINCT FROM d.\"__pgt_aux_nonnull_total\"::text OR st.\"n\"::text IS DISTINCT FROM d.\"n\"::text)",
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Update",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "totals",
+          "Schema": "scoped_dml_check",
+          "Alias": "st",
+          "Startup Cost": 0.16,
+          "Total Cost": 11.19,
+          "Plan Rows": 0,
+          "Plan Width": 0,
+          "Actual Rows": 0.0,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Plans": [
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Startup Cost": 0.16,
+              "Total Cost": 11.19,
+              "Plan Rows": 2,
+              "Plan Width": 84,
+              "Actual Rows": 1.0,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": [
+                "d.d",
+                "d.account",
+                "d.total",
+                "d.n",
+                "d.__pgt_count",
+                "d.__pgt_aux_nonnull_total",
+                "st.ctid",
+                "d.ctid",
+                "matched.*"
+              ],
+              "Inner Unique": false,
+              "Join Filter": "(((st.d)::text IS DISTINCT FROM (d.d)::text) OR (st.account IS DISTINCT FROM d.account) OR ((st.__pgt_count)::text IS DISTINCT FROM (d.__pgt_count)::text) OR ((st.total)::text IS DISTINCT FROM (d.total)::text) OR ((st.__pgt_aux_nonnull_total)::text IS DISTINCT FROM (d.__pgt_aux_nonnull_total)::text) OR ((st.n)::text IS DISTINCT FROM (d.n)::text))",
+              "Rows Removed by Join Filter": 0,
+              "Plans": [
+                {
+                  "Node Type": "Nested Loop",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Startup Cost": 0.15,
+                  "Total Cost": 9.5,
+                  "Plan Rows": 2,
+                  "Plan Width": 88,
+                  "Actual Rows": 1.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": [
+                    "d.d",
+                    "d.account",
+                    "d.total",
+                    "d.n",
+                    "d.__pgt_count",
+                    "d.__pgt_aux_nonnull_total",
+                    "d.ctid",
+                    "matched.*",
+                    "matched.tableoid",
+                    "matched.ctid"
+                  ],
+                  "Inner Unique": false,
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "__pgt_delta_292",
+                      "Schema": "pg_temp",
+                      "Alias": "d",
+                      "Startup Cost": 0.0,
+                      "Total Cost": 1.04,
+                      "Plan Rows": 2,
+                      "Plan Width": 63,
+                      "Actual Rows": 2.0,
+                      "Actual Loops": 1,
+                      "Disabled": true,
+                      "Output": [
+                        "d.d",
+                        "d.account",
+                        "d.total",
+                        "d.n",
+                        "d.__pgt_count",
+                        "d.__pgt_aux_nonnull_total",
+                        "d.ctid",
+                        "d.__pgt_row_id"
+                      ],
+                      "Filter": "(d.__pgt_action = 'I'::text)",
+                      "Rows Removed by Filter": 1
+                    },
+                    {
+                      "Node Type": "Subquery Scan",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Alias": "matched",
+                      "Startup Cost": 0.15,
+                      "Total Cost": 4.22,
+                      "Plan Rows": 1,
+                      "Plan Width": 44,
+                      "Actual Rows": 0.5,
+                      "Actual Loops": 2,
+                      "Disabled": false,
+                      "Output": [
+                        "matched.*",
+                        "matched.tableoid",
+                        "matched.ctid"
+                      ],
+                      "Plans": [
+                        {
+                          "Node Type": "Index Scan",
+                          "Parent Relationship": "Subquery",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Scan Direction": "Forward",
+                          "Index Name": "totals_row_id_idx",
+                          "Relation Name": "totals",
+                          "Schema": "scoped_dml_check",
+                          "Alias": "st2",
+                          "Startup Cost": 0.15,
+                          "Total Cost": 4.21,
+                          "Plan Rows": 1,
+                          "Plan Width": 10,
+                          "Actual Rows": 0.5,
+                          "Actual Loops": 2,
+                          "Disabled": false,
+                          "Output": [
+                            "st2.tableoid",
+                            "st2.ctid"
+                          ],
+                          "Index Cond": "(pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id))",
+                          "Rows Removed by Index Recheck": 0,
+                          "Filter": "(st2.__pgt_row_id = d.__pgt_row_id)",
+                          "Rows Removed by Filter": 0,
+                          "Index Searches": 2
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Memoize",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 0.01,
+                  "Total Cost": 1.02,
+                  "Plan Rows": 1,
+                  "Plan Width": 78,
+                  "Actual Rows": 1.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": [
+                    "st.ctid",
+                    "st.tableoid",
+                    "st.d",
+                    "st.account",
+                    "st.__pgt_count",
+                    "st.total",
+                    "st.__pgt_aux_nonnull_total",
+                    "st.n"
+                  ],
+                  "Cache Key": "matched.tableoid, matched.ctid",
+                  "Cache Mode": "logical",
+                  "Cache Hits": 0,
+                  "Cache Misses": 1,
+                  "Cache Evictions": 0,
+                  "Cache Overflows": 0,
+                  "Peak Memory Usage": 1,
+                  "Plans": [
+                    {
+                      "Node Type": "Tid Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals",
+                      "Schema": "scoped_dml_check",
+                      "Alias": "st",
+                      "Startup Cost": 0.0,
+                      "Total Cost": 1.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 78,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st.ctid",
+                        "st.tableoid",
+                        "st.d",
+                        "st.account",
+                        "st.__pgt_count",
+                        "st.total",
+                        "st.__pgt_aux_nonnull_total",
+                        "st.n"
+                      ],
+                      "TID Cond": "(st.ctid = matched.ctid)",
+                      "Filter": "(matched.tableoid = st.tableoid)",
+                      "Rows Removed by Filter": 0
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -55,6 +55,7 @@ pub mod diff;
 pub mod operators;
 pub mod parser;
 pub mod planner;
+pub mod retention;
 pub mod row_id;
 pub mod row_id_v2;
 pub mod schema;
@@ -838,6 +839,7 @@ fn generate_delta_query_impl(
     }
     ctx.st_user_columns = Some(st_user_cols);
     ctx.st_full_row_identity_expr = Some(full_identity_expr);
+    ctx.retention_partition_key = stage_pgt_id.and_then(crate::refresh::retention_partition_key);
     ctx.window_state_row_relation = window_state_row_relation.map(str::to_owned);
     ctx.merge_safe_dedup = is_scan_chain;
     ctx.st_scan_payload_identity = st_scan_payload_identity;
@@ -918,6 +920,50 @@ fn generate_delta_query_impl(
                 .collect::<Result<_, PgTrickleError>>()?,
         );
     }
+
+    // Every live source access in a deferred delta must use the state at the
+    // NEW LSN, not the current MERGE snapshot. DeltaStage prepares these
+    // relations under a source lock before any refresh SQL is executed.
+    if let Some(pgt_id) = stage_pgt_id {
+        ctx.set_source_bound_tables(
+            source_oids
+                .iter()
+                .map(|oid| {
+                    (
+                        *oid,
+                        format!(
+                            "pg_temp.{}",
+                            diff::quote_ident(
+                                &crate::refresh::delta_stage::DeltaStage::bounded_table_name(
+                                    pgt_id, *oid
+                                )
+                            )
+                        ),
+                    )
+                })
+                .collect(),
+        );
+    } else if let Some(tables) = source_stage_tables {
+        // The centroid path uses per-execution suffixed stage names.
+        // Its bounded snapshot is created using the same nonce.
+        ctx.set_source_bound_tables(
+            tables
+                .iter()
+                .map(|(oid, name)| {
+                    (
+                        *oid,
+                        name.replace("__pgt_cd_", "__pgt_bound_")
+                            .replace("__pgt_cdc_", "__pgt_bound_"),
+                    )
+                })
+                .collect(),
+        );
+    }
+
+    // P5/direct-aggregate paths do not invoke diff_scan for every leaf.
+    // Register their catalog-qualified sources too, so any generated
+    // endpoint, rescan or join snapshot reads the bounded relation.
+    ctx.register_all_source_scans(&source_oids)?;
 
     // DAG-4: Apply any active bypass table mappings from fused-chain execution.
     ctx.set_st_bypass_tables(crate::refresh::get_st_bypass_tables());
@@ -1244,6 +1290,31 @@ pub fn generate_delta_query_cached(
                 })
                 .collect(),
         );
+
+        // Cacheable SQL refers to the same stable frontier-aligned source
+        // stage name that DeltaStage prepares on every execution.
+        ctx.set_source_bound_tables(
+            source_oids
+                .iter()
+                .map(|oid| {
+                    (
+                        *oid,
+                        format!(
+                            "pg_temp.{}",
+                            diff::quote_ident(
+                                &crate::refresh::delta_stage::DeltaStage::bounded_table_name(
+                                    pgt_id, *oid
+                                )
+                            )
+                        ),
+                    )
+                })
+                .collect(),
+        );
+
+        // Optimization may skip diff_scan (P5 algebraic aggregate fast
+        // path), but reconstructed FROMs still reference those leaves.
+        ctx.register_all_source_scans(&source_oids)?;
 
         let (template_sql, output_columns, diff_dedup, diff_has_key_changed) =
             ctx.differentiate_with_columns(&result.tree)?;

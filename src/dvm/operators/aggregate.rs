@@ -97,29 +97,14 @@ fn resolve_group_col(expr: &Expr, child_cols: &[String]) -> String {
     resolve_expr_for_child(expr, child_cols)
 }
 
-/// Return a SQL fragment that can be safely embedded in a SELECT list or
-/// GROUP BY clause.
-///
-/// Simple column names (no parentheses) are double-quoted as identifiers.
-/// Compound SQL expressions (containing `(`) are returned as-is — quoting
-/// them as identifiers would cause PostgreSQL to look for a column whose
-/// name is literally the expression string.
-fn col_ref_or_sql_expr(s: &str) -> String {
-    if s.contains('(') {
-        s.to_string()
-    } else {
-        quote_ident(s)
-    }
-}
-
 /// Resolve an entire expression tree against child CTE column names.
 ///
-/// Recursively rewrites `ColumnRef` nodes using `resolve_col_for_child`
-/// and rebuilds the surrounding expression in SQL syntax. Used for FILTER
-/// clauses where the predicate may contain arbitrary expressions.
+/// Recursively rewrites `ColumnRef` nodes using `resolve_col_for_child`,
+/// quotes their resolved names once, and rebuilds compound SQL expressions.
+/// Used for aggregate arguments, FILTER predicates, and GROUP BY keys.
 fn resolve_expr_for_child(expr: &Expr, child_cols: &[String]) -> String {
     match expr {
-        Expr::ColumnRef { .. } => resolve_col_for_child(expr, child_cols),
+        Expr::ColumnRef { .. } => quote_ident(&resolve_col_for_child(expr, child_cols)),
         Expr::BinaryOp { op, left, right } => {
             format!(
                 "({} {op} {})",
@@ -478,13 +463,10 @@ pub(crate) fn centroid_signed_delta_sql(
     if !matches!(aggregate.function, AggFunc::VectorAvg) {
         return None;
     }
-    let argument = col_ref_or_sql_expr(&resolve_expr_for_child(
-        aggregate.argument.as_ref()?,
-        child_columns,
-    ));
+    let argument = resolve_expr_for_child(aggregate.argument.as_ref()?, child_columns);
     let resolved = group_by
         .iter()
-        .map(|group| col_ref_or_sql_expr(&resolve_group_col(group, child_columns)))
+        .map(|group| resolve_group_col(group, child_columns))
         .collect::<Vec<_>>();
     let names = group_by.iter().map(Expr::output_name).collect::<Vec<_>>();
     let selections = resolved
@@ -788,6 +770,29 @@ fn child_to_from_sql_in_context(
     project_scan_columns: bool,
 ) -> Option<String> {
     match child {
+        OpTree::Scan {
+            table_oid,
+            alias,
+            columns,
+            ..
+        } if ctx.bounded_source_table(*table_oid).is_some() => {
+            // Prefer constructing rescans directly against their bounded
+            // relation. Some query paths (especially optimized aggregates)
+            // never visit diff_scan, so a late SQL-text rewrite alone is not
+            // a sufficient correctness boundary.
+            let source = ctx.bounded_source_table(*table_oid)?;
+            let from = if project_scan_columns {
+                let cols = columns
+                    .iter()
+                    .map(|column| quote_ident(&column.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("(SELECT {cols} FROM {source})")
+            } else {
+                source.to_string()
+            };
+            Some(format!("{from} AS {}", quote_ident(alias)))
+        }
         OpTree::Filter { predicate, child } => {
             let inner = child_to_from_sql_in_context(child, ctx, project_scan_columns)?;
             Some(format!("{inner} WHERE {}", predicate.to_sql()))
@@ -2481,33 +2486,18 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         let group_by_clause = if group_resolved.is_empty() {
             String::new()
         } else {
-            let gb_cols: Vec<String> = group_resolved
-                .iter()
-                .map(|c| col_ref_or_sql_expr(c))
-                .collect();
-            format!("\nGROUP BY {}", gb_cols.join(", "))
+            format!("\nGROUP BY {}", group_resolved.join(", "))
         };
 
         let delta_cte = ctx.next_cte_name("agg_delta");
         let mut delta_selects = Vec::new();
 
-        // Group by columns — alias to output name for consistent downstream refs.
-        // When the output name is a SQL expression (contains '('), always add an
-        // explicit alias so the delta CTE column is named by the full expression
-        // as a quoted identifier. Without this guard, `split_part(x, y, z)` would
-        // be implicitly named `split_part` by PostgreSQL, causing the merge CTE's
-        // `d."split_part(x, y, z)"` reference to fail with "column does not exist".
-        // build_rescan_cte uses the same `&& !expr_sql.contains('(')` guard.
+        // Always alias group keys to their output column names. This preserves
+        // compound expression names and identifiers that themselves contain '('.
+        // The resolved SQL already quotes each ColumnRef; never quote the
+        // entire expression or infer its kind by examining its text.
         for (resolved, output) in group_resolved.iter().zip(group_output.iter()) {
-            if resolved == output && !output.contains('(') {
-                delta_selects.push(col_ref_or_sql_expr(resolved));
-            } else {
-                delta_selects.push(format!(
-                    "{} AS {}",
-                    col_ref_or_sql_expr(resolved),
-                    quote_ident(output)
-                ));
-            }
+            delta_selects.push(format!("{resolved} AS {}", quote_ident(output)));
         }
 
         // Always track insert/delete counts
@@ -3058,7 +3048,7 @@ END AS __pgt_meta_action"#
     // changed group (#1405). For matching V3 GROUP_KEY identities, use the
     // row-probe expression index. The probe can collide, so always compare
     // the complete bytea identity too. Typed encoding preserves NULL keys.
-    let join_cond = if group_columns.is_empty() {
+    let mut join_cond = if group_columns.is_empty() {
         // Scalar aggregates have a single persistent row.
         "TRUE".to_string()
     } else if can_probe_row_identity {
@@ -3082,6 +3072,19 @@ END AS __pgt_meta_action"#
             .collect::<Vec<_>>()
             .join(" AND ")
     };
+    if crate::refresh::is_retention_catchup()
+        && can_probe_row_identity
+        && let Some(key) = ctx.retention_partition_key.as_deref()
+        && let Some(index) = stored_group_keys
+            .iter()
+            .position(|column| *column == format!("sub.{}", quote_ident(key)))
+    {
+        join_cond.push_str(&format!(
+            " AND st.{} OPERATOR(pg_catalog.=) d.{}",
+            quote_ident(key),
+            quote_ident(&group_columns[index]),
+        ));
+    }
 
     // Optional LEFT JOIN to the rescan CTE for group-rescan aggregates
     let rescan_join = if let Some(ref rc) = rescan_cte {
@@ -3109,8 +3112,15 @@ END AS __pgt_meta_action"#
     } else {
         format!("{delta_cte} AS d({delta_group_aliases})")
     };
+    let storage_join = if crate::refresh::is_retention_catchup() && can_probe_row_identity {
+        format!(
+            "LEFT JOIN LATERAL (SELECT st.* FROM {st_table} st WHERE {join_cond} OFFSET 0) st ON TRUE"
+        )
+    } else {
+        format!("LEFT JOIN {st_table} st ON {join_cond}")
+    };
     let merge_sql = format!(
-        "SELECT {selects}\nFROM {delta_from}\nLEFT JOIN {st_table} st ON {join_cond}{rescan_join}",
+        "SELECT {selects}\nFROM {delta_from}\n{storage_join}{rescan_join}",
         selects = merge_selects.join(",\n       "),
     );
     ctx.add_cte(merge_cte.clone(), merge_sql);
@@ -4340,6 +4350,31 @@ mod tests {
     }
 
     #[test]
+    fn test_retention_catchup_scopes_aggregate_storage_probe_to_each_delta_group() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(sub.\"region\"))".into());
+        ctx.retention_partition_key = Some("region".into());
+        let tree = aggregate(
+            vec![colref("region")],
+            vec![count_star("cnt")],
+            scan(1, "t", "public", "t", &["id", "region"]),
+        );
+        let result = crate::refresh::with_refresh_context(
+            crate::refresh::RefreshContext::retention("0/10", None),
+            || diff_aggregate(&mut ctx, &tree),
+        )
+        .unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(
+            &sql,
+            "LEFT JOIN LATERAL (SELECT st.* FROM \"public\".\"st\" st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id)",
+        );
+        assert_sql_contains(&sql, "OFFSET 0) st ON TRUE");
+        assert_sql_contains(&sql, "st.\"region\" OPERATOR(pg_catalog.=) d.\"region\"");
+    }
+
+    #[test]
     fn test_grouped_aggregate_preserves_key_join_for_incompatible_full_identity() {
         // Simulate a target whose FULL refresh used another identity domain.
         // The storage lookup must preserve null-safe group matching instead
@@ -4356,6 +4391,28 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
         assert_sql_contains(&sql, "st.\"region\" IS NOT DISTINCT FROM d.\"region\"");
         assert_sql_not_contains(&sql, "pgtrickle.row_probe_v1(st.__pgt_row_id)");
+    }
+
+    #[test]
+    fn test_retention_catchup_preserves_key_join_for_incompatible_identity() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(sub.*))".into());
+        ctx.retention_partition_key = Some("region".into());
+        let tree = aggregate(
+            vec![colref("region")],
+            vec![count_star("cnt")],
+            scan(1, "t", "public", "t", &["id", "region"]),
+        );
+        let result = crate::refresh::with_refresh_context(
+            crate::refresh::RefreshContext::retention("0/10", None),
+            || diff_aggregate(&mut ctx, &tree),
+        )
+        .unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(&sql, "st.\"region\" IS NOT DISTINCT FROM d.\"region\"");
+        assert_sql_not_contains(&sql, "LEFT JOIN LATERAL (SELECT st.*");
+        assert_sql_not_contains(&sql, "st.\"region\" OPERATOR(pg_catalog.=) d.\"region\"");
     }
 
     #[test]
@@ -4676,11 +4733,11 @@ mod tests {
         let (ins, del) = agg_delta_exprs(&agg, &child_cols);
         assert_eq!(
             ins,
-            "COUNT(CASE WHEN __pgt_action = 'I' THEN name ELSE NULL END)"
+            "COUNT(CASE WHEN __pgt_action = 'I' THEN \"name\" ELSE NULL END)"
         );
         assert_eq!(
             del,
-            "COUNT(CASE WHEN __pgt_action = 'D' THEN name ELSE NULL END)"
+            "COUNT(CASE WHEN __pgt_action = 'D' THEN \"name\" ELSE NULL END)"
         );
     }
 
@@ -4692,11 +4749,11 @@ mod tests {
         let (ins, del) = agg_delta_exprs(&agg, &[]);
         assert_eq!(
             ins,
-            "COUNT(CASE WHEN __pgt_action = 'I' AND (active = true) THEN ROW(a, b) ELSE NULL END)"
+            "COUNT(CASE WHEN __pgt_action = 'I' AND (\"active\" = true) THEN ROW(a, b) ELSE NULL END)"
         );
         assert_eq!(
             del,
-            "COUNT(CASE WHEN __pgt_action = 'D' AND (active = true) THEN ROW(a, b) ELSE NULL END)"
+            "COUNT(CASE WHEN __pgt_action = 'D' AND (\"active\" = true) THEN ROW(a, b) ELSE NULL END)"
         );
     }
 
@@ -5256,11 +5313,11 @@ mod tests {
                 for (action, sql) in [("I", ins), ("D", del)] {
                     assert!(
                         sql.contains(&format!(
-                            "CASE WHEN __pgt_action = '{action}' AND keep THEN "
+                            "CASE WHEN __pgt_action = '{action}' AND \"keep\" THEN "
                         )),
                         "FILTER must guard every argument-dependent expression: {sql}"
                     );
-                    assert!(sql.contains("100 / v"), "missing argument: {sql}");
+                    assert!(sql.contains("100 / \"v\""), "missing argument: {sql}");
                 }
             }
         }
@@ -5278,7 +5335,7 @@ mod tests {
             "Insert expr should check action: {ins}",
         );
         assert!(
-            ins.contains("(status = 'active')"),
+            ins.contains("(\"status\" = 'active')"),
             "Insert expr should contain filter: {ins}",
         );
         assert!(
@@ -5286,7 +5343,7 @@ mod tests {
             "Delete expr should check action: {del}",
         );
         assert!(
-            del.contains("(status = 'active')"),
+            del.contains("(\"status\" = 'active')"),
             "Delete expr should contain filter: {del}",
         );
     }
@@ -5299,11 +5356,11 @@ mod tests {
         );
         let (ins, _del) = agg_delta_exprs(&agg, &["amount".to_string()]);
         assert!(
-            ins.contains("(amount > 0)"),
+            ins.contains("(\"amount\" > 0)"),
             "Insert expr should contain filter: {ins}",
         );
         assert!(
-            ins.contains("THEN amount"),
+            ins.contains("THEN \"amount\""),
             "Insert expr should reference amount column: {ins}",
         );
     }
@@ -5330,7 +5387,7 @@ mod tests {
         );
         let (ins, _del) = agg_delta_exprs(&agg, &["val".to_string(), "active".to_string()]);
         assert!(
-            ins.contains("(active = true)"),
+            ins.contains("(\"active\" = true)"),
             "MIN insert delta should contain filter: {ins}",
         );
         assert!(ins.contains("MIN("), "Should use MIN function: {ins}");
@@ -5352,7 +5409,7 @@ mod tests {
         let dr = result.unwrap();
         let sql = ctx.build_with_query(&dr.cte_name);
         assert!(
-            sql.contains("(status = 'active')"),
+            sql.contains("(\"status\" = 'active')"),
             "Generated SQL should contain FILTER condition: {sql}",
         );
     }
@@ -5556,7 +5613,7 @@ mod tests {
             "BOOL_AND insert delta should check action: {ins}",
         );
         assert!(
-            ins.contains("active IS NOT NULL"),
+            ins.contains("\"active\" IS NOT NULL"),
             "BOOL_AND insert delta should check NOT NULL: {ins}",
         );
     }
@@ -5576,7 +5633,7 @@ mod tests {
         let agg = string_agg_col("name", "', '", "members");
         let (ins, _del) = agg_delta_exprs(&agg, &["name".to_string()]);
         assert!(
-            ins.contains("name IS NOT NULL"),
+            ins.contains("\"name\" IS NOT NULL"),
             "STRING_AGG insert delta should check NOT NULL: {ins}",
         );
     }
@@ -5751,7 +5808,7 @@ mod tests {
         );
         let (ins, _del) = agg_delta_exprs(&agg, &["active".to_string(), "dept".to_string()]);
         assert!(
-            ins.contains("(dept = 'eng')"),
+            ins.contains("(\"dept\" = 'eng')"),
             "Filtered BOOL_AND should include filter: {ins}",
         );
     }
@@ -5762,7 +5819,7 @@ mod tests {
     fn test_resolve_expr_for_child_simple_column() {
         let expr = colref("amount");
         let result = resolve_expr_for_child(&expr, &["amount".to_string()]);
-        assert_eq!(result, "amount");
+        assert_eq!(result, "\"amount\"");
     }
 
     #[test]
@@ -5770,14 +5827,14 @@ mod tests {
         let expr = qcolref("o", "amount");
         let result =
             resolve_expr_for_child(&expr, &["o__amount".to_string(), "c__name".to_string()]);
-        assert_eq!(result, "o__amount");
+        assert_eq!(result, "\"o__amount\"");
     }
 
     #[test]
     fn test_resolve_expr_for_child_binary_op() {
         let expr = binop("=", colref("status"), lit("'active'"));
         let result = resolve_expr_for_child(&expr, &["status".to_string()]);
-        assert_eq!(result, "(status = 'active')");
+        assert_eq!(result, "(\"status\" = 'active')");
     }
 
     #[test]
@@ -5789,13 +5846,91 @@ mod tests {
         );
         let result = resolve_expr_for_child(&expr, &["status".to_string(), "amount".to_string()]);
         assert!(
-            result.contains("status = 'active'"),
+            result.contains("\"status\" = 'active'"),
             "Should resolve left: {result}"
         );
         assert!(
-            result.contains("amount > 0"),
+            result.contains("\"amount\" > 0"),
             "Should resolve right: {result}"
         );
+    }
+
+    #[test]
+    fn test_resolve_expr_for_child_quotes_unusual_identifiers_once() {
+        let columns = vec![
+            "Amount".to_string(),
+            "select".to_string(),
+            "line item".to_string(),
+            "quote\"val".to_string(),
+            "metric(x)".to_string(),
+        ];
+        for column in &columns {
+            let expr = colref(column);
+            assert_eq!(resolve_col_for_child(&expr, &columns), *column);
+            assert_eq!(resolve_expr_for_child(&expr, &columns), quote_ident(column));
+        }
+
+        let joined = qcolref("a", "metric(x)");
+        let joined_cols = vec!["a__metric(x)".to_string()];
+        assert_eq!(resolve_col_for_child(&joined, &joined_cols), "a__metric(x)");
+        assert_eq!(
+            resolve_expr_for_child(&joined, &joined_cols),
+            "\"a__metric(x)\""
+        );
+    }
+
+    #[test]
+    fn test_resolve_expr_for_child_quotes_joined_compound_group_and_filter() {
+        let columns = vec![
+            "l__Group(key)".to_string(),
+            "r__Group(key)".to_string(),
+            "r__line item".to_string(),
+            "l__quote\"val".to_string(),
+            "l__Amount".to_string(),
+        ];
+        let group = Expr::FuncCall {
+            func_name: "COALESCE".to_string(),
+            args: vec![qcolref("l", "Group(key)"), qcolref("r", "Group(key)")],
+        };
+        assert_eq!(
+            resolve_group_col(&group, &columns),
+            "COALESCE(\"l__Group(key)\", \"r__Group(key)\")"
+        );
+        assert_eq!(
+            resolve_expr_for_child(&qcolref("l", "quote\"val"), &columns),
+            "\"l__quote\"\"val\""
+        );
+
+        let mut avg = with_filter(
+            avg_col("Amount", "mean"),
+            binop(">", qcolref("r", "line item"), lit("0")),
+        );
+        avg.argument = Some(qcolref("l", "Amount"));
+        let (ins, del) = agg_delta_exprs(&avg, &columns);
+        assert!(
+            ins.contains(r#"AND ("r__line item" > 0) THEN "l__Amount""#),
+            "{ins}"
+        );
+        assert!(
+            del.contains(r#"AND ("r__line item" > 0) THEN "l__Amount""#),
+            "{del}"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_group_identifier_with_parenthesis_remains_a_column() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        let tree = aggregate(
+            vec![colref("metric(x)")],
+            vec![avg_col("Amount", "mean")],
+            scan(1, "events", "public", "e", &["metric(x)", "Amount"]),
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert!(sql.contains("\"metric(x)\" AS \"metric(x)\""), "{sql}");
+        assert!(sql.contains("GROUP BY \"metric(x)\""), "{sql}");
+        assert!(sql.contains("THEN \"Amount\" ELSE 0 END"), "{sql}");
+        assert!(!sql.contains("GROUP BY metric(x)"), "{sql}");
     }
 
     // ── BIT_AND / BIT_OR / BIT_XOR tests ────────────────────────────
@@ -5809,7 +5944,7 @@ mod tests {
             "BIT_AND insert delta should check action: {ins}",
         );
         assert!(
-            ins.contains("flags IS NOT NULL"),
+            ins.contains("\"flags\" IS NOT NULL"),
             "BIT_AND insert delta should check NOT NULL: {ins}",
         );
         assert!(
@@ -5823,7 +5958,7 @@ mod tests {
         let agg = bit_or_col("flags", "any_flags");
         let (ins, _del) = agg_delta_exprs(&agg, &["flags".to_string()]);
         assert!(
-            ins.contains("flags IS NOT NULL"),
+            ins.contains("\"flags\" IS NOT NULL"),
             "BIT_OR insert delta should check NOT NULL: {ins}",
         );
     }
@@ -5942,7 +6077,7 @@ mod tests {
             "JSON_OBJECT_AGG insert delta should check action: {ins}",
         );
         assert!(
-            ins.contains("name IS NOT NULL"),
+            ins.contains("\"name\" IS NOT NULL"),
             "JSON_OBJECT_AGG insert delta should check NOT NULL: {ins}",
         );
         assert!(
@@ -5956,7 +6091,7 @@ mod tests {
         let agg = jsonb_object_agg_col("key", "val", "obj");
         let (ins, _del) = agg_delta_exprs(&agg, &["key".to_string(), "val".to_string()]);
         assert!(
-            ins.contains("key IS NOT NULL"),
+            ins.contains("\"key\" IS NOT NULL"),
             "JSONB_OBJECT_AGG insert delta should check NOT NULL on key arg: {ins}",
         );
     }
@@ -6624,7 +6759,7 @@ mod tests {
         );
         let (ins, _del) = agg_delta_exprs(&agg, &["category".to_string(), "active".to_string()]);
         assert!(
-            ins.contains("(active = true)"),
+            ins.contains("(\"active\" = true)"),
             "Filtered MODE should include filter: {ins}",
         );
     }
@@ -6637,7 +6772,7 @@ mod tests {
         );
         let (ins, _del) = agg_delta_exprs(&agg, &["amount".to_string()]);
         assert!(
-            ins.contains("(amount > 0)"),
+            ins.contains("(\"amount\" > 0)"),
             "Filtered PERCENTILE_CONT should include filter: {ins}",
         );
     }
@@ -6883,8 +7018,8 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        assert!(sql.contains("AND active THEN CASE WHEN amount IS NOT NULL"));
-        assert!(!sql.contains("amount IS NOT NULL AND active"));
+        assert!(sql.contains("AND \"active\" THEN CASE WHEN \"amount\" IS NOT NULL"));
+        assert!(!sql.contains("\"amount\" IS NOT NULL AND \"active\""));
         assert!(sql.contains("__pgt_aux_nonnull_total"));
     }
 
@@ -7251,6 +7386,23 @@ mod tests {
         assert!(sql.contains("UNION ALL"), "{sql}");
         assert!(sql.contains("WHERE __pgt_action = 'I'"), "{sql}");
         assert!(sql.contains("CROSS JOIN LATERAL"), "{sql}");
+    }
+
+    #[test]
+    fn test_aggregate_rescan_uses_bounded_source_directly() {
+        let op = scan(10, "bound_source", "public", "src", &["id", "v"]);
+        let mut ctx = test_ctx();
+        ctx.set_source_bound_tables(std::collections::HashMap::from([(
+            10,
+            "pg_temp.\"__pgt_bound_99_10\"".into(),
+        )]));
+        let direct = child_to_from_sql_in_context(&op, &ctx, false).unwrap();
+        assert_eq!(direct, "pg_temp.\"__pgt_bound_99_10\" AS \"src\"");
+        let projected = child_to_from_sql_in_context(&op, &ctx, true).unwrap();
+        assert_eq!(
+            projected,
+            "(SELECT \"id\", \"v\" FROM pg_temp.\"__pgt_bound_99_10\") AS \"src\""
+        );
     }
 
     #[test]

@@ -634,6 +634,9 @@ fn stage_centroid_delta(
             serde_json::json!({"sources": source_rows, "delta": delta_rows})
         );
     }
+    // Centroid staging also uses the bounded source VIEW fast path. The
+    // materialized centroid delta no longer needs that view after CTAS.
+    buffers.cleanup_bounded_views()?;
     for source in buffers.source_tables().values() {
         // nosemgrep: rust.spi.run.dynamic-format -- source is an internally generated, quoted temp relation.
         Spi::run(&format!("DROP TABLE {source}"))

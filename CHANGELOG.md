@@ -284,6 +284,9 @@ operations.
 - **Safer maintenance and recovery.** Pausing the scheduler now waits for work
   already in progress, including dependent tables. Restore and cleanup fixes
   keep saved results, pending changes, and recorded progress aligned.
+- **Opt-in partition retention.** Eligible partitioned sources can use `TRIM`
+  to remove expired groups or `RETAIN` to preserve them after detaching old
+  partitions. Existing stream tables remain unchanged until a policy is set.
 - **Less unnecessary work.** Eligible refreshes skip empty stages, focus on
   affected rows, and reuse work already done during the refresh. These changes
   reduce avoidable processing in the workloads they cover.
