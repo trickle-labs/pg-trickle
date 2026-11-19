@@ -794,7 +794,13 @@ pub(crate) fn apply_planner_hints(
     st_relid: pg_sys::Oid,
     scan_count: usize,
     tuning: &crate::catalog::RefreshRuntimeTuning,
+    unreconstructible_history: bool,
 ) -> bool {
+    if crate::refresh::is_retention_catchup() {
+        // Prefer probing affected groups over scanning the materialized history.
+        apply_fixed_join_strategy(crate::config::MergeJoinStrategy::NestedLoop, tuning);
+        return false;
+    }
     if !crate::config::pg_trickle_merge_planner_hints() {
         return false;
     }
@@ -912,8 +918,15 @@ pub(crate) fn apply_planner_hints(
         let requested_mb = tuning.merge_work_mem_mb;
 
         let cap = tuning.delta_work_mem_cap_mb;
-        let (mb, fallback_to_full) =
-            planner_work_mem(requested_mb, cap, crate::refresh::current_full_policy());
+        let (mb, fallback_to_full) = planner_work_mem(
+            requested_mb,
+            cap,
+            if unreconstructible_history {
+                crate::refresh::FullPolicy::Error
+            } else {
+                crate::refresh::current_full_policy()
+            },
+        );
         if fallback_to_full {
             pgrx::notice!(
                 "[pg_trickle] SCAL-3: large-delta work_mem ({requested_mb}MB) exceeds \
@@ -1238,6 +1251,7 @@ pub fn capture_delta_to_bypass_table(
             pgt_id,
             buffer_lsn.as_deref(),
             true,
+            false,
         )?
     } else {
         let source_commit_at =
@@ -1272,6 +1286,47 @@ pub fn capture_delta_to_bypass_table(
     Ok(count)
 }
 
+/// Select only identities present in the retention delta before probing storage.
+pub(crate) fn retention_scoped_rows_sql(
+    table: &str,
+    delta: &str,
+    user_cols: &[String],
+    numbered: bool,
+    partition_key: Option<&str>,
+) -> String {
+    let columns = user_cols
+        .iter()
+        .map(|column| format!("st.{}", crate::sql_builder::ident(column)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let columns = if columns.is_empty() {
+        String::new()
+    } else {
+        format!(", {columns}")
+    };
+    let occurrence = if numbered {
+        ", row_number() OVER (PARTITION BY st.__pgt_row_id ORDER BY st.tableoid, st.ctid) AS __pgt_occurrence"
+    } else {
+        ""
+    };
+    let key = partition_key.filter(|key| user_cols.iter().any(|column| column.as_str() == *key));
+    let selected_key = key
+        .map(|key| format!(", {}", crate::sql_builder::ident(key)))
+        .unwrap_or_default();
+    let partition_match = key
+        .map(|key| {
+            let key = crate::sql_builder::ident(key);
+            format!(" AND st.{key} OPERATOR(pg_catalog.=) affected.{key}")
+        })
+        .unwrap_or_default();
+    format!(
+        "SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id{selected_key} FROM {delta}) affected \
+         CROSS JOIN LATERAL (SELECT st.__pgt_row_id{columns}{occurrence} FROM {table} st \
+         WHERE {}{partition_match} OFFSET 0) scoped",
+        build_row_id_match("st.__pgt_row_id", "affected.__pgt_row_id"),
+    )
+}
+
 /// Shared pre/post diff logic for capturing D+I pairs into a target table.
 ///
 /// Used by both `capture_delta_to_bypass_table` (FusedChain path) and
@@ -1286,6 +1341,7 @@ pub fn capture_delta_to_bypass_table(
 /// `pg_current_wal_lsn()`. Bypass capture needs it because catalog writes can
 /// advance the current LSN past the downstream frontier; Graph V1 needs it so
 /// later members can consume deltas produced earlier in the same graph pass.
+/// `retention_pre_scoped` requires a pre-snapshot containing only delta identities.
 pub(crate) fn capture_diff_to_table(
     st: &StreamTableMeta,
     user_cols: &[String],
@@ -1293,6 +1349,7 @@ pub(crate) fn capture_diff_to_table(
     pgt_id: i64,
     lsn_override: Option<&str>,
     delta_scoped: bool,
+    retention_pre_scoped: bool,
 ) -> Result<i64, PgTrickleError> {
     if user_cols.is_empty() {
         return Ok(0);
@@ -1381,11 +1438,64 @@ pub(crate) fn capture_diff_to_table(
     } else {
         String::new()
     };
+    let post_numbered = if delta_scoped && crate::refresh::is_retention_catchup() {
+        format!(
+            "({}) post",
+            retention_scoped_rows_sql(
+                &quoted_table,
+                &format!("pg_temp.__pgt_delta_{pgt_id}"),
+                user_cols,
+                true,
+                crate::refresh::retention_partition_key(pgt_id).as_deref(),
+            )
+        )
+    } else {
+        format!(
+            "(SELECT post.*, row_number() OVER (PARTITION BY post.__pgt_row_id ORDER BY post.tableoid, post.ctid) AS __pgt_occurrence \
+             FROM {quoted_table} post {post_delta_filter}) post"
+        )
+    };
     let source_commit_at = crate::catalog::RefreshRecord::source_commit_at_sql_for_refresh(pgt_id)?;
 
     // DAG-4: When an LSN override is provided (bypass tables), use the
     // literal value so the rows fall within the downstream frontier range.
     let lsn_expr = change_capture_lsn_expr(lsn_override);
+
+    if retention_pre_scoped {
+        if !vector_senders.is_empty() {
+            return Err(PgTrickleError::InvalidArgument(
+                "retention capture does not support vector output columns".into(),
+            ));
+        }
+        let columns = format!("__pgt_row_id, {flat_col_list}");
+        let before = format!("SELECT {columns} FROM __pgt_pre_{pgt_id}");
+        let after = format!(
+            "SELECT {columns} FROM ({}) scoped",
+            retention_scoped_rows_sql(
+                &quoted_table,
+                &format!("pg_temp.__pgt_delta_{pgt_id}"),
+                user_cols,
+                false,
+                crate::refresh::retention_partition_key(pgt_id).as_deref(),
+            )
+        );
+        let mut total = 0;
+        for (action, left, right) in [('D', &before, &after), ('I', &after, &before)] {
+            let sql = format!(
+                "INSERT INTO {target_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+                 SELECT {lsn_expr}, '{action}', __pgt_row_id, NULL::xid, {source_commit_at}, {flat_col_list} \
+                 FROM ({left} EXCEPT ALL {right}) difference"
+            );
+            total += Spi::connect_mut(|c| {
+                Ok::<i64, PgTrickleError>(
+                    c.update(&sql, None, &[])
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .len() as i64,
+                )
+            })?;
+        }
+        return Ok(total);
+    }
 
     let mut total: i64 = 0;
 
@@ -1397,8 +1507,7 @@ pub(crate) fn capture_diff_to_table(
          SELECT {lsn_expr}, 'D', pre.__pgt_row_id, NULL::xid, {source_commit_at}, {pre_col_refs} \
          FROM (SELECT pre.*, row_number() OVER (PARTITION BY pre.__pgt_row_id ORDER BY pre.tableoid, pre.ctid) AS __pgt_occurrence \
                FROM __pgt_pre_{pgt_id} pre {pre_delta_filter}) pre \
-         LEFT JOIN (SELECT post.*, row_number() OVER (PARTITION BY post.__pgt_row_id ORDER BY post.tableoid, post.ctid) AS __pgt_occurrence \
-                    FROM {quoted_table} post {post_delta_filter}) post ON {pre_post_match} \
+         LEFT JOIN {post_numbered} ON {pre_post_match} \
          WHERE post.__pgt_occurrence IS NULL OR ({is_distinct_pairs})"
     );
     total += Spi::connect_mut(|c| {
@@ -1414,8 +1523,7 @@ pub(crate) fn capture_diff_to_table(
     let ins_sql = format!(
         "INSERT INTO {target_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
          SELECT {lsn_expr}, 'I', post.__pgt_row_id, NULL::xid, {source_commit_at}, {post_col_refs} \
-         FROM (SELECT post.*, row_number() OVER (PARTITION BY post.__pgt_row_id ORDER BY post.tableoid, post.ctid) AS __pgt_occurrence \
-               FROM {quoted_table} post {post_delta_filter}) post \
+         FROM {post_numbered} \
          LEFT JOIN (SELECT pre.*, row_number() OVER (PARTITION BY pre.__pgt_row_id ORDER BY pre.tableoid, pre.ctid) AS __pgt_occurrence \
                     FROM __pgt_pre_{pgt_id} pre {pre_delta_filter}) pre ON {pre_post_match} \
          WHERE pre.__pgt_occurrence IS NULL OR ({is_distinct_pairs})"
@@ -1504,6 +1612,7 @@ pub(crate) fn capture_incremental_diff_to_st_buffer(
         pgt_id,
         graph_lsn.as_deref(),
         true,
+        crate::refresh::is_retention_catchup(),
     )?;
     if total > 0 {
         pgrx::debug1!(
@@ -1515,6 +1624,24 @@ pub(crate) fn capture_incremental_diff_to_st_buffer(
         );
     }
     Ok(total)
+}
+
+#[cfg(all(feature = "e2e-unsafe-test-hooks", not(test)))]
+#[pgrx::pg_extern(schema = "pgtrickle")]
+fn retention_capture_multiset_test(pgt_id: i64) -> i64 {
+    let st = StreamTableMeta::get_by_id(pgt_id)
+        .unwrap_or_else(|error| pgrx::error!("test stream lookup: {}", error))
+        .unwrap_or_else(|| pgrx::error!("test stream not found"));
+    capture_diff_to_table(
+        &st,
+        &["val".to_string()],
+        "pg_temp.__pgt_capture_test",
+        pgt_id,
+        None,
+        true,
+        true,
+    )
+    .unwrap_or_else(|error| pgrx::error!("test capture: {}", error))
 }
 
 /// Capture the full-refresh diff into the ST's change buffer.
@@ -1539,6 +1666,7 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
         &target_table,
         pgt_id,
         graph_lsn.as_deref(),
+        false,
         false,
     )
 }
@@ -2321,6 +2449,50 @@ pub(crate) fn build_trigger_delete_sql(
     }
 }
 
+/// Grouped retention identities are unique; the fallback preserves counted deletes otherwise.
+pub(crate) fn build_retention_trigger_delete_sql(
+    quoted_table: &str,
+    pgt_id: i64,
+    partition_key: Option<&str>,
+) -> String {
+    let key = partition_key.map(crate::sql_builder::ident);
+    if let Some(key) = key.as_ref() {
+        return format!(
+            "DELETE FROM {quoted_table} AS st USING (\
+               SELECT __pgt_row_id, {key} FROM __pgt_delta_{pgt_id} \
+               WHERE __pgt_action = 'D' GROUP BY __pgt_row_id, {key}\
+             ) d WHERE {row_id_match} AND st.{key} OPERATOR(pg_catalog.=) d.{key}",
+            row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
+        );
+    }
+    let grouped_key = key
+        .as_ref()
+        .map(|key| format!(", {key}"))
+        .unwrap_or_default();
+    let target_key = key
+        .as_ref()
+        .map(|key| format!(", d.{key}"))
+        .unwrap_or_default();
+    let lookup_key = key
+        .as_ref()
+        .map(|key| format!(" AND st2.{key} OPERATOR(pg_catalog.=) d.{key}"))
+        .unwrap_or_default();
+    let outer_key = key
+        .as_ref()
+        .map(|key| format!(" AND st.{key} OPERATOR(pg_catalog.=) target.{key}"))
+        .unwrap_or_default();
+    format!(
+        "DELETE FROM {quoted_table} AS st USING (\
+           SELECT matched.tableoid, matched.ctid{target_key} \
+           FROM (SELECT __pgt_row_id{grouped_key}, COUNT(*) AS n FROM __pgt_delta_{pgt_id} \
+                 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id{grouped_key}) d \
+           CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM {quoted_table} st2 \
+             WHERE {row_id_match}{lookup_key} ORDER BY st2.ctid LIMIT d.n) matched\
+         ) target WHERE st.tableoid = target.tableoid AND st.ctid = target.ctid{outer_key}",
+        row_id_match = build_row_id_match("st2.__pgt_row_id", "d.__pgt_row_id"),
+    )
+}
+
 /// Build the trigger-path UPDATE template.
 ///
 /// Updates existing rows where the delta action is 'I' and values changed
@@ -2340,6 +2512,44 @@ pub(crate) fn build_trigger_update_sql(
            AND d.__pgt_action = 'I' \
            AND ({is_distinct_clause})",
         row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
+    )
+}
+
+/// Probe changed identities before updating their physical rows.
+pub(crate) fn build_retention_trigger_update_sql(
+    quoted_table: &str,
+    pgt_id: i64,
+    user_cols: &[String],
+    partition_key: Option<&str>,
+) -> String {
+    let update_set_clause = format_update_set(user_cols);
+    let is_distinct_clause = build_is_distinct_clause(user_cols);
+    let key = partition_key.map(crate::sql_builder::ident);
+    if let Some(key) = key.as_ref() {
+        return format!(
+            "UPDATE {quoted_table} AS st SET {update_set_clause} \
+             FROM __pgt_delta_{pgt_id} AS d WHERE {row_id_match} \
+               AND st.{key} OPERATOR(pg_catalog.=) d.{key} \
+               AND d.__pgt_action = 'I' AND ({is_distinct_clause})",
+            row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
+        );
+    }
+    let lookup_key = key
+        .as_ref()
+        .map(|key| format!(" AND st2.{key} OPERATOR(pg_catalog.=) d.{key}"))
+        .unwrap_or_default();
+    let outer_key = key
+        .as_ref()
+        .map(|key| format!(" AND st.{key} OPERATOR(pg_catalog.=) d.{key}"))
+        .unwrap_or_default();
+    format!(
+        "UPDATE {quoted_table} AS st SET {update_set_clause} \
+         FROM __pgt_delta_{pgt_id} AS d CROSS JOIN LATERAL \
+           (SELECT st2.tableoid, st2.ctid FROM {quoted_table} st2 \
+            WHERE {row_id_match}{lookup_key} OFFSET 0) matched \
+         WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid{outer_key} \
+           AND d.__pgt_action = 'I' AND ({is_distinct_clause})",
+        row_id_match = build_row_id_match("st2.__pgt_row_id", "d.__pgt_row_id"),
     )
 }
 
@@ -2391,6 +2601,35 @@ pub(crate) fn build_trigger_insert_sql(
     }
 }
 
+pub(crate) fn build_trigger_insert_for_storage(
+    quoted_table: &str,
+    pgt_id: i64,
+    user_cols: &[String],
+    has_keyless_source: bool,
+    is_deduplicated: bool,
+    is_partitioned: bool,
+) -> String {
+    // Non-deduplicated keyless deltas represent a multiset: equal row_ids
+    // may be separate occurrences, so neither DISTINCT ON nor NOT EXISTS
+    // can be used to discard them.
+    if has_keyless_source
+        && !is_deduplicated
+        && !user_cols.iter().any(|column| column == "__pgt_count")
+    {
+        return build_trigger_insert_sql(quoted_table, pgt_id, user_cols, true);
+    }
+
+    // A partitioned parent cannot have a UNIQUE (__pgt_row_id) arbiter.
+    // Check the exact identity in existing storage after the UPDATE, and
+    // collapse duplicate delta actions to one INSERT for keyed/group rows.
+    // This also serves deduplicated keyless sources and counted aggregates.
+    if is_partitioned || has_keyless_source {
+        build_trigger_insert_sql_no_conflict(quoted_table, pgt_id, user_cols)
+    } else {
+        build_trigger_insert_sql(quoted_table, pgt_id, user_cols, false)
+    }
+}
+
 /// Build an INSERT for a deduplicated delta when the target row-id index is
 /// non-unique. The preceding UPDATE handles an existing row; this exact
 /// `NOT EXISTS` guard prevents the INSERT from duplicating it without relying
@@ -2412,6 +2651,31 @@ pub(crate) fn build_trigger_insert_sql_no_conflict(
              WHERE {row_id_match}\
            ) \
          ORDER BY d.__pgt_row_id",
+        row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
+    )
+}
+
+/// Keep the existence probe correlated with each incoming identity.
+pub(crate) fn build_retention_trigger_insert_sql(
+    quoted_table: &str,
+    pgt_id: i64,
+    user_cols: &[String],
+    partition_key: Option<&str>,
+) -> String {
+    let user_col_list = format_col_list(user_cols);
+    let d_user_col_list = format_prefixed_col_list("d", user_cols);
+    let partition_match = partition_key
+        .map(|key| {
+            let key = crate::sql_builder::ident(key);
+            format!(" AND st.{key} OPERATOR(pg_catalog.=) d.{key}")
+        })
+        .unwrap_or_default();
+    format!(
+        "INSERT INTO {quoted_table} (__pgt_row_id, {user_col_list}) \
+         SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, {d_user_col_list} \
+         FROM __pgt_delta_{pgt_id} AS d WHERE d.__pgt_action = 'I' \
+           AND NOT EXISTS (SELECT 1 FROM (SELECT 1 FROM {quoted_table} AS st \
+             WHERE {row_id_match}{partition_match} OFFSET 0) matched) ORDER BY d.__pgt_row_id",
         row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
     )
 }
@@ -2542,7 +2806,7 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // that existed before the v0.59.0 upgrade and haven't been ALTERed yet).
     let query_hash = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        "v0.108.3-deferred-history:nonfinite-state:raw-aggregate-columns-v1:join-endpoints-v1"
+        "v0.108.3-deferred-history:nonfinite-state:raw-aggregate-columns-v1:join-endpoints-v1:partitioned-insert-v2"
             .hash(&mut hasher);
         if st.defining_query_hash != 0 {
             st.defining_query_hash.hash(&mut hasher);
@@ -2573,13 +2837,14 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // cases correctly.
     let trigger_update_template = build_trigger_update_sql(&quoted_table, st.pgt_id, user_cols);
 
-    let trigger_insert_template = if st.has_keyless_source
-        && (delta_result.is_deduplicated || user_cols.iter().any(|column| column == "__pgt_count"))
-    {
-        build_trigger_insert_sql_no_conflict(&quoted_table, st.pgt_id, user_cols)
-    } else {
-        build_trigger_insert_sql(&quoted_table, st.pgt_id, user_cols, st.has_keyless_source)
-    };
+    let trigger_insert_template = build_trigger_insert_for_storage(
+        &quoted_table,
+        st.pgt_id,
+        user_cols,
+        st.has_keyless_source,
+        delta_result.is_deduplicated,
+        st.st_partition_key.is_some(),
+    );
 
     // Cache the MERGE template with LSN placeholder tokens.
     // Each refresh resolves the tokens to concrete LSN values

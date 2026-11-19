@@ -2,6 +2,13 @@
   "policy_version": 2,
   "generated_from": "sql/archive/pg_trickle--0.88.0.sql",
   "functions": {
+    "pgtrickle._on_ddl_start()": {
+      "schema": "pgtrickle",
+      "name": "_on_ddl_start",
+      "identity_arguments": "",
+      "class": "trigger_entry",
+      "execution_policy": "capability_specific"
+    },
     "pgtrickle._on_ddl_end()": {
       "schema": "pgtrickle",
       "name": "_on_ddl_end",
@@ -223,6 +230,27 @@
       "schema": "pgtrickle",
       "name": "create_stream_table_realtime",
       "identity_arguments": "text, text, text, boolean, text, integer, double precision",
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
+    },
+    "pgtrickle.create_stream_table_with_retention(text, text, text, text, text, text)": {
+      "schema": "pgtrickle",
+      "name": "create_stream_table_with_retention",
+      "identity_arguments": "text, text, text, text, text, text",
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
+    },
+    "pgtrickle.get_stream_table_partition_retention(text)": {
+      "schema": "pgtrickle",
+      "name": "get_stream_table_partition_retention",
+      "identity_arguments": "text",
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
+    },
+    "pgtrickle.set_stream_table_partition_retention(text, text, text, text)": {
+      "schema": "pgtrickle",
+      "name": "set_stream_table_partition_retention",
+      "identity_arguments": "text, text, text, text",
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
     },
