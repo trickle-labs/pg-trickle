@@ -245,7 +245,6 @@ mod expr_sql_tests {
 
         assert_eq!(expression.to_sql(), "\"t\"\"x\".\"c\"\"y\"");
     }
-
 }
 
 /// Aggregate function types.
