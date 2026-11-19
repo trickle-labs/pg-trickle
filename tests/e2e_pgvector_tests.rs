@@ -2992,9 +2992,36 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
                 .fetch_one(&mut *conn).await.expect("inspect centroid mismatch");
             let groups: serde_json::Value = sqlx::query_scalar("WITH native AS (SELECT grp, count(*) AS n, avg(v) IS NULL AS null_centroid FROM centroid_churn_src GROUP BY grp), actual AS (SELECT grp, __pgt_count AS n, centroid IS NULL AS null_centroid FROM centroid_churn_st) SELECT jsonb_build_object('native', (SELECT jsonb_agg(to_jsonb(native)) FROM native), 'actual', (SELECT jsonb_agg(to_jsonb(actual)) FROM actual))")
                 .fetch_one(&mut *conn).await.expect("inspect centroid groups");
+            let postgres_trace = tokio::process::Command::new("docker")
+                .args(["logs", "--tail", "300", db.container_id()])
+                .output()
+                .await
+                .map(|output| {
+                    let logs = format!(
+                        "{}\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    logs.lines()
+                        .filter(|line| {
+                            [
+                                "dvm_decision_trace=",
+                                "dvm_generated_delta_sql=",
+                                "centroid_delta_staging=",
+                                "centroid_candidates=",
+                                "centroid_applied_rows=",
+                            ]
+                            .iter()
+                            .any(|marker| line.contains(marker))
+                        })
+                        .map(|line| line.chars().take(4_000).collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_else(|error| format!("could not collect PostgreSQL trace: {error}"));
             panic!(
                 "centroid diverged from native AVG at step {step}: {details}; \
-                 groups={groups}; cdc_window={cdc_window}"
+                 groups={groups}; cdc_window={cdc_window}; postgres_trace={postgres_trace}"
             );
         }
         let (error, bound_fraction): (f64, f64) = sqlx::query_as(
