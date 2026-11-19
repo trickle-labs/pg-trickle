@@ -4434,9 +4434,9 @@ mod tests {
         assert!(needs_special_value_rescan(&stddev));
         assert_eq!(
             agg_sum2_rescan_sql(&stddev),
-            "COALESCE(SUM((\"amount\")::numeric * (\"amount\")::numeric), 0)"
+            "COALESCE(SUM((amount)::numeric * (amount)::numeric), 0)"
         );
-        assert_eq!(agg_sum_rescan_sql(&stddev), "COALESCE(SUM(\"amount\"), 0)");
+        assert_eq!(agg_sum_rescan_sql(&stddev), "COALESCE(SUM(amount), 0)");
 
         let merge = agg_merge_expr_mapped(&stddev, true, false, false, "stddev", None);
         assert!(merge.contains("d.\"__special_stddev\""));
@@ -4466,11 +4466,11 @@ mod tests {
         let (ins, del) = agg_delta_exprs(&agg, &[]);
         assert_eq!(
             ins,
-            "COUNT(CASE WHEN __pgt_action = 'I' AND (active = true) THEN ROW(a, b) ELSE NULL END)"
+            "COUNT(CASE WHEN __pgt_action = 'I' AND (\"active\" = true) THEN ROW(a, b) ELSE NULL END)"
         );
         assert_eq!(
             del,
-            "COUNT(CASE WHEN __pgt_action = 'D' AND (active = true) THEN ROW(a, b) ELSE NULL END)"
+            "COUNT(CASE WHEN __pgt_action = 'D' AND (\"active\" = true) THEN ROW(a, b) ELSE NULL END)"
         );
     }
 
