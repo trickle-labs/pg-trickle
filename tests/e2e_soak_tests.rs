@@ -547,8 +547,9 @@ async fn test_soak_stability() {
         active_sts.len()
     );
 
-    // Keep one backend reserved through the entire soak. All DML and
-    // refresh operations use other connections in the pool.
+    // Keep one backend reserved through the entire soak and run manual
+    // refreshes on it: measuring an idle connection would not exercise
+    // the extension's memory-intensive workload. DML uses the pool.
     let mut rss_conn = db
         .pool
         .acquire()
@@ -585,17 +586,20 @@ async fn test_soak_stability() {
         apply_dml_batch(&db, source_idx, batch, cycle).await;
         total_dml_ops += 3; // INSERT + UPDATE + DELETE
 
-        // Manual refresh on a rotating stream table.
+        // Manual refresh on the measured backend, so its RSS reflects
+        // actual extension work (rather than an idle, pinned session).
         // Retry once on transient deadlock before recording a failure.
         let st_idx = (cycle as usize - 1) % active_sts.len();
         let st = active_sts[st_idx];
+        let refresh_sql = format!("SELECT pgtrickle.refresh_stream_table('{st}')");
         let refresh_result = {
-            let r = db
-                .try_execute(&format!("SELECT pgtrickle.refresh_stream_table('{st}')"))
+            let r = sqlx::query(sqlx::AssertSqlSafe(refresh_sql.clone()))
+                .execute(&mut *rss_conn)
                 .await;
             if r.is_err() {
                 tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
-                db.try_execute(&format!("SELECT pgtrickle.refresh_stream_table('{st}')"))
+                sqlx::query(sqlx::AssertSqlSafe(refresh_sql))
+                    .execute(&mut *rss_conn)
                     .await
             } else {
                 r
