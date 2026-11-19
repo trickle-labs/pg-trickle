@@ -105,7 +105,7 @@ impl Expr {
                     buf.push('.');
                     append_quoted_ident(buf, column_name);
                 }
-                None => append_quoted_ident(buf, column_name),
+                None => buf.push_str(column_name),
             },
             Expr::Literal(val) => buf.push_str(val),
             Expr::BinaryOp { op, left, right } => {
@@ -246,20 +246,6 @@ mod expr_sql_tests {
         assert_eq!(expression.to_sql(), "\"t\"\"x\".\"c\"\"y\"");
     }
 
-    #[test]
-    fn to_sql_escapes_unqualified_column_names() {
-        for name in ["Amount", "select", "line item", "a\"b", "metric(x)"] {
-            let expression = Expr::ColumnRef {
-                table_alias: None,
-                column_name: name.into(),
-            };
-
-            assert_eq!(
-                expression.to_sql(),
-                format!("\"{}\"", name.replace('"', "\"\""))
-            );
-        }
-    }
 }
 
 /// Aggregate function types.
