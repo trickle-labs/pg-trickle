@@ -27,7 +27,6 @@ class RetirementContractTests(unittest.TestCase):
         suite["command_argv"][4] = "1000000"
         with self.assertRaises(SystemExit):
             gate.check_live_rag_contract(broken)
-
     def test_retention_contract_requires_trim_retain_and_upgrade_api(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
         gate.check_retention_contract(contract)
