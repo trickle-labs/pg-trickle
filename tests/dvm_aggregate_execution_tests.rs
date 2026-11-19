@@ -85,8 +85,8 @@ async fn test_semantic_sql_controls_reject_predicate_count_payload_and_join_muta
         source:("src/dvm/operators/aggregate.rs",include_str!("../src/dvm/operators/aggregate.rs")),
         oracle:format!("{input} SELECT pg_catalog.count(payload) FILTER(WHERE __pgt_action='I') AS inserted,pg_catalog.count(payload) FILTER(WHERE __pgt_action='D') AS deleted FROM t"),
         mutant:generated.replace(
-            "THEN payload ELSE NULL END",
-            "THEN CASE WHEN payload IS NOT NULL THEN 1 ELSE NULL END ELSE NULL END",
+            "THEN \"payload\" ELSE NULL END",
+            "THEN CASE WHEN \"payload\" IS NOT NULL THEN 1 ELSE NULL END ELSE NULL END",
         ),
         baseline:generated,
     });
