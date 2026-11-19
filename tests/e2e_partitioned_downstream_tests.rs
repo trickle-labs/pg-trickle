@@ -10,6 +10,29 @@ use e2e::E2eDb;
 // for exact CDC capture. PostgreSQL cannot give partitioned storage a global
 // UNIQUE (__pgt_row_id) constraint, so keyed INSERTs must not infer one.
 
+/// Ensure a matching result was produced by the explicit differential DML
+/// path, not by a silent FULL fallback that could mask the regression.
+async fn assert_explicit_partitioned_refresh(db: &E2eDb, name: &str) {
+    let (action, strategy, full_fallback): (String, Option<String>, bool) = sqlx::query_as(
+        "SELECT h.action, h.merge_strategy_used, h.was_full_fallback
+         FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id)
+         WHERE s.pgt_name = $1 AND h.initiated_by = 'MANUAL'
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .bind(name)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read producer refresh history");
+    assert_eq!(action, "DIFFERENTIAL", "{name} must refresh differentially");
+    assert!(!full_fallback, "{name} must not use a FULL fallback");
+    assert_eq!(
+        strategy.as_deref(),
+        Some("explicit_dml"),
+        "{name} must use the partitioned explicit-DML path"
+    );
+}
+
 async fn assert_partitioned_projection_cascade(db: &E2eDb) {
     db.assert_st_matches_query(
         "p1439_up",
@@ -112,6 +135,7 @@ async fn exercise_partitioned_projection_cascade(partition_by: &str, expected_st
     )
     .await;
     refresh_partitioned_projection_cascade(&db).await;
+    assert_explicit_partitioned_refresh(&db, "p1439_up").await;
 
     // Move a stable keyed row across RANGE date / LIST region partitions;
     // also exercise HASH routing when the partition key is region.
@@ -124,10 +148,12 @@ async fn exercise_partitioned_projection_cascade(partition_by: &str, expected_st
     db.execute("UPDATE p1439_src SET amount = 11 WHERE id = 1")
         .await;
     refresh_partitioned_projection_cascade(&db).await;
+    assert_explicit_partitioned_refresh(&db, "p1439_up").await;
 
     db.execute("DELETE FROM p1439_src WHERE id IN (3, 5)")
         .await;
     refresh_partitioned_projection_cascade(&db).await;
+    assert_explicit_partitioned_refresh(&db, "p1439_up").await;
     // Replaying with no new source changes must not create duplicate rows.
     refresh_partitioned_projection_cascade(&db).await;
 }
@@ -246,6 +272,7 @@ async fn exercise_partitioned_aggregate_cascade(partition_by: &str, expected_str
     )
     .await;
     refresh_partitioned_aggregate_cascade(&db).await;
+    assert_explicit_partitioned_refresh(&db, "p1439_agg_up").await;
 
     // Move a group member to another date and region, changing the key
     // of two groups (and possibly the physical output partition).
@@ -258,11 +285,13 @@ async fn exercise_partitioned_aggregate_cascade(partition_by: &str, expected_str
     db.execute("UPDATE p1439_agg_src SET amount = 33 WHERE id = 3")
         .await;
     refresh_partitioned_aggregate_cascade(&db).await;
+    assert_explicit_partitioned_refresh(&db, "p1439_agg_up").await;
 
     // Remove the last member of two groups, checking downstream DELETE CDC.
     db.execute("DELETE FROM p1439_agg_src WHERE id IN (4, 6)")
         .await;
     refresh_partitioned_aggregate_cascade(&db).await;
+    assert_explicit_partitioned_refresh(&db, "p1439_agg_up").await;
     refresh_partitioned_aggregate_cascade(&db).await;
 }
 
