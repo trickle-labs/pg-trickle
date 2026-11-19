@@ -1925,12 +1925,15 @@ struct AnalyzedAggCollectorCtx {
 }
 
 #[cfg(any(not(test), feature = "pg_test"))]
-struct VectorAggCollectorCtx {
+struct AggregateArgumentCollectorCtx {
     by_location: *mut HashMap<i32, (pg_sys::Oid, pg_sys::Oid, i32, pg_sys::Oid)>,
 }
 
 #[cfg(any(not(test), feature = "pg_test"))]
-unsafe extern "C-unwind" fn vector_agg_walker(
+type AggregateArgumentMetadata = (HashMap<i32, u32>, HashMap<i32, AnalyzedAggregateArgument>);
+
+#[cfg(any(not(test), feature = "pg_test"))]
+unsafe extern "C-unwind" fn aggregate_argument_walker(
     node: *mut pg_sys::Node,
     context: *mut std::ffi::c_void,
 ) -> bool {
@@ -1947,7 +1950,7 @@ unsafe extern "C-unwind" fn vector_agg_walker(
                 && !(*arg).expr.is_null()
             {
                 let expr = (*arg).expr as *const pg_sys::Node;
-                let values = &mut *((*(context as *mut VectorAggCollectorCtx)).by_location);
+                let values = &mut *((*(context as *mut AggregateArgumentCollectorCtx)).by_location);
                 values.insert(
                     agg.location,
                     (
@@ -1963,19 +1966,19 @@ unsafe extern "C-unwind" fn vector_agg_walker(
         if pgrx::is_a(node, pg_sys::NodeTag::T_Query) {
             return pg_sys::query_tree_walker_impl(
                 node as *mut pg_sys::Query,
-                Some(vector_agg_walker),
+                Some(aggregate_argument_walker),
                 context,
                 0,
             );
         }
-        pg_sys::expression_tree_walker_impl(node, Some(vector_agg_walker), context)
+        pg_sys::expression_tree_walker_impl(node, Some(aggregate_argument_walker), context)
     }
 }
 
 #[cfg(any(not(test), feature = "pg_test"))]
-fn collect_vector_aggregate_metadata(
+fn collect_aggregate_argument_metadata(
     query: &str,
-) -> Result<HashMap<i32, AnalyzedAggregateArgument>, PgTrickleError> {
+) -> Result<AggregateArgumentMetadata, PgTrickleError> {
     let c_sql = std::ffi::CString::new(query)
         .map_err(|e| PgTrickleError::QueryParseError(format!("Query contains null byte: {e}")))?;
     // SAFETY: PostgreSQL owns all parse nodes in the active backend memory context.
@@ -1999,12 +2002,12 @@ fn collect_vector_aggregate_metadata(
                 ));
             }
             let mut values = HashMap::new();
-            let mut context = VectorAggCollectorCtx {
+            let mut context = AggregateArgumentCollectorCtx {
                 by_location: &mut values,
             };
             pg_sys::query_tree_walker_impl(
                 analyzed,
-                Some(vector_agg_walker),
+                Some(aggregate_argument_walker),
                 &mut context as *mut _ as *mut _,
                 0,
             );
@@ -2012,6 +2015,10 @@ fn collect_vector_aggregate_metadata(
         }))
         .execute()?
     };
+    let argument_types = aggregates
+        .iter()
+        .map(|(location, (_, type_oid, _, _))| (*location, type_oid.to_u32()))
+        .collect();
     let mut result = HashMap::new();
     for (location, (function_oid, type_oid, typmod, result_oid)) in aggregates {
         let type_info = Spi::connect(|client| {
@@ -2033,7 +2040,7 @@ fn collect_vector_aggregate_metadata(
             );
         }
     }
-    Ok(result)
+    Ok((argument_types, result))
 }
 
 #[cfg(any(not(test), feature = "pg_test"))]
@@ -2047,14 +2054,14 @@ fn annotate_vector_aggregates(
     if !lower.contains("avg") && !lower.contains("sum") {
         return Ok(());
     }
-    let metadata = collect_vector_aggregate_metadata(query)?;
-    if metadata.is_empty() {
+    let (argument_types, metadata) = collect_aggregate_argument_metadata(query)?;
+    if argument_types.is_empty() {
         return Ok(());
     }
     let mut found = false;
-    crate::dvm::reclassify_vector_aggregates(tree, &metadata, &mut found);
+    crate::dvm::annotate_aggregate_arguments(tree, &argument_types, &metadata, &mut found);
     for (_, cte) in &mut registry.entries {
-        crate::dvm::reclassify_vector_aggregates(cte, &metadata, &mut found);
+        crate::dvm::annotate_aggregate_arguments(cte, &argument_types, &metadata, &mut found);
     }
     if found && enforce_enabled && !crate::config::pg_trickle_enable_vector_agg() {
         return Err(PgTrickleError::UnsupportedOperator("pgvector aggregates require pg_trickle.enable_vector_agg = on for incremental refresh; use FULL refresh otherwise".into()));

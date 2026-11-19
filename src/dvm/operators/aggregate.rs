@@ -227,7 +227,11 @@ fn needs_special_value_rescan(agg: &AggExpr, child: &OpTree) -> bool {
         return false;
     }
 
-    let type_oid = if let Some(argument) = agg.analyzed_argument.as_ref() {
+    let type_oid = if let Some(argument) = agg
+        .analyzed_argument
+        .as_ref()
+        .filter(|argument| argument.type_oid != 0)
+    {
         Some(argument.type_oid)
     } else if let Some(Expr::ColumnRef {
         table_alias,
@@ -262,6 +266,9 @@ fn source_column_type_oid(
                 .map(|column| column.type_oid))
         }
         OpTree::Filter { child, .. } => source_column_type_oid(child, table_alias, column_name),
+        OpTree::SemiJoin { left, .. } | OpTree::AntiJoin { left, .. } => {
+            source_column_type_oid(left, table_alias, column_name)
+        }
         OpTree::InnerJoin { left, right, .. } if table_alias.is_some() => {
             let left = source_column_type_oid(left, table_alias, column_name)?;
             let right = source_column_type_oid(right, table_alias, column_name)?;
@@ -4536,8 +4543,109 @@ mod tests {
         assert!(!needs_special_value_rescan(&sum, &make_join(23)));
         assert!(needs_special_value_rescan(&sum, &make_join(701)));
 
+        sum.analyzed_argument = Some(crate::dvm::parser::AnalyzedAggregateArgument {
+            location: -1,
+            type_oid: 0,
+            typmod: -1,
+            type_schema: String::new(),
+            type_name: String::new(),
+        });
+        assert!(!needs_special_value_rescan(&sum, &make_join(23)));
+        assert!(needs_special_value_rescan(&sum, &make_join(701)));
+
+        let semi_join = OpTree::SemiJoin {
+            condition: binop(
+                "=",
+                Expr::ColumnRef {
+                    table_alias: Some("o".into()),
+                    column_name: "id".into(),
+                },
+                Expr::ColumnRef {
+                    table_alias: Some("li".into()),
+                    column_name: "id".into(),
+                },
+            ),
+            left: Box::new(scan(1, "orders", "public", "o", &["id"])),
+            right: Box::new(scan(2, "lineitem", "public", "li", &["id"])),
+        };
+        let joined_semi = inner_join(
+            binop(
+                "=",
+                Expr::ColumnRef {
+                    table_alias: Some("o".into()),
+                    column_name: "id".into(),
+                },
+                Expr::ColumnRef {
+                    table_alias: Some("l".into()),
+                    column_name: "id".into(),
+                },
+            ),
+            semi_join,
+            scan(3, "lineitem", "public", "l", &["id", "amount"]),
+        );
+        sum.analyzed_argument = None;
+        sum.argument = Some(Expr::ColumnRef {
+            table_alias: Some("l".into()),
+            column_name: "amount".into(),
+        });
+        assert!(!needs_special_value_rescan(&sum, &joined_semi));
+
         sum.argument = Some(colref("amount"));
         assert!(needs_special_value_rescan(&sum, &make_join(23)));
+    }
+
+    #[test]
+    fn test_analyzed_expression_type_controls_special_value_rescan() {
+        let make_tree = || {
+            let mut sum = sum_col("amount + 1", "total");
+            sum.argument = Some(Expr::Raw("amount + 1".into()));
+            sum.analyzed_argument = Some(crate::dvm::parser::AnalyzedAggregateArgument {
+                location: 42,
+                type_oid: 0,
+                typmod: -1,
+                type_schema: String::new(),
+                type_name: String::new(),
+            });
+            aggregate(
+                Vec::new(),
+                vec![sum],
+                scan(1, "source", "public", "s", &["amount"]),
+            )
+        };
+        let mut tree = make_tree();
+        let mut found_vector_aggregate = false;
+        crate::dvm::annotate_aggregate_arguments(
+            &mut tree,
+            &std::collections::HashMap::from([(42, 23)]),
+            &std::collections::HashMap::new(),
+            &mut found_vector_aggregate,
+        );
+        let OpTree::Aggregate {
+            aggregates, child, ..
+        } = &tree
+        else {
+            panic!("expected aggregate tree");
+        };
+        assert_eq!(
+            aggregates[0].analyzed_argument.as_ref().unwrap().type_oid,
+            23
+        );
+        assert!(!needs_special_value_rescan(&aggregates[0], child));
+
+        let mut tree = make_tree();
+        crate::dvm::annotate_aggregate_arguments(
+            &mut tree,
+            &std::collections::HashMap::from([(42, 701)]),
+            &std::collections::HashMap::new(),
+            &mut found_vector_aggregate,
+        );
+        let OpTree::Aggregate {
+            aggregates, child, ..
+        } = &tree
+        else {
+            panic!("expected aggregate tree");
+        };
+        assert!(needs_special_value_rescan(&aggregates[0], child));
     }
 
     #[test]
