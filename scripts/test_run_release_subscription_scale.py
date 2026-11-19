@@ -86,7 +86,9 @@ class SubscriptionScaleTests(unittest.TestCase):
 
     def test_parse_case_accepts_small_batch_and_repeated_delete_shapes(self):
         for mutation_shape in scale.EXTRA_MUTATION_SHAPES:
-            data = report(1_000_000, 10, True, mutation_shape=mutation_shape)
+            data = report(
+                1_000_000, 10, True, force_explicit=False, mutation_shape=mutation_shape
+            )
             output = scale.REPORT_MARKER + json.dumps(data)
             self.assertEqual(
                 scale.parse_case(
