@@ -41,11 +41,8 @@ async fn assert_partitioned_projection_cascade(db: &E2eDb) {
     .await;
     // Dropping id makes duplicate output rows intentional. EXCEPT ALL in the
     // oracle must catch both lost occurrences and extra downstream CDC rows.
-    db.assert_st_matches_query(
-        "p1439_rows",
-        "SELECT region, amount FROM p1439_src",
-    )
-    .await;
+    db.assert_st_matches_query("p1439_rows", "SELECT region, amount FROM p1439_src")
+        .await;
     db.assert_st_matches_query(
         "p1439_totals",
         "SELECT region, COUNT(*) AS n, SUM(amount) AS total FROM p1439_src GROUP BY region",
@@ -150,8 +147,7 @@ async fn exercise_partitioned_projection_cascade(partition_by: &str, expected_st
     refresh_partitioned_projection_cascade(&db).await;
     assert_explicit_partitioned_refresh(&db, "p1439_up").await;
 
-    db.execute("DELETE FROM p1439_src WHERE id IN (3, 5)")
-        .await;
+    db.execute("DELETE FROM p1439_src WHERE id IN (3, 5)").await;
     refresh_partitioned_projection_cascade(&db).await;
     assert_explicit_partitioned_refresh(&db, "p1439_up").await;
     // Replaying with no new source changes must not create duplicate rows.
