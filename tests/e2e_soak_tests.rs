@@ -200,8 +200,11 @@ async fn apply_dml_batch(db: &E2eDb, source_idx: usize, batch: usize, cycle: u64
     ))
     .await;
 
-    // DELETE ~10% of the batch size
-    let delete_count = (batch as f64 * 0.1).max(1.0) as usize;
+    // Keep the number of source rows constant: otherwise the many-to-many
+    // join grows quadratically during a long soak, and RSS growth primarily
+    // measures a larger working set rather than retained backend memory.
+    // Each batch still exercises INSERT, UPDATE and DELETE.
+    let delete_count = batch;
     db.execute(&format!(
         "DELETE FROM {table}
          WHERE id IN (
@@ -555,6 +558,20 @@ async fn test_soak_stability() {
         .acquire()
         .await
         .expect("Failed to reserve PostgreSQL backend for RSS measurements");
+
+    // Measure growth after warming the same backend through every refresh
+    // operator. The source set stays bounded during the measurement window,
+    // avoiding expected RSS high-water growth from ever-larger join results.
+    apply_dml_batch(&db, 1, batch, 0).await;
+    for st in &active_sts {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT pgtrickle.refresh_stream_table('{st}')"
+        )))
+        .execute(&mut *rss_conn)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to warm backend refresh for {st}: {e}"));
+    }
+
     let initial_rss = get_rss_sample(&mut rss_conn)
         .await
         .unwrap_or_else(|e| panic!("Initial RSS measurement failed: {e}"));
@@ -689,6 +706,18 @@ async fn test_soak_stability() {
     );
     println!("  Total DML operations: {total_dml_ops}");
     println!("  Total refreshes: {total_refreshes}");
+
+    // A bounded workload is essential for a meaningful RSS growth limit.
+    // Without this check, growing source/join result sizes can mimic a leak.
+    for source_idx in 1..=n_sources {
+        let rows: i64 = db
+            .query_scalar(&format!("SELECT count(*) FROM source_{source_idx}"))
+            .await;
+        assert_eq!(
+            rows, 200,
+            "Source table source_{source_idx} grew during a supposedly bounded soak"
+        );
+    }
 
     // Final correctness check — uses FULL refresh (TRUNCATE + INSERT)
     // to guarantee ground-truth equality, bypassing any incremental drift
