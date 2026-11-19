@@ -2959,8 +2959,8 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
                 .fetch_one(&mut *conn)
                 .await
                 .expect("inspect centroid CDC window");
-        // These two deterministic steps previously advanced the frontier without applying the row move.
-        let trace_centroid_delta = (dimensions == 384 && diverse && step == 274)
+        // Trace prior mismatches and the newly observed 384D failure.
+        let trace_centroid_delta = (dimensions == 384 && diverse && matches!(step, 274 | 1373))
             || (dimensions == 3 && !diverse && step == 392);
         if trace_centroid_delta {
             sqlx::query("SET pg_trickle.dvm_decision_trace = on")
