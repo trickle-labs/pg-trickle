@@ -303,6 +303,10 @@ async fn get_rss_kb(db: &E2eDb) -> Option<i64> {
     rss
 }
 
+/// The completed action, status, path and affected-row witness stored in the
+/// refresh history. Keep the SQL row type named to make its intent explicit.
+type RefreshHistoryRecord = (String, String, bool, Option<String>, i64, i64, i64);
+
 /// Evidence from a completed manual refresh at a quiescent checkpoint.
 #[derive(Debug)]
 struct RefreshWitness {
@@ -335,7 +339,7 @@ async fn verify_correctness(db: &E2eDb, st_name: &str) -> Result<RefreshWitness,
     .await
     .map_err(|e| format!("refresh failed for {st_name}: {e}"))?;
 
-    let record: Option<(String, String, bool, Option<String>, i64, i64, i64)> = sqlx::query_as(
+    let record: Option<RefreshHistoryRecord> = sqlx::query_as(
         "SELECT h.action, h.status, h.was_full_fallback, h.merge_strategy_used,
                     COALESCE(h.rows_inserted, 0), COALESCE(h.rows_updated, 0),
                     COALESCE(h.rows_deleted, 0)
@@ -424,12 +428,10 @@ async fn run_correctness_checkpoint(
         }
     }
 
-    if resume_after {
-        if let Err(e) = db.try_execute(&resume).await {
-            let failure = format!("[{label}] scheduler resume failed: {e}");
-            println!("    FAIL — {failure}");
-            failures.push(failure);
-        }
+    if resume_after && let Err(e) = db.try_execute(&resume).await {
+        let failure = format!("[{label}] scheduler resume failed: {e}");
+        println!("    FAIL — {failure}");
+        failures.push(failure);
     }
 }
 
