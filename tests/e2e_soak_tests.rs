@@ -406,7 +406,7 @@ async fn run_correctness_checkpoint(
     let resume = format!("SELECT pgtrickle.resume_scheduler(ARRAY[{target_list}])");
 
     if let Err(e) = db.try_execute(&pause).await {
-        let failure = format!("[{label}] scheduler drain failed: {e}");
+        let failure = format!("[{label}] scheduler drain failed for {active_sts:?}: {e}");
         println!("    FAIL — {failure}");
         failures.push(failure);
     } else {
@@ -623,12 +623,12 @@ async fn test_soak_stability() {
     }
 
     // Final error state check
-    check_no_error_states(&db)
-        .await
-        .expect("Stream tables in error state at soak end");
-    check_worker_alive(&db)
-        .await
-        .expect("Background worker not alive at soak end");
+    if let Err(e) = check_no_error_states(&db).await {
+        health_check_failures.push(format!("[final] {e}"));
+    }
+    if let Err(e) = check_worker_alive(&db).await {
+        health_check_failures.push(format!("[final] {e}"));
+    }
 
     // Report
     if !health_check_failures.is_empty() {
@@ -644,7 +644,6 @@ async fn test_soak_stability() {
 
     println!("\n  ✓ Soak test PASSED: {cycle} cycles, {total_refreshes} refreshes, zero failures");
 }
-
 
 // ── Bounded fail-closed correctness regressions (#1430) ────────────────
 
@@ -732,7 +731,7 @@ async fn test_soak_join_refresh_error_is_not_suppressed() {
     let db = E2eDb::new().await.with_extension().await;
     setup_bounded_join(&db).await;
     // An ordinary refresh error, not a row mismatch. This previously went
-    // through the same "KNOWN JOIN DRIFT (ignored)" branch.
+    // was previously ignored for JOINs by the periodic check.
     db.execute(
         "UPDATE pgtrickle.pgt_stream_tables
          SET status = 'ERROR' WHERE pgt_name = 'soak_join'",
