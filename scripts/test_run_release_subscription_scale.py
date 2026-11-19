@@ -13,6 +13,7 @@ def report(
     dimensions: int = 384,
     pivots: int = 1,
     force_explicit: bool = True,
+    mutation_shape: str = "single_update",
 ) -> dict:
     return {
         "pg_trickle": "0.109.0",
@@ -27,15 +28,33 @@ def report(
                 "initial_rows": rows,
                 "subscriptions": subscriptions,
                 "analyzed": analyzed,
+                "mutation_shape": mutation_shape,
                 "samples": [
                     {
+                        "mutation_shape": mutation_shape,
+                        "changed_rows": {
+                            "single_update": 1,
+                            "small_batch": scale.BATCH_ROWS,
+                            "repeated_updates_delete": 2,
+                        }[mutation_shape],
+                        "source_mutation_ms": 0.2,
+                        "source_wal_bytes": 10,
                         "merge_strategy": "explicit_dml" if force_explicit else "delete_insert",
                         "refresh_ms": 1.0,
                         "commit_ms": 0.1,
+                        "refresh_wal_bytes": 20,
                         "stream_sequential_tuples_returned": 0,
                         "stream_index_tuples_fetched": 1,
                         "source_sequential_tuples_returned": 0,
                         "source_index_tuples_fetched": 1,
+                        "stream_heap_blks_read": 0,
+                        "stream_heap_blks_hit": 1,
+                        "stream_idx_blks_read": 0,
+                        "stream_idx_blks_hit": 1,
+                        "source_heap_blks_read": 0,
+                        "source_heap_blks_hit": 1,
+                        "source_idx_blks_read": 0,
+                        "source_idx_blks_hit": 1,
                     }
                 ],
             }
@@ -65,6 +84,22 @@ class SubscriptionScaleTests(unittest.TestCase):
             data,
         )
 
+    def test_parse_case_accepts_small_batch_and_repeated_delete_shapes(self):
+        for mutation_shape in scale.EXTRA_MUTATION_SHAPES:
+            data = report(1_000_000, 10, True, mutation_shape=mutation_shape)
+            output = scale.REPORT_MARKER + json.dumps(data)
+            self.assertEqual(
+                scale.parse_case(
+                    output,
+                    1_000_000,
+                    10,
+                    True,
+                    force_explicit=False,
+                    mutation_shape=mutation_shape,
+                ),
+                data,
+            )
+
     def test_parse_case_rejects_wrong_scale_or_uncontrolled_merge(self):
         wrong_scale = report(1_000_000, 10, True)
         wrong_scale["measurements"][0]["initial_rows"] -= 1
@@ -90,8 +125,8 @@ class SubscriptionScaleTests(unittest.TestCase):
             scale.CASE_GROUPS,
             (
                 (384, scale.ROW_COUNTS, scale.STATISTICS, True, scale.SUBSCRIPTIONS),
-                (384, (1_000_000,), ("analyzed",), False, (0, 1_000)),
-                (768, (1_000_000,), ("analyzed",), False, (0, 1_000)),
+                (384, (1_000_000,), ("analyzed",), False, scale.SUBSCRIPTIONS),
+                (768, (1_000_000,), ("analyzed",), False, scale.SUBSCRIPTIONS),
             ),
         )
         self.assertEqual(
@@ -99,17 +134,19 @@ class SubscriptionScaleTests(unittest.TestCase):
                 len(rows) * len(statistics) * len(subscriptions)
                 for _, rows, statistics, _, subscriptions in scale.CASE_GROUPS
             ),
-            44,
+            50,
         )
+        self.assertEqual(50 + len(scale.EXTRA_MUTATION_SHAPES), 52)
 
-    def test_matrix_captures_same_strategy_plans_at_zero_and_max_subscriptions(self):
+    def test_matrix_captures_same_strategy_plans_across_subscription_counts(self):
         expected = {
             (384, 1_000_000, 0, "unanalyzed", True),
             (384, 1_000_000, 1_000, "unanalyzed", True),
-            (384, 1_000_000, 0, "analyzed", False),
-            (384, 1_000_000, 1_000, "analyzed", False),
-            (768, 1_000_000, 0, "analyzed", False),
-            (768, 1_000_000, 1_000, "analyzed", False),
+            *(
+                (dimensions, 1_000_000, subscriptions, "analyzed", False)
+                for dimensions in scale.DIMENSIONS
+                for subscriptions in scale.SUBSCRIPTIONS
+            ),
         }
         self.assertEqual(scale.PLAN_CASES, expected)
         self.assertTrue(scale.PLAN_CASES <= {
@@ -119,6 +156,28 @@ class SubscriptionScaleTests(unittest.TestCase):
             for subscriptions in subscriptions_values
             for statistics in statistics_values
         })
+
+    def test_trigger_free_controls_require_one_merge_strategy(self):
+        cases = [
+            {
+                "dimensions": dimensions,
+                "rows": 1_000_000,
+                "statistics": "analyzed",
+                "subscriptions": subscriptions,
+                "force_explicit_with_noop_trigger": False,
+                "report": {
+                    "measurements": [
+                        {"samples": [{"merge_strategy": "delete_insert"}]}
+                    ]
+                },
+            }
+            for dimensions in scale.DIMENSIONS
+            for subscriptions in scale.SUBSCRIPTIONS
+        ]
+        scale.validate_trigger_free_strategies(cases)
+        cases[-1]["report"]["measurements"][0]["samples"][0]["merge_strategy"] = "explicit_dml"
+        with self.assertRaisesRegex(ValueError, "changed merge strategy"):
+            scale.validate_trigger_free_strategies(cases)
 
     def test_parse_case_requires_the_declared_plan_capture(self):
         data = report(1_000_000, 10, False)

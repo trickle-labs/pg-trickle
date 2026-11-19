@@ -423,6 +423,22 @@ async fn test_pgvector_subscription_scaling_workload() {
         "PGVECTOR_SUB_FORCE_EXPLICIT must be 0 or 1"
     );
     let force_explicit = force_explicit == "1";
+    let mutation_shape =
+        std::env::var("PGVECTOR_SUB_MUTATION_SHAPE").unwrap_or_else(|_| "single_update".into());
+    assert!(
+        ["single_update", "small_batch", "repeated_updates_delete"]
+            .contains(&mutation_shape.as_str()),
+        "PGVECTOR_SUB_MUTATION_SHAPE must be single_update, small_batch, or repeated_updates_delete"
+    );
+    let batch_rows: usize = std::env::var("PGVECTOR_SUB_BATCH_ROWS")
+        .unwrap_or_else(|_| "10".into())
+        .parse()
+        .expect("PGVECTOR_SUB_BATCH_ROWS must be an integer");
+    assert!((1..=1000).contains(&batch_rows));
+    if mutation_shape == "small_batch" {
+        assert!(batch_rows * 2 <= row_counts.iter().copied().max().unwrap_or(0));
+    }
+    assert!(pivots < dimensions);
     let vector = |position: usize| {
         format!(
             "[{}]",
@@ -454,7 +470,7 @@ async fn test_pgvector_subscription_scaling_workload() {
                 ))
                 .await;
                 db.execute(&format!(
-                "INSERT INTO {source} SELECT i, '{first}'::vector FROM generate_series(1,{rows}) i"
+                "INSERT INTO {source} SELECT i, CASE WHEN i % 2 = 0 THEN '{first}'::vector ELSE '{second}'::vector END FROM generate_series(1,{rows}) i"
             ))
             .await;
                 db.create_st(
@@ -495,10 +511,17 @@ async fn test_pgvector_subscription_scaling_workload() {
                         .listen(&channel)
                         .await
                         .expect("listen for measured transitions");
-                    let mut values = vec!["0".to_string(); dimensions];
-                    values[0] = format!("{:.4}", 1.0 + (index % pivots) as f64 / 10_000.0);
+                    let pivot_axis = 1 + index % pivots;
+                    let mut values = vec![0.0; dimensions];
+                    values[0] = 1.0;
+                    values[pivot_axis] = 0.1;
+                    let values = values
+                        .into_iter()
+                        .map(|value| format!("{value:.4}"))
+                        .collect::<Vec<_>>();
                     let pivot = format!("[{}]", values.join(","));
-                    db.execute(&format!("SELECT pgtrickle.subscribe_distance('{stream}', '{channel}', 'embedding', '{pivot}', '<->', 0.5)")).await;
+                    let threshold = if index % 2 == 0 { 0.5 } else { 2.0 };
+                    db.execute(&format!("SELECT pgtrickle.subscribe_distance('{stream}', '{channel}', 'embedding', '{pivot}', '<->', {threshold})")).await;
                 }
                 let pgt_id: i64 = sqlx::query_scalar(
                 "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid=$1::text::regclass",
@@ -509,11 +532,56 @@ async fn test_pgvector_subscription_scaling_workload() {
             .expect("inspect subscription stream");
                 let mut samples = Vec::new();
                 for round in 0..rounds {
-                    let vector = if round % 2 == 0 { &second } else { &first };
-                    db.execute(&format!(
-                        "UPDATE {source} SET embedding='{vector}' WHERE id=1"
-                    ))
-                    .await;
+                    let target = if round % 2 == 0 { &first } else { &second };
+                    let other = if round % 2 == 0 { &second } else { &first };
+                    let source_wal_before: String =
+                        sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
+                            .fetch_one(&db.pool)
+                            .await
+                            .expect("read source-change WAL position");
+                    let mutation_start = Instant::now();
+                    let changed_rows = match mutation_shape.as_str() {
+                        "single_update" => {
+                            db.execute(&format!(
+                                "UPDATE {source} SET embedding='{target}' WHERE id=1"
+                            ))
+                            .await;
+                            1
+                        }
+                        "small_batch" => {
+                            let last_id = batch_rows * 2 - 1;
+                            db.execute(&format!(
+                                "UPDATE {source} SET embedding='{target}' \
+                                 WHERE id <= {last_id} AND id % 2 = 1"
+                            ))
+                            .await;
+                            batch_rows
+                        }
+                        "repeated_updates_delete" => {
+                            for vector in [target, other, target] {
+                                db.execute(&format!(
+                                    "UPDATE {source} SET embedding='{vector}' WHERE id=1"
+                                ))
+                                .await;
+                            }
+                            if round == 0 {
+                                db.execute(&format!("DELETE FROM {source} WHERE id=2"))
+                                    .await;
+                                2
+                            } else {
+                                1
+                            }
+                        }
+                        _ => unreachable!("mutation shape was validated"),
+                    };
+                    let source_mutation_ms = mutation_start.elapsed().as_secs_f64() * 1000.0;
+                    let source_wal_bytes: i64 = sqlx::query_scalar(
+                        "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), $1::pg_lsn)::bigint",
+                    )
+                    .bind(&source_wal_before)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("measure source-change WAL bytes");
                     let mut tx = db
                         .pool
                         .begin()
@@ -563,12 +631,31 @@ async fn test_pgvector_subscription_scaling_workload() {
                     pg_stat_get_xact_tuples_fetched($1::text::regclass)::bigint, \
                     pg_stat_get_xact_tuples_returned($2::text::regclass)::bigint, \
                     pg_stat_get_xact_tuples_fetched($2::text::regclass)::bigint";
+                    let buffer_counters = "SELECT COALESCE(s.heap_blks_read, 0)::bigint, \
+                    COALESCE(s.heap_blks_hit, 0)::bigint, COALESCE(s.idx_blks_read, 0)::bigint, \
+                    COALESCE(s.idx_blks_hit, 0)::bigint, COALESCE(d.heap_blks_read, 0)::bigint, \
+                    COALESCE(d.heap_blks_hit, 0)::bigint, COALESCE(d.idx_blks_read, 0)::bigint, \
+                    COALESCE(d.idx_blks_hit, 0)::bigint FROM pg_statio_user_tables s \
+                    CROSS JOIN pg_statio_user_tables d WHERE s.relid=$1::text::regclass \
+                    AND d.relid=$2::text::regclass";
                     let before: (i64, i64, i64, i64) = sqlx::query_as(counters)
                         .bind(&stream)
                         .bind(&source)
                         .fetch_one(&mut *tx)
                         .await
                         .expect("read initial tuple counters");
+                    let buffers_before: (i64, i64, i64, i64, i64, i64, i64, i64) =
+                        sqlx::query_as(buffer_counters)
+                            .bind(&stream)
+                            .bind(&source)
+                            .fetch_one(&mut *tx)
+                            .await
+                            .expect("read initial relation buffer counters");
+                    let wal_before: String =
+                        sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
+                            .fetch_one(&mut *tx)
+                            .await
+                            .expect("read refresh WAL position");
                     let start = Instant::now();
                     sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
                         .bind(&stream)
@@ -594,6 +681,28 @@ async fn test_pgvector_subscription_scaling_workload() {
                         .fetch_one(&mut *tx)
                         .await
                         .expect("read final tuple counters");
+                    sqlx::query("SELECT pg_stat_clear_snapshot()")
+                        .execute(&mut *tx)
+                        .await
+                        .expect("refresh relation-statistics snapshot");
+                    let buffers_after: (i64, i64, i64, i64, i64, i64, i64, i64) =
+                        sqlx::query_as(buffer_counters)
+                            .bind(&stream)
+                            .bind(&source)
+                            .fetch_one(&mut *tx)
+                            .await
+                            .expect("read final relation buffer counters");
+                    let buffer_delta = [
+                        buffers_after.0 - buffers_before.0,
+                        buffers_after.1 - buffers_before.1,
+                        buffers_after.2 - buffers_before.2,
+                        buffers_after.3 - buffers_before.3,
+                        buffers_after.4 - buffers_before.4,
+                        buffers_after.5 - buffers_before.5,
+                        buffers_after.6 - buffers_before.6,
+                        buffers_after.7 - buffers_before.7,
+                    ];
+                    assert!(buffer_delta.iter().all(|value| *value >= 0));
                     let (snapshot, ids, snapshot_kind) = if subscriptions == 0 {
                         (None, None, "none")
                     } else {
@@ -617,17 +726,10 @@ async fn test_pgvector_subscription_scaling_workload() {
                             .fetch_one(&mut *tx)
                             .await
                             .expect("inspect affected identities");
-                            assert_eq!(
-                                (snapshot, ids),
-                                (1, 1),
-                                "bounded snapshot must contain the changed row"
-                            );
+                            assert!(snapshot > 0 && ids >= changed_rows as i64);
                             (Some(snapshot), Some(ids), "bounded")
                         } else {
-                            assert_eq!(
-                                snapshot, rows as i64,
-                                "full snapshot must cover the stream"
-                            );
+                            assert!(snapshot > 0 && snapshot <= rows as i64);
                             (Some(snapshot), None, "full")
                         }
                     };
@@ -643,9 +745,42 @@ async fn test_pgvector_subscription_scaling_workload() {
                     let commit_start = Instant::now();
                     tx.commit().await.expect("commit measured refresh");
                     let commit_ms = commit_start.elapsed().as_secs_f64() * 1000.0;
+                    let refresh_wal_bytes: i64 = sqlx::query_scalar(
+                        "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), $1::pg_lsn)::bigint",
+                    )
+                    .bind(&wal_before)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("measure refresh WAL bytes");
+                    let expected_transition = match mutation_shape.as_str() {
+                        "repeated_updates_delete" if round == 0 => (1, 1),
+                        "repeated_updates_delete" if round % 2 == 0 => (1, 0),
+                        "repeated_updates_delete" => (0, 1),
+                        _ if round % 2 == 0 => (changed_rows as i64, 0),
+                        _ => (0, changed_rows as i64),
+                    };
                     let delivery_start = Instant::now();
                     let mut channels = HashSet::new();
-                    for _ in 0..subscriptions {
+                    let expected_channels = (0..subscriptions)
+                        .filter(|index| {
+                            if index % 2 == 0 {
+                                true
+                            } else {
+                                mutation_shape == "repeated_updates_delete" && round == 0
+                            }
+                        })
+                        .count();
+                    for index in 0..subscriptions {
+                        let expected = if index % 2 == 0 {
+                            expected_transition
+                        } else if mutation_shape == "repeated_updates_delete" && round == 0 {
+                            (0, 1)
+                        } else {
+                            (0, 0)
+                        };
+                        if expected == (0, 0) {
+                            continue;
+                        }
                         let event = tokio::time::timeout(Duration::from_secs(5), listener.recv())
                             .await
                             .expect("wait for measured transition")
@@ -657,14 +792,52 @@ async fn test_pgvector_subscription_scaling_workload() {
                         let payload: serde_json::Value = serde_json::from_str(event.payload())
                             .expect("parse transition payload");
                         assert_eq!(payload["refresh_id"], refresh_id);
-                        assert_eq!(payload["entered"], if round % 2 == 0 { 0 } else { 1 });
-                        assert_eq!(payload["exited"], if round % 2 == 0 { 1 } else { 0 });
+                        assert_eq!(event.channel(), format!("alert_measure_{index}"));
+                        assert_eq!(payload["entered"], expected.0);
+                        assert_eq!(payload["exited"], expected.1);
                     }
-                    assert_eq!(channels.len(), subscriptions);
-                    let delivery_ms = (subscriptions > 0)
+                    assert_eq!(channels.len(), expected_channels);
+                    let delivery_ms = (expected_channels > 0)
                         .then(|| delivery_start.elapsed().as_secs_f64() * 1000.0);
-                    let correct: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT s.embedding::text = d.embedding::text FROM {stream} s JOIN {source} d USING(id) WHERE s.id=1")))
-                    .fetch_one(&db.pool).await.expect("check changed result");
+                    if expected_channels < subscriptions {
+                        assert!(
+                            tokio::time::timeout(Duration::from_millis(20), listener.recv())
+                                .await
+                                .is_err(),
+                            "broad-threshold subscriptions must not emit membership events"
+                        );
+                    }
+                    let correct: bool = match mutation_shape.as_str() {
+                        "small_batch" => {
+                            let last_id = batch_rows * 2 - 1;
+                            sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                                "SELECT count(*) = {batch_rows} AND \
+                                 bool_and(s.embedding::text = d.embedding::text) \
+                                 FROM {stream} s JOIN {source} d USING (id) \
+                                 WHERE d.id <= {last_id} AND d.id % 2 = 1"
+                            )))
+                            .fetch_one(&db.pool)
+                            .await
+                            .expect("check every changed batch result")
+                        }
+                        "repeated_updates_delete" => {
+                            sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                                "SELECT s.embedding::text = d.embedding::text AND \
+                                 NOT EXISTS (SELECT 1 FROM {stream} WHERE id=2) \
+                                 FROM {stream} s JOIN {source} d USING (id) WHERE s.id=1"
+                            )))
+                            .fetch_one(&db.pool)
+                            .await
+                            .expect("check repeated update and delete results")
+                        }
+                        _ => sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                            "SELECT s.embedding::text = d.embedding::text \
+                             FROM {stream} s JOIN {source} d USING (id) WHERE s.id=1"
+                        )))
+                        .fetch_one(&db.pool)
+                        .await
+                        .expect("check changed result"),
+                    };
                     assert!(
                         correct,
                         "measured refresh must propagate the changed vector"
@@ -676,12 +849,14 @@ async fn test_pgvector_subscription_scaling_workload() {
                         after.3 - before.3,
                     ];
                     assert!(tuple_delta.iter().all(|value| *value >= 0));
-                    samples.push(serde_json::json!({"round":round,"refresh_ms":elapsed_ms,"commit_ms":commit_ms,"notification_wait_ms":delivery_ms,"merge_strategy":strategy,
+                    samples.push(serde_json::json!({"round":round,"mutation_shape":mutation_shape,"changed_rows":changed_rows,"source_mutation_ms":source_mutation_ms,"source_wal_bytes":source_wal_bytes,"refresh_ms":elapsed_ms,"commit_ms":commit_ms,"refresh_wal_bytes":refresh_wal_bytes,"notification_wait_ms":delivery_ms,"merge_strategy":strategy,
                     "stream_sequential_tuples_returned":tuple_delta[0],"stream_index_tuples_fetched":tuple_delta[1],
                     "source_sequential_tuples_returned":tuple_delta[2],"source_index_tuples_fetched":tuple_delta[3],
+                    "stream_heap_blks_read":buffer_delta[0],"stream_heap_blks_hit":buffer_delta[1],"stream_idx_blks_read":buffer_delta[2],"stream_idx_blks_hit":buffer_delta[3],
+                    "source_heap_blks_read":buffer_delta[4],"source_heap_blks_hit":buffer_delta[5],"source_idx_blks_read":buffer_delta[6],"source_idx_blks_hit":buffer_delta[7],
                     "snapshot_rows":snapshot,"affected_identities":ids,"snapshot_kind":snapshot_kind}));
                 }
-                measurements.push(serde_json::json!({"initial_rows":rows,"subscriptions":subscriptions,"analyzed":analyzed,"estimated_rows":estimated_rows,"last_analyze":last_analyze,"last_autoanalyze":last_autoanalyze,"samples":samples}));
+                measurements.push(serde_json::json!({"initial_rows":rows,"subscriptions":subscriptions,"analyzed":analyzed,"mutation_shape":mutation_shape,"estimated_rows":estimated_rows,"last_analyze":last_analyze,"last_autoanalyze":last_autoanalyze,"samples":samples}));
             }
         }
     }
@@ -690,7 +865,7 @@ async fn test_pgvector_subscription_scaling_workload() {
     }
     println!(
         "PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON={}",
-        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"dimensions":dimensions,"distinct_pivots":pivots,"force_explicit_with_noop_trigger":force_explicit,"nested_plan_capture":plan_log.is_some(),"measurements":measurements,"notes":"One row alternates across the threshold; each subscription emits its expected event. Refresh, commit, and post-commit listener wait are timed separately; notification delivery can begin before the listener wait. Tuple counters include repeated visits, not distinct rows. Plan instrumentation adds overhead. No controlled concurrency is recorded."})
+        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"dimensions":dimensions,"distinct_pivots":pivots,"selective_threshold":0.5,"broad_threshold":2.0,"force_explicit_with_noop_trigger":force_explicit,"nested_plan_capture":plan_log.is_some(),"measurements":measurements,"notes":"The corpus alternates selective and broad membership. Single-row, small-batch, and repeated-update/delete paths report source mutation, refresh, commit, WAL, tuple, buffer, and post-commit listener measurements separately. Docker CPU/memory samples are retained per case. Broad subscriptions are checked for absent membership events, except that deletes legitimately emit exits. Notification delivery can begin before the listener wait. Tuple counters include repeated visits, not distinct rows. Plan instrumentation adds overhead. No controlled concurrency is recorded."})
     );
 }
 

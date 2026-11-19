@@ -14,26 +14,30 @@ import subprocess
 import sys
 from pathlib import Path
 
+from run_release_centroid_cost import DockerStatsSampler
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ROW_COUNTS = (1_000, 10_000, 100_000, 1_000_000)
 DIMENSIONS = (384, 768)
 SUBSCRIPTIONS = (0, 1, 10, 100, 1000)
 STATISTICS = ("unanalyzed", "analyzed")
+EXTRA_MUTATION_SHAPES = ("small_batch", "repeated_updates_delete")
+BATCH_ROWS = 10
 ROUNDS = 1
-# shortcut: trigger-free runs cover zero and max subscriptions, expand when per-count attribution is required.
 CASE_GROUPS = (
     (384, ROW_COUNTS, STATISTICS, True, SUBSCRIPTIONS),
-    (384, (1_000_000,), ("analyzed",), False, (0, 1000)),
-    (768, (1_000_000,), ("analyzed",), False, (0, 1000)),
+    (384, (1_000_000,), ("analyzed",), False, SUBSCRIPTIONS),
+    (768, (1_000_000,), ("analyzed",), False, SUBSCRIPTIONS),
 )
 PLAN_CASES = {
     (384, 1_000_000, 0, "unanalyzed", True),
     (384, 1_000_000, 1_000, "unanalyzed", True),
-    (384, 1_000_000, 0, "analyzed", False),
-    (384, 1_000_000, 1_000, "analyzed", False),
-    (768, 1_000_000, 0, "analyzed", False),
-    (768, 1_000_000, 1_000, "analyzed", False),
+    *(
+        (dimensions, 1_000_000, subscriptions, "analyzed", False)
+        for dimensions in DIMENSIONS
+        for subscriptions in SUBSCRIPTIONS
+    ),
 }
 REPORT_MARKER = "PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON="
 TEST_COMMAND = [
@@ -59,6 +63,7 @@ def parse_case(
     dimensions: int = 384,
     force_explicit: bool = True,
     pivots: int = 1,
+    mutation_shape: str = "single_update",
 ) -> dict:
     reports = [line.removeprefix(REPORT_MARKER) for line in output.splitlines() if line.startswith(REPORT_MARKER)]
     if len(reports) != 1:
@@ -87,6 +92,7 @@ def parse_case(
         or case.get("initial_rows") != rows
         or case.get("subscriptions") != subscriptions
         or case.get("analyzed") is not analyzed
+        or case.get("mutation_shape") != mutation_shape
     ):
         raise ValueError("subscription benchmark case does not match its requested scale")
     samples = case.get("samples")
@@ -97,13 +103,33 @@ def parse_case(
         force_explicit and sample.get("merge_strategy") != "explicit_dml"
     ):
         raise ValueError("subscription benchmark did not use the controlled merge strategy")
+    if sample.get("mutation_shape") != mutation_shape:
+        raise ValueError("subscription sample used an unexpected mutation shape")
+    expected_changed_rows = {
+        "single_update": 1,
+        "small_batch": BATCH_ROWS,
+        "repeated_updates_delete": 2,
+    }[mutation_shape]
+    if sample.get("changed_rows") != expected_changed_rows:
+        raise ValueError("subscription sample used an unexpected changed-row count")
     for key in (
+        "source_mutation_ms",
+        "source_wal_bytes",
         "refresh_ms",
         "commit_ms",
+        "refresh_wal_bytes",
         "stream_sequential_tuples_returned",
         "stream_index_tuples_fetched",
         "source_sequential_tuples_returned",
         "source_index_tuples_fetched",
+        "stream_heap_blks_read",
+        "stream_heap_blks_hit",
+        "stream_idx_blks_read",
+        "stream_idx_blks_hit",
+        "source_heap_blks_read",
+        "source_heap_blks_hit",
+        "source_idx_blks_read",
+        "source_idx_blks_hit",
     ):
         value = sample.get(key)
         if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
@@ -119,6 +145,7 @@ def run_case(
     force_explicit: bool,
     pivots: int,
     plan_path: Path | None,
+    mutation_shape: str = "single_update",
 ) -> dict:
     environment = os.environ.copy()
     environment.update(
@@ -131,25 +158,41 @@ def run_case(
             "PGVECTOR_SUB_STATISTICS": statistics,
             "PGVECTOR_SUB_FORCE_EXPLICIT": "1" if force_explicit else "0",
             "PGVECTOR_SUB_PIVOTS": str(pivots),
+            "PGVECTOR_SUB_MUTATION_SHAPE": mutation_shape,
+            "PGVECTOR_SUB_BATCH_ROWS": str(BATCH_ROWS),
         }
     )
     environment.pop("PGVECTOR_SUB_PLAN_LOG", None)
     if plan_path is not None:
         environment["PGVECTOR_SUB_PLAN_LOG"] = str(plan_path)
-    completed = subprocess.run(
-        TEST_COMMAND,
-        cwd=ROOT,
-        env=environment,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
+    measurement_path = Path(environment["PGS_RELEASE_MEASUREMENT_JSON"]).resolve()
+    stem = f"subscription-scale-{dimensions}-{rows}-{subscriptions}-{statistics}-{mutation_shape}"
+    stats_path = measurement_path.with_name(f"{stem}-docker-stats.jsonl")
+    stats_path.unlink(missing_ok=True)
+    sampler = DockerStatsSampler(stats_path)
+    sampler.start()
+    try:
+        completed = subprocess.run(
+            TEST_COMMAND,
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    finally:
+        sampler.stop()
     sys.stdout.write(completed.stdout)
     sys.stdout.flush()
     if completed.returncode != 0:
-        raise RuntimeError(f"subscription case {rows}/{statistics}/{subscriptions} failed with exit {completed.returncode}")
-    return parse_case(
+        raise RuntimeError(
+            f"subscription case {rows}/{statistics}/{subscriptions}/{mutation_shape} "
+            f"failed with exit {completed.returncode}"
+        )
+    if sampler.samples == 0:
+        raise RuntimeError(f"subscription case produced no Docker CPU/memory samples: {stats_path}")
+    report = parse_case(
         completed.stdout,
         rows,
         subscriptions,
@@ -158,7 +201,11 @@ def run_case(
         dimensions=dimensions,
         force_explicit=force_explicit,
         pivots=pivots,
+        mutation_shape=mutation_shape,
     )
+    report["resource_samples"] = sampler.samples
+    report["resource_file"] = stats_path.relative_to(ROOT).as_posix()
+    return report
 
 
 def validate_plan_log(output: str, rows: int, subscriptions: int, statistics: str) -> None:
@@ -176,6 +223,31 @@ def validate_plan_log(output: str, rows: int, subscriptions: int, statistics: st
         raise ValueError("subscription plan log is missing the expected case markers")
     if '"Plan":' not in output:
         raise ValueError("subscription plan log contains no auto_explain plan")
+
+
+def validate_trigger_free_strategies(cases: list[dict]) -> None:
+    expected_subscriptions = set(SUBSCRIPTIONS)
+    for dimensions in DIMENSIONS:
+        selected = [
+            case
+            for case in cases
+            if case["dimensions"] == dimensions
+            and case["rows"] == 1_000_000
+            and case["statistics"] == "analyzed"
+            and not case["force_explicit_with_noop_trigger"]
+        ]
+        if {case["subscriptions"] for case in selected} != expected_subscriptions:
+            raise ValueError(
+                f"trigger-free {dimensions}D matrix is missing subscription-count controls"
+            )
+        strategies = {
+            case["report"]["measurements"][0]["samples"][0]["merge_strategy"]
+            for case in selected
+        }
+        if len(strategies) != 1:
+            raise ValueError(
+                f"trigger-free {dimensions}D controls changed merge strategy: {sorted(strategies)}"
+            )
 
 
 def archive_plan_log(path: Path, result: dict) -> str:
@@ -240,6 +312,7 @@ def main() -> int:
             "subscription_counts": list(SUBSCRIPTIONS),
             "statistics": list(STATISTICS),
             "rounds_per_case": ROUNDS,
+            "extra_mutation_shapes": list(EXTRA_MUTATION_SHAPES),
             "host": host_info(),
             "cases": [],
             "raw_evidence_files": [],
@@ -250,7 +323,7 @@ def main() -> int:
             for rows in row_counts:
                 for statistics in statistics_values:
                     for subscriptions in subscription_counts:
-                        pivots = max(1, min(subscriptions, 10))
+                        pivots = max(1, min(subscriptions, 10, dimensions - 1))
                         plan_path = None
                         case_id = (dimensions, rows, subscriptions, statistics, force_explicit)
                         if case_id in PLAN_CASES:
@@ -296,6 +369,7 @@ def main() -> int:
                             "subscriptions": subscriptions,
                             "force_explicit_with_noop_trigger": force_explicit,
                             "distinct_pivots": pivots,
+                            "mutation_shape": "single_update",
                             "report": report,
                         }
                         if plan_path is not None:
@@ -304,7 +378,41 @@ def main() -> int:
                             )
                             case["plan_log"] = plan_relative
                         result["cases"].append(case)
+                        result["raw_evidence_files"].append(report["resource_file"])
                         write_measurement(measurement_path, result)
+        for mutation_shape in EXTRA_MUTATION_SHAPES:
+            dimensions, rows, subscriptions, statistics = 384, 1_000_000, 10, "analyzed"
+            pivots = min(subscriptions, 10, dimensions - 1)
+            print(
+                f"=== Exact-package subscriptions: {rows} rows, {dimensions} dimensions, "
+                f"{subscriptions} subscriptions, {statistics}, {mutation_shape} ===",
+                flush=True,
+            )
+            report = run_case(
+                dimensions,
+                rows,
+                subscriptions,
+                statistics,
+                False,
+                pivots,
+                None,
+                mutation_shape,
+            )
+            result["cases"].append(
+                {
+                    "dimensions": dimensions,
+                    "rows": rows,
+                    "statistics": statistics,
+                    "subscriptions": subscriptions,
+                    "force_explicit_with_noop_trigger": False,
+                    "distinct_pivots": pivots,
+                    "mutation_shape": mutation_shape,
+                    "report": report,
+                }
+            )
+            result["raw_evidence_files"].append(report["resource_file"])
+            write_measurement(measurement_path, result)
+        validate_trigger_free_strategies(result["cases"])
         match = re.match(r"^PostgreSQL (18(?:\.\d+){1,2})", postgres_version or "")
         if not match:
             raise ValueError("subscription measurement did not report a PostgreSQL 18 version")
