@@ -2960,8 +2960,9 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
                 .await
                 .expect("inspect centroid CDC window");
         // Trace prior mismatches and the newly observed 384D failure.
-        let trace_centroid_delta = (dimensions == 384 && diverse && matches!(step, 274 | 1373))
-            || (dimensions == 3 && !diverse && step == 392);
+        let trace_centroid_delta =
+            (dimensions == 384 && diverse && matches!(step, 274 | 1373 | 1482))
+                || (dimensions == 3 && !diverse && step == 392);
         if trace_centroid_delta {
             sqlx::query("SET pg_trickle.dvm_decision_trace = on")
                 .execute(&mut *conn)
