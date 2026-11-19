@@ -335,9 +335,8 @@ async fn verify_correctness(db: &E2eDb, st_name: &str) -> Result<RefreshWitness,
     .await
     .map_err(|e| format!("refresh failed for {st_name}: {e}"))?;
 
-    let record: Option<(String, String, bool, Option<String>, i64, i64, i64)> =
-        sqlx::query_as(
-            "SELECT h.action, h.status, h.was_full_fallback, h.merge_strategy_used,
+    let record: Option<(String, String, bool, Option<String>, i64, i64, i64)> = sqlx::query_as(
+        "SELECT h.action, h.status, h.was_full_fallback, h.merge_strategy_used,
                     COALESCE(h.rows_inserted, 0), COALESCE(h.rows_updated, 0),
                     COALESCE(h.rows_deleted, 0)
              FROM pgtrickle.pgt_refresh_history h
@@ -345,14 +344,14 @@ async fn verify_correctness(db: &E2eDb, st_name: &str) -> Result<RefreshWitness,
              WHERE st.pgt_schema = 'public' AND st.pgt_name = $1
                AND h.refresh_id > $2
              ORDER BY h.refresh_id DESC LIMIT 1",
-        )
-        .bind(st_name)
-        .bind(before)
-        .fetch_optional(&db.pool)
-        .await
-        .map_err(|e| format!("refresh witness lookup failed for {st_name}: {e}"))?;
-    let (action, status, full_fallback, merge_strategy, inserted, updated, deleted) =
-        record.ok_or_else(|| {
+    )
+    .bind(st_name)
+    .bind(before)
+    .fetch_optional(&db.pool)
+    .await
+    .map_err(|e| format!("refresh witness lookup failed for {st_name}: {e}"))?;
+    let (action, status, full_fallback, merge_strategy, inserted, updated, deleted) = record
+        .ok_or_else(|| {
             format!("refresh for {st_name} returned without a new history record (skipped?)")
         })?;
     if status != "COMPLETED"
@@ -701,8 +700,7 @@ async fn corrupt_one_public_join_row(db: &E2eDb) {
 async fn test_soak_join_dml_completes_nonempty_differential_and_matches_exactly() {
     let db = E2eDb::new().await.with_extension().await;
     setup_bounded_join(&db).await;
-    db.execute("INSERT INTO source_1 VALUES (3, 1, 30)")
-        .await;
+    db.execute("INSERT INTO source_1 VALUES (3, 1, 30)").await;
     let witness = verify_correctness(&db, "soak_join")
         .await
         .expect("healthy JOIN must match after DML");
@@ -758,10 +756,8 @@ async fn test_soak_short_final_checkpoint_keeps_failure_after_full_recovery() {
 
     // Recovery may make the public rows equal, but cannot retroactively
     // erase the earlier failure from the original incremental state.
-    db.execute(
-        "SELECT pgtrickle.alter_stream_table('soak_join', refresh_mode => 'FULL')",
-    )
-    .await;
+    db.execute("SELECT pgtrickle.alter_stream_table('soak_join', refresh_mode => 'FULL')")
+        .await;
     db.execute("SELECT pgtrickle.refresh_stream_table('soak_join')")
         .await;
     let defining_query: String = db
@@ -773,5 +769,9 @@ async fn test_soak_short_final_checkpoint_keeps_failure_after_full_recovery() {
     oracle::compare_st_to_query(&db, "public.soak_join", &defining_query)
         .await
         .expect("FULL recovery should restore exact equality");
-    assert_eq!(failures.len(), 1, "recovery must not clear the failing verdict");
+    assert_eq!(
+        failures.len(),
+        1,
+        "recovery must not clear the failing verdict"
+    );
 }
