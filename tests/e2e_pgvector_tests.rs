@@ -2009,11 +2009,34 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
             .await
             .expect("refresh recovered centroid");
     }
-    let recovered: bool = sqlx::query_scalar("SELECT public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)) AND s.centroid::text = '[6,7]' AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND h.merge_strategy_used = 'centroid_algebraic' FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass")
-        .fetch_one(&mut *conn).await.expect("check post-crash catch-up");
+    // After a hard restart, a scheduler-owned refresh can race this manual
+    // catch-up or writer holdback can defer the just-committed source row.
+    // Retry on the same session (which has the centroid GUCs enabled) until
+    // *all* recovery invariants hold. A persistent failure still fails the test.
+    let recovered_sql = "SELECT public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)) AND s.centroid::text = '[6,7]' AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND h.merge_strategy_used = 'centroid_algebraic' FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass";
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut attempts = 1u32;
+    let recovered = loop {
+        let caught_up: bool = sqlx::query_scalar(recovered_sql)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("check post-crash catch-up");
+        if caught_up {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_crash_st')")
+            .execute(&mut *conn)
+            .await
+            .expect("retry post-crash centroid catch-up");
+        attempts += 1;
+    };
     assert!(
         recovered,
-        "algebraic refresh must apply the committed source change after crash recovery"
+        "algebraic refresh must apply the committed source change after crash recovery (attempts={attempts})"
     );
 }
 

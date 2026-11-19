@@ -10,6 +10,12 @@ on:
   schedule:
     - cron: '0 16 * * *'  # Daily 16:00 UTC, after daytime qualification runs
   workflow_dispatch:
+  # Exercise the real Linux/Docker RSS path before merging changes to the soak.
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tests/e2e_soak_tests.rs'
+      - '.github/workflows/stability-tests.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,12 +41,15 @@ jobs:
       - name: Build E2E Docker image
         run: ./tests/build_e2e_image.sh
 
-      - name: Run soak test (10 min)
-        run: SOAK_DURATION_SECS=600 ./scripts/run_e2e_tests.sh --test e2e_soak_tests --run-ignored all --no-capture
+      - name: Run RSS regression tests and soak (2 min on PR, 10 min otherwise)
+        env:
+          SOAK_DURATION_SECS: ${{ github.event_name == 'pull_request' && '120' || '600' }}
+        run: ./scripts/run_e2e_tests.sh --test e2e_soak_tests --run-ignored all --no-capture
         timeout-minutes: 20
 
   # ── G17-MDB: Multi-Database Scheduler Isolation Test ──────────────────
   mdb-test:
+    if: github.event_name != 'pull_request'
     name: Multi-database isolation test
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -58,6 +67,7 @@ jobs:
 
   # ── FEAT-10-01: Citus Chaos Resilience Tests (v0.51.0) ────────────────
   citus-chaos-test:
+    if: github.event_name != 'pull_request'
     name: Citus chaos resilience test
     runs-on: ubuntu-latest
     timeout-minutes: 60
