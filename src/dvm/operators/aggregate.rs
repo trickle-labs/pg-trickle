@@ -4406,7 +4406,7 @@ mod tests {
             &["grp".to_string()],
             Some(&special_filter),
         );
-        assert!(group_filter.contains("\"grp\" IS NOT DISTINCT FROM __pgt_d2.\"__pgt_group_0\""));
+        assert!(group_filter.contains("grp IS NOT DISTINCT FROM __pgt_d2.\"__pgt_group_0\""));
         assert!(group_filter.contains("__pgt_d2.\"__special_total\""));
 
         let merge = agg_merge_expr_mapped(
@@ -5021,7 +5021,7 @@ mod tests {
             for arg in initial_args {
                 for part in arg.split('|') {
                     assert!(
-                        part.starts_with("CASE WHEN \"keep\" THEN ("),
+                        part.starts_with("CASE WHEN keep THEN ("),
                         "initial auxiliary must guard argument evaluation: {part}"
                     );
                 }
