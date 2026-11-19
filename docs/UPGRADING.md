@@ -16,8 +16,8 @@ updates from jobs dispatched before that resume. Pre-upgrade scheduler jobs
 with unknown generation snapshots cannot overwrite newer operator recovery;
 normal subsequent scheduler jobs capture the new generation automatically.
 
-The upgrade also installs the partition-retention API and its DDL hook.
-Retention stays disabled for existing stream tables until explicitly
+The migration also ensures the partition-retention API and its DDL hook are
+present. Retention stays disabled for existing stream tables until explicitly
 configured. See [Partitioned Tables](tutorials/PARTITIONED_TABLES.md) for
 eligibility, configuration, and the safeguards for retained history.
 
@@ -68,11 +68,14 @@ Install the v0.109.0 library and extension files, then apply the upgrade:
 ALTER EXTENSION pg_trickle UPDATE TO '0.109.0';
 ```
 
-The upgrade adds the metric-aware embedding helper and durable ANN maintenance.
-Existing L2 helper calls and index definitions are retained. Legacy distance
-subscriptions remain inactive because their saved thresholds may be incorrect;
-inspect and re-register them. Experimental centroid state remains disabled by
-default.
+The upgrade adds the metric-aware embedding helper, durable ANN maintenance,
+and opt-in `TRIM` and `RETAIN` policies for eligible partitioned sources.
+Existing stream tables are unchanged until a retention policy is configured.
+The DDL hook protects partition cuts and concurrent detach while preserving
+retained history. Existing L2 helper calls and index definitions are retained.
+Legacy distance subscriptions remain inactive because their saved thresholds
+may be incorrect; inspect and re-register them. Experimental centroid state
+remains disabled by default.
 
 The migration adds an internal durable reservation table for local WAL-slot
 retirement. It preserves rollback and restart recovery while a slot is being
