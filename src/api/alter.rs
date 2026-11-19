@@ -1597,7 +1597,7 @@ fn get_storage_table_columns(
                  JOIN pg_namespace n ON n.oid = c.relnamespace \
                  WHERE n.nspname = $1 AND c.relname = $2 \
                  AND a.attnum > 0 AND NOT a.attisdropped \
-                 AND a.attname NOT LIKE '__pgt_%' \
+                 AND NOT starts_with(a.attname::text, '__pgt_') \
                  ORDER BY a.attnum",
                 None,
                 &[schema.into(), table_name.into()],

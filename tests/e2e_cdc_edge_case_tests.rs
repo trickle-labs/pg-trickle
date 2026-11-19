@@ -317,3 +317,133 @@ async fn test_cdc_domain_types() {
     db.refresh_st("dom_st").await;
     db.assert_st_matches_query("dom_st", q).await;
 }
+
+// Regression for #1429: SQL LIKE treats every underscore in '__pgt_%'
+// as a wildcard, incorrectly dropping public columns from ST change buffers.
+#[tokio::test]
+async fn test_cdc_st_buffer_literal_internal_prefix_keeps_public_columns() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        r#"CREATE TABLE prefix_source (
+            id INT PRIMARY KEY,
+            abpgtc INT,
+            xxpgt_value INT,
+            "AbpgtC" INT
+        )"#,
+    )
+    .await;
+    db.execute(
+        r#"INSERT INTO prefix_source VALUES
+            (1, 10, 100, 1000),
+            (2, 20, 200, 2000)"#,
+    )
+    .await;
+
+    let source_query = r#"SELECT id, abpgtc, xxpgt_value, "AbpgtC" FROM prefix_source"#;
+    // Select trigger CDC explicitly, regardless of the cluster-wide default.
+    db.execute(
+        r#"SELECT pgtrickle.create_stream_table(
+            'prefix_up',
+            $$SELECT id, abpgtc, xxpgt_value, "AbpgtC" FROM prefix_source$$,
+            '1d', 'DIFFERENTIAL', cdc_mode => 'trigger')"#,
+    )
+    .await;
+    db.create_st(
+        "prefix_down",
+        r#"SELECT id, abpgtc, xxpgt_value, "AbpgtC" FROM prefix_up"#,
+        "1d",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    // Establish both baselines before checking the subsequent differential run.
+    db.refresh_st_with_retry("prefix_up").await;
+    db.refresh_st_with_retry("prefix_down").await;
+    db.assert_st_matches_query("prefix_up", source_query).await;
+    db.assert_st_matches_query("prefix_down", source_query).await;
+
+    let buffer_has_public_columns: bool = db
+        .query_scalar(
+            "SELECT COUNT(*) = 3 FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = ( \
+                 SELECT pg_catalog.to_regclass(pg_catalog.format( \
+                     'pgtrickle_changes.changes_pgt_%s', pgt_id)) \
+                 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'prefix_up' \
+             ) \
+             AND a.attnum > 0 AND NOT a.attisdropped \
+             AND a.attname::text IN ('abpgtc', 'xxpgt_value', 'AbpgtC')",
+        )
+        .await;
+    assert!(
+        buffer_has_public_columns,
+        "the upstream ST change buffer must carry all three public columns"
+    );
+
+    // Diagnostics must show genuine internals but never these near matches.
+    let misclassified: i64 = db
+        .query_scalar(
+            "SELECT COUNT(*) FROM pgtrickle.list_auxiliary_columns('prefix_up') \
+             WHERE column_name IN ('abpgtc', 'xxpgt_value', 'AbpgtC')",
+        )
+        .await;
+    assert_eq!(misclassified, 0);
+    let internal_row_id: i64 = db
+        .query_scalar(
+            "SELECT COUNT(*) FROM pgtrickle.list_auxiliary_columns('prefix_up') \
+             WHERE column_name = '__pgt_row_id'",
+        )
+        .await;
+    assert_eq!(internal_row_id, 1);
+
+    db.execute(
+        r#"UPDATE prefix_source
+           SET abpgtc = 11, xxpgt_value = 110, "AbpgtC" = 1100
+           WHERE id = 1"#,
+    )
+    .await;
+    db.execute("DELETE FROM prefix_source WHERE id = 2").await;
+    db.execute("INSERT INTO prefix_source VALUES (3, 30, 300, 3000)")
+        .await;
+
+    let before_refresh: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    for name in ["prefix_up", "prefix_down"] {
+        db.try_execute_with_config(
+            &[
+                "SET pg_trickle.refresh_strategy = 'differential'",
+                "SET pg_trickle.differential_max_change_ratio = 0",
+            ],
+            &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{name} differential refresh failed: {e}"));
+    }
+    let completed: i64 = db
+        .query_scalar(&format!(
+            "SELECT COUNT(DISTINCT st.pgt_name) \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name IN ('prefix_up', 'prefix_down') \
+               AND h.refresh_id > {before_refresh} \
+               AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED' \
+               AND NOT h.was_full_fallback"
+        ))
+        .await;
+    assert_eq!(
+        completed, 2,
+        "both levels must complete a non-fallback differential refresh"
+    );
+
+    db.assert_st_matches_query("prefix_up", source_query).await;
+    db.assert_st_matches_query("prefix_down", source_query).await;
+
+    // Expected rows are independent of the source query and include each
+    // affected public column; a count-only assertion could miss this bug.
+    let actual: Vec<(i32, i32, i32, i32)> =
+        sqlx::query_as(r#"SELECT id, abpgtc, xxpgt_value, "AbpgtC" FROM prefix_down ORDER BY id"#)
+            .fetch_all(&db.pool)
+            .await
+            .expect("read downstream public columns");
+    assert_eq!(actual, vec![(1, 11, 110, 1100), (3, 30, 300, 3000)]);
+}

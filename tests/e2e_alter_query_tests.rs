@@ -923,3 +923,93 @@ async fn test_alter_query_data_correctness_with_dml_cycle() {
     )
     .await;
 }
+
+// Regression for #1429: ALTER must see public columns which happen to
+// match the wildcard expression '__pgt_%', including quoted identifiers.
+#[tokio::test]
+async fn test_alter_query_and_partition_keep_public_pgt_lookalikes() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        r#"CREATE TABLE prefix_alter_source (
+            id INT PRIMARY KEY,
+            abpgtc INT NOT NULL,
+            xxpgt_value INT,
+            "AbpgtC" INT
+        )"#,
+    )
+    .await;
+    db.execute(
+        "INSERT INTO prefix_alter_source VALUES (1, 10, 100, 1000), (2, 20, 200, 2000)",
+    )
+    .await;
+    let query = r#"SELECT id, abpgtc, xxpgt_value, "AbpgtC" FROM prefix_alter_source"#;
+    db.create_st("prefix_alter_st", query, "1d", "DIFFERENTIAL")
+        .await;
+
+    let compatible: String = db
+        .query_scalar(
+            r#"SELECT pgtrickle.explain_alter(
+                'prefix_alter_st',
+                'SELECT id, abpgtc, xxpgt_value, "AbpgtC" FROM prefix_alter_source'
+            ) ->> 'classification'"#,
+        )
+        .await;
+    assert_eq!(
+        compatible, "compatible",
+        "an unchanged query must retain every user-visible column"
+    );
+
+    let rebuildable: String = db
+        .query_scalar(
+            r#"SELECT pgtrickle.explain_alter(
+                'prefix_alter_st',
+                'SELECT id, abpgtc, xxpgt_value, "AbpgtC" FROM prefix_alter_source WHERE id > 1'
+            ) ->> 'classification'"#,
+        )
+        .await;
+    assert_eq!(rebuildable, "rebuildable");
+
+    let filtered_query =
+        r#"SELECT id, abpgtc, xxpgt_value, "AbpgtC" FROM prefix_alter_source WHERE id > 1"#;
+    db.alter_st(
+        "prefix_alter_st",
+        r#"query => 'SELECT id, abpgtc, xxpgt_value, "AbpgtC" FROM prefix_alter_source WHERE id > 1'"#,
+    )
+    .await;
+    db.assert_st_matches_query("prefix_alter_st", filtered_query)
+        .await;
+
+    // No downstream dependents: repartitioning is supported, and a column
+    // accidentally filtered by LIKE used to fail key validation here.
+    let missing_key = db
+        .try_execute(
+            "SELECT pgtrickle.alter_stream_table('prefix_alter_st', partition_by => 'missing')",
+        )
+        .await;
+    assert!(missing_key.is_err(), "unknown partition key must be rejected");
+    db.alter_st("prefix_alter_st", "partition_by => 'abpgtc'")
+        .await;
+    let key: String = db
+        .query_scalar(
+            "SELECT st_partition_key FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'prefix_alter_st'",
+        )
+        .await;
+    assert_eq!(key, "abpgtc");
+    let is_partitioned: bool = db
+        .query_scalar(
+            "SELECT relkind = 'p' FROM pg_catalog.pg_class \
+             WHERE oid = 'public.prefix_alter_st'::regclass",
+        )
+        .await;
+    assert!(is_partitioned);
+    db.assert_st_matches_query("prefix_alter_st", filtered_query)
+        .await;
+
+    let value: (i32, i32, i32, i32) =
+        sqlx::query_as(r#"SELECT id, abpgtc, xxpgt_value, "AbpgtC" FROM prefix_alter_st"#)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read repartitioned public columns");
+    assert_eq!(value, (2, 20, 200, 2000));
+}
