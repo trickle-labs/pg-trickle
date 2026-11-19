@@ -631,7 +631,7 @@ async fn check_auto_invariants(db: &E2eDb) -> bool {
                 "SELECT string_agg(column_name, ', ' ORDER BY ordinal_position) \
                  FROM information_schema.columns \
                  WHERE table_name = '{st_table}' \
-                   AND column_name NOT LIKE '__pgt_%'"
+                   AND NOT starts_with(column_name, '__pgt_')"
             ))
             .await;
         let cols = match cols {

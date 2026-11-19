@@ -1422,7 +1422,7 @@ pub fn resolve_st_output_columns(
                  WHERE a.attrelid = $1 \
                    AND a.attnum > 0 \
                    AND NOT a.attisdropped \
-                   AND a.attname::text NOT LIKE '__pgt_%' \
+                   AND NOT starts_with(a.attname::text, '__pgt_') \
                  ORDER BY a.attnum",
                 None,
                 &[pgt_relid.into()],
