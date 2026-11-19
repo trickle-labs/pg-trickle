@@ -54,7 +54,15 @@ jobs:
 
       - name: Run Semgrep ruleset
         # STAB-3: Blocking — unsuppressed findings fail the CI check.
-        run: semgrep scan --error --config .semgrep/pg_trickle.yml --sarif --output semgrep.sarif
+        # The SARIF-only run reports a finding count but omits its locations
+        # from the log. On failure, rerun in text mode for actionable CI logs
+        # without changing either the rules or the failing conclusion.
+        run: |
+          if ! semgrep scan --error --config .semgrep/pg_trickle.yml --sarif --output semgrep.sarif; then
+            echo "::error::Semgrep failed; diagnostic rule IDs and locations follow"
+            semgrep scan --config .semgrep/pg_trickle.yml || true
+            exit 1
+          fi
 
       - name: Filter suppressed findings from SARIF
         # Semgrep 1.x includes nosemgrep-suppressed results in SARIF output with

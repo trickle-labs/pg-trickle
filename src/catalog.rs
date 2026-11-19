@@ -2196,10 +2196,9 @@ impl StDependency {
 /// buffer table, preventing false schema-change alerts.
 ///
 /// The snapshot is a JSON object containing column metadata, RLS state,
-/// partition child count, and the OIDs of all partition descendants. The OID
-/// list is deliberately excluded from the schema fingerprint: it is a durable
-/// pre-DROP lookup for the sql_drop event trigger, and does not change the
-/// existing fingerprint contract used by installed stream tables.
+/// partition child count, and the ancestry and bounds of partition descendants.
+/// The descendant metadata is deliberately excluded from the schema fingerprint:
+/// it is a pre-DROP lookup and does not change the existing fingerprint contract.
 ///
 /// Used at creation time to record the source schema in `pgt_dependencies`
 /// so `detect_schema_change_kind()` can compare against the current catalog.
@@ -2275,13 +2274,63 @@ pub fn build_column_snapshot(
         s
     });
 
-    // PostgreSQL has already deleted pg_inherits rows by the time sql_drop
-    // fires. Persist the ancestry before that DDL so a dropped child can be
-    // traced to the still-live partitioned source, including nested children.
-    snapshot_obj["partition_descendant_oids"] =
-        serde_json::json!(query_partition_descendant_oids(source_oid)?);
+    // PostgreSQL has already deleted pg_inherits rows by sql_drop. Preserve
+    // the bound node as well as ancestry before that DDL, without deparsing
+    // timestamp bounds using the session's time zone or DateStyle.
+    let (oids, descendants) = query_partition_snapshot(source_oid)?;
+    snapshot_obj["partition_descendant_oids"] = oids;
+    snapshot_obj["partition_descendants"] = descendants;
     let snapshot = pgrx::JsonB(snapshot_obj);
     Ok((snapshot, fingerprint))
+}
+
+#[cfg(not(test))]
+fn query_partition_snapshot(
+    source_oid: pg_sys::Oid,
+) -> Result<(serde_json::Value, serde_json::Value), PgTrickleError> {
+    Spi::connect(|client| {
+        let mut rows = client
+            .select(
+                "WITH RECURSIVE descendants(relid, parent_oid) AS ( \
+                   SELECT inhrelid, inhparent FROM pg_catalog.pg_inherits WHERE inhparent = $1 \
+                   UNION ALL \
+                   SELECT i.inhrelid, i.inhparent FROM pg_catalog.pg_inherits i \
+                   JOIN descendants d ON i.inhparent = d.relid \
+                 ) \
+                 SELECT COALESCE(jsonb_agg(DISTINCT d.relid::bigint ORDER BY d.relid::bigint), '[]'::jsonb), \
+                        COALESCE(jsonb_agg(jsonb_build_object( \
+                          'oid', d.relid::bigint, 'parent_oid', d.parent_oid::bigint, \
+                          'bound_node', c.relpartbound::text, 'relkind', c.relkind::text \
+                        ) ORDER BY d.relid, d.parent_oid), '[]'::jsonb) \
+                 FROM descendants d JOIN pg_catalog.pg_class c ON c.oid = d.relid",
+                None,
+                &[source_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let row = rows.next().ok_or_else(|| {
+            PgTrickleError::InternalError("partition snapshot query returned no row".into())
+        })?;
+        let oids = row
+            .get::<pgrx::JsonB>(1)
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::InternalError("missing partition OIDs".into()))?;
+        let mut descendants = row
+            .get::<pgrx::JsonB>(2)
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::InternalError("missing partition bounds".into()))?;
+        let entries = descendants.0.as_array_mut().ok_or_else(|| {
+            PgTrickleError::InternalError("invalid partition snapshot array".into())
+        })?;
+        for entry in entries {
+            let range = entry
+                .get("bound_node")
+                .and_then(serde_json::Value::as_str)
+                .and_then(crate::dvm::retention::decode_catalog_range)
+                .unwrap_or(serde_json::Value::Null);
+            entry["range"] = range;
+        }
+        Ok((oids.0, descendants.0))
+    })
 }
 
 /// Return the owner OID of a source relation.
@@ -2446,7 +2495,12 @@ pub fn store_column_snapshot_for_pgt_id(
     let (snapshot, fingerprint) = build_column_snapshot(source_oid)?;
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_dependencies \
-         SET column_snapshot = $1, schema_fingerprint = $2 \
+         SET column_snapshot = CASE \
+               WHEN column_snapshot ? 'partition_retention' \
+               THEN pg_catalog.jsonb_set($1, '{partition_retention}', \
+                                        column_snapshot->'partition_retention', true) \
+               ELSE $1 END, \
+             schema_fingerprint = $2 \
          WHERE pgt_id = $3 AND source_relid = $4",
         &[
             snapshot.into(),

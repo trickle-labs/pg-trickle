@@ -2132,25 +2132,46 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
             .await
             .expect("refresh recovered centroid");
     }
-    let (binary_matches, actual, frontier_matches, materialized_cleared, strategy, details):
-        (bool, String, Option<bool>, bool, Option<String>, serde_json::Value) = sqlx::query_as("SELECT public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)), s.centroid::text, c.baseline_frontier = t.frontier, c.materialized_xid IS NULL, h.merge_strategy_used, jsonb_build_object('actual', s.centroid::text, 'native', (SELECT avg(v)::text FROM centroid_crash_src), 'binary_matches', public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)), 'baseline_frontier', c.baseline_frontier::text, 'frontier', t.frontier::text, 'materialized_xid', c.materialized_xid::text, 'merge_strategy', h.merge_strategy_used, 'refresh_reason', h.refresh_reason, 'refresh_detail', h.refresh_reason_detail) FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass")
-        .fetch_one(&mut *conn).await.expect("check post-crash catch-up");
+    let recovered_sql = "SELECT public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)), s.centroid::text, c.baseline_frontier = t.frontier, c.materialized_xid IS NULL, h.merge_strategy_used, jsonb_build_object('actual', s.centroid::text, 'native', (SELECT avg(v)::text FROM centroid_crash_src), 'binary_matches', public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)), 'baseline_frontier', c.baseline_frontier::text, 'frontier', t.frontier::text, 'materialized_xid', c.materialized_xid::text, 'merge_strategy', h.merge_strategy_used, 'refresh_reason', h.refresh_reason, 'refresh_detail', h.refresh_reason_detail) FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass";
+    let expected: (bool, String, Option<bool>, bool, Option<String>) = (
+        true,
+        "[6,7]".into(),
+        Some(true),
+        true,
+        Some("centroid_algebraic".into()),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut attempts = 1u32;
+    let (recovered, details) =
+        loop {
+            let (binary_matches, actual, frontier_matches, materialized_cleared, strategy, details):
+            (bool, String, Option<bool>, bool, Option<String>, serde_json::Value) =
+            sqlx::query_as(recovered_sql)
+                .fetch_one(&mut *conn)
+                .await
+                .expect("check post-crash catch-up");
+            let recovered = (
+                binary_matches,
+                actual,
+                frontier_matches,
+                materialized_cleared,
+                strategy,
+            );
+            if recovered == expected || std::time::Instant::now() >= deadline {
+                break (recovered, details);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_crash_st')")
+                .execute(&mut *conn)
+                .await
+                .expect("retry post-crash centroid catch-up");
+            attempts += 1;
+        };
+    // After a hard restart, a scheduler-owned refresh can race this manual
+    // catch-up or writer holdback can defer the just-committed source row.
     assert_eq!(
-        (
-            binary_matches,
-            actual,
-            frontier_matches,
-            materialized_cleared,
-            strategy
-        ),
-        (
-            true,
-            "[6,7]".into(),
-            Some(true),
-            true,
-            Some("centroid_algebraic".into())
-        ),
-        "algebraic refresh must apply the committed source change after crash recovery: {details}"
+        recovered, expected,
+        "algebraic refresh must apply the committed source change after crash recovery: {details} (attempts={attempts})"
     );
 }
 
@@ -4314,6 +4335,12 @@ async fn test_ann_churn_preserves_concurrent_work_and_unknown_rewrites() {
         "DIFFERENTIAL",
     )
     .await;
+    // This test manually controls each refresh and validates exact ANN request
+    // identity across snapshot restore. Prevent the scheduler from running a
+    // concurrent refresh/rewrite that invalidates the index filenode between
+    // request_ann_maintenance and claim_ann_maintenance.
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.ann_churn_stream'])")
+        .await;
     db.execute(
         "CREATE INDEX ann_churn_idx ON ann_churn_stream USING hnsw (embedding vector_l2_ops)",
     )

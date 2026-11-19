@@ -2112,7 +2112,7 @@ unsafe extern "C-unwind" fn analyzed_agg_walker(
 }
 
 #[cfg(any(not(test), feature = "pg_test"))]
-fn collect_analyzed_aggregate_locations(
+pub(crate) fn collect_analyzed_aggregate_locations(
     query: &str,
 ) -> Result<HashMap<i32, pg_sys::Oid>, PgTrickleError> {
     use pgrx::PgList;

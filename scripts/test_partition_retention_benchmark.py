@@ -1,0 +1,232 @@
+import importlib.util
+import io
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+
+BENCHMARK = Path(__file__).resolve().parent.parent / "benchmarks/partition-retention/benchmark.py"
+spec = importlib.util.spec_from_file_location("partition_retention_benchmark", BENCHMARK)
+benchmark = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(benchmark)
+
+
+class InternalPlanSummaryTests(unittest.TestCase):
+    def test_lock_samples_distinguish_consecutive_waits_and_missing_sessions(self):
+        lock = {"wait_event_type": "Lock", "wait_event": "relation"}
+        idle = {"wait_event_type": "Client", "wait_event": "ClientRead"}
+        samples = [
+            {"ts": 1, "writer": idle, "reader": idle},
+            {"ts": 2, "writer": lock, "reader": idle},
+            {"ts": 3, "writer": lock, "reader": None},
+            {"ts": 4, "writer": idle, "reader": lock},
+            {"ts": 5, "writer": lock, "reader": idle},
+        ]
+        self.assertEqual(benchmark.summarize_lock_samples(map(json.dumps, samples)), {
+            "samples": 5,
+            "writer": {"lock_samples": 3, "missing_samples": 0,
+                       "max_consecutive_sample_span_ms": 1000.0, "wait_events": {"relation": 3}},
+            "reader": {"lock_samples": 1, "missing_samples": 1,
+                       "max_consecutive_sample_span_ms": 0.0, "wait_events": {"relation": 1}},
+        })
+        with self.assertRaisesRegex(RuntimeError, "did not record"):
+            benchmark.summarize_lock_samples([])
+        with self.assertRaisesRegex(RuntimeError, "clock moved backwards"):
+            benchmark.summarize_lock_samples(map(json.dumps, samples[::-1]))
+
+    def test_lock_sampler_rejects_a_missing_workload_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "samples"
+            path.write_text(json.dumps({"ts": 1, "writer": None,
+                                        "reader": {"wait_event_type": None, "wait_event": None}}))
+            process = Mock()
+            process.poll.return_value = None
+            output = Mock()
+            with self.assertRaisesRegex(RuntimeError, "lost a workload session"):
+                benchmark.stop_lock_sampler(process, output, path)
+            process.terminate.assert_called_once()
+            process.stdin.close.assert_called_once()
+            output.close.assert_called_once()
+
+    def test_lock_sampler_closes_output_when_psql_cannot_start(self):
+        output = Mock()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(Path, "open", return_value=output), \
+             patch.object(benchmark.subprocess, "Popen", side_effect=OSError("no psql")):
+            path = Path(directory) / "sampler"
+            with self.assertRaisesRegex(OSError, "no psql"):
+                benchmark.start_lock_sampler("db", path, "writer", "reader")
+        output.close.assert_called_once()
+
+    def test_database_error_reports_server_diagnostic(self):
+        error = subprocess.CalledProcessError(1, ["psql"], stderr="ERROR: refresh failed\n")
+        with patch.object(benchmark.subprocess, "run", side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, "PostgreSQL command failed: ERROR: refresh failed") as raised:
+                benchmark.run("db", "SELECT 1")
+        self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_pending_events_rejects_negative_values(self):
+        with patch("sys.argv", ["benchmark.py", "--database", "db", "--output", "out.json",
+                                "--pending-events", "-1"]), patch("sys.stderr", new_callable=io.StringIO) as err:
+            with self.assertRaises(SystemExit) as exit_error:
+                benchmark.main()
+        self.assertEqual(exit_error.exception.code, 2)
+        self.assertIn("--pending-events must be nonnegative", err.getvalue())
+
+    def test_counts_actual_partition_and_output_scans(self):
+        source = {"Query Text": "source query", "Plan": {"Node Type": "Append", "Plans": [
+            {"Node Type": "Seq Scan", "Schema": "trial", "Relation Name": "p1",
+             "Actual Rows": 4, "Rows Removed by Filter": 1, "Actual Loops": 2},
+            {"Node Type": "Seq Scan", "Schema": "trial", "Relation Name": "p2",
+             "Actual Rows": 3, "Actual Loops": 1},
+            {"Node Type": "Seq Scan", "Schema": "other", "Relation Name": "p3",
+             "Actual Rows": 99, "Actual Loops": 1},
+            {"Node Type": "Seq Scan", "Schema": "trial", "Relation Name": "p4",
+             "Actual Rows": 0, "Actual Loops": 0},
+        ]}}
+        output = {"Query Text": "output query", "Plan": {
+            "Node Type": "Bitmap Heap Scan", "Schema": "trial", "Relation Name": "totals",
+            "Actual Rows": 5, "Rows Removed by Index Recheck": 2, "Actual Loops": 1,
+            "Recheck Cond": "d >= boundary",
+        }}
+        log = "noise\nLOG: duration: 1 ms plan:\n" + json.dumps(source) + "\nLOG: duration: 2 ms plan:\n" + json.dumps(output)
+        self.assertEqual(benchmark.internal_plan_summary(log, "trial"), {
+            "captured_statements": 2,
+            "source_partitions_scanned": ["p1", "p2"],
+            "source_rows_examined": 13,
+            "output_rows_examined": 7,
+            "relevant_plans": [
+                {"scans": [{"relation": "p2", "node": "Seq Scan", "rows_examined": 3, "condition": None},
+                           {"relation": "p1", "node": "Seq Scan", "rows_examined": 10, "condition": None}], "plan": source},
+                {"scans": [{"relation": "totals", "node": "Bitmap Heap Scan", "rows_examined": 7, "condition": "d >= boundary"}], "plan": output},
+            ],
+        })
+
+    def test_missing_plan_is_an_error(self):
+        with self.assertRaisesRegex(ValueError, "did not emit"):
+            benchmark.internal_plan_summary("no plans", "trial")
+
+    def test_partitioned_output_scan_is_included_in_guard(self):
+        plan = {"Query Text": "output query", "Plan": {
+            "Node Type": "Seq Scan", "Schema": "trial", "Relation Name": "totals_p0",
+            "Actual Rows": 12, "Actual Loops": 1,
+        }}
+        summary = benchmark.internal_plan_summary("LOG: plan:\n" + json.dumps(plan), "trial")
+        self.assertEqual(summary["output_rows_examined"], 12)
+        with self.assertRaisesRegex(RuntimeError, "unbounded output scan"):
+            benchmark.validate_trim_drop_plan(summary)
+
+    def test_trim_plan_rejects_retained_source_and_full_output_scans(self):
+        summary = {"source_partitions_scanned": ["p0"], "relevant_plans": [
+            {"scans": [{"relation": "totals", "node": "Index Scan", "condition": "row_id = value"}]},
+        ]}
+        benchmark.validate_trim_drop_plan(summary)
+        summary["source_partitions_scanned"].append("p1")
+        with self.assertRaisesRegex(RuntimeError, "retained source partitions"):
+            benchmark.validate_trim_drop_plan(summary)
+        summary["source_partitions_scanned"].pop()
+        summary["relevant_plans"][0]["scans"][0]["condition"] = None
+        with self.assertRaisesRegex(RuntimeError, "unbounded output scan"):
+            benchmark.validate_trim_drop_plan(summary)
+
+    def test_trim_plan_rejects_excessive_index_scan_work(self):
+        summary = {"source_partitions_scanned": [], "relevant_plans": [
+            {"scans": [{"relation": "totals", "node": "Index Scan", "condition": "d >= lower", "rows_examined": 30000}],
+             "plan": {"Plan": {"Node Type": "Index Scan"}}},
+        ]}
+        with self.assertRaisesRegex(RuntimeError, "exceeded twice the affected-group bound"):
+            benchmark.validate_trim_drop_plan(summary, affected_group_limit=2000)
+        summary["relevant_plans"][0]["scans"][0]["rows_examined"] = 2000
+        benchmark.validate_trim_drop_plan(summary, affected_group_limit=2000)
+
+    def test_trim_plan_detects_repeated_delta_scans_outside_downstream_capture(self):
+        summary = {"source_partitions_scanned": [], "relevant_plans": [
+            {"scans": [], "plan": {"Query Text": "UPDATE totals", "Plan": {
+                "Node Type": "Seq Scan", "Relation Name": "__pgt_delta_1", "Actual Loops": 2}}},
+        ]}
+        with self.assertRaisesRegex(RuntimeError, "repeatedly scanned the affected delta"):
+            benchmark.validate_trim_drop_plan(summary)
+
+    def test_trim_plan_detects_excessive_pairs_outside_downstream_capture(self):
+        summary = {"source_partitions_scanned": [], "relevant_plans": [
+            {"scans": [], "plan": {"Query Text": "UPDATE totals", "Plan": {
+                "Node Type": "Nested Loop", "Actual Rows": 1, "Rows Removed by Join Filter": 5000}}},
+        ]}
+        with self.assertRaisesRegex(RuntimeError, "excessive row pairs"):
+            benchmark.validate_trim_drop_plan(summary)
+
+    def test_partitioned_capture_prunes_only_the_writer_partition(self):
+        results = BENCHMARK.parent / "results"
+        before = json.loads((results / "2026-11-17-pg18-macos-output-prune-before.json").read_text())
+        after = json.loads((results / "2026-11-17-pg18-macos-output-prune-after.json").read_text())
+        with self.assertRaisesRegex(RuntimeError, "did not prune"):
+            benchmark.validate_partitioned_capture_pruning(before[1]["drop_internal"], "totals_p1")
+        benchmark.validate_partitioned_capture_pruning(after[1]["drop_internal"], "totals_p1")
+        with self.assertRaisesRegex(RuntimeError, "did not prune"):
+            benchmark.validate_partitioned_capture_pruning(after[1]["drop_internal"], "totals_p0")
+
+    def test_partitioned_maintenance_prunes_correlated_probes(self):
+        results = BENCHMARK.parent / "results"
+        before = json.loads((results / "2026-11-17-pg18-macos-output-prune-after.json").read_text())
+        after = json.loads((results / "2026-11-17-pg18-linux-amd64-maintenance-prune-after.json").read_text())
+        with self.assertRaisesRegex(RuntimeError, "outer TID scan|maintenance probes did not prune"):
+            benchmark.validate_partitioned_maintenance_pruning(before[1]["drop_internal"], "totals_p1")
+        benchmark.validate_partitioned_maintenance_pruning(after[1]["drop_internal"], "totals_p1")
+
+    def test_delete_and_update_prune_outer_target_scans(self):
+        path = BENCHMARK.parent / "results/2026-11-17-pg18-linux-amd64-maintenance-delete.json"
+        summary = json.loads(path.read_text())
+        delete = next(entry for entry in summary["relevant_plans"]
+                      if entry["plan"]["Query Text"].startswith('DELETE FROM "retention_delete_probe"."totals"'))
+        update = next(entry for entry in summary["relevant_plans"]
+                      if entry["plan"]["Query Text"].startswith('UPDATE "retention_delete_probe"."totals"'))
+        self.assertEqual(sorted((scan["relation"], scan["node"], scan["rows_examined"])
+                                for scan in delete["scans"]), [
+            ("totals_p3", "Bitmap Heap Scan", 1.0),
+        ])
+        self.assertEqual(sorted((scan["relation"], scan["node"], scan["rows_examined"])
+                                for scan in update["scans"]), [
+            ("totals_p0", "Bitmap Heap Scan", 0.0),
+            ("totals_p2", "Bitmap Heap Scan", 1.0),
+        ])
+
+    def test_baseline_requires_reinitialization_in_the_timed_backend(self):
+        history = [{"action": "REINITIALIZE", "status": "COMPLETED"}]
+        summary = {"source_partitions_scanned": [f"p{i}" for i in range(1, 31)]}
+        benchmark.validate_baseline_refresh(history, summary)
+        with self.assertRaisesRegex(RuntimeError, "did not complete a reinitialization"):
+            benchmark.validate_baseline_refresh([{"action": "DIFFERENTIAL", "status": "COMPLETED"}], summary)
+        with self.assertRaisesRegex(RuntimeError, "did not scan every retained partition"):
+            benchmark.validate_baseline_refresh(history, {"source_partitions_scanned": []})
+
+    def test_trim_plan_rejects_repeated_delta_scan_in_downstream_capture(self):
+        results = BENCHMARK.parent / "results"
+        before = json.loads((results / "2026-11-17-pg18-macos-operator-cost-before-100m.json").read_text())
+        after = json.loads((results / "2026-11-17-pg18-macos-operator-cost-fixed.json").read_text())
+        with self.assertRaises(RuntimeError) as raised:
+            benchmark.validate_trim_drop_plan(before[1]["drop_internal"])
+        self.assertEqual(str(raised.exception), "TRIM repeatedly scanned the affected delta")
+        with self.assertRaises(RuntimeError) as raised:
+            benchmark.validate_trim_drop_plan(after[1]["drop_internal"])
+        self.assertEqual(str(raised.exception), "TRIM compared excessive row pairs")
+
+    def test_trim_multiset_capture_avoids_quadratic_pairing(self):
+        results = BENCHMARK.parent / "results"
+        before = json.loads((results / "2026-11-17-pg18-macos-join-flags-before.json").read_text())
+        after = json.loads((results / "2026-11-17-pg18-macos-multiset-after.json").read_text())
+        with self.assertRaisesRegex(RuntimeError, "repeatedly scanned the affected delta"):
+            benchmark.validate_trim_drop_plan(before)
+        benchmark.validate_trim_drop_plan(after["drop_internal"])
+
+    def test_refresh_retries_until_the_full_oracle_matches(self):
+        with patch.object(benchmark, "run", side_effect=["", "2", "", "0"]) as run, \
+             patch.object(benchmark.time, "sleep"):
+            self.assertEqual(benchmark.refresh_until_consistent("db", "s.t", "SELECT * FROM source"), 2)
+        self.assertEqual(run.call_count, 4)
+
+
+if __name__ == "__main__":
+    unittest.main()

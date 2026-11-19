@@ -8,6 +8,14 @@ import v0_109_0_release_gate as gate
 
 
 class RetirementContractTests(unittest.TestCase):
+    def test_retention_contract_requires_trim_retain_and_upgrade_api(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        gate.check_retention_contract(contract)
+        broken = copy.deepcopy(contract)
+        next(s for s in broken["required_suites"] if s["id"] == "partition-retention")["required_cases"].pop()
+        with self.assertRaises(SystemExit):
+            gate.check_retention_contract(broken)
+
     def test_published_vector_upgrade_checks_cannot_be_removed(self):
         script = (gate.prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text()
         gate.check_pgvector_upgrade_script(script)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retain the prior release gates and require local WAL retirement qualification."""
+"""Retain prior release gates and require WAL retirement and partition retention evidence."""
 
 import json
 import re
@@ -69,6 +69,11 @@ PGVECTOR_UPGRADE_CASES = {
         "test_upgrade_distance_subscriptions_preserves_legacy_rows",
         "test_upgrade_ann_epoch_handles_old_catalog_and_rollback",
     )
+}
+
+RETENTION_CASES = {
+    "e2e_partition_tests::test_retention_trim_partitioned_stream_storage",
+    "e2e_partition_tests::test_retention_concurrent_detach_preserves_retained_history",
 }
 
 
@@ -172,6 +177,32 @@ def check_retirement_contract(contract: dict) -> None:
     )
 
 
+def check_retention_contract(contract: dict) -> None:
+    suite = next(item for item in contract["required_suites"] if item["id"] == "partition-retention")
+    names = sorted(case.split("::", 1)[1] for case in RETENTION_CASES)
+    selector = "test(/^({})$/)".format("|".join(names))
+    prior.shared.require(
+        set(suite["required_cases"]) == RETENTION_CASES
+        and len(suite["required_cases"]) == len(RETENTION_CASES)
+        and suite["command_argv"] == [
+            "bash", "scripts/run_e2e_tests.sh", "--test", "e2e_partition_tests",
+            "-E", selector,
+        ]
+        and suite["e2e_image"] == "pg_trickle_release_candidate:local"
+        and suite["runtime"] is True
+        and suite["upgrade"] is False,
+        "partition-retention qualification must execute the TRIM and RETAIN cases against the release candidate",
+    )
+    script = (prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8")
+    for marker in (
+        "to_regprocedure('pgtrickle.set_stream_table_partition_retention(text,text,text,text)')",
+        "to_regprocedure('pgtrickle.get_stream_table_partition_retention(text)')",
+        "to_regprocedure('pgtrickle.create_stream_table_with_retention(text,text,text,text,text,text)')",
+        "evtname='pg_trickle_ddl_start_tracker'",
+    ):
+        prior.shared.require(marker in script, f"published upgrade check is missing retention marker {marker}")
+
+
 def main() -> None:
     prior.VERSION = "0.109.0"
     prior.PREVIOUS_VERSION = "0.108.3"
@@ -180,11 +211,12 @@ def main() -> None:
     prior.REQUIRED_CASES = prior.REQUIRED_CASES | CASES | PAUSE_CASES
     prior.REQUIRED_SHARDS = prior.REQUIRED_SHARDS | {"wal-retirement"}
     prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {
-        "wal-retirement", "wal-retirement-upgrade", "pgvector-0.8.1", "pgvector-0.8.7", "pgvector-catalog-upgrade",
-        "centroid-cost-matrix",
+        "wal-retirement", "wal-retirement-upgrade", "partition-retention",
+        "pgvector-0.8.1", "pgvector-0.8.7", "pgvector-catalog-upgrade", "centroid-cost-matrix",
     }
     contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
     check_retirement_contract(contract)
+    check_retention_contract(contract)
     check_pgvector_contract(contract)
     check_pgvector_upgrade_script((prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8"))
     prior.main()

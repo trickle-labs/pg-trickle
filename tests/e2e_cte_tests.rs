@@ -3494,6 +3494,136 @@ async fn test_cte_invalid_query_fails() {
     );
 }
 
+// Issue #1427: recursive UNION ALL must not substitute the output stream table
+// for a separate edge source in the delete cascade. Check both trigger-driven
+// and scheduled refresh, including bag multiplicities and actual DIFF actions.
+const ISSUE_1427_REACH: &str = "WITH RECURSIVE d AS (\
+    SELECT id AS node FROM public.audit_roots \
+    UNION ALL \
+    SELECT e.dst AS node FROM d JOIN public.audit_edges e ON e.src = d.node\
+) SELECT node FROM d";
+
+async fn issue_1427_graph(mode: &str, edges: &str) -> E2eDb {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE audit_roots (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO audit_roots VALUES (0)").await;
+    db.execute("CREATE TABLE audit_edges (src INT, dst INT, PRIMARY KEY (src, dst))")
+        .await;
+    db.execute(&format!("INSERT INTO audit_edges VALUES {edges}"))
+        .await;
+    if mode == "IMMEDIATE" {
+        create_immediate_st(&db, "audit_reach", ISSUE_1427_REACH).await;
+    } else {
+        db.create_st("audit_reach", ISSUE_1427_REACH, "1d", mode)
+            .await;
+    }
+    db.assert_st_matches_query("public.audit_reach", ISSUE_1427_REACH)
+        .await;
+    db
+}
+
+async fn issue_1427_check(db: &E2eDb, mode: &str) {
+    if mode == "DIFFERENTIAL" {
+        db.refresh_st("audit_reach").await;
+        // The fix must not hide the failed DRed behind a FULL refresh.
+        let action: String = db
+            .query_scalar(
+                "SELECT action FROM pgtrickle.pgt_refresh_history \
+                 WHERE status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1",
+            )
+            .await;
+        assert_eq!(action, "DIFFERENTIAL");
+    }
+    // Exact multiset equivalence, not only row-count equality.
+    db.assert_st_matches_query("public.audit_reach", ISSUE_1427_REACH)
+        .await;
+}
+
+async fn issue_1427_delete_update(mode: &str) {
+    let db = issue_1427_graph(mode, "(0,1), (1,2), (2,3)").await;
+
+    // A source-only DELETE has no base-case delta. The old DRed cascade
+    // referenced missing e.src and e.dst columns in audit_reach(node).
+    db.execute("DELETE FROM audit_edges WHERE src = 1 AND dst = 2")
+        .await;
+    issue_1427_check(&db, mode).await;
+    let nodes: Vec<i32> = db
+        .query_scalar("SELECT array_agg(node ORDER BY node) FROM audit_reach")
+        .await;
+    assert_eq!(nodes, vec![0, 1]);
+
+    db.execute("INSERT INTO audit_edges VALUES (1,2)").await;
+    issue_1427_check(&db, mode).await;
+
+    // UPDATE is a DELETE + INSERT in CDC and via OLD/NEW transition tables.
+    db.execute("UPDATE audit_edges SET dst = 4 WHERE src = 1 AND dst = 2")
+        .await;
+    issue_1427_check(&db, mode).await;
+    let nodes: Vec<i32> = db
+        .query_scalar("SELECT array_agg(node ORDER BY node) FROM audit_reach")
+        .await;
+    assert_eq!(nodes, vec![0, 1, 4]);
+}
+
+async fn issue_1427_bag_multiplicity(mode: &str) {
+    // Node 3 and descendant 4 each have two independent derivations.
+    let db = issue_1427_graph(mode, "(0,1), (0,2), (1,3), (2,3), (3,4)").await;
+    let nodes: Vec<i32> = db
+        .query_scalar("SELECT array_agg(node ORDER BY node) FROM audit_reach")
+        .await;
+    assert_eq!(nodes, vec![0, 1, 2, 3, 3, 4, 4]);
+
+    // 2 copies -> 1 copy, not zero. A set anti-join would miss this.
+    db.execute("DELETE FROM audit_edges WHERE src = 1 AND dst = 3")
+        .await;
+    issue_1427_check(&db, mode).await;
+    let nodes: Vec<i32> = db
+        .query_scalar("SELECT array_agg(node ORDER BY node) FROM audit_reach")
+        .await;
+    assert_eq!(nodes, vec![0, 1, 2, 3, 4]);
+
+    // Update the last path; all old descendants must disappear.
+    db.execute("UPDATE audit_edges SET dst = 5 WHERE src = 2 AND dst = 3")
+        .await;
+    issue_1427_check(&db, mode).await;
+    let nodes: Vec<i32> = db
+        .query_scalar("SELECT array_agg(node ORDER BY node) FROM audit_reach")
+        .await;
+    assert_eq!(nodes, vec![0, 1, 2, 5]);
+
+    // Restore both paths, checking a later refresh reintroduces duplicates.
+    db.execute("UPDATE audit_edges SET dst = 3 WHERE src = 2 AND dst = 5")
+        .await;
+    issue_1427_check(&db, mode).await;
+    db.execute("INSERT INTO audit_edges VALUES (1,3)").await;
+    issue_1427_check(&db, mode).await;
+    let nodes: Vec<i32> = db
+        .query_scalar("SELECT array_agg(node ORDER BY node) FROM audit_reach")
+        .await;
+    assert_eq!(nodes, vec![0, 1, 2, 3, 3, 4, 4]);
+}
+
+#[tokio::test]
+async fn test_issue_1427_differential_recursive_edge_delete_and_update() {
+    issue_1427_delete_update("DIFFERENTIAL").await;
+}
+
+#[tokio::test]
+async fn test_issue_1427_immediate_recursive_edge_delete_and_update() {
+    issue_1427_delete_update("IMMEDIATE").await;
+}
+
+#[tokio::test]
+async fn test_issue_1427_differential_union_all_duplicate_derivations() {
+    issue_1427_bag_multiplicity("DIFFERENTIAL").await;
+}
+
+#[tokio::test]
+async fn test_issue_1427_immediate_union_all_duplicate_derivations() {
+    issue_1427_bag_multiplicity("IMMEDIATE").await;
+}
+
 // Issue #1411: a recursive dependency is not necessarily a seed dependency.
 // Compare complete multisets after every mutation, not just row counts: a
 // repeated derivation must not duplicate a node, and an alternate path must
