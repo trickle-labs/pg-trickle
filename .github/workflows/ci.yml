@@ -1217,6 +1217,7 @@ jobs:
         run: |
           # Build the extension artifacts via cargo pgrx package so we can
           # create a lite base Docker image without the full ~10-min builder.
+          rm -rf target/release/pg_trickle-pg18
           cargo pgrx package --features pg18 \
             --pg-config /usr/lib/postgresql/18/bin/pg_config
           # Stage into _e2e_pkg/ — target/ is excluded by .dockerignore so

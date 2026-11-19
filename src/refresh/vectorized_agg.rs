@@ -702,6 +702,7 @@ pub fn algebraic_finalize_sql(
     accumulator_relation: &str,
     delta_relation: &str,
     insert_only_minmax: bool,
+    bounded_rescan_relation: Option<&str>,
 ) -> Result<String, PgTrickleError> {
     let has_minmax = plan.aggregates.iter().any(|aggregate| {
         matches!(
@@ -720,7 +721,18 @@ pub fn algebraic_finalize_sql(
     let consolidated = accumulator_consolidation_sql(plan, &accumulator);
     let needs_minmax_rescan = has_minmax && !insert_only_minmax;
     let (rescan_cte, rescan_join) = if needs_minmax_rescan {
-        minmax_rescan_sql(plan)
+        // The merge may run after commits beyond this refresh's NEW LSN.
+        // Only the frozen per-source relation represents the same frontier
+        // as the staged CDC. A live MIN/MAX repair would persist future rows.
+        let source = match bounded_rescan_relation {
+            Some(relation) => quote_qualified(relation)?,
+            None => format!(
+                "{}.{}",
+                quote_ident(&plan.source_schema),
+                quote_ident(&plan.source_table)
+            ),
+        };
+        minmax_rescan_sql(plan, &source)
     } else {
         (String::new(), String::new())
     };
@@ -877,12 +889,7 @@ pub fn algebraic_finalize_sql(
     ))
 }
 
-fn minmax_rescan_sql(plan: &VectorAggregatePlan) -> (String, String) {
-    let source = format!(
-        "{}.{}",
-        quote_ident(&plan.source_schema),
-        quote_ident(&plan.source_table)
-    );
+fn minmax_rescan_sql(plan: &VectorAggregatePlan, source: &str) -> (String, String) {
     let source_groups = plan
         .group_keys
         .iter()
@@ -1551,6 +1558,7 @@ mod tests {
             "pg_temp.acc",
             "pg_temp.delta",
             false,
+            None,
         )
         .expect("supported finalizer");
         assert!(sql.contains("::numeric / NULLIF"));
@@ -1564,6 +1572,7 @@ mod tests {
             "pg_temp.acc",
             "pg_temp.delta",
             false,
+            None,
         )
         .expect("supported finalizer");
         assert!(sql.contains("WITH d0 AS (SELECT \"account_id\", SUM(__ins_count) AS __ins_count"));
@@ -1580,6 +1589,7 @@ mod tests {
             "pg_temp.acc",
             "pg_temp.delta",
             false,
+            None,
         )
         .expect("supported singleton finalizer");
         assert!(sql.contains("HAVING COUNT(*) > 0), d AS"));
@@ -1605,11 +1615,32 @@ mod tests {
             "pg_temp.acc",
             "pg_temp.delta",
             false,
+            None,
         )
         .expect("supported MIN repair");
         assert!(sql.contains("AS __pgt_group_row_id, MIN(src.\"amount\") AS \"low\""));
         assert!(sql.contains("FROM \"public\".\"source\" src JOIN d ON"));
         assert!(sql.contains("r.__pgt_group_row_id = d.__pgt_group_row_id"));
+
+        // Refreshes with a staged CDC frontier must rescan the bounded
+        // relation even if the live table has a post-frontier DELETE/UPDATE.
+        let bounded = algebraic_finalize_sql(
+            &minmax,
+            "public.target",
+            "pg_temp.acc",
+            "pg_temp.delta",
+            false,
+            Some("pg_temp.__pgt_bound_99_42"),
+        )
+        .expect("bounded MIN repair");
+        assert!(
+            bounded.contains("FROM \"pg_temp\".\"__pgt_bound_99_42\" src JOIN d ON"),
+            "{bounded}"
+        );
+        assert!(
+            !bounded.contains("FROM \"public\".\"source\" src JOIN d ON"),
+            "{bounded}"
+        );
     }
 
     #[test]

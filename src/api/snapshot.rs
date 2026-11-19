@@ -1096,6 +1096,7 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
     let caller = security_context::capture_caller_context(EntryContext::SecurityDefiner)?;
     let stream_name = resolve_name_as_caller(name, &caller.search_path)?;
     let meta = lock_snapshot_stream(&stream_name, SnapshotStreamLockMode::Update)?;
+    crate::dvm::retention::ensure_history_reconstructible(meta.pgt_id)?;
 
     // An IMMEDIATE stream has no deferred CDC history. Restoring older rows
     // would leave its synchronous triggers applying new deltas to a stale

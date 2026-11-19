@@ -1,0 +1,3856 @@
+{
+  "captured_statements": 290,
+  "source_partitions_scanned": [],
+  "source_rows_examined": 0,
+  "output_rows_examined": 12.0,
+  "relevant_plans": [
+    {
+      "scans": [
+        {
+          "relation": "totals_p3",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 1.0,
+          "condition": "((st_4.d = d.d) AND (st_4.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d))))"
+        },
+        {
+          "relation": "totals_p2",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 1.0,
+          "condition": "((st_3.d = d.d) AND (st_3.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d))))"
+        },
+        {
+          "relation": "totals_p0",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 0.0,
+          "condition": "((st_1.d = d.d) AND (st_1.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d))))"
+        }
+      ],
+      "plan": {
+        "Query Text": "INSERT INTO pg_temp.\"__pgt_delta_1\" SELECT * FROM (WITH __pgt_cte_agg_delta_1 AS (\nSELECT c.\"d\" AS \"d\",\n       SUM(CASE WHEN c.action = 'I' THEN 1 ELSE 0 END)::bigint AS __ins_count,\n       SUM(CASE WHEN c.action = 'D' THEN 1 ELSE 0 END)::bigint AS __del_count,\n       SUM(CASE WHEN c.action = 'I' THEN c.\"amount\" ELSE 0 END) AS \"__ins_total\",\n       SUM(CASE WHEN c.action = 'D' THEN c.\"amount\" ELSE 0 END) AS \"__del_total\",\n       SUM(CASE WHEN c.action IN ('I', 'D') THEN CASE WHEN (c.\"amount\")::text IN ('Infinity', '-Infinity', 'NaN') THEN 1 ELSE 0 END ELSE 0 END)::bigint AS \"__special_total\",\n       SUM(CASE WHEN c.action = 'I' AND (c.\"amount\") IS NOT NULL THEN 1 ELSE 0 END)::bigint AS \"__ins_nonnull_total\",\n       SUM(CASE WHEN c.action = 'D' AND (c.\"amount\") IS NOT NULL THEN 1 ELSE 0 END)::bigint AS \"__del_nonnull_total\",\n       SUM(CASE WHEN c.action = 'I' THEN 1 ELSE 0 END)::bigint AS \"__ins_n\",\n       SUM(CASE WHEN c.action = 'D' THEN 1 ELSE 0 END)::bigint AS \"__del_n\"\nFROM pg_temp.\"__pgt_cdc_1_17591\" c\nWHERE c.lsn > '0/1DCF648'::pg_lsn AND c.lsn <= '0/1DE71B0'::pg_lsn\n  AND c.action IN ('I', 'D')\nGROUP BY c.\"d\"\n),\n__pgt_cte_agg_special_groups_2 AS (\nSELECT __pgt_d2.\"__pgt_group_0\" AS \"d\" FROM __pgt_cte_agg_delta_1 AS __pgt_d2(\"__pgt_group_0\") WHERE (COALESCE(__pgt_d2.\"__special_total\", 0) > 0)\n),\n__pgt_cte_agg_special_sum_rescan_3 AS (\nSELECT __pgt_sg.\"d\" AS \"d\", __pgt_sr.\"total\" AS \"total\" FROM __pgt_cte_agg_special_groups_2 AS __pgt_sg CROSS JOIN LATERAL (SELECT SUM(amount) AS \"total\" FROM \"retention_delete_probe\".\"events\" AS \"events\" WHERE d IS NOT DISTINCT FROM __pgt_sg.\"d\") AS __pgt_sr\n),\n__pgt_cte_agg_merge_4 AS (\nSELECT COALESCE(st.__pgt_row_id, pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(d.\"d\"))) AS __pgt_row_id,\n       d.\"d\",\n       COALESCE(st.__pgt_count, 0) + COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0) AS new_count,\n       COALESCE(st.__pgt_count, 0) AS old_count,\n       CASE WHEN (COALESCE(st.\"__pgt_aux_nonnull_total\", 0) + COALESCE(d.\"__ins_nonnull_total\", 0) - COALESCE(d.\"__del_nonnull_total\", 0)) > 0 THEN CASE WHEN COALESCE(d.\"__special_total\", 0) > 0 THEN r.\"total\" ELSE COALESCE(st.\"total\", 0) + COALESCE(d.\"__ins_total\", 0) - COALESCE(d.\"__del_total\", 0) END ELSE NULL END AS \"new_total\",\n       st.\"total\" AS \"old_total\",\n       COALESCE(st.\"__pgt_aux_nonnull_total\", 0) + COALESCE(d.\"__ins_nonnull_total\", 0) - COALESCE(d.\"__del_nonnull_total\", 0) AS \"new___pgt_aux_nonnull_total\",\n       COALESCE(st.\"n\", 0) + COALESCE(d.\"__ins_n\", 0) - COALESCE(d.\"__del_n\", 0) AS \"new_n\",\n       st.\"n\" AS \"old_n\",\n       CASE WHEN st.__pgt_count IS NOT NULL THEN CASE WHEN (COALESCE(st.__pgt_count, 0) + COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0)) > 0 THEN 'U' ELSE 'D' END ELSE CASE WHEN (COALESCE(st.__pgt_count, 0) + COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0)) > 0 THEN 'I' ELSE 'N' END END AS __pgt_meta_action\nFROM __pgt_cte_agg_delta_1 AS d(\"d\")\nLEFT JOIN LATERAL (SELECT st.* FROM \"retention_delete_probe\".\"totals\" st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(d.\"d\"))) AND st.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY', ROW(d.\"d\")) AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\" OFFSET 0) st ON TRUE\nLEFT JOIN __pgt_cte_agg_special_sum_rescan_3 r ON r.\"d\" IS NOT DISTINCT FROM d.\"d\"\n),\n__pgt_cte_agg_final_5 AS (\nSELECT m.__pgt_row_id,\n       CASE WHEN m.__pgt_meta_action = 'D' THEN 'D' ELSE 'I' END AS __pgt_action,\n       m.\"d\" AS \"d\", CASE WHEN m.__pgt_meta_action = 'D' THEN m.old_count ELSE m.new_count END AS __pgt_count,\n       CASE WHEN m.__pgt_meta_action = 'D' THEN m.\"old_total\" ELSE m.\"new_total\" END AS \"total\",\n       CASE WHEN m.__pgt_meta_action = 'D' THEN 0 ELSE m.\"new___pgt_aux_nonnull_total\" END AS \"__pgt_aux_nonnull_total\",\n       CASE WHEN m.__pgt_meta_action = 'D' THEN m.\"old_n\" ELSE m.\"new_n\" END AS \"n\"\nFROM __pgt_cte_agg_merge_4 m\nWHERE m.__pgt_meta_action IN ('I', 'D')\n   OR (m.__pgt_meta_action = 'U'\n       AND (m.new_count IS DISTINCT FROM m.old_count\n          OR m.\"new_total\"::text IS DISTINCT FROM m.\"old_total\"::text\n          OR m.\"new_n\"::text IS DISTINCT FROM m.\"old_n\"::text))\n)\nSELECT * FROM __pgt_cte_agg_final_5) AS d",
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Insert",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "__pgt_delta_1",
+          "Schema": "pg_temp",
+          "Alias": "__pgt_delta_1",
+          "Startup Cost": 75.03,
+          "Total Cost": 117.61,
+          "Plan Rows": 0,
+          "Plan Width": 0,
+          "Actual Rows": 0.0,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Plans": [
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Left",
+              "Startup Cost": 75.03,
+              "Total Cost": 117.61,
+              "Plan Rows": 1,
+              "Plan Width": 100,
+              "Actual Rows": 3.0,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": [
+                "COALESCE(st.__pgt_row_id, pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d)))",
+                "CASE WHEN (CASE WHEN (st.__pgt_count IS NOT NULL) THEN CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'U'::text ELSE 'D'::text END ELSE CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'I'::text ELSE 'N'::text END END = 'D'::text) THEN 'D'::text ELSE 'I'::text END",
+                "d.d",
+                "CASE WHEN (CASE WHEN (st.__pgt_count IS NOT NULL) THEN CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'U'::text ELSE 'D'::text END ELSE CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'I'::text ELSE 'N'::text END END = 'D'::text) THEN COALESCE(st.__pgt_count, '0'::bigint) ELSE ((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) END",
+                "CASE WHEN (CASE WHEN (st.__pgt_count IS NOT NULL) THEN CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'U'::text ELSE 'D'::text END ELSE CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'I'::text ELSE 'N'::text END END = 'D'::text) THEN st.total ELSE CASE WHEN (((COALESCE(st.__pgt_aux_nonnull_total, '0'::bigint) + COALESCE(d.__ins_nonnull_total, '0'::bigint)) - COALESCE(d.__del_nonnull_total, '0'::bigint)) > 0) THEN CASE WHEN (COALESCE(d.__special_total, '0'::bigint) > 0) THEN (sum(events.amount)) ELSE ((COALESCE(st.total, '0'::bigint) + COALESCE(d.__ins_total, '0'::bigint)) - COALESCE(d.__del_total, '0'::bigint)) END ELSE NULL::bigint END END",
+                "CASE WHEN (CASE WHEN (st.__pgt_count IS NOT NULL) THEN CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'U'::text ELSE 'D'::text END ELSE CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'I'::text ELSE 'N'::text END END = 'D'::text) THEN '0'::bigint ELSE ((COALESCE(st.__pgt_aux_nonnull_total, '0'::bigint) + COALESCE(d.__ins_nonnull_total, '0'::bigint)) - COALESCE(d.__del_nonnull_total, '0'::bigint)) END",
+                "CASE WHEN (CASE WHEN (st.__pgt_count IS NOT NULL) THEN CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'U'::text ELSE 'D'::text END ELSE CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'I'::text ELSE 'N'::text END END = 'D'::text) THEN st.n ELSE ((COALESCE(st.n, '0'::bigint) + COALESCE(d.__ins_n, '0'::bigint)) - COALESCE(d.__del_n, '0'::bigint)) END"
+              ],
+              "Inner Unique": false,
+              "Filter": "((CASE WHEN (st.__pgt_count IS NOT NULL) THEN CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'U'::text ELSE 'D'::text END ELSE CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'I'::text ELSE 'N'::text END END = ANY ('{I,D}'::text[])) OR ((CASE WHEN (st.__pgt_count IS NOT NULL) THEN CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'U'::text ELSE 'D'::text END ELSE CASE WHEN (((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) > 0) THEN 'I'::text ELSE 'N'::text END END = 'U'::text) AND ((((COALESCE(st.__pgt_count, '0'::bigint) + COALESCE(d.__ins_count, '0'::bigint)) - COALESCE(d.__del_count, '0'::bigint)) IS DISTINCT FROM COALESCE(st.__pgt_count, '0'::bigint)) OR ((CASE WHEN (((COALESCE(st.__pgt_aux_nonnull_total, '0'::bigint) + COALESCE(d.__ins_nonnull_total, '0'::bigint)) - COALESCE(d.__del_nonnull_total, '0'::bigint)) > 0) THEN CASE WHEN (COALESCE(d.__special_total, '0'::bigint) > 0) THEN (sum(events.amount)) ELSE ((COALESCE(st.total, '0'::bigint) + COALESCE(d.__ins_total, '0'::bigint)) - COALESCE(d.__del_total, '0'::bigint)) END ELSE NULL::bigint END)::text IS DISTINCT FROM (st.total)::text) OR ((((COALESCE(st.n, '0'::bigint) + COALESCE(d.__ins_n, '0'::bigint)) - COALESCE(d.__del_n, '0'::bigint)))::text IS DISTINCT FROM (st.n)::text))))",
+              "Rows Removed by Filter": 0,
+              "Plans": [
+                {
+                  "Node Type": "Aggregate",
+                  "Strategy": "Hashed",
+                  "Partial Mode": "Simple",
+                  "Parent Relationship": "InitPlan",
+                  "Subplan Name": "CTE __pgt_cte_agg_delta_1",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1.26,
+                  "Total Cost": 1.29,
+                  "Plan Rows": 3,
+                  "Plan Width": 76,
+                  "Actual Rows": 3.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": [
+                    "c.d",
+                    "sum(CASE WHEN (c.action = 'I'::bpchar) THEN 1 ELSE 0 END)",
+                    "sum(CASE WHEN (c.action = 'D'::bpchar) THEN 1 ELSE 0 END)",
+                    "sum(CASE WHEN (c.action = 'I'::bpchar) THEN c.amount ELSE 0 END)",
+                    "sum(CASE WHEN (c.action = 'D'::bpchar) THEN c.amount ELSE 0 END)",
+                    "sum(CASE WHEN (c.action = ANY ('{I,D}'::bpchar[])) THEN CASE WHEN ((c.amount)::text = ANY ('{Infinity,-Infinity,NaN}'::text[])) THEN 1 ELSE 0 END ELSE 0 END)",
+                    "sum(CASE WHEN ((c.action = 'I'::bpchar) AND (c.amount IS NOT NULL)) THEN 1 ELSE 0 END)",
+                    "sum(CASE WHEN ((c.action = 'D'::bpchar) AND (c.amount IS NOT NULL)) THEN 1 ELSE 0 END)",
+                    "sum(CASE WHEN (c.action = 'I'::bpchar) THEN 1 ELSE 0 END)",
+                    "sum(CASE WHEN (c.action = 'D'::bpchar) THEN 1 ELSE 0 END)"
+                  ],
+                  "Group Key": [
+                    "c.d"
+                  ],
+                  "Planned Partitions": 0,
+                  "HashAgg Batches": 1,
+                  "Peak Memory Usage": 32,
+                  "Disk Usage": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "__pgt_cdc_1_17591",
+                      "Schema": "pg_temp",
+                      "Alias": "c",
+                      "Startup Cost": 0.0,
+                      "Total Cost": 1.07,
+                      "Plan Rows": 4,
+                      "Plan Width": 10,
+                      "Actual Rows": 4.0,
+                      "Actual Loops": 1,
+                      "Disabled": true,
+                      "Output": [
+                        "c.change_id",
+                        "c.lsn",
+                        "c.action",
+                        "c.source_xid",
+                        "c.source_commit_at",
+                        "c.__pgt_row_id",
+                        "c.changed_cols",
+                        "c.d",
+                        "c.amount",
+                        "c.__pgt_trace_context"
+                      ],
+                      "Filter": "((c.lsn > '0/1DCF648'::pg_lsn) AND (c.lsn <= '0/1DE71B0'::pg_lsn) AND (c.action = ANY ('{I,D}'::bpchar[])))",
+                      "Rows Removed by Filter": 0
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Nested Loop",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Left",
+                  "Startup Cost": 71.15,
+                  "Total Cost": 71.34,
+                  "Plan Rows": 3,
+                  "Plan Width": 84,
+                  "Actual Rows": 3.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": [
+                    "d.d",
+                    "d.__ins_count",
+                    "d.__del_count",
+                    "d.__ins_nonnull_total",
+                    "d.__del_nonnull_total",
+                    "d.__special_total",
+                    "d.__ins_total",
+                    "d.__del_total",
+                    "d.__ins_n",
+                    "d.__del_n",
+                    "(sum(events.amount))"
+                  ],
+                  "Inner Unique": false,
+                  "Join Filter": "(NOT (__pgt_d2.__pgt_group_0 IS DISTINCT FROM d.d))",
+                  "Rows Removed by Join Filter": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "CTE Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "CTE Name": "__pgt_cte_agg_delta_1",
+                      "Alias": "d",
+                      "Startup Cost": 0.0,
+                      "Total Cost": 0.06,
+                      "Plan Rows": 3,
+                      "Plan Width": 76,
+                      "Actual Rows": 3.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "d.d",
+                        "d.__ins_count",
+                        "d.__del_count",
+                        "d.__ins_total",
+                        "d.__del_total",
+                        "d.__special_total",
+                        "d.__ins_nonnull_total",
+                        "d.__del_nonnull_total",
+                        "d.__ins_n",
+                        "d.__del_n"
+                      ],
+                      "Storage": "Memory",
+                      "Maximum Storage": 17
+                    },
+                    {
+                      "Node Type": "Materialize",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 71.15,
+                      "Total Cost": 71.24,
+                      "Plan Rows": 1,
+                      "Plan Width": 12,
+                      "Actual Rows": 0.0,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": [
+                        "__pgt_d2.__pgt_group_0",
+                        "(sum(events.amount))"
+                      ],
+                      "Storage": "Memory",
+                      "Maximum Storage": 17,
+                      "Plans": [
+                        {
+                          "Node Type": "Nested Loop",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Join Type": "Inner",
+                          "Startup Cost": 71.15,
+                          "Total Cost": 71.24,
+                          "Plan Rows": 1,
+                          "Plan Width": 12,
+                          "Actual Rows": 0.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Output": [
+                            "__pgt_d2.__pgt_group_0",
+                            "(sum(events.amount))"
+                          ],
+                          "Inner Unique": false,
+                          "Plans": [
+                            {
+                              "Node Type": "CTE Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "CTE Name": "__pgt_cte_agg_delta_1",
+                              "Alias": "__pgt_d2",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 0.07,
+                              "Plan Rows": 1,
+                              "Plan Width": 4,
+                              "Actual Rows": 0.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": [
+                                "__pgt_d2.__pgt_group_0",
+                                "__pgt_d2.__ins_count",
+                                "__pgt_d2.__del_count",
+                                "__pgt_d2.__ins_total",
+                                "__pgt_d2.__del_total",
+                                "__pgt_d2.__special_total",
+                                "__pgt_d2.__ins_nonnull_total",
+                                "__pgt_d2.__del_nonnull_total",
+                                "__pgt_d2.__ins_n",
+                                "__pgt_d2.__del_n"
+                              ],
+                              "Filter": "(COALESCE(__pgt_d2.__special_total, '0'::bigint) > 0)",
+                              "Rows Removed by Filter": 3,
+                              "Storage": "Memory",
+                              "Maximum Storage": 17
+                            },
+                            {
+                              "Node Type": "Aggregate",
+                              "Strategy": "Plain",
+                              "Partial Mode": "Simple",
+                              "Parent Relationship": "Inner",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Startup Cost": 71.15,
+                              "Total Cost": 71.16,
+                              "Plan Rows": 1,
+                              "Plan Width": 8,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Output": [
+                                "sum(events.amount)"
+                              ],
+                              "Plans": [
+                                {
+                                  "Node Type": "Append",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Startup Cost": 0.0,
+                                  "Total Cost": 71.1,
+                                  "Plan Rows": 20,
+                                  "Plan Width": 4,
+                                  "Actual Rows": 0,
+                                  "Actual Loops": 0,
+                                  "Disabled": false,
+                                  "Subplans Removed": 0,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Seq Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Relation Name": "old",
+                                      "Schema": "retention_delete_probe",
+                                      "Alias": "events_1",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 35.5,
+                                      "Plan Rows": 10,
+                                      "Plan Width": 4,
+                                      "Actual Rows": 0,
+                                      "Actual Loops": 0,
+                                      "Disabled": true,
+                                      "Output": [
+                                        "events_1.amount"
+                                      ],
+                                      "Filter": "(NOT (events_1.d IS DISTINCT FROM __pgt_d2.__pgt_group_0))",
+                                      "Rows Removed by Filter": 0
+                                    },
+                                    {
+                                      "Node Type": "Seq Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Relation Name": "live",
+                                      "Schema": "retention_delete_probe",
+                                      "Alias": "events_2",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 35.5,
+                                      "Plan Rows": 10,
+                                      "Plan Width": 4,
+                                      "Actual Rows": 0,
+                                      "Actual Loops": 0,
+                                      "Disabled": true,
+                                      "Output": [
+                                        "events_2.amount"
+                                      ],
+                                      "Filter": "(NOT (events_2.d IS DISTINCT FROM __pgt_d2.__pgt_group_0))",
+                                      "Rows Removed by Filter": 0
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Append",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 2.6,
+                  "Total Cost": 14.52,
+                  "Plan Rows": 4,
+                  "Plan Width": 100,
+                  "Actual Rows": 0.67,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Subplans Removed": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p0",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_1",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.63,
+                      "Plan Rows": 1,
+                      "Plan Width": 100,
+                      "Actual Rows": 0.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st_1.__pgt_row_id",
+                        "NULL::date",
+                        "st_1.total",
+                        "st_1.n",
+                        "st_1.__pgt_count",
+                        "st_1.__pgt_aux_nonnull_total",
+                        "NULL::jsonb"
+                      ],
+                      "Recheck Cond": "((st_1.d = d.d) AND (st_1.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d))))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(st_1.__pgt_row_id) = pgtrickle.row_probe_v1(pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d))))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p0_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_1.d = d.d)",
+                              "Index Searches": 1
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p0___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_1.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d)))",
+                              "Index Searches": 0
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p1",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_2",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.63,
+                      "Plan Rows": 1,
+                      "Plan Width": 100,
+                      "Actual Rows": 0,
+                      "Actual Loops": 0,
+                      "Disabled": false,
+                      "Output": [
+                        "st_2.__pgt_row_id",
+                        "NULL::date",
+                        "st_2.total",
+                        "st_2.n",
+                        "st_2.__pgt_count",
+                        "st_2.__pgt_aux_nonnull_total",
+                        "NULL::jsonb"
+                      ],
+                      "Recheck Cond": "((st_2.d = d.d) AND (st_2.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d))))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(st_2.__pgt_row_id) = pgtrickle.row_probe_v1(pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d))))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0,
+                          "Actual Loops": 0,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p1_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_2.d = d.d)",
+                              "Index Searches": 0
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p1___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_2.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d)))",
+                              "Index Searches": 0
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p2",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_3",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.63,
+                      "Plan Rows": 1,
+                      "Plan Width": 100,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st_3.__pgt_row_id",
+                        "NULL::date",
+                        "st_3.total",
+                        "st_3.n",
+                        "st_3.__pgt_count",
+                        "st_3.__pgt_aux_nonnull_total",
+                        "NULL::jsonb"
+                      ],
+                      "Recheck Cond": "((st_3.d = d.d) AND (st_3.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d))))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(st_3.__pgt_row_id) = pgtrickle.row_probe_v1(pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d))))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 1,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p2_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_3.d = d.d)",
+                              "Index Searches": 1
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p2___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_3.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d)))",
+                              "Index Searches": 1
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p3",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_4",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.63,
+                      "Plan Rows": 1,
+                      "Plan Width": 100,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st_4.__pgt_row_id",
+                        "NULL::date",
+                        "st_4.total",
+                        "st_4.n",
+                        "st_4.__pgt_count",
+                        "st_4.__pgt_aux_nonnull_total",
+                        "NULL::jsonb"
+                      ],
+                      "Recheck Cond": "((st_4.d = d.d) AND (st_4.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d))))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(st_4.__pgt_row_id) = pgtrickle.row_probe_v1(pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d))))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 1,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p3_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_4.d = d.d)",
+                              "Index Searches": 1
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p3___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_4.__pgt_row_id = pgtrickle.encode_row_id_v3('GROUP_KEY'::text, ROW(d.d)))",
+                              "Index Searches": 1
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scans": [
+        {
+          "relation": "totals_p3",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 1.0,
+          "condition": "((st_4.d = __pgt_delta_1.d) AND (st_4.__pgt_row_id = __pgt_delta_1.__pgt_row_id))"
+        },
+        {
+          "relation": "totals_p2",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 1.0,
+          "condition": "((st_3.d = __pgt_delta_1.d) AND (st_3.__pgt_row_id = __pgt_delta_1.__pgt_row_id))"
+        },
+        {
+          "relation": "totals_p0",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 0.0,
+          "condition": "((st_1.d = __pgt_delta_1.d) AND (st_1.__pgt_row_id = __pgt_delta_1.__pgt_row_id))"
+        }
+      ],
+      "plan": {
+        "Query Text": "INSERT INTO __pgt_pre_1 SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id, \"d\" FROM pg_temp.\"__pgt_delta_1\") affected CROSS JOIN LATERAL (SELECT st.__pgt_row_id, st.\"d\", st.\"total\", st.\"n\" FROM \"retention_delete_probe\".\"totals\" st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(affected.__pgt_row_id) AND st.__pgt_row_id = affected.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) affected.\"d\" OFFSET 0) scoped",
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Insert",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "__pgt_pre_1",
+          "Schema": "pg_temp",
+          "Alias": "__pgt_pre_1",
+          "Startup Cost": 3.65,
+          "Total Cost": 44.67,
+          "Plan Rows": 0,
+          "Plan Width": 0,
+          "Actual Rows": 0.0,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Plans": [
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Startup Cost": 3.65,
+              "Total Cost": 44.67,
+              "Plan Rows": 12,
+              "Plan Width": 52,
+              "Actual Rows": 2.0,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": [
+                "st.__pgt_row_id",
+                "st.d",
+                "st.total",
+                "st.n"
+              ],
+              "Inner Unique": false,
+              "Plans": [
+                {
+                  "Node Type": "Unique",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1.05,
+                  "Total Cost": 1.08,
+                  "Plan Rows": 3,
+                  "Plan Width": 18,
+                  "Actual Rows": 3.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": [
+                    "__pgt_delta_1.__pgt_row_id",
+                    "__pgt_delta_1.d"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Sort",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1.05,
+                      "Total Cost": 1.06,
+                      "Plan Rows": 3,
+                      "Plan Width": 18,
+                      "Actual Rows": 3.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "__pgt_delta_1.__pgt_row_id",
+                        "__pgt_delta_1.d"
+                      ],
+                      "Sort Key": [
+                        "__pgt_delta_1.__pgt_row_id",
+                        "__pgt_delta_1.d"
+                      ],
+                      "Sort Method": "quicksort",
+                      "Sort Space Used": 25,
+                      "Sort Space Type": "Memory",
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Relation Name": "__pgt_delta_1",
+                          "Schema": "pg_temp",
+                          "Alias": "__pgt_delta_1",
+                          "Startup Cost": 0.0,
+                          "Total Cost": 1.03,
+                          "Plan Rows": 3,
+                          "Plan Width": 18,
+                          "Actual Rows": 3.0,
+                          "Actual Loops": 1,
+                          "Disabled": true,
+                          "Output": [
+                            "__pgt_delta_1.__pgt_row_id",
+                            "__pgt_delta_1.d"
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Append",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 2.6,
+                  "Total Cost": 14.49,
+                  "Plan Rows": 4,
+                  "Plan Width": 52,
+                  "Actual Rows": 0.67,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Subplans Removed": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p0",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_1",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.62,
+                      "Plan Rows": 1,
+                      "Plan Width": 52,
+                      "Actual Rows": 0.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st_1.__pgt_row_id",
+                        "st_1.d",
+                        "st_1.total",
+                        "st_1.n"
+                      ],
+                      "Recheck Cond": "((st_1.d = __pgt_delta_1.d) AND (st_1.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(st_1.__pgt_row_id) = pgtrickle.row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p0_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_1.d = __pgt_delta_1.d)",
+                              "Index Searches": 1
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p0___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_1.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                              "Index Searches": 0
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p1",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_2",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.62,
+                      "Plan Rows": 1,
+                      "Plan Width": 52,
+                      "Actual Rows": 0,
+                      "Actual Loops": 0,
+                      "Disabled": false,
+                      "Output": [
+                        "st_2.__pgt_row_id",
+                        "st_2.d",
+                        "st_2.total",
+                        "st_2.n"
+                      ],
+                      "Recheck Cond": "((st_2.d = __pgt_delta_1.d) AND (st_2.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(st_2.__pgt_row_id) = pgtrickle.row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0,
+                          "Actual Loops": 0,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p1_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_2.d = __pgt_delta_1.d)",
+                              "Index Searches": 0
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p1___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_2.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                              "Index Searches": 0
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p2",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_3",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.62,
+                      "Plan Rows": 1,
+                      "Plan Width": 52,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st_3.__pgt_row_id",
+                        "st_3.d",
+                        "st_3.total",
+                        "st_3.n"
+                      ],
+                      "Recheck Cond": "((st_3.d = __pgt_delta_1.d) AND (st_3.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(st_3.__pgt_row_id) = pgtrickle.row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 1,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p2_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_3.d = __pgt_delta_1.d)",
+                              "Index Searches": 1
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p2___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_3.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                              "Index Searches": 1
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p3",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_4",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.62,
+                      "Plan Rows": 1,
+                      "Plan Width": 52,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st_4.__pgt_row_id",
+                        "st_4.d",
+                        "st_4.total",
+                        "st_4.n"
+                      ],
+                      "Recheck Cond": "((st_4.d = __pgt_delta_1.d) AND (st_4.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(st_4.__pgt_row_id) = pgtrickle.row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 1,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p3_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_4.d = __pgt_delta_1.d)",
+                              "Index Searches": 1
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p3___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_4.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                              "Index Searches": 1
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scans": [
+        {
+          "relation": "totals_p3",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 1.0,
+          "condition": "((st_4.d = d.d) AND (d.__pgt_row_id = st_4.__pgt_row_id))"
+        }
+      ],
+      "plan": {
+        "Query Text": "DELETE FROM \"retention_delete_probe\".\"totals\" AS st USING (SELECT __pgt_row_id, \"d\" FROM __pgt_delta_1 WHERE __pgt_action = 'D' GROUP BY __pgt_row_id, \"d\") d WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\"",
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Delete",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "totals",
+          "Schema": "retention_delete_probe",
+          "Alias": "st",
+          "Startup Cost": 3.64,
+          "Total Cost": 15.6,
+          "Plan Rows": 0,
+          "Plan Width": 0,
+          "Actual Rows": 0.0,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Target Tables": [
+            {
+              "Relation Name": "totals_p0",
+              "Schema": "retention_delete_probe",
+              "Alias": "st_1"
+            },
+            {
+              "Relation Name": "totals_p1",
+              "Schema": "retention_delete_probe",
+              "Alias": "st_2"
+            },
+            {
+              "Relation Name": "totals_p2",
+              "Schema": "retention_delete_probe",
+              "Alias": "st_3"
+            },
+            {
+              "Relation Name": "totals_p3",
+              "Schema": "retention_delete_probe",
+              "Alias": "st_4"
+            }
+          ],
+          "Plans": [
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Startup Cost": 3.64,
+              "Total Cost": 15.6,
+              "Plan Rows": 1,
+              "Plan Width": 52,
+              "Actual Rows": 1.0,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": [
+                "d.*",
+                "st.tableoid",
+                "st.ctid"
+              ],
+              "Inner Unique": false,
+              "Plans": [
+                {
+                  "Node Type": "Subquery Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Alias": "d",
+                  "Startup Cost": 1.05,
+                  "Total Cost": 1.07,
+                  "Plan Rows": 1,
+                  "Plan Width": 60,
+                  "Actual Rows": 1.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": [
+                    "d.*",
+                    "d.__pgt_row_id",
+                    "d.d"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Group",
+                      "Parent Relationship": "Subquery",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1.05,
+                      "Total Cost": 1.06,
+                      "Plan Rows": 1,
+                      "Plan Width": 18,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "__pgt_delta_1.__pgt_row_id",
+                        "__pgt_delta_1.d"
+                      ],
+                      "Group Key": [
+                        "__pgt_delta_1.__pgt_row_id",
+                        "__pgt_delta_1.d"
+                      ],
+                      "Plans": [
+                        {
+                          "Node Type": "Sort",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 1.05,
+                          "Total Cost": 1.05,
+                          "Plan Rows": 1,
+                          "Plan Width": 18,
+                          "Actual Rows": 1.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Output": [
+                            "__pgt_delta_1.__pgt_row_id",
+                            "__pgt_delta_1.d"
+                          ],
+                          "Sort Key": [
+                            "__pgt_delta_1.__pgt_row_id",
+                            "__pgt_delta_1.d"
+                          ],
+                          "Sort Method": "quicksort",
+                          "Sort Space Used": 25,
+                          "Sort Space Type": "Memory",
+                          "Plans": [
+                            {
+                              "Node Type": "Seq Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "__pgt_delta_1",
+                              "Schema": "pg_temp",
+                              "Alias": "__pgt_delta_1",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.04,
+                              "Plan Rows": 1,
+                              "Plan Width": 18,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": true,
+                              "Output": [
+                                "__pgt_delta_1.__pgt_row_id",
+                                "__pgt_delta_1.d"
+                              ],
+                              "Filter": "(__pgt_delta_1.__pgt_action = 'D'::text)",
+                              "Rows Removed by Filter": 2
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Append",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 2.6,
+                  "Total Cost": 14.49,
+                  "Plan Rows": 4,
+                  "Plan Width": 46,
+                  "Actual Rows": 1.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Subplans Removed": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p0",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_1",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.62,
+                      "Plan Rows": 1,
+                      "Plan Width": 46,
+                      "Actual Rows": 0,
+                      "Actual Loops": 0,
+                      "Disabled": false,
+                      "Output": [
+                        "st_1.__pgt_row_id",
+                        "st_1.d",
+                        "st_1.tableoid",
+                        "st_1.ctid"
+                      ],
+                      "Recheck Cond": "((st_1.d = d.d) AND (d.__pgt_row_id = st_1.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(d.__pgt_row_id) = pgtrickle.row_probe_v1(st_1.__pgt_row_id))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0,
+                          "Actual Loops": 0,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p0_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_1.d = d.d)",
+                              "Index Searches": 0
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p0___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_1.__pgt_row_id = d.__pgt_row_id)",
+                              "Index Searches": 0
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p1",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_2",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.62,
+                      "Plan Rows": 1,
+                      "Plan Width": 46,
+                      "Actual Rows": 0,
+                      "Actual Loops": 0,
+                      "Disabled": false,
+                      "Output": [
+                        "st_2.__pgt_row_id",
+                        "st_2.d",
+                        "st_2.tableoid",
+                        "st_2.ctid"
+                      ],
+                      "Recheck Cond": "((st_2.d = d.d) AND (d.__pgt_row_id = st_2.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(d.__pgt_row_id) = pgtrickle.row_probe_v1(st_2.__pgt_row_id))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0,
+                          "Actual Loops": 0,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p1_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_2.d = d.d)",
+                              "Index Searches": 0
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p1___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_2.__pgt_row_id = d.__pgt_row_id)",
+                              "Index Searches": 0
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p2",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_3",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.62,
+                      "Plan Rows": 1,
+                      "Plan Width": 46,
+                      "Actual Rows": 0,
+                      "Actual Loops": 0,
+                      "Disabled": false,
+                      "Output": [
+                        "st_3.__pgt_row_id",
+                        "st_3.d",
+                        "st_3.tableoid",
+                        "st_3.ctid"
+                      ],
+                      "Recheck Cond": "((st_3.d = d.d) AND (d.__pgt_row_id = st_3.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(d.__pgt_row_id) = pgtrickle.row_probe_v1(st_3.__pgt_row_id))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0,
+                          "Actual Loops": 0,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p2_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_3.d = d.d)",
+                              "Index Searches": 0
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p2___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_3.__pgt_row_id = d.__pgt_row_id)",
+                              "Index Searches": 0
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p3",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_4",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.62,
+                      "Plan Rows": 1,
+                      "Plan Width": 46,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st_4.__pgt_row_id",
+                        "st_4.d",
+                        "st_4.tableoid",
+                        "st_4.ctid"
+                      ],
+                      "Recheck Cond": "((st_4.d = d.d) AND (d.__pgt_row_id = st_4.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "(pgtrickle.row_probe_v1(d.__pgt_row_id) = pgtrickle.row_probe_v1(st_4.__pgt_row_id))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 1,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p3_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_4.d = d.d)",
+                              "Index Searches": 1
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p3___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_4.__pgt_row_id = d.__pgt_row_id)",
+                              "Index Searches": 1
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scans": [
+        {
+          "relation": "totals_p2",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 1.0,
+          "condition": "((st_3.d = d.d) AND (d.__pgt_row_id = st_3.__pgt_row_id))"
+        },
+        {
+          "relation": "totals_p0",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 0.0,
+          "condition": "((st_1.d = d.d) AND (d.__pgt_row_id = st_1.__pgt_row_id))"
+        }
+      ],
+      "plan": {
+        "Query Text": "UPDATE \"retention_delete_probe\".\"totals\" AS st SET \"d\" = d.\"d\", \"__pgt_count\" = d.\"__pgt_count\", \"total\" = d.\"total\", \"__pgt_aux_nonnull_total\" = d.\"__pgt_aux_nonnull_total\", \"n\" = d.\"n\" FROM __pgt_delta_1 AS d WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\" AND d.__pgt_action = 'I' AND (st.\"d\"::text IS DISTINCT FROM d.\"d\"::text OR st.\"__pgt_count\"::text IS DISTINCT FROM d.\"__pgt_count\"::text OR st.\"total\"::text IS DISTINCT FROM d.\"total\"::text OR st.\"__pgt_aux_nonnull_total\"::text IS DISTINCT FROM d.\"__pgt_aux_nonnull_total\"::text OR st.\"n\"::text IS DISTINCT FROM d.\"n\"::text)",
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Update",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "totals",
+          "Schema": "retention_delete_probe",
+          "Alias": "st",
+          "Startup Cost": 1.6,
+          "Total Cost": 26.6,
+          "Plan Rows": 0,
+          "Plan Width": 0,
+          "Actual Rows": 0.0,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Target Tables": [
+            {
+              "Relation Name": "totals_p0",
+              "Schema": "retention_delete_probe",
+              "Alias": "st_1"
+            },
+            {
+              "Relation Name": "totals_p1",
+              "Schema": "retention_delete_probe",
+              "Alias": "st_2"
+            },
+            {
+              "Relation Name": "totals_p2",
+              "Schema": "retention_delete_probe",
+              "Alias": "st_3"
+            },
+            {
+              "Relation Name": "totals_p3",
+              "Schema": "retention_delete_probe",
+              "Alias": "st_4"
+            }
+          ],
+          "Plans": [
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Startup Cost": 1.6,
+              "Total Cost": 26.6,
+              "Plan Rows": 1,
+              "Plan Width": 52,
+              "Actual Rows": 1.0,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": [
+                "d.d",
+                "d.total",
+                "d.n",
+                "d.__pgt_count",
+                "d.__pgt_aux_nonnull_total",
+                "d.ctid",
+                "st.tableoid",
+                "st.ctid"
+              ],
+              "Inner Unique": false,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "__pgt_delta_1",
+                  "Schema": "pg_temp",
+                  "Alias": "d",
+                  "Startup Cost": 0.0,
+                  "Total Cost": 1.04,
+                  "Plan Rows": 2,
+                  "Plan Width": 56,
+                  "Actual Rows": 2.0,
+                  "Actual Loops": 1,
+                  "Disabled": true,
+                  "Output": [
+                    "d.d",
+                    "d.total",
+                    "d.n",
+                    "d.__pgt_count",
+                    "d.__pgt_aux_nonnull_total",
+                    "d.ctid",
+                    "d.__pgt_row_id"
+                  ],
+                  "Filter": "(d.__pgt_action = 'I'::text)",
+                  "Rows Removed by Filter": 1
+                },
+                {
+                  "Node Type": "Append",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1.6,
+                  "Total Cost": 12.74,
+                  "Plan Rows": 4,
+                  "Plan Width": 78,
+                  "Actual Rows": 0.5,
+                  "Actual Loops": 2,
+                  "Disabled": false,
+                  "Subplans Removed": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p0",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_1",
+                      "Startup Cost": 1.6,
+                      "Total Cost": 2.68,
+                      "Plan Rows": 1,
+                      "Plan Width": 78,
+                      "Actual Rows": 0.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st_1.__pgt_row_id",
+                        "st_1.d",
+                        "st_1.__pgt_count",
+                        "st_1.total",
+                        "st_1.__pgt_aux_nonnull_total",
+                        "st_1.n",
+                        "st_1.tableoid",
+                        "st_1.ctid"
+                      ],
+                      "Recheck Cond": "((st_1.d = d.d) AND (d.__pgt_row_id = st_1.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "((pgtrickle.row_probe_v1(d.__pgt_row_id) = pgtrickle.row_probe_v1(st_1.__pgt_row_id)) AND (((st_1.d)::text IS DISTINCT FROM (d.d)::text) OR ((st_1.__pgt_count)::text IS DISTINCT FROM (d.__pgt_count)::text) OR ((st_1.total)::text IS DISTINCT FROM (d.total)::text) OR ((st_1.__pgt_aux_nonnull_total)::text IS DISTINCT FROM (d.__pgt_aux_nonnull_total)::text) OR ((st_1.n)::text IS DISTINCT FROM (d.n)::text)))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 1.6,
+                          "Total Cost": 1.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p0_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 0.67,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_1.d = d.d)",
+                              "Index Searches": 1
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p0___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 0.67,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_1.__pgt_row_id = d.__pgt_row_id)",
+                              "Index Searches": 0
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p1",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_2",
+                      "Startup Cost": 1.6,
+                      "Total Cost": 2.68,
+                      "Plan Rows": 1,
+                      "Plan Width": 78,
+                      "Actual Rows": 0,
+                      "Actual Loops": 0,
+                      "Disabled": false,
+                      "Output": [
+                        "st_2.__pgt_row_id",
+                        "st_2.d",
+                        "st_2.__pgt_count",
+                        "st_2.total",
+                        "st_2.__pgt_aux_nonnull_total",
+                        "st_2.n",
+                        "st_2.tableoid",
+                        "st_2.ctid"
+                      ],
+                      "Recheck Cond": "((st_2.d = d.d) AND (d.__pgt_row_id = st_2.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "((pgtrickle.row_probe_v1(d.__pgt_row_id) = pgtrickle.row_probe_v1(st_2.__pgt_row_id)) AND (((st_2.d)::text IS DISTINCT FROM (d.d)::text) OR ((st_2.__pgt_count)::text IS DISTINCT FROM (d.__pgt_count)::text) OR ((st_2.total)::text IS DISTINCT FROM (d.total)::text) OR ((st_2.__pgt_aux_nonnull_total)::text IS DISTINCT FROM (d.__pgt_aux_nonnull_total)::text) OR ((st_2.n)::text IS DISTINCT FROM (d.n)::text)))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 1.6,
+                          "Total Cost": 1.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0,
+                          "Actual Loops": 0,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p1_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 0.67,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_2.d = d.d)",
+                              "Index Searches": 0
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p1___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 0.67,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_2.__pgt_row_id = d.__pgt_row_id)",
+                              "Index Searches": 0
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p2",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_3",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.68,
+                      "Plan Rows": 1,
+                      "Plan Width": 78,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st_3.__pgt_row_id",
+                        "st_3.d",
+                        "st_3.__pgt_count",
+                        "st_3.total",
+                        "st_3.__pgt_aux_nonnull_total",
+                        "st_3.n",
+                        "st_3.tableoid",
+                        "st_3.ctid"
+                      ],
+                      "Recheck Cond": "((st_3.d = d.d) AND (d.__pgt_row_id = st_3.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "((pgtrickle.row_probe_v1(d.__pgt_row_id) = pgtrickle.row_probe_v1(st_3.__pgt_row_id)) AND (((st_3.d)::text IS DISTINCT FROM (d.d)::text) OR ((st_3.__pgt_count)::text IS DISTINCT FROM (d.__pgt_count)::text) OR ((st_3.total)::text IS DISTINCT FROM (d.total)::text) OR ((st_3.__pgt_aux_nonnull_total)::text IS DISTINCT FROM (d.__pgt_aux_nonnull_total)::text) OR ((st_3.n)::text IS DISTINCT FROM (d.n)::text)))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 1,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p2_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_3.d = d.d)",
+                              "Index Searches": 1
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p2___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "(st_3.__pgt_row_id = d.__pgt_row_id)",
+                              "Index Searches": 1
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Bitmap Heap Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "totals_p3",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "st_4",
+                      "Startup Cost": 2.6,
+                      "Total Cost": 3.68,
+                      "Plan Rows": 1,
+                      "Plan Width": 78,
+                      "Actual Rows": 0,
+                      "Actual Loops": 0,
+                      "Disabled": false,
+                      "Output": [
+                        "st_4.__pgt_row_id",
+                        "st_4.d",
+                        "st_4.__pgt_count",
+                        "st_4.total",
+                        "st_4.__pgt_aux_nonnull_total",
+                        "st_4.n",
+                        "st_4.tableoid",
+                        "st_4.ctid"
+                      ],
+                      "Recheck Cond": "((st_4.d = d.d) AND (d.__pgt_row_id = st_4.__pgt_row_id))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Filter": "((pgtrickle.row_probe_v1(d.__pgt_row_id) = pgtrickle.row_probe_v1(st_4.__pgt_row_id)) AND (((st_4.d)::text IS DISTINCT FROM (d.d)::text) OR ((st_4.__pgt_count)::text IS DISTINCT FROM (d.__pgt_count)::text) OR ((st_4.total)::text IS DISTINCT FROM (d.total)::text) OR ((st_4.__pgt_aux_nonnull_total)::text IS DISTINCT FROM (d.__pgt_aux_nonnull_total)::text) OR ((st_4.n)::text IS DISTINCT FROM (d.n)::text)))",
+                      "Rows Removed by Filter": 0,
+                      "Exact Heap Blocks": 0,
+                      "Lossy Heap Blocks": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "BitmapAnd",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 2.6,
+                          "Plan Rows": 1,
+                          "Plan Width": 0,
+                          "Actual Rows": 0,
+                          "Actual Loops": 0,
+                          "Disabled": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p3_d_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_4.d = d.d)",
+                              "Index Searches": 0
+                            },
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "totals_p3___pgt_row_id_d_total_n_idx",
+                              "Startup Cost": 0.0,
+                              "Total Cost": 1.17,
+                              "Plan Rows": 3,
+                              "Plan Width": 0,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Index Cond": "(st_4.__pgt_row_id = d.__pgt_row_id)",
+                              "Index Searches": 0
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scans": [
+        {
+          "relation": "totals_p2",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 1.0,
+          "condition": "((st_3.d = d.d) AND (st_3.__pgt_row_id = d.__pgt_row_id))"
+        },
+        {
+          "relation": "totals_p0",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 0.0,
+          "condition": "((st_1.d = d.d) AND (st_1.__pgt_row_id = d.__pgt_row_id))"
+        }
+      ],
+      "plan": {
+        "Query Text": "INSERT INTO \"retention_delete_probe\".\"totals\" (__pgt_row_id, \"d\", \"__pgt_count\", \"total\", \"__pgt_aux_nonnull_total\", \"n\") SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, d.\"d\", d.\"__pgt_count\", d.\"total\", d.\"__pgt_aux_nonnull_total\", d.\"n\" FROM __pgt_delta_1 AS d WHERE d.__pgt_action = 'I' AND NOT EXISTS (SELECT 1 FROM (SELECT 1 FROM \"retention_delete_probe\".\"totals\" AS st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\" OFFSET 0) matched) ORDER BY d.__pgt_row_id",
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Insert",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "totals",
+          "Schema": "retention_delete_probe",
+          "Alias": "totals",
+          "Startup Cost": 17.79,
+          "Total Cost": 17.8,
+          "Plan Rows": 0,
+          "Plan Width": 0,
+          "Actual Rows": 0.0,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Plans": [
+            {
+              "Node Type": "Subquery Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Alias": "*SELECT*",
+              "Startup Cost": 17.79,
+              "Total Cost": 17.8,
+              "Plan Rows": 1,
+              "Plan Width": 82,
+              "Actual Rows": 1.0,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": [
+                "\"*SELECT*\".__pgt_row_id",
+                "\"*SELECT*\".d",
+                "\"*SELECT*\".total",
+                "\"*SELECT*\".n",
+                "\"*SELECT*\".__pgt_count",
+                "\"*SELECT*\".__pgt_aux_nonnull_total",
+                "'null'::jsonb"
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Unique",
+                  "Parent Relationship": "Subquery",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 17.79,
+                  "Total Cost": 17.79,
+                  "Plan Rows": 1,
+                  "Plan Width": 50,
+                  "Actual Rows": 1.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": [
+                    "d.__pgt_row_id",
+                    "d.d",
+                    "d.__pgt_count",
+                    "d.total",
+                    "d.__pgt_aux_nonnull_total",
+                    "d.n"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Sort",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 17.79,
+                      "Total Cost": 17.79,
+                      "Plan Rows": 1,
+                      "Plan Width": 50,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "d.__pgt_row_id",
+                        "d.d",
+                        "d.__pgt_count",
+                        "d.total",
+                        "d.__pgt_aux_nonnull_total",
+                        "d.n"
+                      ],
+                      "Sort Key": [
+                        "d.__pgt_row_id"
+                      ],
+                      "Sort Method": "quicksort",
+                      "Sort Space Used": 25,
+                      "Sort Space Type": "Memory",
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Relation Name": "__pgt_delta_1",
+                          "Schema": "pg_temp",
+                          "Alias": "d",
+                          "Startup Cost": 0.0,
+                          "Total Cost": 17.78,
+                          "Plan Rows": 1,
+                          "Plan Width": 50,
+                          "Actual Rows": 1.0,
+                          "Actual Loops": 1,
+                          "Disabled": true,
+                          "Output": [
+                            "d.__pgt_row_id",
+                            "d.d",
+                            "d.__pgt_count",
+                            "d.total",
+                            "d.__pgt_aux_nonnull_total",
+                            "d.n"
+                          ],
+                          "Filter": "((d.__pgt_action = 'I'::text) AND (NOT EXISTS(SubPlan 1)))",
+                          "Rows Removed by Filter": 2,
+                          "Plans": [
+                            {
+                              "Node Type": "Subquery Scan",
+                              "Parent Relationship": "SubPlan",
+                              "Subplan Name": "SubPlan 1",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Alias": "matched",
+                              "Startup Cost": 2.6,
+                              "Total Cost": 14.53,
+                              "Plan Rows": 4,
+                              "Plan Width": 0,
+                              "Actual Rows": 0.5,
+                              "Actual Loops": 2,
+                              "Disabled": false,
+                              "Plans": [
+                                {
+                                  "Node Type": "Append",
+                                  "Parent Relationship": "Subquery",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Startup Cost": 2.6,
+                                  "Total Cost": 14.49,
+                                  "Plan Rows": 4,
+                                  "Plan Width": 4,
+                                  "Actual Rows": 0.5,
+                                  "Actual Loops": 2,
+                                  "Disabled": false,
+                                  "Subplans Removed": 0,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Bitmap Heap Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Relation Name": "totals_p0",
+                                      "Schema": "retention_delete_probe",
+                                      "Alias": "st_1",
+                                      "Startup Cost": 2.6,
+                                      "Total Cost": 3.62,
+                                      "Plan Rows": 1,
+                                      "Plan Width": 4,
+                                      "Actual Rows": 0.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Output": [
+                                        "NULL::integer"
+                                      ],
+                                      "Recheck Cond": "((st_1.d = d.d) AND (st_1.__pgt_row_id = d.__pgt_row_id))",
+                                      "Rows Removed by Index Recheck": 0,
+                                      "Filter": "(pgtrickle.row_probe_v1(st_1.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id))",
+                                      "Rows Removed by Filter": 0,
+                                      "Exact Heap Blocks": 0,
+                                      "Lossy Heap Blocks": 0,
+                                      "Plans": [
+                                        {
+                                          "Node Type": "BitmapAnd",
+                                          "Parent Relationship": "Outer",
+                                          "Parallel Aware": false,
+                                          "Async Capable": false,
+                                          "Startup Cost": 2.6,
+                                          "Total Cost": 2.6,
+                                          "Plan Rows": 1,
+                                          "Plan Width": 0,
+                                          "Actual Rows": 0.0,
+                                          "Actual Loops": 1,
+                                          "Disabled": false,
+                                          "Plans": [
+                                            {
+                                              "Node Type": "Bitmap Index Scan",
+                                              "Parent Relationship": "Member",
+                                              "Parallel Aware": false,
+                                              "Async Capable": false,
+                                              "Index Name": "totals_p0_d_idx",
+                                              "Startup Cost": 0.0,
+                                              "Total Cost": 1.17,
+                                              "Plan Rows": 3,
+                                              "Plan Width": 0,
+                                              "Actual Rows": 0.0,
+                                              "Actual Loops": 1,
+                                              "Disabled": false,
+                                              "Index Cond": "(st_1.d = d.d)",
+                                              "Index Searches": 1
+                                            },
+                                            {
+                                              "Node Type": "Bitmap Index Scan",
+                                              "Parent Relationship": "Member",
+                                              "Parallel Aware": false,
+                                              "Async Capable": false,
+                                              "Index Name": "totals_p0___pgt_row_id_d_total_n_idx",
+                                              "Startup Cost": 0.0,
+                                              "Total Cost": 1.17,
+                                              "Plan Rows": 3,
+                                              "Plan Width": 0,
+                                              "Actual Rows": 0,
+                                              "Actual Loops": 0,
+                                              "Disabled": false,
+                                              "Index Cond": "(st_1.__pgt_row_id = d.__pgt_row_id)",
+                                              "Index Searches": 0
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "Node Type": "Bitmap Heap Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Relation Name": "totals_p1",
+                                      "Schema": "retention_delete_probe",
+                                      "Alias": "st_2",
+                                      "Startup Cost": 2.6,
+                                      "Total Cost": 3.62,
+                                      "Plan Rows": 1,
+                                      "Plan Width": 4,
+                                      "Actual Rows": 0,
+                                      "Actual Loops": 0,
+                                      "Disabled": false,
+                                      "Output": [
+                                        "NULL::integer"
+                                      ],
+                                      "Recheck Cond": "((st_2.d = d.d) AND (st_2.__pgt_row_id = d.__pgt_row_id))",
+                                      "Rows Removed by Index Recheck": 0,
+                                      "Filter": "(pgtrickle.row_probe_v1(st_2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id))",
+                                      "Rows Removed by Filter": 0,
+                                      "Exact Heap Blocks": 0,
+                                      "Lossy Heap Blocks": 0,
+                                      "Plans": [
+                                        {
+                                          "Node Type": "BitmapAnd",
+                                          "Parent Relationship": "Outer",
+                                          "Parallel Aware": false,
+                                          "Async Capable": false,
+                                          "Startup Cost": 2.6,
+                                          "Total Cost": 2.6,
+                                          "Plan Rows": 1,
+                                          "Plan Width": 0,
+                                          "Actual Rows": 0,
+                                          "Actual Loops": 0,
+                                          "Disabled": false,
+                                          "Plans": [
+                                            {
+                                              "Node Type": "Bitmap Index Scan",
+                                              "Parent Relationship": "Member",
+                                              "Parallel Aware": false,
+                                              "Async Capable": false,
+                                              "Index Name": "totals_p1_d_idx",
+                                              "Startup Cost": 0.0,
+                                              "Total Cost": 1.17,
+                                              "Plan Rows": 3,
+                                              "Plan Width": 0,
+                                              "Actual Rows": 0,
+                                              "Actual Loops": 0,
+                                              "Disabled": false,
+                                              "Index Cond": "(st_2.d = d.d)",
+                                              "Index Searches": 0
+                                            },
+                                            {
+                                              "Node Type": "Bitmap Index Scan",
+                                              "Parent Relationship": "Member",
+                                              "Parallel Aware": false,
+                                              "Async Capable": false,
+                                              "Index Name": "totals_p1___pgt_row_id_d_total_n_idx",
+                                              "Startup Cost": 0.0,
+                                              "Total Cost": 1.17,
+                                              "Plan Rows": 3,
+                                              "Plan Width": 0,
+                                              "Actual Rows": 0,
+                                              "Actual Loops": 0,
+                                              "Disabled": false,
+                                              "Index Cond": "(st_2.__pgt_row_id = d.__pgt_row_id)",
+                                              "Index Searches": 0
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "Node Type": "Bitmap Heap Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Relation Name": "totals_p2",
+                                      "Schema": "retention_delete_probe",
+                                      "Alias": "st_3",
+                                      "Startup Cost": 2.6,
+                                      "Total Cost": 3.62,
+                                      "Plan Rows": 1,
+                                      "Plan Width": 4,
+                                      "Actual Rows": 1.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Output": [
+                                        "NULL::integer"
+                                      ],
+                                      "Recheck Cond": "((st_3.d = d.d) AND (st_3.__pgt_row_id = d.__pgt_row_id))",
+                                      "Rows Removed by Index Recheck": 0,
+                                      "Filter": "(pgtrickle.row_probe_v1(st_3.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id))",
+                                      "Rows Removed by Filter": 0,
+                                      "Exact Heap Blocks": 1,
+                                      "Lossy Heap Blocks": 0,
+                                      "Plans": [
+                                        {
+                                          "Node Type": "BitmapAnd",
+                                          "Parent Relationship": "Outer",
+                                          "Parallel Aware": false,
+                                          "Async Capable": false,
+                                          "Startup Cost": 2.6,
+                                          "Total Cost": 2.6,
+                                          "Plan Rows": 1,
+                                          "Plan Width": 0,
+                                          "Actual Rows": 0.0,
+                                          "Actual Loops": 1,
+                                          "Disabled": false,
+                                          "Plans": [
+                                            {
+                                              "Node Type": "Bitmap Index Scan",
+                                              "Parent Relationship": "Member",
+                                              "Parallel Aware": false,
+                                              "Async Capable": false,
+                                              "Index Name": "totals_p2_d_idx",
+                                              "Startup Cost": 0.0,
+                                              "Total Cost": 1.17,
+                                              "Plan Rows": 3,
+                                              "Plan Width": 0,
+                                              "Actual Rows": 2.0,
+                                              "Actual Loops": 1,
+                                              "Disabled": false,
+                                              "Index Cond": "(st_3.d = d.d)",
+                                              "Index Searches": 1
+                                            },
+                                            {
+                                              "Node Type": "Bitmap Index Scan",
+                                              "Parent Relationship": "Member",
+                                              "Parallel Aware": false,
+                                              "Async Capable": false,
+                                              "Index Name": "totals_p2___pgt_row_id_d_total_n_idx",
+                                              "Startup Cost": 0.0,
+                                              "Total Cost": 1.17,
+                                              "Plan Rows": 3,
+                                              "Plan Width": 0,
+                                              "Actual Rows": 2.0,
+                                              "Actual Loops": 1,
+                                              "Disabled": false,
+                                              "Index Cond": "(st_3.__pgt_row_id = d.__pgt_row_id)",
+                                              "Index Searches": 1
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "Node Type": "Bitmap Heap Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Relation Name": "totals_p3",
+                                      "Schema": "retention_delete_probe",
+                                      "Alias": "st_4",
+                                      "Startup Cost": 2.6,
+                                      "Total Cost": 3.62,
+                                      "Plan Rows": 1,
+                                      "Plan Width": 4,
+                                      "Actual Rows": 0,
+                                      "Actual Loops": 0,
+                                      "Disabled": false,
+                                      "Output": [
+                                        "NULL::integer"
+                                      ],
+                                      "Recheck Cond": "((st_4.d = d.d) AND (st_4.__pgt_row_id = d.__pgt_row_id))",
+                                      "Rows Removed by Index Recheck": 0,
+                                      "Filter": "(pgtrickle.row_probe_v1(st_4.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id))",
+                                      "Rows Removed by Filter": 0,
+                                      "Exact Heap Blocks": 0,
+                                      "Lossy Heap Blocks": 0,
+                                      "Plans": [
+                                        {
+                                          "Node Type": "BitmapAnd",
+                                          "Parent Relationship": "Outer",
+                                          "Parallel Aware": false,
+                                          "Async Capable": false,
+                                          "Startup Cost": 2.6,
+                                          "Total Cost": 2.6,
+                                          "Plan Rows": 1,
+                                          "Plan Width": 0,
+                                          "Actual Rows": 0,
+                                          "Actual Loops": 0,
+                                          "Disabled": false,
+                                          "Plans": [
+                                            {
+                                              "Node Type": "Bitmap Index Scan",
+                                              "Parent Relationship": "Member",
+                                              "Parallel Aware": false,
+                                              "Async Capable": false,
+                                              "Index Name": "totals_p3_d_idx",
+                                              "Startup Cost": 0.0,
+                                              "Total Cost": 1.17,
+                                              "Plan Rows": 3,
+                                              "Plan Width": 0,
+                                              "Actual Rows": 0,
+                                              "Actual Loops": 0,
+                                              "Disabled": false,
+                                              "Index Cond": "(st_4.d = d.d)",
+                                              "Index Searches": 0
+                                            },
+                                            {
+                                              "Node Type": "Bitmap Index Scan",
+                                              "Parent Relationship": "Member",
+                                              "Parallel Aware": false,
+                                              "Async Capable": false,
+                                              "Index Name": "totals_p3___pgt_row_id_d_total_n_idx",
+                                              "Startup Cost": 0.0,
+                                              "Total Cost": 1.17,
+                                              "Plan Rows": 3,
+                                              "Plan Width": 0,
+                                              "Actual Rows": 0,
+                                              "Actual Loops": 0,
+                                              "Disabled": false,
+                                              "Index Cond": "(st_4.__pgt_row_id = d.__pgt_row_id)",
+                                              "Index Searches": 0
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scans": [
+        {
+          "relation": "totals_p3",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 0.0,
+          "condition": "((st_4.d = __pgt_delta_1.d) AND (st_4.__pgt_row_id = __pgt_delta_1.__pgt_row_id))"
+        },
+        {
+          "relation": "totals_p2",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 1.0,
+          "condition": "((st_3.d = __pgt_delta_1.d) AND (st_3.__pgt_row_id = __pgt_delta_1.__pgt_row_id))"
+        },
+        {
+          "relation": "totals_p0",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 1.0,
+          "condition": "((st_1.d = __pgt_delta_1.d) AND (st_1.__pgt_row_id = __pgt_delta_1.__pgt_row_id))"
+        }
+      ],
+      "plan": {
+        "Query Text": "INSERT INTO \"pgtrickle_changes\".changes_pgt_1 (lsn, action, __pgt_row_id, source_xid, source_commit_at, \"d\", \"total\", \"n\") SELECT '0/1E3DDA0'::pg_lsn, 'D', __pgt_row_id, NULL::xid, '2026-11-17 15:15:45.517278+00', \"d\", \"total\", \"n\" FROM (SELECT __pgt_row_id, \"d\", \"total\", \"n\" FROM __pgt_pre_1 EXCEPT ALL SELECT __pgt_row_id, \"d\", \"total\", \"n\" FROM (SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id, \"d\" FROM pg_temp.__pgt_delta_1) affected CROSS JOIN LATERAL (SELECT st.__pgt_row_id, st.\"d\", st.\"total\", st.\"n\" FROM \"retention_delete_probe\".\"totals\" st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(affected.__pgt_row_id) AND st.__pgt_row_id = affected.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) affected.\"d\" OFFSET 0) scoped) scoped) difference",
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Insert",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "changes_pgt_1",
+          "Schema": "pgtrickle_changes",
+          "Alias": "changes_pgt_1",
+          "Startup Cost": 75.19,
+          "Total Cost": 80.29,
+          "Plan Rows": 0,
+          "Plan Width": 0,
+          "Actual Rows": 0.0,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Plans": [
+            {
+              "Node Type": "Subquery Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Alias": "difference",
+              "Startup Cost": 75.19,
+              "Total Cost": 80.29,
+              "Plan Rows": 1020,
+              "Plan Width": 120,
+              "Actual Rows": 2.0,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": [
+                "nextval('pgtrickle_changes.changes_pgt_1_change_id_seq'::regclass)",
+                "'0/1E3DDA0'::pg_lsn",
+                "'D'::character(1)",
+                "NULL::xid",
+                "'2026-11-17 15:15:45.517278+00'::timestamp with time zone",
+                "difference.__pgt_row_id",
+                "difference.d",
+                "difference.total",
+                "difference.n",
+                "NULL::text"
+              ],
+              "Plans": [
+                {
+                  "Node Type": "SetOp",
+                  "Strategy": "Hashed",
+                  "Parent Relationship": "Subquery",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Command": "Except All",
+                  "Startup Cost": 75.19,
+                  "Total Cost": 77.74,
+                  "Plan Rows": 1020,
+                  "Plan Width": 52,
+                  "Actual Rows": 2.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": [
+                    "__pgt_pre_1.__pgt_row_id",
+                    "__pgt_pre_1.d",
+                    "__pgt_pre_1.total",
+                    "__pgt_pre_1.n"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "__pgt_pre_1",
+                      "Schema": "pg_temp",
+                      "Alias": "__pgt_pre_1",
+                      "Startup Cost": 0.0,
+                      "Total Cost": 20.2,
+                      "Plan Rows": 1020,
+                      "Plan Width": 52,
+                      "Actual Rows": 2.0,
+                      "Actual Loops": 1,
+                      "Disabled": true,
+                      "Output": [
+                        "__pgt_pre_1.__pgt_row_id",
+                        "__pgt_pre_1.d",
+                        "__pgt_pre_1.total",
+                        "__pgt_pre_1.n"
+                      ]
+                    },
+                    {
+                      "Node Type": "Nested Loop",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Startup Cost": 3.65,
+                      "Total Cost": 44.67,
+                      "Plan Rows": 12,
+                      "Plan Width": 52,
+                      "Actual Rows": 2.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st.__pgt_row_id",
+                        "st.d",
+                        "st.total",
+                        "st.n"
+                      ],
+                      "Inner Unique": false,
+                      "Plans": [
+                        {
+                          "Node Type": "Unique",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 1.05,
+                          "Total Cost": 1.08,
+                          "Plan Rows": 3,
+                          "Plan Width": 18,
+                          "Actual Rows": 3.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Output": [
+                            "__pgt_delta_1.__pgt_row_id",
+                            "__pgt_delta_1.d"
+                          ],
+                          "Plans": [
+                            {
+                              "Node Type": "Sort",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Startup Cost": 1.05,
+                              "Total Cost": 1.06,
+                              "Plan Rows": 3,
+                              "Plan Width": 18,
+                              "Actual Rows": 3.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": [
+                                "__pgt_delta_1.__pgt_row_id",
+                                "__pgt_delta_1.d"
+                              ],
+                              "Sort Key": [
+                                "__pgt_delta_1.__pgt_row_id",
+                                "__pgt_delta_1.d"
+                              ],
+                              "Sort Method": "quicksort",
+                              "Sort Space Used": 25,
+                              "Sort Space Type": "Memory",
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Relation Name": "__pgt_delta_1",
+                                  "Schema": "pg_temp",
+                                  "Alias": "__pgt_delta_1",
+                                  "Startup Cost": 0.0,
+                                  "Total Cost": 1.03,
+                                  "Plan Rows": 3,
+                                  "Plan Width": 18,
+                                  "Actual Rows": 3.0,
+                                  "Actual Loops": 1,
+                                  "Disabled": true,
+                                  "Output": [
+                                    "__pgt_delta_1.__pgt_row_id",
+                                    "__pgt_delta_1.d"
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "Node Type": "Append",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 14.49,
+                          "Plan Rows": 4,
+                          "Plan Width": 52,
+                          "Actual Rows": 0.67,
+                          "Actual Loops": 3,
+                          "Disabled": false,
+                          "Subplans Removed": 0,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Heap Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "totals_p0",
+                              "Schema": "retention_delete_probe",
+                              "Alias": "st_1",
+                              "Startup Cost": 2.6,
+                              "Total Cost": 3.62,
+                              "Plan Rows": 1,
+                              "Plan Width": 52,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": [
+                                "st_1.__pgt_row_id",
+                                "st_1.d",
+                                "st_1.total",
+                                "st_1.n"
+                              ],
+                              "Recheck Cond": "((st_1.d = __pgt_delta_1.d) AND (st_1.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Index Recheck": 0,
+                              "Filter": "(row_probe_v1(st_1.__pgt_row_id) = row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Filter": 0,
+                              "Exact Heap Blocks": 1,
+                              "Lossy Heap Blocks": 0,
+                              "Plans": [
+                                {
+                                  "Node Type": "BitmapAnd",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Startup Cost": 2.6,
+                                  "Total Cost": 2.6,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 0,
+                                  "Actual Rows": 0.0,
+                                  "Actual Loops": 1,
+                                  "Disabled": false,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p0_d_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 1.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_1.d = __pgt_delta_1.d)",
+                                      "Index Searches": 1
+                                    },
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p0___pgt_row_id_d_total_n_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 1.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_1.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                                      "Index Searches": 1
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "Node Type": "Bitmap Heap Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "totals_p1",
+                              "Schema": "retention_delete_probe",
+                              "Alias": "st_2",
+                              "Startup Cost": 2.6,
+                              "Total Cost": 3.62,
+                              "Plan Rows": 1,
+                              "Plan Width": 52,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Output": [
+                                "st_2.__pgt_row_id",
+                                "st_2.d",
+                                "st_2.total",
+                                "st_2.n"
+                              ],
+                              "Recheck Cond": "((st_2.d = __pgt_delta_1.d) AND (st_2.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Index Recheck": 0,
+                              "Filter": "(row_probe_v1(st_2.__pgt_row_id) = row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Filter": 0,
+                              "Exact Heap Blocks": 0,
+                              "Lossy Heap Blocks": 0,
+                              "Plans": [
+                                {
+                                  "Node Type": "BitmapAnd",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Startup Cost": 2.6,
+                                  "Total Cost": 2.6,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 0,
+                                  "Actual Rows": 0,
+                                  "Actual Loops": 0,
+                                  "Disabled": false,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p1_d_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 0,
+                                      "Actual Loops": 0,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_2.d = __pgt_delta_1.d)",
+                                      "Index Searches": 0
+                                    },
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p1___pgt_row_id_d_total_n_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 0,
+                                      "Actual Loops": 0,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_2.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                                      "Index Searches": 0
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "Node Type": "Bitmap Heap Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "totals_p2",
+                              "Schema": "retention_delete_probe",
+                              "Alias": "st_3",
+                              "Startup Cost": 2.6,
+                              "Total Cost": 3.62,
+                              "Plan Rows": 1,
+                              "Plan Width": 52,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": [
+                                "st_3.__pgt_row_id",
+                                "st_3.d",
+                                "st_3.total",
+                                "st_3.n"
+                              ],
+                              "Recheck Cond": "((st_3.d = __pgt_delta_1.d) AND (st_3.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Index Recheck": 0,
+                              "Filter": "(row_probe_v1(st_3.__pgt_row_id) = row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Filter": 0,
+                              "Exact Heap Blocks": 1,
+                              "Lossy Heap Blocks": 0,
+                              "Plans": [
+                                {
+                                  "Node Type": "BitmapAnd",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Startup Cost": 2.6,
+                                  "Total Cost": 2.6,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 0,
+                                  "Actual Rows": 0.0,
+                                  "Actual Loops": 1,
+                                  "Disabled": false,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p2_d_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 2.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_3.d = __pgt_delta_1.d)",
+                                      "Index Searches": 1
+                                    },
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p2___pgt_row_id_d_total_n_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 2.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_3.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                                      "Index Searches": 1
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "Node Type": "Bitmap Heap Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "totals_p3",
+                              "Schema": "retention_delete_probe",
+                              "Alias": "st_4",
+                              "Startup Cost": 2.6,
+                              "Total Cost": 3.62,
+                              "Plan Rows": 1,
+                              "Plan Width": 52,
+                              "Actual Rows": 0.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": [
+                                "st_4.__pgt_row_id",
+                                "st_4.d",
+                                "st_4.total",
+                                "st_4.n"
+                              ],
+                              "Recheck Cond": "((st_4.d = __pgt_delta_1.d) AND (st_4.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Index Recheck": 0,
+                              "Filter": "(row_probe_v1(st_4.__pgt_row_id) = row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Filter": 0,
+                              "Exact Heap Blocks": 1,
+                              "Lossy Heap Blocks": 0,
+                              "Plans": [
+                                {
+                                  "Node Type": "BitmapAnd",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Startup Cost": 2.6,
+                                  "Total Cost": 2.6,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 0,
+                                  "Actual Rows": 0.0,
+                                  "Actual Loops": 1,
+                                  "Disabled": false,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p3_d_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 1.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_4.d = __pgt_delta_1.d)",
+                                      "Index Searches": 1
+                                    },
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p3___pgt_row_id_d_total_n_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 1.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_4.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                                      "Index Searches": 1
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scans": [
+        {
+          "relation": "totals_p3",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 0.0,
+          "condition": "((st_4.d = __pgt_delta_1.d) AND (st_4.__pgt_row_id = __pgt_delta_1.__pgt_row_id))"
+        },
+        {
+          "relation": "totals_p2",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 1.0,
+          "condition": "((st_3.d = __pgt_delta_1.d) AND (st_3.__pgt_row_id = __pgt_delta_1.__pgt_row_id))"
+        },
+        {
+          "relation": "totals_p0",
+          "node": "Bitmap Heap Scan",
+          "rows_examined": 1.0,
+          "condition": "((st_1.d = __pgt_delta_1.d) AND (st_1.__pgt_row_id = __pgt_delta_1.__pgt_row_id))"
+        }
+      ],
+      "plan": {
+        "Query Text": "INSERT INTO \"pgtrickle_changes\".changes_pgt_1 (lsn, action, __pgt_row_id, source_xid, source_commit_at, \"d\", \"total\", \"n\") SELECT '0/1E3DDA0'::pg_lsn, 'I', __pgt_row_id, NULL::xid, '2026-11-17 15:15:45.517278+00', \"d\", \"total\", \"n\" FROM (SELECT __pgt_row_id, \"d\", \"total\", \"n\" FROM (SELECT scoped.* FROM (SELECT DISTINCT __pgt_row_id, \"d\" FROM pg_temp.__pgt_delta_1) affected CROSS JOIN LATERAL (SELECT st.__pgt_row_id, st.\"d\", st.\"total\", st.\"n\" FROM \"retention_delete_probe\".\"totals\" st WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(affected.__pgt_row_id) AND st.__pgt_row_id = affected.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) affected.\"d\" OFFSET 0) scoped) scoped EXCEPT ALL SELECT __pgt_row_id, \"d\", \"total\", \"n\" FROM __pgt_pre_1) difference",
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Insert",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "changes_pgt_1",
+          "Schema": "pgtrickle_changes",
+          "Alias": "changes_pgt_1",
+          "Startup Cost": 75.19,
+          "Total Cost": 75.25,
+          "Plan Rows": 0,
+          "Plan Width": 0,
+          "Actual Rows": 0.0,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Plans": [
+            {
+              "Node Type": "Subquery Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Alias": "difference",
+              "Startup Cost": 75.19,
+              "Total Cost": 75.25,
+              "Plan Rows": 12,
+              "Plan Width": 120,
+              "Actual Rows": 2.0,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": [
+                "nextval('pgtrickle_changes.changes_pgt_1_change_id_seq'::regclass)",
+                "'0/1E3DDA0'::pg_lsn",
+                "'I'::character(1)",
+                "NULL::xid",
+                "'2026-11-17 15:15:45.517278+00'::timestamp with time zone",
+                "difference.__pgt_row_id",
+                "difference.d",
+                "difference.total",
+                "difference.n",
+                "NULL::text"
+              ],
+              "Plans": [
+                {
+                  "Node Type": "SetOp",
+                  "Strategy": "Hashed",
+                  "Parent Relationship": "Subquery",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Command": "Except All",
+                  "Startup Cost": 75.19,
+                  "Total Cost": 75.22,
+                  "Plan Rows": 12,
+                  "Plan Width": 52,
+                  "Actual Rows": 2.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": [
+                    "st.__pgt_row_id",
+                    "st.d",
+                    "st.total",
+                    "st.n"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Nested Loop",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Startup Cost": 3.65,
+                      "Total Cost": 44.67,
+                      "Plan Rows": 12,
+                      "Plan Width": 52,
+                      "Actual Rows": 2.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "st.__pgt_row_id",
+                        "st.d",
+                        "st.total",
+                        "st.n"
+                      ],
+                      "Inner Unique": false,
+                      "Plans": [
+                        {
+                          "Node Type": "Unique",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 1.05,
+                          "Total Cost": 1.08,
+                          "Plan Rows": 3,
+                          "Plan Width": 18,
+                          "Actual Rows": 3.0,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Output": [
+                            "__pgt_delta_1.__pgt_row_id",
+                            "__pgt_delta_1.d"
+                          ],
+                          "Plans": [
+                            {
+                              "Node Type": "Sort",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Startup Cost": 1.05,
+                              "Total Cost": 1.06,
+                              "Plan Rows": 3,
+                              "Plan Width": 18,
+                              "Actual Rows": 3.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": [
+                                "__pgt_delta_1.__pgt_row_id",
+                                "__pgt_delta_1.d"
+                              ],
+                              "Sort Key": [
+                                "__pgt_delta_1.__pgt_row_id",
+                                "__pgt_delta_1.d"
+                              ],
+                              "Sort Method": "quicksort",
+                              "Sort Space Used": 25,
+                              "Sort Space Type": "Memory",
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Relation Name": "__pgt_delta_1",
+                                  "Schema": "pg_temp",
+                                  "Alias": "__pgt_delta_1",
+                                  "Startup Cost": 0.0,
+                                  "Total Cost": 1.03,
+                                  "Plan Rows": 3,
+                                  "Plan Width": 18,
+                                  "Actual Rows": 3.0,
+                                  "Actual Loops": 1,
+                                  "Disabled": true,
+                                  "Output": [
+                                    "__pgt_delta_1.__pgt_row_id",
+                                    "__pgt_delta_1.d"
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "Node Type": "Append",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 2.6,
+                          "Total Cost": 14.49,
+                          "Plan Rows": 4,
+                          "Plan Width": 52,
+                          "Actual Rows": 0.67,
+                          "Actual Loops": 3,
+                          "Disabled": false,
+                          "Subplans Removed": 0,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Heap Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "totals_p0",
+                              "Schema": "retention_delete_probe",
+                              "Alias": "st_1",
+                              "Startup Cost": 2.6,
+                              "Total Cost": 3.62,
+                              "Plan Rows": 1,
+                              "Plan Width": 52,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": [
+                                "st_1.__pgt_row_id",
+                                "st_1.d",
+                                "st_1.total",
+                                "st_1.n"
+                              ],
+                              "Recheck Cond": "((st_1.d = __pgt_delta_1.d) AND (st_1.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Index Recheck": 0,
+                              "Filter": "(row_probe_v1(st_1.__pgt_row_id) = row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Filter": 0,
+                              "Exact Heap Blocks": 1,
+                              "Lossy Heap Blocks": 0,
+                              "Plans": [
+                                {
+                                  "Node Type": "BitmapAnd",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Startup Cost": 2.6,
+                                  "Total Cost": 2.6,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 0,
+                                  "Actual Rows": 0.0,
+                                  "Actual Loops": 1,
+                                  "Disabled": false,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p0_d_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 1.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_1.d = __pgt_delta_1.d)",
+                                      "Index Searches": 1
+                                    },
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p0___pgt_row_id_d_total_n_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 1.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_1.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                                      "Index Searches": 1
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "Node Type": "Bitmap Heap Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "totals_p1",
+                              "Schema": "retention_delete_probe",
+                              "Alias": "st_2",
+                              "Startup Cost": 2.6,
+                              "Total Cost": 3.62,
+                              "Plan Rows": 1,
+                              "Plan Width": 52,
+                              "Actual Rows": 0,
+                              "Actual Loops": 0,
+                              "Disabled": false,
+                              "Output": [
+                                "st_2.__pgt_row_id",
+                                "st_2.d",
+                                "st_2.total",
+                                "st_2.n"
+                              ],
+                              "Recheck Cond": "((st_2.d = __pgt_delta_1.d) AND (st_2.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Index Recheck": 0,
+                              "Filter": "(row_probe_v1(st_2.__pgt_row_id) = row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Filter": 0,
+                              "Exact Heap Blocks": 0,
+                              "Lossy Heap Blocks": 0,
+                              "Plans": [
+                                {
+                                  "Node Type": "BitmapAnd",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Startup Cost": 2.6,
+                                  "Total Cost": 2.6,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 0,
+                                  "Actual Rows": 0,
+                                  "Actual Loops": 0,
+                                  "Disabled": false,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p1_d_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 0,
+                                      "Actual Loops": 0,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_2.d = __pgt_delta_1.d)",
+                                      "Index Searches": 0
+                                    },
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p1___pgt_row_id_d_total_n_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 0,
+                                      "Actual Loops": 0,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_2.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                                      "Index Searches": 0
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "Node Type": "Bitmap Heap Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "totals_p2",
+                              "Schema": "retention_delete_probe",
+                              "Alias": "st_3",
+                              "Startup Cost": 2.6,
+                              "Total Cost": 3.62,
+                              "Plan Rows": 1,
+                              "Plan Width": 52,
+                              "Actual Rows": 1.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": [
+                                "st_3.__pgt_row_id",
+                                "st_3.d",
+                                "st_3.total",
+                                "st_3.n"
+                              ],
+                              "Recheck Cond": "((st_3.d = __pgt_delta_1.d) AND (st_3.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Index Recheck": 0,
+                              "Filter": "(row_probe_v1(st_3.__pgt_row_id) = row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Filter": 0,
+                              "Exact Heap Blocks": 1,
+                              "Lossy Heap Blocks": 0,
+                              "Plans": [
+                                {
+                                  "Node Type": "BitmapAnd",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Startup Cost": 2.6,
+                                  "Total Cost": 2.6,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 0,
+                                  "Actual Rows": 0.0,
+                                  "Actual Loops": 1,
+                                  "Disabled": false,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p2_d_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 2.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_3.d = __pgt_delta_1.d)",
+                                      "Index Searches": 1
+                                    },
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p2___pgt_row_id_d_total_n_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 2.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_3.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                                      "Index Searches": 1
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "Node Type": "Bitmap Heap Scan",
+                              "Parent Relationship": "Member",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "totals_p3",
+                              "Schema": "retention_delete_probe",
+                              "Alias": "st_4",
+                              "Startup Cost": 2.6,
+                              "Total Cost": 3.62,
+                              "Plan Rows": 1,
+                              "Plan Width": 52,
+                              "Actual Rows": 0.0,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": [
+                                "st_4.__pgt_row_id",
+                                "st_4.d",
+                                "st_4.total",
+                                "st_4.n"
+                              ],
+                              "Recheck Cond": "((st_4.d = __pgt_delta_1.d) AND (st_4.__pgt_row_id = __pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Index Recheck": 0,
+                              "Filter": "(row_probe_v1(st_4.__pgt_row_id) = row_probe_v1(__pgt_delta_1.__pgt_row_id))",
+                              "Rows Removed by Filter": 0,
+                              "Exact Heap Blocks": 1,
+                              "Lossy Heap Blocks": 0,
+                              "Plans": [
+                                {
+                                  "Node Type": "BitmapAnd",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Startup Cost": 2.6,
+                                  "Total Cost": 2.6,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 0,
+                                  "Actual Rows": 0.0,
+                                  "Actual Loops": 1,
+                                  "Disabled": false,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p3_d_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 1.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_4.d = __pgt_delta_1.d)",
+                                      "Index Searches": 1
+                                    },
+                                    {
+                                      "Node Type": "Bitmap Index Scan",
+                                      "Parent Relationship": "Member",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Index Name": "totals_p3___pgt_row_id_d_total_n_idx",
+                                      "Startup Cost": 0.0,
+                                      "Total Cost": 1.17,
+                                      "Plan Rows": 3,
+                                      "Plan Width": 0,
+                                      "Actual Rows": 1.0,
+                                      "Actual Loops": 1,
+                                      "Disabled": false,
+                                      "Index Cond": "(st_4.__pgt_row_id = __pgt_delta_1.__pgt_row_id)",
+                                      "Index Searches": 1
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "__pgt_pre_1",
+                      "Schema": "pg_temp",
+                      "Alias": "__pgt_pre_1",
+                      "Startup Cost": 0.0,
+                      "Total Cost": 20.2,
+                      "Plan Rows": 1020,
+                      "Plan Width": 52,
+                      "Actual Rows": 2.0,
+                      "Actual Loops": 1,
+                      "Disabled": true,
+                      "Output": [
+                        "__pgt_pre_1.__pgt_row_id",
+                        "__pgt_pre_1.d",
+                        "__pgt_pre_1.total",
+                        "__pgt_pre_1.n"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scans": [
+        {
+          "relation": "totals_p3",
+          "node": "Index Scan",
+          "rows_examined": 1.0,
+          "condition": "((totals_4.d >= '2025-01-01'::date) AND (totals_4.d < '2026-01-01'::date))"
+        },
+        {
+          "relation": "totals_p2",
+          "node": "Index Scan",
+          "rows_examined": 0.0,
+          "condition": "((totals_3.d >= '2025-01-01'::date) AND (totals_3.d < '2026-01-01'::date))"
+        },
+        {
+          "relation": "totals_p1",
+          "node": "Index Scan",
+          "rows_examined": 0.0,
+          "condition": "((totals_2.d >= '2025-01-01'::date) AND (totals_2.d < '2026-01-01'::date))"
+        },
+        {
+          "relation": "totals_p0",
+          "node": "Index Scan",
+          "rows_examined": 0.0,
+          "condition": "((totals_1.d >= '2025-01-01'::date) AND (totals_1.d < '2026-01-01'::date))"
+        }
+      ],
+      "plan": {
+        "Query Text": "WITH removed AS (DELETE FROM \"retention_delete_probe\".\"totals\" WHERE \"d\" OPERATOR(pg_catalog.>=) (DATE '2000-01-01' OPERATOR(pg_catalog.+) 9132) AND \"d\" OPERATOR(pg_catalog.<) (DATE '2000-01-01' OPERATOR(pg_catalog.+) 9497) RETURNING __pgt_row_id, \"d\", \"total\", \"n\") INSERT INTO pg_temp.\"__pgt_trim_1\" SELECT * FROM removed",
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Insert",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "__pgt_trim_1",
+          "Schema": "pg_temp",
+          "Alias": "__pgt_trim_1",
+          "Startup Cost": 16.9,
+          "Total Cost": 17.14,
+          "Plan Rows": 0,
+          "Plan Width": 0,
+          "Actual Rows": 0.0,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Plans": [
+            {
+              "Node Type": "ModifyTable",
+              "Operation": "Delete",
+              "Parent Relationship": "InitPlan",
+              "Subplan Name": "CTE removed",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "totals",
+              "Schema": "retention_delete_probe",
+              "Alias": "totals",
+              "Startup Cost": 0.15,
+              "Total Cost": 16.9,
+              "Plan Rows": 12,
+              "Plan Width": 10,
+              "Actual Rows": 1.0,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": [
+                "totals_1.__pgt_row_id",
+                "totals_1.d",
+                "totals_1.total",
+                "totals_1.n"
+              ],
+              "Target Tables": [
+                {
+                  "Relation Name": "totals_p0",
+                  "Schema": "retention_delete_probe",
+                  "Alias": "totals_1"
+                },
+                {
+                  "Relation Name": "totals_p1",
+                  "Schema": "retention_delete_probe",
+                  "Alias": "totals_2"
+                },
+                {
+                  "Relation Name": "totals_p2",
+                  "Schema": "retention_delete_probe",
+                  "Alias": "totals_3"
+                },
+                {
+                  "Relation Name": "totals_p3",
+                  "Schema": "retention_delete_probe",
+                  "Alias": "totals_4"
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Append",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 0.15,
+                  "Total Cost": 16.9,
+                  "Plan Rows": 12,
+                  "Plan Width": 10,
+                  "Actual Rows": 1.0,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Subplans Removed": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Index Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Scan Direction": "Forward",
+                      "Index Name": "totals_p0_d_idx",
+                      "Relation Name": "totals_p0",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "totals_1",
+                      "Startup Cost": 0.15,
+                      "Total Cost": 4.21,
+                      "Plan Rows": 3,
+                      "Plan Width": 10,
+                      "Actual Rows": 0.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "totals_1.tableoid",
+                        "totals_1.ctid"
+                      ],
+                      "Index Cond": "((totals_1.d >= '2025-01-01'::date) AND (totals_1.d < '2026-01-01'::date))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Index Searches": 1
+                    },
+                    {
+                      "Node Type": "Index Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Scan Direction": "Forward",
+                      "Index Name": "totals_p1_d_idx",
+                      "Relation Name": "totals_p1",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "totals_2",
+                      "Startup Cost": 0.15,
+                      "Total Cost": 4.21,
+                      "Plan Rows": 3,
+                      "Plan Width": 10,
+                      "Actual Rows": 0.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "totals_2.tableoid",
+                        "totals_2.ctid"
+                      ],
+                      "Index Cond": "((totals_2.d >= '2025-01-01'::date) AND (totals_2.d < '2026-01-01'::date))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Index Searches": 1
+                    },
+                    {
+                      "Node Type": "Index Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Scan Direction": "Forward",
+                      "Index Name": "totals_p2_d_idx",
+                      "Relation Name": "totals_p2",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "totals_3",
+                      "Startup Cost": 0.15,
+                      "Total Cost": 4.21,
+                      "Plan Rows": 3,
+                      "Plan Width": 10,
+                      "Actual Rows": 0.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "totals_3.tableoid",
+                        "totals_3.ctid"
+                      ],
+                      "Index Cond": "((totals_3.d >= '2025-01-01'::date) AND (totals_3.d < '2026-01-01'::date))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Index Searches": 1
+                    },
+                    {
+                      "Node Type": "Index Scan",
+                      "Parent Relationship": "Member",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Scan Direction": "Forward",
+                      "Index Name": "totals_p3_d_idx",
+                      "Relation Name": "totals_p3",
+                      "Schema": "retention_delete_probe",
+                      "Alias": "totals_4",
+                      "Startup Cost": 0.15,
+                      "Total Cost": 4.21,
+                      "Plan Rows": 3,
+                      "Plan Width": 10,
+                      "Actual Rows": 1.0,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": [
+                        "totals_4.tableoid",
+                        "totals_4.ctid"
+                      ],
+                      "Index Cond": "((totals_4.d >= '2025-01-01'::date) AND (totals_4.d < '2026-01-01'::date))",
+                      "Rows Removed by Index Recheck": 0,
+                      "Index Searches": 1
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "CTE Name": "removed",
+              "Alias": "removed",
+              "Startup Cost": 0.0,
+              "Total Cost": 0.24,
+              "Plan Rows": 12,
+              "Plan Width": 52,
+              "Actual Rows": 1.0,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": [
+                "removed.__pgt_row_id",
+                "removed.d",
+                "removed.total",
+                "removed.n"
+              ],
+              "Storage": "Memory",
+              "Maximum Storage": 17
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

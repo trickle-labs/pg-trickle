@@ -12,13 +12,12 @@ example one partition per month for an `orders` table. This is a common
 technique for managing very large datasets. pg_trickle handles partitioned
 source tables transparently:
 
-- **CDC triggers fire on all partitions.** pg_trickle installs statement-level
-  AFTER triggers directly on the partitioned root table. PostgreSQL routes all
-  DML — whether targeted at the root or at a child partition directly — through
-  the root's triggers. The trigger's `REFERENCING NEW TABLE / OLD TABLE`
-  transition tables contain all affected rows regardless of which partition was
-  written to. All captured changes are recorded in a single change buffer keyed
-  by the parent table's OID.
+- **CDC captures writes routed through the source.** With statement-level CDC,
+  PostgreSQL fires the trigger for the relation named by the statement; a
+  statement directed at a child does not fire its parent's statement trigger.
+  Retention-enabled sources use row-level capture, whose triggers PostgreSQL
+  clones to partitions, so direct child writes are captured as well. Changes
+  use a single change buffer keyed by the source table's OID.
 
 - **ATTACH PARTITION is detected automatically.** When you attach a
   partition with pre-existing data, pg_trickle marks affected stream tables
@@ -79,6 +78,169 @@ SELECT * FROM regional_sales ORDER BY region;
 --  EU     | 550.00 |   2
 --  US     | 275.00 |   2
 ```
+
+## Retention policies
+
+Retention is disabled by default. An eligible stream can opt into `TRIM` or
+`RETAIN` with an explicit cutoff. A partition is expired only when its entire
+half-open range `[lower, upper)` is at or below the cutoff. Advancing the
+cutoff does not remove a partition; it makes a subsequent `DETACH`, concurrent
+`DETACH`, or direct `DROP TABLE` eligible for retention processing.
+
+This example uses the **same** `occurred` column for partitioning and hourly
+grouping. It does not infer any relationship between two timestamps. Run it in
+a database with pg_trickle installed:
+
+```sql
+CREATE TABLE retention_events (
+    occurred timestamp NOT NULL,
+    account_id integer NOT NULL,
+    amount numeric NOT NULL
+) PARTITION BY RANGE (occurred);
+CREATE TABLE retention_events_old PARTITION OF retention_events
+    FOR VALUES FROM ('2025-01-01') TO ('2025-02-01');
+CREATE TABLE retention_events_live PARTITION OF retention_events
+    FOR VALUES FROM ('2025-02-01') TO ('2025-03-01');
+INSERT INTO retention_events VALUES
+    ('2025-01-15 12:05', 1, 10), ('2025-01-15 12:30', 1, 5),
+    ('2025-02-15 09:10', 1, 20), ('2025-02-15 09:20', 2, 7);
+
+SELECT pgtrickle.create_stream_table_with_retention(
+    'hourly_trim',
+    'SELECT pg_catalog.date_trunc(''hour'', occurred) AS hour, account_id,
+            sum(amount) AS total, count(*) AS n
+       FROM retention_events GROUP BY 1, 2',
+    'TRIM', 'occurred', '2025-02-01', '1h'
+);
+SELECT pgtrickle.create_stream_table_with_retention(
+    'hourly_history',
+    'SELECT pg_catalog.date_trunc(''hour'', occurred) AS hour, account_id,
+            sum(amount) AS total, count(*) AS n
+       FROM retention_events GROUP BY 1, 2',
+    'RETAIN', 'occurred', '2025-02-01', '1h'
+);
+
+ALTER TABLE retention_events DETACH PARTITION retention_events_old;
+SELECT hour, account_id, total, n FROM hourly_trim ORDER BY 1, 2;
+-- 2025-02-15 09:00:00 | 1 | 20 | 1
+-- 2025-02-15 09:00:00 | 2 |  7 | 1
+SELECT hour, account_id, total, n FROM hourly_history ORDER BY 1, 2;
+-- The same two rows plus 2025-01-15 12:00:00 | 1 | 15 | 2.
+SELECT pgtrickle.get_stream_table_partition_retention('hourly_history');
+```
+
+For `TRIM`, pg_trickle first brings the stream current under its existing CDC
+locking protocol, then removes the affected output groups using an index. The
+remaining groups continue to receive differential updates. An ineligible
+removal, including a partition that crosses the cutoff, falls back to normal
+reinitialization. A stream with user triggers or output-delta consumers cannot
+currently enable TRIM.
+During retention catch-up and TRIM deletion, pg_trickle temporarily enables
+partition pruning, index and bitmap scans, discourages sequential scans, and disables JIT. It
+then restores the caller's planner settings.
+If stream storage is partitioned solely by the proven retention group key,
+aggregate, DML, and downstream capture lookups include that key so PostgreSQL
+can prune output partitions. The retention planner scope forces parameterized
+nested-loop index probes for this DML and restores the caller's planner
+settings on success or error. Other storage keys keep the ordinary identity
+probe and may visit more output partitions.
+
+For `RETAIN`, removal seals the expired range and preserves its aggregate
+rows. Later differential refreshes continue to update live groups. Sealed
+history cannot be reconstructed from the surviving raw source: FULL refresh,
+reinitialization, policy removal, incompatible query changes and restore paths
+that would replace it are rejected. Pausing a stream with sealed history is
+also rejected because the normal resume path requires reinitialization. Save
+the raw events externally if you need
+to rebuild or correct historical aggregates; deleting and recreating the
+stream deliberately discards its retained history. The whole-table TRUNCATE
+refresh optimization is rejected once history has been sealed because it
+cannot distinguish live from retained groups.
+Automatic change-ratio and cost heuristics continue with DIFFERENTIAL instead
+of choosing an unreconstructible FULL refresh. Explicit FULL requests and
+hard buffer or delta-size limits can still reject refresh; inspect the error
+and adjust those limits or restore the source history before retrying.
+
+The contract is intentionally narrow:
+
+- The source is one logged, trigger-CDC RANGE-partitioned table with one
+  non-null `date`, `timestamp`, or `timestamptz` partition column, the default
+  btree operator class, finite bounds, and no default partition. Descendants
+  must be durable local tables.
+- The defining query is a single-source grouped aggregate with `COUNT(*)`,
+  `COUNT(column)` and/or `SUM(column)`, using PostgreSQL's built-in aggregates
+  without DISTINCT or aggregate filters. `SUM` accepts built-in integer and
+  numeric columns. Floating-point `SUM` is rejected because rounding depends
+  on how changes are batched; `COUNT` of a floating-point column is supported.
+  Other grouping keys must be source
+  columns supported by the stream table's typed row identity and must use
+  deterministic collations; for example, array-valued grouping keys and
+  nondeterministic text collations are rejected. Aggregate arguments cannot be
+  arbitrary expressions. The
+  defining search path must leave `pg_catalog` ahead of other schemas, and the
+  stream owner must not be subject to source row-level security. Its output
+  includes either
+  the exact partition key or an hourly bucket of that same key. Hourly
+  `timestamp` buckets use `pg_catalog.date_trunc('hour', key)`; `timestamptz`
+  buckets must use `pg_catalog.date_trunc('hour', key, 'UTC')`. Partition
+  bounds must align with bucket boundaries. Joins and other query shapes are
+  rejected at configuration time.
+- The source workload may append rows, but grouped output rows are updated;
+  this feature does not require the stream's append-only output fast path.
+- Retention cuts require the configured stream to be active and initialized
+  with no pending reinitialization. Resume and repair it before removing a
+  partition if it has been paused or suspended.
+- Keep the stream table's valid, non-partial btree row-identity index on `__pgt_row_id` or
+  `pgtrickle.row_probe_v1(__pgt_row_id)`. A missing or invalid index rejects
+  the retention cut; restore its original definition, including uniqueness
+  when required, before retrying. Keyed, unpartitioned streams require an
+  immediate unique index whose only key is `__pgt_row_id`; keyless or
+  partitioned streams can use a non-unique identity index.
+- `RETAIN` rejects overlapping historical attachments, including empty
+  partitions, and nonempty attachments that would require rebuilding sealed
+  history. Late arrivals or backfills into a sealed range therefore require a
+  deliberate external rebuild. Ordinary writes to still-attached ranges remain
+  supported. Eligible `DETACH PARTITION CONCURRENTLY` operations suspend the
+  affected streams while PostgreSQL's detach is pending, then replay captured
+  changes and apply the retention cut in its second transaction. If that
+  transaction is interrupted, run PostgreSQL's `DETACH PARTITION ... FINALIZE`
+  to complete the cut; the pending range is visible as `pending_detach` in the
+  policy JSON. Partition attachments and retention configuration changes are
+  blocked while the cut is pending. A dependent remains suspended if another
+  upstream still requires recovery; repair that upstream before resuming it.
+  A nested child can be removed when every
+  intermediate partition level is RANGE-partitioned
+  on the same key with finite, bucket-aligned bounds; the effective range is
+  the intersection of its bounds with all ancestor bounds. For other nested
+  layouts, TRIM falls back and RETAIN rejects the removal. Removing an entire
+  direct child that itself contains subpartitions is also supported.
+
+Enabling retention switches the shared source to row-level CDC and performs a
+protected baseline reinitialization. This captures any earlier direct-child
+writes that statement-level CDC could have missed. It may scan the full source
+once during configuration. Refreshes fail closed if the required capture
+triggers or partition TRUNCATE guards are missing or disabled. While retention
+is configured, TRUNCATE of an attached partition is rejected; use supported
+row-level DELETEs or partition retention instead. Writes are rejected while
+CDC is paused in discard mode, which would otherwise lose their changes. A
+detached table can be modified independently.
+
+If an existing policy used a nondeterministic grouping collation or a
+floating-point `SUM`, refresh now fails closed. Its existing groups may already
+be incorrect; changing the definition alone does not repair them. Restore the
+complete raw history and build a replacement stream with deterministic
+grouping and exact aggregate inputs. If RETAIN has sealed history, do not
+discard the old stream until the replacement has been checked.
+
+The retention cutoff is parsed as the source column type. Include a timezone
+offset for `timestamptz` cutoffs to avoid dependence on the session timezone.
+For an existing initialized managed differential stream, use
+`pgtrickle.set_stream_table_partition_retention(name, policy, column, cutoff)`;
+the API validates the existing source, query, storage and partition layout.
+Use the same function with a later cutoff to advance it. `OFF` disables a
+policy only before any RETAIN range has been sealed. Upgrading leaves existing
+streams disabled until explicitly configured. Inspect the JSON status and
+refresh history when diagnosing a rejected operation or fallback.
 
 ## Adding New Partitions
 
@@ -304,4 +466,4 @@ SELECT pgtrickle.create_stream_table(
 | **Sub-partitioning** | Multi-level partitioning (partitions of partitions) works in principle because triggers propagate through the entire hierarchy, but it is not extensively tested. |
 | **pg_partman compatibility** | `pg_partman` dynamically creates and drops partitions. Since pg_trickle detects ATTACH/DETACH via DDL event triggers, it should work, but this combination is not yet tested. |
 | **Partitioned storage tables** | Using a partitioned table as the stream table's *storage* is not supported. This is tracked for a future release. |
-| **DETACH PARTITION CONCURRENTLY** | This is a two-phase operation. To avoid refreshing against an incomplete intermediate state, pg_trickle suspends dependent stream tables. After DETACH completes, explicitly run `pgtrickle.resume_stream_table('regional_sales')` and refresh. The resume action schedules a full reinitialization. |
+| **DETACH PARTITION CONCURRENTLY** | This is a two-phase operation. Without retention, dependent stream tables are suspended and must be resumed explicitly after detach; resume schedules a full reinitialization. Eligible retention-enabled streams replay CDC and complete their cut in the second phase. If interrupted, run `DETACH PARTITION ... FINALIZE`. |
