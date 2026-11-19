@@ -1399,7 +1399,14 @@ fn test_partitioned_keyed_insert_guards_identity_for_nondeduplicated_delta() {
 #[test]
 fn test_partitioned_keyless_insert_preserves_multiplicity() {
     let cols = vec!["event_day".to_string(), "amount".to_string()];
-    let sql = build_trigger_insert_for_storage("\"public\".\"partitioned_st\"", 42, &cols, true, false, true);
+    let sql = build_trigger_insert_for_storage(
+        "\"public\".\"partitioned_st\"",
+        42,
+        &cols,
+        true,
+        false,
+        true,
+    );
     assert!(!sql.contains("DISTINCT ON"));
     assert!(!sql.contains("NOT EXISTS"));
     assert!(!sql.contains("ON CONFLICT"));
