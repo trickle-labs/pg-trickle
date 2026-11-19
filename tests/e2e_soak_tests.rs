@@ -281,7 +281,9 @@ struct RssSample {
 /// Extract the one positive VmRSS value (in kB) from Linux /proc/self/status.
 /// pg_read_file returns the *whole* document, not one row per line.
 fn parse_rss_kb(status: &str) -> Result<i64, String> {
-    let mut fields = status.lines().filter_map(|line| line.strip_prefix("VmRSS:"));
+    let mut fields = status
+        .lines()
+        .filter_map(|line| line.strip_prefix("VmRSS:"));
     let field = fields
         .next()
         .ok_or_else(|| "VmRSS field missing from /proc/self/status".to_string())?;
@@ -315,8 +317,8 @@ async fn get_rss_sample(conn: &mut sqlx::PgConnection) -> Result<RssSample, Stri
                 format!("cannot read PostgreSQL /proc/self/status (Linux required): {e}")
             })?;
 
-    let rss_kb = parse_rss_kb(&status)
-        .map_err(|e| format!("PostgreSQL backend PID {backend_pid}: {e}"))?;
+    let rss_kb =
+        parse_rss_kb(&status).map_err(|e| format!("PostgreSQL backend PID {backend_pid}: {e}"))?;
     Ok(RssSample {
         backend_pid,
         rss_kb,
@@ -333,7 +335,9 @@ fn rss_growth_percent(initial: RssSample, latest: RssSample) -> Result<f64, Stri
         return Err(format!("invalid PostgreSQL backend PID: {details}"));
     }
     if initial.backend_pid != latest.backend_pid {
-        return Err(format!("RSS samples came from different backends: {details}"));
+        return Err(format!(
+            "RSS samples came from different backends: {details}"
+        ));
     }
     if initial.rss_kb <= 0 || latest.rss_kb <= 0 {
         return Err(format!("RSS samples must be positive: {details}"));
@@ -746,7 +750,8 @@ mod rss_tests {
 
     #[test]
     fn parses_rss_from_realistic_multiline_status() {
-        let status = "Name:\tpostgres\nUmask:\t0022\nVmSize:\t98765 kB\nVmRSS:\t12345 kB\nThreads:\t1\n";
+        let status =
+            "Name:\tpostgres\nUmask:\t0022\nVmSize:\t98765 kB\nVmRSS:\t12345 kB\nThreads:\t1\n";
         assert_eq!(parse_rss_kb(status), Ok(12_345));
     }
 
@@ -777,7 +782,10 @@ mod rss_tests {
             "Name:\tpostgres\nVmRSS:\t12345 kB extra\n",
             "Name:\tpostgres\nVmRSS:\t12345 kB\nVmRSS:\t45678 kB\n",
         ] {
-            assert!(parse_rss_kb(status).is_err(), "accepted bad status: {status:?}");
+            assert!(
+                parse_rss_kb(status).is_err(),
+                "accepted bad status: {status:?}"
+            );
         }
         assert!(validate_rss_growth(sample(4242, 0), sample(4242, 1)).is_err());
         assert!(validate_rss_growth(sample(4242, 1), sample(4242, 0)).is_err());
@@ -798,8 +806,12 @@ mod rss_tests {
     async fn reads_rss_from_one_pinned_postgres_backend() {
         let db = E2eDb::new().await;
         let mut conn = db.pool.acquire().await.expect("Failed to reserve backend");
-        let first = get_rss_sample(&mut conn).await.expect("First RSS read failed");
-        let second = get_rss_sample(&mut conn).await.expect("Second RSS read failed");
+        let first = get_rss_sample(&mut conn)
+            .await
+            .expect("First RSS read failed");
+        let second = get_rss_sample(&mut conn)
+            .await
+            .expect("Second RSS read failed");
         assert_eq!(first.backend_pid, second.backend_pid);
         assert!(first.rss_kb > 0);
         assert!(second.rss_kb > 0);
