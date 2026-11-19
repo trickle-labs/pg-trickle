@@ -1201,7 +1201,7 @@ fn list_auxiliary_columns_impl(
                         pg_catalog.format_type(a.atttypid, a.atttypmod) \
                  FROM pg_catalog.pg_attribute a \
                  WHERE a.attrelid = $1::oid \
-                   AND a.attname LIKE '__pgt_%' \
+                   AND starts_with(a.attname::text, '__pgt_') \
                    AND a.attnum > 0 \
                    AND NOT a.attisdropped \
                  ORDER BY a.attnum",

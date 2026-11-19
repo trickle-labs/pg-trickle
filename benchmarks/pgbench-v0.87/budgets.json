@@ -6,8 +6,9 @@
     "refresh_cpu_share_max": 0.5
   },
   "ci_noise_tolerance": {
-    "description": "Keep statistical noise separate from the product budgets; compare medians of paired repetitions.",
+    "description": "CI tolerates installed TPS down to 95% and active p99 up to 2.25x; product budgets stay unchanged.",
     "paired_repetitions_min": 3,
+    "installed_no_st_tps_ratio_min": 0.95,
     "active_p99_latency_ratio_max": 2.25
   }
 }

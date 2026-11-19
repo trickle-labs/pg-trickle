@@ -44,7 +44,7 @@ async fn assert_invariant(db: &E2eDb, pgt_name: &str, query: &str, seed: u64, cy
             "SELECT string_agg(column_name, ', ' ORDER BY ordinal_position) \
              FROM information_schema.columns \
              WHERE table_schema = 'public' AND table_name = '{pgt_name}' \
-               AND column_name NOT LIKE '__pgt_%'"
+               AND NOT starts_with(column_name, '__pgt_')"
         ))
         .await;
 
