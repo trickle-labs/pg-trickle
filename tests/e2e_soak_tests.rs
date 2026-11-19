@@ -434,6 +434,13 @@ async fn run_correctness_checkpoint(
     }
 }
 
+/// This is the final-path entry point used by the long soak and the bounded
+/// regression: it runs even if the duration never reached the periodic timer.
+async fn run_final_correctness(db: &E2eDb, active_sts: &[&str], failures: &mut Vec<String>) {
+    println!("\n  Final correctness verification (DIFFERENTIAL, no rebuild)...");
+    run_correctness_checkpoint(db, active_sts, "final", failures, false).await;
+}
+
 // ── Main Soak Test ─────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -603,15 +610,7 @@ async fn test_soak_stability() {
     // periodic interval. Drain the scheduler and compare before any repair.
     // Leave the scheduler paused so subsequent final health checks cannot
     // change the result we just certified.
-    println!("\n  Final correctness verification (DIFFERENTIAL, no rebuild)...");
-    run_correctness_checkpoint(
-        &db,
-        &active_sts,
-        "final",
-        &mut health_check_failures,
-        false,
-    )
-    .await;
+    run_final_correctness(&db, &active_sts, &mut health_check_failures).await;
 
     // Final RSS check
     if let (Some(initial), Some(final_rss)) = (initial_rss, get_rss_kb(&db).await) {
@@ -752,10 +751,9 @@ async fn test_soak_short_final_checkpoint_keeps_failure_after_full_recovery() {
     setup_bounded_join(&db).await;
     // No 120-second periodic checkpoint has fired. Final verification is
     // mandatory even for a shorter soak, *before* any FULL repair.
-    assert!(Duration::from_secs(1) < Duration::from_secs(120));
     corrupt_one_public_join_row(&db).await;
     let mut failures = Vec::new();
-    run_correctness_checkpoint(&db, &["soak_join"], "final", &mut failures, false).await;
+    run_final_correctness(&db, &["soak_join"], &mut failures).await;
     assert_eq!(failures.len(), 1, "short soak must detect final JOIN drift");
     assert!(failures[0].contains("[final] CORRECTNESS VIOLATION for soak_join"));
 
