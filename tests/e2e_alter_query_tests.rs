@@ -938,10 +938,8 @@ async fn test_alter_query_and_partition_keep_public_pgt_lookalikes() {
         )"#,
     )
     .await;
-    db.execute(
-        "INSERT INTO prefix_alter_source VALUES (1, 10, 100, 1000), (2, 20, 200, 2000)",
-    )
-    .await;
+    db.execute("INSERT INTO prefix_alter_source VALUES (1, 10, 100, 1000), (2, 20, 200, 2000)")
+        .await;
     let query = r#"SELECT id, abpgtc, xxpgt_value, "AbpgtC" FROM prefix_alter_source"#;
     db.create_st("prefix_alter_st", query, "1d", "DIFFERENTIAL")
         .await;
@@ -986,7 +984,10 @@ async fn test_alter_query_and_partition_keep_public_pgt_lookalikes() {
             "SELECT pgtrickle.alter_stream_table('prefix_alter_st', partition_by => 'missing')",
         )
         .await;
-    assert!(missing_key.is_err(), "unknown partition key must be rejected");
+    assert!(
+        missing_key.is_err(),
+        "unknown partition key must be rejected"
+    );
     db.alter_st("prefix_alter_st", "partition_by => 'abpgtc'")
         .await;
     let key: String = db

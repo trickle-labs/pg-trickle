@@ -360,7 +360,8 @@ async fn test_cdc_st_buffer_literal_internal_prefix_keeps_public_columns() {
     db.refresh_st_with_retry("prefix_up").await;
     db.refresh_st_with_retry("prefix_down").await;
     db.assert_st_matches_query("prefix_up", source_query).await;
-    db.assert_st_matches_query("prefix_down", source_query).await;
+    db.assert_st_matches_query("prefix_down", source_query)
+        .await;
 
     let buffer_has_public_columns: bool = db
         .query_scalar(
@@ -436,7 +437,8 @@ async fn test_cdc_st_buffer_literal_internal_prefix_keeps_public_columns() {
     );
 
     db.assert_st_matches_query("prefix_up", source_query).await;
-    db.assert_st_matches_query("prefix_down", source_query).await;
+    db.assert_st_matches_query("prefix_down", source_query)
+        .await;
 
     // Expected rows are independent of the source query and include each
     // affected public column; a count-only assertion could miss this bug.
