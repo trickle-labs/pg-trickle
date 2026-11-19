@@ -6811,7 +6811,7 @@ async fn test_ann_refresh_epoch_survives_database_restart() {
     .await;
     db.execute("INSERT INTO ann_epoch_restart_source VALUES (1)")
         .await;
-    db.refresh_st("ann_epoch_restart").await;
+    db.refresh_st_with_retry("ann_epoch_restart").await;
     let before: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ann_epoch_restart'").await;
     db.pool.close().await;
     let restarted = tokio::process::Command::new("docker")
@@ -6825,7 +6825,7 @@ async fn test_ann_refresh_epoch_survives_database_restart() {
     assert_eq!(after, before);
     db.execute("INSERT INTO ann_epoch_restart_source VALUES (2)")
         .await;
-    db.refresh_st("ann_epoch_restart").await;
+    db.refresh_st_with_retry("ann_epoch_restart").await;
     let next: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ann_epoch_restart'").await;
     assert!(next > after);
     db.assert_st_matches_query(
