@@ -106,6 +106,23 @@ def main() -> int:
     if any(not finite_nonnegative(product.get(key)) for key in required_budgets):
         fail("all product budgets must be finite, non-negative numbers")
 
+    installed_tps_noise_min = noise.get(
+        "installed_no_st_tps_ratio_min", product["installed_no_st_tps_ratio_min"]
+    )
+    if (
+        not finite_nonnegative(installed_tps_noise_min)
+        or installed_tps_noise_min > product["installed_no_st_tps_ratio_min"]
+    ):
+        fail("CI noise throughput floor must be finite and no higher than its product floor")
+
+    installed_tps_passed = (
+        medians["installed_no_st_tps_ratio"] >= product["installed_no_st_tps_ratio_min"]
+    )
+    installed_tps_ci_tolerated = (
+        args.allow_ci_noise
+        and not installed_tps_passed
+        and medians["installed_no_st_tps_ratio"] >= installed_tps_noise_min
+    )
     active_p99_passed = medians["active_p99_latency_ratio"] <= product["active_p99_latency_ratio_max"]
     active_p99_ci_tolerated = (
         args.allow_ci_noise
@@ -117,7 +134,9 @@ def main() -> int:
         "installed_no_st_tps_ratio": {
             "value": medians["installed_no_st_tps_ratio"],
             "budget": product["installed_no_st_tps_ratio_min"],
-            "passed": medians["installed_no_st_tps_ratio"] >= product["installed_no_st_tps_ratio_min"],
+            "passed": installed_tps_passed or installed_tps_ci_tolerated,
+            "product_budget_passed": installed_tps_passed,
+            "ci_noise_tolerated": installed_tps_ci_tolerated,
         },
         "active_p99_latency_ratio": {
             "value": medians["active_p99_latency_ratio"],

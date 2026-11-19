@@ -59,8 +59,11 @@ missing latency samples, unavailable Linux CPU samples, failed correctness,
 fewer than the configured minimum of three paired repetitions, or a budget
 regression. The initial v0.87 product floor preserves the
 roadmap requirement of at least 99% installed/no-stream TPS; active p99 and
-refresh CPU share are separately budgeted so CI noise cannot silently change
-the product contract.
+refresh CPU share are separately budgeted. GitHub Actions also applies the
+versioned CI-noise floor/ceiling from `budgets.json`; a tolerated result passes
+the CI gate while retaining `product_budget_passed: false` and
+`ci_noise_tolerated: true` in the report. Product budgets are unchanged, and
+local publication runs remain strict.
 
 A [native ARM investigation](../benchmarks/pgbench-v0.87/results/2026-11-07-native-arm/README.md)
 records a candidate and main run, including the limitations of the comparison.
