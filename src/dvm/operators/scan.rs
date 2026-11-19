@@ -79,6 +79,9 @@ pub fn diff_scan(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgTri
             ctx, *table_oid, schema, table_name, columns, pk_columns, alias, tables,
         ),
         DeltaSource::ChangeBuffer => {
+            // Register the source for frontier-aligned rewriting of live
+            // FROM/JOIN reads (MIN/MAX rescans, join partners, pre-state).
+            ctx.register_source_scan(*table_oid, schema, table_name);
             diff_scan_change_buffer(ctx, *table_oid, columns, pk_columns, alias)
         }
     }

@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**180 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**183 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -46,6 +46,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.create_stream_table_fast_append_only()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.create_stream_table_fast_append_only(     'my_schema.event_counts',     'SELECT user_id, count(*) AS n FROM events GROUP BY user_id' ); ```. |
 | `pgtrickle.create_stream_table_if_not_exists()` | `pgtrickle` | `` | This is useful for migration scripts that should be safe to re-run. |
 | `pgtrickle.create_stream_table_realtime()` | `pgtrickle` | `` | Use this preset for latency-sensitive use cases where sub-second freshness is required and the defining query is fully supported by the DVM engine. |
+| `pgtrickle.create_stream_table_with_retention()` | `pgtrickle` | `` | Create and configure a differential stream in one transaction. |
 | `pgtrickle.create_watermark_group()` | `pgtrickle` | `` | - `group_name`: unique name for this group. |
 | `pgtrickle.dedup_stats()` | `pgtrickle` | `SetOf row` | Example: ```sql SELECT * FROM pgtrickle.dedup_stats(); ```. |
 | `pgtrickle.dependency_tree()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.dependency_tree()`. |
@@ -83,6 +84,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.gate_source()` | `pgtrickle` | `void` | `source` is the source table name, optionally schema-qualified. |
 | `pgtrickle.get_refresh_history()` | `pgtrickle` | `` | Exposed as `pgtrickle.get_refresh_history(name, limit)`. |
 | `pgtrickle.get_staleness()` | `pgtrickle` | `double precision (nullable)` |  |
+| `pgtrickle.get_stream_table_partition_retention()` | `pgtrickle` | `jsonb` | Return the effective retention policy and its sealed ranges. |
 | `pgtrickle.graph_contract()` | `pgtrickle` | `SetOf row` | Return a canonical contract for the complete upstream closure of roots. |
 | `pgtrickle.handle_vp_promoted()` | `pgtrickle` | `boolean` | Returns `true` if the payload was valid and a matching source was found; `false` if the payload was invalid or no source matched. |
 | `pgtrickle.health_check()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.health_check()`. |
@@ -149,6 +151,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.scheduler_overhead()` | `pgtrickle` | `SetOf row` | Computes busy-time ratio, queue depth, avg dispatch latency, and the fraction of CPU spent on self-monitoring STs vs user STs from refresh history. |
 | `pgtrickle.self_monitoring_status()` | `pgtrickle` | `SetOf row` | For each of the five expected DF stream tables, reports whether it exists, its current status, refresh mode, and last refresh time. |
 | `pgtrickle.set_orchestration_mode()` | `pgtrickle` | `text` | Change durable refresh ownership for one stream table. |
+| `pgtrickle.set_stream_table_partition_retention()` | `pgtrickle` | `` | Configure or disable an explicit partition-retention policy for a stream. |
 | `pgtrickle.set_stream_table_refresh_policy()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.set_stream_table_refresh_policy('my_schema.my_st', 'DIFFERENTIAL'); ```. |
 | `pgtrickle.set_stream_table_sla()` | `pgtrickle` | `` | Accepts an interval and stores it as `freshness_deadline_ms`. |
 | `pgtrickle.set_stream_table_storage_policy()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.set_stream_table_storage_policy('my_schema.my_st', true, 'hot'); ```. |

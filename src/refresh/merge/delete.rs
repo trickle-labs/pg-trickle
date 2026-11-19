@@ -5,6 +5,7 @@ use super::*;
 pub(crate) fn execute_incremental_truncate_delete(
     st: &StreamTableMeta,
 ) -> Result<(i64, i64), PgTrickleError> {
+    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
     // Suppress the CDC trigger on the ST itself during the operation.
     Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;

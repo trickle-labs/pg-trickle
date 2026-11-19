@@ -566,7 +566,8 @@ pub static PGS_TEST_CHAOS_FOR_TABLE: GucSetting<Option<std::ffi::CString>> =
 /// `before_slot_retirement`, `after_slot_retirement`, `slot_retirement_kept`,
 /// and `before_slot_adoption`. Retirement and adoption witnesses match the
 /// slot name. The snapshot phase `snapshot_after_metadata` pauses after
-/// metadata is read and before rows are copied. Control phases run through the
+/// metadata is read and before rows are copied. `before_upstream_lock` pauses
+/// the inline scheduler before checking upstream locks. Control phases run through the
 /// finalization barrier without injecting a failure.
 pub static PGS_TEST_CHAOS_PHASE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
@@ -1278,7 +1279,7 @@ pub fn register_scheduler_gucs() {
           control_early_progress, control_partial_finalization, \
           before_receipt, before_replay, before_ack, after_slot_advance, \
           before_slot_retirement, after_slot_retirement, slot_retirement_kept, \
-          before_slot_adoption, snapshot_after_metadata; \
+          before_slot_adoption, snapshot_after_metadata, before_upstream_lock; \
           after_apply and during_finalize inject a failure after their barrier; \
           control phases run the finalization barrier without failure and inject \
           their named semantic control. \

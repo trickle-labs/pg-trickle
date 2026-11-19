@@ -976,6 +976,11 @@ WHERE ct.source_placement = 'distributed';
 -- Create event trigger functions with correct RETURNS event_trigger type.
 -- pgrx's #[pg_extern] generates RETURNS void, which PostgreSQL rejects for
 -- event triggers. We create them manually here with the correct return type.
+CREATE FUNCTION pgtrickle."_on_ddl_start"()
+    RETURNS event_trigger
+    LANGUAGE c
+    AS 'MODULE_PATHNAME', 'pg_trickle_on_ddl_start_wrapper';
+
 CREATE FUNCTION pgtrickle."_on_ddl_end"()
     RETURNS event_trigger
     SECURITY DEFINER -- nosemgrep: sql.security-definer.present — event trigger runs with pinned pgtrickle catalog search_path below.
@@ -989,6 +994,11 @@ CREATE FUNCTION pgtrickle."_on_sql_drop"()
     SET search_path TO pgtrickle, pg_catalog, pg_temp
     LANGUAGE c
     AS 'MODULE_PATHNAME', 'pg_trickle_on_sql_drop_wrapper';
+
+-- Event trigger: inspect DDL before a protected partition cut
+CREATE EVENT TRIGGER pg_trickle_ddl_start_tracker
+    ON ddl_command_start
+    EXECUTE FUNCTION pgtrickle._on_ddl_start();
 
 -- Event trigger: track ALTER TABLE on upstream sources
 CREATE EVENT TRIGGER pg_trickle_ddl_tracker
@@ -4538,6 +4548,24 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION pgtrickle."set_stream_table_partition_retention"(
+    "name" text, "policy" text, "source_column" text DEFAULT NULL, "cutoff" text DEFAULT NULL
+) RETURNS void SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', 'set_stream_table_partition_retention_wrapper';
+
+CREATE FUNCTION pgtrickle."get_stream_table_partition_retention"("name" text)
+RETURNS jsonb STRICT SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', 'get_stream_table_partition_retention_wrapper';
+
+CREATE FUNCTION pgtrickle."create_stream_table_with_retention"(
+    "name" text, "query" text, "policy" text, "source_column" text, "cutoff" text,
+    "schedule" text DEFAULT 'calculated'
+) RETURNS void SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', 'create_stream_table_with_retention_wrapper';
+
 GRANT USAGE ON SCHEMA pgtrickle TO pgtrickle_reader, pgtrickle_operator, pgtrickle_admin;
 GRANT SELECT ON pgtrickle.pg_stat_progress_pgtrickle
     TO pgtrickle_reader, pgtrickle_operator, pgtrickle_admin;
@@ -4565,6 +4593,9 @@ GRANT EXECUTE ON FUNCTION pgtrickle.alter_stream_table(
     double precision, text
 ) TO pgtrickle_admin;
 GRANT EXECUTE ON FUNCTION pgtrickle.drop_stream_table(text, boolean) TO pgtrickle_admin;
+GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, text, text, text, text, text) TO pgtrickle_admin;
+GRANT EXECUTE ON FUNCTION pgtrickle.get_stream_table_partition_retention(text) TO pgtrickle_admin;
+GRANT EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention(text, text, text, text) TO pgtrickle_admin;
 
 
 -- src/lib.rs:2138
@@ -4652,6 +4683,9 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_apply_delta_enr(bigint, integer, bo
 REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_handle_truncate(bigint) FROM PUBLIC;
 
 -- owner_lifecycle
+REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, text, text, text, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.get_stream_table_partition_retention(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention(text, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.ann_maintenance_request(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.cancel_ann_maintenance(bigint) FROM PUBLIC;
@@ -4796,6 +4830,7 @@ GRANT EXECUTE ON FUNCTION pgtrickle.worker_allocation_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.worker_pool_status() TO PUBLIC;
 
 -- trigger_entry
+REVOKE EXECUTE ON FUNCTION pgtrickle._on_ddl_start() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_ddl_end() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_sql_drop() FROM PUBLIC;
 

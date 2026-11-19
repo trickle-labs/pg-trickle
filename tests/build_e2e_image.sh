@@ -17,6 +17,7 @@
 # Usage:
 #   ./tests/build_e2e_image.sh              # default build (auto-builds builder)
 #   ./tests/build_e2e_image.sh --no-cache   # force full rebuild of both images
+#   PGS_E2E_FEATURES=e2e-unsafe-test-hooks ./tests/build_e2e_image.sh
 # =============================================================================
 set -euo pipefail
 
@@ -79,6 +80,7 @@ if [[ -n "${BUILDX_CACHE_SCOPE:-}" && "${BUILDER_IMAGE}" == */* ]]; then
         -t "${IMAGE_NAME}:${IMAGE_TAG}" \
         -f "${SCRIPT_DIR}/Dockerfile.e2e" \
         --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE}" \
+        --build-arg "E2E_FEATURES=${PGS_E2E_FEATURES:-}" \
         ${EXTRA_ARGS} \
         "${PROJECT_ROOT}"
 else
@@ -87,6 +89,7 @@ else
         -t "${IMAGE_NAME}:${IMAGE_TAG}" \
         -f "${SCRIPT_DIR}/Dockerfile.e2e" \
         --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE}" \
+        --build-arg "E2E_FEATURES=${PGS_E2E_FEATURES:-}" \
         ${EXTRA_ARGS} \
         "${PROJECT_ROOT}"
 fi

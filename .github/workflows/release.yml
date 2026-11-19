@@ -198,6 +198,7 @@ jobs:
           # 'cargo pgrx info path pg18' returns the installation prefix dir;
           # the pg_config binary lives under bin/ inside that directory.
           PG_CONFIG_PATH="$(cargo pgrx info path pg18)/bin/pg_config"
+          rm -rf target/release/pg_trickle-pg18
           cargo pgrx package --pg-config "${PG_CONFIG_PATH}"
 
 
