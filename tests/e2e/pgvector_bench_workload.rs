@@ -849,6 +849,12 @@ async fn test_pgvector_subscription_scaling_workload() {
                         after.3 - before.3,
                     ];
                     assert!(tuple_delta.iter().all(|value| *value >= 0));
+                    if subscriptions == 0 && !analyzed {
+                        assert_eq!(
+                            tuple_delta[0], 0,
+                            "an unanalyzed zero-subscription refresh must not scan the stream to estimate merge strategy"
+                        );
+                    }
                     samples.push(serde_json::json!({"round":round,"mutation_shape":mutation_shape,"changed_rows":changed_rows,"source_mutation_ms":source_mutation_ms,"source_wal_bytes":source_wal_bytes,"refresh_ms":elapsed_ms,"commit_ms":commit_ms,"refresh_wal_bytes":refresh_wal_bytes,"notification_wait_ms":delivery_ms,"merge_strategy":strategy,
                     "stream_sequential_tuples_returned":tuple_delta[0],"stream_index_tuples_fetched":tuple_delta[1],
                     "source_sequential_tuples_returned":tuple_delta[2],"source_index_tuples_fetched":tuple_delta[3],

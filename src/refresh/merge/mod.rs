@@ -3081,15 +3081,12 @@ pub fn execute_differential_refresh_with_tuning(
         crate::config::MergeStrategy::Merge => false,
         crate::config::MergeStrategy::Auto => {
             // Heuristic: use DELETE+INSERT when delta is a small fraction
-            // of the target table. Estimate target rows from pg_class.
+            // of the target table. If statistics are missing, prefer MERGE
+            // over counting the stream table during refresh.
             let threshold = crate::config::pg_trickle_merge_strategy_threshold();
             if total_change_count > 0 && threshold > 0.0 {
                 let target_rows: i64 = Spi::get_one::<i64>(&format!(
-                    "SELECT CASE WHEN reltuples >= 1 THEN reltuples::bigint \
-                            ELSE (SELECT COUNT(*) FROM \"{}\".\"{}\" ) END \
-                     FROM pg_class WHERE oid = {}::oid",
-                    schema.replace('"', "\"\""),
-                    name.replace('"', "\"\""),
+                    "SELECT reltuples::bigint FROM pg_class WHERE oid = {}::oid",
                     st.pgt_relid.to_u32(),
                 ))
                 .unwrap_or(Some(0))
@@ -4267,11 +4264,7 @@ pub fn execute_differential_refresh_with_tuning(
     if crate::config::pg_trickle_adaptive_merge_strategy() {
         let threshold = crate::config::pg_trickle_merge_strategy_threshold();
         let target_rows: i64 = Spi::get_one::<i64>(&format!(
-            "SELECT CASE WHEN reltuples >= 1 THEN reltuples::bigint \
-                    ELSE (SELECT COUNT(*) FROM \"{}\".\"{}\" ) END \
-             FROM pg_class WHERE oid = {}::oid",
-            schema.replace('"', "\"\""),
-            name.replace('"', "\"\""),
+            "SELECT reltuples::bigint FROM pg_class WHERE oid = {}::oid",
             st.pgt_relid.to_u32(),
         ))
         .unwrap_or(Some(0))
