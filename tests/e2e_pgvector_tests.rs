@@ -2959,10 +2959,25 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
                 .fetch_one(&mut *conn)
                 .await
                 .expect("inspect centroid CDC window");
+        // These two deterministic steps previously advanced the frontier without applying the row move.
+        let trace_centroid_delta = (dimensions == 384 && diverse && step == 274)
+            || (dimensions == 3 && !diverse && step == 392);
+        if trace_centroid_delta {
+            sqlx::query("SET pg_trickle.dvm_decision_trace = on")
+                .execute(&mut *conn)
+                .await
+                .expect("enable centroid failure trace");
+        }
         sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_churn_st')")
             .execute(&mut *conn)
             .await
             .expect("refresh centroid churn");
+        if trace_centroid_delta {
+            sqlx::query("SET pg_trickle.dvm_decision_trace = off")
+                .execute(&mut *conn)
+                .await
+                .expect("disable centroid failure trace");
+        }
         let matches: bool = sqlx::query_scalar(
             "WITH native AS (SELECT grp, avg(v)::real[] AS v, count(*) AS n FROM centroid_churn_src GROUP BY grp), \
              actual AS (SELECT grp, centroid::real[] AS v, __pgt_count AS n FROM centroid_churn_st) \

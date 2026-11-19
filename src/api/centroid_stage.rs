@@ -609,6 +609,31 @@ fn stage_centroid_delta(
         .map_err(|error| PgTrickleError::SpiError(format!("centroid delta staging: {error}")))?;
         Ok(table)
     })?;
+    if crate::config::pg_trickle_dvm_decision_trace() {
+        let source_rows = buffers
+            .source_tables()
+            .iter()
+            .map(|(source_oid, source)| {
+                // nosemgrep: rust.spi.query.dynamic-format -- source is an internally generated, quoted temp relation.
+                let rows =
+                    match Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {source}")) {
+                        Ok(rows) => serde_json::json!({"rows": rows}),
+                        Err(error) => serde_json::json!({"error": error.to_string()}),
+                    };
+                serde_json::json!({"source_oid": source_oid, "staged": rows})
+            })
+            .collect::<Vec<_>>();
+        // nosemgrep: rust.spi.query.dynamic-format -- table is an internally generated temp relation.
+        let delta_rows = match Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {table}"))
+        {
+            Ok(rows) => serde_json::json!({"rows": rows}),
+            Err(error) => serde_json::json!({"error": error.to_string()}),
+        };
+        pgrx::log!(
+            "[pg_trickle] centroid_delta_staging={}",
+            serde_json::json!({"sources": source_rows, "delta": delta_rows})
+        );
+    }
     for source in buffers.source_tables().values() {
         // nosemgrep: rust.spi.run.dynamic-format -- source is an internally generated, quoted temp relation.
         Spi::run(&format!("DROP TABLE {source}"))
@@ -869,6 +894,18 @@ pub(crate) fn stage_centroid_candidates(
          SELECT __pgt_row_id, __pgt_action, {columns}, __pgt_count FROM {candidate_table}"
     ))
     .map_err(|error| PgTrickleError::SpiError(format!("centroid public candidates: {error}")))?;
+    if crate::config::pg_trickle_dvm_decision_trace() {
+        // nosemgrep: rust.spi.query.dynamic-format -- relations are internally generated temp tables.
+        let candidate_rows =
+            match Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {candidate_table}")) {
+                Ok(rows) => serde_json::json!({"rows": rows}),
+                Err(error) => serde_json::json!({"error": error.to_string()}),
+            };
+        pgrx::log!(
+            "[pg_trickle] centroid_candidates={}",
+            serde_json::json!({"private": candidate_rows})
+        );
+    }
     restrict_staged_table(&public_table)?;
     let owner = crate::sql_builder::ident(&crate::refresh::stream_owner_name(st)?);
     // nosemgrep: rust.spi.run.dynamic-format -- table is internal and owner is catalog-derived and quoted.
@@ -898,6 +935,9 @@ pub(crate) fn apply_centroid_candidates(
             Ok(rows.len() as i64)
         })
     })?;
+    if crate::config::pg_trickle_dvm_decision_trace() {
+        pgrx::log!("[pg_trickle] centroid_applied_rows={applied}");
+    }
     let private = &staged.private;
     // nosemgrep: rust.spi.run_with_args.dynamic-format -- private is an internally generated temp relation.
     Spi::run_with_args(
