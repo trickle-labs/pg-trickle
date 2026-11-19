@@ -281,13 +281,21 @@ def check_retention_contract(contract: dict) -> None:
         "partition-retention qualification must execute the TRIM and RETAIN cases against the release candidate",
     )
     script = (prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8")
+    check_retention_upgrade_script(script)
+
+
+def check_retention_upgrade_script(script: str) -> None:
     for marker in (
         "to_regprocedure('pgtrickle.set_stream_table_partition_retention(text,text,text,text)')",
         "to_regprocedure('pgtrickle.get_stream_table_partition_retention(text)')",
         "to_regprocedure('pgtrickle.create_stream_table_with_retention(text,text,text,text,text,text)')",
         "evtname='pg_trickle_ddl_start_tracker'",
+        "get_stream_table_partition_retention('retention_upgrade_st')->>'enabled'",
+        "set_stream_table_partition_retention(\n        'retention_upgrade_st', 'RETAIN', 'd', '2026-01-01')",
+        "DETACH PARTITION public.retention_upgrade_old CONCURRENTLY",
+        "retention_upgrade_st')->'sealed_ranges'",
     ):
-        prior.shared.require(marker in script, f"published upgrade check is missing retention marker {marker}")
+        prior.shared.require(marker in script, f"published upgrade runtime check is missing retention marker {marker}")
 
 
 def main() -> None:

@@ -35,6 +35,13 @@ class RetirementContractTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             gate.check_retention_contract(broken)
 
+    def test_retention_upgrade_requires_runtime_after_direct_upgrade(self):
+        script = (gate.prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text()
+        gate.check_retention_upgrade_script(script)
+        broken = script.replace("DETACH PARTITION public.retention_upgrade_old CONCURRENTLY", "DETACH PARTITION public.retention_upgrade_old", 1)
+        with self.assertRaises(SystemExit):
+            gate.check_retention_upgrade_script(broken)
+
     def test_published_vector_upgrade_checks_cannot_be_removed(self):
         script = (gate.prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text()
         gate.check_pgvector_upgrade_script(script)

@@ -90,6 +90,25 @@ if [[ "$VECTOR_UPGRADE" == true ]]; then
         WHERE s.pgt_name='upgrade_vector_st' AND op.opcname='vector_l2_ops' AND i.indisvalid AND i.indisready")"
     [[ -n "$VECTOR_BEFORE" ]] || { echo "published helper did not create a valid L2 index" >&2; exit 1; }
     echo "Published vector baseline: pgvector=0.8.7 image=$POSTGRES_IMAGE index=$VECTOR_BEFORE"
+
+    # The published package creates this stream before the candidate binary is
+    # installed so the v0.109.0 migration is exercised on existing metadata.
+    psql "CREATE TABLE public.retention_upgrade_source(
+              id int NOT NULL, d date NOT NULL, amount int NOT NULL,
+              PRIMARY KEY(id,d)) PARTITION BY RANGE(d);
+        CREATE TABLE public.retention_upgrade_old PARTITION OF public.retention_upgrade_source
+            FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+        CREATE TABLE public.retention_upgrade_live PARTITION OF public.retention_upgrade_source
+            FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+        INSERT INTO public.retention_upgrade_source VALUES
+            (1,'2025-06-01',10),(2,'2026-06-01',20);
+        SELECT pgtrickle.create_stream_table(
+            name=>'retention_upgrade_st',
+            query=>'SELECT d, SUM(amount) AS total, COUNT(*) AS n
+                    FROM public.retention_upgrade_source GROUP BY d',
+            schedule=>'1h', refresh_mode=>'DIFFERENTIAL')" >/dev/null
+    psql "SELECT pgtrickle.refresh_stream_table('retention_upgrade_st')" >/dev/null
+    psql "SELECT count(*)=2 FROM public.retention_upgrade_st" | grep -qx t
 fi
 
 # Exercise upgrade of actual stream-table storage created by the published
@@ -341,6 +360,24 @@ if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.109.0" ]]; then
         AND to_regprocedure('pgtrickle.create_stream_table_with_retention(text,text,text,text,text,text)') IS NOT NULL
         AND EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger
                     WHERE evtname='pg_trickle_ddl_start_tracker' AND evtevent='ddl_command_start')" | grep -qx t
+
+    # Existing streams stay unconfigured after upgrade. Then exercise RETAIN
+    # through the migrated API and DDL hook on the same upgraded catalog.
+    psql "SELECT pgtrickle.get_stream_table_partition_retention('retention_upgrade_st')->>'enabled'" | grep -qx false
+    psql "SELECT pgtrickle.set_stream_table_partition_retention(
+        'retention_upgrade_st', 'RETAIN', 'd', '2026-01-01')" >/dev/null
+    psql "ALTER TABLE public.retention_upgrade_source
+        DETACH PARTITION public.retention_upgrade_old CONCURRENTLY" >/dev/null
+    psql "SELECT NOT EXISTS (
+        (SELECT d,total,n FROM public.retention_upgrade_st
+         EXCEPT ALL VALUES ('2025-06-01'::date,10::bigint,1::bigint),
+                            ('2026-06-01'::date,20::bigint,1::bigint))
+        UNION ALL
+        (VALUES ('2025-06-01'::date,10::bigint,1::bigint),
+                ('2026-06-01'::date,20::bigint,1::bigint)
+         EXCEPT ALL SELECT d,total,n FROM public.retention_upgrade_st))" | grep -qx t
+    psql "SELECT pgtrickle.get_stream_table_partition_retention('retention_upgrade_st')->'sealed_ranges'
+        = '[{\"lower\":\"2025-01-01\",\"upper\":\"2026-01-01\"}]'::jsonb" | grep -qx t
 fi
 if [[ "$VECTOR_UPGRADE" == true ]]; then
     VECTOR_AFTER="$(psql "SELECT s.pgt_id::text || '|' || s.pgt_relid::text || '|' || s.defining_query || '|' ||
