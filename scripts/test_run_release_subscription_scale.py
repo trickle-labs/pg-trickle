@@ -6,14 +6,21 @@ import unittest
 import run_release_subscription_scale as scale
 
 
-def report(rows: int, subscriptions: int, analyzed: bool) -> dict:
+def report(
+    rows: int,
+    subscriptions: int,
+    analyzed: bool,
+    dimensions: int = 384,
+    pivots: int = 1,
+    force_explicit: bool = True,
+) -> dict:
     return {
         "pg_trickle": "0.109.0",
         "pgvector": "0.8.7",
         "postgres": "PostgreSQL 18.6 on x86_64-pc-linux-gnu",
-        "dimensions": 384,
-        "distinct_pivots": 1,
-        "force_explicit_with_noop_trigger": True,
+        "dimensions": dimensions,
+        "distinct_pivots": pivots,
+        "force_explicit_with_noop_trigger": force_explicit,
         "nested_plan_capture": False,
         "measurements": [
             {
@@ -22,7 +29,7 @@ def report(rows: int, subscriptions: int, analyzed: bool) -> dict:
                 "analyzed": analyzed,
                 "samples": [
                     {
-                        "merge_strategy": "explicit_dml",
+                        "merge_strategy": "explicit_dml" if force_explicit else "delete_insert",
                         "refresh_ms": 1.0,
                         "commit_ms": 0.1,
                         "stream_sequential_tuples_returned": 0,
@@ -41,6 +48,22 @@ class SubscriptionScaleTests(unittest.TestCase):
         data = report(1_000_000, 10, True)
         output = scale.REPORT_MARKER + json.dumps(data)
         self.assertEqual(scale.parse_case(output, 1_000_000, 10, True), data)
+
+    def test_parse_case_accepts_trigger_free_768_dimension_measurement(self):
+        data = report(1_000_000, 1_000, True, dimensions=768, pivots=10, force_explicit=False)
+        output = scale.REPORT_MARKER + json.dumps(data)
+        self.assertEqual(
+            scale.parse_case(
+                output,
+                1_000_000,
+                1_000,
+                True,
+                dimensions=768,
+                force_explicit=False,
+                pivots=10,
+            ),
+            data,
+        )
 
     def test_parse_case_rejects_wrong_scale_or_uncontrolled_merge(self):
         wrong_scale = report(1_000_000, 10, True)
@@ -62,20 +85,39 @@ class SubscriptionScaleTests(unittest.TestCase):
     def test_matrix_includes_the_one_million_source_row_limit(self):
         self.assertEqual(scale.ROW_COUNTS, (1_000, 10_000, 100_000, 1_000_000))
         self.assertEqual(scale.SUBSCRIPTIONS, (0, 1, 10, 100, 1_000))
-        self.assertEqual(scale.DIMENSIONS, 384)
-        self.assertEqual(len(scale.ROW_COUNTS) * len(scale.SUBSCRIPTIONS) * len(scale.STATISTICS), 40)
+        self.assertEqual(scale.DIMENSIONS, (384, 768))
+        self.assertEqual(
+            scale.CASE_GROUPS,
+            (
+                (384, scale.ROW_COUNTS, scale.STATISTICS, True, scale.SUBSCRIPTIONS),
+                (384, (1_000_000,), ("analyzed",), False, (0, 1_000)),
+                (768, (1_000_000,), ("analyzed",), False, (0, 1_000)),
+            ),
+        )
+        self.assertEqual(
+            sum(
+                len(rows) * len(statistics) * len(subscriptions)
+                for _, rows, statistics, _, subscriptions in scale.CASE_GROUPS
+            ),
+            44,
+        )
 
     def test_matrix_captures_same_strategy_plans_at_zero_and_max_subscriptions(self):
         expected = {
-            (1_000_000, 0, "unanalyzed"),
-            (1_000_000, 1_000, "unanalyzed"),
+            (384, 1_000_000, 0, "unanalyzed", True),
+            (384, 1_000_000, 1_000, "unanalyzed", True),
+            (384, 1_000_000, 0, "analyzed", False),
+            (384, 1_000_000, 1_000, "analyzed", False),
+            (768, 1_000_000, 0, "analyzed", False),
+            (768, 1_000_000, 1_000, "analyzed", False),
         }
         self.assertEqual(scale.PLAN_CASES, expected)
         self.assertTrue(scale.PLAN_CASES <= {
-            (rows, subscriptions, statistics)
-            for rows in scale.ROW_COUNTS
-            for subscriptions in scale.SUBSCRIPTIONS
-            for statistics in scale.STATISTICS
+            (dimensions, rows, subscriptions, statistics, force_explicit)
+            for dimensions, row_counts, statistics_values, force_explicit, subscriptions_values in scale.CASE_GROUPS
+            for rows in row_counts
+            for subscriptions in subscriptions_values
+            for statistics in statistics_values
         })
 
     def test_parse_case_requires_the_declared_plan_capture(self):

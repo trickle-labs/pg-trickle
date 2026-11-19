@@ -995,7 +995,7 @@
       "measurement_file": "qualification-logs/raw/subscription-scale-1m.json",
       "e2e_image": "pg_trickle_e2e_pgvector:0.8.7",
       "nextest_retries": 0,
-      "workload": "exact-package 384-dimensional 1k/10k/100k/1m source-row subscription matrix with 1m-row plan controls; not a RAG benchmark"
+      "workload": "exact-package 384-dimensional 1k/10k/100k/1m source-row subscription matrix plus analyzed 1m-row trigger-free controls at 384/768 dimensions; not a RAG benchmark"
     },
     {
       "id": "centroid-cost-matrix",

@@ -255,7 +255,7 @@ def check_subscription_scale_contract(contract: dict) -> None:
         and suite.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
         and suite.get("nextest_retries") == 0
         and suite.get("workload")
-        == "exact-package 384-dimensional 1k/10k/100k/1m source-row subscription matrix with 1m-row plan controls; not a RAG benchmark",
+        == "exact-package 384-dimensional 1k/10k/100k/1m source-row subscription matrix plus analyzed 1m-row trigger-free controls at 384/768 dimensions; not a RAG benchmark",
         "subscription scale must measure the exact release package separately from RAG",
     )
 

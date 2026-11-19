@@ -17,13 +17,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ROW_COUNTS = (1_000, 10_000, 100_000, 1_000_000)
-DIMENSIONS = 384
+DIMENSIONS = (384, 768)
 SUBSCRIPTIONS = (0, 1, 10, 100, 1000)
 STATISTICS = ("unanalyzed", "analyzed")
 ROUNDS = 1
+# shortcut: trigger-free runs cover zero and max subscriptions, expand when per-count attribution is required.
+CASE_GROUPS = (
+    (384, ROW_COUNTS, STATISTICS, True, SUBSCRIPTIONS),
+    (384, (1_000_000,), ("analyzed",), False, (0, 1000)),
+    (768, (1_000_000,), ("analyzed",), False, (0, 1000)),
+)
 PLAN_CASES = {
-    (1_000_000, 0, "unanalyzed"),
-    (1_000_000, 1_000, "unanalyzed"),
+    (384, 1_000_000, 0, "unanalyzed", True),
+    (384, 1_000_000, 1_000, "unanalyzed", True),
+    (384, 1_000_000, 0, "analyzed", False),
+    (384, 1_000_000, 1_000, "analyzed", False),
+    (768, 1_000_000, 0, "analyzed", False),
+    (768, 1_000_000, 1_000, "analyzed", False),
 }
 REPORT_MARKER = "PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON="
 TEST_COMMAND = [
@@ -40,7 +50,15 @@ TEST_COMMAND = [
 
 
 def parse_case(
-    output: str, rows: int, subscriptions: int, analyzed: bool, plan_capture: bool = False
+    output: str,
+    rows: int,
+    subscriptions: int,
+    analyzed: bool,
+    plan_capture: bool = False,
+    *,
+    dimensions: int = 384,
+    force_explicit: bool = True,
+    pivots: int = 1,
 ) -> dict:
     reports = [line.removeprefix(REPORT_MARKER) for line in output.splitlines() if line.startswith(REPORT_MARKER)]
     if len(reports) != 1:
@@ -54,9 +72,9 @@ def parse_case(
         or report.get("pgvector") != "0.8.7"
         or not isinstance(postgres, str)
         or not re.match(r"^PostgreSQL 18(?:\.|\s)", postgres)
-        or report.get("dimensions") != DIMENSIONS
-        or report.get("distinct_pivots") != 1
-        or report.get("force_explicit_with_noop_trigger") is not True
+        or report.get("dimensions") != dimensions
+        or report.get("distinct_pivots") != pivots
+        or report.get("force_explicit_with_noop_trigger") is not force_explicit
         or report.get("nested_plan_capture") is not plan_capture
     ):
         raise ValueError("subscription benchmark used unexpected package, database, or plan-control settings")
@@ -75,7 +93,9 @@ def parse_case(
     if not isinstance(samples, list) or len(samples) != ROUNDS:
         raise ValueError("subscription benchmark did not record the required round")
     sample = samples[0]
-    if not isinstance(sample, dict) or sample.get("merge_strategy") != "explicit_dml":
+    if not isinstance(sample, dict) or (
+        force_explicit and sample.get("merge_strategy") != "explicit_dml"
+    ):
         raise ValueError("subscription benchmark did not use the controlled merge strategy")
     for key in (
         "refresh_ms",
@@ -91,17 +111,26 @@ def parse_case(
     return report
 
 
-def run_case(rows: int, subscriptions: int, statistics: str, plan_path: Path | None) -> dict:
+def run_case(
+    dimensions: int,
+    rows: int,
+    subscriptions: int,
+    statistics: str,
+    force_explicit: bool,
+    pivots: int,
+    plan_path: Path | None,
+) -> dict:
     environment = os.environ.copy()
     environment.update(
         {
             "PGVECTOR_EXPECTED_VERSION": "0.8.7",
             "PGVECTOR_SUB_ROWS": str(rows),
             "PGVECTOR_SUB_COUNTS": str(subscriptions),
-            "PGVECTOR_SUB_DIM": str(DIMENSIONS),
+            "PGVECTOR_SUB_DIM": str(dimensions),
             "PGVECTOR_SUB_ROUNDS": str(ROUNDS),
             "PGVECTOR_SUB_STATISTICS": statistics,
-            "PGVECTOR_SUB_FORCE_EXPLICIT": "1",
+            "PGVECTOR_SUB_FORCE_EXPLICIT": "1" if force_explicit else "0",
+            "PGVECTOR_SUB_PIVOTS": str(pivots),
         }
     )
     environment.pop("PGVECTOR_SUB_PLAN_LOG", None)
@@ -126,6 +155,9 @@ def run_case(rows: int, subscriptions: int, statistics: str, plan_path: Path | N
         subscriptions,
         statistics == "analyzed",
         plan_capture=plan_path is not None,
+        dimensions=dimensions,
+        force_explicit=force_explicit,
+        pivots=pivots,
     )
 
 
@@ -194,8 +226,17 @@ def main() -> int:
             "candidate_commit": os.environ["PGT_RELEASE_CANDIDATE_COMMIT"],
             "package_sha256": os.environ["PGT_RELEASE_ARTIFACT_SHA256"],
             "workload": "distance-subscription scale; not a RAG benchmark",
-            "row_counts": list(ROW_COUNTS),
-            "dimensions": DIMENSIONS,
+            "case_groups": [
+                {
+                    "dimensions": dimensions,
+                    "row_counts": list(row_counts),
+                    "statistics": list(statistics),
+                    "subscription_counts": list(subscriptions),
+                    "force_explicit_with_noop_trigger": force_explicit,
+                }
+                for dimensions, row_counts, statistics, force_explicit, subscriptions in CASE_GROUPS
+            ],
+            "dimensions": list(DIMENSIONS),
             "subscription_counts": list(SUBSCRIPTIONS),
             "statistics": list(STATISTICS),
             "rounds_per_case": ROUNDS,
@@ -205,47 +246,65 @@ def main() -> int:
         }
         write_measurement(measurement_path, result)
         postgres_version = None
-        for rows in ROW_COUNTS:
-            for statistics in STATISTICS:
-                for subscriptions in SUBSCRIPTIONS:
-                    plan_path = None
-                    case_id = (rows, subscriptions, statistics)
-                    if case_id in PLAN_CASES:
-                        plan_name = f"subscription-scale-{rows}-{subscriptions}-{statistics}.log"
-                        plan_path = measurement_path.parent / plan_name
-                        plan_path.unlink(missing_ok=True)
-                    print(
-                        f"=== Exact-package subscriptions: {rows} rows, {DIMENSIONS} dimensions, "
-                        f"{subscriptions} subscriptions, {statistics} ===",
-                        flush=True,
-                    )
-                    try:
-                        report = run_case(rows, subscriptions, statistics, plan_path)
-                    except (OSError, RuntimeError, ValueError):
-                        if plan_path is not None and plan_path.is_file():
-                            try:
-                                archive_plan_log(plan_path, result)
-                            except (OSError, ValueError) as archive_error:
-                                print(
-                                    f"WARNING: could not retain partial plan log {plan_path.name}: {archive_error}",
-                                    file=sys.stderr,
-                                    flush=True,
-                                )
-                        raise
-                    postgres_version = report["postgres"]
-                    case = {
-                        "rows": rows,
-                        "statistics": statistics,
-                        "subscriptions": subscriptions,
-                        "report": report,
-                    }
-                    if plan_path is not None:
-                        plan_relative = attach_plan_log(
-                            plan_path, rows, subscriptions, statistics, result
+        for dimensions, row_counts, statistics_values, force_explicit, subscription_counts in CASE_GROUPS:
+            for rows in row_counts:
+                for statistics in statistics_values:
+                    for subscriptions in subscription_counts:
+                        pivots = max(1, min(subscriptions, 10))
+                        plan_path = None
+                        case_id = (dimensions, rows, subscriptions, statistics, force_explicit)
+                        if case_id in PLAN_CASES:
+                            mode = "explicit" if force_explicit else "trigger-free"
+                            plan_name = (
+                                f"subscription-scale-{dimensions}-{rows}-{subscriptions}-"
+                                f"{statistics}-{mode}.log"
+                            )
+                            plan_path = measurement_path.parent / plan_name
+                            plan_path.unlink(missing_ok=True)
+                        mode = "forced explicit control" if force_explicit else "trigger-free"
+                        print(
+                            f"=== Exact-package subscriptions: {rows} rows, {dimensions} dimensions, "
+                            f"{subscriptions} subscriptions, {statistics}, {mode} ===",
+                            flush=True,
                         )
-                        case["plan_log"] = plan_relative
-                    result["cases"].append(case)
-                    write_measurement(measurement_path, result)
+                        try:
+                            report = run_case(
+                                dimensions,
+                                rows,
+                                subscriptions,
+                                statistics,
+                                force_explicit,
+                                pivots,
+                                plan_path,
+                            )
+                        except (OSError, RuntimeError, ValueError):
+                            if plan_path is not None and plan_path.is_file():
+                                try:
+                                    archive_plan_log(plan_path, result)
+                                except (OSError, ValueError) as archive_error:
+                                    print(
+                                        f"WARNING: could not retain partial plan log {plan_path.name}: {archive_error}",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
+                            raise
+                        postgres_version = report["postgres"]
+                        case = {
+                            "dimensions": dimensions,
+                            "rows": rows,
+                            "statistics": statistics,
+                            "subscriptions": subscriptions,
+                            "force_explicit_with_noop_trigger": force_explicit,
+                            "distinct_pivots": pivots,
+                            "report": report,
+                        }
+                        if plan_path is not None:
+                            plan_relative = attach_plan_log(
+                                plan_path, rows, subscriptions, statistics, result
+                            )
+                            case["plan_log"] = plan_relative
+                        result["cases"].append(case)
+                        write_measurement(measurement_path, result)
         match = re.match(r"^PostgreSQL (18(?:\.\d+){1,2})", postgres_version or "")
         if not match:
             raise ValueError("subscription measurement did not report a PostgreSQL 18 version")
