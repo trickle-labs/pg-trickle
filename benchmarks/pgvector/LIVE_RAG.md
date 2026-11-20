@@ -224,7 +224,7 @@ For an opt-in concurrent three-approach exercise, run the ignored
 `test_live_rag_unblocked_writes_and_reads_during_refresh` E2E test. It uses
 fresh databases, one paced visibility writer, a restricted tenant reader and
 a 200 ms target maintenance cadence. `PGT_RAG_LOAD_ROWS` selects 1,000 to
-1,000,000 documents (default 1,000), `PGT_RAG_LOAD_DIMENSIONS` selects 384,
+100,000 documents (default 1,000), `PGT_RAG_LOAD_DIMENSIONS` selects 384,
 768 or 1536 (default 384), and `PGT_RAG_LOAD_CHANGES` selects 1 to 1,000
 ordered changes (default 100), subject to the test's tenant-size bound.
 For example, after preparing the E2E image and pinned pgvector image:
@@ -255,8 +255,10 @@ benchmark: it does not measure ANN recall or per-document freshness and runs
 the three databases serially. The batch runner substitutes the configured
 vector dimensions into the hybrid query; the standalone SQL example above
 remains three-dimensional. The retained candidate-bounded results cover
-10k rows at 384/768/1536 dimensions and 100k rows at 384 dimensions, but not
-the higher-dimensional 100k cases or 1m-row corpus. Larger-load
-recovery-to-searchability and final integrated-package reruns remain
+10k rows at 384/768/1536 dimensions and 100k rows at 384 dimensions. They are
+not final-package qualification. The release gate reruns both 10k and 100k at
+384/768/1536 against the exact package; corpora above 100k are out of scope and
+unvalidated.
+Larger-load recovery-to-searchability and final integrated-package reruns remain
 outstanding. The report records a scoped comparison and limitations; do not
 infer a universal performance advantage from these synthetic cases.

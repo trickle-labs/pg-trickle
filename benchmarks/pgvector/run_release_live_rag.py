@@ -17,7 +17,8 @@ import run_live_rag_batches
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DIMENSIONS = (768, 1536)
+ROWS = (10_000, 100_000)
+DIMENSIONS = (384, 768, 1536)
 BATCH = 1000
 CYCLES = 3
 DELAY_SECONDS = 0.02
@@ -28,7 +29,7 @@ POSTGRES_PASSWORD = "release-qualification"
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--rows", type=int, choices=(100_000,), required=True)
+    result.add_argument("--rows", type=int, choices=ROWS, nargs="+", required=True)
     result.add_argument("--dimensions", type=int, choices=DIMENSIONS, nargs="+", required=True)
     return result
 
@@ -137,10 +138,11 @@ def run_case(rows: int, dimensions: int, measurement_path: Path) -> dict:
     candidate_root = os.environ["PGT_EXTENSION_DIR"]
     attestation_path = os.environ["PGT_RELEASE_ATTESTATION_PATH"]
     image = os.environ["PGS_E2E_IMAGE"]
-    container = f"pgt-live-rag-{os.getpid()}-{dimensions}"
+    container = f"pgt-live-rag-{os.getpid()}-{rows}-{dimensions}"
     port = start_database(image, container)
-    stats_path = measurement_path.with_name(f"live-rag-100k-{dimensions}-docker-stats.jsonl")
-    checkpoint_path = measurement_path.with_name(f"live-rag-100k-{dimensions}-checkpoint.json")
+    size = f"{rows // 1000}k"
+    stats_path = measurement_path.with_name(f"live-rag-{size}-{dimensions}-docker-stats.jsonl")
+    checkpoint_path = measurement_path.with_name(f"live-rag-{size}-{dimensions}-checkpoint.json")
     stats = DockerStats(container, stats_path)
     connection_vars = connection_environment(port)
     previous = {key: os.environ.get(key) for key in connection_vars}
@@ -208,41 +210,46 @@ def write_measurement(path: Path, report: dict) -> None:
 
 def main() -> int:
     args = parser().parse_args()
-    if tuple(args.dimensions) != DIMENSIONS:
-        parser().error(f"dimensions must be selected in order: {DIMENSIONS}")
+    if tuple(args.rows) != ROWS or tuple(args.dimensions) != DIMENSIONS:
+        parser().error(f"release matrix requires rows {ROWS} and dimensions {DIMENSIONS} in order")
     measurement_path = Path(os.environ["PGS_RELEASE_MEASUREMENT_JSON"]).resolve()
     if not measurement_path.is_relative_to(ROOT):
         parser().error("measurement output must stay inside the repository workspace")
     reports: list[dict] = []
     evidence: list[Path] = []
-    for dimensions in args.dimensions:
-        evidence.extend(
-            [
-                measurement_path.with_name(f"live-rag-100k-{dimensions}-docker-stats.jsonl"),
-                measurement_path.with_name(f"live-rag-100k-{dimensions}-checkpoint.json"),
-            ]
-        )
+    for rows in args.rows:
+        size = f"{rows // 1000}k"
+        for dimensions in args.dimensions:
+            evidence.extend(
+                [
+                    measurement_path.with_name(f"live-rag-{size}-{dimensions}-docker-stats.jsonl"),
+                    measurement_path.with_name(f"live-rag-{size}-{dimensions}-checkpoint.json"),
+                ]
+            )
     for path in evidence:
         path.unlink(missing_ok=True)
     result = {
         "status": "running",
-        "rows": args.rows,
+        "rows": list(args.rows),
         "dimensions": list(args.dimensions),
         "cases": reports,
         "raw_evidence_files": [],
     }
     write_measurement(measurement_path, result)
     try:
-        for dimensions in args.dimensions:
-            print(f"=== Exact-package live RAG: {args.rows} rows, {dimensions} dimensions ===", flush=True)
-            report = run_case(args.rows, dimensions, measurement_path)
-            reports.append(report)
-            result["raw_evidence_files"] = sorted(path.relative_to(ROOT).as_posix() for path in evidence)
-            write_measurement(measurement_path, result)
+        for rows in args.rows:
+            for dimensions in args.dimensions:
+                print(f"=== Exact-package live RAG: {rows} rows, {dimensions} dimensions ===", flush=True)
+                report = run_case(rows, dimensions, measurement_path)
+                reports.append(report)
+                result["raw_evidence_files"] = sorted(
+                    path.relative_to(ROOT).as_posix() for path in evidence if path.is_file()
+                )
+                write_measurement(measurement_path, result)
         result["status"] = "complete"
         result["candidate_commit"] = os.environ["PGT_RELEASE_CANDIDATE_COMMIT"]
         result["package_sha256"] = os.environ["PGT_RELEASE_ARTIFACT_SHA256"]
-        result["workload"] = "100,000-document mixed update/insert/delete corpus, 768 and 1,536 dimensions"
+        result["workload"] = "10,000/100,000-document mixed update/insert/delete corpus, 384/768/1536 dimensions"
         result["raw_evidence_files"] = sorted(
             path.relative_to(ROOT).as_posix() for path in evidence if path.is_file()
         )

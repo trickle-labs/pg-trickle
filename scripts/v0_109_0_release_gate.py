@@ -114,15 +114,14 @@ def check_live_rag_contract(contract: dict) -> None:
         and suite.get("suite_version") == "0.109.0"
         and suite.get("command_argv") == [
             "python3", "benchmarks/pgvector/run_release_live_rag.py",
-            "--rows", "100000", "--dimensions", "768", "1536",
+            "--rows", "10000", "100000", "--dimensions", "384", "768", "1536",
         ]
         and suite.get("measurement_file") == "qualification-logs/raw/live-rag-100k.json"
         and suite.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
         and not suite.get("required_cases")
         and "timeout-minutes: 360" in workflow,
-        "release qualification must measure the exact package at 100,000 RAG documents without a 1M case",
+        "release qualification must measure the exact package at 10,000 and 100,000 RAG documents without a 1M case",
     )
-
 
 def check_pgvector_upgrade_script(script: str) -> None:
     for marker in (

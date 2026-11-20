@@ -4,6 +4,7 @@ import sys
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import run_live_rag_batches as benchmark
 
@@ -41,6 +42,23 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_json_result_ignores_prior_psql_output(self):
         self.assertEqual(benchmark.json_result('\n{"ok":true}\n'), {"ok": True})
+
+    def test_database_metadata_installs_vector_before_reading_versions(self):
+        versions = {
+            "postgres": "18.6",
+            "pgvector": "0.8.7",
+            "pg_trickle": "0.109.0",
+            "occupied": False,
+        }
+        with patch.object(
+            benchmark.worker,
+            "psql",
+            side_effect=["CREATE EXTENSION", json.dumps(versions)],
+        ) as psql:
+            self.assertEqual(benchmark.database_metadata(), versions)
+
+        self.assertEqual(psql.call_args_list[0].args[0], "CREATE EXTENSION IF NOT EXISTS vector")
+        self.assertIn("FROM pg_extension WHERE extname='vector'", psql.call_args_list[1].args[0])
 
     def test_plan_execution_time_is_extracted_from_explain(self):
         self.assertEqual(benchmark.plan_execution_ms({"plans": {"planner": [{"Execution Time": 1.25}]}}, "planner"), 1.25)
@@ -87,6 +105,15 @@ class BenchmarkTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("deleted IDs are not reused", result.stderr)
+
+    def test_rag_runner_rejects_corpora_above_100k_before_connecting(self):
+        result = subprocess.run(
+            [sys.executable, benchmark.__file__, "--rows", "100001", "--dimensions", "384",
+             "--candidate-commit", "0" * 40, "--package-sha256", "0" * 64],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("larger RAG corpora are out of scope", result.stderr)
 
     def test_availability_reports_searchable_absent_and_stale_rows(self):
         sql = benchmark.availability_sql("SELECT 1 AS id")
