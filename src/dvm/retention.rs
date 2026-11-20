@@ -2943,8 +2943,8 @@ mod tests {
             ),
         ];
         for (expression, group, type_oid, expected) in cases {
-            assert!(matches!(
-            query_group_candidate(&query(expression, group, type_oid, false), 42, "occurred"),
+            assert_eq!(
+                query_group_candidate(&query(expression, group, type_oid, false), 42, "occurred"),
                 Ok(RetentionGroupCandidate {
                     output_column: "bucket".into(),
                     bucket: expected,
@@ -2973,7 +2973,7 @@ mod tests {
 
     #[test]
     fn rejects_unproven_column_timezone_and_nullability() {
-        assert_eq!(
+        assert!(matches!(
             query_group_candidate(
                 &query(
                     hour("other", None),
@@ -3087,8 +3087,8 @@ mod tests {
             });
             aggregates[0].function = function;
             aggregates[0].argument = Some(col("value"));
-            assert!(matches!(
-            query_group_candidate(&tree, 42, "occurred").map(|_| ()),
+            assert_eq!(
+                query_group_candidate(&tree, 42, "occurred").map(|_| ()),
                 expected
             );
         }
@@ -3104,7 +3104,7 @@ mod tests {
             unreachable!()
         };
         aggregates[0].is_distinct = true;
-        assert_eq!(
+        assert!(matches!(
             query_group_candidate(&tree, 42, "occurred"),
             Err(RetentionQueryError::UnsupportedAggregate(_))
         ));
