@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running tests/e2e_bench_tests.rs (/private/tmp/pg-trickle-resume-1394/target/debug/deps/e2e_bench_tests-325822825afdd68c)
+
+running 1 test
+PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON={"dimensions":384,"distinct_pivots":1000,"force_explicit_with_noop_trigger":false,"measurements":[{"analyzed":true,"estimated_rows":1000000.0,"initial_rows":1000000,"last_analyze":"2026-11-15 15:16:00.478678+00","last_autoanalyze":null,"samples":[{"affected_identities":1,"commit_ms":3.514208,"merge_strategy":"explicit_dml","notification_wait_ms":8.694375,"refresh_ms":508.92833299999995,"round":0,"snapshot_kind":"bounded","snapshot_rows":1,"source_index_tuples_fetched":0,"source_sequential_tuples_returned":0,"stream_index_tuples_fetched":0,"stream_sequential_tuples_returned":0}],"subscriptions":1000}],"nested_plan_capture":false,"notes":"One row alternates across the threshold; each subscription emits its expected event. Refresh, commit, and post-commit listener wait are timed separately; notification delivery can begin before the listener wait. Tuple counters include repeated visits, not distinct rows. Plan instrumentation adds overhead. No controlled concurrency is recorded.","pg_trickle":"0.109.0","pgvector":"0.8.7","postgres":"PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"}
+test pgvector_workload::test_pgvector_subscription_scaling_workload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out; finished in 40.47s
