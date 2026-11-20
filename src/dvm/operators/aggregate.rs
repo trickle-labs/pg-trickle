@@ -25,16 +25,6 @@ fn qualified_column(prefix: &str, name: &str) -> String {
     result
 }
 
-fn qualified_column_with_alias(prefix: &str, name: &str) -> String {
-    let mut result = String::with_capacity(prefix.len() + 2 * name.len() + 9);
-    result.push_str(prefix);
-    result.push('.');
-    push_quoted_ident(&mut result, name);
-    result.push_str(" AS ");
-    push_quoted_ident(&mut result, name);
-    result
-}
-
 /// Resolve a column reference expression against child CTE column names.
 ///
 /// For a qualified `ColumnRef("c", "region")`, checks if `c__region`
@@ -2252,10 +2242,9 @@ fn generate_direct_agg_delta(
     let delta_cte = ctx.next_cte_name("agg_delta");
     let mut select_exprs = Vec::new();
 
-    // Group columns: c."region" AS "region"
-    // A44-10: direct CB reference — same value on both I and D rows within a group
+    // Group columns: the direct reference already carries its output name.
     for name in &group_output {
-        select_exprs.push(qualified_column_with_alias("c", name));
+        select_exprs.push(qualified_column("c", name));
     }
 
     // __ins_count, __del_count (total row counts per group)
@@ -4251,6 +4240,8 @@ mod tests {
         // Should use direct bypass (P5) since it's Scan → Aggregate with COUNT(*)
         // A44-10 (D+I schema): P5 uses c.action directly, no LATERAL VALUES
         assert_sql_contains(&sql, "changes_1");
+        assert_sql_contains(&sql, "c.\"region\"");
+        assert_sql_not_contains(&sql, "c.\"region\" AS \"region\"");
         assert_sql_contains(&sql, "c.action = 'I'");
         assert_sql_contains(&sql, "c.action = 'D'");
     }
@@ -8223,11 +8214,8 @@ mod tests {
     }
 
     #[test]
-    fn test_qualified_column_helpers_escape_identifiers() {
+    fn test_qualified_column_escapes_identifiers() {
         assert_eq!(qualified_column("c", "a\"b"), "c.\"a\"\"b\"");
-        assert_eq!(
-            qualified_column_with_alias("c", "region"),
-            "c.\"region\" AS \"region\""
-        );
+        assert_eq!(qualified_column("c", "foo(bar)"), "c.\"foo(bar)\"");
     }
 }
