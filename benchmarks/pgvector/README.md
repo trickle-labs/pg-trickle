@@ -5,13 +5,18 @@
 The opt-in subscription workload accepts comma-separated `PGVECTOR_SUB_ROWS`
 (1–1,000,000) and `PGVECTOR_SUB_COUNTS` (0–1,000), plus
 `PGVECTOR_SUB_DIM` (2–1,536) and `PGVECTOR_SUB_ROUNDS` (1–100).
+`PGVECTOR_SUB_PIVOTS` selects 1–1,000 distinct nearby pivot vectors (default 1);
+all remain on the same side of each measured threshold transition.
 `PGVECTOR_SUB_STATISTICS=both` runs separate unanalyzed and analyzed streams;
 the harness disables autovacuum on each and rejects an unanalyzed control if
 statistics were already collected. `PGVECTOR_SUB_FORCE_EXPLICIT=1` adds the
 same no-op row trigger to every stream, including the zero-subscription
 control, and requires the recorded merge path to be `explicit_dml` throughout.
 Trigger overhead is part of every control measurement, so these timings do not
-represent trigger-free production workloads.
+represent trigger-free production workloads. User triggers also disable the
+bounded distance snapshot, so subscribed cases take a full stream snapshot and
+scan the stream during evaluation. The report records the observed snapshot
+kind and row count; run without the trigger to investigate the bounded path.
 
 For a bounded control run on a packaged candidate image:
 
@@ -19,6 +24,7 @@ For a bounded control run on a packaged candidate image:
 PGS_E2E_IMAGE=pg_trickle_e2e_pgvector:0.8.7 \
 PGVECTOR_SUB_ROWS=1000,10000 PGVECTOR_SUB_COUNTS=0,1,10 \
 PGVECTOR_SUB_DIM=384 PGVECTOR_SUB_STATISTICS=both PGVECTOR_SUB_FORCE_EXPLICIT=1 \
+PGVECTOR_SUB_PLAN_LOG=subscription-postgres.log \
   ./scripts/run_e2e_tests.sh --retries 0 --test e2e_bench_tests \
   --run-ignored ignored-only --no-capture \
   -E 'test(test_pgvector_subscription_scaling_workload)'
@@ -26,11 +32,19 @@ PGVECTOR_SUB_DIM=384 PGVECTOR_SUB_STATISTICS=both PGVECTOR_SUB_FORCE_EXPLICIT=1 
 
 The report separates refresh, commit, and post-commit listener wait; listener
 wait is not commit-to-delivery latency because delivery may begin earlier.
-Same-transaction tuple counters and table statistics do not identify the
-internal SQL plan. This harness does not yet capture internal EXPLAIN plans,
-controlled concurrent load, WAL, or CPU, and a run alone does not establish a
-general scaling limit. Record the candidate artifact digest and host details
-alongside results. Larger cases are deliberately opt-in.
+When `PGVECTOR_SUB_PLAN_LOG` is set, PostgreSQL `auto_explain` records nested
+JSON plans with actual rows and buffers. START and END log markers identify each
+case and refresh. The file combines Docker stdout and stderr; use timestamps
+to interpret their ordering. Capture is also attempted when a test panics.
+Instrumentation adds overhead, so compare timings separately from uninstrumented
+runs. The scheduled job records its image ID and pg_trickle file hashes; these
+identify the development image, not a published release artifact. The harness
+does not yet measure controlled concurrent load, WAL, or CPU, and a run alone
+does not establish a general scaling limit. Larger cases remain opt-in.
+
+The [v0.109.0 candidate measurements](results/2026-11-09-candidate-subscription-arm64/README.md)
+compare the forced-trigger and bounded paths through 100,000 rows and 100
+subscriptions, with representative nested plans and explicit limitations.
 
 ## Version conformance
 
