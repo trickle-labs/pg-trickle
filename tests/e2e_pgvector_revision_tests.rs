@@ -2,7 +2,7 @@
 
 mod e2e;
 
-use e2e::E2eDb;
+use e2e::{E2eDb, disable_scheduler};
 
 type Claim = (String, String, String);
 
@@ -338,6 +338,7 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool, cancel: bo
     }
     .with_extension()
     .await;
+    disable_scheduler(&db).await;
     let setup = run_live_rag_script(&db, "setup_live_rag.py", &["--dimensions", "3"]).await;
     assert!(
         setup.status.success(),
@@ -429,7 +430,9 @@ async fn exercise_live_rag_concurrent_write(active_maintenance: bool, cancel: bo
             db.execute("UPDATE live_rag.access SET visible=false WHERE document_id=2"),
         )
         .await
-        .expect("source write did not commit during maintenance");
+        .unwrap_or_else(|_| {
+            panic!("{table}: source write did not commit during maintenance");
+        });
         let recovery_started = std::time::Instant::now();
         let result = if restart {
             let killed = tokio::process::Command::new("docker")
