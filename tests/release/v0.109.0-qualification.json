@@ -856,6 +856,9 @@
         "e2e_pgvector_tests::test_embedding_stream_table_halfvec_and_sparsevec_indexes",
         "e2e_pgvector_tests::test_distance_subscription_typed_predicates_and_authorization",
         "e2e_pgvector_tests::test_distance_subscription_notifies_only_membership_crossings",
+        "e2e_pgvector_tests::test_distance_subscription_duplicate_predicates_with_user_trigger",
+        "e2e_pgvector_tests::test_distance_subscription_concurrent_commit_and_rollback",
+        "e2e_pgvector_tests::test_distance_subscription_trigger_concurrent_commit_and_rollback",
         "e2e_pgvector_tests::test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
         "e2e_pgvector_tests::test_ann_worker_records_lock_timeout_and_can_retry",
         "e2e_pgvector_hybrid_tests::test_tenant_tutorial_sql_runs_with_isolated_reader",
@@ -900,6 +903,9 @@
         "e2e_pgvector_tests::test_embedding_stream_table_halfvec_and_sparsevec_indexes",
         "e2e_pgvector_tests::test_distance_subscription_typed_predicates_and_authorization",
         "e2e_pgvector_tests::test_distance_subscription_notifies_only_membership_crossings",
+        "e2e_pgvector_tests::test_distance_subscription_duplicate_predicates_with_user_trigger",
+        "e2e_pgvector_tests::test_distance_subscription_concurrent_commit_and_rollback",
+        "e2e_pgvector_tests::test_distance_subscription_trigger_concurrent_commit_and_rollback",
         "e2e_pgvector_tests::test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
         "e2e_pgvector_tests::test_ann_worker_records_lock_timeout_and_can_retry",
         "e2e_pgvector_hybrid_tests::test_tenant_tutorial_sql_runs_with_isolated_reader",
@@ -956,6 +962,25 @@
       "measured_rounds_per_case": 20,
       "controlled_writer_hold_ms": 10,
       "workload": "exact package: 5,000 rows, 384/768/1536 dimensions, small/mid/large/skewed groups, three warmups and 20 measured refreshes for one-row and 2,500-row changes in warm, cold, and controlled-writer modes, with CPU/memory, WAL, tuple visits, buffer counts, lock waits, storage, and state bytes"
+    },
+    {
+      "id": "subscription-scale-1m",
+      "kind": "measurement",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.109.0",
+      "command": "python3 scripts/run_release_subscription_scale.py",
+      "command_argv": [
+        "python3",
+        "scripts/run_release_subscription_scale.py"
+      ],
+      "measurement_file": "qualification-logs/raw/subscription-scale-1m.json",
+      "e2e_image": "pg_trickle_e2e_pgvector:0.8.7",
+      "nextest_retries": 0,
+      "workload": "exact-package 384-dimensional 1k/10k/100k/1m source-row subscription matrix with 1m-row plan controls; not a RAG benchmark"
     }
   ],
   "artifacts": [

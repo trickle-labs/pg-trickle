@@ -14,7 +14,7 @@
 
 mod e2e;
 
-use e2e::E2eDb;
+use e2e::{E2eDb, disable_scheduler};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 7.1 — DML between layer refreshes
@@ -26,6 +26,7 @@ use e2e::E2eDb;
 #[tokio::test]
 async fn test_dml_between_layer_refreshes() {
     let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
 
     db.execute(
         "CREATE TABLE btw_src (
@@ -101,6 +102,7 @@ async fn test_dml_between_layer_refreshes() {
 #[tokio::test]
 async fn test_concurrent_insert_during_pipeline_refresh() {
     let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
 
     db.execute(
         "CREATE TABLE conc_dag_src (
@@ -151,10 +153,7 @@ async fn test_concurrent_insert_during_pipeline_refresh() {
         }
     });
 
-    // Run 5 pipeline refresh cycles concurrently with the inserts.
-    // Use retry for both layers because the background scheduler can race
-    // with our manual refresh calls when CDC triggers fire from the
-    // concurrent insert task.
+    // Drive both layers manually while the concurrent inserts continue.
     for _ in 0..5 {
         db.refresh_st_with_retry("conc_dag_l1").await;
         db.refresh_st_with_retry("conc_dag_l2").await;
@@ -223,6 +222,7 @@ async fn test_concurrent_insert_during_pipeline_refresh() {
 #[tokio::test]
 async fn test_rollback_between_refreshes() {
     let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
 
     db.execute(
         "CREATE TABLE rb_src (

@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running tests/e2e_pgvector_tests.rs (/private/tmp/pg-trickle-task-1399/target/debug/deps/e2e_pgvector_tests-0b480014c9ba917b)
+
+running 1 test
+DISTANCE_CONCURRENCY_JSON={"dimensions":3,"exit_post_commit_drain_ms":5.744375000000001,"first_post_commit_drain_ms":1.3127499999999999,"listener_connections":1,"pg_trickle":"0.109.0","pgvector":"0.8.1","postgres":"18.6 (Debian 18.6-1.pgdg13+2)","rows":10000,"second_post_commit_drain_ms":0.937875,"subscriptions":100}
+test test_distance_subscription_concurrent_scale ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 140 filtered out; finished in 15.97s
+

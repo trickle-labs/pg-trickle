@@ -78,6 +78,25 @@ class RetirementContractTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 gate.check_pgvector_contract(broken)
 
+    def test_subscription_concurrency_case_is_required_for_both_versions(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        for version in ("0.8.1", "0.8.7"):
+            for name in ("test_distance_subscription_concurrent_commit_and_rollback", "test_distance_subscription_trigger_concurrent_commit_and_rollback"):
+                broken = copy.deepcopy(contract)
+                cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
+                cases.remove(f"e2e_pgvector_tests::{name}")
+                with self.assertRaises(SystemExit):
+                    gate.check_pgvector_contract(broken)
+
+    def test_duplicate_subscription_case_is_required_for_both_versions(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        for version in ("0.8.1", "0.8.7"):
+            broken = copy.deepcopy(contract)
+            cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
+            cases.remove("e2e_pgvector_tests::test_distance_subscription_duplicate_predicates_with_user_trigger")
+            with self.assertRaises(SystemExit):
+                gate.check_pgvector_contract(broken)
+
     def test_metadata_tracks_package_and_never_precedes_gate(self):
         check = gate.prior.shared.check_metadata_version
         check("0.110.0", "0.110.0", "0.109.0")
@@ -115,3 +134,18 @@ class RetirementContractTests(unittest.TestCase):
             next(s for s in broken["required_suites"] if s["id"] == suite_id)[field] = value
             with self.assertRaises(SystemExit):
                 gate.check_retirement_contract(broken)
+
+    def test_exact_package_subscription_measurement_is_required(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        gate.check_subscription_scale_contract(contract)
+        for field, value in [
+            ("kind", "test"),
+            ("runtime", False),
+            ("e2e_image", "pg_trickle_e2e_pgvector:0.8.1"),
+            ("nextest_retries", 2),
+            ("measurement_file", "qualification-logs/raw/wrong.json"),
+        ]:
+            broken = copy.deepcopy(contract)
+            next(s for s in broken["required_suites"] if s["id"] == "subscription-scale-1m")[field] = value
+            with self.assertRaises(SystemExit):
+                gate.check_subscription_scale_contract(broken)
