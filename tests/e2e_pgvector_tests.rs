@@ -2884,7 +2884,7 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
             .expect("set up centroid churn");
     }
 
-    let bound: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL)")
+    let bound: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation AND c.schema_version = 1 AND c.status = 'BUILDING')")
         .fetch_one(&mut *conn).await.expect("inspect initial churn state");
     assert!(bound, "churn fixture must initialize centroid state");
     let cdc_buffer: String = sqlx::query_scalar(
@@ -2901,6 +2901,7 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
     let mut algebraic = 0;
     let mut unbound_refreshes = 0;
     let mut last_unbound_refresh_id = None;
+    let mut first_unbound_context = None;
     let mut max_error: f64 = 0.0;
     let mut max_bound_fraction: f64 = 0.0;
     let mut frontier_retries = 0;
@@ -3077,12 +3078,17 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
         }
         let used_algebraic: bool = sqlx::query_scalar("SELECT merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
             .fetch_one(&mut *conn).await.expect("inspect churn strategy");
-        let bound: bool = sqlx::query_scalar("SELECT COALESCE(c.baseline_frontier = t.frontier, false) FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass")
+        let bound: bool = sqlx::query_scalar("SELECT COALESCE(c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation AND c.schema_version = 1 AND c.status = 'BUILDING', false) FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass")
             .fetch_one(&mut *conn).await.expect("inspect churn state");
         if !bound {
+            let context: serde_json::Value = sqlx::query_scalar("SELECT jsonb_build_object('state', jsonb_build_object('frontier_matches', c.baseline_frontier = t.frontier, 'materialized_xid', c.materialized_xid::text, 'cost_rescan_active', c.cost_rescan_active, 'cost_rescan_xid', c.cost_rescan_xid::text, 'stream_relid_matches', c.stream_relid = t.pgt_relid, 'query_matches', c.defining_query = t.defining_query, 'contract_matches', c.contract_generation = t.contract_generation, 'schema_version', c.schema_version, 'status', c.status), 'recent_history', (SELECT jsonb_agg(to_jsonb(h)) FROM (SELECT refresh_id, merge_strategy_used, delta_row_count, refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 3) h)) FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass")
+                .fetch_one(&mut *conn).await.expect("inspect unbound churn state");
+            if first_unbound_context.is_none() {
+                first_unbound_context = Some(context.clone());
+            }
             assert!(
                 diverse && !used_algebraic,
-                "unexpected unbound state at step {step}"
+                "unexpected unbound state at step {step}: {context}"
             );
             let (refresh_id, delta_rows, fallback, outcome, reason): (i64, i64, Option<String>, Option<String>, Option<String>) = sqlx::query_as("SELECT h.refresh_id, COALESCE(h.delta_row_count, 0)::bigint, h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason', h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome', h.refresh_reason_detail::jsonb->'centroid_rebase'->>'reason' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
                 .fetch_one(&mut *conn).await.expect("inspect unbound churn fallback");
@@ -3112,7 +3118,10 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
         "only {algebraic} refreshes used algebraic state"
     );
     if diverse {
-        assert_eq!(unbound_refreshes, 0, "diverse churn lost its bound state");
+        assert_eq!(
+            unbound_refreshes, 0,
+            "diverse churn lost its bound state: {first_unbound_context:?}"
+        );
     }
     println!(
         "CENTROID_DRIFT_JSON={}",
