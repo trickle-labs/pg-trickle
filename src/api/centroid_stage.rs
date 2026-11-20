@@ -288,9 +288,13 @@ pub(crate) fn invalidate_baseline(
     if installed.is_some() {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_centroid_states c SET baseline_frontier = \
-               CASE WHEN c.materialized_xid = pg_current_xact_id_if_assigned() \
+             CASE WHEN (c.materialized_xid = pg_current_xact_id_if_assigned() \
                  AND c.baseline_frontier = t.frontier AND c.stream_relid = t.pgt_relid \
-                 AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation \
+                 AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation) \
+                 OR ($2 AND c.materialized_xid IS NULL AND c.baseline_frontier = t.frontier \
+                     AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query \
+                     AND c.contract_generation = t.contract_generation AND c.schema_version = 1 \
+                     AND c.status = 'BUILDING' AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL) \
                  THEN c.baseline_frontier ELSE NULL END, materialized_xid = NULL, \
              cost_rescan_active = COALESCE((c.cost_rescan_xid = pg_current_xact_id_if_assigned() \
                  OR ($2 AND c.cost_rescan_xid IS NULL AND c.cost_rescan_active \
