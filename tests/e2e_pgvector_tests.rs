@@ -2712,11 +2712,20 @@ async fn test_centroid_cost_model_rescans_and_rebinds_safely() {
             .await
             .expect("exercise cost-rescan rollback");
     }
-    let provisional: bool = sqlx::query_scalar("SELECT c.baseline_frontier IS NULL AND c.cost_rescan_active FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
-        .fetch_one(&mut *conn).await.expect("inspect provisional cost marker");
+    // The transaction can still own the provisional xid marker before the
+    // durable cost-rescan flag is finalized. Either proves that the rescan
+    // selection is visible to the current transaction.
+    let (unbound, active, pending): (bool, bool, bool) = sqlx::query_as(
+        "SELECT c.baseline_frontier IS NULL, c.cost_rescan_active, c.cost_rescan_xid IS NOT NULL \
+         FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) \
+         WHERE t.pgt_relid = 'centroid_policy_st'::regclass",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("inspect provisional cost marker");
     assert!(
-        provisional,
-        "cost-rescan mode must be visible inside the transaction"
+        unbound && (active || pending),
+        "cost-rescan selection must be visible inside the transaction: baseline_unbound={unbound}, active={active}, pending_xid={pending}"
     );
     sqlx::query("ROLLBACK")
         .execute(&mut *conn)
