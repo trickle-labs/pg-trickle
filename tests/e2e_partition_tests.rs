@@ -8148,9 +8148,8 @@ async fn test_alter_st_partition_key_change_and_remove_reject_with_downstream() 
         assert_eq!(key, "event_day");
     }
     // The rejected ALTER must preserve the existing downstream dependency
-    // and materialized result. Incremental refresh of a partitioned producer
-    // with downstream consumers is an independent issue (#1439); the two
-    // unpartitioned and IMMEDIATE guard tests exercise post-rejection writes.
+    // and materialized result. The normal partitioned explicit-DML path is
+    // covered by #1439; verify it still works after the rejected operations.
     let dependent_source_oid: i64 = db
         .query_scalar(
             "SELECT source_relid::bigint FROM pgtrickle.pgt_dependencies
@@ -8160,6 +8159,21 @@ async fn test_alter_st_partition_key_change_and_remove_reject_with_downstream() 
         )
         .await;
     assert_eq!(dependent_source_oid, oid_before);
+    db.assert_st_matches_query(
+        "guard_change_up",
+        "SELECT id, event_day, category FROM guard_change_src",
+    )
+    .await;
+    db.assert_st_matches_query(
+        "guard_change_down",
+        "SELECT id, category FROM guard_change_src",
+    )
+    .await;
+
+    db.execute("INSERT INTO guard_change_src VALUES (2, '2026-02-01', 'B')")
+        .await;
+    db.refresh_st_with_retry("guard_change_up").await;
+    db.refresh_st_with_retry("guard_change_down").await;
     db.assert_st_matches_query(
         "guard_change_up",
         "SELECT id, event_day, category FROM guard_change_src",

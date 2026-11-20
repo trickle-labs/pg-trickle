@@ -200,8 +200,11 @@ async fn apply_dml_batch(db: &E2eDb, source_idx: usize, batch: usize, cycle: u64
     ))
     .await;
 
-    // DELETE ~10% of the batch size
-    let delete_count = (batch as f64 * 0.1).max(1.0) as usize;
+    // Keep the number of source rows constant: otherwise the many-to-many
+    // join grows quadratically during a long soak, and RSS growth primarily
+    // measures a larger working set rather than retained backend memory.
+    // Each batch still exercises INSERT, UPDATE and DELETE.
+    let delete_count = batch;
     db.execute(&format!(
         "DELETE FROM {table}
          WHERE id IN (
@@ -270,37 +273,94 @@ async fn check_worker_alive(db: &E2eDb) -> Result<(), String> {
     Ok(())
 }
 
-/// Get the current RSS of the PostgreSQL backend (in KB).
-/// Returns None if the platform doesn't support this.
-async fn get_rss_kb(db: &E2eDb) -> Option<i64> {
-    // Use /proc/self/status on Linux (Docker container)
-    db.try_execute(
-        "CREATE OR REPLACE FUNCTION pg_temp.get_rss_kb()
-         RETURNS BIGINT LANGUAGE plpgsql AS $$
-         DECLARE
-             line TEXT;
-             rss_kb BIGINT;
-         BEGIN
-             FOR line IN SELECT pg_read_file('/proc/self/status') LOOP
-                 IF line LIKE 'VmRSS:%' THEN
-                     rss_kb := regexp_replace(line, '[^0-9]', '', 'g')::bigint;
-                     RETURN rss_kb;
-                 END IF;
-             END LOOP;
-             RETURN NULL;
-         EXCEPTION WHEN OTHERS THEN
-             RETURN NULL;
-         END; $$",
-    )
-    .await
-    .ok()?;
+const RSS_GROWTH_LIMIT_PCT: i64 = 20;
 
-    let rss: Option<i64> = sqlx::query_scalar("SELECT pg_temp.get_rss_kb()")
-        .fetch_one(&db.pool)
-        .await
-        .ok()?;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RssSample {
+    backend_pid: i32,
+    rss_kb: i64,
+}
 
-    rss
+/// Extract the one positive VmRSS value (in kB) from Linux /proc/self/status.
+/// pg_read_file returns the *whole* document, not one row per line.
+fn parse_rss_kb(status: &str) -> Result<i64, String> {
+    let mut fields = status
+        .lines()
+        .filter_map(|line| line.strip_prefix("VmRSS:"));
+    let field = fields
+        .next()
+        .ok_or_else(|| "VmRSS field missing from /proc/self/status".to_string())?;
+    if fields.next().is_some() {
+        return Err("multiple VmRSS fields in /proc/self/status".into());
+    }
+
+    let mut parts = field.split_whitespace();
+    let value = parts
+        .next()
+        .ok_or_else(|| "VmRSS value missing from /proc/self/status".to_string())?;
+    let rss_kb = value
+        .parse::<i64>()
+        .map_err(|e| format!("invalid VmRSS value {field:?}: {e}"))?;
+    if rss_kb <= 0 || parts.next() != Some("kB") || parts.next().is_some() {
+        return Err(format!(
+            "invalid VmRSS value {field:?}: expected a positive integer followed by kB"
+        ));
+    }
+    Ok(rss_kb)
+}
+
+/// Read RSS and PID in one query on a caller-owned, pinned PostgreSQL
+/// connection. Errors are fatal to qualification, not an absent sample.
+async fn get_rss_sample(conn: &mut sqlx::PgConnection) -> Result<RssSample, String> {
+    let (backend_pid, status): (i32, String) =
+        sqlx::query_as("SELECT pg_backend_pid(), pg_read_file('/proc/self/status')")
+            .fetch_one(conn)
+            .await
+            .map_err(|e| {
+                format!("cannot read PostgreSQL /proc/self/status (Linux required): {e}")
+            })?;
+
+    let rss_kb =
+        parse_rss_kb(&status).map_err(|e| format!("PostgreSQL backend PID {backend_pid}: {e}"))?;
+    Ok(RssSample {
+        backend_pid,
+        rss_kb,
+    })
+}
+
+/// Calculate growth only for positive RSS readings from the same backend.
+fn rss_growth_percent(initial: RssSample, latest: RssSample) -> Result<f64, String> {
+    let details = format!(
+        "initial backend PID {}: {} kB; latest backend PID {}: {} kB",
+        initial.backend_pid, initial.rss_kb, latest.backend_pid, latest.rss_kb
+    );
+    if initial.backend_pid <= 0 || latest.backend_pid <= 0 {
+        return Err(format!("invalid PostgreSQL backend PID: {details}"));
+    }
+    if initial.backend_pid != latest.backend_pid {
+        return Err(format!(
+            "RSS samples came from different backends: {details}"
+        ));
+    }
+    if initial.rss_kb <= 0 || latest.rss_kb <= 0 {
+        return Err(format!("RSS samples must be positive: {details}"));
+    }
+    Ok((latest.rss_kb as f64 / initial.rss_kb as f64 - 1.0) * 100.0)
+}
+
+/// Enforce the strict <20% growth limit without floating-point rounding.
+fn validate_rss_growth(initial: RssSample, final_rss: RssSample) -> Result<f64, String> {
+    let growth_pct = rss_growth_percent(initial, final_rss)?;
+    if i128::from(final_rss.rss_kb) * 100
+        >= i128::from(initial.rss_kb) * (100 + i128::from(RSS_GROWTH_LIMIT_PCT))
+    {
+        return Err(format!(
+            "RSS growth {growth_pct:.1}% violates the <{RSS_GROWTH_LIMIT_PCT}% threshold: \
+             backend PID {}, initial={} kB, final={} kB",
+            initial.backend_pid, initial.rss_kb, final_rss.rss_kb
+        ));
+    }
+    Ok(growth_pct)
 }
 
 /// The completed action, status, path and affected-row witness stored in the
@@ -493,11 +553,35 @@ async fn test_soak_stability() {
         active_sts.len()
     );
 
-    // Record initial RSS
-    let initial_rss = get_rss_kb(&db).await;
-    if let Some(rss) = initial_rss {
-        println!("  Initial RSS: {} KB", rss);
+    // Keep one backend reserved through the entire soak and run manual
+    // refreshes on it: measuring an idle connection would not exercise
+    // the extension's memory-intensive workload. DML uses the pool.
+    let mut rss_conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("Failed to reserve PostgreSQL backend for RSS measurements");
+
+    // Measure growth after warming the same backend through every refresh
+    // operator. The source set stays bounded during the measurement window,
+    // avoiding expected RSS high-water growth from ever-larger join results.
+    apply_dml_batch(&db, 1, batch, 0).await;
+    for st in &active_sts {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT pgtrickle.refresh_stream_table('{st}')"
+        )))
+        .execute(&mut *rss_conn)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to warm backend refresh for {st}: {e}"));
     }
+
+    let initial_rss = get_rss_sample(&mut rss_conn)
+        .await
+        .unwrap_or_else(|e| panic!("Initial RSS measurement failed: {e}"));
+    println!(
+        "  Initial RSS (PostgreSQL backend PID {}): {} kB",
+        initial_rss.backend_pid, initial_rss.rss_kb
+    );
 
     // ── Soak Loop ──────────────────────────────────────────────────────
     let start = Instant::now();
@@ -522,17 +606,20 @@ async fn test_soak_stability() {
         apply_dml_batch(&db, source_idx, batch, cycle).await;
         total_dml_ops += 3; // INSERT + UPDATE + DELETE
 
-        // Manual refresh on a rotating stream table.
+        // Manual refresh on the measured backend, so its RSS reflects
+        // actual extension work (rather than an idle, pinned session).
         // Retry once on transient deadlock before recording a failure.
         let st_idx = (cycle as usize - 1) % active_sts.len();
         let st = active_sts[st_idx];
+        let refresh_sql = format!("SELECT pgtrickle.refresh_stream_table('{st}')");
         let refresh_result = {
-            let r = db
-                .try_execute(&format!("SELECT pgtrickle.refresh_stream_table('{st}')"))
+            let r = sqlx::query(sqlx::AssertSqlSafe(refresh_sql.clone()))
+                .execute(&mut *rss_conn)
                 .await;
             if r.is_err() {
                 tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
-                db.try_execute(&format!("SELECT pgtrickle.refresh_stream_table('{st}')"))
+                sqlx::query(sqlx::AssertSqlSafe(refresh_sql))
+                    .execute(&mut *rss_conn)
                     .await
             } else {
                 r
@@ -565,15 +652,19 @@ async fn test_soak_stability() {
                 print!("worker OK");
             }
 
-            // RSS check
-            if let Some(rss) = get_rss_kb(&db).await {
-                print!(", RSS={rss}KB");
-                if let Some(initial) = initial_rss {
-                    let growth_pct =
-                        ((rss as f64 - initial as f64) / initial as f64 * 100.0).max(0.0);
-                    print!(" (+{growth_pct:.1}%)");
-                }
-            }
+            // RSS diagnostics are always taken from the reserved backend.
+            let rss = get_rss_sample(&mut rss_conn).await.unwrap_or_else(|e| {
+                panic!(
+                    "[{elapsed}s] RSS measurement failed for backend PID {} (initial={} kB): {e}",
+                    initial_rss.backend_pid, initial_rss.rss_kb
+                )
+            });
+            let growth_pct = rss_growth_percent(initial_rss, rss)
+                .unwrap_or_else(|e| panic!("[{elapsed}s] RSS measurement unqualified: {e}"));
+            print!(
+                ", RSS backend PID {}: {} kB (growth={growth_pct:+.1}%)",
+                rss.backend_pid, rss.rss_kb
+            );
 
             println!(", refreshes={total_refreshes}, dml_ops={total_dml_ops}");
             last_check = Instant::now();
@@ -607,21 +698,37 @@ async fn test_soak_stability() {
     println!("  Total DML operations: {total_dml_ops}");
     println!("  Total refreshes: {total_refreshes}");
 
+    // A bounded workload is essential for a meaningful RSS growth limit.
+    // Without this check, growing source/join result sizes can mimic a leak.
+    for source_idx in 1..=n_sources {
+        let rows: i64 = db
+            .query_scalar(&format!("SELECT count(*) FROM source_{source_idx}"))
+            .await;
+        assert_eq!(
+            rows, 200,
+            "Source table source_{source_idx} grew during a supposedly bounded soak"
+        );
+    }
+
     // Final correctness is unconditional, even for runs shorter than the
     // periodic interval. Drain the scheduler and compare before any repair.
     // Leave the scheduler paused so subsequent final health checks cannot
     // change the result we just certified.
     run_final_correctness(&db, &active_sts, &mut health_check_failures).await;
 
-    // Final RSS check
-    if let (Some(initial), Some(final_rss)) = (initial_rss, get_rss_kb(&db).await) {
-        let growth_pct = ((final_rss as f64 - initial as f64) / initial as f64 * 100.0).max(0.0);
-        println!("\n  RSS: initial={initial}KB, final={final_rss}KB, growth={growth_pct:.1}%");
-        assert!(
-            growth_pct < 20.0,
-            "RSS grew by {growth_pct:.1}% (threshold: 20%): initial={initial}KB, final={final_rss}KB"
-        );
-    }
+    // Final RSS check — missing, invalid or cross-backend readings fail.
+    let final_rss = get_rss_sample(&mut rss_conn).await.unwrap_or_else(|e| {
+        panic!(
+            "Final RSS measurement failed for backend PID {} (initial={} kB): {e}",
+            initial_rss.backend_pid, initial_rss.rss_kb
+        )
+    });
+    let growth_pct = validate_rss_growth(initial_rss, final_rss)
+        .unwrap_or_else(|e| panic!("RSS stability check failed: {e}"));
+    println!(
+        "\n  RSS backend PID {}: initial={} kB, final={} kB, growth={growth_pct:.1}% (limit: <{RSS_GROWTH_LIMIT_PCT}%)",
+        initial_rss.backend_pid, initial_rss.rss_kb, final_rss.rss_kb
+    );
 
     // Final error state check
     if let Err(e) = check_no_error_states(&db).await {
@@ -644,6 +751,87 @@ async fn test_soak_stability() {
     }
 
     println!("\n  ✓ Soak test PASSED: {cycle} cycles, {total_refreshes} refreshes, zero failures");
+}
+
+#[cfg(test)]
+mod rss_tests {
+    use super::*;
+
+    fn sample(pid: i32, rss_kb: i64) -> RssSample {
+        RssSample {
+            backend_pid: pid,
+            rss_kb,
+        }
+    }
+
+    #[test]
+    fn parses_rss_from_realistic_multiline_status() {
+        let status =
+            "Name:\tpostgres\nUmask:\t0022\nVmSize:\t98765 kB\nVmRSS:\t12345 kB\nThreads:\t1\n";
+        assert_eq!(parse_rss_kb(status), Ok(12_345));
+    }
+
+    #[test]
+    fn accepts_positive_baseline_and_growth_below_threshold() {
+        assert!(validate_rss_growth(sample(4242, 10_000), sample(4242, 11_900)).is_ok());
+        assert!(validate_rss_growth(sample(4242, 10_000), sample(4242, 9_000)).is_ok());
+    }
+
+    #[test]
+    fn rejects_growth_at_or_above_threshold() {
+        for rss_kb in [12_000, 12_100] {
+            let err = validate_rss_growth(sample(4242, 10_000), sample(4242, rss_kb))
+                .expect_err("growth at or above 20% must fail");
+            assert!(err.contains("threshold"), "{err}");
+            assert!(err.contains("PID 4242"), "{err}");
+            assert!(err.contains("kB"), "{err}");
+        }
+    }
+
+    #[test]
+    fn rejects_missing_or_malformed_rss() {
+        for status in [
+            "Name:\tpostgres\nVmSize:\t50000 kB\n",
+            "Name:\tpostgres\nVmRSS:\tgarbage kB\n",
+            "Name:\tpostgres\nVmRSS:\t0 kB\n",
+            "Name:\tpostgres\nVmRSS:\t12345 MB\n",
+            "Name:\tpostgres\nVmRSS:\t12345 kB extra\n",
+            "Name:\tpostgres\nVmRSS:\t12345 kB\nVmRSS:\t45678 kB\n",
+        ] {
+            assert!(
+                parse_rss_kb(status).is_err(),
+                "accepted bad status: {status:?}"
+            );
+        }
+        assert!(validate_rss_growth(sample(4242, 0), sample(4242, 1)).is_err());
+        assert!(validate_rss_growth(sample(4242, 1), sample(4242, 0)).is_err());
+    }
+
+    #[test]
+    fn rejects_changed_or_invalid_backend_pid() {
+        let err = validate_rss_growth(sample(4242, 10_000), sample(4243, 10_000))
+            .expect_err("different backends cannot qualify the memory check");
+        assert!(err.contains("PID 4242"), "{err}");
+        assert!(err.contains("PID 4243"), "{err}");
+        assert!(validate_rss_growth(sample(0, 10_000), sample(0, 10_000)).is_err());
+    }
+
+    /// Check the real PostgreSQL /proc reader on the daily Linux/Docker run.
+    #[tokio::test]
+    #[ignore = "requires the full Linux PostgreSQL E2E Docker image"]
+    async fn reads_rss_from_one_pinned_postgres_backend() {
+        let db = E2eDb::new().await;
+        let mut conn = db.pool.acquire().await.expect("Failed to reserve backend");
+        let first = get_rss_sample(&mut conn)
+            .await
+            .expect("First RSS read failed");
+        let second = get_rss_sample(&mut conn)
+            .await
+            .expect("Second RSS read failed");
+        assert_eq!(first.backend_pid, second.backend_pid);
+        assert!(first.rss_kb > 0);
+        assert!(second.rss_kb > 0);
+    }
 }
 
 // ── Bounded fail-closed correctness regressions (#1430) ────────────────

@@ -2609,14 +2609,24 @@ pub(crate) fn build_trigger_insert_for_storage(
     is_deduplicated: bool,
     is_partitioned: bool,
 ) -> String {
-    // Partitioned storage has no global unique row-identity constraint.
-    if (has_keyless_source
-        && (is_deduplicated || user_cols.iter().any(|column| column == "__pgt_count")))
-        || (is_partitioned && !has_keyless_source)
+    // Non-deduplicated keyless deltas represent a multiset: equal row_ids
+    // may be separate occurrences, so neither DISTINCT ON nor NOT EXISTS
+    // can be used to discard them.
+    if has_keyless_source
+        && !is_deduplicated
+        && !user_cols.iter().any(|column| column == "__pgt_count")
     {
+        return build_trigger_insert_sql(quoted_table, pgt_id, user_cols, true);
+    }
+
+    // A partitioned parent cannot have a UNIQUE (__pgt_row_id) arbiter.
+    // Check the exact identity in existing storage after the UPDATE, and
+    // collapse duplicate delta actions to one INSERT for keyed/group rows.
+    // This also serves deduplicated keyless sources and counted aggregates.
+    if is_partitioned || has_keyless_source {
         build_trigger_insert_sql_no_conflict(quoted_table, pgt_id, user_cols)
     } else {
-        build_trigger_insert_sql(quoted_table, pgt_id, user_cols, has_keyless_source)
+        build_trigger_insert_sql(quoted_table, pgt_id, user_cols, false)
     }
 }
 

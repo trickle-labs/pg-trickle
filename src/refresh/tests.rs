@@ -1378,6 +1378,64 @@ fn test_partitioned_keyed_insert_avoids_unique_conflict_target() {
 }
 
 #[test]
+fn test_partitioned_keyed_insert_guards_identity_for_nondeduplicated_delta() {
+    let cols = vec!["event_day".to_string(), "amount".to_string()];
+    for is_deduplicated in [true, false] {
+        let sql = build_trigger_insert_for_storage(
+            "\"public\".\"partitioned_st\"",
+            42,
+            &cols,
+            false,
+            is_deduplicated,
+            true,
+        );
+        assert!(sql.contains("DISTINCT ON (d.__pgt_row_id)"));
+        assert!(sql.contains("NOT EXISTS"));
+        assert!(sql.contains("st.__pgt_row_id = d.__pgt_row_id"));
+        assert!(!sql.contains("ON CONFLICT"));
+    }
+}
+
+#[test]
+fn test_partitioned_keyless_insert_preserves_multiplicity() {
+    let cols = vec!["event_day".to_string(), "amount".to_string()];
+    let sql = build_trigger_insert_for_storage(
+        "\"public\".\"partitioned_st\"",
+        42,
+        &cols,
+        true,
+        false,
+        true,
+    );
+    assert!(!sql.contains("DISTINCT ON"));
+    assert!(!sql.contains("NOT EXISTS"));
+    assert!(!sql.contains("ON CONFLICT"));
+    assert!(sql.contains("FROM __pgt_delta_42 AS d"));
+
+    let deduplicated = build_trigger_insert_for_storage(
+        "\"public\".\"partitioned_st\"",
+        42,
+        &cols,
+        true,
+        true,
+        true,
+    );
+    assert!(deduplicated.contains("NOT EXISTS"));
+    assert!(!deduplicated.contains("ON CONFLICT"));
+
+    let counted = build_trigger_insert_for_storage(
+        "\"public\".\"partitioned_st\"",
+        42,
+        &["__pgt_count".to_string(), "amount".to_string()],
+        true,
+        false,
+        true,
+    );
+    assert!(counted.contains("NOT EXISTS"));
+    assert!(!counted.contains("ON CONFLICT"));
+}
+
+#[test]
 fn test_build_trigger_insert_keyed() {
     let cols = vec!["a".to_string(), "b".to_string()];
     let sql = build_trigger_insert_sql("\"public\".\"t\"", 10, &cols, false);
