@@ -30,23 +30,26 @@ pub struct RetentionGroupCandidate {
     pub source_column: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetentionQueryError {
-    UnsupportedShape,
-    UnsupportedAggregate,
+    UnsupportedShape(String),
+    UnsupportedAggregate(String),
     FloatingPointSum,
-    InvalidSourceKey,
-    MissingProjectedGroupKey,
+    InvalidSourceKey(String),
+    MissingProjectedGroupKey(String),
 }
 
 impl std::fmt::Display for RetentionQueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnsupportedShape(reason)
+            | Self::UnsupportedAggregate(reason)
+            | Self::InvalidSourceKey(reason)
+            | Self::MissingProjectedGroupKey(reason) => f.write_str(reason),
             Self::FloatingPointSum => write!(
                 f,
                 "floating-point SUM is unsupported; restore complete raw history and use a numeric aggregate"
             ),
-            other => write!(f, "{other:?}"),
         }
     }
 }
@@ -2486,6 +2489,33 @@ fn has_floating_sum(tree: &OpTree) -> bool {
     })
 }
 
+/// Name an operator that cannot be part of the narrow retention query shape.
+fn retention_operator_name(tree: &OpTree) -> &'static str {
+    match tree {
+        OpTree::Scan { .. } => "table scan",
+        OpTree::Project { .. } => "projection",
+        OpTree::Aggregate { .. } => "grouped aggregate",
+        OpTree::Filter { .. } => "WHERE or HAVING filter",
+        OpTree::InnerJoin { .. }
+        | OpTree::LeftJoin { .. }
+        | OpTree::FullJoin { .. }
+        | OpTree::SemiJoin { .. }
+        | OpTree::AntiJoin { .. } => "join",
+        OpTree::Distinct { .. } => "DISTINCT",
+        OpTree::UnionAll { .. }
+        | OpTree::Intersect { .. }
+        | OpTree::Except { .. } => "set operation",
+        OpTree::Subquery { .. }
+        | OpTree::CteScan { .. }
+        | OpTree::RecursiveCte { .. }
+        | OpTree::RecursiveSelfRef { .. } => "subquery or CTE",
+        OpTree::Window { .. } => "window function",
+        OpTree::LateralFunction { .. } | OpTree::LateralSubquery { .. } => "LATERAL",
+        OpTree::ScalarSubquery { .. } => "scalar subquery",
+        OpTree::ConstantSelect { .. } => "constant SELECT",
+    }
+}
+
 /// Find a projected group key tied to the specified non-null source column.
 ///
 /// Hour candidates require separately verified hour-aligned RANGE bounds.
@@ -2499,9 +2529,21 @@ pub fn query_group_candidate(
             expressions,
             aliases,
             child,
-        } if expressions.len() == aliases.len() => (Some((expressions, aliases)), child.as_ref()),
+        } => {
+            if expressions.len() != aliases.len() {
+                return Err(RetentionQueryError::UnsupportedShape(
+                    "SELECT list has mismatched expressions and output names; retention requires plain projected columns".into(),
+                ));
+            }
+            (Some((expressions, aliases)), child.as_ref())
+        }
         OpTree::Aggregate { .. } => (None, tree),
-        _ => return Err(RetentionQueryError::UnsupportedShape),
+        _ => {
+            return Err(RetentionQueryError::UnsupportedShape(format!(
+                "query contains a top-level {}; retention requires a single-source grouped aggregate without other query operators",
+                retention_operator_name(tree)
+            )));
+        }
     };
     let OpTree::Aggregate {
         group_by,
@@ -2509,7 +2551,10 @@ pub fn query_group_candidate(
         child,
     } = aggregate
     else {
-        return Err(RetentionQueryError::UnsupportedShape);
+        return Err(RetentionQueryError::UnsupportedShape(format!(
+            "SELECT input is a {}, not a grouped aggregate; retention requires GROUP BY over one source table",
+            retention_operator_name(aggregate)
+        )));
     };
     let OpTree::Scan {
         table_oid,
@@ -2518,7 +2563,10 @@ pub fn query_group_candidate(
         ..
     } = child.as_ref()
     else {
-        return Err(RetentionQueryError::UnsupportedShape);
+        return Err(RetentionQueryError::UnsupportedShape(format!(
+            "aggregate input contains a {}; retention requires a direct scan of a single source table",
+            retention_operator_name(child)
+        )));
     };
     if has_floating_sum(tree) {
         return Err(RetentionQueryError::FloatingPointSum);
@@ -2528,52 +2576,97 @@ pub fn query_group_candidate(
         .find(|column| column.name == key && !column.is_nullable)
         .filter(|column| matches!(column.type_oid, DATE_OID | TIMESTAMP_OID | TIMESTAMPTZ_OID))
         .filter(|_| *table_oid == source_oid)
-        .ok_or(RetentionQueryError::InvalidSourceKey)?;
-    if group_by.iter().any(|group| match group {
-        Expr::ColumnRef {
-            table_alias,
-            column_name,
-        } => {
-            !table_alias.as_deref().is_none_or(|name| name == alias)
-                || !columns.iter().any(|column| column.name == *column_name)
-        }
-        _ => bucket(group, alias, key, column.type_oid).is_none(),
-    }) || projection.is_some_and(|(expressions, _)| {
-        expressions
-            .iter()
-            .any(|expr| !matches!(expr, Expr::ColumnRef { .. }))
-    }) {
-        return Err(RetentionQueryError::UnsupportedShape);
-    }
-    if aggregates.is_empty()
-        || aggregates.iter().any(|aggregate| {
-            !matches!(
-                aggregate.function,
-                AggFunc::CountStar | AggFunc::Count | AggFunc::Sum
-            ) || aggregate.is_distinct
-                || aggregate.filter.is_some()
-                || aggregate.second_arg.is_some()
-                || aggregate.order_within_group.is_some()
-                || match aggregate.function {
-                    AggFunc::CountStar => aggregate.argument.is_some(),
-                    AggFunc::Count | AggFunc::Sum => match aggregate.argument.as_ref() {
-                        Some(Expr::ColumnRef {
-                            table_alias,
-                            column_name,
-                        }) if table_alias.as_deref().is_none_or(|name| name == alias) => columns
-                            .iter()
-                            .find(|column| column.name == *column_name)
-                            .is_none_or(|column| {
-                                aggregate.function == AggFunc::Sum
-                                    && !matches!(column.type_oid, 20 | 21 | 23 | 1700)
-                            }),
-                        _ => true,
-                    },
-                    _ => true,
+        .ok_or_else(|| {
+            RetentionQueryError::InvalidSourceKey(format!(
+                "source column \"{key}\" must belong to the single source table and be a non-null date, timestamp, or timestamptz partition key"
+            ))
+        })?;
+
+    for group in group_by {
+        match group {
+            Expr::ColumnRef {
+                table_alias,
+                column_name,
+            } => {
+                if !table_alias.as_deref().is_none_or(|name| name == alias)
+                    || !columns.iter().any(|column| column.name == *column_name)
+                {
+                    return Err(RetentionQueryError::UnsupportedShape(format!(
+                        "grouping key \"{}\" is not a plain column of source \"{alias}\"; other grouping keys must be source columns",
+                        group.to_sql()
+                    )));
                 }
-        })
-    {
-        return Err(RetentionQueryError::UnsupportedAggregate);
+            }
+            _ if bucket(group, alias, key, column.type_oid).is_none() => {
+                return Err(RetentionQueryError::UnsupportedShape(format!(
+                    "grouping key \"{}\" is neither the partition key \"{key}\" nor an hourly bucket of it; other grouping keys must be plain source columns",
+                    group.to_sql()
+                )));
+            }
+            _ => {}
+        }
+    }
+    if let Some((expressions, aliases)) = projection {
+        for (expression, output) in expressions.iter().zip(aliases) {
+            if !matches!(expression, Expr::ColumnRef { .. }) {
+                return Err(RetentionQueryError::UnsupportedShape(format!(
+                    "select-list item \"{} AS {output}\" is not a plain column reference; retention projections must reference grouped columns or aggregate outputs directly",
+                    expression.to_sql()
+                )));
+            }
+        }
+    }
+
+    if aggregates.is_empty() {
+        return Err(RetentionQueryError::UnsupportedAggregate(
+            "query has no aggregates; retention requires COUNT(*) / COUNT(column) or SUM(numeric source column)".into(),
+        ));
+    }
+    if let Some(aggregate) = aggregates.iter().find(|aggregate| {
+        !matches!(
+            aggregate.function,
+            AggFunc::CountStar | AggFunc::Count | AggFunc::Sum
+        ) || aggregate.is_distinct
+            || aggregate.filter.is_some()
+            || aggregate.second_arg.is_some()
+            || aggregate.order_within_group.is_some()
+            || match aggregate.function {
+                AggFunc::CountStar => aggregate.argument.is_some(),
+                AggFunc::Count | AggFunc::Sum => match aggregate.argument.as_ref() {
+                    Some(Expr::ColumnRef {
+                        table_alias,
+                        column_name,
+                    }) if table_alias.as_deref().is_none_or(|name| name == alias) => columns
+                        .iter()
+                        .find(|column| column.name == *column_name)
+                        .is_none_or(|column| {
+                            aggregate.function == AggFunc::Sum
+                                && !matches!(column.type_oid, 20 | 21 | 23 | 1700)
+                        }),
+                    _ => true,
+                },
+                _ => true,
+            }
+    }) {
+        let arg = aggregate
+            .argument
+            .as_ref()
+            .map(Expr::to_sql)
+            .unwrap_or_else(|| "*".into());
+        let argument = if aggregate.is_distinct {
+            format!("DISTINCT {arg}")
+        } else {
+            arg
+        };
+        let signature = if aggregate.function == AggFunc::CountStar {
+            "COUNT(*)".to_string()
+        } else {
+            format!("{:?}({argument})", aggregate.function)
+        };
+        return Err(RetentionQueryError::UnsupportedAggregate(format!(
+            "aggregate \"{signature} AS {}\" is not supported; retention allows only COUNT(*), COUNT(column), and SUM(numeric source column) without DISTINCT, FILTER, ORDER BY, or extra arguments",
+            aggregate.alias
+        )));
     }
 
     for group in group_by {
@@ -2584,7 +2677,10 @@ pub fn query_group_candidate(
         if candidate != RetentionBucket::Exact
             && columns.iter().any(|column| column.name == group_output)
         {
-            return Err(RetentionQueryError::UnsupportedShape);
+            return Err(RetentionQueryError::UnsupportedShape(format!(
+                "hourly grouping key \"{}\" has the same output name \"{group_output}\" as a source column; retention group output names must be unambiguous",
+                group.to_sql()
+            )));
         }
         if group_by
             .iter()
@@ -2595,7 +2691,10 @@ pub fn query_group_candidate(
                 .iter()
                 .any(|aggregate| aggregate.alias == group_output)
         {
-            return Err(RetentionQueryError::UnsupportedShape);
+            return Err(RetentionQueryError::UnsupportedShape(format!(
+                "grouping key \"{}\" has a duplicate output name \"{group_output}\"; retention group output names must be unique",
+                group.to_sql()
+            )));
         }
         let output = if let Some((expressions, aliases)) = projection {
             let mut matching = expressions.iter().zip(aliases).filter_map(|(expr, output)| {
@@ -2608,14 +2707,18 @@ pub fn query_group_candidate(
             if matching.next().is_some()
                 || aliases.iter().filter(|alias| *alias == output).count() != 1
             {
-                return Err(RetentionQueryError::UnsupportedShape);
+                return Err(RetentionQueryError::UnsupportedShape(format!(
+                    "projected partition key \"{group_output}\" has an ambiguous output name \"{output}\"; retention requires one uniquely named key column"
+                )));
             }
             output.clone()
         } else {
             group_output
         };
         if output.is_empty() {
-            return Err(RetentionQueryError::UnsupportedShape);
+            return Err(RetentionQueryError::UnsupportedShape(
+                "projected partition key has an empty output name; retention requires a named key column".into(),
+            ));
         }
         return Ok(RetentionGroupCandidate {
             output_column: output,
@@ -2625,7 +2728,9 @@ pub fn query_group_candidate(
             source_column: key.to_string(),
         });
     }
-    Err(RetentionQueryError::MissingProjectedGroupKey)
+    Err(RetentionQueryError::MissingProjectedGroupKey(format!(
+        "the GROUP BY and select list must project the partition key \"{key}\" or an approved hourly bucket of that same key as a plain column"
+    )))
 }
 
 #[cfg(all(feature = "e2e-unsafe-test-hooks", not(test)))]
@@ -2637,7 +2742,16 @@ fn retention_candidate_test(query: &str, source_oid: pgrx::pg_sys::Oid, key: &st
                 "Ok({:?}, {:?}, {})",
                 candidate.output_column, candidate.bucket, candidate.source_type_oid
             ),
-            Err(error) => format!("Err({error:?})"),
+            Err(error) => {
+                let kind = match error {
+                    RetentionQueryError::UnsupportedShape(_) => "UnsupportedShape",
+                    RetentionQueryError::UnsupportedAggregate(_) => "UnsupportedAggregate",
+                    RetentionQueryError::FloatingPointSum => "FloatingPointSum",
+                    RetentionQueryError::InvalidSourceKey(_) => "InvalidSourceKey",
+                    RetentionQueryError::MissingProjectedGroupKey(_) => "MissingProjectedGroupKey",
+                };
+                format!("Err({kind})")
+            },
         },
         Err(error) => format!("parse error: {error}"),
     }
@@ -2829,8 +2943,8 @@ mod tests {
             ),
         ];
         for (expression, group, type_oid, expected) in cases {
-            assert_eq!(
-                query_group_candidate(&query(expression, group, type_oid, false), 42, "occurred"),
+            assert!(matches!(
+            query_group_candidate(&query(expression, group, type_oid, false), 42, "occurred"),
                 Ok(RetentionGroupCandidate {
                     output_column: "bucket".into(),
                     bucket: expected,
@@ -2870,21 +2984,21 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape)
-        );
+            Err(RetentionQueryError::UnsupportedShape(_))
+        ));
         let unqualified = Expr::FuncCall {
             func_name: "date_trunc".into(),
             args: vec![Expr::Literal("'hour'".into()), col("occurred")],
         };
-        assert_eq!(
+        assert!(matches!(
             query_group_candidate(
                 &query(unqualified.clone(), unqualified, TIMESTAMP_OID, false),
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape)
-        );
-        assert_eq!(
+            Err(RetentionQueryError::UnsupportedShape(_))
+        ));
+        assert!(matches!(
             query_group_candidate(
                 &query(
                     hour("occurred", None),
@@ -2895,25 +3009,25 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape)
-        );
-        assert_eq!(
+            Err(RetentionQueryError::UnsupportedShape(_))
+        ));
+        assert!(matches!(
             query_group_candidate(
                 &query(col("occurred"), col("occurred"), DATE_OID, true),
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::InvalidSourceKey)
-        );
-        assert_eq!(
+            Err(RetentionQueryError::InvalidSourceKey(_))
+        ));
+        assert!(matches!(
             query_group_candidate(
                 &query(col("occurred"), col("occurred"), DATE_OID, false),
                 43,
                 "occurred"
             ),
-            Err(RetentionQueryError::InvalidSourceKey)
-        );
-        assert_eq!(
+            Err(RetentionQueryError::InvalidSourceKey(_))
+        ));
+        assert!(matches!(
             query_group_candidate(
                 &query(
                     hour("occurred", Some("Europe/Oslo")),
@@ -2924,16 +3038,16 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape)
-        );
-        assert_eq!(
+            Err(RetentionQueryError::UnsupportedShape(_))
+        ));
+        assert!(matches!(
             query_group_candidate(
                 &query(col("occurred"), col("other"), DATE_OID, false),
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape)
-        );
+            Err(RetentionQueryError::UnsupportedShape(_))
+        ));
     }
 
     #[test]
@@ -2973,8 +3087,8 @@ mod tests {
             });
             aggregates[0].function = function;
             aggregates[0].argument = Some(col("value"));
-            assert_eq!(
-                query_group_candidate(&tree, 42, "occurred").map(|_| ()),
+            assert!(matches!(
+            query_group_candidate(&tree, 42, "occurred").map(|_| ()),
                 expected
             );
         }
@@ -2992,17 +3106,17 @@ mod tests {
         aggregates[0].is_distinct = true;
         assert_eq!(
             query_group_candidate(&tree, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedAggregate)
-        );
+            Err(RetentionQueryError::UnsupportedAggregate(_))
+        ));
 
         let tree = OpTree::Filter {
             predicate: Expr::Literal("true".into()),
             child: Box::new(query(col("occurred"), col("occurred"), DATE_OID, false)),
         };
-        assert_eq!(
+        assert!(matches!(
             query_group_candidate(&tree, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedShape)
-        );
+            Err(RetentionQueryError::UnsupportedShape(_))
+        ));
 
         let group = hour("occurred", None);
         let conflicting_name = group.output_name();
@@ -3021,10 +3135,10 @@ mod tests {
             type_oid: TIMESTAMP_OID,
             is_nullable: false,
         });
-        assert_eq!(
+        assert!(matches!(
             query_group_candidate(&tree, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedShape)
-        );
+            Err(RetentionQueryError::UnsupportedShape(_))
+        ));
     }
 
     #[test]
@@ -3038,10 +3152,10 @@ mod tests {
         };
         aggregates[0].function = AggFunc::Sum;
         aggregates[0].argument = Some(Expr::Literal("random()".into()));
-        assert_eq!(
+        assert!(matches!(
             query_group_candidate(&tree, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedAggregate)
-        );
+            Err(RetentionQueryError::UnsupportedAggregate(_))
+        ));
         let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
         let OpTree::Project { child, .. } = &mut tree else {
             unreachable!()
@@ -3053,10 +3167,104 @@ mod tests {
             func_name: "random".into(),
             args: vec![],
         });
-        assert_eq!(
+        assert!(matches!(
             query_group_candidate(&tree, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedShape)
-        );
+            Err(RetentionQueryError::UnsupportedShape(_))
+        ));
+    }
+
+    #[test]
+    fn eligibility_errors_name_the_offending_projection_group_and_aggregate() {
+        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
+        let OpTree::Project {
+            expressions,
+            aliases,
+            ..
+        } = &mut tree
+        else {
+            unreachable!()
+        };
+        expressions.push(Expr::Literal("'x'::text".into()));
+        aliases.push("tag".into());
+        let message = query_group_candidate(&tree, 42, "occurred")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("select-list item \"'x'::text AS tag\""), "{message}");
+        assert!(message.contains("plain column reference"), "{message}");
+
+        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
+        let OpTree::Project { child, .. } = &mut tree else {
+            unreachable!()
+        };
+        let OpTree::Aggregate {
+            group_by, child, ..
+        } = child.as_mut()
+        else {
+            unreachable!()
+        };
+        group_by.push(hour("other", None));
+        let OpTree::Scan { columns, .. } = child.as_mut() else {
+            unreachable!()
+        };
+        columns.push(Column {
+            name: "other".into(),
+            type_oid: TIMESTAMP_OID,
+            is_nullable: false,
+        });
+        let message = query_group_candidate(&tree, 42, "occurred")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("grouping key"), "{message}");
+        assert!(message.contains("other"), "{message}");
+        assert!(message.contains("partition key \"occurred\""), "{message}");
+        assert!(message.contains("hourly bucket of it"), "{message}");
+
+        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
+        let OpTree::Project { child, .. } = &mut tree else {
+            unreachable!()
+        };
+        let OpTree::Aggregate { aggregates, .. } = child.as_mut() else {
+            unreachable!()
+        };
+        aggregates[0].is_distinct = true;
+        let message = query_group_candidate(&tree, 42, "occurred")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("COUNT(*) AS n"), "{message}");
+        assert!(message.contains("without DISTINCT"), "{message}");
+    }
+
+    #[test]
+    fn eligibility_errors_explain_missing_or_invalid_partition_key() {
+        let message = query_group_candidate(
+            &query(col("other"), col("occurred"), DATE_OID, false),
+            42,
+            "occurred",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("select list"), "{message}");
+        assert!(message.contains("partition key \"occurred\""), "{message}");
+
+        let message = query_group_candidate(
+            &query(col("occurred"), col("occurred"), DATE_OID, true),
+            42,
+            "occurred",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("source column \"occurred\""), "{message}");
+        assert!(message.contains("non-null"), "{message}");
+
+        let tree = OpTree::Filter {
+            predicate: Expr::Literal("true".into()),
+            child: Box::new(query(col("occurred"), col("occurred"), DATE_OID, false)),
+        };
+        let message = query_group_candidate(&tree, 42, "occurred")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("WHERE or HAVING filter"), "{message}");
+        assert!(message.contains("single-source grouped aggregate"), "{message}");
     }
 
     #[test]
