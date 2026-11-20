@@ -3766,7 +3766,7 @@ async fn test_retention_rejects_inexact_floating_sum() {
         assert!(
             error
                 .to_string()
-                .contains("does not support floating-point SUM"),
+                .contains("floating-point SUM is unsupported"),
             "{error}"
         );
         let relation: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
@@ -3782,7 +3782,7 @@ async fn test_retention_rejects_inexact_floating_sum() {
     assert!(
         error
             .to_string()
-            .contains("does not support floating-point SUM"),
+            .contains("floating-point SUM is unsupported"),
         "{error}"
     );
     db.execute("UPDATE pgtrickle.pgt_dependencies dep SET column_snapshot = jsonb_set(COALESCE(dep.column_snapshot,'{}'::jsonb), '{partition_retention}', jsonb_build_object('version',1,'mode','RETAIN','candidate',jsonb_build_object('output_column','d','bucket','EXACT','source_type_oid',1082,'source_oid',dep.source_relid::oid::bigint,'source_column','d'),'cutoff',jsonb_build_object('kind','DATE','value',DATE '2026-01-01' - DATE '2000-01-01'),'query_hash',st.defining_query_hash,'sealed','[]'::jsonb)) FROM pgtrickle.pgt_stream_tables st WHERE st.pgt_id=dep.pgt_id AND st.pgt_name='float_legacy' AND dep.source_relid='retention_float_src'::regclass").await;
