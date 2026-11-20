@@ -3095,7 +3095,7 @@ pg_trickle.prediction_min_samples = 5           # minimum samples before model a
 pg_trickle.log_delta_sql = false                # log delta SQL at DEBUG1 (diagnostic only)
 pg_trickle.delta_work_mem = 0                   # work_mem MB for delta execution (0 = inherit)
 pg_trickle.delta_enable_nestloop = true         # allow nested-loop joins in delta SQL
-pg_trickle.analyze_before_delta = true          # ANALYZE graph stages/deltas or source buffers
+pg_trickle.analyze_before_delta = true          # ANALYZE staged CDC, ordinary buffers and graph deltas
 pg_trickle.max_change_buffer_alert_rows = 0     # change buffer overflow alert threshold (0 = off)
 pg_trickle.diff_output_format = 'split'         # 'split' (DI-2 pairs) | 'merged' (compat)
 

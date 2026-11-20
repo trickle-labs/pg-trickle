@@ -534,7 +534,7 @@ SET pg_trickle.delta_work_mem = 256;  -- MB
 -- Disable nested loops for delta execution
 SET pg_trickle.delta_enable_nestloop = off;
 
--- Run ANALYZE on change buffers (enabled by default)
+-- ANALYZE staged CDC windows and ordinary change buffers (enabled by default)
 SET pg_trickle.analyze_before_delta = on;
 ```
 

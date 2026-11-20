@@ -382,10 +382,9 @@ pub static PGS_DELTA_WORK_MEM: GucSetting<i32> = GucSetting::<i32>::new(0);
 /// planner statistics are reliable.
 pub static PGS_DELTA_ENABLE_NESTLOOP: GucSetting<bool> = GucSetting::<bool>::new(true);
 
-/// PERF-5: Analyze the relations read by delta execution.
-///
-/// Graph refreshes analyze their bounded CDC stages and materialized deltas;
-/// other refreshes analyze persistent source change buffers.
+/// PERF-5: Analyze staged CDC windows before every delta execution.
+/// Ordinary refreshes also analyze persistent source change buffers;
+/// graph refreshes additionally analyze materialized deltas.
 pub static PGS_ANALYZE_BEFORE_DELTA: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// UX-7: DIFF output row format for aggregate UPDATE-splits.
@@ -964,8 +963,9 @@ pub fn register_dvm_gucs() {
     GucRegistry::define_bool_guc(
         c"pg_trickle.analyze_before_delta",
         c"Analyze relations used by delta execution.",
-        c"When true (default), graph refreshes analyze bounded CDC stages and \
-           materialized deltas. Other refreshes analyze persistent source change buffers.",
+        c"When true (default), every refresh analyzes its staged CDC windows. \
+           Ordinary refreshes also analyze persistent source change buffers, \
+           while graph refreshes analyze materialized deltas.",
         &PGS_ANALYZE_BEFORE_DELTA,
         GucContext::Suset,
         GucFlags::default(),
@@ -1372,7 +1372,7 @@ pub fn pg_trickle_delta_enable_nestloop() -> bool {
     PGS_DELTA_ENABLE_NESTLOOP.get()
 }
 
-/// PERF-5: Returns whether ANALYZE is run on change buffers before delta execution.
+/// PERF-5: Returns whether staged CDC windows and ordinary change buffers are analyzed.
 pub fn pg_trickle_analyze_before_delta() -> bool {
     PGS_ANALYZE_BEFORE_DELTA.get()
 }
