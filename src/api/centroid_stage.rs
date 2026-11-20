@@ -999,6 +999,9 @@ pub(crate) fn advance_empty_frontier(
     let previous = serde_json::to_value(previous).map_err(|error| {
         PgTrickleError::InternalError(format!("serialize centroid frontier: {error}"))
     })?;
+    let next_json = serde_json::to_value(next).map_err(|error| {
+        PgTrickleError::InternalError(format!("serialize centroid frontier: {error}"))
+    })?;
     let bound = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
          WHERE c.pgt_id = $1 AND c.baseline_frontier = $2 AND t.frontier = $2 \
@@ -1006,7 +1009,7 @@ pub(crate) fn advance_empty_frontier(
            AND c.stream_relid = t.pgt_relid \
            AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation \
            AND c.schema_version = 1 AND c.status = 'BUILDING')",
-        &[st.pgt_id.into(), pgrx::JsonB(previous).into()],
+        &[st.pgt_id.into(), pgrx::JsonB(previous.clone()).into()],
     ).map_err(|error| PgTrickleError::SpiError(error.to_string()))?.unwrap_or(false);
     if bound {
         let oids = dependencies
@@ -1015,7 +1018,21 @@ pub(crate) fn advance_empty_frontier(
             .collect::<Vec<_>>();
         crate::cdc::lock_source_relations(&oids)?;
         if sources_at_frontier(dependencies, next)? {
-            set_pending_frontier(st, next, None)?;
+            Spi::run_with_args(
+                "UPDATE pgtrickle.pgt_centroid_states c SET baseline_frontier = $2 \
+                 FROM pgtrickle.pgt_stream_tables t WHERE c.pgt_id = $1 AND t.pgt_id = c.pgt_id \
+                   AND c.baseline_frontier = $3 AND t.frontier = $3 \
+                   AND c.materialized_xid IS NULL AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL \
+                   AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query \
+                   AND c.contract_generation = t.contract_generation AND c.schema_version = 1 \
+                   AND c.status = 'BUILDING'",
+                &[
+                    st.pgt_id.into(),
+                    pgrx::JsonB(next_json).into(),
+                    pgrx::JsonB(previous).into(),
+                ],
+            )
+            .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
         }
     }
     Ok(())
