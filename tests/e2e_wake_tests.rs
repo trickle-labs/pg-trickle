@@ -6,6 +6,7 @@
 mod e2e;
 
 use e2e::E2eDb;
+#[cfg(not(feature = "light-e2e"))]
 use std::time::Duration;
 
 // Return the generated SQL body for a specific source's CDC trigger function.
@@ -43,7 +44,7 @@ async fn assert_capture_functions_do_not_notify(db: &E2eDb, source: &str, suffix
 /// All statement-level DML functions and TRUNCATE must avoid notifications.
 #[tokio::test]
 async fn test_wake_statement_cdc_triggers_do_not_notify() {
-    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE wake_src (id INT PRIMARY KEY, val TEXT)")
         .await;
@@ -66,7 +67,7 @@ async fn test_wake_statement_cdc_triggers_do_not_notify() {
 /// Legacy row-level CDC and its TRUNCATE trigger must also avoid notifications.
 #[tokio::test]
 async fn test_wake_row_cdc_triggers_do_not_notify() {
-    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE wake_row_src (id INT PRIMARY KEY, val TEXT)")
         .await;
@@ -85,7 +86,7 @@ async fn test_wake_row_cdc_triggers_do_not_notify() {
 /// A DML-only rebuild would leave the old notifying TRUNCATE body in pg_proc.
 #[tokio::test]
 async fn test_wake_rebuild_removes_legacy_notifications() {
-    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE wake_upgrade_src (id INT PRIMARY KEY, val TEXT)")
         .await;
@@ -140,6 +141,7 @@ async fn test_wake_rebuild_removes_legacy_notifications() {
 
 /// Verify polling actually propagates a committed CDC mutation, not just that
 /// an initial FULL refresh was recorded in the history.
+#[cfg(not(feature = "light-e2e"))]
 #[tokio::test]
 async fn test_wake_poll_only_scheduler_propagates_committed_change() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;

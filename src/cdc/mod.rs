@@ -873,7 +873,7 @@ fn build_truncate_trigger_fn_sql(
         "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
-         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $
+         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
              {sync_guard}
              -- A07: discard mode is lossy; hold mode keeps capture active.
@@ -889,7 +889,7 @@ fn build_truncate_trigger_fn_sql(
                      NULL::xid, NULL::timestamptz);
              RETURN NULL;
          END;
-         $",
+         $$",
     )
 }
 
