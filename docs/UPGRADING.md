@@ -2,6 +2,11 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+The v0.109.0 candidate's supported published-package path is directly from
+v0.108.3; see [0.108.3 to 0.109.0](#01083-to-01090) below. The v0.110.x
+sections are unreleased development notes and do not describe an upgrade from
+v0.109.0.
+
 ## 0.110.1 to 0.110.2
 
 Install the v0.110.2 library and extension migration files, then run:
@@ -52,13 +57,6 @@ SELECT pgtrickle.refresh_stream_table('public.my_stream_table');
 The CDC health view now explains why an explicit WAL request stays in
 trigger mode. The current WAL decoder requires a regular table with a
 primary key and `REPLICA IDENTITY FULL`.
-
-## 0.109.0 to 0.110.0
-
-Install the v0.110.0 library and extension files, then run
-`ALTER EXTENSION pg_trickle UPDATE TO '0.110.0';`. This adds the
-metric-aware embedding helper. Existing helper calls remain L2 and existing
-stream tables, index definitions, and maintenance policies are retained.
 
 ## 0.108.3 to 0.109.0
 
