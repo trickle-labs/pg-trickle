@@ -156,6 +156,7 @@ def check_pgvector_contract(contract: dict) -> None:
 def check_live_rag_contract(contract: dict) -> None:
     suite = next((item for item in contract["required_suites"] if item["id"] == "live-rag-100k"), None)
     workflow = (prior.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    runner = (prior.ROOT / "benchmarks/pgvector/run_release_live_rag.py").read_text(encoding="utf-8")
     prior.shared.require(
         suite is not None
         and suite.get("kind") == "measurement"
@@ -172,8 +173,14 @@ def check_live_rag_contract(contract: dict) -> None:
         and suite.get("measurement_file") == "qualification-logs/raw/live-rag-100k.json"
         and suite.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
         and not suite.get("required_cases")
+        and all(marker in runner for marker in (
+            "live-rag-100k-decision-table.md",
+            "live-rag-100k-maintenance-p50.svg",
+            "live-rag-100k-hybrid-recall.svg",
+            '"raw_evidence_files"',
+        ))
         and "timeout-minutes: 360" in workflow,
-        "release qualification must measure the exact package at 10,000 and 100,000 RAG documents without a 1M case",
+        "release qualification must measure the exact package at 10,000 and 100,000 RAG documents, retain the decision table and plots, and omit a 1M case",
     )
 
 
