@@ -580,7 +580,7 @@ async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
         .await;
     assert!(
         delta_sql.contains(
-            "ROW(ROW(\"region\", \"bucket\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"
+            "ROW(ROW(region, bucket)) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"
         ),
         "{delta_sql}"
     );

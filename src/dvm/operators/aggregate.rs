@@ -4038,7 +4038,7 @@ mod tests {
         let single = build_group_filter("delta", &[colref("region")], &["region".into()], None);
         assert_eq!(
             single,
-            "EXISTS (SELECT 1 FROM delta AS __pgt_d2(\"__pgt_group_0\") WHERE ROW(ROW(\"region\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\")))"
+            "EXISTS (SELECT 1 FROM delta AS __pgt_d2(\"__pgt_group_0\") WHERE ROW(ROW(region)) = ROW(ROW(__pgt_d2.\"__pgt_group_0\")))"
         );
 
         let multi = build_group_filter(
@@ -4059,7 +4059,7 @@ mod tests {
         );
         assert!(
             multi.contains(
-                "ROW(ROW(\"region\", \"s\".\"Day\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"
+                "ROW(ROW(region, \"s\".\"Day\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"
             ),
             "{multi}"
         );
@@ -4086,7 +4086,7 @@ mod tests {
         // per-key IS NOT DISTINCT FROM nested-loop plans.
         assert!(
             sql.contains(
-                "ROW(ROW(\"region\", \"day\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"
+                "ROW(ROW(region, day)) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"
             ),
             "{sql}"
         );
@@ -4464,7 +4464,7 @@ mod tests {
             &["grp".to_string()],
             Some(&special_filter),
         );
-        assert!(group_filter.contains("grp IS NOT DISTINCT FROM __pgt_d2.\"__pgt_group_0\""));
+        assert!(group_filter.contains("ROW(ROW(grp)) = ROW(ROW(__pgt_d2.\"__pgt_group_0\"))"));
         assert!(group_filter.contains("__pgt_d2.\"__special_total\""));
 
         let merge = agg_merge_expr_mapped(
@@ -7394,7 +7394,12 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains("d.\"__pgt_group_0\" IS NOT DISTINCT FROM n.\"__pgt_group_0\""),
+            sql.contains(concat!(
+                "ROW(ROW(d.\"__pgt_group_0\", d.\"__pgt_group_1\", ",
+                "d.\"__pgt_group_2\", d.\"__pgt_group_3\")) = ",
+                "ROW(ROW(n.\"__pgt_group_0\", n.\"__pgt_group_1\", ",
+                "n.\"__pgt_group_2\", n.\"__pgt_group_3\"))"
+            )),
             "{sql}"
         );
         assert!(
