@@ -146,12 +146,7 @@ fn build_group_filter(
         .join(", ");
     let source_keys: Vec<String> = group_by.iter().map(Expr::to_sql).collect();
     let delta_keys: Vec<String> = (0..group_output.len())
-        .map(|index| {
-            format!(
-                "__pgt_d2.{}",
-                quote_ident(&format!("__pgt_group_{index}"))
-            )
-        })
+        .map(|index| format!("__pgt_d2.{}", quote_ident(&format!("__pgt_group_{index}"))))
         .collect();
     let condition = hashable_group_match(&source_keys, &delta_keys);
     let delta_filter = delta_filter
@@ -1751,12 +1746,7 @@ fn build_rescan_cte(
                 .map(|column| format!("__pgt_dq.{}", quote_ident(&dq_col_name(column))))
                 .collect();
             let delta_keys: Vec<String> = (0..group_output.len())
-                .map(|index| {
-                    format!(
-                        "__pgt_d2.{}",
-                        quote_ident(&format!("__pgt_group_{index}"))
-                    )
-                })
+                .map(|index| format!("__pgt_d2.{}", quote_ident(&format!("__pgt_group_{index}"))))
                 .collect();
             let condition = hashable_group_match(&source_keys, &delta_keys);
             let delta_filter = config
@@ -4045,12 +4035,7 @@ mod tests {
 
     #[test]
     fn test_group_filter_uses_hashable_record_equality_for_nullable_keys() {
-        let single = build_group_filter(
-            "delta",
-            &[colref("region")],
-            &["region".into()],
-            None,
-        );
+        let single = build_group_filter("delta", &[colref("region")], &["region".into()], None);
         assert_eq!(
             single,
             "EXISTS (SELECT 1 FROM delta AS __pgt_d2(\"__pgt_group_0\") WHERE ROW(ROW(\"region\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\")))"
@@ -4068,7 +4053,10 @@ mod tests {
             &["duplicate".into(), "duplicate".into()],
             Some("COALESCE(__pgt_d2.\"__special_peak\", 0) > 0"),
         );
-        assert!(multi.contains("AS __pgt_d2(\"__pgt_group_0\", \"__pgt_group_1\")"), "{multi}");
+        assert!(
+            multi.contains("AS __pgt_d2(\"__pgt_group_0\", \"__pgt_group_1\")"),
+            "{multi}"
+        );
         assert!(
             multi.contains(
                 "ROW(ROW(\"region\", \"s\".\"Day\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"

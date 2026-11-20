@@ -559,17 +559,19 @@ async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
     // PostgreSQL treats NULL fields as equal for composite record equality.
     // An extra ROW layer forces record_eq, unlike plain ROW(...)=ROW(...).
     let equal_null_keys: bool = db
-        .query_scalar(
-            "SELECT ROW(ROW(NULL::text, 1::int)) = ROW(ROW(NULL::text, 1::int))",
-        )
+        .query_scalar("SELECT ROW(ROW(NULL::text, 1::int)) = ROW(ROW(NULL::text, 1::int))")
         .await;
     let different_null_keys: bool = db
-        .query_scalar(
-            "SELECT ROW(ROW(NULL::text, 1::int)) = ROW(ROW('x'::text, 1::int))",
-        )
+        .query_scalar("SELECT ROW(ROW(NULL::text, 1::int)) = ROW(ROW('x'::text, 1::int))")
         .await;
-    assert!(equal_null_keys, "two NULL group-key fields must compare equal");
-    assert!(!different_null_keys, "NULL and non-NULL keys must not match");
+    assert!(
+        equal_null_keys,
+        "two NULL group-key fields must compare equal"
+    );
+    assert!(
+        !different_null_keys,
+        "NULL and non-NULL keys must not match"
+    );
 
     // The generated production SQL must use the same condition in BOTH
     // the source rescan restriction and the rescan-to-delta merge.
@@ -583,7 +585,9 @@ async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
         "{delta_sql}"
     );
     assert!(
-        delta_sql.contains("ROW(ROW(r.\"region\", r.\"bucket\")) = ROW(ROW(d.\"region\", d.\"bucket\"))"),
+        delta_sql.contains(
+            "ROW(ROW(r.\"region\", r.\"bucket\")) = ROW(ROW(d.\"region\", d.\"bucket\"))"
+        ),
         "{delta_sql}"
     );
 
@@ -639,10 +643,8 @@ async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
         .await;
 
     // Change a group key (including a NULL transition) and rescan again.
-    db.execute(
-        "UPDATE agg_mass_extreme_source SET region = NULL, value = 8 WHERE id % 100 = 22",
-    )
-    .await;
+    db.execute("UPDATE agg_mass_extreme_source SET region = NULL, value = 8 WHERE id % 100 = 22")
+        .await;
     refresh_differential(&db, "agg_mass_extreme_st").await;
     db.assert_st_matches_query("agg_mass_extreme_st", query)
         .await;
