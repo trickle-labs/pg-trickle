@@ -336,7 +336,6 @@ async fn join_counts_future_partner_only_in_next_window() {
     assert_no_full_fallback(&db, "bound_join_st").await;
 }
 
-
 // Regression for #1453: a normal DIFFERENTIAL refresh must ANALYZE the
 // materialized CDC window read by the delta query, even without planner hints.
 // Inspect the staged table before COMMIT (it is ON COMMIT DROP). The negative
