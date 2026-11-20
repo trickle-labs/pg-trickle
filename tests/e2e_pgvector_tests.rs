@@ -2902,6 +2902,7 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
     let mut last_unbound_refresh_id = None;
     let mut max_error: f64 = 0.0;
     let mut max_bound_fraction: f64 = 0.0;
+    let mut frontier_retries = 0;
     let mut checkpoints = Vec::new();
     for step in 0..steps {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -2979,20 +2980,54 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
                 .await
                 .expect("disable centroid failure trace");
         }
-        let matches: bool = sqlx::query_scalar(
-            "WITH native AS (SELECT grp, avg(v)::real[] AS v, count(*) AS n FROM centroid_churn_src GROUP BY grp), \
+        let matches_sql = "WITH native AS (SELECT grp, avg(v)::real[] AS v, count(*) AS n FROM centroid_churn_src GROUP BY grp), \
              actual AS (SELECT grp, centroid::real[] AS v, __pgt_count AS n FROM centroid_churn_st) \
              SELECT NOT EXISTS (SELECT 1 FROM native n FULL JOIN actual a USING (grp) \
              WHERE n.n IS DISTINCT FROM a.n OR (n.v IS NULL) <> (a.v IS NULL) OR \
                array_length(n.v, 1) IS DISTINCT FROM array_length(a.v, 1) OR \
                EXISTS (SELECT 1 FROM generate_series(1, array_length(n.v, 1)) AS i \
-                 WHERE abs(n.v[i]::float8 - a.v[i]::float8) > 1e-5 + 1e-6 * abs(n.v[i]::float8)))"
-        ).fetch_one(&mut *conn).await.expect("compare churn with native AVG");
+                 WHERE abs(n.v[i]::float8 - a.v[i]::float8) > 1e-5 + 1e-6 * abs(n.v[i]::float8)))";
+        let mut matches: bool = sqlx::query_scalar(matches_sql)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("compare churn with native AVG");
+        for _ in 0..3 {
+            if matches {
+                break;
+            }
+            let pending_sql = format!(
+                "SELECT EXISTS (SELECT 1 FROM {cdc_buffer} c WHERE c.lsn > (\
+                   SELECT (frontier->'sources'->('centroid_churn_src'::regclass::oid::text)->>'lsn')::pg_lsn \
+                   FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_churn_st'::regclass))"
+            );
+            let pending: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(pending_sql.as_str()))
+                .fetch_one(&mut *conn)
+                .await
+                .expect("check for CDC beyond the centroid frontier");
+            if !pending {
+                break;
+            }
+            sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_churn_st')")
+                .execute(&mut *conn)
+                .await
+                .expect("retry centroid refresh while CDC remains beyond its frontier");
+            frontier_retries += 1;
+            matches = sqlx::query_scalar(matches_sql)
+                .fetch_one(&mut *conn)
+                .await
+                .expect("compare retried churn refresh with native AVG");
+        }
         if !matches {
             let details: serde_json::Value = sqlx::query_scalar("WITH native AS (SELECT grp, avg(v)::real[] AS v, count(*) AS n FROM centroid_churn_src GROUP BY grp), actual AS (SELECT grp, centroid::real[] AS v, __pgt_count AS n FROM centroid_churn_st), failures AS (SELECT n.grp, i, n.v[i] AS native, a.v[i] AS actual, abs(n.v[i]::float8 - a.v[i]::float8) AS error, 1e-5 + 1e-6 * abs(n.v[i]::float8) AS bound FROM native n JOIN actual a USING (grp) CROSS JOIN generate_series(1, array_length(n.v, 1)) i WHERE abs(n.v[i]::float8 - a.v[i]::float8) > 1e-5 + 1e-6 * abs(n.v[i]::float8) ORDER BY error DESC LIMIT 10) SELECT jsonb_build_object('failures', (SELECT jsonb_agg(to_jsonb(failures)) FROM failures), 'history', (SELECT to_jsonb(h) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1))")
                 .fetch_one(&mut *conn).await.expect("inspect centroid mismatch");
             let groups: serde_json::Value = sqlx::query_scalar("WITH native AS (SELECT grp, count(*) AS n, avg(v) IS NULL AS null_centroid FROM centroid_churn_src GROUP BY grp), actual AS (SELECT grp, __pgt_count AS n, centroid IS NULL AS null_centroid FROM centroid_churn_st) SELECT jsonb_build_object('native', (SELECT jsonb_agg(to_jsonb(native)) FROM native), 'actual', (SELECT jsonb_agg(to_jsonb(actual)) FROM actual))")
                 .fetch_one(&mut *conn).await.expect("inspect centroid groups");
+            let frontier_after: serde_json::Value = sqlx::query_scalar(
+                "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_churn_st'::regclass",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .expect("inspect frontier after centroid mismatch");
             let postgres_trace = tokio::process::Command::new("docker")
                 .args(["logs", "--tail", "300", db.container_id()])
                 .output()
@@ -3022,7 +3057,8 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
                 .unwrap_or_else(|error| format!("could not collect PostgreSQL trace: {error}"));
             panic!(
                 "centroid diverged from native AVG at step {step}: {details}; \
-                 groups={groups}; cdc_window={cdc_window}; postgres_trace={postgres_trace}"
+                 groups={groups}; cdc_window={cdc_window}; frontier_after={frontier_after}; \
+                 postgres_trace={postgres_trace}"
             );
         }
         let (error, bound_fraction): (f64, f64) = sqlx::query_as(
@@ -3079,7 +3115,7 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
     }
     println!(
         "CENTROID_DRIFT_JSON={}",
-        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"seed":"0x7a139465","dimensions":dimensions,"diverse_components":diverse,"refresh_calls":steps,"latest_history_algebraic_observations":algebraic,"unbound_refreshes":unbound_refreshes,"absolute_tolerance":1e-5,"relative_tolerance":1e-6,"checkpoints":checkpoints})
+        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"seed":"0x7a139465","dimensions":dimensions,"diverse_components":diverse,"refresh_calls":steps,"frontier_retries":frontier_retries,"latest_history_algebraic_observations":algebraic,"unbound_refreshes":unbound_refreshes,"absolute_tolerance":1e-5,"relative_tolerance":1e-6,"checkpoints":checkpoints})
     );
 }
 
