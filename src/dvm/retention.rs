@@ -2502,9 +2502,9 @@ fn retention_operator_name(tree: &OpTree) -> &'static str {
         | OpTree::SemiJoin { .. }
         | OpTree::AntiJoin { .. } => "join",
         OpTree::Distinct { .. } => "DISTINCT",
-        OpTree::UnionAll { .. }
-        | OpTree::Intersect { .. }
-        | OpTree::Except { .. } => "set operation",
+        OpTree::UnionAll { .. } | OpTree::Intersect { .. } | OpTree::Except { .. } => {
+            "set operation"
+        }
         OpTree::Subquery { .. }
         | OpTree::CteScan { .. }
         | OpTree::RecursiveCte { .. }
@@ -2751,7 +2751,7 @@ fn retention_candidate_test(query: &str, source_oid: pgrx::pg_sys::Oid, key: &st
                     RetentionQueryError::MissingProjectedGroupKey(_) => "MissingProjectedGroupKey",
                 };
                 format!("Err({kind})")
-            },
+            }
         },
         Err(error) => format!("parse error: {error}"),
     }
@@ -3189,7 +3189,10 @@ mod tests {
         let message = query_group_candidate(&tree, 42, "occurred")
             .unwrap_err()
             .to_string();
-        assert!(message.contains("select-list item \"'x'::text AS tag\""), "{message}");
+        assert!(
+            message.contains("select-list item \"'x'::text AS tag\""),
+            "{message}"
+        );
         assert!(message.contains("plain column reference"), "{message}");
 
         let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
@@ -3264,7 +3267,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(message.contains("WHERE or HAVING filter"), "{message}");
-        assert!(message.contains("single-source grouped aggregate"), "{message}");
+        assert!(
+            message.contains("single-source grouped aggregate"),
+            "{message}"
+        );
     }
 
     #[test]

@@ -5765,9 +5765,7 @@ async fn test_retention_eligibility_diagnostics_report_construct_and_contract_hi
     .await
     .expect("eligible query must still be accepted");
     let policy: serde_json::Value = db
-        .query_scalar(
-            "SELECT pgtrickle.get_stream_table_partition_retention('retention_diag_ok')",
-        )
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('retention_diag_ok')")
         .await;
     assert_eq!(policy["enabled"], true);
 
@@ -5804,7 +5802,10 @@ async fn test_retention_eligibility_diagnostics_report_construct_and_contract_hi
         .expect_err("ineligible retention query must fail");
 
         let message = error.to_string();
-        assert!(message.contains("retention query is not eligible"), "{message}");
+        assert!(
+            message.contains("retention query is not eligible"),
+            "{message}"
+        );
         assert!(message.contains(context), "{message}");
         assert!(message.contains(expression), "{message}");
         assert!(message.contains(rule), "{message}");

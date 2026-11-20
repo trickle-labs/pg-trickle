@@ -773,6 +773,7 @@ impl PgTrickleError {
             | PgTrickleError::NotFound(_)
             | PgTrickleError::AlreadyExists(_)
             | PgTrickleError::InvalidArgument(_)
+            | PgTrickleError::RetentionQueryIneligible(_)
             | PgTrickleError::IntegrationError { .. }
             | PgTrickleError::FreshnessEvidenceUnavailable(_)
             | PgTrickleError::QueryTooComplex(_)
