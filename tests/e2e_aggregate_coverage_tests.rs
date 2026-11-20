@@ -535,14 +535,22 @@ async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
         "CREATE TABLE agg_mass_extreme_source (id int PRIMARY KEY, region text, bucket int, value int NOT NULL)",
     )
     .await;
-    // 1,500 affected groups, including partially and fully NULL composite
-    // keys, to exercise the source semi-join and the rescan-to-delta join.
+    // 1,500 group IDs (with some coalescing on NULL keys), including
+    // partially and fully NULL composite keys, to exercise the source semi-join and the rescan-to-delta join.
     db.execute(
-        "INSERT INTO agg_mass_extreme_source          SELECT g * 10 + i,                 CASE WHEN g % 13 = 0 THEN NULL ELSE 'grp-' || g END,                 CASE WHEN g % 17 = 0 THEN NULL ELSE g % 4 END, i          FROM generate_series(1, 1500) AS g, generate_series(1, 5) AS i",
+        r#"INSERT INTO agg_mass_extreme_source
+           SELECT g * 10 + i,
+                  CASE WHEN g % 13 = 0 THEN NULL ELSE 'grp-' || g END,
+                  CASE WHEN g % 17 = 0 THEN NULL ELSE g % 4 END,
+                  i
+           FROM generate_series(1, 1500) AS g,
+                generate_series(1, 5) AS i"#,
     )
     .await;
     db.execute("ANALYZE agg_mass_extreme_source").await;
-    let query = "SELECT region, bucket, COUNT(*) AS n, SUM(value) AS total,                         MIN(value) AS low, MAX(value) AS high                  FROM agg_mass_extreme_source GROUP BY region, bucket";
+    let query = "SELECT region, bucket, COUNT(*) AS n, SUM(value) AS total, \
+                 MIN(value) AS low, MAX(value) AS high \
+                 FROM agg_mass_extreme_source GROUP BY region, bucket";
     db.create_st("agg_mass_extreme_st", query, "1m", "DIFFERENTIAL")
         .await;
     db.assert_st_matches_query("agg_mass_extreme_st", query)
@@ -591,7 +599,22 @@ async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
         .await
         .unwrap();
     let plan: serde_json::Value = sqlx::query_scalar(
-        "EXPLAIN (FORMAT JSON, COSTS OFF)          WITH affected AS MATERIALIZED (             SELECT region, bucket FROM agg_mass_extreme_source              WHERE value = 5 GROUP BY region, bucket         ), rescan AS MATERIALIZED (             SELECT s.region, s.bucket, MAX(s.value) AS high              FROM agg_mass_extreme_source s              WHERE EXISTS (                 SELECT 1 FROM affected d                  WHERE ROW(ROW(s.region, s.bucket)) = ROW(ROW(d.region, d.bucket))             ) GROUP BY s.region, s.bucket         )          SELECT SUM(COALESCE(r.high, 0)) FROM affected d          LEFT JOIN rescan r            ON ROW(ROW(r.region, r.bucket)) = ROW(ROW(d.region, d.bucket))",
+        r#"EXPLAIN (FORMAT JSON, COSTS OFF)
+           WITH affected AS MATERIALIZED (
+               SELECT region, bucket FROM agg_mass_extreme_source
+               WHERE value = 5 GROUP BY region, bucket
+           ), rescan AS MATERIALIZED (
+               SELECT s.region, s.bucket, MAX(s.value) AS high
+               FROM agg_mass_extreme_source s
+               WHERE EXISTS (
+                   SELECT 1 FROM affected d
+                   WHERE ROW(ROW(s.region, s.bucket)) = ROW(ROW(d.region, d.bucket))
+               )
+               GROUP BY s.region, s.bucket
+           )
+           SELECT SUM(COALESCE(r.high, 0)) FROM affected d
+           LEFT JOIN rescan r
+             ON ROW(ROW(r.region, r.bucket)) = ROW(ROW(d.region, d.bucket))"#,
     )
     .fetch_one(&mut *conn)
     .await
@@ -617,7 +640,7 @@ async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
 
     // Change a group key (including a NULL transition) and rescan again.
     db.execute(
-        "UPDATE agg_mass_extreme_source SET region = NULL, value = 8          WHERE id % 100 = 22",
+        "UPDATE agg_mass_extreme_source SET region = NULL, value = 8 WHERE id % 100 = 22",
     )
     .await;
     refresh_differential(&db, "agg_mass_extreme_st").await;
