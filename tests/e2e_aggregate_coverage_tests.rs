@@ -591,7 +591,7 @@ async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
         .await
         .unwrap();
     let plan: serde_json::Value = sqlx::query_scalar(
-        "EXPLAIN (FORMAT JSON, COSTS OFF)          WITH affected AS MATERIALIZED (             SELECT region, bucket FROM agg_mass_extreme_source              WHERE value = 5 GROUP BY region, bucket         ), rescan AS MATERIALIZED (             SELECT s.region, s.bucket, MAX(s.value) AS high              FROM agg_mass_extreme_source s              WHERE EXISTS (                 SELECT 1 FROM affected d                  WHERE ROW(ROW(s.region, s.bucket)) = ROW(ROW(d.region, d.bucket))             ) GROUP BY s.region, s.bucket         )          SELECT COUNT(*) FROM affected d          LEFT JOIN rescan r            ON ROW(ROW(r.region, r.bucket)) = ROW(ROW(d.region, d.bucket))",
+        "EXPLAIN (FORMAT JSON, COSTS OFF)          WITH affected AS MATERIALIZED (             SELECT region, bucket FROM agg_mass_extreme_source              WHERE value = 5 GROUP BY region, bucket         ), rescan AS MATERIALIZED (             SELECT s.region, s.bucket, MAX(s.value) AS high              FROM agg_mass_extreme_source s              WHERE EXISTS (                 SELECT 1 FROM affected d                  WHERE ROW(ROW(s.region, s.bucket)) = ROW(ROW(d.region, d.bucket))             ) GROUP BY s.region, s.bucket         )          SELECT SUM(COALESCE(r.high, 0)) FROM affected d          LEFT JOIN rescan r            ON ROW(ROW(r.region, r.bucket)) = ROW(ROW(d.region, d.bucket))",
     )
     .fetch_one(&mut *conn)
     .await
