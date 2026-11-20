@@ -863,11 +863,7 @@ pub(crate) fn validate_stream_table_row_identity(
 /// CDC capture must not issue NOTIFY: PostgreSQL serializes transactions with
 /// queued notifications at COMMIT, while the scheduler independently polls
 /// change buffers.
-fn build_truncate_trigger_fn_sql(
-    change_schema: &str,
-    name: &str,
-    sync_commit: bool,
-) -> String {
+fn build_truncate_trigger_fn_sql(change_schema: &str, name: &str, sync_commit: bool) -> String {
     let sync_guard = sync_guard_sql(sync_commit);
     format!(
         "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()

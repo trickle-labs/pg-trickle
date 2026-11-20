@@ -117,7 +117,10 @@ async fn test_wake_rebuild_removes_legacy_notifications() {
         ))
         .await;
         let legacy = capture_function_body(&db, "wake_upgrade_src", suffix).await;
-        assert!(legacy.contains("pg_notify"), "legacy fixture was not installed");
+        assert!(
+            legacy.contains("pg_notify"),
+            "legacy fixture was not installed"
+        );
     }
 
     db.execute("SELECT pgtrickle.rebuild_cdc_triggers()").await;
@@ -132,11 +135,8 @@ async fn test_wake_rebuild_removes_legacy_notifications() {
     db.execute("INSERT INTO wake_upgrade_src VALUES (1, 'captured')")
         .await;
     db.refresh_st("wake_upgrade_st").await;
-    db.assert_st_matches_query(
-        "wake_upgrade_st",
-        "SELECT id, val FROM wake_upgrade_src",
-    )
-    .await;
+    db.assert_st_matches_query("wake_upgrade_st", "SELECT id, val FROM wake_upgrade_src")
+        .await;
 }
 
 /// Verify polling actually propagates a committed CDC mutation, not just that
