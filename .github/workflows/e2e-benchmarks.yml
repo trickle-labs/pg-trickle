@@ -373,15 +373,21 @@ jobs:
           fi
       - name: Build E2E Docker image
         run: ./tests/build_e2e_image.sh
+      - name: Install pinned pgvector
+        run: ./tests/build_e2e_pgvector_image.sh 0.8.7
       - name: Measure workload
         env:
           PGVECTOR_BENCH_DIM: ${{ matrix.dimensions }}
+          PGVECTOR_EXPECTED_VERSION: "0.8.7"
+          PGS_E2E_IMAGE: pg_trickle_e2e_pgvector:0.8.7
         run: |
           mkdir -p target/pgvector-bench
           uname -a > target/pgvector-bench/host.txt
           lscpu >> target/pgvector-bench/host.txt
           docker version >> target/pgvector-bench/host.txt
           git rev-parse HEAD >> target/pgvector-bench/host.txt
+          docker image inspect pg_trickle_e2e_pgvector:0.8.7 --format '{{.Id}} {{.Os}}/{{.Architecture}}' >> target/pgvector-bench/host.txt
+          docker run --rm --entrypoint sh pg_trickle_e2e_pgvector:0.8.7 -c 'sha256sum /usr/lib/postgresql/18/lib/pg_trickle.so /usr/share/postgresql/18/extension/pg_trickle*' > target/pgvector-bench/package-files.sha256
           ./scripts/run_e2e_tests.sh --retries 0 --test e2e_bench_tests \
             --run-ignored ignored-only --no-capture \
             -E 'test(test_pgvector_filtered_ann_workload)' \
@@ -394,6 +400,9 @@ jobs:
           PGVECTOR_SUB_DIM: "384"
           PGVECTOR_SUB_STATISTICS: both
           PGVECTOR_SUB_FORCE_EXPLICIT: "1"
+          PGVECTOR_SUB_PLAN_LOG: target/pgvector-bench/subscription-postgres.log
+          PGVECTOR_EXPECTED_VERSION: "0.8.7"
+          PGS_E2E_IMAGE: pg_trickle_e2e_pgvector:0.8.7
         run: |
           ./scripts/run_e2e_tests.sh --retries 0 --test e2e_bench_tests \
             --run-ignored ignored-only --no-capture \

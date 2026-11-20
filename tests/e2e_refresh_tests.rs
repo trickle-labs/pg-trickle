@@ -7,13 +7,14 @@
 
 mod e2e;
 
-use e2e::E2eDb;
+use e2e::{E2eDb, disable_scheduler};
 
 // ── Basic DML Refresh ──────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_refresh_cost_evidence_reports_empty_filtered_output() {
     let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
     db.execute_seq(&[
         "SET pg_trickle.refresh_strategy = 'differential'",
         "CREATE TABLE rf_cost_filter_src (id INT PRIMARY KEY, active BOOLEAN, val INT)",
