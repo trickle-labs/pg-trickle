@@ -2,20 +2,20 @@
 # Stability Tests — Long-running soak and multi-database isolation tests
 #
 # Separated from ci.yml because these are heavyweight, non-blocking stability
-# tests that don't gate PRs or merges.  They run daily and on manual dispatch.
+# tests that normally run daily or on manual dispatch. Soak correctness
+# regressions additionally run on PRs touching the soak harness.
 # =============================================================================
 name: Stability Tests
 
 on:
-  schedule:
-    - cron: '0 16 * * *'  # Daily 16:00 UTC, after daytime qualification runs
-  workflow_dispatch:
-  # Exercise the real Linux/Docker RSS path before merging changes to the soak.
   pull_request:
     branches: [main]
     paths:
       - 'tests/e2e_soak_tests.rs'
       - '.github/workflows/stability-tests.yml'
+  schedule:
+    - cron: '0 16 * * *'  # Daily 16:00 UTC, after daytime qualification runs
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -29,6 +29,7 @@ env:
 jobs:
   # ── G17-SOAK: Long-Running Stability Soak Test ───────────────────────
   soak-test:
+    if: github.event_name != 'pull_request'
     name: Stability soak test
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -41,11 +42,35 @@ jobs:
       - name: Build E2E Docker image
         run: ./tests/build_e2e_image.sh
 
-      - name: Run RSS regression tests and soak (2 min on PR, 10 min otherwise)
-        env:
-          SOAK_DURATION_SECS: ${{ github.event_name == 'pull_request' && '120' || '600' }}
-        run: ./scripts/run_e2e_tests.sh --test e2e_soak_tests --run-ignored all --no-capture
+      - name: Run soak test (10 min)
+        run: SOAK_DURATION_SECS=600 ./scripts/run_e2e_tests.sh --test e2e_soak_tests --run-ignored all --no-capture
         timeout-minutes: 20
+
+  # ── #1430: Soak correctness regressions on relevant PRs ────────────
+  soak-correctness-regressions:
+    if: github.event_name == 'pull_request'
+    name: Soak correctness E2E regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Build E2E Docker image
+        run: ./tests/build_e2e_image.sh
+
+      - name: Run bounded differential and negative-control regressions
+        run: ./scripts/run_e2e_tests.sh --test e2e_soak_tests --retries 0 --no-capture
+        timeout-minutes: 10
+
+      - name: Run short soak (final check before periodic interval)
+        run: |
+          SOAK_DURATION_SECS=30 ./scripts/run_e2e_tests.sh \
+            --test e2e_soak_tests --run-ignored all \
+            -E 'test(=test_soak_stability)' --retries 0 --no-capture
+        timeout-minutes: 10
 
   # ── G17-MDB: Multi-Database Scheduler Isolation Test ──────────────────
   mdb-test:
@@ -111,7 +136,7 @@ jobs:
   check:
     name: Stability gate
     runs-on: ubuntu-latest
-    needs: [soak-test, mdb-test, citus-chaos-test]
+    needs: [soak-test, soak-correctness-regressions, mdb-test, citus-chaos-test]
     if: always()
     steps:
       - name: Fail if any stability job failed
@@ -119,6 +144,7 @@ jobs:
         run: |
           echo "One or more stability jobs failed:"
           echo "  soak-test:         ${{ needs.soak-test.result }}"
+          echo "  soak-regressions:  ${{ needs.soak-correctness-regressions.result }}"
           echo "  mdb-test:          ${{ needs.mdb-test.result }}"
           echo "  citus-chaos-test:  ${{ needs.citus-chaos-test.result }}"
           exit 1

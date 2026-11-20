@@ -7,7 +7,7 @@
 //!   - Stable memory usage (RSS growth < 20% over the test duration)
 //!   - Correctness: stream table contents match defining queries
 //!
-//! These tests are `#[ignore]`d to skip in normal `cargo test` runs.
+//! The long soak is `#[ignore]`d; bounded correctness regression tests run in normal E2E suites.
 //! Run manually or via CI:
 //!
 //! ```bash
@@ -25,7 +25,7 @@
 
 mod e2e;
 
-use e2e::E2eDb;
+use e2e::{E2eDb, oracle};
 use std::time::{Duration, Instant};
 
 // ── Configuration ──────────────────────────────────────────────────────
@@ -363,144 +363,143 @@ fn validate_rss_growth(initial: RssSample, final_rss: RssSample) -> Result<f64, 
     Ok(growth_pct)
 }
 
-/// Verify stream table correctness by comparing contents to defining query.
-async fn verify_correctness(db: &E2eDb, st_name: &str) -> Result<(), String> {
-    verify_correctness_inner(db, st_name, false).await
+/// The completed action, status, path and affected-row witness stored in the
+/// refresh history. Keep the SQL row type named to make its intent explicit.
+type RefreshHistoryRecord = (String, String, bool, Option<String>, i64, i64, i64);
+
+/// Evidence from a completed manual refresh at a quiescent checkpoint.
+#[derive(Debug)]
+struct RefreshWitness {
+    action: String,
+    affected_rows: i64,
 }
 
-/// Verify stream table correctness using a FULL refresh first.
+/// Catch up a stream with a manual refresh and compare its *maintained* public
+/// result against its defining query. The scheduler must already be paused and
+/// drained. In particular, never switch to FULL or repair a mismatched result.
 ///
-/// A FULL refresh (TRUNCATE + INSERT) guarantees the stream table exactly
-/// matches the defining query, bypassing any incremental-maintenance drift.
-async fn verify_correctness_full(db: &E2eDb, st_name: &str) -> Result<(), String> {
-    verify_correctness_inner(db, st_name, true).await
-}
+/// A manual refresh can return Ok when it was actually skipped. Insist on a
+/// new, completed history record and reject implicit FULL fallbacks so this
+/// checkpoint cannot certify correctness by rebuilding the stream table.
+async fn verify_correctness(db: &E2eDb, st_name: &str) -> Result<RefreshWitness, String> {
+    let before: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(h.refresh_id), 0)
+         FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+         WHERE st.pgt_schema = 'public' AND st.pgt_name = $1",
+    )
+    .bind(st_name)
+    .fetch_one(&db.pool)
+    .await
+    .map_err(|e| format!("refresh history lookup failed for {st_name}: {e}"))?;
 
-async fn verify_correctness_inner(
-    db: &E2eDb,
-    st_name: &str,
-    force_full: bool,
-) -> Result<(), String> {
-    if force_full {
-        // Switch to FULL, refresh, then switch back to DIFFERENTIAL.
-        // FULL refresh is TRUNCATE + INSERT — guaranteed ground truth.
-        for attempt in 0u8..5 {
-            match db
-                .try_execute(&format!(
-                    "SELECT pgtrickle.alter_stream_table('{st_name}', refresh_mode => 'FULL')"
-                ))
-                .await
-            {
-                Ok(()) => break,
-                Err(_) if attempt < 4 => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                }
-                Err(e) => {
-                    return Err(format!("alter to FULL failed for {st_name}: {e}"));
-                }
-            }
-        }
-        for attempt in 0u8..5 {
-            match db
-                .try_execute(&format!(
-                    "SELECT pgtrickle.refresh_stream_table('{st_name}')"
-                ))
-                .await
-            {
-                Ok(()) => {
-                    if attempt < 4 {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                        continue;
-                    }
-                    break;
-                }
-                Err(_) if attempt < 4 => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                }
-                Err(e) => {
-                    return Err(format!("FULL refresh failed for {st_name}: {e}"));
-                }
-            }
-        }
-        // Restore DIFFERENTIAL mode for subsequent soak cycles.
-        let _ = db
-            .try_execute(&format!(
-                "SELECT pgtrickle.alter_stream_table('{st_name}', refresh_mode => 'DIFFERENTIAL')"
-            ))
-            .await;
-    } else {
-        // DIFFERENTIAL refresh path (original logic).
-        // Retry up to 5 times with a short back-off because:
-        //   (a) The background worker may hold the catalog row lock, making
-        //       refresh_stream_table return RefreshSkipped (silently as Ok).  A
-        //       second call after the worker commits ensures a real refresh.
-        //   (b) A transient deadlock (cycles 162/167 pattern) can cause the
-        //       refresh to fail; retrying recovers without marking a false
-        //       correctness violation.
-        for attempt in 0u8..5 {
-            match db
-                .try_execute(&format!(
-                    "SELECT pgtrickle.refresh_stream_table('{st_name}')"
-                ))
-                .await
-            {
-                Ok(()) => {
-                    if attempt < 4 {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                        continue;
-                    }
-                    break;
-                }
-                Err(e) if attempt < 4 => {
-                    eprintln!("  [verify_correctness] retry {attempt}: {e}");
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                }
-                Err(e) => return Err(format!("refresh failed for {st_name}: {e}")),
-            }
-        }
-    }
+    db.try_execute(&format!(
+        "SELECT pgtrickle.refresh_stream_table('public.{st_name}')"
+    ))
+    .await
+    .map_err(|e| format!("refresh failed for {st_name}: {e}"))?;
 
-    // Get defining query
-    let defining_query: String = db
-        .query_scalar(&format!(
-            "SELECT defining_query FROM pgtrickle.pgt_stream_tables
-             WHERE pgt_name = '{st_name}'"
-        ))
-        .await;
-
-    // Get user-visible columns
-    let cols: String = db
-        .query_scalar(&format!(
-            "SELECT string_agg(column_name, ', ' ORDER BY ordinal_position)
-             FROM information_schema.columns
-             WHERE table_name = '{st_name}'
-               AND left(column_name, 6) <> '__pgt_'"
-        ))
-        .await;
-
-    // Multiset equality check
-    let matches: bool = db
-        .query_scalar(&format!(
-            "SELECT NOT EXISTS (
-                (SELECT {cols} FROM public.{st_name} EXCEPT ALL ({defining_query}))
-                UNION ALL
-                (({defining_query}) EXCEPT ALL SELECT {cols} FROM public.{st_name})
-            )"
-        ))
-        .await;
-
-    if !matches {
-        let st_count: i64 = db
-            .query_scalar(&format!("SELECT count(*) FROM public.{st_name}"))
-            .await;
-        let q_count: i64 = db
-            .query_scalar(&format!("SELECT count(*) FROM ({defining_query}) _q"))
-            .await;
+    let record: Option<RefreshHistoryRecord> = sqlx::query_as(
+        "SELECT h.action, h.status, h.was_full_fallback, h.merge_strategy_used,
+                    COALESCE(h.rows_inserted, 0), COALESCE(h.rows_updated, 0),
+                    COALESCE(h.rows_deleted, 0)
+             FROM pgtrickle.pgt_refresh_history h
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+             WHERE st.pgt_schema = 'public' AND st.pgt_name = $1
+               AND h.refresh_id > $2
+             ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .bind(st_name)
+    .bind(before)
+    .fetch_optional(&db.pool)
+    .await
+    .map_err(|e| format!("refresh witness lookup failed for {st_name}: {e}"))?;
+    let (action, status, full_fallback, merge_strategy, inserted, updated, deleted) = record
+        .ok_or_else(|| {
+            format!("refresh for {st_name} returned without a new history record (skipped?)")
+        })?;
+    if status != "COMPLETED"
+        || !matches!(action.as_str(), "DIFFERENTIAL" | "NO_DATA")
+        || full_fallback
+        || merge_strategy.as_deref() == Some("FULL")
+    {
         return Err(format!(
-            "CORRECTNESS VIOLATION: {st_name} has {st_count} rows, query returns {q_count}"
+            "unexpected refresh path for {st_name}: action={action}, status={status}, \
+             was_full_fallback={full_fallback}, merge_strategy={merge_strategy:?}"
         ));
     }
-    Ok(())
+
+    let defining_query: String = sqlx::query_scalar(
+        "SELECT defining_query FROM pgtrickle.pgt_stream_tables
+         WHERE pgt_schema = 'public' AND pgt_name = $1",
+    )
+    .bind(st_name)
+    .fetch_one(&db.pool)
+    .await
+    .map_err(|e| format!("defining query lookup failed for {st_name}: {e}"))?;
+
+    // Exact bag comparison, including duplicate rows, and concrete extra/missing
+    // row samples on failure. All writes are quiesced for the entire comparison.
+    oracle::compare_st_to_query(db, &format!("public.{st_name}"), &defining_query)
+        .await
+        .map_err(|e| format!("CORRECTNESS VIOLATION for {st_name}: {e}"))?;
+
+    Ok(RefreshWitness {
+        action,
+        affected_rows: inserted + updated + deleted,
+    })
+}
+
+/// Every correctness checkpoint uses the same drain/refresh/compare path.
+/// Keep failures in the caller-owned accumulator: later checks, or an optional
+/// manual recovery outside this harness, must never erase an earlier mismatch.
+async fn run_correctness_checkpoint(
+    db: &E2eDb,
+    active_sts: &[&str],
+    label: &str,
+    failures: &mut Vec<String>,
+    resume_after: bool,
+) {
+    let target_list = active_sts
+        .iter()
+        .map(|name| format!("'public.{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let pause = format!("SELECT pgtrickle.pause_scheduler(ARRAY[{target_list}])");
+    let resume = format!("SELECT pgtrickle.resume_scheduler(ARRAY[{target_list}])");
+
+    if let Err(e) = db.try_execute(&pause).await {
+        let failure = format!("[{label}] scheduler drain failed for {active_sts:?}: {e}");
+        println!("    FAIL — {failure}");
+        failures.push(failure);
+    } else {
+        for st in active_sts {
+            match verify_correctness(db, st).await {
+                Ok(witness) => println!(
+                    "    {st}: ✓ (action={}, affected_rows={})",
+                    witness.action, witness.affected_rows
+                ),
+                Err(e) => {
+                    let failure = format!("[{label}] {e}");
+                    println!("    {st}: FAIL — {failure}");
+                    failures.push(failure);
+                }
+            }
+        }
+    }
+
+    if resume_after && let Err(e) = db.try_execute(&resume).await {
+        let failure = format!("[{label}] scheduler resume failed: {e}");
+        println!("    FAIL — {failure}");
+        failures.push(failure);
+    }
+}
+
+/// This is the final-path entry point used by the long soak and the bounded
+/// regression: it runs even if the duration never reached the periodic timer.
+async fn run_final_correctness(db: &E2eDb, active_sts: &[&str], failures: &mut Vec<String>) {
+    println!("\n  Final correctness verification (DIFFERENTIAL, no rebuild)...");
+    run_correctness_checkpoint(db, active_sts, "final", failures, false).await;
 }
 
 // ── Main Soak Test ─────────────────────────────────────────────────────
@@ -512,6 +511,10 @@ async fn test_soak_stability() {
     let cycle_delay = Duration::from_millis(cycle_delay_ms());
     let batch = batch_size();
     let n_sources = num_sources();
+    assert!(
+        (1..=5).contains(&n_sources),
+        "SOAK_NUM_SOURCES must be between 1 and 5"
+    );
 
     println!("\n══════════════════════════════════════════════════════════");
     println!("  G17-SOAK: Long-Running Stability Soak Test");
@@ -667,31 +670,19 @@ async fn test_soak_stability() {
             last_check = Instant::now();
         }
 
-        // Periodic correctness checks (every 2 min)
+        // Periodic correctness checks (every 2 min), after a quiescent
+        // scheduler boundary. JOIN violations have no special exemption.
         if last_correctness.elapsed() >= correctness_interval {
             let elapsed = start.elapsed().as_secs();
             println!("  [{elapsed}s] Running correctness check...");
-            for st in &active_sts {
-                if let Err(e) = verify_correctness(&db, st).await {
-                    if *st == "soak_join" {
-                        // Known TOCTOU limitation: many-to-many JOIN under
-                        // concurrent DML can accumulate phantom rows during
-                        // DIFFERENTIAL refresh.  The race occurs because
-                        // get_slot_positions() captures the frontier LSN in
-                        // one SPI call, but the MERGE reads the source table
-                        // (R₁) with a potentially newer READ COMMITTED
-                        // snapshot.  R₁ can see source changes beyond the
-                        // frontier that ΔR does not include, producing an
-                        // error term ΔL ⋈ ΔR_extra that accumulates across
-                        // cycles.  The final correctness check uses a FULL
-                        // refresh to verify ground-truth equality.
-                        println!("  [{elapsed}s] KNOWN JOIN DRIFT (ignored): {e}");
-                    } else {
-                        println!("  [{elapsed}s] CORRECTNESS FAIL: {e}");
-                        health_check_failures.push(format!("[{elapsed}s] {e}"));
-                    }
-                }
-            }
+            run_correctness_checkpoint(
+                &db,
+                &active_sts,
+                &format!("{elapsed}s"),
+                &mut health_check_failures,
+                true,
+            )
+            .await;
             last_correctness = Instant::now();
         }
 
@@ -719,19 +710,11 @@ async fn test_soak_stability() {
         );
     }
 
-    // Final correctness check — uses FULL refresh (TRUNCATE + INSERT)
-    // to guarantee ground-truth equality, bypassing any incremental drift
-    // from the TOCTOU race in many-to-many join DIFFERENTIAL refresh.
-    println!("\n  Final correctness verification (FULL refresh)...");
-    for st in &active_sts {
-        match verify_correctness_full(&db, st).await {
-            Ok(()) => println!("    {st}: ✓"),
-            Err(e) => {
-                println!("    {st}: FAIL — {e}");
-                health_check_failures.push(format!("[final] {e}"));
-            }
-        }
-    }
+    // Final correctness is unconditional, even for runs shorter than the
+    // periodic interval. Drain the scheduler and compare before any repair.
+    // Leave the scheduler paused so subsequent final health checks cannot
+    // change the result we just certified.
+    run_final_correctness(&db, &active_sts, &mut health_check_failures).await;
 
     // Final RSS check — missing, invalid or cross-backend readings fail.
     let final_rss = get_rss_sample(&mut rss_conn).await.unwrap_or_else(|e| {
@@ -748,12 +731,12 @@ async fn test_soak_stability() {
     );
 
     // Final error state check
-    check_no_error_states(&db)
-        .await
-        .expect("Stream tables in error state at soak end");
-    check_worker_alive(&db)
-        .await
-        .expect("Background worker not alive at soak end");
+    if let Err(e) = check_no_error_states(&db).await {
+        health_check_failures.push(format!("[final] {e}"));
+    }
+    if let Err(e) = check_worker_alive(&db).await {
+        health_check_failures.push(format!("[final] {e}"));
+    }
 
     // Report
     if !health_check_failures.is_empty() {
@@ -849,4 +832,136 @@ mod rss_tests {
         assert!(first.rss_kb > 0);
         assert!(second.rss_kb > 0);
     }
+}
+
+// ── Bounded fail-closed correctness regressions (#1430) ────────────────
+
+/// Small deterministic JOIN fixture. Pause/drain scheduler dispatch before
+/// the first manual refresh; every later checkpoint has a stable source cut.
+async fn setup_bounded_join(db: &E2eDb) {
+    db.execute(
+        "CREATE TABLE source_1 (id INT PRIMARY KEY, category INT NOT NULL, value NUMERIC(12,2))",
+    )
+    .await;
+    db.execute("CREATE TABLE source_2 (id INT PRIMARY KEY, category INT NOT NULL, label TEXT)")
+        .await;
+    db.execute("INSERT INTO source_1 VALUES (1, 1, 10), (2, 2, 20)")
+        .await;
+    db.execute("INSERT INTO source_2 VALUES (1, 1, 'a'), (2, 1, 'b'), (3, 2, 'c')")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            'soak_join',
+            'SELECT s1.id, s1.category, s1.value, s2.label AS label_2
+             FROM source_1 s1
+             JOIN source_2 s2 ON s1.category = s2.category',
+            schedule => '1s',
+            refresh_mode => 'DIFFERENTIAL'
+        )",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['soak_join'])")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('soak_join')")
+        .await;
+}
+
+/// Bypass only the stream-table DML guard in a test transaction, without
+/// changing source data. A subsequent NO_DATA refresh must not hide drift.
+async fn corrupt_one_public_join_row(db: &E2eDb) {
+    let mut tx = db.pool.begin().await.expect("begin corruption transaction");
+    sqlx::query("SET LOCAL pg_trickle.internal_refresh = 'true'")
+        .execute(&mut *tx)
+        .await
+        .expect("set test-only DML guard override");
+    let changed = sqlx::query(
+        "UPDATE public.soak_join SET value = value + 1
+         WHERE ctid = (SELECT ctid FROM public.soak_join LIMIT 1)",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("inject one incorrect public JOIN row")
+    .rows_affected();
+    assert_eq!(changed, 1, "fixture must contain a JOIN row to corrupt");
+    tx.commit().await.expect("commit injected JOIN drift");
+}
+
+#[tokio::test]
+async fn test_soak_join_dml_completes_nonempty_differential_and_matches_exactly() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_bounded_join(&db).await;
+    db.execute("INSERT INTO source_1 VALUES (3, 1, 30)").await;
+    let witness = verify_correctness(&db, "soak_join")
+        .await
+        .expect("healthy JOIN must match after DML");
+    assert_eq!(witness.action, "DIFFERENTIAL");
+    assert!(
+        witness.affected_rows > 0,
+        "a completed, nonempty differential refresh is required: {witness:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_soak_periodic_checkpoint_reports_join_row_drift() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_bounded_join(&db).await;
+    corrupt_one_public_join_row(&db).await;
+    let mut failures = Vec::new();
+    run_correctness_checkpoint(&db, &["soak_join"], "120s", &mut failures, true).await;
+    assert_eq!(failures.len(), 1, "JOIN mismatch must fail periodic checks");
+    assert!(failures[0].contains("CORRECTNESS VIOLATION for soak_join"));
+    assert!(failures[0].contains("Extra rows in ST"));
+    assert!(failures[0].contains("Missing rows from ST"));
+}
+
+#[tokio::test]
+async fn test_soak_join_refresh_error_is_not_suppressed() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_bounded_join(&db).await;
+    // An ordinary refresh error, not a row mismatch. This previously went
+    // was previously ignored for JOINs by the periodic check.
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables
+         SET status = 'ERROR' WHERE pgt_name = 'soak_join'",
+    )
+    .await;
+    let mut failures = Vec::new();
+    run_correctness_checkpoint(&db, &["soak_join"], "120s", &mut failures, false).await;
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].contains("refresh failed for soak_join"));
+    assert!(failures[0].contains("error state"));
+}
+
+#[tokio::test]
+async fn test_soak_short_final_checkpoint_keeps_failure_after_full_recovery() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_bounded_join(&db).await;
+    // No 120-second periodic checkpoint has fired. Final verification is
+    // mandatory even for a shorter soak, *before* any FULL repair.
+    corrupt_one_public_join_row(&db).await;
+    let mut failures = Vec::new();
+    run_final_correctness(&db, &["soak_join"], &mut failures).await;
+    assert_eq!(failures.len(), 1, "short soak must detect final JOIN drift");
+    assert!(failures[0].contains("[final] CORRECTNESS VIOLATION for soak_join"));
+
+    // Recovery may make the public rows equal, but cannot retroactively
+    // erase the earlier failure from the original incremental state.
+    db.execute("SELECT pgtrickle.alter_stream_table('soak_join', refresh_mode => 'FULL')")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('soak_join')")
+        .await;
+    let defining_query: String = db
+        .query_scalar(
+            "SELECT defining_query FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'soak_join'",
+        )
+        .await;
+    oracle::compare_st_to_query(&db, "public.soak_join", &defining_query)
+        .await
+        .expect("FULL recovery should restore exact equality");
+    assert_eq!(
+        failures.len(),
+        1,
+        "recovery must not clear the failing verdict"
+    );
 }
