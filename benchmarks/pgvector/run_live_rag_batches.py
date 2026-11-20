@@ -31,7 +31,7 @@ SELECT d.id, d.incarnation, d.revision, d.chunk_version, 'model-v1',
 FROM embedding_demo.documents d;
 """
 
-CHANGED_IDS = "SELECT 1 + ((:'cycle'::bigint * :'batch'::bigint + i) % :'rows'::bigint) FROM generate_series(0, :'batch'::integer - 1) i"
+CHANGED_IDS = "SELECT 1 + ((:'cycle'::bigint * :'batch'::bigint + i) % :'rows'::bigint) AS id FROM generate_series(0, :'batch'::integer - 1) i"
 CHANGE = """
 BEGIN;
 UPDATE embedding_demo.documents SET body = body || ' update ' || :'cycle'

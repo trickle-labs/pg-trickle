@@ -121,6 +121,12 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIn(f"'{approach}_absent'", sql)
             self.assertIn(f"'{approach}_stale'", sql)
 
+    def test_default_changed_ids_match_availability_query(self):
+        self.assertRegex(benchmark.CHANGED_IDS, r"\bAS id\s+FROM\b")
+        self.assertIn(
+            "JOIN changed USING (id)", benchmark.availability_sql(benchmark.CHANGED_IDS)
+        )
+
     def test_attestation_requires_both_archive_and_container(self):
         result = subprocess.run(
             [sys.executable, benchmark.__file__, "--rows", "4", "--dimensions", "384",
