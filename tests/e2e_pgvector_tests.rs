@@ -11,7 +11,7 @@
 
 mod e2e;
 
-use e2e::E2eDb;
+use e2e::{E2eDb, disable_scheduler};
 
 // ═══════════════════════════════════════════════════════════════════════
 // Helper: enable pgvector and the vector agg GUC
@@ -2847,6 +2847,7 @@ async fn test_centroid_diverse_768_dimensional_drift_matches_native_avg() {
 async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, diverse: bool) {
     assert!([3, 384, 768, 1536].contains(&dimensions));
     let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
     setup_pgvector(&db).await;
     let mut conn = db.pool.acquire().await.expect("acquire churn session");
     let versions: (String, String, String) = sqlx::query_as("SELECT version(), (SELECT extversion FROM pg_extension WHERE extname = 'vector'), (SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle')")
