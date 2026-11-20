@@ -4042,6 +4042,73 @@ mod tests {
         super::is_direct_agg_eligible(child, group_by, aggs, &ctx)
     }
 
+    // ── Hashable, NULL-safe group matching (issue #1456) ────────────
+
+    #[test]
+    fn test_group_filter_uses_hashable_record_equality_for_nullable_keys() {
+        let single = build_group_filter(
+            "delta",
+            &[colref("region")],
+            &["region".into()],
+            None,
+        );
+        assert_eq!(
+            single,
+            "EXISTS (SELECT 1 FROM delta AS __pgt_d2(\"__pgt_group_0\")              WHERE ROW(ROW(\"region\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\")))"
+        );
+
+        let multi = build_group_filter(
+            "agg_delta",
+            &[
+                colref("region"),
+                Expr::ColumnRef {
+                    table_alias: Some("s".into()),
+                    column_name: "Day".into(),
+                },
+            ],
+            &["duplicate".into(), "duplicate".into()],
+            Some("COALESCE(__pgt_d2.\"__special_peak\", 0) > 0"),
+        );
+        assert!(multi.contains("AS __pgt_d2(\"__pgt_group_0\", \"__pgt_group_1\")"), "{multi}");
+        assert!(
+            multi.contains(
+                "ROW(ROW(\"region\", \"s\".\"Day\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"
+            ),
+            "{multi}"
+        );
+        assert!(
+            multi.contains("AND (COALESCE(__pgt_d2.\"__special_peak\", 0) > 0)"),
+            "{multi}"
+        );
+        // Reusing the public output alias cannot collapse the positional keys.
+        assert!(!multi.contains("AS __pgt_d2(\"duplicate\""), "{multi}");
+    }
+
+    #[test]
+    fn test_grouped_max_rescan_hash_matches_source_and_merge_keys() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        let tree = aggregate(
+            vec![colref("region"), colref("day")],
+            vec![max_col("amount", "peak"), min_col("amount", "low")],
+            scan(1, "events", "public", "e", &["region", "day", "amount"]),
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // The source semi-join and the rescan-to-delta join must BOTH avoid
+        // per-key IS NOT DISTINCT FROM nested-loop plans.
+        assert!(
+            sql.contains(
+                "ROW(ROW(\"region\", \"day\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("ROW(ROW(r.\"region\", r.\"day\")) = ROW(ROW(d.\"region\", d.\"day\"))"),
+            "{sql}"
+        );
+    }
+
     // ── is_direct_agg_eligible tests ────────────────────────────────
 
     #[test]
