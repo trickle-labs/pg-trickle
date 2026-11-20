@@ -942,6 +942,7 @@
         "e2e_pgvector_tests::test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh",
         "e2e_pgvector_tests::test_centroid_unsafe_rebase_remains_unbound_without_retry_storm",
         "e2e_pgvector_tests::test_centroid_refresh_serializes_concurrent_source_writer",
+        "e2e_pgvector_tests::test_centroid_source_ahead_fallback_is_reported",
         "e2e_pgvector_tests::test_centroid_cost_model_accepts_real_refresh_history",
         "e2e_pgvector_tests::test_pgvector_compat_installed_version",
         "e2e_pgvector_tests::test_pgvector_distance_types_and_functions_differential",
