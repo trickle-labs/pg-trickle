@@ -588,6 +588,27 @@ pub struct E2eDb {
     _container: ContainerLease,
 }
 
+/// Disable this database's scheduler for tests that drive refreshes manually.
+#[allow(dead_code)]
+pub async fn disable_scheduler(db: &E2eDb) {
+    // Stop any running worker and prevent a reconnect from starting another.
+    db.execute(
+        "DO $$ BEGIN \
+           EXECUTE format('ALTER DATABASE %I SET pg_trickle.enabled = off', current_database()); \
+         END $$",
+    )
+    .await;
+    db.execute(
+        "SELECT pg_terminate_backend(pid) \
+         FROM pg_stat_activity \
+         WHERE datname = current_database() \
+           AND backend_type = 'pg_trickle scheduler' \
+           AND pid <> pg_backend_pid()",
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+}
+
 #[cfg(not(feature = "light-e2e"))]
 #[allow(dead_code)]
 impl E2eDb {
