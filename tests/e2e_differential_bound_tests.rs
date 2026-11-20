@@ -341,7 +341,11 @@ async fn join_counts_future_partner_only_in_next_window() {
 // Inspect the staged table before COMMIT (it is ON COMMIT DROP). The negative
 // control also verifies that analyze_before_delta = off still disables ANALYZE.
 async fn inspect_issue_1453_stage_statistics(db: &E2eDb, analyze: bool) {
-    let mut tx = db.pool.begin().await.expect("begin inspectable CDC refresh");
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin inspectable CDC refresh");
     sqlx::query("SET LOCAL pg_trickle.refresh_strategy = 'differential'")
         .execute(&mut *tx)
         .await
@@ -403,7 +407,10 @@ async fn inspect_issue_1453_stage_statistics(db: &E2eDb, analyze: bool) {
     .fetch_one(&mut *tx)
     .await
     .expect("read refresh action");
-    assert_eq!(action, "DIFFERENTIAL", "the regression must not fall back to FULL");
+    assert_eq!(
+        action, "DIFFERENTIAL",
+        "the regression must not fall back to FULL"
+    );
 
     tx.commit().await.expect("commit inspected refresh");
 }
