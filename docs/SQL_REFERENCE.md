@@ -6523,8 +6523,12 @@ with an attached outbox.
 |---------|-----------|
 | All functions in the `pgtrickle` schema documented in this reference | Signature and return type preserved across minor releases. New optional parameters may be added with defaults that preserve existing behaviour. |
 | Catalog tables `pgtrickle.pgt_stream_tables`, `pgtrickle.pgt_dependencies`, `pgtrickle.pgt_refresh_history` | Existing columns are not renamed or removed. New columns may be added. |
-| NOTIFY channels `pg_trickle_refresh`, `pgtrickle_alert`, `pgtrickle_wake` | Channel names and JSON payload structure preserved. New keys may be added to JSON payloads. |
+| NOTIFY channels `pg_trickle_refresh`, `pgtrickle_alert` | Channel names and JSON payload structure preserved. New keys may be added to JSON payloads. |
 | GUC names listed in `docs/CONFIGURATION.md` | Names preserved; default values may change between minor releases (documented in CHANGELOG). |
+
+The former `pgtrickle_wake` channel is no longer emitted by CDC capture triggers.
+The scheduler polls on `pg_trickle.scheduler_interval_ms`; consumers must not
+rely on `LISTEN pgtrickle_wake` for change delivery.
 
 ### Unstable (may change in any release)
 

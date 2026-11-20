@@ -2,6 +2,37 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## Trigger CDC notification removal (issue #1454)
+
+Starting with a release containing this change, newly generated trigger-based
+CDC functions no longer emit `pgtrickle_wake` notifications. PostgreSQL
+serializes commits that queue notifications, while pg_trickle's scheduler
+already polls the change buffers independently.
+
+Existing trigger functions are stored as PL/pgSQL bodies in the database;
+installing a new shared library alone does not update those bodies. After
+installing the fixed version and applying its extension upgrade, run as the
+extension administrator:
+
+```sql
+SELECT pgtrickle.rebuild_cdc_triggers();
+```
+
+This rebuilds the row- or statement-level DML and TRUNCATE capture functions
+without clearing queued CDC rows or recreating stream tables. Confirm that no
+managed capture function still emits a notification:
+
+```sql
+SELECT n.nspname, p.proname
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'pgtrickle_changes'
+  AND p.proname ~ '^pg_trickle_cdc_(fn|ins_fn|upd_fn|del_fn|truncate_fn)_'
+  AND p.prosrc ~* 'notify';
+```
+
+An empty result means the old notifying function bodies are gone.
+
 ## 0.110.1 to 0.110.2
 
 Install the v0.110.2 library and extension migration files, then run:
