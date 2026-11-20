@@ -5722,6 +5722,111 @@ async fn test_retention_public_api_validates_alignment_cutoff_index_and_owner() 
 }
 
 #[tokio::test]
+async fn test_retention_eligibility_diagnostics_report_construct_and_contract_hint() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute(
+        "CREATE TABLE retention_diag_ev (
+            event_day DATE NOT NULL,
+            occurred_at TIMESTAMPTZ NOT NULL,
+            meter TEXT NOT NULL,
+            amount NUMERIC NOT NULL
+        ) PARTITION BY RANGE (event_day)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE retention_diag_old PARTITION OF retention_diag_ev
+         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE retention_diag_live PARTITION OF retention_diag_ev
+         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO retention_diag_ev VALUES
+         ('2025-06-01', '2025-06-01 12:05+00', 'a', 10),
+         ('2026-06-01', '2026-06-01 09:10+00', 'b', 20)",
+    )
+    .await;
+
+    let valid = "SELECT event_day, meter, sum(amount) AS total, count(*) AS n
+                 FROM retention_diag_ev GROUP BY event_day, meter";
+    sqlx::query(
+        "SELECT pgtrickle.create_stream_table_with_retention(
+            $1, $2, 'TRIM', 'event_day', '2026-01-01', '1h')",
+    )
+    .bind("retention_diag_ok")
+    .bind(valid)
+    .execute(&db.pool)
+    .await
+    .expect("eligible query must still be accepted");
+    let policy: serde_json::Value = db
+        .query_scalar(
+            "SELECT pgtrickle.get_stream_table_partition_retention('retention_diag_ok')",
+        )
+        .await;
+    assert_eq!(policy["enabled"], true);
+
+    let cases = [
+        (
+            "retention_diag_constant",
+            "SELECT 'x'::text AS tag, event_day, meter, sum(amount) AS total, count(*) AS n
+             FROM retention_diag_ev GROUP BY event_day, meter",
+            "select-list item",
+            "tag",
+            "plain column reference",
+        ),
+        (
+            "retention_diag_other_hour",
+            "SELECT event_day, meter,
+                    date_trunc('hour', occurred_at AT TIME ZONE 'UTC') AS hour,
+                    sum(amount) AS total, count(*) AS n
+             FROM retention_diag_ev
+             GROUP BY event_day, meter, date_trunc('hour', occurred_at AT TIME ZONE 'UTC')",
+            "grouping key",
+            "occurred_at",
+            "partition key \"event_day\"",
+        ),
+    ];
+    for (name, query, context, expression, rule) in cases {
+        let error = sqlx::query(
+            "SELECT pgtrickle.create_stream_table_with_retention(
+                $1, $2, 'TRIM', 'event_day', '2026-01-01', '1h')",
+        )
+        .bind(name)
+        .bind(query)
+        .execute(&db.pool)
+        .await
+        .expect_err("ineligible retention query must fail");
+
+        let message = error.to_string();
+        assert!(message.contains("retention query is not eligible"), "{message}");
+        assert!(message.contains(context), "{message}");
+        assert!(message.contains(expression), "{message}");
+        assert!(message.contains(rule), "{message}");
+
+        let database_error = error.as_database_error().expect("PostgreSQL error");
+        let pg_error = database_error.downcast_ref::<sqlx::postgres::PgDatabaseError>();
+        let hint = pg_error.hint().expect("retention contract hint");
+        assert!(
+            hint.contains("docs/tutorials/PARTITIONED_TABLES.md#retention-policies"),
+            "{hint}"
+        );
+
+        let created: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+            .bind(name)
+            .fetch_one(&db.pool)
+            .await
+            .expect("check failed create did not leave a stream");
+        assert_eq!(created, None);
+    }
+}
+
+#[tokio::test]
 #[cfg(feature = "e2e-unsafe-test-hooks")]
 async fn test_retention_rejects_non_durable_partition_trees() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
