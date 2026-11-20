@@ -422,6 +422,7 @@ def write_retrieval_plot(path: Path, rows: list[dict]) -> None:
 
 
 def write_report_artifacts(measurement_path: Path, result: dict, evidence: list[Path]) -> None:
+    measurement_path.parent.mkdir(parents=True, exist_ok=True)
     decisions = decision_table(result["cases"])
     decision_path = measurement_path.with_name("live-rag-100k-decision-table.md")
     maintenance_plot = measurement_path.with_name("live-rag-100k-maintenance-p50.svg")

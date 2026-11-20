@@ -22,7 +22,7 @@ class ReleaseLiveRagTests(unittest.TestCase):
 
     def test_release_live_rag_records_all_six_matrix_cases(self):
         with tempfile.TemporaryDirectory(dir=run_release_live_rag.ROOT) as directory:
-            measurement = Path(directory) / "measurement.json"
+            measurement = Path(directory) / "raw" / "measurement.json"
 
             def run_case(rows, dimensions, path):
                 size = f"{rows // 1000}k"
