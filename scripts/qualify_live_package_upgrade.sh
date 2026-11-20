@@ -43,6 +43,10 @@ elif [[ "$FROM_VERSION" == "0.108.4" && "$TO_VERSION" == "0.109.0" ]]; then
     cp -a "$CANDIDATE_DIR/usr/lib/postgresql/18/lib/." "$WORK_DIR/previous/lib/"
     cp -a "$CANDIDATE_DIR/usr/share/postgresql/18/extension/." "$WORK_DIR/previous/extension/"
     cp sql/archive/pg_trickle--0.108.4.sql "$WORK_DIR/previous/extension/"
+    sed -i "s/^default_version = .*/default_version = '${FROM_VERSION}'/" \
+        "$WORK_DIR/previous/extension/pg_trickle.control"
+    grep -Fxq "default_version = '${FROM_VERSION}'" \
+        "$WORK_DIR/previous/extension/pg_trickle.control"
     SYNTHETIC_BASELINE=true
 else
     curl --fail --location --retry 3 \
