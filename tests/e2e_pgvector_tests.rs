@@ -3093,20 +3093,32 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
             let (refresh_id, delta_rows, fallback, outcome, reason): (i64, i64, Option<String>, Option<String>, Option<String>) = sqlx::query_as("SELECT h.refresh_id, COALESCE(h.delta_row_count, 0)::bigint, h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason', h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome', h.refresh_reason_detail::jsonb->'centroid_rebase'->>'reason' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
                 .fetch_one(&mut *conn).await.expect("inspect unbound churn fallback");
             if unbound_refreshes == 0 {
-                assert_eq!(fallback.as_deref(), Some("STATE_REJECTED"));
-                assert_eq!(outcome.as_deref(), Some("unbound"));
+                assert_eq!(
+                    fallback.as_deref(),
+                    Some("STATE_REJECTED"),
+                    "first unbound refresh at step {step}: {context}"
+                );
+                assert_eq!(
+                    outcome.as_deref(),
+                    Some("unbound"),
+                    "first unbound refresh at step {step}: {context}"
+                );
                 assert!(
                     reason
                         .as_deref()
-                        .is_some_and(|value| value.contains("InvalidState"))
+                        .is_some_and(|value| value.contains("InvalidState")),
+                    "unexpected rebase reason {reason:?} at step {step}: {context}"
                 );
             } else if last_unbound_refresh_id != Some(refresh_id) {
                 assert!(
                     fallback.as_deref() == Some("STATE_UNBOUND")
                         || (fallback.is_none() && delta_rows == 0),
-                    "unexpected fallback {fallback:?} with {delta_rows} delta rows at step {step}"
+                    "unexpected fallback {fallback:?} with {delta_rows} delta rows at step {step}: {context}"
                 );
-                assert!(outcome.is_none(), "unbound state must not retry rebase");
+                assert!(
+                    outcome.is_none(),
+                    "unbound state must not retry rebase at step {step}: {context}"
+                );
             }
             last_unbound_refresh_id = Some(refresh_id);
             unbound_refreshes += 1;
