@@ -282,6 +282,34 @@ def check_retention_contract(contract: dict) -> None:
     )
     script = (prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8")
     check_retention_upgrade_script(script)
+    upgrade_1084 = next(
+        (item for item in contract["required_suites"] if item["id"] == "retention-upgrade-1084"),
+        None,
+    )
+    prior.shared.require(upgrade_1084 is not None, "qualification contract is missing the v0.108.4 retention upgrade")
+    assert upgrade_1084 is not None
+    prior.shared.require(
+        upgrade_1084["command_argv"] == [
+            "bash", "scripts/qualify_live_package_upgrade.sh", "0.108.4", "0.109.0"
+        ]
+        and upgrade_1084["artifact_id"] == "linux-amd64"
+        and upgrade_1084["runtime"] is True
+        and upgrade_1084["upgrade"] is True
+        and upgrade_1084["requires_postgresql"] is True
+        and "archived v0.108.4 install catalog" in upgrade_1084["workload"],
+        "retention qualification must execute a direct v0.108.4 catalog upgrade against the candidate",
+    )
+    for version in ("0.108.3", "0.108.4"):
+        migration = (prior.ROOT / f"sql/pg_trickle--{version}--0.109.0.sql").read_text(encoding="utf-8")
+        for marker in (
+            "CREATE OR REPLACE FUNCTION pgtrickle.set_stream_table_partition_retention(",
+            "CREATE OR REPLACE FUNCTION pgtrickle.get_stream_table_partition_retention(",
+            "CREATE OR REPLACE FUNCTION pgtrickle.create_stream_table_with_retention(",
+            "CREATE EVENT TRIGGER pg_trickle_ddl_start_tracker",
+            "REVOKE EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention",
+            "GRANT EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention",
+        ):
+            prior.shared.require(marker in migration, f"v{version} upgrade is missing retention marker {marker}")
 
 
 def check_retention_upgrade_script(script: str) -> None:
@@ -294,6 +322,10 @@ def check_retention_upgrade_script(script: str) -> None:
         "set_stream_table_partition_retention(\n        'retention_upgrade_st', 'RETAIN', 'd', '2026-01-01')",
         "DETACH PARTITION public.retention_upgrade_old CONCURRENTLY",
         "retention_upgrade_st')->'sealed_ranges'",
+        'FROM_VERSION" == "0.108.4"',
+        "sql/archive/pg_trickle--0.108.4.sql",
+        "SYNTHETIC_BASELINE=true",
+        'FROM_VERSION" == "0.108.3" || "$FROM_VERSION" == "0.108.4"',
     ):
         prior.shared.require(marker in script, f"published upgrade runtime check is missing retention marker {marker}")
 
@@ -308,7 +340,7 @@ def main() -> None:
     prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {
         "wal-retirement", "wal-retirement-upgrade", "pgvector-0.8.1", "pgvector-0.8.7",
         "pgvector-catalog-upgrade", "live-rag-100k", "subscription-scale-1m",
-        "centroid-cost-matrix", "partition-retention",
+        "centroid-cost-matrix", "partition-retention", "retention-upgrade-1084",
     }
     contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
     check_retirement_contract(contract)

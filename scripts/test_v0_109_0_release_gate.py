@@ -41,6 +41,13 @@ class RetirementContractTests(unittest.TestCase):
         broken = script.replace("DETACH PARTITION public.retention_upgrade_old CONCURRENTLY", "DETACH PARTITION public.retention_upgrade_old", 1)
         with self.assertRaises(SystemExit):
             gate.check_retention_upgrade_script(broken)
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        gate.check_retention_contract(contract)
+        contract["required_suites"] = [
+            suite for suite in contract["required_suites"] if suite["id"] != "retention-upgrade-1084"
+        ]
+        with self.assertRaises(SystemExit):
+            gate.check_retention_contract(contract)
 
     def test_published_vector_upgrade_checks_cannot_be_removed(self):
         script = (gate.prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text()
