@@ -1766,7 +1766,6 @@ fn build_rescan_cte(
             format!(
                 "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_aliases}) WHERE {condition}{delta_filter})"
             )
-
         };
 
         // Select only the rescan aggregate columns from the defining query,
@@ -4054,7 +4053,7 @@ mod tests {
         );
         assert_eq!(
             single,
-            "EXISTS (SELECT 1 FROM delta AS __pgt_d2(\"__pgt_group_0\")              WHERE ROW(ROW(\"region\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\")))"
+            "EXISTS (SELECT 1 FROM delta AS __pgt_d2(\"__pgt_group_0\") WHERE ROW(ROW(\"region\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\")))"
         );
 
         let multi = build_group_filter(
