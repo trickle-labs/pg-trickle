@@ -204,7 +204,7 @@ async fn test_refresh_picks_up_deletes() {
     assert_eq!(db.count("public.rf_del_st").await, 3);
 
     db.execute("DELETE FROM rf_del WHERE id = 2").await;
-    db.refresh_st("rf_del_st").await;
+    db.refresh_st_with_retry("rf_del_st").await;
 
     assert_eq!(db.count("public.rf_del_st").await, 2);
 
