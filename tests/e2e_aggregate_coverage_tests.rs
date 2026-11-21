@@ -526,6 +526,143 @@ async fn test_agg_min_max_differential() {
     db.assert_st_matches_query("agg_mm_st", q).await;
 }
 
+// ── #1456: bounded, hashable rescans with nullable composite group keys ──
+
+#[tokio::test]
+async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE agg_mass_extreme_source (id int PRIMARY KEY, region text, bucket int, value int NOT NULL)",
+    )
+    .await;
+    // 1,500 group IDs (with some coalescing on NULL keys), including
+    // partially and fully NULL composite keys, to exercise the source semi-join and the rescan-to-delta join.
+    db.execute(
+        r#"INSERT INTO agg_mass_extreme_source
+           SELECT g * 10 + i,
+                  CASE WHEN g % 13 = 0 THEN NULL ELSE 'grp-' || g END,
+                  CASE WHEN g % 17 = 0 THEN NULL ELSE g % 4 END,
+                  i
+           FROM generate_series(1, 1500) AS g,
+                generate_series(1, 5) AS i"#,
+    )
+    .await;
+    db.execute("ANALYZE agg_mass_extreme_source").await;
+    let query = "SELECT region, bucket, COUNT(*) AS n, SUM(value) AS total, \
+                 MIN(value) AS low, MAX(value) AS high \
+                 FROM agg_mass_extreme_source GROUP BY region, bucket";
+    db.create_st("agg_mass_extreme_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("agg_mass_extreme_st", query)
+        .await;
+
+    // Hashes only select candidates; the exact comparison preserves NULL keys.
+    let equal_null_keys: bool = db
+        .query_scalar("SELECT ROW(NULL::text, 1::int) IS NOT DISTINCT FROM ROW(NULL::text, 1::int)")
+        .await;
+    let different_null_keys: bool = db
+        .query_scalar("SELECT ROW(NULL::text, 1::int) IS NOT DISTINCT FROM ROW('x'::text, 1::int)")
+        .await;
+    assert!(
+        equal_null_keys,
+        "two NULL group-key fields must compare equal"
+    );
+    assert!(
+        !different_null_keys,
+        "NULL and non-NULL keys must not match"
+    );
+
+    // The generated production SQL must use the same condition in BOTH
+    // the source rescan restriction and the rescan-to-delta merge.
+    let delta_sql: String = db
+        .query_scalar("SELECT pgtrickle.explain_diff_sql('agg_mass_extreme_st')")
+        .await;
+    assert!(
+        delta_sql.contains(
+            "pg_catalog.hash_record_extended(ROW(region, bucket), 0::bigint) = pg_catalog.hash_record_extended(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"), 0::bigint)"
+        ),
+        "{delta_sql}"
+    );
+    assert!(
+        delta_sql.contains(
+            "ROW(region, bucket) IS NOT DISTINCT FROM ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\")"
+        ),
+        "{delta_sql}"
+    );
+    assert!(
+        delta_sql.contains(
+            "pg_catalog.hash_record_extended(ROW(r.\"region\", r.\"bucket\"), 0::bigint) = pg_catalog.hash_record_extended(ROW(d.\"region\", d.\"bucket\"), 0::bigint)"
+        ),
+        "{delta_sql}"
+    );
+    assert!(
+        delta_sql.contains(
+            "ROW(r.\"region\", r.\"bucket\") IS NOT DISTINCT FROM ROW(d.\"region\", d.\"bucket\")"
+        ),
+        "{delta_sql}"
+    );
+
+    // A plan-shape check, not a wall-clock threshold: force PostgreSQL to
+    // choose between a hash join and the old quadratic nested-loop behavior.
+    let mut conn = db.pool.acquire().await.unwrap();
+    sqlx::query("SET enable_nestloop = off")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("SET enable_mergejoin = off")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let plan: serde_json::Value = sqlx::query_scalar(
+        r#"EXPLAIN (FORMAT JSON, COSTS OFF)
+           WITH affected AS MATERIALIZED (
+               SELECT region, bucket FROM agg_mass_extreme_source
+               WHERE value = 5 GROUP BY region, bucket
+           ), rescan AS MATERIALIZED (
+               SELECT s.region, s.bucket, MAX(s.value) AS high
+               FROM agg_mass_extreme_source s
+               WHERE EXISTS (
+                   SELECT 1 FROM affected d
+                   WHERE pg_catalog.hash_record_extended(ROW(s.region, s.bucket), 0::bigint) = pg_catalog.hash_record_extended(ROW(d.region, d.bucket), 0::bigint)
+                     AND ROW(s.region, s.bucket) IS NOT DISTINCT FROM ROW(d.region, d.bucket)
+               )
+               GROUP BY s.region, s.bucket
+           )
+           SELECT SUM(COALESCE(r.high, 0)) FROM affected d
+           LEFT JOIN rescan r
+             ON pg_catalog.hash_record_extended(ROW(r.region, r.bucket), 0::bigint) = pg_catalog.hash_record_extended(ROW(d.region, d.bucket), 0::bigint)
+            AND ROW(r.region, r.bucket) IS NOT DISTINCT FROM ROW(d.region, d.bucket)"#,
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert!(
+        plan.to_string().matches("\"Hash Cond\"").count() >= 2,
+        "both joins should have a hash condition: {plan}"
+    );
+    drop(conn);
+
+    // Delete all maxima in one delta, then all minima in the next.
+    // Every surviving group's extreme must come from its remaining rows.
+    db.execute("DELETE FROM agg_mass_extreme_source WHERE value = 5")
+        .await;
+    refresh_differential(&db, "agg_mass_extreme_st").await;
+    db.assert_st_matches_query("agg_mass_extreme_st", query)
+        .await;
+    db.execute("DELETE FROM agg_mass_extreme_source WHERE value = 1")
+        .await;
+    refresh_differential(&db, "agg_mass_extreme_st").await;
+    db.assert_st_matches_query("agg_mass_extreme_st", query)
+        .await;
+
+    // Change a group key (including a NULL transition) and rescan again.
+    db.execute("UPDATE agg_mass_extreme_source SET region = NULL, value = 8 WHERE id % 100 = 22")
+        .await;
+    refresh_differential(&db, "agg_mass_extreme_st").await;
+    db.assert_st_matches_query("agg_mass_extreme_st", query)
+        .await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // DISTINCT aggregates
 // ═══════════════════════════════════════════════════════════════════════
