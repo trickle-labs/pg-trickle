@@ -5928,14 +5928,14 @@ async fn test_retention_eligibility_diagnostics_report_construct_and_contract_hi
         .await;
     assert_eq!(policy["enabled"], true);
 
-    let cases = [
+    // The original issue #1458 examples are now valid: a projected exact
+    // partition key proves locality regardless of unrelated group expressions
+    // and harmless SELECT constants.
+    let accepted_cases = [
         (
             "retention_diag_constant",
             "SELECT 'x'::text AS tag, event_day, meter, sum(amount) AS total, count(*) AS n
              FROM retention_diag_ev GROUP BY event_day, meter",
-            "select-list item",
-            "tag",
-            "plain column reference",
         ),
         (
             "retention_diag_other_hour",
@@ -5944,9 +5944,33 @@ async fn test_retention_eligibility_diagnostics_report_construct_and_contract_hi
                     sum(amount) AS total, count(*) AS n
              FROM retention_diag_ev
              GROUP BY event_day, meter, date_trunc('hour', occurred_at AT TIME ZONE 'UTC')",
-            "grouping key",
-            "occurred_at",
-            "partition key \"event_day\"",
+        ),
+    ];
+    for (name, query) in accepted_cases {
+        sqlx::query(
+            "SELECT pgtrickle.create_stream_table_with_retention(
+                $1, $2, 'TRIM', 'event_day', '2026-01-01', '1h')",
+        )
+        .bind(name)
+        .bind(query)
+        .execute(&db.pool)
+        .await
+        .expect("partition-aligned retention query must be admitted");
+        db.assert_st_matches_query(name, query).await;
+    }
+
+    // A different timestamp's hour bucket cannot *replace* the partition
+    // key; otherwise a group could contain rows from different partitions.
+    let cases = [
+        (
+            "retention_diag_missing_key",
+            "SELECT meter, date_trunc('hour', occurred_at AT TIME ZONE 'UTC') AS hour,
+                    count(*) AS n
+             FROM retention_diag_ev
+             GROUP BY meter, date_trunc('hour', occurred_at AT TIME ZONE 'UTC')",
+            "GROUP BY and select list",
+            "event_day",
+            "plain column",
         ),
     ];
     for (name, query, context, expression, rule) in cases {
