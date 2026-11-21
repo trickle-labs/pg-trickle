@@ -126,6 +126,10 @@ fn retention_pruning_key(partition_spec: Option<&str>, group_column: &str) -> Op
 pub struct RetentionState {
     pub version: u8,
     pub mode: RetentionMode,
+    /// True only for cutoff-free TRIM. Older explicit TRIM policies retain
+    /// their existing cutoff semantics for backward compatibility.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub trim_unbounded: bool,
     pub candidate: RetentionGroupCandidate,
     pub cutoff: RetentionBound,
     pub query_hash: i64,
@@ -144,6 +148,10 @@ pub enum RetentionStateError {
     TrimCannotSeal,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn bound_value(bound: RetentionBound) -> i64 {
     match bound {
         RetentionBound::Date(value) => i64::from(value),
@@ -159,6 +167,7 @@ impl RetentionState {
             || self.candidate.source_column.is_empty()
             || self.candidate.output_column.is_empty()
             || (self.mode == RetentionMode::Trim && !self.sealed.is_empty())
+            || (self.mode != RetentionMode::Trim && self.trim_unbounded)
         {
             return Err(RetentionStateError::InvalidState);
         }
@@ -216,7 +225,7 @@ impl RetentionState {
                 self.cutoff,
             )
             .map_err(RetentionStateError::InvalidRange)?;
-            if self.mode == RetentionMode::Retain && !expired {
+            if !self.trim_unbounded && !expired {
                 return Err(RetentionStateError::NotExpired);
             }
             if self.sealed.iter().any(|old| {
@@ -621,7 +630,7 @@ pub(crate) fn prepare_concurrent_retention_detaches(
             }
             Err(error) => return Err(error),
         };
-        if partition.is_none_or(|partition| state.mode == RetentionMode::Retain && !partition.expired) {
+        if partition.is_none_or(|partition| !state.trim_unbounded && !partition.expired) {
             if state.mode == RetentionMode::Trim {
                 continue;
             }
@@ -845,7 +854,7 @@ pub(crate) fn prepare_automatic_detaches(
             }
             Err(error) => return Err(error),
         };
-        if partition.is_none_or(|partition| state.mode == RetentionMode::Retain && !partition.expired) {
+        if partition.is_none_or(|partition| !state.trim_unbounded && !partition.expired) {
             if state.mode == RetentionMode::Trim {
                 continue;
             }
@@ -1533,7 +1542,7 @@ pub fn prepare_retention_cut(
                     "retention target is not an aligned source partition".into(),
                 )
             })?;
-    if state.mode == RetentionMode::Retain && !partition.expired {
+    if !state.trim_unbounded && !partition.expired {
         return Err(PgTrickleError::InvalidArgument(
             "partition is not wholly below the retention cutoff".into(),
         ));
