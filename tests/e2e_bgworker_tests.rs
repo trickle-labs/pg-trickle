@@ -761,6 +761,11 @@ async fn test_refresh_worker_sigterm_interrupts_spi_and_recovers() {
     .await
     .expect("find running job for sleeping worker");
 
+    // Quiesce new dispatches so a replacement cannot race the rollback
+    // assertion. This does not cancel the already-running SPI statement.
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+
     let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(worker_pid)
         .fetch_one(&db.pool)
@@ -793,6 +798,13 @@ async fn test_refresh_worker_sigterm_interrupts_spi_and_recovers() {
     let count_after_term: i64 = db.query_scalar("SELECT n FROM sigterm_st").await;
     assert_eq!(count_after_term, 1, "terminated refresh must roll back");
 
+    // Remove the artificial delay before allowing the scheduler to dispatch
+    // another worker. Otherwise the retry could also sleep for 30 seconds.
+    db.execute("UPDATE sigterm_src SET delay_seconds = 0 WHERE id = 2")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+
     // The coordinator must reap the dead worker instead of leaving a
     // permanent RUNNING job and an occupied worker slot.
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -813,10 +825,8 @@ async fn test_refresh_worker_sigterm_interrupts_spi_and_recovers() {
     .await
     .expect("scheduler did not reap the terminated refresh worker");
 
-    // Remove the artificial delay and verify a replacement worker applies
-    // both rows. The stream table should remain usable (not ERROR).
-    db.execute("UPDATE sigterm_src SET delay_seconds = 0 WHERE id = 2")
-        .await;
+    // Verify a replacement worker applies both rows. The stream table
+    // should remain usable (not ERROR).
     let recovered = db
         .wait_for_condition(
             "refresh worker restarted after SIGTERM",
