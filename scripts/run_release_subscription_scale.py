@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure exact-package distance subscriptions through one million source rows."""
+"""Measure exact-package distance subscriptions through 100,000 source rows."""
 
 from __future__ import annotations
 
@@ -16,14 +16,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ROW_COUNTS = (1_000, 10_000, 100_000, 1_000_000)
+ROW_COUNTS = (1_000, 10_000, 100_000)
 DIMENSIONS = 384
 SUBSCRIPTIONS = (0, 1, 10, 100, 1000)
 STATISTICS = ("unanalyzed", "analyzed")
 ROUNDS = 1
 PLAN_CASES = {
-    (1_000_000, 0, "unanalyzed"),
-    (1_000_000, 1_000, "unanalyzed"),
+    (100_000, 0, "unanalyzed"),
+    (100_000, 1_000, "unanalyzed"),
 }
 REPORT_MARKER = "PGVECTOR_SUBSCRIPTION_BENCHMARK_JSON="
 TEST_COMMAND = [

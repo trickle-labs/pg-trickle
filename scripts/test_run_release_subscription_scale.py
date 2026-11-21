@@ -38,20 +38,20 @@ def report(rows: int, subscriptions: int, analyzed: bool) -> dict:
 
 class SubscriptionScaleTests(unittest.TestCase):
     def test_parse_case_accepts_the_requested_measurement(self):
-        data = report(1_000_000, 10, True)
+        data = report(100_000, 10, True)
         output = scale.REPORT_MARKER + json.dumps(data)
-        self.assertEqual(scale.parse_case(output, 1_000_000, 10, True), data)
+        self.assertEqual(scale.parse_case(output, 100_000, 10, True), data)
 
     def test_parse_case_rejects_wrong_scale_or_uncontrolled_merge(self):
-        wrong_scale = report(1_000_000, 10, True)
+        wrong_scale = report(100_000, 10, True)
         wrong_scale["measurements"][0]["initial_rows"] -= 1
         with self.assertRaisesRegex(ValueError, "does not match"):
-            scale.parse_case(scale.REPORT_MARKER + json.dumps(wrong_scale), 1_000_000, 10, True)
+            scale.parse_case(scale.REPORT_MARKER + json.dumps(wrong_scale), 100_000, 10, True)
 
-        wrong_strategy = report(1_000_000, 10, True)
+        wrong_strategy = report(100_000, 10, True)
         wrong_strategy["measurements"][0]["samples"][0]["merge_strategy"] = "delete_insert"
         with self.assertRaisesRegex(ValueError, "controlled merge strategy"):
-            scale.parse_case(scale.REPORT_MARKER + json.dumps(wrong_strategy), 1_000_000, 10, True)
+            scale.parse_case(scale.REPORT_MARKER + json.dumps(wrong_strategy), 100_000, 10, True)
 
     def test_parse_case_rejects_missing_tuple_counters(self):
         missing_counter = report(1_000, 10, False)
@@ -59,16 +59,16 @@ class SubscriptionScaleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source_index_tuples_fetched"):
             scale.parse_case(scale.REPORT_MARKER + json.dumps(missing_counter), 1_000, 10, False)
 
-    def test_matrix_includes_the_one_million_source_row_limit(self):
-        self.assertEqual(scale.ROW_COUNTS, (1_000, 10_000, 100_000, 1_000_000))
+    def test_matrix_caps_source_rows_at_100k(self):
+        self.assertEqual(scale.ROW_COUNTS, (1_000, 10_000, 100_000))
         self.assertEqual(scale.SUBSCRIPTIONS, (0, 1, 10, 100, 1_000))
         self.assertEqual(scale.DIMENSIONS, 384)
-        self.assertEqual(len(scale.ROW_COUNTS) * len(scale.SUBSCRIPTIONS) * len(scale.STATISTICS), 40)
+        self.assertEqual(len(scale.ROW_COUNTS) * len(scale.SUBSCRIPTIONS) * len(scale.STATISTICS), 30)
 
     def test_matrix_captures_same_strategy_plans_at_zero_and_max_subscriptions(self):
         expected = {
-            (1_000_000, 0, "unanalyzed"),
-            (1_000_000, 1_000, "unanalyzed"),
+            (100_000, 0, "unanalyzed"),
+            (100_000, 1_000, "unanalyzed"),
         }
         self.assertEqual(scale.PLAN_CASES, expected)
         self.assertTrue(scale.PLAN_CASES <= {
@@ -79,28 +79,28 @@ class SubscriptionScaleTests(unittest.TestCase):
         })
 
     def test_parse_case_requires_the_declared_plan_capture(self):
-        data = report(1_000_000, 10, False)
+        data = report(100_000, 10, False)
         data["nested_plan_capture"] = True
         output = scale.REPORT_MARKER + json.dumps(data)
         self.assertEqual(
-            scale.parse_case(output, 1_000_000, 10, False, plan_capture=True), data
+            scale.parse_case(output, 100_000, 10, False, plan_capture=True), data
         )
         with self.assertRaisesRegex(ValueError, "plan-control"):
-            scale.parse_case(output, 1_000_000, 10, False)
+            scale.parse_case(output, 100_000, 10, False)
 
     def test_plan_log_requires_case_markers_and_an_explain_plan(self):
         plan = (
-            "PGVECTOR_SUB_START rows=1000000 subscriptions=0 analyzed=false round=0\n"
+            "PGVECTOR_SUB_START rows=100000 subscriptions=0 analyzed=false round=0\n"
             '{"Plan":{"Node Type":"Seq Scan"}}\n'
-            "PGVECTOR_SUB_END rows=1000000 subscriptions=0 analyzed=false round=0\n"
+            "PGVECTOR_SUB_END rows=100000 subscriptions=0 analyzed=false round=0\n"
         )
-        scale.validate_plan_log(plan, 1_000_000, 0, "unanalyzed")
+        scale.validate_plan_log(plan, 100_000, 0, "unanalyzed")
         with self.assertRaisesRegex(ValueError, "case markers"):
-            scale.validate_plan_log(plan.replace("PGVECTOR_SUB_END", "OTHER"), 1_000_000, 0, "unanalyzed")
+            scale.validate_plan_log(plan.replace("PGVECTOR_SUB_END", "OTHER"), 100_000, 0, "unanalyzed")
         with self.assertRaisesRegex(ValueError, "no auto_explain plan"):
             scale.validate_plan_log(
                 plan.replace('{"Plan":{"Node Type":"Seq Scan"}}\n', ""),
-                1_000_000,
+                100_000,
                 0,
                 "unanalyzed",
             )

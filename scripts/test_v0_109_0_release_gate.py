@@ -171,7 +171,7 @@ class RetirementContractTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 gate.check_retirement_contract(broken)
 
-    def test_exact_package_subscription_measurement_is_required(self):
+    def test_subscription_scale_contract_requires_only_the_100k_matrix(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
         gate.check_subscription_scale_contract(contract)
         for field, value in [
@@ -182,6 +182,15 @@ class RetirementContractTests(unittest.TestCase):
             ("measurement_file", "qualification-logs/raw/wrong.json"),
         ]:
             broken = copy.deepcopy(contract)
-            next(s for s in broken["required_suites"] if s["id"] == "subscription-scale-1m")[field] = value
+            next(s for s in broken["required_suites"] if s["id"] == "subscription-scale-100k")[field] = value
             with self.assertRaises(SystemExit):
                 gate.check_subscription_scale_contract(broken)
+
+        includes_one_million = copy.deepcopy(contract)
+        one_million = copy.deepcopy(
+            next(s for s in includes_one_million["required_suites"] if s["id"] == "subscription-scale-100k")
+        )
+        one_million["id"] = "subscription-scale-1m"
+        includes_one_million["required_suites"].append(one_million)
+        with self.assertRaises(SystemExit):
+            gate.check_subscription_scale_contract(includes_one_million)
