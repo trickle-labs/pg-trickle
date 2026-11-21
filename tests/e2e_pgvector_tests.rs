@@ -11,7 +11,7 @@
 
 mod e2e;
 
-use e2e::E2eDb;
+use e2e::{E2eDb, disable_scheduler};
 
 // ═══════════════════════════════════════════════════════════════════════
 // Helper: enable pgvector and the vector agg GUC
@@ -2847,6 +2847,7 @@ async fn test_centroid_diverse_768_dimensional_drift_matches_native_avg() {
 async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, diverse: bool) {
     assert!([3, 384, 768, 1536].contains(&dimensions));
     let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
     setup_pgvector(&db).await;
     let mut conn = db.pool.acquire().await.expect("acquire churn session");
     let versions: (String, String, String) = sqlx::query_as("SELECT version(), (SELECT extversion FROM pg_extension WHERE extname = 'vector'), (SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle')")
@@ -2883,16 +2884,27 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
             .expect("set up centroid churn");
     }
 
-    let bound: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL)")
+    let bound: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation AND c.schema_version = 1 AND c.status = 'BUILDING')")
         .fetch_one(&mut *conn).await.expect("inspect initial churn state");
     assert!(bound, "churn fixture must initialize centroid state");
+    let cdc_buffer: String = sqlx::query_scalar(
+        "SELECT format('%I.%I', current_setting('pg_trickle.change_buffer_schema'), \
+         'changes_' || COALESCE((SELECT source_stable_name FROM pgtrickle.pgt_change_tracking \
+         WHERE source_relid = 'centroid_churn_src'::regclass), \
+         'centroid_churn_src'::regclass::oid::text))",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("resolve churn CDC buffer");
 
     let mut seed = 0x7a13_9465_u64;
     let mut algebraic = 0;
     let mut unbound_refreshes = 0;
     let mut last_unbound_refresh_id = None;
+    let mut first_unbound_context = None;
     let mut max_error: f64 = 0.0;
     let mut max_bound_fraction: f64 = 0.0;
+    let mut frontier_retries = 0;
     let mut checkpoints = Vec::new();
     for step in 0..steps {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -2936,25 +2948,120 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
             sqlx::query("INSERT INTO centroid_churn_src VALUES ($1, $2, $3::text::vector) ON CONFLICT (id) DO UPDATE SET grp = EXCLUDED.grp, v = EXCLUDED.v")
                 .bind(id).bind(group).bind(vector).execute(&mut *conn).await.expect("upsert churn row");
         }
+        let cdc_window_sql = format!(
+            "WITH f AS (SELECT frontier->'sources'->('centroid_churn_src'::regclass::oid::text)->>'lsn' AS lsn \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_churn_st'::regclass) \
+             SELECT jsonb_build_object('frontier_lsn', f.lsn, 'events', \
+               COALESCE((SELECT jsonb_agg(jsonb_build_object('change_id', c.change_id, 'lsn', c.lsn::text, \
+                 'action', c.action, 'id', c.id, 'grp', c.grp, 'changed_cols', c.changed_cols::text, \
+                 'vector_is_null', c.v IS NULL) ORDER BY c.change_id) FROM {cdc_buffer} c \
+                 WHERE c.lsn >= f.lsn::pg_lsn), '[]'::jsonb)) FROM f"
+        );
+        let cdc_window: serde_json::Value =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(cdc_window_sql.as_str()))
+                .fetch_one(&mut *conn)
+                .await
+                .expect("inspect centroid CDC window");
+        // Trace prior mismatches and the newly observed 384D failure.
+        let trace_centroid_delta =
+            (dimensions == 384 && diverse && matches!(step, 274 | 1373 | 1482))
+                || (dimensions == 3 && !diverse && step == 392);
+        if trace_centroid_delta {
+            sqlx::query("SET pg_trickle.dvm_decision_trace = on")
+                .execute(&mut *conn)
+                .await
+                .expect("enable centroid failure trace");
+        }
         sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_churn_st')")
             .execute(&mut *conn)
             .await
             .expect("refresh centroid churn");
-        let matches: bool = sqlx::query_scalar(
-            "WITH native AS (SELECT grp, avg(v)::real[] AS v, count(*) AS n FROM centroid_churn_src GROUP BY grp), \
+        if trace_centroid_delta {
+            sqlx::query("SET pg_trickle.dvm_decision_trace = off")
+                .execute(&mut *conn)
+                .await
+                .expect("disable centroid failure trace");
+        }
+        let matches_sql = "WITH native AS (SELECT grp, avg(v)::real[] AS v, count(*) AS n FROM centroid_churn_src GROUP BY grp), \
              actual AS (SELECT grp, centroid::real[] AS v, __pgt_count AS n FROM centroid_churn_st) \
              SELECT NOT EXISTS (SELECT 1 FROM native n FULL JOIN actual a USING (grp) \
              WHERE n.n IS DISTINCT FROM a.n OR (n.v IS NULL) <> (a.v IS NULL) OR \
                array_length(n.v, 1) IS DISTINCT FROM array_length(a.v, 1) OR \
                EXISTS (SELECT 1 FROM generate_series(1, array_length(n.v, 1)) AS i \
-                 WHERE abs(n.v[i]::float8 - a.v[i]::float8) > 1e-5 + 1e-6 * abs(n.v[i]::float8)))"
-        ).fetch_one(&mut *conn).await.expect("compare churn with native AVG");
+                 WHERE abs(n.v[i]::float8 - a.v[i]::float8) > 1e-5 + 1e-6 * abs(n.v[i]::float8)))";
+        let mut matches: bool = sqlx::query_scalar(matches_sql)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("compare churn with native AVG");
+        for _ in 0..3 {
+            if matches {
+                break;
+            }
+            let pending_sql = format!(
+                "SELECT EXISTS (SELECT 1 FROM {cdc_buffer} c WHERE c.lsn > (\
+                   SELECT (frontier->'sources'->('centroid_churn_src'::regclass::oid::text)->>'lsn')::pg_lsn \
+                   FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_churn_st'::regclass))"
+            );
+            let pending: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(pending_sql.as_str()))
+                .fetch_one(&mut *conn)
+                .await
+                .expect("check for CDC beyond the centroid frontier");
+            if !pending {
+                break;
+            }
+            sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_churn_st')")
+                .execute(&mut *conn)
+                .await
+                .expect("retry centroid refresh while CDC remains beyond its frontier");
+            frontier_retries += 1;
+            matches = sqlx::query_scalar(matches_sql)
+                .fetch_one(&mut *conn)
+                .await
+                .expect("compare retried churn refresh with native AVG");
+        }
         if !matches {
             let details: serde_json::Value = sqlx::query_scalar("WITH native AS (SELECT grp, avg(v)::real[] AS v, count(*) AS n FROM centroid_churn_src GROUP BY grp), actual AS (SELECT grp, centroid::real[] AS v, __pgt_count AS n FROM centroid_churn_st), failures AS (SELECT n.grp, i, n.v[i] AS native, a.v[i] AS actual, abs(n.v[i]::float8 - a.v[i]::float8) AS error, 1e-5 + 1e-6 * abs(n.v[i]::float8) AS bound FROM native n JOIN actual a USING (grp) CROSS JOIN generate_series(1, array_length(n.v, 1)) i WHERE abs(n.v[i]::float8 - a.v[i]::float8) > 1e-5 + 1e-6 * abs(n.v[i]::float8) ORDER BY error DESC LIMIT 10) SELECT jsonb_build_object('failures', (SELECT jsonb_agg(to_jsonb(failures)) FROM failures), 'history', (SELECT to_jsonb(h) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1))")
                 .fetch_one(&mut *conn).await.expect("inspect centroid mismatch");
             let groups: serde_json::Value = sqlx::query_scalar("WITH native AS (SELECT grp, count(*) AS n, avg(v) IS NULL AS null_centroid FROM centroid_churn_src GROUP BY grp), actual AS (SELECT grp, __pgt_count AS n, centroid IS NULL AS null_centroid FROM centroid_churn_st) SELECT jsonb_build_object('native', (SELECT jsonb_agg(to_jsonb(native)) FROM native), 'actual', (SELECT jsonb_agg(to_jsonb(actual)) FROM actual))")
                 .fetch_one(&mut *conn).await.expect("inspect centroid groups");
-            panic!("centroid diverged from native AVG at step {step}: {details}; groups={groups}");
+            let frontier_after: serde_json::Value = sqlx::query_scalar(
+                "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_churn_st'::regclass",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .expect("inspect frontier after centroid mismatch");
+            let postgres_trace = tokio::process::Command::new("docker")
+                .args(["logs", "--tail", "300", db.container_id()])
+                .output()
+                .await
+                .map(|output| {
+                    let logs = format!(
+                        "{}\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    logs.lines()
+                        .filter(|line| {
+                            [
+                                "dvm_decision_trace=",
+                                "dvm_generated_delta_sql=",
+                                "centroid_delta_staging=",
+                                "centroid_candidates=",
+                                "centroid_applied_rows=",
+                            ]
+                            .iter()
+                            .any(|marker| line.contains(marker))
+                        })
+                        .map(|line| line.chars().take(4_000).collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_else(|error| format!("could not collect PostgreSQL trace: {error}"));
+            panic!(
+                "centroid diverged from native AVG at step {step}: {details}; \
+                 groups={groups}; cdc_window={cdc_window}; frontier_after={frontier_after}; \
+                 postgres_trace={postgres_trace}"
+            );
         }
         let (error, bound_fraction): (f64, f64) = sqlx::query_as(
             "WITH native AS (SELECT grp, avg(v)::real[] AS v FROM centroid_churn_src GROUP BY grp), \
@@ -2971,30 +3078,47 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
         }
         let used_algebraic: bool = sqlx::query_scalar("SELECT merge_strategy_used = 'centroid_algebraic' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
             .fetch_one(&mut *conn).await.expect("inspect churn strategy");
-        let bound: bool = sqlx::query_scalar("SELECT COALESCE(c.baseline_frontier = t.frontier, false) FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass")
+        let bound: bool = sqlx::query_scalar("SELECT COALESCE(c.baseline_frontier = t.frontier AND c.materialized_xid IS NULL AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation AND c.schema_version = 1 AND c.status = 'BUILDING', false) FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass")
             .fetch_one(&mut *conn).await.expect("inspect churn state");
         if !bound {
+            let context: serde_json::Value = sqlx::query_scalar("SELECT jsonb_build_object('state', jsonb_build_object('frontier_matches', c.baseline_frontier = t.frontier, 'materialized_xid', c.materialized_xid::text, 'cost_rescan_active', c.cost_rescan_active, 'cost_rescan_xid', c.cost_rescan_xid::text, 'stream_relid_matches', c.stream_relid = t.pgt_relid, 'query_matches', c.defining_query = t.defining_query, 'contract_matches', c.contract_generation = t.contract_generation, 'schema_version', c.schema_version, 'status', c.status), 'recent_history', (SELECT jsonb_agg(to_jsonb(h)) FROM (SELECT h.refresh_id, h.merge_strategy_used, h.delta_row_count, h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 3) h)) FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass")
+                .fetch_one(&mut *conn).await.expect("inspect unbound churn state");
+            if first_unbound_context.is_none() {
+                first_unbound_context = Some(context.clone());
+            }
             assert!(
                 diverse && !used_algebraic,
-                "unexpected unbound state at step {step}"
+                "unexpected unbound state at step {step}: {context}"
             );
             let (refresh_id, delta_rows, fallback, outcome, reason): (i64, i64, Option<String>, Option<String>, Option<String>) = sqlx::query_as("SELECT h.refresh_id, COALESCE(h.delta_row_count, 0)::bigint, h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason', h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome', h.refresh_reason_detail::jsonb->'centroid_rebase'->>'reason' FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_churn_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
                 .fetch_one(&mut *conn).await.expect("inspect unbound churn fallback");
             if unbound_refreshes == 0 {
-                assert_eq!(fallback.as_deref(), Some("STATE_REJECTED"));
-                assert_eq!(outcome.as_deref(), Some("unbound"));
+                assert_eq!(
+                    fallback.as_deref(),
+                    Some("STATE_REJECTED"),
+                    "first unbound refresh at step {step}: {context}"
+                );
+                assert_eq!(
+                    outcome.as_deref(),
+                    Some("unbound"),
+                    "first unbound refresh at step {step}: {context}"
+                );
                 assert!(
                     reason
                         .as_deref()
-                        .is_some_and(|value| value.contains("InvalidState"))
+                        .is_some_and(|value| value.contains("InvalidState")),
+                    "unexpected rebase reason {reason:?} at step {step}: {context}"
                 );
             } else if last_unbound_refresh_id != Some(refresh_id) {
                 assert!(
                     fallback.as_deref() == Some("STATE_UNBOUND")
                         || (fallback.is_none() && delta_rows == 0),
-                    "unexpected fallback {fallback:?} with {delta_rows} delta rows at step {step}"
+                    "unexpected fallback {fallback:?} with {delta_rows} delta rows at step {step}: {context}"
                 );
-                assert!(outcome.is_none(), "unbound state must not retry rebase");
+                assert!(
+                    outcome.is_none(),
+                    "unbound state must not retry rebase at step {step}: {context}"
+                );
             }
             last_unbound_refresh_id = Some(refresh_id);
             unbound_refreshes += 1;
@@ -3006,11 +3130,14 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
         "only {algebraic} refreshes used algebraic state"
     );
     if diverse {
-        assert_eq!(unbound_refreshes, 0, "diverse churn lost its bound state");
+        assert_eq!(
+            unbound_refreshes, 0,
+            "diverse churn lost its bound state: {first_unbound_context:?}"
+        );
     }
     println!(
         "CENTROID_DRIFT_JSON={}",
-        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"seed":"0x7a139465","dimensions":dimensions,"diverse_components":diverse,"refresh_calls":steps,"latest_history_algebraic_observations":algebraic,"unbound_refreshes":unbound_refreshes,"absolute_tolerance":1e-5,"relative_tolerance":1e-6,"checkpoints":checkpoints})
+        serde_json::json!({"postgres":versions.0,"pgvector":versions.1,"pg_trickle":versions.2,"seed":"0x7a139465","dimensions":dimensions,"diverse_components":diverse,"refresh_calls":steps,"frontier_retries":frontier_retries,"latest_history_algebraic_observations":algebraic,"unbound_refreshes":unbound_refreshes,"absolute_tolerance":1e-5,"relative_tolerance":1e-6,"checkpoints":checkpoints})
     );
 }
 
@@ -3033,6 +3160,7 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
         "CREATE TABLE centroid_crash_src (id int PRIMARY KEY, grp int, v vector(2))",
         "INSERT INTO centroid_crash_src VALUES (1, 1, '[1,2]'), (2, 1, '[3,4]')",
         "SELECT pgtrickle.create_stream_table('centroid_crash_st', $$SELECT grp, avg(v) AS centroid FROM centroid_crash_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.centroid_crash_st'])",
         "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_crash_st'::regclass",
         "SELECT pgtrickle.refresh_stream_table('centroid_crash_st')",
         "UPDATE centroid_crash_src SET v = '[5,6]' WHERE id = 1",
@@ -3115,6 +3243,7 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
         "SET pg_trickle.enable_vector_agg = on",
         "SET pg_trickle.enable_centroid_state = on",
         "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.centroid_crash_st'])",
         "SELECT pgtrickle.refresh_stream_table('centroid_crash_st')",
     ] {
         sqlx::query(sql)
@@ -3122,6 +3251,8 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
             .await
             .expect("refresh recovered centroid");
     }
+    // A scheduler refresh can race catch-up after restart, or writer holdback
+    // can defer the committed row; retry briefly and retain timeout details.
     let recovered_sql = "SELECT public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)), s.centroid::text, c.baseline_frontier = t.frontier, c.materialized_xid IS NULL, h.merge_strategy_used, jsonb_build_object('actual', s.centroid::text, 'native', (SELECT avg(v)::text FROM centroid_crash_src), 'binary_matches', public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)), 'baseline_frontier', c.baseline_frontier::text, 'frontier', t.frontier::text, 'materialized_xid', c.materialized_xid::text, 'merge_strategy', h.merge_strategy_used, 'refresh_reason', h.refresh_reason, 'refresh_detail', h.refresh_reason_detail) FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass";
     let expected: (bool, String, Option<bool>, bool, Option<String>) = (
         true,
@@ -3157,11 +3288,80 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
                 .expect("retry post-crash centroid catch-up");
             attempts += 1;
         };
-    // After a hard restart, a scheduler-owned refresh can race this manual
-    // catch-up or writer holdback can defer the just-committed source row.
     assert_eq!(
         recovered, expected,
         "algebraic refresh must apply the committed source change after crash recovery: {details} (attempts={attempts})"
+    );
+
+    sqlx::query("UPDATE centroid_crash_src SET v = '[9,10]' WHERE id = 1")
+        .execute(&mut *conn)
+        .await
+        .expect("commit source change after crash recovery");
+    let (catchup_frontier, next_frontier): (String, String) = sqlx::query_as(
+        "SELECT frontier::text, jsonb_set(frontier, ARRAY['sources', 'centroid_crash_src'::regclass::oid::text, 'lsn'], to_jsonb(pg_current_wal_insert_lsn()::text))::text FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_crash_st'::regclass",
+    )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("read post-update frontiers");
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .expect("begin centroid candidate check");
+    let candidate_table: String = sqlx::query_scalar(
+        "SELECT pgtrickle._centroid_stage_candidates('centroid_crash_st'::regclass::oid, $1, $2)",
+    )
+    .bind(&catchup_frontier)
+    .bind(&next_frontier)
+    .fetch_one(&mut *conn)
+    .await
+    .expect("stage recovered centroid candidate");
+    let candidate_sql = format!(
+        "SELECT COALESCE(jsonb_agg(jsonb_build_object('action', __pgt_action, 'grp', grp, 'centroid', centroid::text, 'group_count', __pgt_count)), '[]'::jsonb) FROM {candidate_table}"
+    );
+    let candidate: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(candidate_sql))
+        .fetch_one(&mut *conn)
+        .await
+        .expect("read staged centroid candidate");
+    assert_eq!(candidate.as_array().map(Vec::len), Some(1), "{candidate}");
+    assert_eq!(candidate[0]["action"], "I", "{candidate}");
+    assert_eq!(candidate[0]["grp"], 1, "{candidate}");
+    assert_eq!(candidate[0]["centroid"], "[8,9]", "{candidate}");
+    assert_eq!(candidate[0]["group_count"], 2, "{candidate}");
+    sqlx::query("ROLLBACK")
+        .execute(&mut *conn)
+        .await
+        .expect("rollback centroid candidate check");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_crash_st')")
+        .execute(&mut *conn)
+        .await
+        .expect("refresh after crash recovery catch-up");
+    let recovered_delta_details: serde_json::Value = sqlx::query_scalar("SELECT jsonb_build_object('binary_matches', public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)), 'actual', s.centroid::text, 'native', (SELECT avg(v)::text FROM centroid_crash_src), 'source_id1', (SELECT v::text FROM centroid_crash_src WHERE id = 1), 'frontier_matches', c.baseline_frontier = t.frontier, 'materialized_cleared', c.materialized_xid IS NULL, 'merge_strategy', h.merge_strategy_used, 'centroid_state', g.state, 'group_count', g.group_count, 'state_checksum_valid', g.state_checksum = pg_catalog.md5(pg_catalog.int8send(g.pgt_id) || g.row_id || pg_catalog.int8send(g.group_count) || pg_catalog.array_send(g.state)), 'frontier', t.frontier::text, 'baseline_frontier', c.baseline_frontier::text, 'materialized_xid', c.materialized_xid::text, 'refresh_reason', h.refresh_reason, 'refresh_reason_detail', h.refresh_reason_detail) FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN pgtrickle.pgt_centroid_groups g ON g.pgt_id = c.pgt_id AND g.row_id = s.__pgt_row_id JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("check post-recovery incremental refresh");
+    assert_eq!(
+        recovered_delta_details["binary_matches"], true,
+        "recovered centroid must match native AVG after later deltas: {recovered_delta_details}"
+    );
+    assert_eq!(
+        recovered_delta_details["actual"], "[8,9]",
+        "{recovered_delta_details}"
+    );
+    assert_eq!(
+        recovered_delta_details["source_id1"], "[9,10]",
+        "{recovered_delta_details}"
+    );
+    assert_eq!(
+        recovered_delta_details["frontier_matches"], true,
+        "{recovered_delta_details}"
+    );
+    assert_eq!(
+        recovered_delta_details["materialized_cleared"], true,
+        "{recovered_delta_details}"
+    );
+    assert_eq!(
+        recovered_delta_details["merge_strategy"], "centroid_algebraic",
+        "{recovered_delta_details}"
     );
 }
 
@@ -5326,12 +5526,6 @@ async fn test_ann_churn_preserves_concurrent_work_and_unknown_rewrites() {
         "DIFFERENTIAL",
     )
     .await;
-    // This test manually controls each refresh and validates exact ANN request
-    // identity across snapshot restore. Prevent the scheduler from running a
-    // concurrent refresh/rewrite that invalidates the index filenode between
-    // request_ann_maintenance and claim_ann_maintenance.
-    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.ann_churn_stream'])")
-        .await;
     db.execute(
         "CREATE INDEX ann_churn_idx ON ann_churn_stream USING hnsw (embedding vector_l2_ops)",
     )

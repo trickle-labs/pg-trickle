@@ -288,9 +288,13 @@ pub(crate) fn invalidate_baseline(
     if installed.is_some() {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_centroid_states c SET baseline_frontier = \
-               CASE WHEN c.materialized_xid = pg_current_xact_id_if_assigned() \
+             CASE WHEN (c.materialized_xid = pg_current_xact_id_if_assigned() \
                  AND c.baseline_frontier = t.frontier AND c.stream_relid = t.pgt_relid \
-                 AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation \
+                 AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation) \
+                 OR ($2 AND c.materialized_xid IS NULL AND c.baseline_frontier = t.frontier \
+                     AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query \
+                     AND c.contract_generation = t.contract_generation AND c.schema_version = 1 \
+                     AND c.status = 'BUILDING' AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL) \
                  THEN c.baseline_frontier ELSE NULL END, materialized_xid = NULL, \
              cost_rescan_active = COALESCE((c.cost_rescan_xid = pg_current_xact_id_if_assigned() \
                  OR ($2 AND c.cost_rescan_xid IS NULL AND c.cost_rescan_active \
@@ -609,6 +613,31 @@ fn stage_centroid_delta(
         .map_err(|error| PgTrickleError::SpiError(format!("centroid delta staging: {error}")))?;
         Ok(table)
     })?;
+    if crate::config::pg_trickle_dvm_decision_trace() {
+        let source_rows = buffers
+            .source_tables()
+            .iter()
+            .map(|(source_oid, source)| {
+                // nosemgrep: rust.spi.query.dynamic-format -- source is an internally generated, quoted temp relation.
+                let rows =
+                    match Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {source}")) {
+                        Ok(rows) => serde_json::json!({"rows": rows}),
+                        Err(error) => serde_json::json!({"error": error.to_string()}),
+                    };
+                serde_json::json!({"source_oid": source_oid, "staged": rows})
+            })
+            .collect::<Vec<_>>();
+        // nosemgrep: rust.spi.query.dynamic-format -- table is an internally generated temp relation.
+        let delta_rows = match Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {table}"))
+        {
+            Ok(rows) => serde_json::json!({"rows": rows}),
+            Err(error) => serde_json::json!({"error": error.to_string()}),
+        };
+        pgrx::log!(
+            "[pg_trickle] centroid_delta_staging={}",
+            serde_json::json!({"sources": source_rows, "delta": delta_rows})
+        );
+    }
     // Centroid staging also uses the bounded source VIEW fast path. The
     // materialized centroid delta no longer needs that view after CTAS.
     buffers.cleanup_bounded_views()?;
@@ -872,6 +901,18 @@ pub(crate) fn stage_centroid_candidates(
          SELECT __pgt_row_id, __pgt_action, {columns}, __pgt_count FROM {candidate_table}"
     ))
     .map_err(|error| PgTrickleError::SpiError(format!("centroid public candidates: {error}")))?;
+    if crate::config::pg_trickle_dvm_decision_trace() {
+        // nosemgrep: rust.spi.query.dynamic-format -- relations are internally generated temp tables.
+        let candidate_rows =
+            match Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {candidate_table}")) {
+                Ok(rows) => serde_json::json!({"rows": rows}),
+                Err(error) => serde_json::json!({"error": error.to_string()}),
+            };
+        pgrx::log!(
+            "[pg_trickle] centroid_candidates={}",
+            serde_json::json!({"private": candidate_rows})
+        );
+    }
     restrict_staged_table(&public_table)?;
     let owner = crate::sql_builder::ident(&crate::refresh::stream_owner_name(st)?);
     // nosemgrep: rust.spi.run.dynamic-format -- table is internal and owner is catalog-derived and quoted.
@@ -901,6 +942,9 @@ pub(crate) fn apply_centroid_candidates(
             Ok(rows.len() as i64)
         })
     })?;
+    if crate::config::pg_trickle_dvm_decision_trace() {
+        pgrx::log!("[pg_trickle] centroid_applied_rows={applied}");
+    }
     let private = &staged.private;
     // nosemgrep: rust.spi.run_with_args.dynamic-format -- private is an internally generated temp relation.
     Spi::run_with_args(
@@ -959,6 +1003,9 @@ pub(crate) fn advance_empty_frontier(
     let previous = serde_json::to_value(previous).map_err(|error| {
         PgTrickleError::InternalError(format!("serialize centroid frontier: {error}"))
     })?;
+    let next_json = serde_json::to_value(next).map_err(|error| {
+        PgTrickleError::InternalError(format!("serialize centroid frontier: {error}"))
+    })?;
     let bound = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
          WHERE c.pgt_id = $1 AND c.baseline_frontier = $2 AND t.frontier = $2 \
@@ -966,7 +1013,7 @@ pub(crate) fn advance_empty_frontier(
            AND c.stream_relid = t.pgt_relid \
            AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation \
            AND c.schema_version = 1 AND c.status = 'BUILDING')",
-        &[st.pgt_id.into(), pgrx::JsonB(previous).into()],
+        &[st.pgt_id.into(), pgrx::JsonB(previous.clone()).into()],
     ).map_err(|error| PgTrickleError::SpiError(error.to_string()))?.unwrap_or(false);
     if bound {
         let oids = dependencies
@@ -975,7 +1022,21 @@ pub(crate) fn advance_empty_frontier(
             .collect::<Vec<_>>();
         crate::cdc::lock_source_relations(&oids)?;
         if sources_at_frontier(dependencies, next)? {
-            set_pending_frontier(st, next, None)?;
+            Spi::run_with_args(
+                "UPDATE pgtrickle.pgt_centroid_states c SET baseline_frontier = $2 \
+                 FROM pgtrickle.pgt_stream_tables t WHERE c.pgt_id = $1 AND t.pgt_id = c.pgt_id \
+                   AND c.baseline_frontier = $3 AND t.frontier = $3 \
+                   AND c.materialized_xid IS NULL AND NOT c.cost_rescan_active AND c.cost_rescan_xid IS NULL \
+                   AND c.stream_relid = t.pgt_relid AND c.defining_query = t.defining_query \
+                   AND c.contract_generation = t.contract_generation AND c.schema_version = 1 \
+                   AND c.status = 'BUILDING'",
+                &[
+                    st.pgt_id.into(),
+                    pgrx::JsonB(next_json).into(),
+                    pgrx::JsonB(previous).into(),
+                ],
+            )
+            .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
         }
     }
     Ok(())

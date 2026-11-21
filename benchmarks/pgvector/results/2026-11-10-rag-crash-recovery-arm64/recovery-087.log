@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running tests/e2e_pgvector_revision_tests.rs (/private/tmp/pg-trickle-task-1399/target/debug/deps/e2e_pgvector_revision_tests-7ac7530d67ba7c77)
+
+running 2 tests
+test test_live_rag_recovers_after_database_crash_during_maintenance ... E2E connect attempt 1/30: error communicating with database: Connection reset by peer (os error 54)
+application interruption to completed reconciliation: 1.428s
+E2E connect attempt 1/30: error communicating with database: Connection reset by peer (os error 54)
+periodic_full interruption to completed reconciliation: 1.409s
+E2E connect attempt 1/30: error communicating with database: Connection reset by peer (os error 54)
+differential interruption to completed reconciliation: 1.395s
+ok
+test test_live_rag_recovers_after_maintenance_cancellation ... application interruption to completed reconciliation: 0.057s
+periodic_full interruption to completed reconciliation: 0.053s
+differential interruption to completed reconciliation: 0.049s
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 8.80s
+

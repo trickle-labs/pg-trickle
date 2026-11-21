@@ -53,10 +53,17 @@ mkdir -p /opt/pg-trickle
 tar -xzf "$PG_TRICKLE_RELEASE_ARCHIVE" --strip-components=1 -C /opt/pg-trickle
 ```
 
-Run as a dedicated OS user and configure a systemd service:
+Run as a dedicated OS user. Save this complete unit as
+`/etc/systemd/system/pg-trickle-ann.service`:
 
 ```ini
+[Unit]
+Description=pg_trickle ANN maintenance supervisor
+Wants=network-online.target
+After=network-online.target
+
 [Service]
+Type=simple
 User=pgtrickle-ann
 WorkingDirectory=/opt/pg-trickle
 Environment=PGSERVICE=ann_maintenance
@@ -65,10 +72,22 @@ Restart=always
 RestartSec=10
 KillMode=control-group
 TimeoutStopSec=70
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-Start or stop the service with the host's service manager. On a graceful stop,
-the supervisor interrupts active `psql` so it requests server-side query
+Enable and start the supervisor, then check its journal:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now pg-trickle-ann.service
+sudo systemctl status pg-trickle-ann.service
+sudo journalctl -u pg-trickle-ann.service
+```
+
+Stop it with `sudo systemctl stop pg-trickle-ann.service`. On a graceful stop,
+the supervisor interrupts active `psql` to request server-side query
 cancellation; a canceled request can be recorded as failed. Abrupt process or
 connection loss can instead leave an interrupted request, which is reclaimed
 only after its reservation expires. An interrupted concurrent reindex can

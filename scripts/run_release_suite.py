@@ -240,6 +240,7 @@ def main() -> int:
                 {
                     "PGT_EXTENSION_DIR": str(extension_dir),
                     "PGT_RELEASE_CANDIDATE_COMMIT": args.candidate_commit,
+                    "PGT_RELEASE_CANDIDATE_ARCHIVE": str(artifact),
                     "PGT_RELEASE_ARTIFACT_ID": artifact_spec["id"],
                     "PGT_RELEASE_ARTIFACT_SHA256": artifact_digest,
                     "PGT_RELEASE_PLATFORM": artifact_spec["platform"],
@@ -260,16 +261,24 @@ def main() -> int:
                 measurement_path.unlink(missing_ok=True)
                 environment["PGS_RELEASE_MEASUREMENT_JSON"] = str(measurement_path)
 
-            completed = subprocess.run(
-                command,
-                cwd=ROOT,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            output = completed.stdout.decode("utf-8", errors="replace")
-            args.log.write_bytes(completed.stdout)
-            sys.stdout.buffer.write(completed.stdout)
+            output_bytes = bytearray()
+            with args.log.open("wb") as log_file:
+                completed = subprocess.Popen(
+                    command,
+                    cwd=ROOT,
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                assert completed.stdout is not None
+                while chunk := completed.stdout.read1(64 * 1024):
+                    log_file.write(chunk)
+                    log_file.flush()
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+                    output_bytes.extend(chunk)
+                completed.wait()
+            output = output_bytes.decode("utf-8", errors="replace")
             machine_results = machine_summary(output)
             summaries = TEST_SUMMARY.findall(output)
             if machine_results is not None:

@@ -9,13 +9,21 @@
 //! - Vanishes (new_count ≤ 0, was > 0) → DELETE
 //! - Changes value → UPDATE (emitted as DELETE + INSERT pair)
 
-use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
+use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, push_quoted_ident, quote_ident};
 use crate::dvm::operators::join_common::{
     build_snapshot_inline_from, build_snapshot_sql, snapshot_join_column_name,
 };
 use crate::dvm::operators::scan::build_hash_expr_for_domain;
 use crate::dvm::parser::{AggExpr, AggFunc, CteRegistry, Expr, OpTree, apply_column_aliases};
 use crate::error::PgTrickleError;
+
+fn qualified_column(prefix: &str, name: &str) -> String {
+    let mut result = String::with_capacity(prefix.len() + name.len() + 3);
+    result.push_str(prefix);
+    result.push('.');
+    push_quoted_ident(&mut result, name);
+    result
+}
 
 /// Resolve a column reference expression against child CTE column names.
 ///
@@ -194,7 +202,11 @@ fn needs_special_value_rescan(agg: &AggExpr, child: &OpTree) -> bool {
         return false;
     }
 
-    let type_oid = if let Some(argument) = agg.analyzed_argument.as_ref() {
+    let type_oid = if let Some(argument) = agg
+        .analyzed_argument
+        .as_ref()
+        .filter(|argument| argument.type_oid != 0)
+    {
         Some(argument.type_oid)
     } else if let Some(Expr::ColumnRef {
         table_alias,
@@ -229,6 +241,9 @@ fn source_column_type_oid(
                 .map(|column| column.type_oid))
         }
         OpTree::Filter { child, .. } => source_column_type_oid(child, table_alias, column_name),
+        OpTree::SemiJoin { left, .. } | OpTree::AntiJoin { left, .. } => {
+            source_column_type_oid(left, table_alias, column_name)
+        }
         OpTree::InnerJoin { left, right, .. } if table_alias.is_some() => {
             let left = source_column_type_oid(left, table_alias, column_name)?;
             let right = source_column_type_oid(right, table_alias, column_name)?;
@@ -239,6 +254,29 @@ fn source_column_type_oid(
         }
         _ => Err(()),
     }
+}
+
+fn direct_sum_uses_row_count(agg: &AggExpr, scan: &OpTree) -> bool {
+    if !matches!(agg.function, AggFunc::Sum) || agg.is_distinct || agg.filter.is_some() {
+        return false;
+    }
+    let Some(Expr::ColumnRef {
+        table_alias,
+        column_name,
+    }) = agg.argument.as_ref()
+    else {
+        return false;
+    };
+    let OpTree::Scan { alias, columns, .. } = scan else {
+        return false;
+    };
+    if table_alias.as_deref().is_some_and(|table| table != alias) {
+        return false;
+    }
+    columns
+        .iter()
+        .find(|column| column.name == *column_name)
+        .is_some_and(|column| !column.is_nullable)
 }
 
 fn internal_group_columns(group_output: &[String]) -> Vec<String> {
@@ -438,7 +476,7 @@ pub(crate) fn centroid_signed_delta_sql(
     };
     let keys = names
         .iter()
-        .map(|name| format!("d.{}", quote_ident(name)))
+        .map(|name| qualified_column("d", name))
         .collect::<Vec<_>>();
     let row_id = build_hash_expr_for_domain("GROUP_KEY", &keys);
     let sql = format!(
@@ -1170,7 +1208,7 @@ fn build_intermediate_agg_delta(
         // make the DELETE half of a D+I update miss the stored row.
         let group_hash_d: Vec<String> = group_columns
             .iter()
-            .map(|c| format!("d.{}", quote_ident(c)))
+            .map(|c| qualified_column("d", c))
             .collect();
         let group_hash_n: Vec<String> = group_columns
             .iter()
@@ -1267,17 +1305,22 @@ fn build_intermediate_agg_delta(
             format!("{delta_cte} AS d({delta_group_aliases})")
         };
 
-        let old_presence = format!(
-            "\nWHERE {}",
-            crate::aggregate_lifecycle::group_presence_sql(group_columns.is_empty(), old_pgt_count,)
-        );
-        let new_presence = format!(
-            "\nWHERE {}",
-            crate::aggregate_lifecycle::group_presence_sql(
-                group_columns.is_empty(),
-                "n.__pgt_count",
+        let old_presence = if group_columns.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nWHERE {}",
+                crate::aggregate_lifecycle::group_presence_sql(false, old_pgt_count)
             )
-        );
+        };
+        let new_presence = if group_columns.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nWHERE {}",
+                crate::aggregate_lifecycle::group_presence_sql(false, "n.__pgt_count")
+            )
+        };
         let final_sql = format!(
             "\
 -- D events: old state (algebraic: old = new - ins + del)
@@ -2199,10 +2242,9 @@ fn generate_direct_agg_delta(
     let delta_cte = ctx.next_cte_name("agg_delta");
     let mut select_exprs = Vec::new();
 
-    // Group columns: c."region" AS "region"
-    // A44-10: direct CB reference — same value on both I and D rows within a group
+    // Group columns: the direct reference already carries its output name.
     for name in &group_output {
-        select_exprs.push(format!("c.{} AS {}", quote_ident(name), quote_ident(name),));
+        select_exprs.push(qualified_column("c", name));
     }
 
     // __ins_count, __del_count (total row counts per group)
@@ -2263,7 +2305,10 @@ fn generate_direct_agg_delta(
 
         // SUM needs a qualifying non-NULL count so the algebraic merge can
         // restore PostgreSQL's NULL result when the last value disappears.
-        if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
+        if matches!(agg.function, AggFunc::Sum)
+            && !agg.is_distinct
+            && !direct_sum_uses_row_count(agg, scan)
+        {
             let argument = case_rewrites
                 .get(&agg.alias)
                 .cloned()
@@ -2286,7 +2331,7 @@ fn generate_direct_agg_delta(
     } else {
         let refs: Vec<String> = group_output
             .iter()
-            .map(|name| format!("c.{}", quote_ident(name)))
+            .map(|name| qualified_column("c", name))
             .collect();
         format!("\nGROUP BY {}", refs.join(", "))
     };
@@ -2334,7 +2379,7 @@ fn direct_agg_delta_exprs(agg: &AggExpr, _has_value_only: bool) -> (String, Stri
             let col = agg
                 .argument
                 .as_ref()
-                .map(|e| format!("c.{}", quote_ident(&e.output_name())))
+                .map(|e| qualified_column("c", &e.output_name()))
                 .unwrap_or_else(|| "1".to_string());
             (
                 // COUNT checks the datum null flag; IS NOT NULL tests composite fields.
@@ -2348,7 +2393,7 @@ fn direct_agg_delta_exprs(agg: &AggExpr, _has_value_only: bool) -> (String, Stri
             let col = agg
                 .argument
                 .as_ref()
-                .map(|e| format!("c.{}", quote_ident(&e.output_name())))
+                .map(|e| qualified_column("c", &e.output_name()))
                 .unwrap_or_else(|| "0".to_string());
             (
                 format!("SUM(CASE WHEN c.action = 'I' THEN {col} ELSE 0 END)"),
@@ -2370,7 +2415,7 @@ fn direct_agg_argument_expr(agg: &AggExpr) -> String {
     agg.argument
         .as_ref()
         .map(|expr| match expr {
-            Expr::ColumnRef { .. } => format!("c.{}", quote_ident(&expr.output_name())),
+            Expr::ColumnRef { column_name, .. } => qualified_column("c", column_name),
             _ => expr.to_sql(),
         })
         .unwrap_or_else(|| "1".to_string())
@@ -2664,7 +2709,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // Row ID from group-by columns (using output names)
     let group_hash_exprs: Vec<String> = group_columns
         .iter()
-        .map(|c| format!("d.{}", quote_ident(c)))
+        .map(|c| qualified_column("d", c))
         .collect();
     let row_id_expr = if group_hash_exprs.is_empty() {
         "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
@@ -2685,7 +2730,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     // Group columns
     for col in &group_columns {
-        merge_selects.push(format!("d.{}", quote_ident(col)));
+        merge_selects.push(qualified_column("d", col));
     }
 
     // New count = old + inserts - deletes
@@ -2716,6 +2761,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         // SUM and AVG use rescan values only when deltas contain special
         // numeric values; ordinary changes keep the algebraic path.
         let agg_has_nonnull_aux = matches!(agg.function, AggFunc::Sum) && !agg.is_distinct;
+        let sum_nonnull_from_row_count = use_p5 && direct_sum_uses_row_count(agg, child);
         let agg_has_rescan = rescan_config.includes(agg, child);
         let has_special_value_delta = needs_special_value_rescan(agg, child);
         let special_state = if agg.uses_incremental_nonfinite_state(child) {
@@ -2759,11 +2805,8 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             has_special_value_delta,
             use_having_rescan,
             agg_has_nonnull_aux,
+            sum_nonnull_from_row_count,
             &st_col_name(&agg.alias),
-            ctx.agg_sum_coalesce_defaults
-                .as_ref()
-                .and_then(|m| m.get(&agg.alias))
-                .map(|s| s.as_str()),
         );
         let new_val_expr = if let Some((_, value, use_state)) = &special_state {
             let value = format!("({value})::numeric");
@@ -2773,6 +2816,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                         &agg.alias,
                         &st_col_name(&agg.alias),
                         use_having_rescan,
+                        sum_nonnull_from_row_count,
                     );
                     crate::aggregate_lifecycle::aggregate_value_sql(true, &new_nonnull, &value)
                 }
@@ -2912,7 +2956,12 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         // Update the SUM nonnull-count auxiliary column.
         if agg_has_nonnull_aux {
             let st_alias = st_col_name(&agg.alias);
-            let new_nonnull = sum_nonnull_count_expr(&agg.alias, &st_alias, use_having_rescan);
+            let new_nonnull = sum_nonnull_count_expr(
+                &agg.alias,
+                &st_alias,
+                use_having_rescan,
+                sum_nonnull_from_row_count,
+            );
             merge_selects.push(format!(
                 "{new_nonnull} AS {}",
                 quote_ident(&format!("new___pgt_aux_nonnull_{}", agg.alias)),
@@ -2968,7 +3017,7 @@ END AS __pgt_meta_action"#
             } else {
                 st_col_name(column)
             };
-            format!("sub.{}", quote_ident(&storage_name))
+            qualified_column("sub", &storage_name)
         })
         .collect();
     // FULL encoding does not parenthesize composite ROW elements; delta
@@ -3646,7 +3695,20 @@ fn initialize_having_group(having_rescan: bool, rescanned: &str, algebraic: &str
     }
 }
 
-fn sum_nonnull_count_expr(alias: &str, st_col: &str, having_rescan: bool) -> String {
+fn sum_nonnull_count_expr(
+    alias: &str,
+    st_col: &str,
+    having_rescan: bool,
+    uses_row_count: bool,
+) -> String {
+    if uses_row_count {
+        return initialize_having_group(
+            having_rescan,
+            "COALESCE(r.\"__pgt_count\", 0)",
+            "COALESCE(st.\"__pgt_count\", 0) + COALESCE(d.\"__ins_count\", 0) - COALESCE(d.\"__del_count\", 0)",
+        );
+    }
+
     let aux = quote_ident(&format!("__pgt_aux_nonnull_{st_col}"));
     let ins = quote_ident(&format!("__ins_nonnull_{alias}"));
     let del = quote_ident(&format!("__del_nonnull_{alias}"));
@@ -3667,8 +3729,8 @@ fn agg_merge_expr_mapped(
     has_special_value_delta: bool,
     having_rescan: bool,
     has_nonnull_aux: bool,
+    sum_nonnull_from_row_count: bool,
     st_col: &str,
-    _else_default: Option<&str>,
 ) -> String {
     let alias = &agg.alias;
     let qt = quote_ident(st_col);
@@ -3724,7 +3786,12 @@ fn agg_merge_expr_mapped(
                 } else {
                     value
                 };
-                let new_nonnull = sum_nonnull_count_expr(alias, st_col, having_rescan);
+                let new_nonnull = sum_nonnull_count_expr(
+                    alias,
+                    st_col,
+                    having_rescan,
+                    sum_nonnull_from_row_count,
+                );
                 crate::aggregate_lifecycle::aggregate_value_sql(true, &new_nonnull, &value)
             } else if has_rescan {
                 // Rescan CTE available (HAVING context):
@@ -4037,9 +4104,9 @@ fn agg_merge_expr_mapped(
 
 /// Convenience wrapper: uses the aggregate's own alias as the ST column name.
 ///
-/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, has_rescan, false, false, &agg.alias, None)`.
+/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, has_rescan, false, false, false, &agg.alias)`.
 pub fn agg_merge_expr(agg: &AggExpr, has_rescan: bool) -> String {
-    agg_merge_expr_mapped(agg, has_rescan, has_rescan, false, false, &agg.alias, None)
+    agg_merge_expr_mapped(agg, has_rescan, has_rescan, false, false, false, &agg.alias)
 }
 
 #[cfg(test)]
@@ -4173,6 +4240,8 @@ mod tests {
         // Should use direct bypass (P5) since it's Scan → Aggregate with COUNT(*)
         // A44-10 (D+I schema): P5 uses c.action directly, no LATERAL VALUES
         assert_sql_contains(&sql, "changes_1");
+        assert_sql_contains(&sql, "c.\"region\"");
+        assert_sql_not_contains(&sql, "c.\"region\" AS \"region\"");
         assert_sql_contains(&sql, "c.action = 'I'");
         assert_sql_contains(&sql, "c.action = 'D'");
     }
@@ -4479,13 +4548,13 @@ mod tests {
             true,
             false,
             true,
+            false,
             "total",
-            None,
         );
         assert!(merge.contains("d.\"__special_total\""));
         assert!(merge.contains("r.\"total\""));
 
-        let avg_merge = agg_merge_expr_mapped(&avg, true, true, false, false, "average", None);
+        let avg_merge = agg_merge_expr_mapped(&avg, true, true, false, false, false, "average");
         assert!(avg_merge.contains("d.\"__special_average\""));
         assert!(avg_merge.contains("r.\"average\""));
     }
@@ -4522,8 +4591,109 @@ mod tests {
         assert!(!needs_special_value_rescan(&sum, &make_join(23)));
         assert!(needs_special_value_rescan(&sum, &make_join(701)));
 
+        sum.analyzed_argument = Some(crate::dvm::parser::AnalyzedAggregateArgument {
+            location: -1,
+            type_oid: 0,
+            typmod: -1,
+            type_schema: String::new(),
+            type_name: String::new(),
+        });
+        assert!(!needs_special_value_rescan(&sum, &make_join(23)));
+        assert!(needs_special_value_rescan(&sum, &make_join(701)));
+
+        let semi_join = OpTree::SemiJoin {
+            condition: binop(
+                "=",
+                Expr::ColumnRef {
+                    table_alias: Some("o".into()),
+                    column_name: "id".into(),
+                },
+                Expr::ColumnRef {
+                    table_alias: Some("li".into()),
+                    column_name: "id".into(),
+                },
+            ),
+            left: Box::new(scan(1, "orders", "public", "o", &["id"])),
+            right: Box::new(scan(2, "lineitem", "public", "li", &["id"])),
+        };
+        let joined_semi = inner_join(
+            binop(
+                "=",
+                Expr::ColumnRef {
+                    table_alias: Some("o".into()),
+                    column_name: "id".into(),
+                },
+                Expr::ColumnRef {
+                    table_alias: Some("l".into()),
+                    column_name: "id".into(),
+                },
+            ),
+            semi_join,
+            scan(3, "lineitem", "public", "l", &["id", "amount"]),
+        );
+        sum.analyzed_argument = None;
+        sum.argument = Some(Expr::ColumnRef {
+            table_alias: Some("l".into()),
+            column_name: "amount".into(),
+        });
+        assert!(!needs_special_value_rescan(&sum, &joined_semi));
+
         sum.argument = Some(colref("amount"));
         assert!(needs_special_value_rescan(&sum, &make_join(23)));
+    }
+
+    #[test]
+    fn test_analyzed_expression_type_controls_special_value_rescan() {
+        let make_tree = || {
+            let mut sum = sum_col("amount + 1", "total");
+            sum.argument = Some(Expr::Raw("amount + 1".into()));
+            sum.analyzed_argument = Some(crate::dvm::parser::AnalyzedAggregateArgument {
+                location: 42,
+                type_oid: 0,
+                typmod: -1,
+                type_schema: String::new(),
+                type_name: String::new(),
+            });
+            aggregate(
+                Vec::new(),
+                vec![sum],
+                scan(1, "source", "public", "s", &["amount"]),
+            )
+        };
+        let mut tree = make_tree();
+        let mut found_vector_aggregate = false;
+        crate::dvm::annotate_aggregate_arguments(
+            &mut tree,
+            &std::collections::HashMap::from([(42, 23)]),
+            &std::collections::HashMap::new(),
+            &mut found_vector_aggregate,
+        );
+        let OpTree::Aggregate {
+            aggregates, child, ..
+        } = &tree
+        else {
+            panic!("expected aggregate tree");
+        };
+        assert_eq!(
+            aggregates[0].analyzed_argument.as_ref().unwrap().type_oid,
+            23
+        );
+        assert!(!needs_special_value_rescan(&aggregates[0], child));
+
+        let mut tree = make_tree();
+        crate::dvm::annotate_aggregate_arguments(
+            &mut tree,
+            &std::collections::HashMap::from([(42, 701)]),
+            &std::collections::HashMap::new(),
+            &mut found_vector_aggregate,
+        );
+        let OpTree::Aggregate {
+            aggregates, child, ..
+        } = &tree
+        else {
+            panic!("expected aggregate tree");
+        };
+        assert!(needs_special_value_rescan(&aggregates[0], child));
     }
 
     #[test]
@@ -4542,7 +4712,7 @@ mod tests {
         );
         assert_eq!(agg_sum_rescan_sql(&stddev), "COALESCE(SUM(amount), 0)");
 
-        let merge = agg_merge_expr_mapped(&stddev, true, true, false, false, "stddev", None);
+        let merge = agg_merge_expr_mapped(&stddev, true, true, false, false, false, "stddev");
         assert!(merge.contains("d.\"__special_stddev\""));
         assert!(merge.contains("r.\"stddev\""));
     }
@@ -7766,6 +7936,32 @@ mod tests {
     }
 
     #[test]
+    fn test_p5_nonnull_sum_uses_group_row_count() {
+        let child = scan_not_null(1, "t", "public", "t", &["id", "region", "amount"]);
+        let group_by = vec![colref("region")];
+        let aggs = vec![sum_col("amount", "total")];
+        assert!(direct_sum_uses_row_count(&aggs[0], &child));
+
+        let mut ctx = crate::dvm::diff::DiffContext::new_standalone(
+            crate::version::Frontier::default(),
+            crate::version::Frontier::default(),
+        );
+        let (cte_name, _) = generate_direct_agg_delta(&mut ctx, &child, &group_by, &aggs).unwrap();
+        let sql = ctx.cte_sql(&cte_name).expect("CTE should exist");
+        assert!(!sql.contains("__ins_nonnull_total"), "{sql}");
+        assert!(sql.contains("__ins_count"), "{sql}");
+
+        let count = sum_nonnull_count_expr("total", "total", false, true);
+        assert_eq!(
+            count,
+            "COALESCE(st.\"__pgt_count\", 0) + COALESCE(d.\"__ins_count\", 0) - COALESCE(d.\"__del_count\", 0)"
+        );
+        let merge = agg_merge_expr_mapped(&aggs[0], false, false, false, true, true, "total");
+        assert!(merge.contains("d.\"__ins_count\""), "{merge}");
+        assert!(!merge.contains("__ins_nonnull_total"), "{merge}");
+    }
+
+    #[test]
     fn test_a2_p5_no_value_only_without_key_columns() {
         // Without key columns set, the standard P5 path should be used (no 'V').
         let child = scan(1, "t", "public", "t", &["id", "region", "amount"]);
@@ -8015,5 +8211,11 @@ mod tests {
             ),
             hashed
         );
+    }
+
+    #[test]
+    fn test_qualified_column_escapes_identifiers() {
+        assert_eq!(qualified_column("c", "a\"b"), "c.\"a\"\"b\"");
+        assert_eq!(qualified_column("c", "foo(bar)"), "c.\"foo(bar)\"");
     }
 }

@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import run_release_centroid_cost as runner
@@ -70,6 +71,33 @@ class CentroidCostMeasurementTests(unittest.TestCase):
             suite["required_modes"],
             [{"cache_mode": mode, "concurrent_writer": writer} for mode, writer in runner.MODES],
         )
+
+    def test_run_case_sets_retries_once_for_machine_formatted_nextest(self):
+        report = json.loads(self.measurement().partition(runner.MARKER)[2])
+        report.update({"pgvector": "0.8.7", "postgres": "PostgreSQL 18.0"})
+        output = runner.MARKER + json.dumps(report)
+        sampler = SimpleNamespace(samples=1, start=lambda: None, stop=lambda: None)
+
+        with tempfile.TemporaryDirectory(dir=runner.ROOT) as directory:
+            measurement = Path(directory) / "measurement.json"
+            with patch.dict(
+                os.environ,
+                {
+                    "GITHUB_ACTIONS": "true",
+                    "PGT_EXTENSION_DIR": "/tmp/package",
+                    "PGT_RELEASE_MACHINE_FORMAT": "1",
+                },
+            ), patch.object(runner, "DockerStatsSampler", return_value=sampler), patch.object(
+                runner.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout=output),
+            ) as run:
+                runner.run_case(384, 1, "warm", False, measurement)
+
+        command = run.call_args.args[0]
+        environment = run.call_args.kwargs["env"]
+        self.assertNotIn("--retries", command)
+        self.assertEqual(environment["PGT_RELEASE_NEXTEST_RETRIES"], "0")
 
     def test_rejects_missing_cache_or_lock_wait_evidence(self):
         with self.assertRaises(ValueError):

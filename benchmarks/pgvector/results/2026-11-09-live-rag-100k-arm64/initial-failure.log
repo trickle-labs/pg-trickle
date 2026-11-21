@@ -1,0 +1,31 @@
+NOTICE:  extension "vector" already exists, skipping
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table embedding_demo.corpus_v1 created (pgt_id=1, mode=DIFFERENTIAL, initialized=true)
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table embedding_demo.corpus_v2 created (pgt_id=2, mode=DIFFERENTIAL, initialized=true)
+WARNING:  [pg_trickle] SELECT_STAR: The defining query uses SELECT *, so source schema changes can require reinitialization. HINT: List output columns explicitly for a more stable stream-table schema.
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_6779e0a335f92cd5" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table live_rag.differential created (pgt_id=3, mode=DIFFERENTIAL, initialized=true)
+NOTICE:  stream table "live_rag"."differential" using FULL refresh: 15001 changes exceed the 15000-row threshold for source OID 17915.
+WARNING:  [pg_trickle] Falling back to FULL refresh for live_rag.differential: DELTA_RATIO_EXCEEDED (15001 changes exceed the 15000-row threshold for source OID 17915.)
+INFO:  Stream table live_rag.differential refreshed (DIFFERENTIAL: +100000 -0)
+ERROR:  could not resize shared memory segment "/PostgreSQL.3927137028" to 4194304 bytes: No space left on device
+Traceback (most recent call last):
+  File "/private/tmp/pg-trickle-task-1399/benchmarks/pgvector/run_live_rag_batches.py", line 224, in <module>
+    main()
+  File "/private/tmp/pg-trickle-task-1399/benchmarks/pgvector/run_live_rag_batches.py", line 218, in main
+    print(json.dumps(run(args), sort_keys=True))
+                     ^^^^^^^^^
+  File "/private/tmp/pg-trickle-task-1399/benchmarks/pgvector/run_live_rag_batches.py", line 129, in run
+    initial_exact = json_result(worker.psql(EXACT))
+                                ^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/pg-trickle-task-1399/benchmarks/pgvector/fake_embedding_worker.py", line 30, in psql
+    return subprocess.run(command, input=sql, text=True, stdout=subprocess.PIPE, check=True).stdout.strip()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/grove/.local/share/uv/python/cpython-3.12.14-macos-aarch64-none/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['psql', '-X', '-w', '-qAt', '-v', 'ON_ERROR_STOP=1']' returned non-zero exit status 3.
