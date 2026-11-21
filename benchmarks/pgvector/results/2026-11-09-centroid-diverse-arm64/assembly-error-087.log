@@ -1,0 +1,19 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.10s
+     Running tests/e2e_pgvector_tests.rs (/private/tmp/pg-trickle-task-1399/target/debug/deps/e2e_pgvector_tests-0b480014c9ba917b)
+
+running 1 test
+
+thread 'test_centroid_diverse_high_dimensional_drift_matches_native_avg' (3185247) panicked at tests/e2e/mod.rs:502:81:
+Failed to start shared pg_trickle E2E container. Did you run ./tests/build_e2e_image.sh first?: WaitContainer(WaitLog(EndOfStream([b"2026-11-09 19:03:15.396 UTC [29] LOG:  pg_trickle: initialized (shared_preload_libraries)\n", b"initdb: warning: enabling \"trust\" authentication for local connections\n", b"initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.\n", b"psql:/docker-entrypoint-initdb.d/00-create-pg-trickle.sql:1: ERROR:  could not find function \"list_ann_maintenance_requests_wrapper\" in file \"/usr/lib/postgresql/18/lib/pg_trickle.so\"\n", b"CONTEXT:  SQL statement \"CREATE  FUNCTION pgtrickle.\"list_ann_maintenance_requests\"(\n", b"\t\"after_request_id\" bigint, /* i64 */\n", b"\t\"max_results\" INT /* i32 */\n", b") RETURNS SETOF jsonb /* pgrx :: JsonB */\n", b"STRICT SECURITY DEFINER \n", b"SET search_path TO pgtrickle, pg_catalog, pg_temp\n", b"LANGUAGE c /* Rust */\n", b"AS 'pg_trickle', 'list_ann_maintenance_requests_wrapper'\"\n", b"extension script file \"pg_trickle--0.109.0.sql\", near line 2612\n"])))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test test_centroid_diverse_high_dimensional_drift_matches_native_avg ... FAILED
+
+failures:
+
+failures:
+    test_centroid_diverse_high_dimensional_drift_matches_native_avg
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 139 filtered out; finished in 1.04s
+
+error: test failed, to rerun pass `--test e2e_pgvector_tests`

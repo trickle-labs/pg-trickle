@@ -73,6 +73,190 @@ fn percentiles(mut values: Vec<f64>) -> serde_json::Value {
     serde_json::json!({"p50": at(0.50), "p95": at(0.95), "p99": at(0.99), "samples": values})
 }
 
+#[cfg(not(target_os = "linux"))]
+async fn reset_centroid_cache(_db: &mut E2eDb) -> f64 {
+    panic!("cold-cache centroid measurements require a Linux Docker runner");
+}
+
+#[cfg(target_os = "linux")]
+async fn reset_centroid_cache(db: &mut E2eDb) -> f64 {
+    assert_eq!(
+        std::env::var("GITHUB_ACTIONS").as_deref(),
+        Ok("true"),
+        "host page-cache clearing is limited to the disposable GitHub Actions runner"
+    );
+    let started = Instant::now();
+    db.pool.close().await;
+    let stop = tokio::process::Command::new("docker")
+        .args(["stop", "--time", "1", db.container_id()])
+        .output()
+        .await
+        .expect("restart isolated PostgreSQL container for cold-cache sample");
+    assert!(
+        stop.status.success(),
+        "stop PostgreSQL for cold-cache sample failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    let drop_cache = tokio::process::Command::new("sudo")
+        .args([
+            "-n",
+            "sh",
+            "-c",
+            "sync && echo 3 > /proc/sys/vm/drop_caches",
+        ])
+        .output()
+        .await
+        .expect("drop host page cache for cold-cache sample");
+    let start = tokio::process::Command::new("docker")
+        .args(["start", db.container_id()])
+        .output()
+        .await
+        .expect("start PostgreSQL after cold-cache reset");
+    assert!(
+        start.status.success(),
+        "start PostgreSQL after cold-cache reset failed: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    db.pool = db.reconnect_after_restart().await;
+    assert!(
+        drop_cache.status.success(),
+        "drop host page cache failed: {}",
+        String::from_utf8_lossy(&drop_cache.stderr)
+    );
+    started.elapsed().as_secs_f64() * 1000.0
+}
+
+async fn centroid_refresh_with_writer_lock(
+    db: &E2eDb,
+    connection: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    refresh_sql: &str,
+    writer_id: i64,
+) -> (serde_json::Value, f64, f64, f64) {
+    sqlx::query("SET application_name = 'pgvector-centroid-refresh'")
+        .execute(&mut **connection)
+        .await
+        .expect("label centroid refresh session");
+    let refresh_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut **connection)
+        .await
+        .expect("read centroid refresh backend");
+    let mut writer = db.pool.acquire().await.expect("acquire centroid writer");
+    sqlx::query("SET application_name = 'pgvector-centroid-writer'")
+        .execute(&mut *writer)
+        .await
+        .expect("label centroid writer session");
+    let writer_started = Instant::now();
+    sqlx::query("BEGIN")
+        .execute(&mut *writer)
+        .await
+        .expect("begin controlled centroid writer");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("read centroid writer backend");
+    let writer_lock_started = Instant::now();
+    // shortcut: toggle an unprojected key only; broaden writes before claiming sustained-writer performance.
+    let update = format!(
+        "UPDATE vector_centroid_source SET id = CASE id WHEN {writer_id} THEN {next_writer_id} ELSE {writer_id} END WHERE id IN ({writer_id}, {next_writer_id})",
+        next_writer_id = writer_id + 1
+    );
+    sqlx::query(sqlx::AssertSqlSafe(update))
+        .execute(&mut *writer)
+        .await
+        .expect("update controlled centroid writer row");
+
+    let refresh_started = Instant::now();
+    let refresh =
+        sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(refresh_sql.to_owned()))
+            .fetch_one(&mut **connection);
+    tokio::pin!(refresh);
+    let minimum_hold = Duration::from_millis(10);
+    let mut last_poll = refresh_started;
+    let mut observed_lock_wait = Duration::ZERO;
+    let mut writer_committed = false;
+    let plan = loop {
+        tokio::select! {
+            result = &mut refresh => {
+                break result.expect("run centroid refresh with writer lock");
+            }
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {
+                let now = Instant::now();
+                let is_blocked: bool = sqlx::query_scalar(
+                    "SELECT $1 = ANY(pg_catalog.pg_blocking_pids($2))",
+                )
+                .bind(writer_pid)
+                .bind(refresh_pid)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect controlled centroid writer lock");
+                if is_blocked {
+                    observed_lock_wait += now.saturating_duration_since(last_poll);
+                }
+                last_poll = now;
+                if observed_lock_wait >= minimum_hold {
+                    sqlx::query("COMMIT")
+                        .execute(&mut *writer)
+                        .await
+                        .expect("release controlled centroid writer lock");
+                    writer_committed = true;
+                    break refresh.await.expect("run centroid refresh after writer commit");
+                }
+            }
+        }
+    };
+    if !writer_committed {
+        let hold_elapsed = if observed_lock_wait.is_zero() {
+            writer_lock_started.elapsed()
+        } else {
+            observed_lock_wait
+        };
+        tokio::time::sleep(minimum_hold.saturating_sub(hold_elapsed)).await;
+        sqlx::query("COMMIT")
+            .execute(&mut *writer)
+            .await
+            .expect("commit controlled centroid writer");
+    }
+    (
+        plan,
+        refresh_started.elapsed().as_secs_f64() * 1000.0,
+        observed_lock_wait.as_secs_f64() * 1000.0,
+        writer_started.elapsed().as_secs_f64() * 1000.0,
+    )
+}
+
+fn centroid_plan_buffers(explain: &serde_json::Value) -> serde_json::Value {
+    let root = explain
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("Plan"))
+        .unwrap_or(explain);
+    serde_json::json!({
+        "shared_hit_blocks": root.get("Shared Hit Blocks").and_then(serde_json::Value::as_i64).unwrap_or(0),
+        "shared_read_blocks": root.get("Shared Read Blocks").and_then(serde_json::Value::as_i64).unwrap_or(0),
+        "shared_dirtied_blocks": root.get("Shared Dirtied Blocks").and_then(serde_json::Value::as_i64).unwrap_or(0),
+        "shared_written_blocks": root.get("Shared Written Blocks").and_then(serde_json::Value::as_i64).unwrap_or(0)
+    })
+}
+
+#[test]
+fn centroid_plan_buffers_reads_root_buffer_counts() {
+    let plan = serde_json::json!([{"Plan": {
+        "Shared Hit Blocks": 7,
+        "Shared Read Blocks": 3,
+        "Shared Dirtied Blocks": 2,
+        "Shared Written Blocks": 1
+    }}]);
+    assert_eq!(
+        centroid_plan_buffers(&plan),
+        serde_json::json!({
+            "shared_hit_blocks": 7,
+            "shared_read_blocks": 3,
+            "shared_dirtied_blocks": 2,
+            "shared_written_blocks": 1
+        })
+    );
+}
+
 fn has_index(value: &serde_json::Value, index: &str) -> bool {
     match value {
         serde_json::Value::Object(fields) => {
@@ -520,7 +704,20 @@ async fn test_pgvector_subscription_scaling_workload() {
 #[tokio::test]
 #[ignore = "database benchmark; run explicitly with --run-ignored all --no-capture"]
 async fn test_pgvector_filtered_ann_workload() {
-    let db = E2eDb::new().await.with_extension().await;
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    let centroid_cache_mode =
+        std::env::var("PGVECTOR_CENTROID_CACHE_MODE").unwrap_or_else(|_| "warm".into());
+    let centroid_concurrent_writer = std::env::var("PGVECTOR_CENTROID_CONCURRENT_WRITER")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    assert!(
+        matches!(centroid_cache_mode.as_str(), "warm" | "cold"),
+        "unsupported centroid cache mode: {centroid_cache_mode}"
+    );
+    assert!(
+        !centroid_concurrent_writer || centroid_cache_mode == "warm",
+        "controlled writer measurements require the warm cache mode"
+    );
     db.execute("CREATE EXTENSION vector").await;
     let dim: usize = std::env::var("PGVECTOR_BENCH_DIM")
         .unwrap_or_else(|_| "384".into())
@@ -794,16 +991,36 @@ async fn test_pgvector_filtered_ann_workload() {
         )
         .await;
     }
-    db.execute(&format!("CREATE TABLE vector_centroid_source (id bigint PRIMARY KEY, small_group int NOT NULL, large_group int NOT NULL, embedding vector({dim}) NOT NULL)")).await;
-    db.execute("INSERT INTO vector_centroid_source SELECT id, (id % 100)::int, (id % 2)::int, embedding FROM vector_bench_source").await;
-    db.execute("CREATE INDEX vector_centroid_small_group ON vector_centroid_source (small_group)")
-        .await;
-    db.execute("CREATE INDEX vector_centroid_large_group ON vector_centroid_source (large_group)")
-        .await;
+    db.execute(&format!("CREATE TABLE vector_centroid_source (id bigint PRIMARY KEY, small_group int NOT NULL, medium_group int NOT NULL, large_group int NOT NULL, skewed_group int NOT NULL, embedding vector({dim}) NOT NULL)")).await;
+    db.execute(&format!("INSERT INTO vector_centroid_source SELECT id, (id % 100)::int, (id % 10)::int, (id % 2)::int, CASE WHEN id > {} THEN 0 ELSE (id % 10 + 1)::int END, embedding FROM vector_bench_source", rows / 5)).await;
+    db.execute_seq(&[
+        "CREATE INDEX vector_centroid_small_group ON vector_centroid_source (small_group)",
+        "CREATE INDEX vector_centroid_medium_group ON vector_centroid_source (medium_group)",
+        "CREATE INDEX vector_centroid_large_group ON vector_centroid_source (large_group)",
+        "CREATE INDEX vector_centroid_skewed_group ON vector_centroid_source (skewed_group)",
+    ])
+    .await;
     db.execute("ANALYZE vector_centroid_source").await;
-    for group in ["small", "large"] {
+    let (largest_skewed_group, smallest_skewed_group): (i64, i64) = sqlx::query_as(
+        "SELECT max(group_rows)::bigint, min(group_rows)::bigint FROM (SELECT count(*) AS group_rows FROM vector_centroid_source GROUP BY skewed_group) groups",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("measure skewed group sizes");
+    assert!(
+        largest_skewed_group >= (rows as i64 * 7 / 10)
+            && smallest_skewed_group * 10 < largest_skewed_group,
+        "centroid fixture does not contain a strongly skewed group: largest={largest_skewed_group}, smallest={smallest_skewed_group}"
+    );
+    let group_shapes = [
+        ("small", "small_group"),
+        ("medium", "medium_group"),
+        ("large", "large_group"),
+        ("skewed", "skewed_group"),
+    ];
+    for &(group, group_column) in &group_shapes {
         let query = format!(
-            "SELECT {group}_group, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group}_group"
+            "SELECT {group_column}, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group_column}"
         );
         for (label, mode, algebraic) in [
             ("differential", "DIFFERENTIAL", false),
@@ -829,7 +1046,7 @@ async fn test_pgvector_filtered_ann_workload() {
             .await;
         }
     }
-    for group in ["small", "large"] {
+    for &(group, _) in &group_shapes {
         let stream = format!("vector_centroid_{group}_algebraic");
         let reset = format!(
             "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = '{stream}'::regclass"
@@ -846,15 +1063,15 @@ async fn test_pgvector_filtered_ann_workload() {
             .bind(&stream).fetch_one(&db.pool).await.expect("inspect centroid benchmark baseline");
         assert!(bound, "centroid baseline was not bound for {stream}");
     }
-    let target = rows - 1;
+    let target = rows / 2;
     db.execute(&format!("UPDATE vector_centroid_source SET embedding = (SELECT embedding FROM vector_centroid_source WHERE id = {rows}) WHERE id = {target}")).await;
     let mut centroid = Vec::new();
-    for group in ["small", "large"] {
-        let group_value = if group == "small" {
-            target % 100
-        } else {
-            target % 2
-        };
+    for &(group, group_column) in &group_shapes {
+        let group_value: i32 = db
+            .query_scalar(&format!(
+                "SELECT {group_column} FROM vector_centroid_source WHERE id = {target}"
+            ))
+            .await;
         let explanation: String = db
             .query_scalar(&format!(
                 "SELECT pgtrickle.explain_stream_table('vector_centroid_{group}_differential')"
@@ -866,11 +1083,11 @@ async fn test_pgvector_filtered_ann_workload() {
         );
         let group_rows: i64 = db
             .query_scalar(&format!(
-                "SELECT count(*) FROM vector_centroid_source WHERE {group}_group = {group_value}"
+                "SELECT count(*) FROM vector_centroid_source WHERE {group_column} = {group_value}"
             ))
             .await;
         let explain = format!(
-            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT avg(embedding) FROM vector_centroid_source WHERE {group}_group = {group_value}"
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT avg(embedding) FROM vector_centroid_source WHERE {group_column} = {group_value}"
         );
         let group_plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain))
             .fetch_one(&db.pool)
@@ -972,7 +1189,7 @@ async fn test_pgvector_filtered_ann_workload() {
                 );
             }
             let numerical = format!(
-                "WITH native AS (SELECT {group}_group, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group}_group) SELECT COALESCE(max(abs(x.actual::float8 - x.expected::float8)), 0)::float8, COALESCE(bool_and({CENTROID_COMPONENT_WITHIN_BOUND}), false) AND count(*) = (SELECT count(*) FROM native) * {dim} AND (SELECT count(*) FROM {stream}) = (SELECT count(*) FROM native) AND count(DISTINCT s.{group}_group) = (SELECT count(*) FROM native) FROM {stream} s JOIN native n USING ({group}_group) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid::real[]) AS x(actual, expected)"
+                "WITH native AS (SELECT {group_column}, avg(embedding) AS centroid FROM vector_centroid_source GROUP BY {group_column}) SELECT COALESCE(max(abs(x.actual::float8 - x.expected::float8)), 0)::float8, COALESCE(bool_and({CENTROID_COMPONENT_WITHIN_BOUND}), false) AND count(*) = (SELECT count(*) FROM native) * {dim} AND (SELECT count(*) FROM {stream}) = (SELECT count(*) FROM native) AND count(DISTINCT s.{group_column}) = (SELECT count(*) FROM native) FROM {stream} s JOIN native n USING ({group_column}) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid::real[]) AS x(actual, expected)"
             );
             let (max_error, within_bound): (f64, bool) =
                 sqlx::query_as(sqlx::AssertSqlSafe(numerical.as_str()))
@@ -989,7 +1206,7 @@ async fn test_pgvector_filtered_ann_workload() {
                 } else {
                     format!("avg(embedding)::vector({dim})")
                 };
-                db.assert_st_matches_query(&stream, &format!("SELECT {group}_group, {centroid_expr} AS centroid FROM vector_centroid_source GROUP BY {group}_group")).await;
+                db.assert_st_matches_query(&stream, &format!("SELECT {group_column}, {centroid_expr} AS centroid FROM vector_centroid_source GROUP BY {group_column}")).await;
             }
             let storage_bytes: i64 =
                 sqlx::query_scalar("SELECT pg_total_relation_size($1::regclass)::bigint")
@@ -1003,10 +1220,38 @@ async fn test_pgvector_filtered_ann_workload() {
         }
         centroid.push(serde_json::json!({"group_shape": group, "changed_rows": 1, "affected_group_rows": group_rows, "representative_group_query_plan": group_plan, "refresh": measurements}));
     }
+    let centroid_writer_id = rows as i64 + 1;
+    if centroid_concurrent_writer {
+        db.execute(&format!(
+            "INSERT INTO vector_centroid_source SELECT {centroid_writer_id}, 1000, 1000, 1000, 1000, embedding FROM vector_centroid_source WHERE id = 1"
+        ))
+        .await;
+        for &(group, _) in &group_shapes {
+            for variant in ["differential", "algebraic", "full"] {
+                let stream = format!("vector_centroid_{group}_{variant}");
+                let centroid_setting = if variant == "algebraic" {
+                    "SET pg_trickle.enable_centroid_state = on"
+                } else {
+                    "SET pg_trickle.enable_centroid_state = off"
+                };
+                let refresh = format!("SELECT pgtrickle.refresh_stream_table('{stream}')");
+                db.execute_seq(&[
+                    "SET pg_trickle.enable_vector_agg = on",
+                    centroid_setting,
+                    &refresh,
+                ])
+                .await;
+            }
+        }
+    }
     let mut repeated = Vec::new();
-    let mut timings = vec![vec![Vec::<f64>::new(); 3]; 2];
-    let groups = ["small", "large"];
+    let mut timings = vec![vec![Vec::<f64>::new(); 3]; group_shapes.len()];
+    let mut execution_timings = vec![vec![Vec::<f64>::new(); 3]; group_shapes.len()];
+    let mut lock_wait_timings = vec![vec![Vec::<f64>::new(); 3]; group_shapes.len()];
+    let mut writer_transaction_timings = vec![vec![Vec::<f64>::new(); 3]; group_shapes.len()];
+    let mut cache_reset_timings = vec![vec![Vec::<f64>::new(); 3]; group_shapes.len()];
     let variants = ["differential", "algebraic", "full"];
+    let warmup_rounds = 3;
     let mut conn = db
         .pool
         .acquire()
@@ -1031,12 +1276,13 @@ async fn test_pgvector_filtered_ann_workload() {
     .await
     .expect("check repeated centroid inputs");
     assert!(distinct_inputs, "repeated source vectors must be distinct");
-    for round in 0..centroid_samples {
+    for round in 0..warmup_rounds + centroid_samples {
         let source_id = if round % 2 == 0 {
             alternate_source
         } else {
             rows
         };
+        let mutation_start = Instant::now();
         let mutation = format!(
             "UPDATE vector_centroid_source SET embedding = (SELECT embedding FROM vector_centroid_source WHERE id = {source_id}) WHERE id >= {first_rewritten} AND id < {rows}"
         );
@@ -1045,9 +1291,10 @@ async fn test_pgvector_filtered_ann_workload() {
             .await
             .expect("mutate repeated centroid source");
         assert_eq!(updated.rows_affected(), centroid_rewrite_rows as u64);
-        for group_offset in 0..groups.len() {
-            let group_idx = (group_offset + round) % groups.len();
-            let group = groups[group_idx];
+        let mutation_ms = mutation_start.elapsed().as_secs_f64() * 1000.0;
+        for group_offset in 0..group_shapes.len() {
+            let group_idx = (group_offset + round) % group_shapes.len();
+            let (group, group_column) = group_shapes[group_idx];
             for offset in 0..variants.len() {
                 let variant_idx = (offset + round) % variants.len();
                 let variant = variants[variant_idx];
@@ -1060,14 +1307,114 @@ async fn test_pgvector_filtered_ann_workload() {
                 .execute(&mut *conn)
                 .await
                 .expect("select repeated centroid strategy");
-                let start = Instant::now();
-                sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
+                let cache_reset_ms = if round >= warmup_rounds && centroid_cache_mode == "cold" {
+                    drop(conn);
+                    let reset_ms = reset_centroid_cache(&mut db).await;
+                    conn = db
+                        .pool
+                        .acquire()
+                        .await
+                        .expect("reconnect cold-cache centroid session");
+                    for setting in [
+                        "SET pg_trickle.enable_vector_agg = on",
+                        "SET pg_trickle.refresh_strategy = 'differential'",
+                        "SET pg_trickle.differential_max_change_ratio = 0",
+                        if variant == "algebraic" {
+                            "SET pg_trickle.enable_centroid_state = on"
+                        } else {
+                            "SET pg_trickle.enable_centroid_state = off"
+                        },
+                    ] {
+                        sqlx::query(setting)
+                            .execute(&mut *conn)
+                            .await
+                            .expect("restore cold-cache centroid settings");
+                    }
+                    Some(reset_ms)
+                } else {
+                    None
+                };
+                if centroid_cache_mode == "warm" {
+                    let warm_source: i64 = sqlx::query_scalar(
+                        "SELECT COALESCE(sum(pg_catalog.pg_column_size(embedding)), 0)::bigint FROM vector_centroid_source",
+                    )
+                    .fetch_one(&mut *conn)
+                    .await
+                    .expect("warm centroid source pages");
+                    let warm_stream = format!(
+                        "SELECT COALESCE(sum(pg_catalog.pg_column_size(centroid)), 0)::bigint FROM {stream}"
+                    );
+                    let warm_stream_bytes: i64 =
+                        sqlx::query_scalar(sqlx::AssertSqlSafe(warm_stream))
+                            .fetch_one(&mut *conn)
+                            .await
+                            .expect("warm centroid materialized pages");
+                    let warm_state_bytes: i64 = sqlx::query_scalar(
+                        "SELECT COALESCE(sum(pg_catalog.pg_column_size(g.state)), 0)::bigint FROM pgtrickle.pgt_centroid_groups g JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = $1::regclass",
+                    )
                     .bind(&stream)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .expect("warm centroid auxiliary-state pages");
+                    assert!(warm_source >= 0 && warm_stream_bytes >= 0 && warm_state_bytes >= 0);
+                }
+                sqlx::query("BEGIN")
                     .execute(&mut *conn)
                     .await
-                    .expect("repeat centroid refresh");
-                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                let history: (String, bool, String) = sqlx::query_as("SELECT h.action::text, h.was_full_fallback, h.merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = $1 AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+                    .expect("begin repeated centroid measurement");
+                let before_lsn: String =
+                    sqlx::query_scalar("SELECT pg_current_wal_insert_lsn()::text")
+                        .fetch_one(&mut *conn)
+                        .await
+                        .expect("read centroid WAL start");
+                let before_source: (i64, i64) = sqlx::query_as(
+                    "SELECT COALESCE(pg_stat_get_xact_tuples_returned('vector_centroid_source'::regclass), 0)::bigint, \
+                            COALESCE(pg_stat_get_xact_tuples_fetched('vector_centroid_source'::regclass), 0)::bigint",
+                )
+                .fetch_one(&mut *conn)
+                .await
+                .expect("read centroid tuple counters before refresh");
+                let start = Instant::now();
+                let refresh_sql = format!(
+                    "EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON) SELECT pgtrickle.refresh_stream_table('{stream}')"
+                );
+                let (refresh_plan, elapsed_ms, writer_lock_wait_ms, writer_transaction_ms) =
+                    if centroid_concurrent_writer && round >= warmup_rounds {
+                        centroid_refresh_with_writer_lock(
+                            &db,
+                            &mut conn,
+                            &refresh_sql,
+                            centroid_writer_id,
+                        )
+                        .await
+                    } else {
+                        let plan: serde_json::Value =
+                            sqlx::query_scalar(sqlx::AssertSqlSafe(refresh_sql))
+                                .fetch_one(&mut *conn)
+                                .await
+                                .expect("repeat centroid refresh with buffer counts");
+                        (plan, start.elapsed().as_secs_f64() * 1000.0, 0.0, 0.0)
+                    };
+                let refresh_execution_ms = (elapsed_ms - writer_lock_wait_ms).max(0.0);
+                let buffer_usage = centroid_plan_buffers(&refresh_plan);
+                let after_source: (i64, i64) = sqlx::query_as(
+                    "SELECT COALESCE(pg_stat_get_xact_tuples_returned('vector_centroid_source'::regclass), 0)::bigint, \
+                            COALESCE(pg_stat_get_xact_tuples_fetched('vector_centroid_source'::regclass), 0)::bigint",
+                )
+                .fetch_one(&mut *conn)
+                .await
+                .expect("read centroid tuple counters after refresh");
+                let source_sequential_tuples = after_source.0 - before_source.0;
+                let source_index_tuples = after_source.1 - before_source.1;
+                assert!(source_sequential_tuples >= 0 && source_index_tuples >= 0);
+                let wal_bytes: f64 = sqlx::query_scalar(
+                    "SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(), $1::text::pg_lsn)::float8",
+                )
+                .bind(&before_lsn)
+                .fetch_one(&mut *conn)
+                .await
+                .expect("measure repeated centroid WAL");
+                let history: (String, bool, String, Option<String>) = sqlx::query_as("SELECT h.action::text, h.was_full_fallback, h.merge_strategy_used, h.refresh_reason_detail::text FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = $1 AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
                     .bind(&stream).fetch_one(&mut *conn).await.expect("inspect repeated centroid strategy");
                 assert_eq!(
                     history.0,
@@ -1086,13 +1433,23 @@ async fn test_pgvector_filtered_ann_workload() {
                         history.2
                     );
                 }
+                let detail = history
+                    .3
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .unwrap_or_default();
+                let concurrent_group = if centroid_concurrent_writer {
+                    " UNION SELECT 1000"
+                } else {
+                    ""
+                };
                 let comparison = format!(
-                    "WITH affected AS (SELECT DISTINCT {group}_group FROM vector_centroid_source WHERE id >= {first_rewritten} AND id < {rows}), \
-                     native AS (SELECT {group}_group, avg(embedding)::real[] AS centroid FROM vector_centroid_source WHERE {group}_group IN (SELECT {group}_group FROM affected) GROUP BY {group}_group) \
-                     SELECT count(*)::bigint, (SELECT count(*) FROM native)::bigint, count(DISTINCT s.{group}_group)::bigint, \
+                    "WITH affected AS (SELECT DISTINCT {group_column} FROM vector_centroid_source WHERE id >= {first_rewritten} AND id < {rows}{concurrent_group}), \
+                     native AS (SELECT {group_column}, avg(embedding)::real[] AS centroid FROM vector_centroid_source WHERE {group_column} IN (SELECT {group_column} FROM affected) GROUP BY {group_column}) \
+                     SELECT count(*)::bigint, (SELECT count(*) FROM native)::bigint, count(DISTINCT s.{group_column})::bigint, \
                        COALESCE(max(abs(x.actual::float8 - x.expected::float8)), 0)::float8, \
                        COALESCE(bool_and({CENTROID_COMPONENT_WITHIN_BOUND}), false) \
-                     FROM {stream} s JOIN native n USING ({group}_group) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid) x(actual, expected)"
+                     FROM {stream} s JOIN native n USING ({group_column}) CROSS JOIN LATERAL unnest(s.centroid::real[], n.centroid) x(actual, expected)"
                 );
                 let (components, expected_groups, actual_groups, max_error, within_bound): (
                     i64,
@@ -1110,33 +1467,123 @@ async fn test_pgvector_filtered_ann_workload() {
                         && within_bound,
                     "round {round} {group} {variant}: components={components}, expected_groups={expected_groups}, actual_groups={actual_groups}, max_error={max_error}"
                 );
-                timings[group_idx][variant_idx].push(elapsed_ms);
-                repeated.push(serde_json::json!({"round": round, "group_shape": group, "strategy": variant, "actual_strategy": history.2, "elapsed_ms": elapsed_ms, "max_absolute_component_error": max_error}));
+                let affected_source_rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM vector_centroid_source WHERE {group_column} IN (SELECT DISTINCT {group_column} FROM vector_centroid_source WHERE id >= {first_rewritten} AND id < {rows})"
+                )))
+                .fetch_one(&mut *conn)
+                .await
+                .expect("measure affected centroid source rows");
+                let storage_bytes: i64 =
+                    sqlx::query_scalar("SELECT pg_total_relation_size($1::regclass)::bigint")
+                        .bind(&stream)
+                        .fetch_one(&mut *conn)
+                        .await
+                        .expect("measure repeated centroid storage");
+                let state_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(sum(octet_length(g.row_id) + octet_length(pg_catalog.array_send(g.state)) + octet_length(g.state_checksum) + 16), 0)::bigint FROM pgtrickle.pgt_centroid_groups g JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = $1::regclass")
+                    .bind(&stream).fetch_one(&mut *conn).await.expect("measure repeated centroid state");
+                if round >= warmup_rounds {
+                    let sample = round - warmup_rounds;
+                    timings[group_idx][variant_idx].push(elapsed_ms);
+                    execution_timings[group_idx][variant_idx].push(refresh_execution_ms);
+                    if let Some(reset_ms) = cache_reset_ms {
+                        cache_reset_timings[group_idx][variant_idx].push(reset_ms);
+                    }
+                    if centroid_concurrent_writer {
+                        lock_wait_timings[group_idx][variant_idx].push(writer_lock_wait_ms);
+                        writer_transaction_timings[group_idx][variant_idx]
+                            .push(writer_transaction_ms);
+                    }
+                    repeated.push(serde_json::json!({
+                        "sample": sample,
+                        "group_shape": group,
+                        "group_column": group_column,
+                        "strategy": variant,
+                        "cache_mode": &centroid_cache_mode,
+                        "concurrent_writer": centroid_concurrent_writer,
+                        "actual_strategy": history.2,
+                        "changed_rows": centroid_rewrite_rows,
+                        "affected_source_rows": affected_source_rows,
+                        "source_mutation_ms": mutation_ms,
+                        "refresh_ms": elapsed_ms,
+                        "refresh_execution_after_lock_ms": refresh_execution_ms,
+                        "cache_reset_ms": cache_reset_ms,
+                        "writer_lock_wait_ms": if centroid_concurrent_writer { Some(writer_lock_wait_ms) } else { None },
+                        "writer_transaction_ms": if centroid_concurrent_writer { Some(writer_transaction_ms) } else { None },
+                        "buffer_usage": buffer_usage,
+                        "refresh_wal_bytes_cluster_wide": wal_bytes,
+                        "source_sequential_tuples_returned": source_sequential_tuples,
+                        "source_index_tuples_fetched": source_index_tuples,
+                        "storage_bytes_including_indexes": storage_bytes,
+                        "auxiliary_state_logical_bytes": state_bytes,
+                        "fallback_reason": detail.get("centroid_fallback").and_then(|value| value.get("reason")),
+                        "rebase": detail.get("centroid_rebase"),
+                        "max_absolute_component_error": max_error
+                    }));
+                }
+                sqlx::query("COMMIT")
+                    .execute(&mut *conn)
+                    .await
+                    .expect("commit repeated centroid measurement");
             }
         }
     }
-    let repeated_summary = groups
+    let repeated_summary = group_shapes
         .iter()
         .enumerate()
-        .flat_map(|(group_idx, group)| {
+        .flat_map(|(group_idx, (group, _))| {
             let timings = &timings;
+            let execution_timings = &execution_timings;
+            let lock_wait_timings = &lock_wait_timings;
+            let writer_transaction_timings = &writer_transaction_timings;
+            let cache_reset_timings = &cache_reset_timings;
             variants
                 .iter()
                 .enumerate()
                 .map(move |(variant_idx, variant)| {
-                    serde_json::json!({
+                    let mut summary = serde_json::json!({
                         "group_shape": group, "strategy": variant,
-                        "refresh_ms": percentiles(timings[group_idx][variant_idx].clone())
-                    })
+                        "refresh_ms": percentiles(timings[group_idx][variant_idx].clone()),
+                        "refresh_execution_after_lock_ms": percentiles(execution_timings[group_idx][variant_idx].clone())
+                    });
+                    if !lock_wait_timings[group_idx][variant_idx].is_empty() {
+                        summary["writer_lock_wait_ms"] = percentiles(lock_wait_timings[group_idx][variant_idx].clone());
+                    }
+                    if !writer_transaction_timings[group_idx][variant_idx].is_empty() {
+                        summary["writer_transaction_ms"] = percentiles(writer_transaction_timings[group_idx][variant_idx].clone());
+                    }
+                    if !cache_reset_timings[group_idx][variant_idx].is_empty() {
+                        summary["cache_reset_ms"] = percentiles(cache_reset_timings[group_idx][variant_idx].clone());
+                    }
+                    summary
                 })
         })
         .collect::<Vec<_>>();
+    let all_lock_waits = lock_wait_timings
+        .iter()
+        .flatten()
+        .flat_map(|values| values.iter().copied())
+        .collect::<Vec<_>>();
+    let all_cache_resets = cache_reset_timings
+        .iter()
+        .flatten()
+        .flat_map(|values| values.iter().copied())
+        .collect::<Vec<_>>();
+    let lock_wait_summary = if all_lock_waits.is_empty() {
+        serde_json::Value::Null
+    } else {
+        percentiles(all_lock_waits)
+    };
+    let cache_reset_summary = if all_cache_resets.is_empty() {
+        serde_json::Value::Null
+    } else {
+        percentiles(all_cache_resets)
+    };
     println!(
         "PGVECTOR_BENCHMARK_JSON={}",
         serde_json::json!({"schema": 1, "postgres": versions.0,
         "pgvector": versions.1, "pg_trickle": versions.2, "host_arch": std::env::consts::ARCH,
         "data": "md5(id:dimension), seedless deterministic", "rows": rows, "dimensions": dim,
-        "ann": results, "centroid_baseline": centroid, "centroid_repeated": {"rounds": centroid_samples, "changed_rows_per_round": centroid_rewrite_rows, "observations": repeated, "summary": repeated_summary, "notes": "Each round changes the configured number of source vectors; group and strategy order rotate. All affected groups are checked against native AVG. Times cover the refresh call without EXPLAIN, mutation or validation. No warmup, concurrent load, or repeated rebase measurements."}, "centroid_notes": "Each refresh is executed under EXPLAIN ANALYZE; SPI work may not be individually visible in the plan. Source tuple counters cover same-transaction sequential returns and index fetches, including repeated visits, during the refresh. Group rescan, algebraic and FULL run in that order. WAL excludes the source mutation; auxiliary bytes are logical payload estimates.", "refresh": {"operations": ["update embedding", "update embedding", "delete"],
+        "ann": results, "centroid_baseline": centroid, "centroid_repeated": {"warmup_rounds": warmup_rounds, "measured_rounds": centroid_samples, "changed_rows_per_round": centroid_rewrite_rows, "cache_mode": &centroid_cache_mode, "concurrent_writer": centroid_concurrent_writer, "lock_wait_ms": lock_wait_summary, "cache_reset_ms": cache_reset_summary, "observations": repeated, "summary": repeated_summary, "notes": "Each measured round changes the configured number of source vectors; group and strategy order rotate after three warmup rounds. Warm samples pre-read source, materialized, and centroid-state pages. Cold samples stop PostgreSQL, drop the Linux host page cache, then start the isolated container before each timed refresh; reset time is reported separately. Concurrent samples toggle an unprojected source key while refresh runs, preserving centroid values; observed writer lock waits are sampled at 1 ms intervals, and the writer transaction remains open for at least 10 ms. This is a controlled single-writer overlap case, not sustained writer throughput. All affected groups are checked against native AVG. Refresh timings exclude mutation, cache reset, and validation; mutation time, WAL, tuple visits, buffer counts, storage, and state bytes are recorded separately."}, "centroid_notes": "The one-row baseline refreshes use EXPLAIN ANALYZE; SPI work may not be individually visible in the plan. Repeated samples use EXPLAIN ANALYZE BUFFERS WAL and record top-level shared block counts, source tuple visits, storage, and auxiliary bytes. WAL is cluster-wide and includes the concurrent writer in writer cases; auxiliary bytes are logical payload estimates.", "refresh": {"operations": ["update embedding", "update embedding", "delete"],
         "changed_rows": [1, rows / 10, rows / 10], "elapsed_ms": refresh_ms,
         "wal_bytes_cluster_wide": wal_bytes,
         "full_elapsed_ms": full_refresh_ms, "full_wal_bytes_cluster_wide": full_wal_bytes,

@@ -46,6 +46,7 @@ class RetirementContractTests(unittest.TestCase):
             run.return_value.returncode = 0
             self.assertEqual(pgvector_suite.main(), 0)
         command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--run-ignored") + 1], "all")
         for case in cases:
             binary, name = case.split("::", 1)
             self.assertIn(binary, command)
@@ -75,10 +76,33 @@ class RetirementContractTests(unittest.TestCase):
             next(s for s in broken["required_suites"] if s["id"] == "pgvector-0.8.1")[field] = value
             with self.assertRaises(SystemExit):
                 gate.check_pgvector_contract(broken)
+        for version in ("0.8.1", "0.8.7"):
+            broken = copy.deepcopy(contract)
+            cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
+            cases.remove("e2e_pgvector_tests::test_centroid_crash_recovers_committed_source_and_rolls_back_refresh")
+            with self.assertRaises(SystemExit):
+                gate.check_pgvector_contract(broken)
         broken = copy.deepcopy(contract)
         next(s for s in broken["required_suites"] if s["id"] == "pgvector-catalog-upgrade")["required_cases"].pop()
         with self.assertRaises(SystemExit):
             gate.check_pgvector_contract(broken)
+
+    def test_centroid_cost_matrix_is_required_and_package_bound(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        gate.check_pgvector_contract(contract)
+        for field, value in [
+            ("required", False),
+            ("e2e_image", "pg_trickle_e2e:latest"),
+            ("command_argv", ["true"]),
+            ("measurement_file", "qualification-logs/raw/other.json"),
+            ("required_modes", []),
+            ("measured_rounds_per_case", 1),
+            ("controlled_writer_hold_ms", 0),
+        ]:
+            broken = copy.deepcopy(contract)
+            next(s for s in broken["required_suites"] if s["id"] == "centroid-cost-matrix")[field] = value
+            with self.assertRaises(SystemExit):
+                gate.check_pgvector_contract(broken)
 
     def test_ann_restart_case_is_required_for_both_versions(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
