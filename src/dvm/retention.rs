@@ -1,4 +1,4 @@
-//! Conservative query-side candidates for partition-local aggregate groups.
+//! Query-side proofs of partition-local aggregate groups.
 //!
 //! A candidate is not sufficient to authorize retention: callers must also
 //! validate the partition key, every bound, and the retention lifecycle.
@@ -2454,12 +2454,12 @@ pub(crate) fn validate_builtin_aggregates(
     for oid in analyzed.values() {
         let builtin = Spi::get_one_with_args::<bool>(
             "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-             WHERE p.oid = $1 AND n.nspname = 'pg_catalog' AND p.prokind = 'a' AND p.proname IN ('sum','count'))",
+             WHERE p.oid = $1 AND n.nspname = 'pg_catalog' AND p.prokind = 'a')",
             &[(*oid).into()],
         ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false);
         if !builtin {
             return Err(PgTrickleError::InvalidArgument(
-                "partition retention supports only PostgreSQL built-in SUM and COUNT aggregates"
+                "partition retention requires PostgreSQL built-in aggregate identities"
                     .into(),
             ));
         }
@@ -2582,93 +2582,18 @@ pub fn query_group_candidate(
             ))
         })?;
 
-    for group in group_by {
-        match group {
-            Expr::ColumnRef {
-                table_alias,
-                column_name,
-            } => {
-                if !table_alias.as_deref().is_none_or(|name| name == alias)
-                    || !columns.iter().any(|column| column.name == *column_name)
-                {
-                    return Err(RetentionQueryError::UnsupportedShape(format!(
-                        "grouping key \"{}\" is not a plain column of source \"{alias}\"; other grouping keys must be source columns",
-                        group.to_sql()
-                    )));
-                }
-            }
-            _ if bucket(group, alias, key, column.type_oid).is_none() => {
-                return Err(RetentionQueryError::UnsupportedShape(format!(
-                    "grouping key \"{}\" is neither the partition key \"{key}\" nor an hourly bucket of it; other grouping keys must be plain source columns",
-                    group.to_sql()
-                )));
-            }
-            _ => {}
-        }
-    }
-    if let Some((expressions, aliases)) = projection {
-        for (expression, output) in expressions.iter().zip(aliases) {
-            if !matches!(expression, Expr::ColumnRef { .. }) {
-                return Err(RetentionQueryError::UnsupportedShape(format!(
-                    "select-list item \"{} AS {output}\" is not a plain column reference; retention projections must reference grouped columns or aggregate outputs directly",
-                    expression.to_sql()
-                )));
-            }
-        }
-    }
+    // Group locality follows from ONE projected group key that identifies the
+    // source partition. Additional group expressions and SELECT projections
+    // cannot merge groups across partitions. The normal DIFFERENTIAL validator
+    // checks expression volatility, type compatibility and row identities.
+    // Keep the partition-identifying projection itself strict below: deleting
+    // by an arbitrary projection would not be a valid range predicate.
 
     if aggregates.is_empty() {
         return Err(RetentionQueryError::UnsupportedAggregate(
-            "query has no aggregates; retention requires COUNT(*) / COUNT(column) or SUM(numeric source column)".into(),
+            "query has no aggregates; retention requires a grouped aggregate".into(),
         ));
     }
-    if let Some(aggregate) = aggregates.iter().find(|aggregate| {
-        !matches!(
-            aggregate.function,
-            AggFunc::CountStar | AggFunc::Count | AggFunc::Sum
-        ) || aggregate.is_distinct
-            || aggregate.filter.is_some()
-            || aggregate.second_arg.is_some()
-            || aggregate.order_within_group.is_some()
-            || match aggregate.function {
-                AggFunc::CountStar => aggregate.argument.is_some(),
-                AggFunc::Count | AggFunc::Sum => match aggregate.argument.as_ref() {
-                    Some(Expr::ColumnRef {
-                        table_alias,
-                        column_name,
-                    }) if table_alias.as_deref().is_none_or(|name| name == alias) => columns
-                        .iter()
-                        .find(|column| column.name == *column_name)
-                        .is_none_or(|column| {
-                            aggregate.function == AggFunc::Sum
-                                && !matches!(column.type_oid, 20 | 21 | 23 | 1700)
-                        }),
-                    _ => true,
-                },
-                _ => true,
-            }
-    }) {
-        let arg = aggregate
-            .argument
-            .as_ref()
-            .map(Expr::to_sql)
-            .unwrap_or_else(|| "*".into());
-        let argument = if aggregate.is_distinct {
-            format!("DISTINCT {arg}")
-        } else {
-            arg
-        };
-        let signature = if aggregate.function == AggFunc::CountStar {
-            "COUNT(*)".to_string()
-        } else {
-            format!("{:?}({argument})", aggregate.function)
-        };
-        return Err(RetentionQueryError::UnsupportedAggregate(format!(
-            "aggregate \"{signature} AS {}\" is not supported; retention allows only COUNT(*), COUNT(column), and SUM(numeric source column) without DISTINCT, FILTER, ORDER BY, or extra arguments",
-            aggregate.alias
-        )));
-    }
-
     for group in group_by {
         let Some(candidate) = bucket(group, alias, key, column.type_oid) else {
             continue;
