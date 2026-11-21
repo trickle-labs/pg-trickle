@@ -66,6 +66,19 @@ pub fn rebuild_cdc_trigger_function(
             })?;
         }
     }
+    // Rebuild the persisted TRUNCATE function as well as the DML functions.
+    // Otherwise a source created before this fix could keep issuing NOTIFY.
+    Spi::run(&super::build_truncate_trigger_fn_sql(
+        change_schema,
+        &cdc_name,
+        sync_commit,
+    ))
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "Failed to rebuild CDC TRUNCATE trigger function: {e}"
+        ))
+    })?;
+
     // suppress unused warning when name == oid string
     let _ = oid_u32;
 
@@ -267,6 +280,16 @@ fn rebuild_cdc_trigger_inner(
             )?;
         }
     }
+
+    // Replace the persisted TRUNCATE body too; the DML trigger rebuild alone
+    // does not remove legacy NOTIFY calls from existing source tables.
+    let sync_commit = super::buffer_uses_sync_commit(&format!("changes_{cdc_name}"))?;
+    replace_trigger_function(
+        change_schema,
+        &format!("pg_trickle_cdc_truncate_fn_{cdc_name}"),
+        &super::build_truncate_trigger_fn_sql(change_schema, &cdc_name, sync_commit),
+        "TRUNCATE",
+    )?;
 
     // 2. Drop ALL existing trigger variants (handles both row-level and
     //    statement-level triggers — whichever mode was active before).
