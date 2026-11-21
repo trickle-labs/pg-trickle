@@ -332,9 +332,7 @@ pub(crate) fn execute_manual_refresh(
     // missed. A retention catch-up runs inside the prepared detach protocol:
     // the snapshot is intentionally updated only after that cut completes.
     let mut checked = st.clone();
-    if !refresh::is_retention_catchup()
-        && crate::catalog::partition_snapshot_changed(st.pgt_id)?
-    {
+    if !refresh::is_retention_catchup() && crate::catalog::partition_snapshot_changed(st.pgt_id)? {
         StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;
         checked.needs_reinit = true;
     }

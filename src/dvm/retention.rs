@@ -2469,8 +2469,7 @@ pub(crate) fn validate_builtin_aggregates(
         ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false);
         if !builtin {
             return Err(PgTrickleError::InvalidArgument(
-                "partition retention requires PostgreSQL built-in aggregate identities"
-                    .into(),
+                "partition retention requires PostgreSQL built-in aggregate identities".into(),
             ));
         }
     }
@@ -3087,7 +3086,8 @@ mod tests {
             group_by,
             aggregates,
             ..
-        } = child.as_mut() else {
+        } = child.as_mut()
+        else {
             unreachable!()
         };
         group_by.push(hour("other", None));
@@ -3098,12 +3098,7 @@ mod tests {
         assert_eq!(candidate.output_column, "bucket");
 
         // Absence of the partition-determining key is still not proof of locality.
-        let only_other_group = query(
-            hour("other", None),
-            hour("other", None),
-            DATE_OID,
-            false,
-        );
+        let only_other_group = query(hour("other", None), hour("other", None), DATE_OID, false);
         assert!(matches!(
             query_group_candidate(&only_other_group, 42, "occurred"),
             Err(RetentionQueryError::MissingProjectedGroupKey(_))
@@ -3117,7 +3112,8 @@ mod tests {
             expressions,
             aliases,
             ..
-        } = &mut tree else {
+        } = &mut tree
+        else {
             unreachable!()
         };
         expressions.push(Expr::Literal("'x'::text".into()));

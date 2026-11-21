@@ -523,9 +523,10 @@ pub fn execute_reinitialize_refresh(st: &StreamTableMeta) -> Result<(i64, i64), 
     // Otherwise every subsequent refresh would repeat the reinitialization.
     for dep in crate::catalog::StDependency::get_for_st(st.pgt_id)? {
         if dep.source_type == "TABLE"
-            && dep.column_snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.get("partition_descendant_oids").is_some()
-            })
+            && dep
+                .column_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.get("partition_descendant_oids").is_some())
         {
             crate::catalog::store_column_snapshot_for_pgt_id(st.pgt_id, dep.source_relid)?;
         }

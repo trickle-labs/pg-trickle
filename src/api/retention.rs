@@ -136,7 +136,11 @@ fn set_policy(
         1082 => "2000-01-01",
         1114 => "2000-01-01 00:00:00",
         1184 => "2000-01-01 00:00:00+00",
-        _ => return Err(PgTrickleError::InvalidArgument("unsupported retention key type".into())),
+        _ => {
+            return Err(PgTrickleError::InvalidArgument(
+                "unsupported retention key type".into(),
+            ));
+        }
     };
     let cutoff_text = match supplied_cutoff {
         Some(value) => value,
