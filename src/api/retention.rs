@@ -117,9 +117,9 @@ fn set_policy(
     let key = source_column.filter(|key| !key.is_empty()).ok_or_else(|| {
         PgTrickleError::InvalidArgument("retention requires a source column".into())
     })?;
-    // TRIM reflects ordinary source deletion: there is no expiry horizon.
-    // Keep an in-range serialized cutoff for backwards-compatible state and
-    // diagnostics, but never use it as an eligibility gate for TRIM cuts.
+    // Omitted cutoffs make partition removal itself the retention signal.
+    // Use a typed placeholder in persisted state (v1) for compatibility;
+    // alignment and the live/sealed boundary remain independently validated.
     let supplied_cutoff = cutoff.filter(|cutoff| !cutoff.is_empty());
     let source_oid = retention::retention_source(&st)?;
     let candidate = crate::refresh::with_stream_owner(&st, || {
@@ -140,15 +140,10 @@ fn set_policy(
     };
     let cutoff_text = match supplied_cutoff {
         Some(value) => value,
-        None if mode == RetentionMode::Trim => implicit_trim_cutoff,
-        None => {
-            return Err(PgTrickleError::InvalidArgument(
-                "RETAIN requires an explicit cutoff".into(),
-            ));
-        }
+        None => implicit_trim_cutoff,
     };
     let cutoff = retention::parse_retention_cutoff(candidate.source_type_oid, cutoff_text)?;
-    let trim_unbounded = mode == RetentionMode::Trim && supplied_cutoff.is_none();
+    let cutoff_unbounded = supplied_cutoff.is_none();
     let query_hash = crate::catalog::compute_defining_query_hash(&st.defining_query);
     let previous = load_policy(st.pgt_id)?;
     if previous
@@ -163,6 +158,7 @@ fn set_policy(
     let state = if let Some((previous_source, mut previous)) = previous {
         if !previous.sealed.is_empty() {
             if previous.mode != mode
+                || previous.cutoff_unbounded != cutoff_unbounded
                 || previous_source != source_oid
                 || previous.candidate != candidate
                 || previous.query_hash != query_hash
@@ -179,7 +175,7 @@ fn set_policy(
             RetentionState {
                 version: 1,
                 mode,
-                trim_unbounded,
+                cutoff_unbounded,
                 candidate,
                 cutoff,
                 query_hash,
@@ -191,7 +187,7 @@ fn set_policy(
         RetentionState {
             version: 1,
             mode,
-            trim_unbounded,
+            cutoff_unbounded,
             candidate,
             cutoff,
             query_hash,
@@ -371,7 +367,7 @@ fn get_stream_table_partition_retention(name: &str) -> pgrx::JsonB {
             "enabled": true, "policy": state.mode, "source": source_name,
             "source_column": state.candidate.source_column, "group_column": state.candidate.output_column,
             "bucket": state.candidate.bucket,
-            "cutoff": if state.trim_unbounded { None } else { Some(display_bound(state.cutoff)?) },
+            "cutoff": if state.cutoff_unbounded { None } else { Some(display_bound(state.cutoff)?) },
             "sealed_ranges": ranges,
         });
         if let Some(pending) = state.pending {
