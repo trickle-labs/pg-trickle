@@ -3108,20 +3108,25 @@ mod tests {
     #[test]
     fn accepts_constant_projection_with_an_unmodified_partition_key() {
         let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
-        let OpTree::Project {
-            expressions,
-            aliases,
-            ..
-        } = &mut tree
-        else {
-            unreachable!()
-        };
-        expressions.push(Expr::Literal("'x'::text".into()));
-        aliases.push("tag".into());
+        {
+            let OpTree::Project {
+                expressions,
+                aliases,
+                ..
+            } = &mut tree
+            else {
+                unreachable!()
+            };
+            expressions.push(Expr::Literal("'x'::text".into()));
+            aliases.push("tag".into());
+        }
         assert!(query_group_candidate(&tree, 42, "occurred").is_ok());
 
         // The WHERE predicate in the range DELETE must be on a projected
         // partition identity, not a computed replacement.
+        let OpTree::Project { expressions, .. } = &mut tree else {
+            unreachable!()
+        };
         expressions[0] = Expr::Literal("'2025-01-01'::date".into());
         assert!(matches!(
             query_group_candidate(&tree, 42, "occurred"),
