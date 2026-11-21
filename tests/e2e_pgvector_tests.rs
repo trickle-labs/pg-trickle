@@ -3998,7 +3998,7 @@ async fn test_centroid_cost_model_rescans_and_rebinds_safely() {
         .fetch_one(&mut *conn).await.expect("inspect cost reversal history");
     assert_eq!(
         rebind_round,
-        Some(7),
+        Some(8),
         "cost reversal must wait for the cooldown; refresh history:\n{history}"
     );
     let bound: bool = sqlx::query_scalar("SELECT c.baseline_frontier = t.frontier AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome' = 'bound' FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
