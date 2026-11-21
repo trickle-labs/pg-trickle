@@ -1,0 +1,16 @@
+Full E2E run id: full-e2e-81935-1794235118
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+────────────
+ Nextest run ID a02c2d29-7d45-4476-a6f7-75d001d0a1aa with nextest profile: default
+    Starting 1 test across 1 binary (138 tests skipped)
+       START [         ] (1/1) pg_trickle::e2e_pgvector_tests test_ann_worker_retries_after_restart_during_concurrent_reindex
+
+running 1 test
+E2E connect attempt 1/30: error communicating with database: Connection reset by peer (os error 54)
+test test_ann_worker_retries_after_restart_during_concurrent_reindex ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out; finished in 15.93s
+
+        PASS [  15.941s] (1/1) pg_trickle::e2e_pgvector_tests test_ann_worker_retries_after_restart_during_concurrent_reindex
+────────────
+     Summary [  15.941s] 1 test run: 1 passed, 138 skipped
