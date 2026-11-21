@@ -117,9 +117,10 @@ fn set_policy(
     let key = source_column.filter(|key| !key.is_empty()).ok_or_else(|| {
         PgTrickleError::InvalidArgument("retention requires a source column".into())
     })?;
-    let cutoff = cutoff.filter(|cutoff| !cutoff.is_empty()).ok_or_else(|| {
-        PgTrickleError::InvalidArgument("retention requires an explicit cutoff".into())
-    })?;
+    // TRIM reflects ordinary source deletion: there is no expiry horizon.
+    // Keep an in-range serialized cutoff for backwards-compatible state and
+    // diagnostics, but never use it as an eligibility gate for TRIM cuts.
+    let supplied_cutoff = cutoff.filter(|cutoff| !cutoff.is_empty());
     let source_oid = retention::retention_source(&st)?;
     let candidate = crate::refresh::with_stream_owner(&st, || {
         let tree = crate::dvm::parser::parse_defining_query(&st.defining_query)?;
@@ -131,7 +132,22 @@ fn set_policy(
             .map_err(retention_eligibility_error)?;
         Ok(candidate)
     })?;
-    let cutoff = retention::parse_retention_cutoff(candidate.source_type_oid, cutoff)?;
+    let implicit_trim_cutoff = match candidate.source_type_oid {
+        1082 => "2000-01-01",
+        1114 => "2000-01-01 00:00:00",
+        1184 => "2000-01-01 00:00:00+00",
+        _ => return Err(PgTrickleError::InvalidArgument("unsupported retention key type".into())),
+    };
+    let cutoff_text = match supplied_cutoff {
+        Some(value) => value,
+        None if mode == RetentionMode::Trim => implicit_trim_cutoff,
+        None => {
+            return Err(PgTrickleError::InvalidArgument(
+                "RETAIN requires an explicit cutoff".into(),
+            ));
+        }
+    };
+    let cutoff = retention::parse_retention_cutoff(candidate.source_type_oid, cutoff_text)?;
     let query_hash = crate::catalog::compute_defining_query_hash(&st.defining_query);
     let previous = load_policy(st.pgt_id)?;
     if previous
@@ -287,7 +303,7 @@ fn create_stream_table_with_retention(
     query: &str,
     policy: &str,
     source_column: &str,
-    cutoff: &str,
+    cutoff: default!(Option<&str>, "NULL"),
     schedule: default!(Option<&str>, "'calculated'"),
 ) {
     let result = (|| -> Result<(), PgTrickleError> {
@@ -309,7 +325,7 @@ fn create_stream_table_with_retention(
             entry_context: Some(security_context::EntryContext::SecurityDefiner),
             ..Default::default()
         })?;
-        set_policy(name, policy, Some(source_column), Some(cutoff))
+        set_policy(name, policy, Some(source_column), cutoff)
     })();
     if let Err(error) = result {
         super::raise_error_with_context(error);
