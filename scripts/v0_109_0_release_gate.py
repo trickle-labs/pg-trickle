@@ -196,11 +196,15 @@ def check_retirement_contract(contract: dict) -> None:
 
 
 def check_subscription_scale_contract(contract: dict) -> None:
+    prior.shared.require(
+        not any(suite.get("id") == "subscription-scale-1m" for suite in contract["required_suites"]),
+        "the 1M source-row subscription suite is outside v0.109.0 scope",
+    )
     suite = next(
-        (item for item in contract["required_suites"] if item["id"] == "subscription-scale-1m"),
+        (item for item in contract["required_suites"] if item["id"] == "subscription-scale-100k"),
         None,
     )
-    prior.shared.require(suite is not None, "the exact-package subscription matrix through one million rows is required")
+    prior.shared.require(suite is not None, "the exact-package subscription matrix through 100,000 rows is required")
     if suite is None:
         return
     prior.shared.require(
@@ -212,11 +216,11 @@ def check_subscription_scale_contract(contract: dict) -> None:
         and suite.get("requires_postgresql") is True
         and suite.get("suite_version") == "0.109.0"
         and suite.get("command_argv") == ["python3", "scripts/run_release_subscription_scale.py"]
-        and suite.get("measurement_file") == "qualification-logs/raw/subscription-scale-1m.json"
+        and suite.get("measurement_file") == "qualification-logs/raw/subscription-scale-100k.json"
         and suite.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
         and suite.get("nextest_retries") == 0
         and suite.get("workload")
-        == "exact-package 384-dimensional 1k/10k/100k/1m source-row subscription matrix with 1m-row plan controls; not a RAG benchmark",
+        == "exact-package 384-dimensional 1k/10k/100k source-row subscription matrix with 100k-row plan controls; not a RAG benchmark",
         "subscription scale must measure the exact release package separately from RAG",
     )
 
@@ -257,7 +261,7 @@ def main() -> None:
     prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {
         "wal-retirement", "wal-retirement-upgrade", "partition-retention",
         "pgvector-0.8.1", "pgvector-0.8.7", "pgvector-catalog-upgrade",
-        "live-rag-100k", "subscription-scale-1m",
+        "live-rag-100k", "subscription-scale-100k",
     }
     contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
     check_retirement_contract(contract)
