@@ -2308,6 +2308,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, te
 REVOKE EXECUTE ON FUNCTION pgtrickle.get_stream_table_partition_retention(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention(text, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.ann_maintenance_request(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.cancel_ann_maintenance(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.claim_ann_maintenance(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.finish_ann_maintenance(bigint, boolean, text) FROM PUBLIC;
