@@ -697,3 +697,139 @@ async fn test_pool_worker_does_not_run_while_disabled() {
         "scheduler should resume refreshes after re-enabling"
     );
 }
+
+// ── #1464: SIGTERM must interrupt a running refresh statement ───────────────
+
+/// Reproduce a refresh worker stuck inside a single SPI statement. SIGTERM
+/// must end it promptly rather than waiting for pg_sleep to finish, and the
+/// coordinator must reap the orphaned job and retry without losing the last
+/// committed stream table contents.
+#[tokio::test]
+async fn test_refresh_worker_sigterm_interrupts_spi_and_recovers() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+
+    db.execute("CREATE TABLE sigterm_src (id INT PRIMARY KEY, delay_seconds FLOAT8 NOT NULL)")
+        .await;
+    db.execute("INSERT INTO sigterm_src VALUES (1, 0)")
+        .await;
+    // FULL refresh executes this as one statement. Initially sleep(0)
+    // ensures that creating the stream table does not delay the test.
+    db.create_st(
+        "sigterm_st",
+        "SELECT pg_sleep(max(delay_seconds))::text AS slept, \
+         count(*)::bigint AS n FROM sigterm_src",
+        "1s",
+        "FULL",
+    )
+    .await;
+    let initial_count: i64 = db.query_scalar("SELECT n FROM sigterm_st").await;
+    assert_eq!(initial_count, 1);
+
+    // Make the next scheduled refresh spend 30 seconds inside PostgreSQL,
+    // where polling BackgroundWorker::sigterm_received() is not possible.
+    db.execute("INSERT INTO sigterm_src VALUES (2, 30)")
+        .await;
+    let worker_pid = tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let pid: Option<i32> = sqlx::query_scalar(
+                "SELECT pid FROM pg_stat_activity \
+                 WHERE datname = current_database() \
+                   AND backend_type = 'pg_trickle refresh worker' \
+                   AND wait_event = 'PgSleep' \
+                 LIMIT 1",
+            )
+            .fetch_optional(&db.pool)
+            .await
+            .expect("query refresh worker activity");
+            if let Some(pid) = pid {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("scheduler never started a refresh inside pg_sleep");
+
+    let job_id: i64 = sqlx::query_scalar(
+        "SELECT job_id FROM pgtrickle.pgt_scheduler_jobs \
+         WHERE worker_pid = $1 AND status = 'RUNNING' \
+         ORDER BY job_id DESC LIMIT 1",
+    )
+    .bind(worker_pid)
+    .fetch_one(&db.pool)
+    .await
+    .expect("find running job for sleeping worker");
+
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(worker_pid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("send SIGTERM to refresh worker");
+    assert!(terminated, "SIGTERM must be sent to the witnessed worker");
+
+    // The 8-second bound is deliberately much less than the 30-second
+    // statement. Before the fix, SIGTERM only woke the latch and the PID
+    // remained in pg_stat_activity until pg_sleep returned.
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let alive: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
+            )
+            .bind(worker_pid)
+            .fetch_one(&db.pool)
+            .await
+            .expect("check whether terminated worker exited");
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("SIGTERM did not interrupt the active SPI statement");
+
+    // The aborted FULL refresh must not expose a partially refreshed ST.
+    let count_after_term: i64 = db.query_scalar("SELECT n FROM sigterm_st").await;
+    assert_eq!(count_after_term, 1, "terminated refresh must roll back");
+
+    // The coordinator must reap the dead worker instead of leaving a
+    // permanent RUNNING job and an occupied worker slot.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let status: String = sqlx::query_scalar(
+                "SELECT status FROM pgtrickle.pgt_scheduler_jobs WHERE job_id = $1",
+            )
+            .bind(job_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect terminated scheduler job");
+            if status == "RETRYABLE_FAILED" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("scheduler did not reap the terminated refresh worker");
+
+    // Remove the artificial delay and verify a replacement worker applies
+    // both rows. The stream table should remain usable (not ERROR).
+    db.execute("UPDATE sigterm_src SET delay_seconds = 0 WHERE id = 2")
+        .await;
+    let recovered = db
+        .wait_for_condition(
+            "refresh worker restarted after SIGTERM",
+            "SELECT n = 2 FROM sigterm_st",
+            Duration::from_secs(60),
+            Duration::from_millis(250),
+        )
+        .await;
+    assert!(recovered, "a new worker must successfully refresh the ST");
+    let st_status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'sigterm_st'",
+        )
+        .await;
+    assert_eq!(st_status, "ACTIVE", "SIGTERM must not put the ST in ERROR");
+}
