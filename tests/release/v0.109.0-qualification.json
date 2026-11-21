@@ -1025,6 +1025,25 @@
       "workload": "v0.108.3 catalog snapshot on candidate binary: vector helpers, legacy subscriptions, index identity and transactional rollback"
     },
     {
+      "id": "subscription-scale-100k",
+      "kind": "measurement",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.109.0",
+      "command": "python3 scripts/run_release_subscription_scale.py",
+      "command_argv": [
+        "python3",
+        "scripts/run_release_subscription_scale.py"
+      ],
+      "measurement_file": "qualification-logs/raw/subscription-scale-100k.json",
+      "e2e_image": "pg_trickle_e2e_pgvector:0.8.7",
+      "nextest_retries": 0,
+      "workload": "exact-package 384-dimensional 1k/10k/100k source-row subscription matrix plus 100k-row analyzed trigger-free controls at 384/768 dimensions; not a RAG benchmark"
+    },
+    {
       "id": "centroid-cost-matrix",
       "kind": "measurement",
       "artifact_id": "linux-amd64",

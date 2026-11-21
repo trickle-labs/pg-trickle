@@ -24,7 +24,7 @@ class RetirementContractTests(unittest.TestCase):
         gate.check_live_rag_contract(contract)
         broken = copy.deepcopy(contract)
         suite = next(s for s in broken["required_suites"] if s["id"] == "live-rag-100k")
-        suite["command_argv"][4] = "1000000"
+        suite["command_argv"][4] = "100001"
         with self.assertRaises(SystemExit):
             gate.check_live_rag_contract(broken)
     def test_retention_contract_requires_trim_retain_and_upgrade_api(self):
@@ -194,6 +194,18 @@ class RetirementContractTests(unittest.TestCase):
             next(s for s in broken["required_suites"] if s["id"] == suite_id)[field] = value
             with self.assertRaises(SystemExit):
                 gate.check_retirement_contract(broken)
+
+    def test_subscription_scale_contract_requires_only_the_100k_matrix(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        gate.check_subscription_scale_contract(contract)
+        for field, value in [
+            ("required", False),
+            ("measurement_file", "qualification-logs/raw/wrong.json"),
+        ]:
+            broken = copy.deepcopy(contract)
+            next(s for s in broken["required_suites"] if s["id"] == "subscription-scale-100k")[field] = value
+            with self.assertRaises(SystemExit):
+                gate.check_subscription_scale_contract(broken)
 
     def test_centroid_cost_matrix_is_required_and_package_bound(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())

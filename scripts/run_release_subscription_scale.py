@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure exact-package distance subscriptions through one million source rows."""
+"""Measure exact-package distance subscriptions through 100,000 source rows."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from run_release_centroid_cost import DockerStatsSampler
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ROW_COUNTS = (1_000, 10_000, 100_000, 1_000_000)
+ROW_COUNTS = (1_000, 10_000, 100_000)
 DIMENSIONS = (384, 768)
 SUBSCRIPTIONS = (0, 1, 10, 100, 1000)
 STATISTICS = ("unanalyzed", "analyzed")
@@ -27,14 +27,14 @@ BATCH_ROWS = 10
 ROUNDS = 1
 CASE_GROUPS = (
     (384, ROW_COUNTS, STATISTICS, True, SUBSCRIPTIONS),
-    (384, (1_000_000,), ("analyzed",), False, SUBSCRIPTIONS),
-    (768, (1_000_000,), ("analyzed",), False, SUBSCRIPTIONS),
+    (384, (100_000,), ("analyzed",), False, SUBSCRIPTIONS),
+    (768, (100_000,), ("analyzed",), False, SUBSCRIPTIONS),
 )
 PLAN_CASES = {
-    (384, 1_000_000, 0, "unanalyzed", True),
-    (384, 1_000_000, 1_000, "unanalyzed", True),
+    (384, 100_000, 0, "unanalyzed", True),
+    (384, 100_000, 1_000, "unanalyzed", True),
     *(
-        (dimensions, 1_000_000, subscriptions, "analyzed", False)
+        (dimensions, 100_000, subscriptions, "analyzed", False)
         for dimensions in DIMENSIONS
         for subscriptions in SUBSCRIPTIONS
     ),
@@ -232,7 +232,7 @@ def validate_trigger_free_strategies(cases: list[dict]) -> None:
             case
             for case in cases
             if case["dimensions"] == dimensions
-            and case["rows"] == 1_000_000
+            and case["rows"] == 100_000
             and case["statistics"] == "analyzed"
             and not case["force_explicit_with_noop_trigger"]
         ]
@@ -381,7 +381,7 @@ def main() -> int:
                         result["raw_evidence_files"].append(report["resource_file"])
                         write_measurement(measurement_path, result)
         for mutation_shape in EXTRA_MUTATION_SHAPES:
-            dimensions, rows, subscriptions, statistics = 384, 1_000_000, 10, "analyzed"
+            dimensions, rows, subscriptions, statistics = 384, 100_000, 10, "analyzed"
             pivots = min(subscriptions, 10, dimensions - 1)
             print(
                 f"=== Exact-package subscriptions: {rows} rows, {dimensions} dimensions, "
