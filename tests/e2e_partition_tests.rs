@@ -2690,6 +2690,16 @@ async fn test_partition_snapshot_reconciliation_recovers_missed_drop_notificatio
         "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'reconcile_st'",
     ).await;
     assert!(!reinit, "successful protected rebuild clears the flag");
+
+    // OIDs can be identical while bounds change (for example after a restore).
+    // The persisted bound-node snapshot must be reconciled as well.
+    db.execute("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_descendants,0,bound_node}', to_jsonb('invalid_saved_bound'::text)) WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'reconcile_st') AND source_relid = 'reconcile_src'::regclass").await;
+    db.refresh_st_with_retry("reconcile_st").await;
+    db.assert_st_matches_query("reconcile_st", query).await;
+    let bound_action: String = db.query_scalar(
+        "SELECT h.action FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'reconcile_st' ORDER BY h.refresh_id DESC LIMIT 1",
+    ).await;
+    assert_eq!(bound_action, "REINITIALIZE");
 }
 
 #[tokio::test]
