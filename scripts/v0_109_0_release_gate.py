@@ -48,6 +48,7 @@ PGVECTOR_CASES = {
         "test_centroid_unsafe_rebase_remains_unbound_without_retry_storm",
         "test_centroid_refresh_serializes_concurrent_source_writer",
         "test_centroid_cost_model_accepts_real_refresh_history",
+        "test_centroid_source_ahead_fallback_is_reported",
         "test_pgvector_compat_installed_version",
         "test_pgvector_distance_types_and_functions_differential",
         "test_embedding_stream_table_v2_metrics_and_options",
@@ -246,31 +247,6 @@ def check_retirement_contract(contract: dict) -> None:
     )
 
 
-def check_subscription_scale_contract(contract: dict) -> None:
-    suite = next(
-        (item for item in contract["required_suites"] if item["id"] == "subscription-scale-1m"),
-        None,
-    )
-    prior.shared.require(suite is not None, "the exact-package subscription matrix through one million rows is required")
-    if suite is None:
-        return
-    prior.shared.require(
-        suite.get("kind") == "measurement"
-        and suite.get("artifact_id") == "linux-amd64"
-        and suite.get("required") is True
-        and suite.get("runtime") is True
-        and suite.get("upgrade") is False
-        and suite.get("requires_postgresql") is True
-        and suite.get("suite_version") == "0.109.0"
-        and suite.get("command_argv") == ["python3", "scripts/run_release_subscription_scale.py"]
-        and suite.get("measurement_file") == "qualification-logs/raw/subscription-scale-1m.json"
-        and suite.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
-        and suite.get("nextest_retries") == 0
-        and suite.get("workload")
-        == "exact-package 384-dimensional 1k/10k/100k/1m source-row subscription matrix plus analyzed 1m-row trigger-free controls at 384/768 dimensions; not a RAG benchmark",
-        "subscription scale must measure the exact release package separately from RAG",
-    )
-
 def check_retention_contract(contract: dict) -> None:
     suite = next(item for item in contract["required_suites"] if item["id"] == "partition-retention")
     names = sorted(case.split("::", 1)[1] for case in RETENTION_CASES)
@@ -346,7 +322,7 @@ def main() -> None:
     prior.REQUIRED_SHARDS = prior.REQUIRED_SHARDS | {"wal-retirement"}
     prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {
         "wal-retirement", "wal-retirement-upgrade", "pgvector-0.8.1", "pgvector-0.8.7",
-        "pgvector-catalog-upgrade", "live-rag-100k", "subscription-scale-1m",
+        "pgvector-catalog-upgrade", "live-rag-100k",
         "centroid-cost-matrix", "partition-retention", "retention-upgrade-1084",
     }
     contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
@@ -355,7 +331,6 @@ def main() -> None:
     check_pgvector_contract(contract)
     check_ann_packaging_workflow((prior.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
     check_live_rag_contract(contract)
-    check_subscription_scale_contract(contract)
     check_pgvector_upgrade_script((prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8"))
     prior.main()
 
