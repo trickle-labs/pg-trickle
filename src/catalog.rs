@@ -2454,39 +2454,54 @@ pub fn query_partition_descendant_oids(
     Ok(Vec::new())
 }
 
-/// Level-triggered partition-DLL recovery: compare the durable ancestry snapshot
-/// with PostgreSQL's current recursive partition tree before applying a delta.
-///
-/// A missed sql_drop/ddl_command_end notification (for example during restore)
-/// must not leave groups from a vanished partition in a materialization.
-/// We deliberately *rebuild* on disagreement rather than attempt to infer a
-/// delete range from live catalog state after the child has disappeared.
-/// In particular, a RETAIN stream with sealed history will fail closed when
-/// its historical state cannot be reconstructed.
+/// Level-triggered partition-DDL recovery compares durable membership and
+/// bounds to the current recursive tree before processing a differential delta.
+/// The saved catalog tracks range metadata as well as child OIDs. A missed
+/// hook must force a protected rebuild (or fail closed with sealed RETAIN).
 #[cfg(not(test))]
 pub(crate) fn partition_snapshot_changed(pgt_id: i64) -> Result<bool, PgTrickleError> {
     let changed = Spi::get_one_with_args::<bool>(
-        "WITH RECURSIVE descendants(root_oid, relid) AS ( \\
-           SELECT dep.source_relid, inh.inhrelid \\
-             FROM pgtrickle.pgt_dependencies dep \\
-             JOIN pg_catalog.pg_inherits inh ON inh.inhparent = dep.source_relid \\
-            WHERE dep.pgt_id = $1 AND dep.source_type = 'TABLE' \\
-           UNION ALL \\
-           SELECT d.root_oid, inh.inhrelid \\
-             FROM descendants d \\
-             JOIN pg_catalog.pg_inherits inh ON inh.inhparent = d.relid \\
-         ), current_children AS ( \\
-           SELECT root_oid, pg_catalog.jsonb_agg(DISTINCT relid::bigint ORDER BY relid::bigint) AS oids \\
-             FROM descendants GROUP BY root_oid \\
-         ) \\
-         SELECT EXISTS ( \\
-           SELECT 1 FROM pgtrickle.pgt_dependencies dep \\
-           LEFT JOIN current_children children ON children.root_oid = dep.source_relid \\
-           WHERE dep.pgt_id = $1 AND dep.source_type = 'TABLE' \\
-             AND dep.column_snapshot ? 'partition_descendant_oids' \\
-             AND dep.column_snapshot->'partition_descendant_oids' \\
-                 IS DISTINCT FROM COALESCE(children.oids, '[]'::jsonb) \\
-         )",
+        r#"WITH RECURSIVE descendants(root_oid, relid, parent_oid) AS (
+             SELECT dep.source_relid, inh.inhrelid, inh.inhparent
+               FROM pgtrickle.pgt_dependencies dep
+               JOIN pg_catalog.pg_inherits inh ON inh.inhparent = dep.source_relid
+              WHERE dep.pgt_id = $1 AND dep.source_type = 'TABLE'
+             UNION ALL
+             SELECT d.root_oid, inh.inhrelid, inh.inhparent
+               FROM descendants d
+               JOIN pg_catalog.pg_inherits inh ON inh.inhparent = d.relid
+           ), current_children AS (
+             SELECT d.root_oid,
+                    pg_catalog.jsonb_agg(DISTINCT d.relid::bigint
+                                         ORDER BY d.relid::bigint) AS oids,
+                    pg_catalog.jsonb_object_agg(d.relid::text,
+                      pg_catalog.jsonb_build_object(
+                        'parent_oid', d.parent_oid::bigint,
+                        'bound_node', c.relpartbound::text,
+                        'relkind', c.relkind::text)) AS metadata
+               FROM descendants d
+               JOIN pg_catalog.pg_class c ON c.oid = d.relid
+              GROUP BY d.root_oid
+           )
+           SELECT EXISTS (
+             SELECT 1 FROM pgtrickle.pgt_dependencies dep
+             LEFT JOIN current_children children ON children.root_oid = dep.source_relid
+             WHERE dep.pgt_id = $1 AND dep.source_type = 'TABLE'
+               AND (
+                 (dep.column_snapshot ? 'partition_descendant_oids'
+                  AND dep.column_snapshot->'partition_descendant_oids'
+                      IS DISTINCT FROM COALESCE(children.oids, '[]'::jsonb))
+                 OR
+                 (dep.column_snapshot ? 'partition_descendants'
+                  AND COALESCE(
+                    (SELECT pg_catalog.jsonb_object_agg(
+                              entry->>'oid', entry - 'oid' - 'range')
+                       FROM pg_catalog.jsonb_array_elements(
+                         dep.column_snapshot->'partition_descendants') entry),
+                     '{}'::jsonb)
+                      IS DISTINCT FROM COALESCE(children.metadata, '{}'::jsonb))
+               )
+           )"#,
         &[pgt_id.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
