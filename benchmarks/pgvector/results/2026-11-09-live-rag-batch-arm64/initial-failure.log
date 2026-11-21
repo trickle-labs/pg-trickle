@@ -1,0 +1,55 @@
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-task-1399)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.47s
+     Running tests/e2e_pgvector_revision_tests.rs (target/debug/deps/e2e_pgvector_revision_tests-7ac7530d67ba7c77)
+
+running 1 test
+
+thread 'test_live_rag_batched_benchmark_compares_equivalent_corpora' (834084) panicked at tests/e2e_pgvector_revision_tests.rs:126:5:
+batch benchmark failed: NOTICE:  extension "vector" already exists, skipping
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table embedding_demo.corpus_v1 created (pgt_id=1, mode=DIFFERENTIAL, initialized=true)
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table embedding_demo.corpus_v2 created (pgt_id=2, mode=DIFFERENTIAL, initialized=true)
+WARNING:  [pg_trickle] SELECT_STAR: The defining query uses SELECT *, so source schema changes can require reinitialization. HINT: List output columns explicitly for a more stable stream-table schema.
+NOTICE:  publication "pgtrickle_cdc_58faaf2ab477b610" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_6779e0a335f92cd5" does not exist, skipping
+NOTICE:  publication "pgtrickle_cdc_e4098a94b204d6e2" does not exist, skipping
+INFO:  Stream table live_rag.differential created (pgt_id=3, mode=DIFFERENTIAL, initialized=true)
+NOTICE:  schema "pg_temp" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_19261" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_19154" does not exist, skipping
+NOTICE:  table "__pgt_delta_3" does not exist, skipping
+INFO:  [PGS_PROFILE] explicit_dml: materialize=18.77ms delete=0.41ms(0) update=0.11ms(0) insert=0.27ms(4) for live_rag.differential
+NOTICE:  table "__pgt_recon_3" does not exist, skipping
+INFO:  [PGS_PROFILE] decision=2.41ms generate+build=3.00ms merge_exec=24.10ms cleanup_enqueue=0.00ms total=29.51ms affected=4 phantom_cleanup=0 delta_est=12 mode=INCR path=cache_miss hints=none strategy=explicit_dml_reconciled
+INFO:  Stream table live_rag.differential refreshed (DIFFERENTIAL: +4 -0)
+ERROR:  each EXCEPT query must have the same number of columns
+Traceback (most recent call last):
+  File "/private/tmp/pg-trickle-task-1399/benchmarks/pgvector/run_live_rag_batches.py", line 178, in <module>
+    main()
+  File "/private/tmp/pg-trickle-task-1399/benchmarks/pgvector/run_live_rag_batches.py", line 172, in main
+    print(json.dumps(run(args), sort_keys=True))
+                     ^^^^^^^^^
+  File "/private/tmp/pg-trickle-task-1399/benchmarks/pgvector/run_live_rag_batches.py", line 97, in run
+    initial_exact = json_result(worker.psql(EXACT))
+                                ^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/pg-trickle-task-1399/benchmarks/pgvector/fake_embedding_worker.py", line 30, in psql
+    return subprocess.run(command, input=sql, text=True, stdout=subprocess.PIPE, check=True).stdout.strip()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/grove/.local/share/uv/python/cpython-3.12.14-macos-aarch64-none/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['psql', '-X', '-w', '-qAt', '-v', 'ON_ERROR_STOP=1']' returned non-zero exit status 3.
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test test_live_rag_batched_benchmark_compares_equivalent_corpora ... FAILED
+
+failures:
+
+failures:
+    test_live_rag_batched_benchmark_compares_equivalent_corpora
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 2.11s
+
+error: test failed, to rerun pass `--test e2e_pgvector_revision_tests`

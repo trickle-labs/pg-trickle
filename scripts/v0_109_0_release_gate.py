@@ -70,6 +70,12 @@ PGVECTOR_CASES = {
     "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components",
     "e2e_pgvector_hybrid_tests::test_tenant_tutorial_sql_runs_with_isolated_reader",
     "e2e_pgvector_revision_tests::test_revision_safe_generation_and_model_rollover",
+    "e2e_pgvector_revision_tests::test_live_rag_model_rollover_hides_old_results_until_reconciled",
+    "e2e_pgvector_revision_tests::test_live_rag_converges_after_writes_during_maintenance",
+    "e2e_pgvector_revision_tests::test_live_rag_converges_after_writes_during_active_maintenance",
+    "e2e_pgvector_revision_tests::test_live_rag_recovers_after_maintenance_cancellation",
+    "e2e_pgvector_revision_tests::test_live_rag_recovers_after_database_crash_during_maintenance",
+    "e2e_pgvector_revision_tests::test_live_rag_paced_writes_and_tenant_reads_during_refresh",
 }
 
 PGVECTOR_UPGRADE_CASES = {
@@ -134,6 +140,29 @@ def check_pgvector_contract(contract: dict) -> None:
         "centroid cost qualification must retain the required exact-package matrix",
     )
 
+
+def check_live_rag_contract(contract: dict) -> None:
+    suite = next((item for item in contract["required_suites"] if item["id"] == "live-rag-100k"), None)
+    workflow = (prior.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    prior.shared.require(
+        suite is not None
+        and suite.get("kind") == "measurement"
+        and suite.get("artifact_id") == "linux-amd64"
+        and suite.get("required") is True
+        and suite.get("runtime") is True
+        and suite.get("upgrade") is False
+        and suite.get("requires_postgresql") is True
+        and suite.get("suite_version") == "0.109.0"
+        and suite.get("command_argv") == [
+            "python3", "benchmarks/pgvector/run_release_live_rag.py",
+            "--rows", "10000", "100000", "--dimensions", "384", "768", "1536",
+        ]
+        and suite.get("measurement_file") == "qualification-logs/raw/live-rag-100k.json"
+        and suite.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
+        and not suite.get("required_cases")
+        and "timeout-minutes: 360" in workflow,
+        "release qualification must measure the exact package at 10,000 and 100,000 RAG documents without a 1M case",
+    )
 
 def check_pgvector_upgrade_script(script: str) -> None:
     for marker in (
@@ -263,12 +292,13 @@ def main() -> None:
     prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {
         "wal-retirement", "wal-retirement-upgrade", "partition-retention",
         "pgvector-0.8.1", "pgvector-0.8.7", "pgvector-catalog-upgrade",
-        "centroid-cost-matrix", "subscription-scale-100k",
+        "live-rag-100k", "centroid-cost-matrix", "subscription-scale-100k",
     }
     contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
     check_retirement_contract(contract)
     check_retention_contract(contract)
     check_pgvector_contract(contract)
+    check_live_rag_contract(contract)
     check_ann_packaging_workflow((prior.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
     check_subscription_scale_contract(contract)
     check_pgvector_upgrade_script((prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8"))

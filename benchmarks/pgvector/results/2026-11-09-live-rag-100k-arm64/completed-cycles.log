@@ -1,0 +1,16 @@
+NOTICE:  table "__pgt_cdc_3_17915" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_18077" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_17970" does not exist, skipping
+NOTICE:  table "__pgt_delta_3" does not exist, skipping
+INFO:  [PGS_PROFILE] explicit_dml: materialize=394.67ms delete=1.33ms(9) update=0.25ms(0) insert=99.67ms(6) for live_rag.differential
+NOTICE:  table "__pgt_recon_3" does not exist, skipping
+INFO:  [PGS_PROFILE] decision=2.99ms generate+build=3.74ms merge_exec=6099.56ms cleanup_enqueue=0.00ms total=6106.29ms affected=15 phantom_cleanup=0 delta_est=33 mode=INCR path=cache_miss hints=none strategy=explicit_dml_reconciled
+INFO:  Stream table live_rag.differential refreshed (DIFFERENTIAL: +15 -0)
+NOTICE:  table "__pgt_cdc_3_17915" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_18077" does not exist, skipping
+NOTICE:  table "__pgt_cdc_3_17970" does not exist, skipping
+NOTICE:  table "__pgt_delta_3" does not exist, skipping
+INFO:  [PGS_PROFILE] explicit_dml: materialize=402.46ms delete=1.19ms(9) update=0.21ms(0) insert=76.32ms(6) for live_rag.differential
+NOTICE:  table "__pgt_recon_3" does not exist, skipping
+INFO:  [PGS_PROFILE] decision=2.80ms generate+build=3.53ms merge_exec=5926.22ms cleanup_enqueue=0.00ms total=5932.56ms affected=15 phantom_cleanup=0 delta_est=33 mode=INCR path=cache_miss hints=none strategy=explicit_dml_reconciled
+INFO:  Stream table live_rag.differential refreshed (DIFFERENTIAL: +15 -0)

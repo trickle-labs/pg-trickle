@@ -11,6 +11,15 @@ import v0_109_0_release_gate as gate
 
 
 class RetirementContractTests(unittest.TestCase):
+    def test_live_rag_contract_requires_exact_capped_package_matrix(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        gate.check_live_rag_contract(contract)
+        broken = copy.deepcopy(contract)
+        suite = next(s for s in broken["required_suites"] if s["id"] == "live-rag-100k")
+        suite["command_argv"][3] = "1000000"
+        with self.assertRaises(SystemExit):
+            gate.check_live_rag_contract(broken)
+
     def test_release_workflow_requires_ann_payload_verification_and_files(self):
         workflow = (gate.prior.ROOT / ".github/workflows/release.yml").read_text()
         gate.check_ann_packaging_workflow(workflow)
@@ -86,6 +95,14 @@ class RetirementContractTests(unittest.TestCase):
         next(s for s in broken["required_suites"] if s["id"] == "pgvector-catalog-upgrade")["required_cases"].pop()
         with self.assertRaises(SystemExit):
             gate.check_pgvector_contract(broken)
+
+        for version in ("0.8.1", "0.8.7"):
+            for case in ("test_live_rag_model_rollover_hides_old_results_until_reconciled", "test_live_rag_converges_after_writes_during_maintenance", "test_live_rag_converges_after_writes_during_active_maintenance", "test_live_rag_recovers_after_maintenance_cancellation", "test_live_rag_recovers_after_database_crash_during_maintenance", "test_live_rag_paced_writes_and_tenant_reads_during_refresh"):
+                broken = copy.deepcopy(contract)
+                cases = next(s for s in broken["required_suites"] if s["id"] == f"pgvector-{version}")["required_cases"]
+                cases.remove(f"e2e_pgvector_revision_tests::{case}")
+                with self.assertRaises(SystemExit):
+                    gate.check_pgvector_contract(broken)
 
     def test_centroid_cost_matrix_is_required_and_package_bound(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())

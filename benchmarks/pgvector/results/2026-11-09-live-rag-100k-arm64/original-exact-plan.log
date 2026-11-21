@@ -1,0 +1,166 @@
+BEGIN
+SET
+SET
+SET
+SET
+[
+  {
+    "Plan": {
+      "Node Type": "Limit",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 53801.96,
+      "Total Cost": 53801.96,
+      "Plan Rows": 1,
+      "Plan Width": 16,
+      "Disabled": false,
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 53801.96,
+          "Total Cost": 53801.96,
+          "Plan Rows": 1,
+          "Plan Width": 16,
+          "Disabled": false,
+          "Sort Key": ["(((c.embedding)::vector(384) <=> '[0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1]'::vector))"],
+          "Plans": [
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Startup Cost": 4518.29,
+              "Total Cost": 53801.95,
+              "Plan Rows": 1,
+              "Plan Width": 16,
+              "Disabled": false,
+              "Inner Unique": true,
+              "Join Filter": "((c.embedding = (e.embedding)::vector) AND (c.id = a.document_id) AND (e.incarnation = c.incarnation) AND (e.revision = c.revision) AND (e.chunk_version = c.chunk_version) AND (d.body = c.body))",
+              "Plans": [
+                {
+                  "Node Type": "Hash Join",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Startup Cost": 4518.29,
+                  "Total Cost": 27270.57,
+                  "Plan Rows": 1,
+                  "Plan Width": 1676,
+                  "Disabled": false,
+                  "Inner Unique": false,
+                  "Hash Cond": "((e.document_id = a.document_id) AND (e.incarnation = d.incarnation) AND (e.revision = d.revision) AND (e.chunk_version = d.chunk_version))",
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "results",
+                      "Alias": "e",
+                      "Startup Cost": 0.00,
+                      "Total Cost": 21252.12,
+                      "Plan Rows": 100010,
+                      "Plan Width": 1597,
+                      "Disabled": false,
+                      "Filter": "(model_version = 'model-v1'::text)"
+                    },
+                    {
+                      "Node Type": "Hash",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 4496.89,
+                      "Total Cost": 4496.89,
+                      "Plan Rows": 1070,
+                      "Plan Width": 79,
+                      "Disabled": false,
+                      "Plans": [
+                        {
+                          "Node Type": "Hash Join",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Join Type": "Inner",
+                          "Startup Cost": 1900.38,
+                          "Total Cost": 4496.89,
+                          "Plan Rows": 1070,
+                          "Plan Width": 79,
+                          "Disabled": false,
+                          "Inner Unique": true,
+                          "Hash Cond": "(d.id = a.document_id)",
+                          "Plans": [
+                            {
+                              "Node Type": "Seq Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "documents",
+                              "Alias": "d",
+                              "Startup Cost": 0.00,
+                              "Total Cost": 2334.00,
+                              "Plan Rows": 100000,
+                              "Plan Width": 63,
+                              "Disabled": false,
+                              "Filter": "published"
+                            },
+                            {
+                              "Node Type": "Hash",
+                              "Parent Relationship": "Inner",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Startup Cost": 1887.00,
+                              "Total Cost": 1887.00,
+                              "Plan Rows": 1070,
+                              "Plan Width": 16,
+                              "Disabled": false,
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Relation Name": "access",
+                                  "Alias": "a",
+                                  "Startup Cost": 0.00,
+                                  "Total Cost": 1887.00,
+                                  "Plan Rows": 1070,
+                                  "Plan Width": 16,
+                                  "Disabled": false,
+                                  "Filter": "(visible AND (tenant_id = 2))"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "application",
+                  "Alias": "c",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 26502.12,
+                  "Plan Rows": 1170,
+                  "Plan Width": 1624,
+                  "Disabled": false,
+                  "Filter": "((model_version = 'model-v1'::text) AND (tenant_id = 2))"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]
+ROLLBACK
