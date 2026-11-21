@@ -328,6 +328,17 @@ pub(crate) fn execute_manual_refresh(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<ManualRefreshResult, PgTrickleError> {
+    // Level-triggered recovery closes the gap when DDL notification was
+    // missed. A retention catch-up runs inside the prepared detach protocol:
+    // the snapshot is intentionally updated only after that cut completes.
+    let mut checked = st.clone();
+    if !refresh::is_retention_catchup()
+        && crate::catalog::partition_snapshot_changed(st.pgt_id)?
+    {
+        StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;
+        checked.needs_reinit = true;
+    }
+    let st = &checked;
     crate::dvm::retention::ensure_retention_capture(st.pgt_id)?;
     if matches!(st.status, StStatus::Suspended | StStatus::Error) {
         return Err(PgTrickleError::InvalidArgument(format!(

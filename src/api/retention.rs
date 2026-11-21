@@ -117,9 +117,10 @@ fn set_policy(
     let key = source_column.filter(|key| !key.is_empty()).ok_or_else(|| {
         PgTrickleError::InvalidArgument("retention requires a source column".into())
     })?;
-    let cutoff = cutoff.filter(|cutoff| !cutoff.is_empty()).ok_or_else(|| {
-        PgTrickleError::InvalidArgument("retention requires an explicit cutoff".into())
-    })?;
+    // Omitted cutoffs make partition removal itself the retention signal.
+    // Use a typed placeholder in persisted state (v1) for compatibility;
+    // alignment and the live/sealed boundary remain independently validated.
+    let supplied_cutoff = cutoff.filter(|cutoff| !cutoff.is_empty());
     let source_oid = retention::retention_source(&st)?;
     let candidate = crate::refresh::with_stream_owner(&st, || {
         let tree = crate::dvm::parser::parse_defining_query(&st.defining_query)?;
@@ -131,7 +132,18 @@ fn set_policy(
             .map_err(retention_eligibility_error)?;
         Ok(candidate)
     })?;
-    let cutoff = retention::parse_retention_cutoff(candidate.source_type_oid, cutoff)?;
+    let implicit_trim_cutoff = match candidate.source_type_oid {
+        1082 => "2000-01-01",
+        1114 => "2000-01-01 00:00:00",
+        1184 => "2000-01-01 00:00:00+00",
+        _ => return Err(PgTrickleError::InvalidArgument("unsupported retention key type".into())),
+    };
+    let cutoff_text = match supplied_cutoff {
+        Some(value) => value,
+        None => implicit_trim_cutoff,
+    };
+    let cutoff = retention::parse_retention_cutoff(candidate.source_type_oid, cutoff_text)?;
+    let cutoff_unbounded = supplied_cutoff.is_none();
     let query_hash = crate::catalog::compute_defining_query_hash(&st.defining_query);
     let previous = load_policy(st.pgt_id)?;
     if previous
@@ -146,6 +158,7 @@ fn set_policy(
     let state = if let Some((previous_source, mut previous)) = previous {
         if !previous.sealed.is_empty() {
             if previous.mode != mode
+                || previous.cutoff_unbounded != cutoff_unbounded
                 || previous_source != source_oid
                 || previous.candidate != candidate
                 || previous.query_hash != query_hash
@@ -162,6 +175,7 @@ fn set_policy(
             RetentionState {
                 version: 1,
                 mode,
+                cutoff_unbounded,
                 candidate,
                 cutoff,
                 query_hash,
@@ -173,6 +187,7 @@ fn set_policy(
         RetentionState {
             version: 1,
             mode,
+            cutoff_unbounded,
             candidate,
             cutoff,
             query_hash,
@@ -287,7 +302,7 @@ fn create_stream_table_with_retention(
     query: &str,
     policy: &str,
     source_column: &str,
-    cutoff: &str,
+    cutoff: default!(Option<&str>, "NULL"),
     schedule: default!(Option<&str>, "'calculated'"),
 ) {
     let result = (|| -> Result<(), PgTrickleError> {
@@ -309,7 +324,7 @@ fn create_stream_table_with_retention(
             entry_context: Some(security_context::EntryContext::SecurityDefiner),
             ..Default::default()
         })?;
-        set_policy(name, policy, Some(source_column), Some(cutoff))
+        set_policy(name, policy, Some(source_column), cutoff)
     })();
     if let Err(error) = result {
         super::raise_error_with_context(error);
@@ -351,7 +366,9 @@ fn get_stream_table_partition_retention(name: &str) -> pgrx::JsonB {
         let mut result = serde_json::json!({
             "enabled": true, "policy": state.mode, "source": source_name,
             "source_column": state.candidate.source_column, "group_column": state.candidate.output_column,
-            "bucket": state.candidate.bucket, "cutoff": display_bound(state.cutoff)?, "sealed_ranges": ranges,
+            "bucket": state.candidate.bucket,
+            "cutoff": if state.cutoff_unbounded { None } else { Some(display_bound(state.cutoff)?) },
+            "sealed_ranges": ranges,
         });
         if let Some(pending) = state.pending {
             result["pending_detach"] = serde_json::json!({

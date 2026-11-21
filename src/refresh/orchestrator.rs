@@ -517,6 +517,19 @@ pub fn execute_reinitialize_refresh(st: &StreamTableMeta) -> Result<(i64, i64), 
     // Replace the inlined query and all query-derived state in this same
     // transaction after the target reflects the current source definitions.
     let updated = crate::api::reinit_rewrite_if_needed(st)?;
+    // A missed partition DDL notification is recovered through this protected
+    // FULL rebuild. Only after the new output is materialized may its durable
+    // source ancestry be promoted to the observed committed partition tree.
+    // Otherwise every subsequent refresh would repeat the reinitialization.
+    for dep in crate::catalog::StDependency::get_for_st(st.pgt_id)? {
+        if dep.source_type == "TABLE"
+            && dep.column_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.get("partition_descendant_oids").is_some()
+            })
+        {
+            crate::catalog::store_column_snapshot_for_pgt_id(st.pgt_id, dep.source_relid)?;
+        }
+    }
     let _window_plan = crate::window_state::prepare_for_protected_refresh(&updated)?;
     // REL-101-1: rebuild private set-operation state against the reinitialized
     // (possibly rewritten) query in the same transaction. Gated on the cheap

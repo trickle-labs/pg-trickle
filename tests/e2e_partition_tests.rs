@@ -2602,6 +2602,165 @@ async fn test_retention_scoped_capture_preserves_duplicate_occurrences() {
     assert_eq!(scoped, expected);
 }
 
+
+
+
+#[tokio::test]
+async fn test_trim_without_cutoff_deletes_an_aligned_partition_independent_of_age() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE unbounded_trim_source (id integer NOT NULL, d date NOT NULL, amount integer NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE unbounded_trim_earlier PARTITION OF unbounded_trim_source FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE unbounded_trim_later PARTITION OF unbounded_trim_source FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO unbounded_trim_source VALUES (1,'2025-06-01',5),(2,'2026-06-01',10)").await;
+    let query = "SELECT d, COUNT(*) AS n, SUM(amount) AS total FROM unbounded_trim_source GROUP BY d";
+    db.create_st("unbounded_trim_st", query, "1h", "DIFFERENTIAL").await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('unbounded_trim_st','TRIM','d')").await;
+    let policy: serde_json::Value = db.query_scalar(
+        "SELECT pgtrickle.get_stream_table_partition_retention('unbounded_trim_st')",
+    ).await;
+    assert!(policy["cutoff"].is_null(), "source-driven TRIM has no cutoff: {policy}");
+    // Drop the later partition, above the internal type placeholder and above
+    // any traditional retention cutoff. Its groups still need to vanish.
+    db.execute("DROP TABLE unbounded_trim_later").await;
+    db.assert_st_matches_query("unbounded_trim_st", query).await;
+    let groups: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT d::text, total FROM unbounded_trim_st ORDER BY d",
+    ).fetch_all(&db.pool).await.expect("read remaining groups");
+    assert_eq!(groups, vec![("2025-06-01".into(), 5)]);
+    let needs_reinit: bool = db.query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'unbounded_trim_st'",
+    ).await;
+    assert!(!needs_reinit, "source-driven local delete avoids reinitialization");
+}
+
+#[tokio::test]
+async fn test_retain_without_cutoff_seals_source_driven_removal_and_rejects_reattach() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE unbounded_retain_source (id integer NOT NULL, d date NOT NULL, amount integer NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE unbounded_retain_earlier PARTITION OF unbounded_retain_source FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE unbounded_retain_later PARTITION OF unbounded_retain_source FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO unbounded_retain_source VALUES (1,'2025-06-01',5),(2,'2026-06-01',10)").await;
+    let query = "SELECT d, COUNT(*) AS n, SUM(amount) AS total FROM unbounded_retain_source GROUP BY d";
+    db.create_st("unbounded_retain_st", query, "1h", "DIFFERENTIAL").await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('unbounded_retain_st','RETAIN','d')").await;
+    db.execute("ALTER TABLE unbounded_retain_source DETACH PARTITION unbounded_retain_later").await;
+    let retained: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT d::text, total FROM unbounded_retain_st ORDER BY d",
+    ).fetch_all(&db.pool).await.expect("read retained groups");
+    assert_eq!(retained, vec![
+        ("2025-06-01".into(), 5), ("2026-06-01".into(), 10),
+    ]);
+    let policy: serde_json::Value = db.query_scalar(
+        "SELECT pgtrickle.get_stream_table_partition_retention('unbounded_retain_st')",
+    ).await;
+    assert!(policy["cutoff"].is_null(), "source-driven RETAIN has no cutoff");
+    assert_eq!(policy["sealed_ranges"].as_array().map(Vec::len), Some(1));
+    let error = db.try_execute(
+        "ALTER TABLE unbounded_retain_source ATTACH PARTITION unbounded_retain_later FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    ).await.expect_err("must not reopen sealed retained history");
+    assert!(error.to_string().contains("partition attach blocked"), "{error}");
+}
+
+#[tokio::test]
+async fn test_partition_snapshot_reconciliation_recovers_missed_drop_notification() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE reconcile_src (id int NOT NULL, d date NOT NULL, amount int NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE reconcile_old PARTITION OF reconcile_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE reconcile_live PARTITION OF reconcile_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO reconcile_src VALUES (1,'2025-06-01',9),(2,'2026-06-01',12)").await;
+    let query = "SELECT d, sum(amount) AS total, count(*) AS n FROM reconcile_src GROUP BY d";
+    db.create_st("reconcile_st", query, "1h", "DIFFERENTIAL").await;
+
+    // Simulate a stale persisted ancestry after a restore / missed event hook.
+    // No needs_reinit bit is set; the next refresh must notice the discrepancy.
+    db.execute("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_descendant_oids}', '[99999999]'::jsonb) WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'reconcile_st') AND source_relid = 'reconcile_src'::regclass").await;
+    db.refresh_st_with_retry("reconcile_st").await;
+    db.assert_st_matches_query("reconcile_st", query).await;
+    let action: String = db.query_scalar(
+        "SELECT h.action FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'reconcile_st' ORDER BY h.refresh_id DESC LIMIT 1",
+    ).await;
+    assert_eq!(action, "REINITIALIZE");
+    let reinit: bool = db.query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'reconcile_st'",
+    ).await;
+    assert!(!reinit, "successful protected rebuild clears the flag");
+
+    // OIDs can be identical while bounds change (for example after a restore).
+    // The persisted bound-node snapshot must be reconciled as well.
+    db.execute("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_descendants,0,bound_node}', to_jsonb('invalid_saved_bound'::text)) WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'reconcile_st') AND source_relid = 'reconcile_src'::regclass").await;
+    db.refresh_st_with_retry("reconcile_st").await;
+    db.assert_st_matches_query("reconcile_st", query).await;
+    let bound_action: String = db.query_scalar(
+        "SELECT h.action FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'reconcile_st' ORDER BY h.refresh_id DESC LIMIT 1",
+    ).await;
+    assert_eq!(bound_action, "REINITIALIZE");
+}
+
+#[tokio::test]
+async fn test_retention_aligned_day_key_allows_other_time_bucket_constant_and_max() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE aligned_usage (request_id text NOT NULL, event_day date NOT NULL, occurred_at timestamptz NOT NULL, meter text NOT NULL, scope_path text NOT NULL, value numeric NOT NULL, PRIMARY KEY (request_id, event_day)) PARTITION BY RANGE (event_day)").await;
+    db.execute("CREATE TABLE aligned_usage_old PARTITION OF aligned_usage FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE aligned_usage_live PARTITION OF aligned_usage FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO aligned_usage VALUES ('1','2025-12-31','2025-12-31 22:12+00','cpu','a',2),('2','2025-12-31','2025-12-31 22:20+00','cpu','a',7),('3','2026-01-02','2026-01-02 03:10+00','cpu','a',3),('4','2026-01-02','2026-01-02 03:40+00','cpu','a',5)").await;
+    let query = "SELECT meter, scope_path, event_day, date_trunc('hour', occurred_at AT TIME ZONE 'UTC') AS hour, 'x'::text AS tag, SUM(value) AS quantity, COUNT(*) AS events, MAX(value) AS peak FROM aligned_usage GROUP BY meter, scope_path, event_day, date_trunc('hour', occurred_at AT TIME ZONE 'UTC')";
+    db.create_st("aligned_hourly", query, "1h", "DIFFERENTIAL").await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('aligned_hourly', 'TRIM', 'event_day', '2026-01-01')").await;
+
+    // CDC catch-up must preserve pending live rows even as the old partition goes.
+    db.execute("INSERT INTO aligned_usage VALUES ('5','2026-01-02','2026-01-02 03:52+00','cpu','a',8)").await;
+    db.execute("ALTER TABLE aligned_usage DETACH PARTITION aligned_usage_old").await;
+    db.assert_st_matches_query("aligned_hourly", query).await;
+    let rows: Vec<(String, String, String, i64, String)> = sqlx::query_as(
+        "SELECT event_day::text, hour::text, tag, events, quantity::text FROM aligned_hourly ORDER BY event_day, hour",
+    ).fetch_all(&db.pool).await.expect("read aligned groups");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "2026-01-02");
+    assert_eq!(rows[0].2, "x");
+    assert_eq!(rows[0].3, 3);
+    assert_eq!(rows[0].4, "16");
+    let needs_reinit: bool = db.query_scalar("SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'aligned_hourly'").await;
+    assert!(!needs_reinit, "aligned drop must not rebuild the whole stream");
+    let (action, status): (String, String) = sqlx::query_as(
+        "SELECT h.action, h.status FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'aligned_hourly' ORDER BY h.refresh_id DESC LIMIT 1",
+    ).fetch_one(&db.pool).await.expect("read retention refresh history");
+    assert_eq!((action.as_str(), status.as_str()), ("DIFFERENTIAL", "COMPLETED"));
+}
+
+#[tokio::test]
+async fn test_retain_aligned_day_key_preserves_expired_computed_groups() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE aligned_retain_src (id int NOT NULL, event_day date NOT NULL, occurred_at timestamptz NOT NULL, amount numeric NOT NULL, PRIMARY KEY (id, event_day)) PARTITION BY RANGE (event_day)").await;
+    db.execute("CREATE TABLE aligned_retain_old PARTITION OF aligned_retain_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE aligned_retain_live PARTITION OF aligned_retain_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO aligned_retain_src VALUES (1,'2025-06-01','2025-06-01 13:12+00',8),(2,'2026-06-01','2026-06-01 14:13+00',12)").await;
+    let query = "SELECT event_day, date_trunc('hour', occurred_at AT TIME ZONE 'UTC') AS hour, 'fixed'::text AS tag, SUM(amount) AS total, MAX(amount) AS peak FROM aligned_retain_src GROUP BY event_day, date_trunc('hour', occurred_at AT TIME ZONE 'UTC')";
+    db.create_st("aligned_retained", query, "1h", "DIFFERENTIAL").await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('aligned_retained', 'RETAIN', 'event_day', '2026-01-01')").await;
+    db.execute("DROP TABLE aligned_retain_old").await;
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT event_day::text, total::text, tag FROM aligned_retained ORDER BY event_day",
+    ).fetch_all(&db.pool).await.expect("read preserved groups");
+    assert_eq!(rows, vec![
+        ("2025-06-01".into(), "8".into(), "fixed".into()),
+        ("2026-06-01".into(), "12".into(), "fixed".into()),
+    ]);
+    let retention: serde_json::Value = db.query_scalar(
+        "SELECT pgtrickle.get_stream_table_partition_retention('aligned_retained')",
+    ).await;
+    assert_eq!(retention["sealed_ranges"].as_array().map(Vec::len), Some(1));
+}
+
 #[tokio::test]
 async fn test_retention_trim_requires_unique_index_for_keyed_stream() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
@@ -5769,14 +5928,14 @@ async fn test_retention_eligibility_diagnostics_report_construct_and_contract_hi
         .await;
     assert_eq!(policy["enabled"], true);
 
-    let cases = [
+    // The original issue #1458 examples are now valid: a projected exact
+    // partition key proves locality regardless of unrelated group expressions
+    // and harmless SELECT constants.
+    let accepted_cases = [
         (
             "retention_diag_constant",
             "SELECT 'x'::text AS tag, event_day, meter, sum(amount) AS total, count(*) AS n
              FROM retention_diag_ev GROUP BY event_day, meter",
-            "select-list item",
-            "tag",
-            "plain column reference",
         ),
         (
             "retention_diag_other_hour",
@@ -5785,9 +5944,33 @@ async fn test_retention_eligibility_diagnostics_report_construct_and_contract_hi
                     sum(amount) AS total, count(*) AS n
              FROM retention_diag_ev
              GROUP BY event_day, meter, date_trunc('hour', occurred_at AT TIME ZONE 'UTC')",
-            "grouping key",
-            "occurred_at",
-            "partition key \"event_day\"",
+        ),
+    ];
+    for (name, query) in accepted_cases {
+        sqlx::query(
+            "SELECT pgtrickle.create_stream_table_with_retention(
+                $1, $2, 'TRIM', 'event_day', '2026-01-01', '1h')",
+        )
+        .bind(name)
+        .bind(query)
+        .execute(&db.pool)
+        .await
+        .expect("partition-aligned retention query must be admitted");
+        db.assert_st_matches_query(name, query).await;
+    }
+
+    // A different timestamp's hour bucket cannot *replace* the partition
+    // key; otherwise a group could contain rows from different partitions.
+    let cases = [
+        (
+            "retention_diag_missing_key",
+            "SELECT meter, date_trunc('hour', occurred_at AT TIME ZONE 'UTC') AS hour,
+                    count(*) AS n
+             FROM retention_diag_ev
+             GROUP BY meter, date_trunc('hour', occurred_at AT TIME ZONE 'UTC')",
+            "GROUP BY and select list",
+            "event_day",
+            "plain column",
         ),
     ];
     for (name, query, context, expression, rule) in cases {
