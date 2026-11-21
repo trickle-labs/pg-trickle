@@ -3827,7 +3827,7 @@ fn execute_scheduled_refresh(
     // this ST and advanced its frontier.  Using the stale frontier would
     // cause the differential refresh to re-process already-consumed
     // change buffer rows, producing incorrect aggregate deltas.
-    let st = match load_st_by_id(st.pgt_id) {
+    let mut st = match load_st_by_id(st.pgt_id) {
         Some(fresh) => fresh,
         None => {
             log!(
@@ -3837,6 +3837,22 @@ fn execute_scheduled_refresh(
             return RefreshOutcome::PermanentFailure;
         }
     };
+    // Reconcile after taking the catalog row lock, rather than trust a DDL
+    // event hook that might have been missed around backup/restore.
+    match crate::catalog::partition_snapshot_changed(st.pgt_id) {
+        Ok(true) => {
+            if let Err(e) = StreamTableMeta::mark_for_reinitialize(st.pgt_id) {
+                pgrx::warning!("pg_trickle: cannot recover partition ancestry: {e}");
+                return RefreshOutcome::RetryableFailure;
+            }
+            st.needs_reinit = true;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            pgrx::warning!("pg_trickle: cannot verify partition ancestry: {e}");
+            return RefreshOutcome::RetryableFailure;
+        }
+    }
     let st = &st;
 
     // DDL can suspend a stream after dispatch but before this row lock.
