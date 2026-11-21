@@ -1,0 +1,86 @@
+   Compiling plotters-svg v0.3.7
+   Compiling bollard v0.20.2
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-resume-1394)
+   Compiling docker_credential v1.3.2
+   Compiling ciborium-ll v0.2.2
+   Compiling astral-tokio-tar v0.6.2
+   Compiling cargo_metadata v0.18.1
+   Compiling futures v0.3.32
+   Compiling sqlx-core v0.9.0
+   Compiling parse-display v0.9.1
+   Compiling croner v4.0.2
+   Compiling serde_with v3.18.0
+   Compiling rayon-core v1.13.0
+   Compiling cargo_toml v0.22.3
+   Compiling sqlx-macros-core v0.9.0
+   Compiling ferroid v2.0.0
+   Compiling itertools v0.14.0
+   Compiling itertools v0.10.5
+   Compiling hkdf v0.13.0
+   Compiling atoi v2.0.0
+   Compiling lru v0.19.0
+   Compiling etcetera v0.11.0
+   Compiling wait-timeout v0.2.1
+   Compiling cast v0.3.0
+   Compiling bit-vec v0.8.0
+   Compiling xxhash-rust v0.8.19
+   Compiling quick-error v1.2.3
+   Compiling rusty-fork v0.3.1
+   Compiling bit-set v0.8.0
+   Compiling criterion-plot v0.5.0
+   Compiling testcontainers v0.27.3
+   Compiling sqlx-postgres v0.9.0
+   Compiling sqlx-macros v0.9.0
+   Compiling pgrx-pg-config v0.18.0
+   Compiling rayon v1.12.0
+   Compiling clap-cargo v0.14.1
+   Compiling ciborium v0.2.2
+   Compiling plotters v0.3.7
+   Compiling rand_xorshift v0.4.0
+   Compiling sysinfo v0.34.2
+   Compiling tinytemplate v1.2.1
+   Compiling is-terminal v0.4.17
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling unarray v0.1.4
+   Compiling proptest v1.11.0
+   Compiling criterion v0.5.1
+   Compiling pgrx-tests v0.18.0
+   Compiling sqlx v0.9.0
+   Compiling testcontainers-modules v0.15.0
+   Compiling regex-lite v0.1.9
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 01s
+     Running tests/e2e_pgvector_tests.rs (target/debug/deps/e2e_pgvector_tests-0b480014c9ba917b)
+
+running 1 test
+SET
+hnsw: 120 committed writes, refreshes and indexed reads in 32.981035167s
+REINDEX
+ finish_ann_maintenance 
+------------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+SET
+test test_ann_supervisor_sustains_reads_and_refresh_during_concurrent_reindex has been running for over 60 seconds
+ivfflat: 120 committed writes, refreshes and indexed reads in 32.776654334s
+REINDEX
+ finish_ann_maintenance 
+------------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+test test_ann_supervisor_sustains_reads_and_refresh_during_concurrent_reindex ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 151 filtered out; finished in 90.35s
+

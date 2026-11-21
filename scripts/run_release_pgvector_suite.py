@@ -23,6 +23,12 @@ def main() -> int:
     command.extend(["-E", expression])
     env = os.environ.copy()
     env["PGVECTOR_EXPECTED_VERSION"] = version
+    if env.get("PGT_RELEASE_CANDIDATE_COMMIT"):
+        operator_root = Path(env["PGT_EXTENSION_DIR"])
+        for name in ("ann_maintenance_supervisor.py", "ann_maintenance_worker.sql"):
+            if not (operator_root / "scripts" / name).is_file():
+                raise ValueError(f"candidate package is missing scripts/{name}")
+        env["PGT_ANN_OPERATOR_ROOT"] = str(operator_root)
     return subprocess.run(command, env=env, check=False).returncode
 
 

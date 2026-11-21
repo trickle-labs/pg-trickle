@@ -4,6 +4,7 @@
 import json
 import re
 
+import check_ann_release_payload
 import v0_108_3_release_gate as prior
 
 
@@ -57,7 +58,13 @@ PGVECTOR_CASES = {
         "test_distance_subscription_concurrent_commit_and_rollback",
         "test_distance_subscription_trigger_concurrent_commit_and_rollback",
         "test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
+        "test_ann_supervisor_allows_restricted_reads_and_writes_during_reindex",
         "test_ann_worker_records_lock_timeout_and_can_retry",
+        "test_ann_worker_retries_after_restart_during_concurrent_reindex",
+        "test_ann_request_listing_filters_privileges_and_pages",
+        "test_ann_supervisor_processes_authorized_request",
+        "test_ann_supervisor_reconnects_after_database_restart",
+        "test_ann_supervisor_bounds_repeated_failures",
     )
 } | {
     "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components",
@@ -138,6 +145,16 @@ def check_pgvector_upgrade_script(script: str) -> None:
         "upgrade_vector_st_embedding_idx",
     ):
         prior.shared.require(marker in script, f"published vector upgrade check is missing {marker}")
+
+
+def check_ann_packaging_workflow(workflow: str) -> None:
+    tar_section = workflow.partition("name: Create archive (tar.gz)")[2].partition("name: Archive full SQL")[0]
+    zip_section = workflow.partition("name: Create archive (zip)")[2].partition("name: Verify packaged ANN operator files")[0]
+    for path in check_ann_release_payload.FILES:
+        name = path.rsplit("/", 1)[-1]
+        prior.shared.require(name in tar_section and name in zip_section, f"release archives must include {path}")
+    prior.shared.require("run: python scripts/check_ann_release_payload.py" in workflow,
+                         "release archives must verify the packaged ANN operator files")
 
 
 def check_retirement_contract(contract: dict) -> None:
@@ -248,6 +265,7 @@ def main() -> None:
     check_retirement_contract(contract)
     check_retention_contract(contract)
     check_pgvector_contract(contract)
+    check_ann_packaging_workflow((prior.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
     check_subscription_scale_contract(contract)
     check_pgvector_upgrade_script((prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8"))
     prior.main()
