@@ -207,14 +207,16 @@ impl RetentionState {
             {
                 return Err(RetentionStateError::InvalidState);
             }
-            if !range_is_expired(
+            // A TRIM cut is source-driven: its range need not be below any
+            // application cutoff. RETAIN alone requires a prior sealed horizon.
+            let expired = range_is_expired(
                 &self.candidate,
                 pending.range.lower,
                 pending.range.upper,
                 self.cutoff,
             )
-            .map_err(RetentionStateError::InvalidRange)?
-            {
+            .map_err(RetentionStateError::InvalidRange)?;
+            if self.mode == RetentionMode::Retain && !expired {
                 return Err(RetentionStateError::NotExpired);
             }
             if self.sealed.iter().any(|old| {
@@ -619,7 +621,7 @@ pub(crate) fn prepare_concurrent_retention_detaches(
             }
             Err(error) => return Err(error),
         };
-        if partition.is_none_or(|partition| !partition.expired) {
+        if partition.is_none_or(|partition| state.mode == RetentionMode::Retain && !partition.expired) {
             if state.mode == RetentionMode::Trim {
                 continue;
             }
@@ -843,7 +845,7 @@ pub(crate) fn prepare_automatic_detaches(
             }
             Err(error) => return Err(error),
         };
-        if partition.is_none_or(|partition| !partition.expired) {
+        if partition.is_none_or(|partition| state.mode == RetentionMode::Retain && !partition.expired) {
             if state.mode == RetentionMode::Trim {
                 continue;
             }
@@ -1531,7 +1533,7 @@ pub fn prepare_retention_cut(
                     "retention target is not an aligned source partition".into(),
                 )
             })?;
-    if !partition.expired {
+    if state.mode == RetentionMode::Retain && !partition.expired {
         return Err(PgTrickleError::InvalidArgument(
             "partition is not wholly below the retention cutoff".into(),
         ));
