@@ -1425,7 +1425,9 @@ fn write_dag_results_json(results: &[DagBenchResult]) {
         .unwrap_or_else(|_| "target/dag_bench_results".to_string());
     let _ = std::fs::create_dir_all(&out_dir);
 
-    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H%M%S");
+    let timestamp = jiff::Timestamp::now()
+        .strftime("%Y-%m-%dT%H%M%S")
+        .to_string();
     let path = format!("{out_dir}/{timestamp}.json");
 
     let mut entries = Vec::new();

@@ -1555,7 +1555,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             // If fanout is disabled we fall back to the per-group per-member
             // path used in earlier versions.
             let mut failed_poll_sts = HashSet::new();
-            let fanout_cache: Option<std::collections::HashSet<i64>> =
+            let fanout_cache: Option<HashMap<i64, bool>> =
                 if !all_groups_load_deferred && config::pg_trickle_enable_change_buffer_fanout() {
                     // Collect all active STs referenced in the consistency groups.
                     let all_pgt_ids: Vec<i64> = groups
@@ -1581,7 +1581,11 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     match batched_has_source_changes(&sts) {
                         Ok((changes, failed)) => {
                             failed_poll_sts = failed;
-                            Some(changes)
+                            Some(
+                                sts.into_iter()
+                                    .map(|st| (st.pgt_id, changes.contains(&st.pgt_id)))
+                                    .collect(),
+                            )
                         }
                         Err(e) => {
                             warning!("pg_trickle: failed to detect source changes: {}", e);
@@ -1612,27 +1616,27 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 {
                     continue;
                 }
-                // PERF-1: Use the per-tick fanout cache when available; otherwise
-                // fall back to per-member has_table_source_changes calls (legacy path).
+                // A missing snapshot means the ST was not due when the batch
+                // query ran; refresh_single_st may find it due later this tick.
+                // Leave it uncached so it checks the live change buffer then.
                 let initial_table_changes: HashMap<i64, bool> = match &fanout_cache {
                     Some(cache) => group
                         .members
                         .iter()
-                        .filter_map(|member| {
-                            if let NodeId::StreamTable(id) = member {
-                                Some((*id, cache.contains(id)))
-                            } else {
-                                None
+                        .filter_map(|member| match member {
+                            NodeId::StreamTable(id) => {
+                                cache.get(id).map(|has_changes| (*id, *has_changes))
                             }
+                            _ => None,
                         })
                         .collect(),
                     None => group
                         .members
                         .iter()
                         .filter_map(|member| match member {
-                            NodeId::StreamTable(id) => load_st_by_id(*id).map(|st| {
+                            NodeId::StreamTable(id) => load_st_by_id(*id).and_then(|st| {
                                 let due = check_schedule(&st, dag_ref) || st.needs_reinit;
-                                (*id, due && has_table_source_changes(&st))
+                                due.then(|| (*id, has_table_source_changes(&st)))
                             }),
                             _ => None,
                         })

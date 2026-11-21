@@ -42,7 +42,9 @@ def postgres_metrics(args):
     # The frozen worker-health checks deliberately restart PostgreSQL.
     for attempt in range(5):
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)
-        if not postgres_is_restarting(result) or attempt == 4:
+        # Docker can return a signal exit with no streams if the container restarts mid-exec.
+        silent_exit = result.returncode != 0 and not result.stdout and not result.stderr
+        if not (postgres_is_restarting(result) or silent_exit) or attempt == 4:
             return result
         time.sleep(1)
 
@@ -66,6 +68,38 @@ def capture_logs(name, path, previous=None):
     return follower, stream
 
 
+def replay_logs(name, path):
+    replay_path = path.with_suffix(path.suffix + ".replay")
+    try:
+        with replay_path.open("w") as stream:
+            replay = subprocess.Popen(["docker", "logs", "--timestamps", name],
+                                      stdout=stream, stderr=subprocess.STDOUT)
+            try:
+                code = replay.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                replay.terminate()
+                replay.wait(timeout=15)
+                raise RuntimeError("container log replay did not finish")
+        if code != 0:
+            raise RuntimeError(f"container log replay failed: {code}")
+        replay_path.replace(path)
+    finally:
+        replay_path.unlink(missing_ok=True)
+
+
+def finish_log_capture(name, path, follower, stream):
+    try:
+        code = follower.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        follower.terminate()
+        follower.wait(timeout=15)
+        raise RuntimeError("container log capture did not finish")
+    finally:
+        stream.close()
+    if code != 0:
+        replay_logs(name, path)
+
+
 def disk_metrics(args):
     # Relation files and pg_internal.init can disappear during PostgreSQL
     # maintenance/restarts while du walks the data directory. Retry only these
@@ -77,8 +111,12 @@ def disk_metrics(args):
     for attempt in range(5):
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)
         transient = result.stderr.splitlines()
-        if (result.returncode == 0 or not transient or attempt == 4
-                or not all(re.fullmatch(vanished, line) for line in transient)):
+        # A container restart can kill docker exec without producing output.
+        silent_exit = result.returncode != 0 and not result.stdout and not result.stderr
+        if (result.returncode == 0 or attempt == 4
+                or not (silent_exit or transient and all(
+                    re.fullmatch(vanished, line) for line in transient
+                ))):
             return result
         time.sleep(0.2)
 
@@ -113,17 +151,8 @@ def main(image, run_name, profile_cases=None):
             log_followers = {}
 
             def finish_logs():
-                for follower, stream in log_followers.values():
-                    try:
-                        code = follower.wait(timeout=30)
-                    except subprocess.TimeoutExpired:
-                        follower.terminate()
-                        follower.wait(timeout=15)
-                        raise RuntimeError("container log capture did not finish")
-                    finally:
-                        stream.close()
-                    if code != 0:
-                        raise RuntimeError(f"container log capture failed: {code}")
+                for name, (follower, stream) in log_followers.items():
+                    finish_log_capture(name, run / f"{name}-full.log", follower, stream)
 
             cleanup.callback(finish_logs)
 
@@ -178,7 +207,13 @@ def main(image, run_name, profile_cases=None):
                             capture_output=True, text=True, timeout=15)
                         if container_has_exited(state.returncode, state.stdout, state.stderr):
                             continue
-                        raise RuntimeError(f"resource measurement failed: {measured.stderr} {disk.stderr}")
+                        raise RuntimeError(
+                            "resource measurement failed: "
+                            f"PostgreSQL metrics rc={measured.returncode} "
+                            f"stdout={measured.stdout!r} stderr={measured.stderr!r}; "
+                            f"PGDATA size rc={disk.returncode} "
+                            f"stdout={disk.stdout!r} stderr={disk.stderr!r}"
+                        )
                     if measured.returncode:
                         now = time.monotonic()
                         since = postgres_unavailable_since.setdefault(name, now)

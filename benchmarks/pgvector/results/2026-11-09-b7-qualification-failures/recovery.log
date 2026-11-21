@@ -1,0 +1,64 @@
+Full E2E run id: full-e2e-437769-1794243917
+[1m[92m   Compiling[0m pg_trickle v0.109.0 (/home/runner/work/pg-trickle/pg-trickle)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 39.18s
+────────────
+[32;1m Nextest run[0m ID [1m9abeeea3-c732-4744-a8cc-a890c0c55870[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m13[0m tests across [1m3[0m binaries ([1m45[0m tests [33;1mskipped[0m)
+{"type":"suite","event":"started","test_count":1,"nextest":{"crate":"pg_trickle","test_binary":"e2e_dvm_failpoint_tests","kind":"test"}}
+{"type":"test","event":"started","name":"pg_trickle::e2e_dvm_failpoint_tests$test_dvm_failpoint_preserves_last_committed_result_and_recovers"}
+[32;1m        PASS[0m [  28.400s] ( 1/13) [35;1mpg_trickle::e2e_dvm_failpoint_tests[0m [34;1mtest_dvm_failpoint_preserves_last_committed_result_and_recovers[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_dvm_failpoint_tests$test_dvm_failpoint_preserves_last_committed_result_and_recovers","exec_time":28.400287945}
+{"type":"suite","event":"ok","passed":1,"failed":0,"ignored":0,"measured":0,"filtered_out":15,"exec_time":28.400287945,"nextest":{"crate":"pg_trickle","test_binary":"e2e_dvm_failpoint_tests","kind":"test"}}
+{"type":"suite","event":"started","test_count":9,"nextest":{"crate":"pg_trickle","test_binary":"e2e_failure_recovery_tests","kind":"test"}}
+{"type":"test","event":"started","name":"pg_trickle::e2e_failure_recovery_tests$test_cancel_backend_during_refresh_recovers"}
+[32;1m        PASS[0m [  17.139s] ( 2/13) [35;1mpg_trickle::e2e_failure_recovery_tests[0m [34;1mtest_cancel_backend_during_refresh_recovers[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_failure_recovery_tests$test_cancel_backend_during_refresh_recovers","exec_time":17.139403465}
+{"type":"test","event":"started","name":"pg_trickle::e2e_failure_recovery_tests$test_recovery_capture_instance_catalog_and_safe_report"}
+{"type":"test","event":"started","name":"pg_trickle::e2e_failure_recovery_tests$test_recovery_clone_isolation_requires_explicit_adoption"}
+{"type":"suite","event":"ok","passed":1,"failed":0,"ignored":6,"measured":0,"filtered_out":12,"exec_time":17.139403465,"nextest":{"crate":"pg_trickle","test_binary":"e2e_failure_recovery_tests","kind":"test"}}
+{"type":"suite","event":"started","test_count":9,"nextest":{"crate":"pg_trickle","test_binary":"e2e_failure_recovery_tests","kind":"test"}}
+{"type":"test","event":"started","name":"pg_trickle::e2e_failure_recovery_tests$test_recovery_frontier_ahead_of_wal_fails_closed"}
+{"type":"test","event":"started","name":"pg_trickle::e2e_failure_recovery_tests$test_recovery_missing_slot_is_reinitialization_required"}
+{"type":"test","event":"started","name":"pg_trickle::e2e_failure_recovery_tests$test_recovery_missing_trigger_is_reinitialization_required"}
+{"type":"suite","event":"ok","passed":0,"failed":0,"ignored":6,"measured":0,"filtered_out":12,"exec_time":0,"nextest":{"crate":"pg_trickle","test_binary":"e2e_failure_recovery_tests","kind":"test"}}
+{"type":"suite","event":"started","test_count":9,"nextest":{"crate":"pg_trickle","test_binary":"e2e_failure_recovery_tests","kind":"test"}}
+{"type":"test","event":"started","name":"pg_trickle::e2e_failure_recovery_tests$test_recovery_quiesce_and_resume_boundary"}
+{"type":"test","event":"started","name":"pg_trickle::e2e_failure_recovery_tests$test_lock_timeout_during_refresh"}
+[32;1m        PASS[0m [  26.805s] ( 3/13) [35;1mpg_trickle::e2e_failure_recovery_tests[0m [34;1mtest_lock_timeout_during_refresh[0m
+{"type":"test","event":"ignored","name":"pg_trickle::e2e_failure_recovery_tests$test_recovery_quiesce_and_resume_boundary"}
+{"type":"test","event":"ok","name":"pg_trickle::e2e_failure_recovery_tests$test_lock_timeout_during_refresh","exec_time":26.805452348}
+{"type":"test","event":"started","name":"pg_trickle::e2e_failure_recovery_tests$test_statement_timeout_during_refresh_recovers"}
+[32;1m        PASS[0m [  26.760s] ( 4/13) [35;1mpg_trickle::e2e_failure_recovery_tests[0m [34;1mtest_statement_timeout_during_refresh_recovers[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_failure_recovery_tests$test_statement_timeout_during_refresh_recovers","exec_time":26.759866669}
+{"type":"suite","event":"ok","passed":2,"failed":0,"ignored":6,"measured":0,"filtered_out":12,"exec_time":53.565319017,"nextest":{"crate":"pg_trickle","test_binary":"e2e_failure_recovery_tests","kind":"test"}}
+{"type":"suite","event":"started","test_count":9,"nextest":{"crate":"pg_trickle","test_binary":"e2e_refresh_atomicity_tests","kind":"test"}}
+{"type":"test","event":"started","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_after_apply_failure_rolls_back"}
+[32;1m        PASS[0m [  20.452s] ( 5/13) [35;1mpg_trickle::e2e_refresh_atomicity_tests[0m [34;1mtest_refresh_after_apply_failure_rolls_back[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_after_apply_failure_rolls_back","exec_time":20.451664953}
+{"type":"test","event":"started","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_auxiliary_state_failure_rolls_back"}
+[32;1m        PASS[0m [  18.017s] ( 6/13) [35;1mpg_trickle::e2e_refresh_atomicity_tests[0m [34;1mtest_refresh_auxiliary_state_failure_rolls_back[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_auxiliary_state_failure_rolls_back","exec_time":18.016506617}
+{"type":"test","event":"started","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_caller_rollback_preserves_committed_state"}
+[32;1m        PASS[0m [  17.748s] ( 7/13) [35;1mpg_trickle::e2e_refresh_atomicity_tests[0m [34;1mtest_refresh_caller_rollback_preserves_committed_state[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_caller_rollback_preserves_committed_state","exec_time":17.748113425}
+{"type":"test","event":"started","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_concurrent_writer_preserves_next_batch"}
+[32;1m        PASS[0m [  18.154s] ( 8/13) [35;1mpg_trickle::e2e_refresh_atomicity_tests[0m [34;1mtest_refresh_concurrent_writer_preserves_next_batch[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_concurrent_writer_preserves_next_batch","exec_time":18.153660128}
+{"type":"test","event":"started","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_early_progress_control_is_detected"}
+[32;1m        PASS[0m [  19.234s] ( 9/13) [35;1mpg_trickle::e2e_refresh_atomicity_tests[0m [34;1mtest_refresh_early_progress_control_is_detected[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_early_progress_control_is_detected","exec_time":19.233654121}
+{"type":"test","event":"started","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_finalization_failure_rolls_back"}
+[32;1m        PASS[0m [  20.476s] (10/13) [35;1mpg_trickle::e2e_refresh_atomicity_tests[0m [34;1mtest_refresh_finalization_failure_rolls_back[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_finalization_failure_rolls_back","exec_time":20.476168098}
+{"type":"test","event":"started","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_partial_finalization_control_is_detected"}
+[32;1m        PASS[0m [  19.006s] (11/13) [35;1mpg_trickle::e2e_refresh_atomicity_tests[0m [34;1mtest_refresh_partial_finalization_control_is_detected[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_partial_finalization_control_is_detected","exec_time":19.006464389}
+{"type":"test","event":"started","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_savepoint_rollback_preserves_outer_transaction"}
+[32;1m        PASS[0m [  17.800s] (12/13) [35;1mpg_trickle::e2e_refresh_atomicity_tests[0m [34;1mtest_refresh_savepoint_rollback_preserves_outer_transaction[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_savepoint_rollback_preserves_outer_transaction","exec_time":17.800420531}
+{"type":"test","event":"started","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_two_callers_publish_one_consistent_result"}
+[32;1m        PASS[0m [  18.092s] (13/13) [35;1mpg_trickle::e2e_refresh_atomicity_tests[0m [34;1mtest_refresh_two_callers_publish_one_consistent_result[0m
+{"type":"test","event":"ok","name":"pg_trickle::e2e_refresh_atomicity_tests$test_refresh_two_callers_publish_one_consistent_result","exec_time":18.09207376}
+{"type":"suite","event":"ok","passed":9,"failed":0,"ignored":0,"measured":0,"filtered_out":12,"exec_time":168.978726022,"nextest":{"crate":"pg_trickle","test_binary":"e2e_refresh_atomicity_tests","kind":"test"}}
+────────────
+[32;1m     Summary[0m [ 268.086s] [1m13[0m tests run: [1m13[0m [32;1mpassed[0m, [1m45[0m [33;1mskipped[0m

@@ -281,7 +281,7 @@ jobs:
     name: Unit tests (scheduled/manual, macos-arm64)
     needs: release-qualification-contract
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -1109,9 +1109,12 @@ jobs:
           # Scripts with a from-version older than SUPPORT_CUTOFF are kept in
           # sql/ for PostgreSQL chain compatibility but are not re-validated in
           # CI (they are stable, fully-tested historical scripts).
+          # Future-targeted migrations remain in the tree for later package versions.
           SUPPORT_CUTOFF="0.40.0"
           # Returns 0 if version $1 >= $2 (uses sort -V for correctness).
           version_ge() { printf '%s\n%s' "$2" "$1" | sort -V -C; }
+          # Returns 0 if version $1 <= $2.
+          version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
           current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           pairs=()
           for f in sql/pg_trickle--*--*.sql; do
@@ -1119,6 +1122,9 @@ jobs:
             from=${base#pg_trickle--}
             to=${from#*--}
             from=${from%%--*}
+            if ! version_le "$to" "$current_version"; then
+              continue
+            fi
             if version_ge "$from" "$SUPPORT_CUTOFF"; then
               pairs+=("$from $to")
             fi
@@ -1185,8 +1191,19 @@ jobs:
         if: steps.changes.outputs.run_upgrade_slice == 'true'
         id: pair
         run: |
-          # Find the most recent X→Y SQL upgrade script (highest Y).
-          latest=$(ls sql/pg_trickle--*--*.sql | sort -V | tail -1)
+          # Select the latest migration that belongs to this package version.
+          version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
+          current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          latest=$(for f in sql/pg_trickle--*--*.sql; do
+            base=$(basename "$f" .sql)
+            from=${base#pg_trickle--}
+            to=${from#*--}
+            if version_le "$to" "$current_version"; then echo "$f"; fi
+          done | sort -V | tail -1)
+          if [[ -z "$latest" ]]; then
+            echo "ERROR: no upgrade script targets v${current_version} or earlier"
+            exit 1
+          fi
           base=$(basename "$latest" .sql)
           from=${base#pg_trickle--}
           to=${from#*--}
@@ -1200,6 +1217,7 @@ jobs:
         run: |
           # Build the extension artifacts via cargo pgrx package so we can
           # create a lite base Docker image without the full ~10-min builder.
+          rm -rf target/release/pg_trickle-pg18
           cargo pgrx package --features pg18 \
             --pg-config /usr/lib/postgresql/18/bin/pg_config
           # Stage into _e2e_pkg/ — target/ is excluded by .dockerignore so
@@ -1269,6 +1287,8 @@ jobs:
           SUPPORT_CUTOFF="0.40.0"
           # Returns 0 if version $1 >= $2 (sort -V for correctness).
           version_ge() { printf '%s\n%s' "$2" "$1" | sort -V -C; }
+          # Returns 0 if version $1 <= $2.
+          version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
           current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           items='['
           first=true
@@ -1277,6 +1297,9 @@ jobs:
             from=${base#pg_trickle--}
             to=${from#*--}
             from=${from%%--*}
+            if ! version_le "$to" "$current_version"; then
+              continue
+            fi
             # Skip pairs whose from-version predates the support cutoff.
             if ! version_ge "$from" "$SUPPORT_CUTOFF"; then
               continue

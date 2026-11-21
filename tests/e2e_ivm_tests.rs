@@ -13,7 +13,7 @@
 
 mod e2e;
 
-use e2e::E2eDb;
+use e2e::{E2eDb, disable_scheduler};
 use sqlx::PgPool;
 #[cfg(not(feature = "light-e2e"))]
 use std::time::Duration;
@@ -1994,6 +1994,7 @@ async fn test_ivm_alter_to_immediate_allows_window() {
 #[tokio::test]
 async fn test_ivm_cascading_immediate_sts() {
     let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
 
     for (suffix, use_enr) in [("temp", false), ("enr", true)] {
         let base = format!("cascade_base_{suffix}");

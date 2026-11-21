@@ -1,0 +1,36 @@
+
+running 1 test
+SET
+REINDEX
+ finish_ann_maintenance 
+------------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+SET
+test test_ann_supervisor_processes_authorized_request ... FAILED
+
+failures:
+
+---- test_ann_supervisor_processes_authorized_request stdout ----
+
+thread 'test_ann_supervisor_processes_authorized_request' (497826) panicked at tests/e2e_pgvector_tests.rs:40:6:
+worker backend did not exit: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    test_ann_supervisor_processes_authorized_request
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 138 filtered out; finished in 21.05s
+
+    Blocking waiting for file lock on build directory
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-task-1399)
+    Finished `test` profile [unoptimized] target(s) in 1m 31s
+     Running tests/e2e_pgvector_tests.rs (target/debug/deps/e2e_pgvector_tests-d3efbfae06bec58a)
+error: test failed, to rerun pass `--test e2e_pgvector_tests`

@@ -531,14 +531,6 @@ pub(crate) fn rebase_reason(
     if changes >= MAX_CHANGES_SINCE_REBASE {
         return Some(RebaseReason::ChangeLimit);
     }
-    if count == 0 {
-        return if sums.iter().all(|sum| *sum == 0.0) {
-            None
-        } else {
-            Some(RebaseReason::InvalidState)
-        };
-    }
-
     // Two float64 sums (the maintained state and a fresh native aggregate)
     // are bounded using a deliberately loose multiple of gamma_n. The
     // operation cap keeps each gamma denominator well away from zero and
@@ -546,6 +538,17 @@ pub(crate) fn rebase_reason(
     let steps = operations as f64 + count as f64 + 2.0;
     if steps * f64::EPSILON >= 0.25 {
         return Some(RebaseReason::NumericalError);
+    }
+    if count == 0 {
+        // Retractions can leave rounding residue after the last non-NULL input.
+        return if sums.iter().zip(magnitudes).all(|(&sum, &magnitude)| {
+            let bound = 8.0 * f64::EPSILON * steps * magnitude;
+            bound.is_finite() && sum.abs() <= bound
+        }) {
+            None
+        } else {
+            Some(RebaseReason::InvalidState)
+        };
     }
     for (&sum, &magnitude) in sums.iter().zip(magnitudes) {
         let average = sum / count as f64;
@@ -665,6 +668,43 @@ mod tests {
             Some(RebaseReason::ChangeLimit)
         );
         assert_eq!(rebase_reason(2, 2, 0, &[5.0], &[5.0]), None);
+    }
+
+    #[test]
+    fn test_empty_centroid_allows_only_bounded_rounding_residue() {
+        assert_eq!(rebase_reason(0, 1226, 428, &[1.3e-11], &[1000.0]), None);
+        assert_eq!(
+            rebase_reason(0, 1226, 428, &[1.0], &[1000.0]),
+            Some(RebaseReason::InvalidState)
+        );
+        assert_eq!(
+            rebase_reason(0, 1, 1, &[1e-20], &[0.0]),
+            Some(RebaseReason::InvalidState)
+        );
+        assert_eq!(
+            rebase_reason(0, 1 << 52, 1, &[0.0], &[1.0]),
+            Some(RebaseReason::NumericalError)
+        );
+    }
+
+    #[test]
+    fn test_empty_centroid_residue_cannot_bypass_later_error_guard() {
+        let mut initial = Vec::new();
+        for value in [1e20_f32, 1.0, -1e20] {
+            initial = accumulate_delta(initial, Some(&[value]), 1).unwrap();
+        }
+        let state = initialize_state(&initial, 1).unwrap();
+        let mut deleted = Vec::new();
+        for value in [1e20_f32, -1e20, 1.0] {
+            deleted = accumulate_delta(deleted, Some(&[value]), -1).unwrap();
+        }
+        let empty = merge_delta(&state, &deleted, 1, false).unwrap();
+        assert_eq!(empty[0], 0.0);
+        assert_ne!(empty[3], 0.0);
+        assert_eq!(finalize_state(&empty, 1).unwrap(), None);
+        let added = accumulate_delta(Vec::new(), Some(&[2.0]), 1).unwrap();
+        let nonempty = merge_delta(&empty, &added, 1, false).unwrap();
+        assert!(finalize_state(&nonempty, 1).is_err());
     }
 
     #[test]

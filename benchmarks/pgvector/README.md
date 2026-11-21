@@ -1,5 +1,99 @@
 # Filtered pgvector workload
 
+### Long-running centroid drift
+
+The `centroid-drift` job in the manually dispatched E2E Benchmarks workflow runs 2,000 seeded
+mutation and refresh calls against a development image with pgvector 0.8.7.
+It compares every group to native `avg(vector)` after each call and records
+the largest component error and fraction of the absolute-plus-relative
+tolerance at 100-call checkpoints. The run includes updates, deletes, NULL
+transitions and group moves; it uses three dimensions and does not qualify
+large dimensions, concurrent workloads, crash recovery or release artifacts.
+The uploaded results identify the image and its extension files.
+
+To run it locally after building the version-specific image:
+
+```sh
+PGS_E2E_IMAGE=pg_trickle_e2e_pgvector:0.8.7 PGVECTOR_EXPECTED_VERSION=0.8.7 \
+  ./scripts/run_e2e_tests.sh --retries 0 --test e2e_pgvector_tests \
+  --run-ignored ignored-only --no-capture \
+  -E 'test(test_centroid_long_running_drift_matches_native_avg)'
+```
+
+Use `test_centroid_high_dimensional_drift_matches_native_avg` in the same
+command to run the 1,536-dimensional variant. It uses the same seed and a
+small corpus, so it does not establish a general numerical operating envelope.
+
+### Exact-package centroid cost matrix
+
+The `centroid-cost-matrix` v0.109.0 qualification suite runs the filtered
+workload against the candidate package copied into the PostgreSQL test image.
+It covers 5,000 rows at 384, 768 and 1,536 dimensions, with small, medium, large
+and skewed group distributions. For one-row and 2,500-row changes it discards
+three warmup rounds and retains 20 measured refreshes per strategy and group
+shape in three modes: explicitly warmed pages, cold PostgreSQL and Linux host
+page caches, and warmed pages with a controlled source writer. Cold samples
+stop PostgreSQL, clear host page caches, and start the isolated container; this
+mode runs only on the disposable Linux GitHub Actions runner. The writer case
+toggles an unprojected source key while refresh runs, preserving centroid
+values. It samples writer lock waits at 1 ms intervals and holds the writer
+transaction open for at least 10 ms. This is a controlled single-writer overlap
+case, not sustained writer throughput.
+
+The JSON reports p50/p95/p99 refresh, writer transaction, and lock-wait timings,
+shared buffer counts, source tuple visits, WAL, stream storage and logical
+auxiliary-state bytes.
+Docker samples retain CPU and memory observations, and cold-cache reset time is
+reported separately. These are single-runner synthetic measurements; they do
+not establish natural rebase frequency or a general operating envelope, so the
+automatic selector remains experimental and opt-in.
+
+### Controlled distance-subscription measurements
+
+The opt-in subscription workload accepts comma-separated `PGVECTOR_SUB_ROWS`
+(1–1,000,000) and `PGVECTOR_SUB_COUNTS` (0–1,000), plus
+`PGVECTOR_SUB_DIM` (2–1,536) and `PGVECTOR_SUB_ROUNDS` (1–100).
+`PGVECTOR_SUB_PIVOTS` selects 1–1,000 distinct nearby pivot vectors (default 1);
+all remain on the same side of each measured threshold transition.
+`PGVECTOR_SUB_STATISTICS=both` runs separate unanalyzed and analyzed streams;
+the harness disables autovacuum on each and rejects an unanalyzed control if
+statistics were already collected. `PGVECTOR_SUB_FORCE_EXPLICIT=1` adds the
+same no-op row trigger to every stream, including the zero-subscription
+control, and requires the recorded merge path to be `explicit_dml` throughout.
+Trigger overhead is part of every control measurement, so these timings do not
+represent trigger-free production workloads. User triggers also disable the
+bounded distance snapshot, so subscribed cases take a full stream snapshot and
+scan the stream during evaluation. The report records the observed snapshot
+kind and row count; run without the trigger to investigate the bounded path.
+
+For a bounded control run on a packaged candidate image:
+
+```sh
+PGS_E2E_IMAGE=pg_trickle_e2e_pgvector:0.8.7 \
+PGVECTOR_SUB_ROWS=1000,10000 PGVECTOR_SUB_COUNTS=0,1,10 \
+PGVECTOR_SUB_DIM=384 PGVECTOR_SUB_STATISTICS=both PGVECTOR_SUB_FORCE_EXPLICIT=1 \
+PGVECTOR_SUB_PLAN_LOG=subscription-postgres.log \
+  ./scripts/run_e2e_tests.sh --retries 0 --test e2e_bench_tests \
+  --run-ignored ignored-only --no-capture \
+  -E 'test(test_pgvector_subscription_scaling_workload)'
+```
+
+The report separates refresh, commit, and post-commit listener wait; listener
+wait is not commit-to-delivery latency because delivery may begin earlier.
+When `PGVECTOR_SUB_PLAN_LOG` is set, PostgreSQL `auto_explain` records nested
+JSON plans with actual rows and buffers. START and END log markers identify each
+case and refresh. The file combines Docker stdout and stderr; use timestamps
+to interpret their ordering. Capture is also attempted when a test panics.
+Instrumentation adds overhead, so compare timings separately from uninstrumented
+runs. The scheduled job records its image ID and pg_trickle file hashes; these
+identify the development image, not a published release artifact. The harness
+does not yet measure controlled concurrent load, WAL, or CPU, and a run alone
+does not establish a general scaling limit. Larger cases remain opt-in.
+
+The [v0.109.0 candidate measurements](results/2026-11-09-candidate-subscription-arm64/README.md)
+compare the forced-trigger and bounded paths through 100,000 rows and 100
+subscriptions, with representative nested plans and explicit limitations.
+
 ## Version conformance
 
 The PR compatibility workflow packages pg_trickle for PostgreSQL 18.6 and
@@ -64,27 +158,30 @@ do not necessarily expose plans for statements executed through SPI. A separate
 affected-group query illustrates a possible rescan. Same-transaction PostgreSQL
 tuple counters record sequential returns and index fetches from the source during
 each refresh, including repeated visits; they are not counts of distinct rows.
-This is one observation per
-strategy in the order listed; EXPLAIN overhead and cache order affect timings.
-The workload also performs five repeated one-row changes by default, rotating
-the group and strategy order. Set `PGVECTOR_CENTROID_REWRITE_ROWS` to update
+This is one observation per strategy in the order listed; EXPLAIN overhead and
+cache order affect timings. The repeated comparison uses three excluded warmup
+rounds, then rotates group and strategy order. Set `PGVECTOR_CENTROID_REWRITE_ROWS` to update
 more rows per round, up to the surviving source rows less two fixed inputs.
-It checks each selected strategy and all affected groups against native AVG,
-and records individual refresh times and percentiles without EXPLAIN. Set
+It checks each selected strategy and all affected groups against native AVG
+with an absolute bound of `1e-5` plus a relative bound of `1e-6`, rejects
+missing components, and records each round's maximum absolute component error,
+refresh time, WAL, tuple visits, storage and logical state bytes without EXPLAIN. Set
 `PGVECTOR_CENTROID_SAMPLES` from 1 to 50 to change the number of rounds; a
 small sample cannot establish tail latency. The algebraic measurement asserts
 that every round uses algebraic state, so batches that trigger a rebase fail
-the benchmark rather than being silently counted as algebraic. The workload does not
-measure source-write overhead or concurrent load. Use a dedicated host and
-more repetitions before drawing performance conclusions.
+the benchmark rather than being silently counted as algebraic. The workload
+records source mutation time but does not measure concurrent load or natural
+rebase frequency. Use a dedicated host and more repetitions before drawing
+performance conclusions.
 
 The scheduled run also measures distance subscriptions separately with 1,000
 and 10,000 rows and zero, one, or ten subscriptions. Five one-row changes per
-case alternate across the threshold. It verifies the affected-row snapshot and
-differential strategy, and records refresh-call time plus same-transaction
-source and stream tuple counters. The stream is analyzed before measurement;
-the counters include repeated visits and are not distinct row counts. A listener
-verifies each event after commit; those timings exclude client delivery. The
+case alternate across the threshold using 384-dimensional vectors. It runs
+analyzed and unanalyzed controls, forces the same explicit-DML path with a
+no-op row trigger, verifies the affected-row snapshot and differential strategy,
+and records refresh, commit, listener-wait and same-transaction source and
+stream tuple counters. The counters include repeated visits and are not distinct
+row counts. A listener verifies each event after commit. The
 [local report](results/2026-11-08-subscription-scaling-arm64/README.md) also
 records an unanalysed control and its limitations.
 

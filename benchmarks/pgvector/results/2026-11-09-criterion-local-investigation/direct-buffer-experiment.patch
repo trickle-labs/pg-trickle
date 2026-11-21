@@ -1,0 +1,38 @@
+diff --git a/src/dvm/operators/aggregate.rs b/src/dvm/operators/aggregate.rs
+index 9e224fe4..dd5d31bf 100644
+--- a/src/dvm/operators/aggregate.rs
++++ b/src/dvm/operators/aggregate.rs
+@@ -2245,14 +2245,25 @@ fn generate_direct_agg_delta(
+          AND c.action IN ('I', 'D')"
+     );
+ 
+-    let delta_sql = format!(
+-        "\
+-SELECT {selects}
+-FROM {change_table} c
+-{where_clause}{group_by}",
+-        selects = select_exprs.join(",\n       "),
+-        group_by = group_by_clause,
+-    );
++    let capacity = 18
++        + select_exprs.iter().map(String::len).sum::<usize>()
++        + select_exprs.len().saturating_sub(1) * 9
++        + change_table.len()
++        + where_clause.len()
++        + group_by_clause.len();
++    let mut delta_sql = String::with_capacity(capacity);
++    delta_sql.push_str("SELECT ");
++    for (index, expression) in select_exprs.iter().enumerate() {
++        if index != 0 {
++            delta_sql.push_str(",\n       ");
++        }
++        delta_sql.push_str(expression);
++    }
++    delta_sql.push_str("\nFROM ");
++    delta_sql.push_str(&change_table);
++    delta_sql.push_str(" c\n");
++    delta_sql.push_str(&where_clause);
++    delta_sql.push_str(&group_by_clause);
+ 
+     ctx.add_cte(delta_cte.clone(), delta_sql);
+ 

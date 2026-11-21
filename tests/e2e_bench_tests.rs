@@ -431,7 +431,9 @@ fn write_results_json(results: &[BenchResult]) {
         std::env::var("PGS_BENCH_JSON_DIR").unwrap_or_else(|_| "target/bench_results".to_string());
     let _ = std::fs::create_dir_all(&out_dir);
 
-    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H%M%S");
+    let timestamp = jiff::Timestamp::now()
+        .strftime("%Y-%m-%dT%H%M%S")
+        .to_string();
     let path = format!("{}/{}.json", out_dir, timestamp);
 
     // Build JSON manually to avoid serde dependency
