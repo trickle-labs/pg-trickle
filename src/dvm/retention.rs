@@ -2909,7 +2909,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape(_))
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
         ));
         let unqualified = Expr::FuncCall {
             func_name: "date_trunc".into(),
@@ -2921,7 +2921,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape(_))
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
         ));
         assert!(matches!(
             query_group_candidate(
@@ -2934,7 +2934,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape(_))
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
         ));
         assert!(matches!(
             query_group_candidate(
@@ -2963,7 +2963,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape(_))
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
         ));
         assert!(matches!(
             query_group_candidate(
@@ -2971,7 +2971,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape(_))
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
         ));
     }
 
@@ -3020,7 +3020,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_aggregates_and_query_shapes() {
+    fn aggregate_choice_does_not_change_locality_but_other_operators_do() {
         let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
         let OpTree::Project { child, .. } = &mut tree else {
             unreachable!()
@@ -3028,18 +3028,19 @@ mod tests {
         let OpTree::Aggregate { aggregates, .. } = child.as_mut() else {
             unreachable!()
         };
-        aggregates[0].is_distinct = true;
-        assert!(matches!(
-            query_group_candidate(&tree, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedAggregate(_))
-        ));
+        // The aggregate's evaluation remains the normal DVM's responsibility.
+        aggregates[0].function = AggFunc::Max;
+        aggregates[0].argument = Some(col("occurred"));
+        assert!(query_group_candidate(&tree, 42, "occurred").is_ok());
 
-        let tree = OpTree::Filter {
+        // A top-level operator can modify groups outside the removed partition,
+        // so this proof deliberately does not admit arbitrary operator trees.
+        let filtered_result = OpTree::Filter {
             predicate: Expr::Literal("true".into()),
-            child: Box::new(query(col("occurred"), col("occurred"), DATE_OID, false)),
+            child: Box::new(tree),
         };
         assert!(matches!(
-            query_group_candidate(&tree, 42, "occurred"),
+            query_group_candidate(&filtered_result, 42, "occurred"),
             Err(RetentionQueryError::UnsupportedShape(_))
         ));
 
@@ -3067,99 +3068,59 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unproven_group_and_aggregate_expressions() {
-        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
-        let OpTree::Project { child, .. } = &mut tree else {
-            unreachable!()
-        };
-        let OpTree::Aggregate { aggregates, .. } = child.as_mut() else {
-            unreachable!()
-        };
-        aggregates[0].function = AggFunc::Sum;
-        aggregates[0].argument = Some(Expr::Literal("random()".into()));
-        assert!(matches!(
-            query_group_candidate(&tree, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedAggregate(_))
-        ));
-        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
-        let OpTree::Project { child, .. } = &mut tree else {
-            unreachable!()
-        };
-        let OpTree::Aggregate { group_by, .. } = child.as_mut() else {
-            unreachable!()
-        };
-        group_by.push(Expr::FuncCall {
-            func_name: "random".into(),
-            args: vec![],
-        });
-        assert!(matches!(
-            query_group_candidate(&tree, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedShape(_))
-        ));
-    }
-
-    #[test]
-    fn eligibility_errors_name_the_offending_projection_group_and_aggregate() {
-        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
-        let OpTree::Project {
-            expressions,
-            aliases,
-            ..
-        } = &mut tree
-        else {
-            unreachable!()
-        };
-        expressions.push(Expr::Literal("'x'::text".into()));
-        aliases.push("tag".into());
-        let message = query_group_candidate(&tree, 42, "occurred")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            message.contains("select-list item \"'x'::text AS tag\""),
-            "{message}"
-        );
-        assert!(message.contains("plain column reference"), "{message}");
-
+    fn locality_ignores_other_group_expressions_and_aggregate_arguments() {
         let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
         let OpTree::Project { child, .. } = &mut tree else {
             unreachable!()
         };
         let OpTree::Aggregate {
-            group_by, child, ..
-        } = child.as_mut()
-        else {
+            group_by,
+            aggregates,
+            ..
+        } = child.as_mut() else {
             unreachable!()
         };
         group_by.push(hour("other", None));
-        let OpTree::Scan { columns, .. } = child.as_mut() else {
-            unreachable!()
-        };
-        columns.push(Column {
-            name: "other".into(),
-            type_oid: TIMESTAMP_OID,
-            is_nullable: false,
-        });
-        let message = query_group_candidate(&tree, 42, "occurred")
-            .unwrap_err()
-            .to_string();
-        assert!(message.contains("grouping key"), "{message}");
-        assert!(message.contains("other"), "{message}");
-        assert!(message.contains("partition key \"occurred\""), "{message}");
-        assert!(message.contains("hourly bucket of it"), "{message}");
+        aggregates[0].function = AggFunc::Avg;
+        aggregates[0].argument = Some(col("value"));
+        let candidate = query_group_candidate(&tree, 42, "occurred")
+            .expect("a projected partition key makes other groups partition-local");
+        assert_eq!(candidate.output_column, "bucket");
 
+        // Absence of the partition-determining key is still not proof of locality.
+        let only_other_group = query(
+            hour("other", None),
+            hour("other", None),
+            DATE_OID,
+            false,
+        );
+        assert!(matches!(
+            query_group_candidate(&only_other_group, 42, "occurred"),
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
+        ));
+    }
+
+    #[test]
+    fn accepts_constant_projection_with_an_unmodified_partition_key() {
         let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
-        let OpTree::Project { child, .. } = &mut tree else {
+        let OpTree::Project {
+            expressions,
+            aliases,
+            ..
+        } = &mut tree else {
             unreachable!()
         };
-        let OpTree::Aggregate { aggregates, .. } = child.as_mut() else {
-            unreachable!()
-        };
-        aggregates[0].is_distinct = true;
-        let message = query_group_candidate(&tree, 42, "occurred")
-            .unwrap_err()
-            .to_string();
-        assert!(message.contains("COUNT(*) AS n"), "{message}");
-        assert!(message.contains("without DISTINCT"), "{message}");
+        expressions.push(Expr::Literal("'x'::text".into()));
+        aliases.push("tag".into());
+        assert!(query_group_candidate(&tree, 42, "occurred").is_ok());
+
+        // The WHERE predicate in the range DELETE must be on a projected
+        // partition identity, not a computed replacement.
+        expressions[0] = Expr::Literal("'2025-01-01'::date".into());
+        assert!(matches!(
+            query_group_candidate(&tree, 42, "occurred"),
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
+        ));
     }
 
     #[test]
