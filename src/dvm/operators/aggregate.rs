@@ -111,20 +111,14 @@ fn resolve_expr_for_child(expr: &Expr, child_cols: &[String]) -> String {
 
 // ── Group-rescan helpers ────────────────────────────────────────────
 
-/// Compare GROUP BY keys using a hash-joinable, NULL-safe equality.
-///
-/// PostgreSQL's row-constructor `=` returns NULL for matching NULL fields,
-/// while `IS NOT DISTINCT FROM` is not hash-joinable. Wrapping the key row
-/// in an outer single-field ROW makes the comparison use `record_eq` for
-/// the inner composite value: NULL fields compare equal, and PostgreSQL can
-/// hash (or merge) the group match instead of doing a nested loop.
+/// Compare GROUP BY keys with a hash key and an exact NULL-safe check.
 ///
 /// Both sides must contain corresponding keys in the same order and types.
 fn hashable_group_match(left: &[String], right: &[String]) -> String {
+    let left = left.join(", ");
+    let right = right.join(", ");
     format!(
-        "ROW(ROW({})) = ROW(ROW({}))",
-        left.join(", "),
-        right.join(", "),
+        "pg_catalog.hash_record_extended(ROW({left}), 0::bigint) = pg_catalog.hash_record_extended(ROW({right}), 0::bigint) AND ROW({left}) IS NOT DISTINCT FROM ROW({right})"
     )
 }
 
@@ -4034,11 +4028,11 @@ mod tests {
     // ── Hashable, NULL-safe group matching (issue #1456) ────────────
 
     #[test]
-    fn test_group_filter_uses_hashable_record_equality_for_nullable_keys() {
+    fn test_group_filter_uses_hash_key_and_exact_nullable_comparison() {
         let single = build_group_filter("delta", &[colref("region")], &["region".into()], None);
         assert_eq!(
             single,
-            "EXISTS (SELECT 1 FROM delta AS __pgt_d2(\"__pgt_group_0\") WHERE ROW(ROW(region)) = ROW(ROW(__pgt_d2.\"__pgt_group_0\")))"
+            "EXISTS (SELECT 1 FROM delta AS __pgt_d2(\"__pgt_group_0\") WHERE pg_catalog.hash_record_extended(ROW(region), 0::bigint) = pg_catalog.hash_record_extended(ROW(__pgt_d2.\"__pgt_group_0\"), 0::bigint) AND ROW(region) IS NOT DISTINCT FROM ROW(__pgt_d2.\"__pgt_group_0\"))"
         );
 
         let multi = build_group_filter(
@@ -4059,10 +4053,11 @@ mod tests {
         );
         assert!(
             multi.contains(
-                "ROW(ROW(region, \"s\".\"Day\")) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"
+                "pg_catalog.hash_record_extended(ROW(region, \"s\".\"Day\"), 0::bigint) = pg_catalog.hash_record_extended(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"), 0::bigint)"
             ),
             "{multi}"
         );
+        assert!(multi.contains("ROW(region, \"s\".\"Day\") IS NOT DISTINCT FROM ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\")"), "{multi}");
         assert!(
             multi.contains("AND (COALESCE(__pgt_d2.\"__special_peak\", 0) > 0)"),
             "{multi}"
@@ -4082,16 +4077,22 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // The source semi-join and the rescan-to-delta join must BOTH avoid
-        // per-key IS NOT DISTINCT FROM nested-loop plans.
+        // Both joins use a hash key, then verify the complete nullable group.
         assert!(
             sql.contains(
-                "ROW(ROW(region, day)) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"
+                "pg_catalog.hash_record_extended(ROW(region, day), 0::bigint) = pg_catalog.hash_record_extended(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"), 0::bigint)"
             ),
             "{sql}"
         );
         assert!(
-            sql.contains("ROW(ROW(r.\"region\", r.\"day\")) = ROW(ROW(d.\"region\", d.\"day\"))"),
+            sql.contains("pg_catalog.hash_record_extended(ROW(r.\"region\", r.\"day\"), 0::bigint) = pg_catalog.hash_record_extended(ROW(d.\"region\", d.\"day\"), 0::bigint)"),
+            "{sql}"
+        );
+        assert!(sql.contains("ROW(region, day) IS NOT DISTINCT FROM ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\")"), "{sql}");
+        assert!(
+            sql.contains(
+                "ROW(r.\"region\", r.\"day\") IS NOT DISTINCT FROM ROW(d.\"region\", d.\"day\")"
+            ),
             "{sql}"
         );
     }
@@ -4464,7 +4465,10 @@ mod tests {
             &["grp".to_string()],
             Some(&special_filter),
         );
-        assert!(group_filter.contains("ROW(ROW(grp)) = ROW(ROW(__pgt_d2.\"__pgt_group_0\"))"));
+        assert!(group_filter.contains("pg_catalog.hash_record_extended(ROW(grp), 0::bigint) = pg_catalog.hash_record_extended(ROW(__pgt_d2.\"__pgt_group_0\"), 0::bigint)"));
+        assert!(
+            group_filter.contains("ROW(grp) IS NOT DISTINCT FROM ROW(__pgt_d2.\"__pgt_group_0\")")
+        );
         assert!(group_filter.contains("__pgt_d2.\"__special_total\""));
 
         let merge = agg_merge_expr_mapped(
@@ -7395,13 +7399,14 @@ mod tests {
         );
         assert!(
             sql.contains(concat!(
-                "ROW(ROW(d.\"__pgt_group_0\", d.\"__pgt_group_1\", ",
-                "d.\"__pgt_group_2\", d.\"__pgt_group_3\")) = ",
-                "ROW(ROW(n.\"__pgt_group_0\", n.\"__pgt_group_1\", ",
-                "n.\"__pgt_group_2\", n.\"__pgt_group_3\"))"
+                "pg_catalog.hash_record_extended(ROW(d.\"__pgt_group_0\", d.\"__pgt_group_1\", ",
+                "d.\"__pgt_group_2\", d.\"__pgt_group_3\"), 0::bigint) = ",
+                "pg_catalog.hash_record_extended(ROW(n.\"__pgt_group_0\", n.\"__pgt_group_1\", ",
+                "n.\"__pgt_group_2\", n.\"__pgt_group_3\"), 0::bigint)"
             )),
             "{sql}"
         );
+        assert!(sql.contains("ROW(d.\"__pgt_group_0\", d.\"__pgt_group_1\", d.\"__pgt_group_2\", d.\"__pgt_group_3\") IS NOT DISTINCT FROM ROW(n.\"__pgt_group_0\", n.\"__pgt_group_1\", n.\"__pgt_group_2\", n.\"__pgt_group_3\")"), "{sql}");
         assert!(
             sql.contains("d.\"__pgt_group_0\" AS \"source_record_id\"")
                 && sql.contains("d.\"__pgt_group_1\" AS \"source_record_id\""),

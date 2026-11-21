@@ -556,13 +556,12 @@ async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
     db.assert_st_matches_query("agg_mass_extreme_st", query)
         .await;
 
-    // PostgreSQL treats NULL fields as equal for composite record equality.
-    // An extra ROW layer forces record_eq, unlike plain ROW(...)=ROW(...).
+    // Hashes only select candidates; the exact comparison preserves NULL keys.
     let equal_null_keys: bool = db
-        .query_scalar("SELECT ROW(ROW(NULL::text, 1::int)) = ROW(ROW(NULL::text, 1::int))")
+        .query_scalar("SELECT ROW(NULL::text, 1::int) IS NOT DISTINCT FROM ROW(NULL::text, 1::int)")
         .await;
     let different_null_keys: bool = db
-        .query_scalar("SELECT ROW(ROW(NULL::text, 1::int)) = ROW(ROW('x'::text, 1::int))")
+        .query_scalar("SELECT ROW(NULL::text, 1::int) IS NOT DISTINCT FROM ROW('x'::text, 1::int)")
         .await;
     assert!(
         equal_null_keys,
@@ -580,13 +579,25 @@ async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
         .await;
     assert!(
         delta_sql.contains(
-            "ROW(ROW(region, bucket)) = ROW(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"))"
+            "pg_catalog.hash_record_extended(ROW(region, bucket), 0::bigint) = pg_catalog.hash_record_extended(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"), 0::bigint)"
         ),
         "{delta_sql}"
     );
     assert!(
         delta_sql.contains(
-            "ROW(ROW(r.\"region\", r.\"bucket\")) = ROW(ROW(d.\"region\", d.\"bucket\"))"
+            "ROW(region, bucket) IS NOT DISTINCT FROM ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\")"
+        ),
+        "{delta_sql}"
+    );
+    assert!(
+        delta_sql.contains(
+            "pg_catalog.hash_record_extended(ROW(r.\"region\", r.\"bucket\"), 0::bigint) = pg_catalog.hash_record_extended(ROW(d.\"region\", d.\"bucket\"), 0::bigint)"
+        ),
+        "{delta_sql}"
+    );
+    assert!(
+        delta_sql.contains(
+            "ROW(r.\"region\", r.\"bucket\") IS NOT DISTINCT FROM ROW(d.\"region\", d.\"bucket\")"
         ),
         "{delta_sql}"
     );
@@ -612,13 +623,15 @@ async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
                FROM agg_mass_extreme_source s
                WHERE EXISTS (
                    SELECT 1 FROM affected d
-                   WHERE ROW(ROW(s.region, s.bucket)) = ROW(ROW(d.region, d.bucket))
+                   WHERE pg_catalog.hash_record_extended(ROW(s.region, s.bucket), 0::bigint) = pg_catalog.hash_record_extended(ROW(d.region, d.bucket), 0::bigint)
+                     AND ROW(s.region, s.bucket) IS NOT DISTINCT FROM ROW(d.region, d.bucket)
                )
                GROUP BY s.region, s.bucket
            )
            SELECT SUM(COALESCE(r.high, 0)) FROM affected d
            LEFT JOIN rescan r
-             ON ROW(ROW(r.region, r.bucket)) = ROW(ROW(d.region, d.bucket))"#,
+             ON pg_catalog.hash_record_extended(ROW(r.region, r.bucket), 0::bigint) = pg_catalog.hash_record_extended(ROW(d.region, d.bucket), 0::bigint)
+            AND ROW(r.region, r.bucket) IS NOT DISTINCT FROM ROW(d.region, d.bucket)"#,
     )
     .fetch_one(&mut *conn)
     .await
