@@ -2454,6 +2454,51 @@ pub fn query_partition_descendant_oids(
     Ok(Vec::new())
 }
 
+/// Level-triggered partition-DLL recovery: compare the durable ancestry snapshot
+/// with PostgreSQL's current recursive partition tree before applying a delta.
+///
+/// A missed sql_drop/ddl_command_end notification (for example during restore)
+/// must not leave groups from a vanished partition in a materialization.
+/// We deliberately *rebuild* on disagreement rather than attempt to infer a
+/// delete range from live catalog state after the child has disappeared.
+/// In particular, a RETAIN stream with sealed history will fail closed when
+/// its historical state cannot be reconstructed.
+#[cfg(not(test))]
+pub(crate) fn partition_snapshot_changed(pgt_id: i64) -> Result<bool, PgTrickleError> {
+    let changed = Spi::get_one_with_args::<bool>(
+        "WITH RECURSIVE descendants(root_oid, relid) AS ( \\
+           SELECT dep.source_relid, inh.inhrelid \\
+             FROM pgtrickle.pgt_dependencies dep \\
+             JOIN pg_catalog.pg_inherits inh ON inh.inhparent = dep.source_relid \\
+            WHERE dep.pgt_id = $1 AND dep.source_type = 'TABLE' \\
+           UNION ALL \\
+           SELECT d.root_oid, inh.inhrelid \\
+             FROM descendants d \\
+             JOIN pg_catalog.pg_inherits inh ON inh.inhparent = d.relid \\
+         ), current_children AS ( \\
+           SELECT root_oid, pg_catalog.jsonb_agg(DISTINCT relid::bigint ORDER BY relid::bigint) AS oids \\
+             FROM descendants GROUP BY root_oid \\
+         ) \\
+         SELECT EXISTS ( \\
+           SELECT 1 FROM pgtrickle.pgt_dependencies dep \\
+           LEFT JOIN current_children children ON children.root_oid = dep.source_relid \\
+           WHERE dep.pgt_id = $1 AND dep.source_type = 'TABLE' \\
+             AND dep.column_snapshot ? 'partition_descendant_oids' \\
+             AND dep.column_snapshot->'partition_descendant_oids' \\
+                 IS DISTINCT FROM COALESCE(children.oids, '[]'::jsonb) \\
+         )",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::InternalError("cannot inspect partition ancestry".into()))?;
+    Ok(changed)
+}
+
+#[cfg(test)]
+pub(crate) fn partition_snapshot_changed(_pgt_id: i64) -> Result<bool, PgTrickleError> {
+    Ok(false)
+}
+
 /// Get the stored column snapshot for a dependency pair.
 ///
 /// Returns `None` if no snapshot is stored.
