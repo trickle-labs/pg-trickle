@@ -248,6 +248,10 @@ def check_retirement_contract(contract: dict) -> None:
 
 
 def check_subscription_scale_contract(contract: dict) -> None:
+    prior.shared.require(
+        not any(suite.get("id") == "subscription-scale-1m" for suite in contract["required_suites"]),
+        "the 1M source-row subscription suite is outside v0.109.0 scope",
+    )
     suite = next(
         (item for item in contract["required_suites"] if item["id"] == "subscription-scale-100k"),
         None,

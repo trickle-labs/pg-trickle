@@ -207,6 +207,16 @@ class RetirementContractTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 gate.check_subscription_scale_contract(broken)
 
+    def test_subscription_scale_contract_rejects_1m_suite(self):
+        contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
+        one_million = copy.deepcopy(
+            next(s for s in contract["required_suites"] if s["id"] == "subscription-scale-100k")
+        )
+        one_million["id"] = "subscription-scale-1m"
+        contract["required_suites"].append(one_million)
+        with self.assertRaises(SystemExit):
+            gate.check_subscription_scale_contract(contract)
+
     def test_centroid_cost_matrix_is_required_and_package_bound(self):
         contract = json.loads((gate.prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
         gate.check_pgvector_contract(contract)
