@@ -2603,6 +2603,34 @@ async fn test_retention_scoped_capture_preserves_duplicate_occurrences() {
 }
 
 
+
+#[tokio::test]
+async fn test_partition_snapshot_reconciliation_recovers_missed_drop_notification() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE reconcile_src (id int NOT NULL, d date NOT NULL, amount int NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE reconcile_old PARTITION OF reconcile_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE reconcile_live PARTITION OF reconcile_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO reconcile_src VALUES (1,'2025-06-01',9),(2,'2026-06-01',12)").await;
+    let query = "SELECT d, sum(amount) AS total, count(*) AS n FROM reconcile_src GROUP BY d";
+    db.create_st("reconcile_st", query, "1h", "DIFFERENTIAL").await;
+
+    // Simulate a stale persisted ancestry after a restore / missed event hook.
+    // No needs_reinit bit is set; the next refresh must notice the discrepancy.
+    db.execute("UPDATE pgtrickle.pgt_dependencies SET column_snapshot = jsonb_set(column_snapshot, '{partition_descendant_oids}', '[99999999]'::jsonb) WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'reconcile_st') AND source_relid = 'reconcile_src'::regclass").await;
+    db.refresh_st_with_retry("reconcile_st").await;
+    db.assert_st_matches_query("reconcile_st", query).await;
+    let action: String = db.query_scalar(
+        "SELECT h.action FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'reconcile_st' ORDER BY h.refresh_id DESC LIMIT 1",
+    ).await;
+    assert_eq!(action, "REINITIALIZE");
+    let reinit: bool = db.query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'reconcile_st'",
+    ).await;
+    assert!(!reinit, "successful protected rebuild clears the flag");
+}
+
 #[tokio::test]
 async fn test_retention_aligned_day_key_allows_other_time_bucket_constant_and_max() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
