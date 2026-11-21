@@ -148,6 +148,7 @@ fn set_policy(
         }
     };
     let cutoff = retention::parse_retention_cutoff(candidate.source_type_oid, cutoff_text)?;
+    let trim_unbounded = mode == RetentionMode::Trim && supplied_cutoff.is_none();
     let query_hash = crate::catalog::compute_defining_query_hash(&st.defining_query);
     let previous = load_policy(st.pgt_id)?;
     if previous
@@ -178,6 +179,7 @@ fn set_policy(
             RetentionState {
                 version: 1,
                 mode,
+                trim_unbounded,
                 candidate,
                 cutoff,
                 query_hash,
@@ -189,6 +191,7 @@ fn set_policy(
         RetentionState {
             version: 1,
             mode,
+            trim_unbounded,
             candidate,
             cutoff,
             query_hash,
@@ -367,7 +370,9 @@ fn get_stream_table_partition_retention(name: &str) -> pgrx::JsonB {
         let mut result = serde_json::json!({
             "enabled": true, "policy": state.mode, "source": source_name,
             "source_column": state.candidate.source_column, "group_column": state.candidate.output_column,
-            "bucket": state.candidate.bucket, "cutoff": display_bound(state.cutoff)?, "sealed_ranges": ranges,
+            "bucket": state.candidate.bucket,
+            "cutoff": if state.trim_unbounded { None } else { Some(display_bound(state.cutoff)?) },
+            "sealed_ranges": ranges,
         });
         if let Some(pending) = state.pending {
             result["pending_detach"] = serde_json::json!({
