@@ -2604,6 +2604,67 @@ async fn test_retention_scoped_capture_preserves_duplicate_occurrences() {
 
 
 
+
+#[tokio::test]
+async fn test_trim_without_cutoff_deletes_an_aligned_partition_independent_of_age() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE unbounded_trim_source (id integer NOT NULL, d date NOT NULL, amount integer NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE unbounded_trim_earlier PARTITION OF unbounded_trim_source FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE unbounded_trim_later PARTITION OF unbounded_trim_source FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO unbounded_trim_source VALUES (1,'2025-06-01',5),(2,'2026-06-01',10)").await;
+    let query = "SELECT d, COUNT(*) AS n, SUM(amount) AS total FROM unbounded_trim_source GROUP BY d";
+    db.create_st("unbounded_trim_st", query, "1h", "DIFFERENTIAL").await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('unbounded_trim_st','TRIM','d')").await;
+    let policy: serde_json::Value = db.query_scalar(
+        "SELECT pgtrickle.get_stream_table_partition_retention('unbounded_trim_st')",
+    ).await;
+    assert!(policy["cutoff"].is_null(), "source-driven TRIM has no cutoff: {policy}");
+    // Drop the later partition, above the internal type placeholder and above
+    // any traditional retention cutoff. Its groups still need to vanish.
+    db.execute("DROP TABLE unbounded_trim_later").await;
+    db.assert_st_matches_query("unbounded_trim_st", query).await;
+    let groups: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT d::text, total FROM unbounded_trim_st ORDER BY d",
+    ).fetch_all(&db.pool).await.expect("read remaining groups");
+    assert_eq!(groups, vec![("2025-06-01".into(), 5)]);
+    let needs_reinit: bool = db.query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'unbounded_trim_st'",
+    ).await;
+    assert!(!needs_reinit, "source-driven local delete avoids reinitialization");
+}
+
+#[tokio::test]
+async fn test_retain_without_cutoff_seals_source_driven_removal_and_rejects_reattach() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE unbounded_retain_source (id integer NOT NULL, d date NOT NULL, amount integer NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE unbounded_retain_earlier PARTITION OF unbounded_retain_source FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE unbounded_retain_later PARTITION OF unbounded_retain_source FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO unbounded_retain_source VALUES (1,'2025-06-01',5),(2,'2026-06-01',10)").await;
+    let query = "SELECT d, COUNT(*) AS n, SUM(amount) AS total FROM unbounded_retain_source GROUP BY d";
+    db.create_st("unbounded_retain_st", query, "1h", "DIFFERENTIAL").await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('unbounded_retain_st','RETAIN','d')").await;
+    db.execute("ALTER TABLE unbounded_retain_source DETACH PARTITION unbounded_retain_later").await;
+    let retained: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT d::text, total FROM unbounded_retain_st ORDER BY d",
+    ).fetch_all(&db.pool).await.expect("read retained groups");
+    assert_eq!(retained, vec![
+        ("2025-06-01".into(), 5), ("2026-06-01".into(), 10),
+    ]);
+    let policy: serde_json::Value = db.query_scalar(
+        "SELECT pgtrickle.get_stream_table_partition_retention('unbounded_retain_st')",
+    ).await;
+    assert!(policy["cutoff"].is_null(), "source-driven RETAIN has no cutoff");
+    assert_eq!(policy["sealed_ranges"].as_array().map(Vec::len), Some(1));
+    let error = db.try_execute(
+        "ALTER TABLE unbounded_retain_source ATTACH PARTITION unbounded_retain_later FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    ).await.expect_err("must not reopen sealed retained history");
+    assert!(error.to_string().contains("partition attach blocked"), "{error}");
+}
+
 #[tokio::test]
 async fn test_partition_snapshot_reconciliation_recovers_missed_drop_notification() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
