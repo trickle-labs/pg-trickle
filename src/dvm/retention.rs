@@ -3261,6 +3261,7 @@ mod tests {
         RetentionState {
             version: 1,
             mode,
+            trim_unbounded: false,
             candidate: RetentionGroupCandidate {
                 output_column: "d".into(),
                 bucket: RetentionBucket::Exact,
