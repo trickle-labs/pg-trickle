@@ -17,7 +17,7 @@ def main() -> int:
     cases = [case.split("::", 1) for case in suite["required_cases"]]
     binaries = sorted({binary for binary, _ in cases})
     expression = " | ".join(f"test({name})" for _, name in cases)
-    command = ["bash", "scripts/run_e2e_tests.sh", "--no-capture"]
+    command = ["bash", "scripts/run_e2e_tests.sh", "--no-capture", "--run-ignored", "all"]
     for binary in binaries:
         command.extend(["--test", binary])
     command.extend(["-E", expression])

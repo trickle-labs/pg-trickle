@@ -3,6 +3,54 @@
 The end-to-end revision-safe RAG comparison is documented in
 [LIVE_RAG.md](LIVE_RAG.md).
 
+### Long-running centroid drift
+
+The `centroid-drift` job in the manually dispatched E2E Benchmarks workflow runs 2,000 seeded
+mutation and refresh calls against a development image with pgvector 0.8.7.
+It compares every group to native `avg(vector)` after each call and records
+the largest component error and fraction of the absolute-plus-relative
+tolerance at 100-call checkpoints. The run includes updates, deletes, NULL
+transitions and group moves; it uses three dimensions and does not qualify
+large dimensions, concurrent workloads, crash recovery or release artifacts.
+The uploaded results identify the image and its extension files.
+
+To run it locally after building the version-specific image:
+
+```sh
+PGS_E2E_IMAGE=pg_trickle_e2e_pgvector:0.8.7 PGVECTOR_EXPECTED_VERSION=0.8.7 \
+  ./scripts/run_e2e_tests.sh --retries 0 --test e2e_pgvector_tests \
+  --run-ignored ignored-only --no-capture \
+  -E 'test(test_centroid_long_running_drift_matches_native_avg)'
+```
+
+Use `test_centroid_high_dimensional_drift_matches_native_avg` in the same
+command to run the 1,536-dimensional variant. It uses the same seed and a
+small corpus, so it does not establish a general numerical operating envelope.
+
+### Exact-package centroid cost matrix
+
+The `centroid-cost-matrix` v0.109.0 qualification suite runs the filtered
+workload against the candidate package copied into the PostgreSQL test image.
+It covers 5,000 rows at 384, 768 and 1,536 dimensions, with small, medium, large
+and skewed group distributions. For one-row and 2,500-row changes it discards
+three warmup rounds and retains 20 measured refreshes per strategy and group
+shape in three modes: explicitly warmed pages, cold PostgreSQL and Linux host
+page caches, and warmed pages with a controlled source writer. Cold samples
+stop PostgreSQL, clear host page caches, and start the isolated container; this
+mode runs only on the disposable Linux GitHub Actions runner. The writer case
+toggles an unprojected source key while refresh runs, preserving centroid
+values. It samples writer lock waits at 1 ms intervals and holds the writer
+transaction open for at least 10 ms. This is a controlled single-writer overlap
+case, not sustained writer throughput.
+
+The JSON reports p50/p95/p99 refresh, writer transaction, and lock-wait timings,
+shared buffer counts, source tuple visits, WAL, stream storage and logical
+auxiliary-state bytes.
+Docker samples retain CPU and memory observations, and cold-cache reset time is
+reported separately. These are single-runner synthetic measurements; they do
+not establish natural rebase frequency or a general operating envelope, so the
+automatic selector remains experimental and opt-in.
+
 ### Controlled distance-subscription measurements
 
 The opt-in subscription workload accepts comma-separated `PGVECTOR_SUB_ROWS`
@@ -113,21 +161,21 @@ do not necessarily expose plans for statements executed through SPI. A separate
 affected-group query illustrates a possible rescan. Same-transaction PostgreSQL
 tuple counters record sequential returns and index fetches from the source during
 each refresh, including repeated visits; they are not counts of distinct rows.
-This is one observation per
-strategy in the order listed; EXPLAIN overhead and cache order affect timings.
-The workload also performs five repeated one-row changes by default, rotating
-the group and strategy order. Set `PGVECTOR_CENTROID_REWRITE_ROWS` to update
+This is one observation per strategy in the order listed; EXPLAIN overhead and
+cache order affect timings. The repeated comparison uses three excluded warmup
+rounds, then rotates group and strategy order. Set `PGVECTOR_CENTROID_REWRITE_ROWS` to update
 more rows per round, up to the surviving source rows less two fixed inputs.
 It checks each selected strategy and all affected groups against native AVG
 with an absolute bound of `1e-5` plus a relative bound of `1e-6`, rejects
 missing components, and records each round's maximum absolute component error,
-refresh time and percentiles without EXPLAIN. Set
+refresh time, WAL, tuple visits, storage and logical state bytes without EXPLAIN. Set
 `PGVECTOR_CENTROID_SAMPLES` from 1 to 50 to change the number of rounds; a
 small sample cannot establish tail latency. The algebraic measurement asserts
 that every round uses algebraic state, so batches that trigger a rebase fail
-the benchmark rather than being silently counted as algebraic. The workload does not
-measure source-write overhead or concurrent load. Use a dedicated host and
-more repetitions before drawing performance conclusions.
+the benchmark rather than being silently counted as algebraic. The workload
+records source mutation time but does not measure concurrent load or natural
+rebase frequency. Use a dedicated host and more repetitions before drawing
+performance conclusions.
 
 The scheduled run also measures distance subscriptions separately with 1,000
 and 10,000 rows and zero, one, or ten subscriptions. Five one-row changes per

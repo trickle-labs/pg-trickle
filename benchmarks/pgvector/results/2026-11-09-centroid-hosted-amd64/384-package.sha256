@@ -1,0 +1,3 @@
+efb56fa3eb120795988315973773b84d5ba178c9702052a60099a472d75200c0  /usr/lib/postgresql/18/lib/pg_trickle.so
+ac9b259a5b6e355a655d7b673a2f11c5edd4603faf380421c8b786b3dafe341e  /usr/share/postgresql/18/extension/pg_trickle--0.109.0.sql
+d96d7a1a038764e1e94c8e58f542ce33f30b81f69fef5ea3dc429190f3f40b0c  /usr/share/postgresql/18/extension/pg_trickle.control

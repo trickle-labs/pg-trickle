@@ -36,6 +36,18 @@ PAUSE_CASES = {
 PGVECTOR_CASES = {
     "e2e_pgvector_tests::" + name
     for name in (
+        "test_centroid_randomized_refresh_churn_matches_native_avg",
+        "test_centroid_long_running_drift_matches_native_avg",
+        "test_centroid_diverse_384_dimensional_drift_matches_native_avg",
+        "test_centroid_diverse_768_dimensional_drift_matches_native_avg",
+        "test_centroid_diverse_high_dimensional_drift_matches_native_avg",
+        "test_centroid_crash_recovers_committed_source_and_rolls_back_refresh",
+        "test_centroid_opt_in_applies_and_falls_back_after_corruption",
+        "test_centroid_missing_state_rebuilds_or_stays_unbound",
+        "test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh",
+        "test_centroid_unsafe_rebase_remains_unbound_without_retry_storm",
+        "test_centroid_refresh_serializes_concurrent_source_writer",
+        "test_centroid_cost_model_accepts_real_refresh_history",
         "test_pgvector_compat_installed_version",
         "test_pgvector_distance_types_and_functions_differential",
         "test_embedding_stream_table_v2_metrics_and_options",
@@ -107,6 +119,25 @@ def check_pgvector_contract(contract: dict) -> None:
         and upgrade.get("runtime") is True and upgrade.get("upgrade") is True
         and upgrade.get("requires_postgresql") is True and upgrade.get("nextest_retries") == 0,
         "pgvector catalog upgrade must run every required case against the candidate package",
+    )
+    centroid_cost = suites.get("centroid-cost-matrix", {})
+    prior.shared.require(
+        centroid_cost.get("kind") == "measurement"
+        and centroid_cost.get("required") is True
+        and centroid_cost.get("runtime") is True
+        and centroid_cost.get("requires_postgresql") is True
+        and centroid_cost.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
+        and centroid_cost.get("command_argv") == ["python3", "scripts/run_release_centroid_cost.py"]
+        and centroid_cost.get("measurement_file") == "qualification-logs/raw/centroid-cost-matrix.json"
+        and centroid_cost.get("nextest_retries") == 0
+        and centroid_cost.get("required_modes") == [
+            {"cache_mode": "warm", "concurrent_writer": False},
+            {"cache_mode": "cold", "concurrent_writer": False},
+            {"cache_mode": "warm", "concurrent_writer": True},
+        ]
+        and centroid_cost.get("measured_rounds_per_case") == 20
+        and centroid_cost.get("controlled_writer_hold_ms") == 10,
+        "centroid cost qualification must retain the required exact-package matrix",
     )
 
 
@@ -261,7 +292,7 @@ def main() -> None:
     prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {
         "wal-retirement", "wal-retirement-upgrade", "partition-retention",
         "pgvector-0.8.1", "pgvector-0.8.7", "pgvector-catalog-upgrade",
-        "live-rag-100k", "subscription-scale-100k",
+        "live-rag-100k", "centroid-cost-matrix", "subscription-scale-100k",
     }
     contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
     check_retirement_contract(contract)
