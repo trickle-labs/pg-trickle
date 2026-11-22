@@ -4161,7 +4161,7 @@ pub mod create;
 pub(crate) mod recovery;
 pub mod refresh_ops;
 #[cfg(not(test))]
-mod retention;
+pub(crate) mod retention;
 
 // Re-export from submodules for backward-compatible crate::api:: paths.
 pub use refresh_ops::reinit_rewrite_if_needed;
