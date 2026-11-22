@@ -428,10 +428,7 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
     // case SQL equality evaluates to NULL, not false. Assert transaction
     // equality when both IDs are available, and keep the frontier/buffer
     // and exact-result checks below as the mandatory no-replay evidence.
-    if change_upstream
-        && baseline != "FRONTIER_MISSING"
-        && !witness["same_transaction"].is_null()
-    {
+    if change_upstream && baseline != "FRONTIER_MISSING" && !witness["same_transaction"].is_null() {
         assert_eq!(witness["same_transaction"], true, "{diagnostics}");
     }
     if baseline == "FALLBACK" {
