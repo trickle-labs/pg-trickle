@@ -2498,7 +2498,7 @@ async fn test_compaction_shared_stream_preserves_consumer_boundaries() {
         // registers. A metadata lock timeout rolls the CREATE transaction back;
         // retry only that transient conflict, never an unrelated DDL error.
         let sql = format!(
-            "SELECT pgtrickle.create_stream_table('{name}', ${query}$ , '1h', 'DIFFERENTIAL')"
+            "SELECT pgtrickle.create_stream_table('{name}', $${query}$$, '1h', 'DIFFERENTIAL')"
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
