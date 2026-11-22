@@ -253,16 +253,19 @@ The settings most users configure at install time.
 
 ### pg_trickle.enabled
 
-Enable or disable the pg_trickle extension.
+Control automatic stream-table refreshes performed by pg_trickle's schedulers.
 
 | Property | Value |
 |---|---|
 | Type | `bool` |
 | Default | `true` |
 | Context | `SUSET` (superuser) |
-| Restart Required | No |
+| Restart Required | No for server-wide changes (reload required); restart the scheduler worker for database-level overrides |
 
-When set to `false`, the background scheduler stops processing refreshes. Existing stream tables remain in the catalog but are not refreshed. Manual `pgtrickle.refresh_stream_table()` calls still work.
+Each database has its own scheduler background worker. When this setting is
+`false` **in the scheduler's session**, it skips automatic refreshes. Existing
+stream tables remain in the catalog but are not refreshed automatically. Manual
+`pgtrickle.refresh_stream_table()` calls still work.
 
 > **Note on CDC triggers**: Setting `enabled = false` stops the scheduler from
 > refreshing stream tables but does **not** disable CDC trigger execution.
@@ -275,13 +278,43 @@ When set to `false`, the background scheduler stops processing refreshes. Existi
 > manually and recreate them via `pgtrickle.repair_stream_table()` when
 > re-enabling.
 
-```sql
--- Disable automatic refreshes
-SET pg_trickle.enabled = false;
+A plain `SET pg_trickle.enabled = off` in a SQL client changes only
+that session's value. It **does not** affect the scheduler running in its own
+background-worker session. To pause automatic refreshes server-wide, use a
+superuser session to update PostgreSQL's configuration and reload it:
 
--- Re-enable
-SET pg_trickle.enabled = true;
+```sql
+-- Disable automatic refreshes across the server
+ALTER SYSTEM SET pg_trickle.enabled = off;
+SELECT pg_reload_conf();
+
+-- Re-enable automatic refreshes
+ALTER SYSTEM SET pg_trickle.enabled = on;
+SELECT pg_reload_conf();
 ```
+
+Alternatively, set `pg_trickle.enabled = off` in `postgresql.conf` and
+reload the configuration. Database-level overrides take precedence over the
+server-wide setting, so they may keep individual schedulers enabled or
+disabled.
+
+To control a single database, set a database-level default instead:
+
+```sql
+-- Disable automatic refreshes for analytics (after its scheduler restarts)
+ALTER DATABASE analytics SET pg_trickle.enabled = off;
+
+-- Later, restore the server-wide setting (after another scheduler restart)
+ALTER DATABASE analytics RESET pg_trickle.enabled;
+```
+
+**Important:** `ALTER DATABASE ... SET` and `ALTER DATABASE ... RESET`
+affect new connections only. An existing scheduler loads its database-level
+setting when it connects, so `pg_reload_conf()` alone **does not** apply these
+changes to that worker. Restart the affected database's scheduler background
+worker after either change (or restart PostgreSQL); the launcher will spawn a
+replacement. Until then, the existing scheduler continues using its previous
+value.
 
 ---
 
