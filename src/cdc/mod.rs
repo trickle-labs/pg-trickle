@@ -3727,7 +3727,7 @@ pub fn compute_safe_upper_bound(
                              WHERE datname = current_database()
                                AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL
                              UNION ALL
-                             SELECT "transaction"::text AS xid,
+                             SELECT \"transaction\"::text AS xid,
                                     EXTRACT(EPOCH FROM (clock_timestamp() - prepared))::bigint AS age_secs
                              FROM pg_prepared_xacts
                              WHERE database = current_database()
