@@ -2620,6 +2620,9 @@ async fn test_aligned_stream_deletes_with_source_without_trim_policy() {
     assert_eq!(policy["enabled"], false, "no user-configured policy: {policy}");
     assert_eq!(policy["automatic_delete_with_source"], true, "{policy}");
     // A write to the child must be captured after the initial protected baseline.
+    let truncate_error = db.try_execute("TRUNCATE automatic_old").await
+        .expect_err("automatic protection forbids untracked TRUNCATE");
+    assert!(truncate_error.to_string().contains("TRUNCATE"));
     db.execute("INSERT INTO automatic_old VALUES (3,'2025-06-01',6)").await;
     db.execute("INSERT INTO automatic_new VALUES (4,'2026-06-01',9)").await;
     db.execute("DROP TABLE automatic_old").await;

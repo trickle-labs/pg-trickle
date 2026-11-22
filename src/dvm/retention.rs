@@ -598,6 +598,66 @@ fn retention_policies_for_source(
     })
 }
 
+
+/// A broken automatic capture must take the ordinary FULL-rebuild fallback,
+/// never block user partition DDL or silently skip unknown direct-child writes.
+/// Explicit TRIM / RETAIN have stronger user promises and remain fail-closed.
+#[cfg(not(test))]
+fn automatic_cut_available(
+    pgt_id: i64,
+    source_oid: pg_sys::Oid,
+    state: &RetentionState,
+) -> Result<bool, crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    if !state.automatic {
+        return Ok(true);
+    }
+    let st = crate::catalog::StreamTableMeta::get_by_id(pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
+    let aligned = st.status == crate::dag::StStatus::Active
+        && !st.needs_reinit
+        && state.candidate.source_oid == source_oid.to_u32()
+        && state.query_hash == crate::catalog::compute_defining_query_hash(&st.defining_query);
+    let ready = if aligned {
+        let capture = ensure_retention_capture(pgt_id);
+        let storage = validate_retention_storage(
+            &st,
+            source_oid,
+            &state.candidate,
+            RetentionMode::Trim,
+            false,
+        );
+        match (capture, storage) {
+            (Ok(()), Ok(())) => true,
+            (Err(PgTrickleError::InvalidArgument(_)), _)
+            | (_, Err(PgTrickleError::InvalidArgument(_))) => false,
+            (Err(error), _) | (_, Err(error)) => return Err(error),
+        }
+    } else {
+        false
+    };
+    if !ready {
+        let changed = Spi::get_one_with_args::<i64>(
+            "UPDATE pgtrickle.pgt_dependencies
+                SET column_snapshot = column_snapshot - 'partition_retention'
+              WHERE pgt_id = $1 AND source_relid = $2
+                AND column_snapshot->'partition_retention'->>'automatic' = 'true'
+              RETURNING pgt_id",
+            &[pgt_id.into(), source_oid.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if changed != Some(pgt_id) {
+            return Err(PgTrickleError::InvalidArgument(
+                "automatic partition capture changed before its safe fallback".into(),
+            ));
+        }
+        // The DDL completion hook will mark the stream for reinitialization.
+        // Remaining no-op guards are harmless until its CDC is rebuilt.
+    }
+    Ok(ready)
+}
+
 /// Persist a protected cut before PostgreSQL commits the first detach phase.
 #[cfg(not(test))]
 pub(crate) fn prepare_concurrent_retention_detaches(
@@ -618,6 +678,9 @@ pub(crate) fn prepare_concurrent_retention_detaches(
                 ));
             }
             prepared.push(pgt_id);
+            continue;
+        }
+        if !automatic_cut_available(pgt_id, source_oid, &state)? {
             continue;
         }
         let partition = match resolve_retention_partition(
@@ -842,6 +905,9 @@ pub(crate) fn prepare_automatic_detaches(
             ));
         }
         if prepared_detach_exists(pgt_id, source_oid.to_u32(), target_oid.to_u32()) {
+            continue;
+        }
+        if !automatic_cut_available(pgt_id, source_oid, &state)? {
             continue;
         }
         let partition = match resolve_retention_partition(
