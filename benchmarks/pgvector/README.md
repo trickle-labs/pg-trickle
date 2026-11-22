@@ -1,5 +1,8 @@
 # Filtered pgvector workload
 
+The end-to-end revision-safe RAG comparison is documented in
+[LIVE_RAG.md](LIVE_RAG.md).
+
 ### Long-running centroid drift
 
 The `centroid-drift` job in the manually dispatched E2E Benchmarks workflow runs 2,000 seeded

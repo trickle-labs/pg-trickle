@@ -1,0 +1,12 @@
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-1396-evidence)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.86s
+     Running tests/e2e_pgvector_revision_tests.rs (/private/tmp/pg-trickle-task-1399/target/debug/deps/e2e_pgvector_revision_tests-7ac7530d67ba7c77)
+
+running 1 test
+application cancellation to completed reconciliation: 0.057s
+periodic_full cancellation to completed reconciliation: 0.053s
+differential cancellation to completed reconciliation: 0.053s
+test test_live_rag_recovers_after_maintenance_cancellation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 2.40s
+

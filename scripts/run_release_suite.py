@@ -240,6 +240,7 @@ def main() -> int:
                 {
                     "PGT_EXTENSION_DIR": str(extension_dir),
                     "PGT_RELEASE_CANDIDATE_COMMIT": args.candidate_commit,
+                    "PGT_RELEASE_CANDIDATE_ARCHIVE": str(artifact),
                     "PGT_RELEASE_ARTIFACT_ID": artifact_spec["id"],
                     "PGT_RELEASE_ARTIFACT_SHA256": artifact_digest,
                     "PGT_RELEASE_PLATFORM": artifact_spec["platform"],
