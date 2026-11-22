@@ -155,13 +155,6 @@ pub(crate) fn retained_live_rebuild(
     }))
 }
 
-#[cfg(test)]
-pub(crate) fn retained_live_rebuild(
-    _st: &StreamTableMeta,
-) -> Result<Option<RetainedLiveRebuild>, PgTrickleError> {
-    Ok(None)
-}
-
 /// Preserve non-eligibility errors while giving contract violations a targeted hint.
 fn retention_eligibility_error(error: PgTrickleError) -> PgTrickleError {
     match error {

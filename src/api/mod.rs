@@ -4162,6 +4162,24 @@ pub(crate) mod recovery;
 pub mod refresh_ops;
 #[cfg(not(test))]
 pub(crate) mod retention;
+#[cfg(test)]
+pub(crate) mod retention {
+    use crate::{catalog::StreamTableMeta, error::PgTrickleError};
+
+    pub(crate) struct RetainedLiveRebuild;
+
+    impl RetainedLiveRebuild {
+        pub(crate) fn live_predicate(&self, _alias: &str) -> String {
+            unreachable!("retained live rebuild is disabled in unit tests")
+        }
+    }
+
+    pub(crate) fn retained_live_rebuild(
+        _st: &StreamTableMeta,
+    ) -> Result<Option<RetainedLiveRebuild>, PgTrickleError> {
+        Ok(None)
+    }
+}
 
 // Re-export from submodules for backward-compatible crate::api:: paths.
 pub use refresh_ops::reinit_rewrite_if_needed;
