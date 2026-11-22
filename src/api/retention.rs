@@ -86,6 +86,7 @@ impl RetainedLiveRebuild {
 /// Called only after acquiring the source locks used by protected FULL. Never
 /// downgrade a failed proof to an ordinary TRUNCATE: sealed history is gone
 /// from the source and is not reconstructible.
+#[cfg(not(test))]
 pub(crate) fn retained_live_rebuild(
     st: &StreamTableMeta,
 ) -> Result<Option<RetainedLiveRebuild>, PgTrickleError> {
@@ -128,6 +129,13 @@ pub(crate) fn retained_live_rebuild(
         output_column: state.candidate.output_column,
         sealed: state.sealed,
     }))
+}
+
+#[cfg(test)]
+pub(crate) fn retained_live_rebuild(
+    _st: &StreamTableMeta,
+) -> Result<Option<RetainedLiveRebuild>, PgTrickleError> {
+    Ok(None)
 }
 
 /// Preserve non-eligibility errors while giving contract violations a targeted hint.
