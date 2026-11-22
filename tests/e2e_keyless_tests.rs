@@ -189,11 +189,11 @@ async fn test_keyless_aggregate_full_refresh() {
     // Insert duplicate rows
     db.execute("INSERT INTO km_agg VALUES ('X',1),('Y',5)")
         .await;
-    db.refresh_st("km_agg_st").await;
+    db.refresh_st_until_converged("km_agg_st").await;
     db.assert_st_matches_query("km_agg_st", q).await;
 
     // Delete all Y rows
     db.execute("DELETE FROM km_agg WHERE cat = 'Y'").await;
-    db.refresh_st("km_agg_st").await;
+    db.refresh_st_until_converged("km_agg_st").await;
     db.assert_st_matches_query("km_agg_st", q).await;
 }
