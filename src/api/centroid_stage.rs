@@ -618,9 +618,8 @@ fn stage_centroid_delta(
             .source_tables()
             .iter()
             .map(|(source_oid, source)| {
-                // nosemgrep: rust.spi.query.dynamic-format -- source is an internally generated, quoted temp relation.
-                let rows =
-                    match Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {source}")) {
+                let rows = match Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {source}")) // nosemgrep: rust.spi.query.dynamic-format -- source is an internally generated, quoted temp relation.
+                    {
                         Ok(rows) => serde_json::json!({"rows": rows}),
                         Err(error) => serde_json::json!({"error": error.to_string()}),
                     };
@@ -902,9 +901,8 @@ pub(crate) fn stage_centroid_candidates(
     ))
     .map_err(|error| PgTrickleError::SpiError(format!("centroid public candidates: {error}")))?;
     if crate::config::pg_trickle_dvm_decision_trace() {
-        // nosemgrep: rust.spi.query.dynamic-format -- relations are internally generated temp tables.
-        let candidate_rows =
-            match Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {candidate_table}")) {
+        let candidate_rows = match Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {candidate_table}")) // nosemgrep: rust.spi.query.dynamic-format -- relations are internally generated temp tables.
+            {
                 Ok(rows) => serde_json::json!({"rows": rows}),
                 Err(error) => serde_json::json!({"error": error.to_string()}),
             };
