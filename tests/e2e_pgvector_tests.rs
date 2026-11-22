@@ -2962,9 +2962,24 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
                 .fetch_one(&mut *conn)
                 .await
                 .expect("inspect centroid CDC window");
+        let state_before_refresh = if dimensions == 384 && diverse && step == 1326 {
+            Some(sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT jsonb_build_object('frontier_matches', c.baseline_frontier = t.frontier, \
+                 'baseline_frontier', c.baseline_frontier, 'table_frontier', t.frontier, \
+                 'materialized_xid', c.materialized_xid::text, 'cost_rescan_active', c.cost_rescan_active, \
+                 'cost_rescan_xid', c.cost_rescan_xid::text, 'status', c.status) \
+                 FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) \
+                 WHERE t.pgt_relid = 'centroid_churn_st'::regclass",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .expect("inspect centroid state before failing refresh"))
+        } else {
+            None
+        };
         // Trace prior mismatches and the newly observed 384D failure.
         let trace_centroid_delta =
-            (dimensions == 384 && diverse && matches!(step, 274 | 1373 | 1482))
+            (dimensions == 384 && diverse && matches!(step, 274 | 1325 | 1326 | 1373 | 1482))
                 || (dimensions == 3 && !diverse && step == 392);
         if trace_centroid_delta {
             sqlx::query("SET pg_trickle.dvm_decision_trace = on")
@@ -3096,7 +3111,7 @@ async fn run_centroid_randomized_refresh_churn(steps: usize, dimensions: usize, 
                 assert_eq!(
                     fallback.as_deref(),
                     Some("STATE_REJECTED"),
-                    "first unbound refresh at step {step}: {context}"
+                    "first unbound refresh at step {step}: before={state_before_refresh:?}; cdc_window={cdc_window}; after={context}"
                 );
                 assert_eq!(
                     outcome.as_deref(),
