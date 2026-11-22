@@ -68,9 +68,7 @@ fn retention_eligibility_error(error: PgTrickleError) -> PgTrickleError {
 /// it and retain the locks through commit. Only such a baseline authorizes
 /// automatic capture; never retrofit an unverified live CDC frontier.
 #[cfg(not(test))]
-pub(crate) fn arm_automatic_trim_after_full_snapshot(
-    pgt_id: i64,
-) -> Result<(), PgTrickleError> {
+pub(crate) fn arm_automatic_trim_after_full_snapshot(pgt_id: i64) -> Result<(), PgTrickleError> {
     use crate::dag::RefreshMode;
 
     let st = StreamTableMeta::get_by_id(pgt_id)?
@@ -113,11 +111,7 @@ pub(crate) fn arm_automatic_trim_after_full_snapshot(
 
     let candidate = crate::refresh::with_stream_owner(&st, || {
         let tree = crate::dvm::parser::parse_defining_query(&st.defining_query)?;
-        let candidate = match retention::query_group_candidate(
-            &tree,
-            source_oid.to_u32(),
-            &key,
-        ) {
+        let candidate = match retention::query_group_candidate(&tree, source_oid.to_u32(), &key) {
             Ok(candidate) => candidate,
             Err(_) => return Ok(None),
         };
@@ -203,9 +197,7 @@ pub(crate) fn arm_automatic_trim_after_full_snapshot(
 }
 
 #[cfg(test)]
-pub(crate) fn arm_automatic_trim_after_full_snapshot(
-    _pgt_id: i64,
-) -> Result<(), PgTrickleError> {
+pub(crate) fn arm_automatic_trim_after_full_snapshot(_pgt_id: i64) -> Result<(), PgTrickleError> {
     Ok(())
 }
 
