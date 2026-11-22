@@ -96,13 +96,18 @@ pub(crate) fn arm_automatic_trim_after_full_snapshot(pgt_id: i64) -> Result<(), 
     // Only a plain single-column RANGE key is a safe range-delete predicate.
     // The partition layout validator below additionally rejects default,
     // overlapping, non-durable and unaligned descendants.
+    // A plain table or a non-RANGE partitioned table has no eligible key.
+    // Keep a result row even in that case: pgrx's get_one_with_args returns
+    // SpiError::InvalidPosition when the query itself yields zero rows.
     let key = Spi::get_one_with_args::<String>(
-        "SELECT a.attname::text FROM pg_catalog.pg_partitioned_table p
-         JOIN pg_catalog.pg_attribute a
-           ON a.attrelid = p.partrelid AND a.attnum = p.partattrs[0]
-         WHERE p.partrelid = $1 AND p.partstrat = 'r'
-           AND p.partnatts = 1 AND p.partexprs IS NULL
-           AND a.attnotnull AND NOT a.attisdropped",
+        "SELECT (
+           SELECT a.attname::text FROM pg_catalog.pg_partitioned_table p
+           JOIN pg_catalog.pg_attribute a
+             ON a.attrelid = p.partrelid AND a.attnum = p.partattrs[0]
+           WHERE p.partrelid = $1 AND p.partstrat = 'r'
+             AND p.partnatts = 1 AND p.partexprs IS NULL
+             AND a.attnotnull AND NOT a.attisdropped
+         )",
         &[source_oid.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;

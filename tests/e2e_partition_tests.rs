@@ -237,6 +237,67 @@ async fn test_partition_hash_source() {
         .await;
 }
 
+/// Non-RANGE sources must bypass automatic delete-with-source setup rather
+/// than failing stream creation on an empty partition-key lookup.
+#[tokio::test]
+async fn test_non_range_sources_skip_automatic_retention() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE retention_probe_plain (id INT PRIMARY KEY, amount INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO retention_probe_plain VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "retention_probe_plain_st",
+        "SELECT id, amount FROM retention_probe_plain",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("INSERT INTO retention_probe_plain VALUES (2, 20)")
+        .await;
+    db.refresh_st("retention_probe_plain_st").await;
+    db.assert_st_matches_query(
+        "retention_probe_plain_st",
+        "SELECT id, amount FROM retention_probe_plain",
+    )
+    .await;
+
+    db.execute(
+        "CREATE TABLE retention_probe_hash (
+            id INT PRIMARY KEY, amount INT NOT NULL
+        ) PARTITION BY HASH (id)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE retention_probe_hash_0 PARTITION OF retention_probe_hash
+         FOR VALUES WITH (MODULUS 2, REMAINDER 0)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE retention_probe_hash_1 PARTITION OF retention_probe_hash
+         FOR VALUES WITH (MODULUS 2, REMAINDER 1)",
+    )
+    .await;
+    db.execute("INSERT INTO retention_probe_hash VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "retention_probe_hash_st",
+        "SELECT id, amount FROM retention_probe_hash",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("INSERT INTO retention_probe_hash VALUES (2, 20)")
+        .await;
+    db.refresh_st("retention_probe_hash_st").await;
+    db.assert_st_matches_query(
+        "retention_probe_hash_st",
+        "SELECT id, amount FROM retention_probe_hash",
+    )
+    .await;
+}
+
 // ── PT2: ATTACH PARTITION detection ────────────────────────────────────
 
 #[tokio::test]
