@@ -2894,6 +2894,8 @@ pub fn sync_capture_body_for_source(source_oid: pg_sys::Oid) -> Result<(), PgTri
                   JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id
                  WHERE d.source_relid = $1
                    AND (st.status IN ('ACTIVE', 'INITIALIZING')
+                        OR (st.status = 'SUSPENDED' AND NOT st.needs_reinit
+                            AND st.refresh_reason = 'CDC_REPLAY_PAUSE')
                         OR d.column_snapshot ? 'partition_retention')
             )"#,
         &[source_oid.into()],
