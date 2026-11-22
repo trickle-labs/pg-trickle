@@ -92,6 +92,10 @@ jobs:
       intersect_mutants: ${{ steps.paths.outputs.intersect_mutants }}
     steps:
       - uses: actions/checkout@v7
+        # Release contracts describe the exact candidate version, not a PR merge
+        # that may combine it with APIs targeting a later package release.
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Select checks for changed files
         id: paths
