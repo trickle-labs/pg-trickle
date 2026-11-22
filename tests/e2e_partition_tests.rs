@@ -2062,6 +2062,16 @@ async fn test_replay_resume_falls_back_after_reinitialization_required() {
         "SELECT id,amount FROM resume_fallback_st ORDER BY id"
     ).fetch_all(&db.pool).await.expect("reinitialized rows");
     assert_eq!(rows,vec![(1,4),(2,7)]);
+
+    // A change-buffer identity/version loss also prevents replay even if the
+    // frontier exists. Retain the protected baseline requirement on resume.
+    db.execute("SELECT pgtrickle.pause_stream_table('resume_fallback_st')").await;
+    db.execute("UPDATE pgtrickle.pgt_change_buffers SET row_probe_version = NULL WHERE source_kind = 'BASE' AND source_id = 'resume_fallback_src'::regclass::oid::bigint").await;
+    db.execute("SELECT pgtrickle.resume_stream_table('resume_fallback_st')").await;
+    let needs_reinit: bool = db.query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name='resume_fallback_st'"
+    ).await;
+    assert!(needs_reinit,"invalid CDC-buffer metadata must forbid replay");
 }
 
 
