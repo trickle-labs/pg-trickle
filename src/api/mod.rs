@@ -4163,7 +4163,15 @@ pub mod refresh_ops;
 #[cfg(not(test))]
 mod retention;
 
+#[cfg(not(test))]
 pub(crate) use retention::arm_automatic_trim_after_full_snapshot;
+
+#[cfg(test)]
+pub(crate) fn arm_automatic_trim_after_full_snapshot(
+    _pgt_id: i64,
+) -> Result<(), crate::error::PgTrickleError> {
+    Ok(())
+}
 
 // Re-export from submodules for backward-compatible crate::api:: paths.
 pub use refresh_ops::reinit_rewrite_if_needed;

@@ -3185,7 +3185,7 @@ pub(super) fn initialize_st(
     // The source is still locked from before the initial FULL materialization.
     // Eligible unconfigured streams can establish protected delete-with-source
     // capture here; a DDL-time retrofit would not prove a safe CDC baseline.
-    super::retention::arm_automatic_trim_after_full_snapshot(pgt_id)?;
+    super::arm_automatic_trim_after_full_snapshot(pgt_id)?;
 
     // Record the initial population in pgt_refresh_history so that monitoring
     // tools and tests can observe the initial fill event.  Errors here are
