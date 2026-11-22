@@ -382,34 +382,6 @@ UPDATED_VERSION="$(psql "SELECT extversion FROM pg_extension WHERE extname = 'pg
     echo "extension update reported $UPDATED_VERSION, expected $TO_VERSION" >&2
     exit 1
 }
-if [[ "$RETENTION_UPGRADE" == true ]]; then
-    psql "SELECT to_regprocedure('pgtrickle.set_stream_table_partition_retention(text,text,text,text)') IS NOT NULL
-        AND to_regprocedure('pgtrickle.get_stream_table_partition_retention(text)') IS NOT NULL
-        AND to_regprocedure('pgtrickle.create_stream_table_with_retention(text,text,text,text,text,text)') IS NOT NULL
-        AND EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger
-                    WHERE evtname='pg_trickle_ddl_start_tracker' AND evtevent='ddl_command_start')" | grep -qx t
-
-    # Existing streams stay unconfigured after upgrade. Then exercise RETAIN
-    # through the migrated API and DDL hook on the same upgraded catalog.
-    # The SUM query is marked needs_reinit because older materializations lack
-    # the differential aggregate state added in v0.109.0.
-    psql "SELECT pgtrickle.refresh_stream_table('retention_upgrade_st')" >/dev/null
-    psql "SELECT pgtrickle.get_stream_table_partition_retention('retention_upgrade_st')->>'enabled'" | grep -qx false
-    psql "SELECT pgtrickle.set_stream_table_partition_retention(
-        'retention_upgrade_st', 'RETAIN', 'd', '2026-01-01')" >/dev/null
-    psql "ALTER TABLE public.retention_upgrade_source
-        DETACH PARTITION public.retention_upgrade_old CONCURRENTLY" >/dev/null
-    psql "SELECT NOT EXISTS (
-        (SELECT d,total,n FROM public.retention_upgrade_st
-         EXCEPT ALL VALUES ('2025-06-01'::date,10::bigint,1::bigint),
-                            ('2026-06-01'::date,20::bigint,1::bigint))
-        UNION ALL
-        (VALUES ('2025-06-01'::date,10::bigint,1::bigint),
-                ('2026-06-01'::date,20::bigint,1::bigint)
-         EXCEPT ALL SELECT d,total,n FROM public.retention_upgrade_st))" | grep -qx t
-    psql "SELECT pgtrickle.get_stream_table_partition_retention('retention_upgrade_st')->'sealed_ranges'
-        = '[{\"lower\":\"2025-01-01\",\"upper\":\"2026-01-01\"}]'::jsonb" | grep -qx t
-fi
 if [[ "$VECTOR_UPGRADE" == true ]]; then
     VECTOR_AFTER="$(psql "SELECT s.pgt_id::text || '|' || s.pgt_relid::text || '|' || s.defining_query || '|' ||
         i.indexrelid::text || '|' || pg_relation_filenode(i.indexrelid)::text || '|' || pg_get_indexdef(i.indexrelid)
@@ -459,6 +431,35 @@ if [[ "$VECTOR_UPGRADE" == true ]]; then
 fi
 CAPTURE_STATE="$(psql 'SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton')"
 [[ "$CAPTURE_STATE" == "ACTIVE" ]] || { echo "capture did not resume after update" >&2; exit 1; }
+
+if [[ "$RETENTION_UPGRADE" == true ]]; then
+    psql "SELECT to_regprocedure('pgtrickle.set_stream_table_partition_retention(text,text,text,text)') IS NOT NULL
+        AND to_regprocedure('pgtrickle.get_stream_table_partition_retention(text)') IS NOT NULL
+        AND to_regprocedure('pgtrickle.create_stream_table_with_retention(text,text,text,text,text,text)') IS NOT NULL
+        AND EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger
+                    WHERE evtname='pg_trickle_ddl_start_tracker' AND evtevent='ddl_command_start')" | grep -qx t
+
+    # Existing streams stay unconfigured after upgrade. Then exercise RETAIN
+    # through the migrated API and DDL hook on the same upgraded catalog.
+    # The SUM query is marked needs_reinit because older materializations lack
+    # the differential aggregate state added in v0.109.0.
+    psql "SELECT pgtrickle.refresh_stream_table('retention_upgrade_st')" >/dev/null
+    psql "SELECT pgtrickle.get_stream_table_partition_retention('retention_upgrade_st')->>'enabled'" | grep -qx false
+    psql "SELECT pgtrickle.set_stream_table_partition_retention(
+        'retention_upgrade_st', 'RETAIN', 'd', '2026-01-01')" >/dev/null
+    psql "ALTER TABLE public.retention_upgrade_source
+        DETACH PARTITION public.retention_upgrade_old CONCURRENTLY" >/dev/null
+    psql "SELECT NOT EXISTS (
+        (SELECT d,total,n FROM public.retention_upgrade_st
+         EXCEPT ALL VALUES ('2025-06-01'::date,10::bigint,1::bigint),
+                            ('2026-06-01'::date,20::bigint,1::bigint))
+        UNION ALL
+        (VALUES ('2025-06-01'::date,10::bigint,1::bigint),
+                ('2026-06-01'::date,20::bigint,1::bigint)
+         EXCEPT ALL SELECT d,total,n FROM public.retention_upgrade_st))" | grep -qx t
+    psql "SELECT pgtrickle.get_stream_table_partition_retention('retention_upgrade_st')->'sealed_ranges'
+        = '[{\"lower\":\"2025-01-01\",\"upper\":\"2026-01-01\"}]'::jsonb" | grep -qx t
+fi
 
 if [[ "$AGGREGATE_UPGRADE" == true ]]; then
     # Graph-coordinated refresh exercises the manual FULL target for an
