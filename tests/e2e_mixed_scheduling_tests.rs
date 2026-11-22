@@ -150,8 +150,7 @@ async fn refresh_for_mode(db: &E2eDb, st_name: &str, query: &str, mode: Schedule
                     .await
                     .unwrap_or_default();
                     panic!(
-                        "[{mode}] scheduler did not converge '{st_name}': {diff}\\n\
-                         stream states: {states:?}\\nrecent refreshes: {recent:?}"
+                        "[{mode}] scheduler did not converge '{st_name}': {diff}\nstream states: {states:?}\nrecent refreshes: {recent:?}"
                     );
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
