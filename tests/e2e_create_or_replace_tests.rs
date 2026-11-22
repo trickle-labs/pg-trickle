@@ -731,10 +731,13 @@ async fn test_cor_published_aggregate_preflight_and_guarded_replace() {
         .await;
     assert_eq!(publication_oid_before, publication_oid_after);
 
-    let replace_sql = format!(
-        "SELECT pgtrickle.create_or_replace_stream_table('pub1463_totals', $q${with_peak}$q$, '1h', 'DIFFERENTIAL')"
-    );
-    let refused = sqlx::query(&replace_sql).execute(&db.pool).await;
+    // Bind the replacement query rather than interpolating dynamic SQL.
+    let refused = sqlx::query(
+        "SELECT pgtrickle.create_or_replace_stream_table('pub1463_totals', $1, '1h', 'DIFFERENTIAL')",
+    )
+    .bind(with_peak)
+    .execute(&db.pool)
+    .await;
     assert!(refused.is_err(), "unguarded replacement must fail closed");
     assert!(
         refused
