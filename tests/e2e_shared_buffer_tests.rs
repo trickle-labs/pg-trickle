@@ -2494,7 +2494,27 @@ async fn test_compaction_shared_stream_preserves_consumer_boundaries() {
     .await;
     let query = "SELECT id FROM compact_upstream";
     for name in ["compact_fast", "compact_slow"] {
-        db.create_st(name, query, "1h", "DIFFERENTIAL").await;
+        // The scheduler may be refreshing compact_upstream while this child
+        // registers. A metadata lock timeout rolls the CREATE transaction back;
+        // retry only that transient conflict, never an unrelated DDL error.
+        let sql = format!(
+            "SELECT pgtrickle.create_stream_table('{name}', ${query}$ , '1h', 'DIFFERENTIAL')"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            match db.try_execute(&sql).await {
+                Ok(()) => break,
+                Err(error)
+                    if error
+                        .to_string()
+                        .contains("lock timeout: upstream stream-table metadata")
+                        && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(error) => panic!("create_stream_table('{name}') failed: {error}"),
+            }
+        }
     }
 
     db.execute("INSERT INTO compact_src VALUES (101)").await;
