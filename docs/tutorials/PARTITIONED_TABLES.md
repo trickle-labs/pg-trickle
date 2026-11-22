@@ -81,8 +81,8 @@ SELECT * FROM regional_sales ORDER BY region;
 
 ## Retention policies
 
-Explicit retention policies are disabled by default. A newly initialized,
-partition-aligned managed DIFFERENTIAL stream can automatically delete groups
+Explicit retention policies are disabled by default. A newly initialized or
+protectedly reinitialized partition-aligned managed DIFFERENTIAL stream can automatically delete groups
 when their source partition is removed, without configuring `TRIM` or a cutoff.
 The initial FULL baseline must establish complete partition CDC, truncate guards
 and a suitable output index under source locks. Streams that do not meet these
@@ -90,7 +90,8 @@ requirements use the protected full-reinitialization fallback instead. This
 fast path is internal: `get_stream_table_partition_retention` reports
 `enabled: false` and `automatic_delete_with_source: true` when it is armed.
 A caller may still explicitly configure `TRIM` or `RETAIN`, optionally
-with a cutoff. When a cutoff is provided, a partition is
+with a cutoff. Setting the policy to `OFF` disables automatic delete-with-source,
+including across subsequent protected rebuilds. When a cutoff is provided, a partition is
 eligible only when its entire half-open range `[lower, upper)` is below the
 cutoff. Advancing the cutoff does not remove a partition; it makes a subsequent
 `DETACH`, concurrent `DETACH`, or direct `DROP TABLE` eligible for retention

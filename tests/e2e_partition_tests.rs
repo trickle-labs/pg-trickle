@@ -2637,6 +2637,54 @@ async fn test_aligned_stream_deletes_with_source_without_trim_policy() {
     assert_eq!(rows, vec![("2026-06-01".into(), 9, 17)]);
 }
 
+
+#[tokio::test]
+async fn test_legacy_stream_auto_arms_after_a_protected_reinitialization() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE legacy_auto_src (id int NOT NULL, d date NOT NULL, amount int NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE legacy_auto_old PARTITION OF legacy_auto_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE legacy_auto_live PARTITION OF legacy_auto_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO legacy_auto_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)").await;
+    let query = "SELECT d, SUM(amount) AS total, COUNT(*) AS n FROM legacy_auto_src GROUP BY d";
+    db.create_st("legacy_auto_st", query, "1h", "DIFFERENTIAL").await;
+    // Model a pre-upgrade stream with no internal proof. The first removal
+    // falls back to a protected FULL; subsequent removals can use the cut.
+    db.execute("UPDATE pgtrickle.pgt_dependencies SET column_snapshot =
+        column_snapshot - 'partition_retention'
+        WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'legacy_auto_st')
+          AND source_relid = 'legacy_auto_src'::regclass").await;
+    db.execute("DROP TABLE legacy_auto_old").await;
+    let must_rebuild: bool = db.query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'legacy_auto_st'"
+    ).await;
+    assert!(must_rebuild);
+    db.refresh_st_with_retry("legacy_auto_st").await;
+    db.assert_st_matches_query("legacy_auto_st", query).await;
+    let policy: serde_json::Value = db.query_scalar(
+        "SELECT pgtrickle.get_stream_table_partition_retention('legacy_auto_st')"
+    ).await;
+    assert_eq!(policy["automatic_delete_with_source"], true, "{policy}");
+
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('legacy_auto_st','OFF')").await;
+    let policy: serde_json::Value = db.query_scalar(
+        "SELECT pgtrickle.get_stream_table_partition_retention('legacy_auto_st')"
+    ).await;
+    assert_eq!(policy["enabled"], false);
+    assert_eq!(policy["automatic_delete_with_source"], serde_json::Value::Null);
+    // A new protected reinitialization must not silently defeat explicit OFF.
+    db.execute("UPDATE pgtrickle.pgt_dependencies SET column_snapshot =
+        jsonb_set(column_snapshot, '{partition_descendant_oids}', '[9999999]'::jsonb)
+        WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'legacy_auto_st')
+          AND source_relid = 'legacy_auto_src'::regclass").await;
+    db.refresh_st_with_retry("legacy_auto_st").await;
+    let policy: serde_json::Value = db.query_scalar(
+        "SELECT pgtrickle.get_stream_table_partition_retention('legacy_auto_st')"
+    ).await;
+    assert_eq!(policy["automatic_delete_with_source"], serde_json::Value::Null);
+}
+
 #[tokio::test]
 async fn test_unaligned_stream_without_policy_falls_back_to_reinitialize() {
     let db = E2eDb::new_dedicated().await.with_extension().await;

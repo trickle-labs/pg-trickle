@@ -2555,11 +2555,13 @@ pub fn store_column_snapshot_for_pgt_id(
     let (snapshot, fingerprint) = build_column_snapshot(source_oid)?;
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_dependencies \
-         SET column_snapshot = CASE \
+         SET column_snapshot = (CASE \
                WHEN column_snapshot ? 'partition_retention' \
                THEN pg_catalog.jsonb_set($1, '{partition_retention}', \
                                         column_snapshot->'partition_retention', true) \
-               ELSE $1 END, \
+               ELSE $1 END) \
+               || CASE WHEN column_snapshot->>'partition_auto_disabled' = 'true' \
+                  THEN '{"partition_auto_disabled":true}'::jsonb ELSE '{}'::jsonb END, \
              schema_fingerprint = $2 \
          WHERE pgt_id = $3 AND source_relid = $4",
         &[

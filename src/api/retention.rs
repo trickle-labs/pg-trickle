@@ -62,24 +62,30 @@ fn retention_eligibility_error(error: PgTrickleError) -> PgTrickleError {
 }
 
 
-/// Arm an internal delete-with-source cut from the *initial* FULL snapshot.
+/// Arm automatic delete-with-source after a protected FULL materialization.
 ///
-/// initialize_st has already locked the source before reading it and retains
-/// those locks until CREATE commits. This is the only point at which an
-/// unconfigured stream can prove that its rows and CDC frontier share a safe
-/// baseline, including direct-child writes and TRUNCATE. Never retrofit a
-/// live stream from an unverified trigger without a protected FULL baseline.
+/// Initial population and reinitialization lock the source before reading
+/// it and retain the locks through commit. Only such a baseline authorizes
+/// automatic capture; never retrofit an unverified live CDC frontier.
 #[cfg(not(test))]
-pub(crate) fn arm_automatic_trim_after_initialization(
+pub(crate) fn arm_automatic_trim_after_full_snapshot(
     pgt_id: i64,
 ) -> Result<(), PgTrickleError> {
     use crate::dag::RefreshMode;
 
     let st = StreamTableMeta::get_by_id(pgt_id)?
         .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
+    let opted_out = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies
+         WHERE pgt_id = $1 AND column_snapshot->>'partition_auto_disabled' = 'true')",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
     if st.refresh_mode != RefreshMode::Differential
         || !st.is_populated
         || st.needs_reinit
+        || opted_out
         || load_policy(pgt_id)?.is_some()
     {
         return Ok(());
@@ -197,7 +203,7 @@ pub(crate) fn arm_automatic_trim_after_initialization(
 }
 
 #[cfg(test)]
-pub(crate) fn arm_automatic_trim_after_initialization(
+pub(crate) fn arm_automatic_trim_after_full_snapshot(
     _pgt_id: i64,
 ) -> Result<(), PgTrickleError> {
     Ok(())
@@ -232,8 +238,11 @@ fn set_policy(
             crate::cdc::lock_source_relations(&[*source_oid])?;
         }
         Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_dependencies SET column_snapshot = column_snapshot - 'partition_retention' \
-             WHERE pgt_id = $1 AND column_snapshot ? 'partition_retention'",
+            "UPDATE pgtrickle.pgt_dependencies
+             SET column_snapshot = pg_catalog.jsonb_set(
+                 COALESCE(column_snapshot, '{}'::jsonb) - 'partition_retention',
+                 '{partition_auto_disabled}', 'true'::jsonb, true)
+             WHERE pgt_id = $1 AND source_type = 'TABLE'",
             &[st.pgt_id.into()],
         ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         if let Some((source_oid, _)) = previous {
@@ -382,7 +391,7 @@ fn set_policy(
     );
     let updated = Spi::get_one_with_args::<i64>(
         "UPDATE pgtrickle.pgt_dependencies SET column_snapshot = \
-         pg_catalog.jsonb_set(COALESCE(column_snapshot, '{}'::jsonb), '{partition_retention}', $3, true) \
+         pg_catalog.jsonb_set(COALESCE(column_snapshot, '{}'::jsonb) - 'partition_auto_disabled', '{partition_retention}', $3, true) \
          WHERE pgt_id = $1 AND source_relid = $2 RETURNING pgt_id",
         &[st.pgt_id.into(), source_oid.into(), value.into()],
     ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
