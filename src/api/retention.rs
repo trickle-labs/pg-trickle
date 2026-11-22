@@ -108,6 +108,25 @@ pub(crate) fn retained_live_rebuild(
             "the sealed stream's query or refresh mode changed; cannot prove a live-only rebuild".into(),
         ));
     }
+    // Re-derive the partition/group proof from the currently installed query.
+    // A matching stored hash alone is not a substitute for query validation.
+    let actual_candidate = crate::refresh::with_stream_owner(st, || {
+        let tree = crate::dvm::parser::parse_defining_query(&st.defining_query)?;
+        let candidate = retention::query_group_candidate(
+            &tree,
+            source_oid.to_u32(),
+            &state.candidate.source_column,
+        )
+        .map_err(|error| PgTrickleError::RetentionQueryIneligible(error.to_string()))?;
+        retention::validate_retention_group_collations(&tree, source_oid)?;
+        retention::validate_builtin_aggregates(&st.defining_query, &tree)?;
+        Ok(candidate)
+    })?;
+    if actual_candidate != state.candidate {
+        return Err(PgTrickleError::InvalidArgument(
+            "retained group mapping no longer matches the defining query".into(),
+        ));
+    }
     retention::ensure_retention_capture(st.pgt_id)?;
     retention::ensure_no_live_sealed_overlap(source_oid, &state, None)?;
     retention::validate_retention_storage(
