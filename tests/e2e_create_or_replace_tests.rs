@@ -661,7 +661,8 @@ async fn test_cor_published_aggregate_preflight_and_guarded_replace() {
     )
     .await;
 
-    let original = "SELECT grp, sum(value) AS total, count(*) AS n FROM pub1463_events GROUP BY grp";
+    let original =
+        "SELECT grp, sum(value) AS total, count(*) AS n FROM pub1463_events GROUP BY grp";
     let with_peak = "SELECT grp, sum(value) AS total, count(*) AS n, max(value) AS peak FROM pub1463_events GROUP BY grp";
     create_or_replace(&db, "pub1463_totals", original, "1h", "DIFFERENTIAL").await;
     db.execute("CREATE UNIQUE INDEX pub1463_totals_grp ON pub1463_totals (grp)")
@@ -694,7 +695,10 @@ async fn test_cor_published_aggregate_preflight_and_guarded_replace() {
             "SELECT pgtrickle.would_replace_stream_table_storage('public.pub1463_totals', $q$SELECT  grp,  sum(value) AS total, count(*) AS n FROM pub1463_events  GROUP BY grp$q$)",
         )
         .await;
-    assert!(!cosmetic, "whitespace-only changes must not replace storage");
+    assert!(
+        !cosmetic,
+        "whitespace-only changes must not replace storage"
+    );
 
     let new_aggregate: bool = db
         .query_scalar(&format!(
@@ -708,7 +712,10 @@ async fn test_cor_published_aggregate_preflight_and_guarded_replace() {
             "SELECT pgtrickle.would_replace_stream_table_storage('pub1463_totals', $q$SELECT grp, sum(value) AS total, count(*) AS n FROM pub1463_events WHERE value > 10 GROUP BY grp$q$)",
         )
         .await;
-    assert!(semantic, "semantic changes with unchanged columns also rebuild");
+    assert!(
+        semantic,
+        "semantic changes with unchanged columns also rebuild"
+    );
 
     assert_eq!(storage_oid_before, db.table_oid("pub1463_totals").await);
     let updated_after: String = db
@@ -730,7 +737,10 @@ async fn test_cor_published_aggregate_preflight_and_guarded_replace() {
     let refused = sqlx::query(&replace_sql).execute(&db.pool).await;
     assert!(refused.is_err(), "unguarded replacement must fail closed");
     assert!(
-        refused.unwrap_err().to_string().contains("drop the publication first"),
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("drop the publication first"),
         "published replacement should explain why it was blocked"
     );
     assert_eq!(storage_oid_before, db.table_oid("pub1463_totals").await);
@@ -777,7 +787,10 @@ async fn test_cor_storage_preflight_missing_and_invalid_queries() {
             "SELECT pgtrickle.would_replace_stream_table_storage('pub1463_missing', 'SELECT 1')",
         )
         .await;
-    assert!(!missing, "creating a missing table does not replace storage");
+    assert!(
+        !missing,
+        "creating a missing table does not replace storage"
+    );
 
     db.execute("CREATE TABLE pub1463_source (id INT PRIMARY KEY, value INT)")
         .await;
@@ -797,7 +810,10 @@ async fn test_cor_storage_preflight_missing_and_invalid_queries() {
     )
     .fetch_one(&db.pool)
     .await;
-    assert!(invalid.is_err(), "invalid changed queries must raise an error");
+    assert!(
+        invalid.is_err(),
+        "invalid changed queries must raise an error"
+    );
     assert_eq!(original_oid, db.table_oid("pub1463_snapshot").await);
     assert_eq!(db.count("pub1463_snapshot").await, 1);
 }

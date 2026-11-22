@@ -507,9 +507,7 @@ fn would_replace_stream_table_storage_impl(
 
     // Use the caller's search_path and the exact comparison used by
     // create_or_replace_stream_table, including TopK and whitespace handling.
-    let rw = with_invoker_search_path(&caller.search_path, || {
-        run_query_rewrite_pipeline(query)
-    })?;
+    let rw = with_invoker_search_path(&caller.search_path, || run_query_rewrite_pipeline(query))?;
     if !replacement_query_changed(&existing.defining_query, &rw.query)? {
         return Ok(false);
     }

@@ -65,3 +65,14 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, te
 GRANT EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention(text, text, text, text) TO pgtrickle_admin;
 GRANT EXECUTE ON FUNCTION pgtrickle.get_stream_table_partition_retention(text) TO pgtrickle_admin;
 GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, text, text, text, text, text) TO pgtrickle_admin;
+
+-- #1463: Declarative preflight for replacements that would change the
+-- published stream table's storage relation. Owner checking happens in Rust.
+CREATE OR REPLACE FUNCTION pgtrickle.would_replace_stream_table_storage(
+    name text, query text
+) RETURNS boolean
+LANGUAGE c STRICT SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+AS 'MODULE_PATHNAME', 'would_replace_stream_table_storage_wrapper';
+
+REVOKE EXECUTE ON FUNCTION pgtrickle.would_replace_stream_table_storage(text, text) FROM PUBLIC;
