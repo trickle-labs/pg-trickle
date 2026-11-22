@@ -2580,15 +2580,26 @@ pub fn query_group_candidate(
     if has_floating_sum(tree) {
         return Err(RetentionQueryError::FloatingPointSum);
     }
+    let missing_projected_key = || {
+        RetentionQueryError::MissingProjectedGroupKey(format!(
+            "the GROUP BY and select list must project the partition key \"{key}\" or an approved hourly bucket of that same key as a plain column"
+        ))
+    };
     let column = columns
         .iter()
         .find(|column| column.name == key && !column.is_nullable)
         .filter(|column| matches!(column.type_oid, DATE_OID | TIMESTAMP_OID | TIMESTAMPTZ_OID))
         .filter(|_| *table_oid == source_oid)
         .ok_or_else(|| {
-            RetentionQueryError::InvalidSourceKey(format!(
-                "source column \"{key}\" must belong to the single source table and be a non-null date, timestamp, or timestamptz partition key"
-            ))
+            // The parser may prune an unreferenced key from the scan. Report
+            // the missing GROUP BY/SELECT proof instead of an invalid source key.
+            if *table_oid == source_oid && !columns.iter().any(|column| column.name == key) {
+                missing_projected_key()
+            } else {
+                RetentionQueryError::InvalidSourceKey(format!(
+                    "source column \"{key}\" must belong to the single source table and be a non-null date, timestamp, or timestamptz partition key"
+                ))
+            }
         })?;
 
     // Group locality follows from ONE projected group key that identifies the
@@ -2662,9 +2673,7 @@ pub fn query_group_candidate(
             source_column: key.to_string(),
         });
     }
-    Err(RetentionQueryError::MissingProjectedGroupKey(format!(
-        "the GROUP BY and select list must project the partition key \"{key}\" or an approved hourly bucket of that same key as a plain column"
-    )))
+    Err(missing_projected_key())
 }
 
 #[cfg(all(feature = "e2e-unsafe-test-hooks", not(test)))]
@@ -3155,6 +3164,25 @@ mod tests {
         .to_string();
         assert!(message.contains("source column \"occurred\""), "{message}");
         assert!(message.contains("non-null"), "{message}");
+
+        // The parser can omit unused source columns from its scan. Missing
+        // projected keys should still produce the actionable locality hint.
+        let mut pruned = query(col("other"), col("other"), DATE_OID, false);
+        let OpTree::Project { child, .. } = &mut pruned else {
+            unreachable!()
+        };
+        let OpTree::Aggregate { child, .. } = child.as_mut() else {
+            unreachable!()
+        };
+        let OpTree::Scan { columns, .. } = child.as_mut() else {
+            unreachable!()
+        };
+        columns[0].name = "other".into();
+        let message = query_group_candidate(&pruned, 42, "occurred")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("GROUP BY and select list"), "{message}");
+        assert!(message.contains("partition key \"occurred\""), "{message}");
 
         let tree = OpTree::Filter {
             predicate: Expr::Literal("true".into()),
