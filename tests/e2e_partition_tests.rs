@@ -2614,6 +2614,13 @@ async fn test_aligned_stream_deletes_with_source_without_trim_policy() {
     db.execute("INSERT INTO automatic_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)").await;
     let query = "SELECT d, MAX(amount) AS biggest, SUM(amount) AS total, COUNT(*) AS n FROM automatic_src GROUP BY d";
     db.create_st("automatic_st", query, "1h", "DIFFERENTIAL").await;
+    let downstream_query = "SELECT d, biggest, total FROM automatic_st";
+    db.create_st(
+        "automatic_downstream",
+        downstream_query,
+        "1h",
+        "DIFFERENTIAL",
+    ).await;
     let policy: serde_json::Value = db.query_scalar(
         "SELECT pgtrickle.get_stream_table_partition_retention('automatic_st')"
     ).await;
@@ -2635,6 +2642,19 @@ async fn test_aligned_stream_deletes_with_source_without_trim_policy() {
         "SELECT d::text, biggest, total FROM automatic_st ORDER BY d"
     ).fetch_all(&db.pool).await.expect("read automatically trimmed groups");
     assert_eq!(rows, vec![("2026-06-01".into(), 9, 17)]);
+    db.refresh_st_until_converged("automatic_downstream").await;
+    db.assert_st_matches_query("automatic_downstream", downstream_query).await;
+    // PostgreSQL's two-phase DETACH CONCURRENTLY must use the protected cut.
+    db.execute("ALTER TABLE automatic_src DETACH PARTITION automatic_new CONCURRENTLY").await;
+    db.assert_st_matches_query("automatic_st", query).await;
+    db.refresh_st_until_converged("automatic_downstream").await;
+    db.assert_st_matches_query("automatic_downstream", downstream_query).await;
+    let remaining: i64 = db.count("automatic_st").await;
+    assert_eq!(remaining, 0, "concurrent detach removes the final groups");
+    let needs_reinit: bool = db.query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'automatic_st'"
+    ).await;
+    assert!(!needs_reinit, "automatic concurrent cut avoids reinitialization");
 }
 
 
