@@ -2602,73 +2602,100 @@ async fn test_retention_scoped_capture_preserves_duplicate_occurrences() {
     assert_eq!(scoped, expected);
 }
 
-
 #[tokio::test]
 async fn test_aligned_stream_deletes_with_source_without_trim_policy() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
-    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
     db.execute("SELECT pg_reload_conf()").await;
     db.execute("CREATE TABLE automatic_src (id int NOT NULL, d date NOT NULL, amount int NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
     db.execute("CREATE TABLE automatic_old PARTITION OF automatic_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
     db.execute("CREATE TABLE automatic_new PARTITION OF automatic_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
-    db.execute("INSERT INTO automatic_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)").await;
+    db.execute("INSERT INTO automatic_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)")
+        .await;
     let query = "SELECT d, MAX(amount) AS biggest, SUM(amount) AS total, COUNT(*) AS n FROM automatic_src GROUP BY d";
-    db.create_st("automatic_st", query, "1h", "DIFFERENTIAL").await;
+    db.create_st("automatic_st", query, "1h", "DIFFERENTIAL")
+        .await;
     let downstream_query = "SELECT d, biggest, total FROM automatic_st";
     db.create_st(
         "automatic_downstream",
         downstream_query,
         "1h",
         "DIFFERENTIAL",
-    ).await;
-    let policy: serde_json::Value = db.query_scalar(
-        "SELECT pgtrickle.get_stream_table_partition_retention('automatic_st')"
-    ).await;
-    assert_eq!(policy["enabled"], false, "no user-configured policy: {policy}");
+    )
+    .await;
+    let policy: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('automatic_st')")
+        .await;
+    assert_eq!(
+        policy["enabled"], false,
+        "no user-configured policy: {policy}"
+    );
     assert_eq!(policy["automatic_delete_with_source"], true, "{policy}");
     // A write to the child must be captured after the initial protected baseline.
-    let truncate_error = db.try_execute("TRUNCATE automatic_old").await
+    let truncate_error = db
+        .try_execute("TRUNCATE automatic_old")
+        .await
         .expect_err("automatic protection forbids untracked TRUNCATE");
     assert!(truncate_error.to_string().contains("TRUNCATE"));
-    db.execute("INSERT INTO automatic_old VALUES (3,'2025-06-01',6)").await;
-    db.execute("INSERT INTO automatic_new VALUES (4,'2026-06-01',9)").await;
+    db.execute("INSERT INTO automatic_old VALUES (3,'2025-06-01',6)")
+        .await;
+    db.execute("INSERT INTO automatic_new VALUES (4,'2026-06-01',9)")
+        .await;
     db.execute("DROP TABLE automatic_old").await;
-    let needs_reinit: bool = db.query_scalar(
-        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'automatic_st'"
-    ).await;
-    assert!(!needs_reinit, "automatic aligned deletion should not rebuild");
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'automatic_st'",
+        )
+        .await;
+    assert!(
+        !needs_reinit,
+        "automatic aligned deletion should not rebuild"
+    );
     db.assert_st_matches_query("automatic_st", query).await;
-    let rows: Vec<(String, i32, i64)> = sqlx::query_as(
-        "SELECT d::text, biggest, total FROM automatic_st ORDER BY d"
-    ).fetch_all(&db.pool).await.expect("read automatically trimmed groups");
+    let rows: Vec<(String, i32, i64)> =
+        sqlx::query_as("SELECT d::text, biggest, total FROM automatic_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read automatically trimmed groups");
     assert_eq!(rows, vec![("2026-06-01".into(), 9, 17)]);
     db.refresh_st_until_converged("automatic_downstream").await;
-    db.assert_st_matches_query("automatic_downstream", downstream_query).await;
+    db.assert_st_matches_query("automatic_downstream", downstream_query)
+        .await;
     // PostgreSQL's two-phase DETACH CONCURRENTLY must use the protected cut.
-    db.execute("ALTER TABLE automatic_src DETACH PARTITION automatic_new CONCURRENTLY").await;
+    db.execute("ALTER TABLE automatic_src DETACH PARTITION automatic_new CONCURRENTLY")
+        .await;
     db.assert_st_matches_query("automatic_st", query).await;
     db.refresh_st_until_converged("automatic_downstream").await;
-    db.assert_st_matches_query("automatic_downstream", downstream_query).await;
+    db.assert_st_matches_query("automatic_downstream", downstream_query)
+        .await;
     let remaining: i64 = db.count("automatic_st").await;
     assert_eq!(remaining, 0, "concurrent detach removes the final groups");
-    let needs_reinit: bool = db.query_scalar(
-        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'automatic_st'"
-    ).await;
-    assert!(!needs_reinit, "automatic concurrent cut avoids reinitialization");
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'automatic_st'",
+        )
+        .await;
+    assert!(
+        !needs_reinit,
+        "automatic concurrent cut avoids reinitialization"
+    );
 }
-
 
 #[tokio::test]
 async fn test_legacy_stream_auto_arms_after_a_protected_reinitialization() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
-    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
     db.execute("SELECT pg_reload_conf()").await;
     db.execute("CREATE TABLE legacy_auto_src (id int NOT NULL, d date NOT NULL, amount int NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
     db.execute("CREATE TABLE legacy_auto_old PARTITION OF legacy_auto_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
     db.execute("CREATE TABLE legacy_auto_live PARTITION OF legacy_auto_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
-    db.execute("INSERT INTO legacy_auto_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)").await;
+    db.execute("INSERT INTO legacy_auto_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)")
+        .await;
     let query = "SELECT d, SUM(amount) AS total, COUNT(*) AS n FROM legacy_auto_src GROUP BY d";
-    db.create_st("legacy_auto_st", query, "1h", "DIFFERENTIAL").await;
+    db.create_st("legacy_auto_st", query, "1h", "DIFFERENTIAL")
+        .await;
     // Model a pre-upgrade stream with no internal proof. The first removal
     // falls back to a protected FULL; subsequent removals can use the cut.
     db.execute("UPDATE pgtrickle.pgt_dependencies SET column_snapshot =
@@ -2682,52 +2709,68 @@ async fn test_legacy_stream_auto_arms_after_a_protected_reinitialization() {
     assert!(must_rebuild);
     db.refresh_st_with_retry("legacy_auto_st").await;
     db.assert_st_matches_query("legacy_auto_st", query).await;
-    let policy: serde_json::Value = db.query_scalar(
-        "SELECT pgtrickle.get_stream_table_partition_retention('legacy_auto_st')"
-    ).await;
+    let policy: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('legacy_auto_st')")
+        .await;
     assert_eq!(policy["automatic_delete_with_source"], true, "{policy}");
 
-    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('legacy_auto_st','OFF')").await;
-    let policy: serde_json::Value = db.query_scalar(
-        "SELECT pgtrickle.get_stream_table_partition_retention('legacy_auto_st')"
-    ).await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('legacy_auto_st','OFF')")
+        .await;
+    let policy: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('legacy_auto_st')")
+        .await;
     assert_eq!(policy["enabled"], false);
-    assert_eq!(policy["automatic_delete_with_source"], serde_json::Value::Null);
+    assert_eq!(
+        policy["automatic_delete_with_source"],
+        serde_json::Value::Null
+    );
     // A new protected reinitialization must not silently defeat explicit OFF.
     db.execute("UPDATE pgtrickle.pgt_dependencies SET column_snapshot =
         jsonb_set(column_snapshot, '{partition_descendant_oids}', '[9999999]'::jsonb)
         WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'legacy_auto_st')
           AND source_relid = 'legacy_auto_src'::regclass").await;
     db.refresh_st_with_retry("legacy_auto_st").await;
-    let policy: serde_json::Value = db.query_scalar(
-        "SELECT pgtrickle.get_stream_table_partition_retention('legacy_auto_st')"
-    ).await;
-    assert_eq!(policy["automatic_delete_with_source"], serde_json::Value::Null);
+    let policy: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('legacy_auto_st')")
+        .await;
+    assert_eq!(
+        policy["automatic_delete_with_source"],
+        serde_json::Value::Null
+    );
 }
 
 #[tokio::test]
 async fn test_unaligned_stream_without_policy_falls_back_to_reinitialize() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
-    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
     db.execute("SELECT pg_reload_conf()").await;
     db.execute("CREATE TABLE automatic_fallback_src (id int NOT NULL, d date NOT NULL, amount int NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
     db.execute("CREATE TABLE automatic_fallback_old PARTITION OF automatic_fallback_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
     db.execute("CREATE TABLE automatic_fallback_live PARTITION OF automatic_fallback_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
-    db.execute("INSERT INTO automatic_fallback_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)").await;
+    db.execute("INSERT INTO automatic_fallback_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)")
+        .await;
     // No partition identity in the group key: a local range delete is unsafe.
     let query = "SELECT SUM(amount) AS total, COUNT(*) AS n FROM automatic_fallback_src";
-    db.create_st("automatic_fallback_st", query, "1h", "DIFFERENTIAL").await;
-    let policy: serde_json::Value = db.query_scalar(
-        "SELECT pgtrickle.get_stream_table_partition_retention('automatic_fallback_st')"
-    ).await;
-    assert_eq!(policy["automatic_delete_with_source"], serde_json::Value::Null);
+    db.create_st("automatic_fallback_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    let policy: serde_json::Value = db
+        .query_scalar(
+            "SELECT pgtrickle.get_stream_table_partition_retention('automatic_fallback_st')",
+        )
+        .await;
+    assert_eq!(
+        policy["automatic_delete_with_source"],
+        serde_json::Value::Null
+    );
     db.execute("DROP TABLE automatic_fallback_old").await;
     let needs_reinit: bool = db.query_scalar(
         "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'automatic_fallback_st'"
     ).await;
     assert!(needs_reinit, "unaligned aggregates must rebuild");
     db.refresh_st_with_retry("automatic_fallback_st").await;
-    db.assert_st_matches_query("automatic_fallback_st", query).await;
+    db.assert_st_matches_query("automatic_fallback_st", query)
+        .await;
 }
 
 #[tokio::test]

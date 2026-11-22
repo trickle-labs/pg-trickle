@@ -2561,7 +2561,7 @@ pub fn store_column_snapshot_for_pgt_id(
                                         column_snapshot->'partition_retention', true) \
                ELSE $1 END) \
                || CASE WHEN column_snapshot->>'partition_auto_disabled' = 'true' \
-                  THEN '{"partition_auto_disabled":true}'::jsonb ELSE '{}'::jsonb END, \
+                  THEN pg_catalog.jsonb_build_object('partition_auto_disabled', true) ELSE '{}'::jsonb END, \
              schema_fingerprint = $2 \
          WHERE pgt_id = $3 AND source_relid = $4",
         &[
