@@ -61,7 +61,6 @@ fn retention_eligibility_error(error: PgTrickleError) -> PgTrickleError {
     }
 }
 
-
 /// Arm automatic delete-with-source after a protected FULL materialization.
 ///
 /// Initial population and reinitialization lock the source before reading
@@ -127,7 +126,9 @@ pub(crate) fn arm_automatic_trim_after_full_snapshot(pgt_id: i64) -> Result<(), 
         }
         Ok(Some(candidate))
     })?;
-    let Some(candidate) = candidate else { return Ok(()) };
+    let Some(candidate) = candidate else {
+        return Ok(());
+    };
 
     let cutoff = match candidate.source_type_oid {
         1082 => RetentionBound::Date(0),
@@ -236,7 +237,8 @@ fn set_policy(
                  '{partition_auto_disabled}', 'true'::jsonb, true)
              WHERE pgt_id = $1 AND source_type = 'TABLE'",
             &[st.pgt_id.into()],
-        ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         if let Some((source_oid, _)) = previous {
             crate::cdc::rebuild_cdc_trigger(
                 source_oid,

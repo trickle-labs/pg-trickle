@@ -598,7 +598,6 @@ fn retention_policies_for_source(
     })
 }
 
-
 /// A broken automatic capture must take the ordinary FULL-rebuild fallback,
 /// never block user partition DDL or silently skip unknown direct-child writes.
 /// Explicit TRIM / RETAIN have stronger user promises and remain fail-closed.
