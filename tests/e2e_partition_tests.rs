@@ -5150,6 +5150,38 @@ async fn test_retention_scheduled_refresh_preserves_sealed_history() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+
+    // Force the scheduler's protected REINITIALIZE path as well as the normal
+    // differential path. The old partition is no longer available, so any
+    // whole-table TRUNCATE would irretrievably lose its sealed aggregate.
+    let marker: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.execute("UPDATE retention_scheduled_src SET amount = amount + 2 WHERE amount = 20")
+        .await;
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = true WHERE pgt_name = 'retention_scheduled_st'")
+        .await;
+    expected[1].2 += 2;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+    loop {
+        let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+            "SELECT d::text, account, total, n FROM retention_scheduled_st ORDER BY d, account",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .expect("read scheduler scoped reinitialization");
+        let completed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='retention_scheduled_st' AND h.refresh_id > $1 AND h.initiated_by='SCHEDULER' AND h.action='REINITIALIZE' AND h.status='COMPLETED')"
+        ).bind(marker).fetch_one(&db.pool).await.expect("read scheduler reinitialize action");
+        if rows == expected && completed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "scheduler live-only reinit failed: {rows:?}, completed: {completed}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 #[tokio::test]
