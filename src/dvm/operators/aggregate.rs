@@ -119,6 +119,17 @@ fn resolve_expr_for_child(expr: &Expr, child_cols: &[String]) -> String {
 
 // ── Group-rescan helpers ────────────────────────────────────────────
 
+/// Compare GROUP BY keys with a hash key and an exact NULL-safe check.
+///
+/// Both sides must contain corresponding keys in the same order and types.
+fn hashable_group_match(left: &[String], right: &[String]) -> String {
+    let left = left.join(", ");
+    let right = right.join(", ");
+    format!(
+        "pg_catalog.hash_record_extended(ROW({left}), 0::bigint) = pg_catalog.hash_record_extended(ROW({right}), 0::bigint) AND ROW({left}) IS NOT DISTINCT FROM ROW({right})"
+    )
+}
+
 /// Build a NULL-safe affected-group filter without shadowing source columns.
 ///
 /// The delta columns are renamed inside the subquery, while the source side
@@ -135,24 +146,16 @@ fn build_group_filter(
         .map(|(index, _)| quote_ident(&format!("__pgt_group_{index}")))
         .collect::<Vec<_>>()
         .join(", ");
-    let conditions = group_by
-        .iter()
-        .zip(group_output)
-        .enumerate()
-        .map(|(index, (expr, _))| {
-            format!(
-                "{} IS NOT DISTINCT FROM __pgt_d2.{}",
-                expr.to_sql(),
-                quote_ident(&format!("__pgt_group_{index}")),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" AND ");
+    let source_keys: Vec<String> = group_by.iter().map(Expr::to_sql).collect();
+    let delta_keys: Vec<String> = (0..group_output.len())
+        .map(|index| format!("__pgt_d2.{}", quote_ident(&format!("__pgt_group_{index}"))))
+        .collect();
+    let condition = hashable_group_match(&source_keys, &delta_keys);
     let delta_filter = delta_filter
         .map(|filter| format!(" AND ({filter})"))
         .unwrap_or_default();
     format!(
-        "EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_cols}) WHERE {conditions}{delta_filter})"
+        "EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_cols}) WHERE {condition}{delta_filter})"
     )
 }
 
@@ -1265,11 +1268,15 @@ fn build_intermediate_agg_delta(
         let join_cond = if group_output.is_empty() {
             "TRUE".to_string()
         } else {
-            group_columns
+            let d_keys: Vec<String> = group_columns
                 .iter()
-                .map(|c| format!("d.{q} IS NOT DISTINCT FROM n.{q}", q = quote_ident(c),))
-                .collect::<Vec<_>>()
-                .join(" AND ")
+                .map(|c| format!("d.{}", quote_ident(c)))
+                .collect();
+            let n_keys: Vec<String> = group_columns
+                .iter()
+                .map(|c| format!("n.{}", quote_ident(c)))
+                .collect();
+            hashable_group_match(&d_keys, &n_keys)
         };
 
         // Format column sections
@@ -1815,49 +1822,25 @@ fn build_rescan_cte(
                     )
                 })
                 .unwrap_or_default()
-        } else if group_output.len() == 1 {
-            // Use EXISTS with IS NOT DISTINCT FROM instead of IN to
-            // correctly match NULL group-key values (NULL IN (...) → NULL).
-            let delta_col = &group_output[0];
-            let dq_col = dq_col_name(delta_col);
-            format!(
-                "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_aliases}) WHERE __pgt_dq.{dqc} IS NOT DISTINCT FROM __pgt_d2.{d2c}{delta_filter})",
-                delta_filter = config
-                    .special_value_filter
-                    .map(|filter| format!(" AND ({filter})"))
-                    .unwrap_or_default(),
-                delta_aliases = group_output
-                    .iter()
-                    .map(|column| quote_ident(column))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                dqc = quote_ident(&dq_col),
-                d2c = quote_ident(delta_col),
-            )
         } else {
-            let corr: Vec<String> = group_output
-                .iter()
-                .map(|delta_col| {
-                    let dq_col = dq_col_name(delta_col);
-                    format!(
-                        "__pgt_dq.{dqc} IS NOT DISTINCT FROM __pgt_d2.{d2c}",
-                        dqc = quote_ident(&dq_col),
-                        d2c = quote_ident(delta_col),
-                    )
-                })
-                .collect();
-            let delta_aliases = group_output
-                .iter()
-                .map(|column| quote_ident(column))
+            let delta_aliases = (0..group_output.len())
+                .map(|index| quote_ident(&format!("__pgt_group_{index}")))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let source_keys: Vec<String> = group_output
+                .iter()
+                .map(|column| format!("__pgt_dq.{}", quote_ident(&dq_col_name(column))))
+                .collect();
+            let delta_keys: Vec<String> = (0..group_output.len())
+                .map(|index| format!("__pgt_d2.{}", quote_ident(&format!("__pgt_group_{index}"))))
+                .collect();
+            let condition = hashable_group_match(&source_keys, &delta_keys);
+            let delta_filter = config
+                .special_value_filter
+                .map(|filter| format!(" AND ({filter})"))
+                .unwrap_or_default();
             format!(
-                "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_aliases}) WHERE {}{delta_filter})",
-                corr.join(" AND "),
-                delta_filter = config
-                    .special_value_filter
-                    .map(|filter| format!(" AND ({filter})"))
-                    .unwrap_or_default(),
+                "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_aliases}) WHERE {condition}{delta_filter})"
             )
         };
 
@@ -3080,11 +3063,15 @@ END AS __pgt_meta_action"#
         let rescan_join_cond = if group_columns.is_empty() {
             "TRUE".to_string()
         } else {
-            group_columns
+            let rescan_keys: Vec<String> = group_columns
                 .iter()
-                .map(|c| format!("r.{qc} IS NOT DISTINCT FROM d.{qc}", qc = quote_ident(c)))
-                .collect::<Vec<_>>()
-                .join(" AND ")
+                .map(|c| format!("r.{}", quote_ident(c)))
+                .collect();
+            let delta_keys: Vec<String> = group_columns
+                .iter()
+                .map(|c| format!("d.{}", quote_ident(c)))
+                .collect();
+            hashable_group_match(&rescan_keys, &delta_keys)
         };
         format!("\nLEFT JOIN {rc} r ON {rescan_join_cond}")
     } else {
@@ -4159,6 +4146,78 @@ mod tests {
         super::is_direct_agg_eligible(child, group_by, aggs, &ctx)
     }
 
+    // ── Hashable, NULL-safe group matching (issue #1456) ────────────
+
+    #[test]
+    fn test_group_filter_uses_hash_key_and_exact_nullable_comparison() {
+        let single = build_group_filter("delta", &[colref("region")], &["region".into()], None);
+        assert_eq!(
+            single,
+            "EXISTS (SELECT 1 FROM delta AS __pgt_d2(\"__pgt_group_0\") WHERE pg_catalog.hash_record_extended(ROW(region), 0::bigint) = pg_catalog.hash_record_extended(ROW(__pgt_d2.\"__pgt_group_0\"), 0::bigint) AND ROW(region) IS NOT DISTINCT FROM ROW(__pgt_d2.\"__pgt_group_0\"))"
+        );
+
+        let multi = build_group_filter(
+            "agg_delta",
+            &[
+                colref("region"),
+                Expr::ColumnRef {
+                    table_alias: Some("s".into()),
+                    column_name: "Day".into(),
+                },
+            ],
+            &["duplicate".into(), "duplicate".into()],
+            Some("COALESCE(__pgt_d2.\"__special_peak\", 0) > 0"),
+        );
+        assert!(
+            multi.contains("AS __pgt_d2(\"__pgt_group_0\", \"__pgt_group_1\")"),
+            "{multi}"
+        );
+        assert!(
+            multi.contains(
+                "pg_catalog.hash_record_extended(ROW(region, \"s\".\"Day\"), 0::bigint) = pg_catalog.hash_record_extended(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"), 0::bigint)"
+            ),
+            "{multi}"
+        );
+        assert!(multi.contains("ROW(region, \"s\".\"Day\") IS NOT DISTINCT FROM ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\")"), "{multi}");
+        assert!(
+            multi.contains("AND (COALESCE(__pgt_d2.\"__special_peak\", 0) > 0)"),
+            "{multi}"
+        );
+        // Reusing the public output alias cannot collapse the positional keys.
+        assert!(!multi.contains("AS __pgt_d2(\"duplicate\""), "{multi}");
+    }
+
+    #[test]
+    fn test_grouped_max_rescan_hash_matches_source_and_merge_keys() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        let tree = aggregate(
+            vec![colref("region"), colref("day")],
+            vec![max_col("amount", "peak"), min_col("amount", "low")],
+            scan(1, "events", "public", "e", &["region", "day", "amount"]),
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // Both joins use a hash key, then verify the complete nullable group.
+        assert!(
+            sql.contains(
+                "pg_catalog.hash_record_extended(ROW(region, day), 0::bigint) = pg_catalog.hash_record_extended(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"), 0::bigint)"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("pg_catalog.hash_record_extended(ROW(r.\"region\", r.\"day\"), 0::bigint) = pg_catalog.hash_record_extended(ROW(d.\"region\", d.\"day\"), 0::bigint)"),
+            "{sql}"
+        );
+        assert!(sql.contains("ROW(region, day) IS NOT DISTINCT FROM ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\")"), "{sql}");
+        assert!(
+            sql.contains(
+                "ROW(r.\"region\", r.\"day\") IS NOT DISTINCT FROM ROW(d.\"region\", d.\"day\")"
+            ),
+            "{sql}"
+        );
+    }
+
     // ── is_direct_agg_eligible tests ────────────────────────────────
 
     #[test]
@@ -4539,7 +4598,10 @@ mod tests {
             &["grp".to_string()],
             Some(&special_filter),
         );
-        assert!(group_filter.contains("grp IS NOT DISTINCT FROM __pgt_d2.\"__pgt_group_0\""));
+        assert!(group_filter.contains("pg_catalog.hash_record_extended(ROW(grp), 0::bigint) = pg_catalog.hash_record_extended(ROW(__pgt_d2.\"__pgt_group_0\"), 0::bigint)"));
+        assert!(
+            group_filter.contains("ROW(grp) IS NOT DISTINCT FROM ROW(__pgt_d2.\"__pgt_group_0\")")
+        );
         assert!(group_filter.contains("__pgt_d2.\"__special_total\""));
 
         let merge = agg_merge_expr_mapped(
@@ -7640,9 +7702,15 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains("d.\"__pgt_group_0\" IS NOT DISTINCT FROM n.\"__pgt_group_0\""),
+            sql.contains(concat!(
+                "pg_catalog.hash_record_extended(ROW(d.\"__pgt_group_0\", d.\"__pgt_group_1\", ",
+                "d.\"__pgt_group_2\", d.\"__pgt_group_3\"), 0::bigint) = ",
+                "pg_catalog.hash_record_extended(ROW(n.\"__pgt_group_0\", n.\"__pgt_group_1\", ",
+                "n.\"__pgt_group_2\", n.\"__pgt_group_3\"), 0::bigint)"
+            )),
             "{sql}"
         );
+        assert!(sql.contains("ROW(d.\"__pgt_group_0\", d.\"__pgt_group_1\", d.\"__pgt_group_2\", d.\"__pgt_group_3\") IS NOT DISTINCT FROM ROW(n.\"__pgt_group_0\", n.\"__pgt_group_1\", n.\"__pgt_group_2\", n.\"__pgt_group_3\")"), "{sql}");
         assert!(
             sql.contains("d.\"__pgt_group_0\" AS \"source_record_id\"")
                 && sql.contains("d.\"__pgt_group_1\" AS \"source_record_id\""),

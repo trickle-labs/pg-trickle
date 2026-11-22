@@ -858,6 +858,37 @@ pub(crate) fn validate_stream_table_row_identity(
     }
 }
 
+/// Generate the TRUNCATE capture function for new and rebuilt CDC triggers.
+///
+/// CDC capture must not issue NOTIFY: PostgreSQL serializes transactions with
+/// queued notifications at COMMIT, while the scheduler independently polls
+/// change buffers.
+fn build_truncate_trigger_fn_sql(change_schema: &str, name: &str, sync_commit: bool) -> String {
+    let sync_guard = sync_guard_sql(sync_commit);
+    format!(
+        "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()
+         RETURNS trigger LANGUAGE plpgsql
+         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
+         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
+         BEGIN
+             {sync_guard}
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
+                 RETURN NULL;
+             END IF;
+             INSERT INTO {change_schema}.changes_{name}
+                 (lsn, action, __pgt_row_id, source_xid, source_commit_at)
+             VALUES (pg_current_wal_insert_lsn(), 'T',
+                     pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8)),
+                     NULL::xid, NULL::timestamptz);
+             RETURN NULL;
+         END;
+         $$",
+    )
+}
+
 /// Create a CDC trigger on a source table.
 ///
 /// Dispatches to statement-level (`FOR EACH STATEMENT … REFERENCING NEW TABLE
@@ -1012,32 +1043,7 @@ pub fn create_change_trigger(
     }
 
     // ── TRUNCATE capture (statement-level trigger) ──────────────────
-    let sync_guard = sync_guard_sql(sync_commit);
-    let truncate_fn_sql = format!(
-        "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()
-         RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
-         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
-         BEGIN
-             {sync_guard}
-             -- A07: discard mode is lossy; hold mode keeps capture active.
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
-                 AND current_setting('pg_trickle.cdc_capture_mode', true)
-                     IS DISTINCT FROM 'hold') THEN
-                 RETURN NULL;
-             END IF;
-             INSERT INTO {change_schema}.changes_{name}
-                 (lsn, action, __pgt_row_id, source_xid, source_commit_at)
-             VALUES (pg_current_wal_insert_lsn(), 'T',
-                     pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8)),
-                     NULL::xid, NULL::timestamptz);
-             PERFORM pg_notify('pgtrickle_wake', '');
-             RETURN NULL;
-         END;
-         $$",
-        change_schema = change_schema,
-        name = stable_name,
-    );
+    let truncate_fn_sql = build_truncate_trigger_fn_sql(change_schema, stable_name, sync_commit);
 
     Spi::run(&truncate_fn_sql).map_err(|e| {
         PgTrickleError::SpiError(format!(
@@ -2526,10 +2532,8 @@ fn build_row_trigger_fn_sql(
         .collect::<Vec<_>>()
         .join("");
 
-    // WAKE-1: PERFORM pg_notify wakes the scheduler via LISTEN/NOTIFY
-    // when event-driven mode is active. The NOTIFY is coalesced by
-    // PostgreSQL — only one notification per transaction regardless of
-    // how many rows are affected. Cost is negligible (~0.5 µs).
+    // The scheduler polls change buffers; notifying here would serialize
+    // concurrent source transactions at COMMIT.
     //
     // F10: Capture W3C traceparent from session GUC into __pgt_trace_context.
     // current_setting returns '' when GUC is not set; NULLIF converts to NULL.
@@ -2554,7 +2558,6 @@ fn build_row_trigger_fn_sql(
                  VALUES (pg_current_wal_insert_lsn(), 'I'
                          {ip}{nv},
                          NULLIF(current_setting('pg_trickle.trace_id', true), ''));
-                 PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN NEW;
              ELSIF TG_OP = 'UPDATE' THEN
                  -- A44-10: D+I decomposition — D-row must be emitted before I-row.
@@ -2571,7 +2574,6 @@ fn build_row_trigger_fn_sql(
                  VALUES (pg_current_wal_insert_lsn(), 'I'
                          {ip}{ucv}{nv},
                          NULLIF(current_setting('pg_trickle.trace_id', true), ''));
-                 PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN NEW;
              ELSIF TG_OP = 'DELETE' THEN
                  INSERT INTO {cs}.changes_{name}
@@ -2579,7 +2581,6 @@ fn build_row_trigger_fn_sql(
                  VALUES (pg_current_wal_insert_lsn(), 'D'
                          {dp}{ov},
                          NULLIF(current_setting('pg_trickle.trace_id', true), ''));
-                 PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN OLD;
              END IF;
              RETURN NULL;
@@ -2644,7 +2645,6 @@ fn build_stmt_trigger_fn_sql(
     }
 
     // INSERT trigger function — only accesses __pgt_new transition table.
-    // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     // F10: Capture W3C traceparent from session GUC into __pgt_trace_context.
     let ins_fn = format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{name}()
@@ -2665,7 +2665,6 @@ fn build_stmt_trigger_fn_sql(
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT statement_lsn, 'I', {pkn}{ncr}, trace_context
              FROM __pgt_new n;
-             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -2675,7 +2674,6 @@ fn build_stmt_trigger_fn_sql(
 
     // UPDATE trigger function — accesses both __pgt_new and __pgt_old.
     // A44-10: D+I decomposition — emit D-row (OLD values) + I-row (NEW values).
-    // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     let upd_fn = if pk_columns.is_empty() || !pair_updates {
         // Keyless/deferred keys cannot pair transition rows uniquely by key.
         // Two separate INSERT … SELECT statements (row-level trigger cannot batch).
@@ -2704,7 +2702,6 @@ fn build_stmt_trigger_fn_sql(
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT statement_lsn, 'I', {pkn}{ncr}, trace_context
              FROM __pgt_new n;
-             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -2795,7 +2792,6 @@ fn build_stmt_trigger_fn_sql(
              FROM pair_rows p
              WHERE p.__pgt_new_present
              ORDER BY 2;
-             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -2805,7 +2801,6 @@ fn build_stmt_trigger_fn_sql(
     };
 
     // DELETE trigger function — only accesses __pgt_old transition table.
-    // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     // F10: Capture W3C traceparent from session GUC into __pgt_trace_context.
     let del_fn = format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_del_fn_{name}()
@@ -2826,7 +2821,6 @@ fn build_stmt_trigger_fn_sql(
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT statement_lsn, 'D', {pko}{ocr}, trace_context
              FROM __pgt_old o;
-             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -3924,6 +3918,43 @@ mod tests {
     fn test_trigger_name_for_source_large_oid() {
         let oid = pgrx::pg_sys::Oid::from(4294967295u32); // u32::MAX
         assert_eq!(trigger_name_for_source(oid), "pg_trickle_cdc_4294967295");
+    }
+
+    #[test]
+    fn test_capture_trigger_sql_never_queues_notifications() {
+        let pk = vec!["id".to_string()];
+        let columns = vec![
+            ("id".to_string(), "integer".to_string()),
+            ("value".to_string(), "text".to_string()),
+        ];
+        let row = build_row_trigger_fn_sql("pgtrickle_changes", "source", &pk, &columns);
+        let (insert, paired_update, delete) =
+            build_stmt_trigger_fn_sql("pgtrickle_changes", "source", &pk, &columns, true);
+        let (_, unpaired_update, _) =
+            build_stmt_trigger_fn_sql("pgtrickle_changes", "source", &pk, &columns, false);
+        let truncate = build_truncate_trigger_fn_sql("pgtrickle_changes", "source", false);
+
+        for (kind, sql) in [
+            ("row", row.as_str()),
+            ("insert", insert.as_str()),
+            ("paired update", paired_update.as_str()),
+            ("unpaired update", unpaired_update.as_str()),
+            ("delete", delete.as_str()),
+            ("truncate", truncate.as_str()),
+        ] {
+            assert!(
+                sql.contains("INSERT INTO"),
+                "{kind} must write to the change buffer"
+            );
+            assert!(
+                !sql.to_ascii_lowercase().contains("notify"),
+                "{kind} must not queue a commit-time notification: {sql}"
+            );
+        }
+
+        let sync_truncate = build_truncate_trigger_fn_sql("pgtrickle_changes", "source", true);
+        assert!(sync_truncate.contains("set_config('synchronous_commit', 'on', true)"));
+        assert!(!sync_truncate.to_ascii_lowercase().contains("notify"));
     }
 
     #[test]

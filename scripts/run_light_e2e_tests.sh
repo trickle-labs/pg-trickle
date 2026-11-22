@@ -148,6 +148,8 @@ LIGHT_E2E_TESTS=(
     e2e_lsn_contract_tests
     e2e_snapshot_refresh_consistency_tests
     e2e_partitioned_downstream_tests
+    # CDC NOTIFY contention regressions run here; polling test needs full E2E.
+    e2e_wake_tests
 )
 
 usage() {

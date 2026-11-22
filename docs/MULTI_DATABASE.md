@@ -141,8 +141,11 @@ databases.
   [downstream publications](PUBLICATIONS.md) to bridge databases.
 - `shared_preload_libraries = 'pg_trickle'` is server-wide. The
   launcher then discovers per-database state.
-- `pg_trickle.enabled = off` disables the launcher (and therefore
-  every scheduler) — use it for maintenance windows.
+- A server-wide `pg_trickle.enabled = off` pauses automatic refreshes,
+  **not** the launcher or the scheduler processes. A client-session `SET` does
+  not affect these workers. Use `ALTER SYSTEM` plus `pg_reload_conf()` for a
+  server-wide change; database-level overrides require their scheduler worker
+  to restart. See [Configuration](CONFIGURATION.md#pg_trickleenabled).
 
 ---
 

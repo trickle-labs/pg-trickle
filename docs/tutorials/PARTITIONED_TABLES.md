@@ -184,7 +184,11 @@ The contract is intentionally narrow:
   `timestamp` buckets use `pg_catalog.date_trunc('hour', key)`; `timestamptz`
   buckets must use `pg_catalog.date_trunc('hour', key, 'UTC')`. Partition
   bounds must align with bucket boundaries. Joins and other query shapes are
-  rejected at configuration time.
+  rejected at configuration time. The SELECT list may only project grouped
+  source columns and aggregate outputs as plain column references (aliases are
+  allowed); literal constants and computed select-list items are not eligible.
+  An hourly grouping expression over a different timestamp column is not a
+  substitute for the partition key and is not an additional allowed group key.
 - The source workload may append rows, but grouped output rows are updated;
   this feature does not require the stream's append-only output fast path.
 - Retention cuts require the configured stream to be active and initialized

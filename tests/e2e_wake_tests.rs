@@ -1,136 +1,149 @@
-//! WAKE-1: E2E tests for scheduler wake behaviour.
+//! E2E regressions for issue #1454: CDC capture must not queue NOTIFY.
 //!
-//! CQ-10-02 (v0.51.0): `event_driven_wake` GUC has been removed. The scheduler
-//! always operates in polling-only mode via latch-based sleeping.
-//! CDC triggers still emit `pg_notify('pgtrickle_wake')` for future use
-//! once a background-worker-compatible notification mechanism is available.
-//!
-//! Verifies that:
-//! 1. CDC triggers emit `pg_notify('pgtrickle_wake', '')` after writing to
-//!    the change buffer (for future use).
-//! 2. Poll-based operation works correctly.
+//! The scheduler uses polling, not LISTEN. Committed changes must still reach
+//! scheduled stream tables without serializing source transactions at COMMIT.
 
 mod e2e;
 
 use e2e::E2eDb;
+#[cfg(not(feature = "light-e2e"))]
 use std::time::Duration;
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// Return the generated SQL body for a specific source's CDC trigger function.
+async fn capture_function_body(db: &E2eDb, source: &str, suffix: &str) -> String {
+    let source_oid = db.table_oid(source).await;
+    let stable_name: String = db
+        .query_scalar(&format!(
+            "SELECT source_stable_name FROM pgtrickle.pgt_change_tracking \
+             WHERE source_relid = {source_oid}"
+        ))
+        .await;
+    let name = format!("pg_trickle_cdc_{suffix}_{stable_name}");
+    db.query_scalar(&format!(
+        "SELECT p.prosrc FROM pg_proc p \
+         JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = 'pgtrickle_changes' AND p.proname = '{name}'"
+    ))
+    .await
+}
 
-/// Wait until a ST has at least `min_completed` COMPLETED refreshes.
-async fn wait_for_n_refreshes(
-    db: &E2eDb,
-    pgt_name: &str,
-    min_completed: i64,
-    timeout: Duration,
-) -> bool {
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > timeout {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let count: i64 = db
-            .query_scalar(&format!(
-                "SELECT count(*) FROM pgtrickle.pgt_refresh_history h \
-                 JOIN pgtrickle.pgt_stream_tables d ON h.pgt_id = d.pgt_id \
-                 WHERE d.pgt_name = '{pgt_name}' AND h.status = 'COMPLETED'"
-            ))
-            .await;
-        if count >= min_completed {
-            return true;
-        }
+async fn assert_capture_functions_do_not_notify(db: &E2eDb, source: &str, suffixes: &[&str]) {
+    for suffix in suffixes {
+        let body = capture_function_body(db, source, suffix).await;
+        assert!(
+            body.contains("INSERT INTO"),
+            "{source}: expected an active {suffix} capture body: {body}"
+        );
+        assert!(
+            !body.to_ascii_lowercase().contains("notify"),
+            "{source}: {suffix} must not queue a commit-time NOTIFY: {body}"
+        );
     }
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────
-
-/// WAKE-1: Verify that CDC triggers include `pg_notify('pgtrickle_wake', '')`
-/// in the generated trigger function body.
+/// All statement-level DML functions and TRUNCATE must avoid notifications.
 #[tokio::test]
-async fn test_wake_cdc_trigger_emits_notify() {
-    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+async fn test_wake_statement_cdc_triggers_do_not_notify() {
+    let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE wake_src (id INT PRIMARY KEY, val TEXT)")
         .await;
-    db.execute("INSERT INTO wake_src VALUES (1, 'a')").await;
     db.create_st(
         "wake_st",
         "SELECT id, val FROM wake_src",
-        "1s",
+        "1m",
         "DIFFERENTIAL",
     )
     .await;
 
-    // Check that the trigger function includes the pg_notify call.
-    let fn_body: String = db
-        .query_scalar(
-            "SELECT prosrc FROM pg_proc \
-             WHERE proname LIKE 'pg_trickle_cdc_ins_fn_%' \
-             ORDER BY oid DESC LIMIT 1",
-        )
-        .await;
-    assert!(
-        fn_body.contains("pg_notify('pgtrickle_wake'"),
-        "INSERT trigger function should contain pg_notify('pgtrickle_wake'): {}",
-        fn_body,
-    );
-
-    // Also check UPDATE and DELETE trigger functions.
-    let upd_body: String = db
-        .query_scalar(
-            "SELECT prosrc FROM pg_proc \
-             WHERE proname LIKE 'pg_trickle_cdc_upd_fn_%' \
-             ORDER BY oid DESC LIMIT 1",
-        )
-        .await;
-    assert!(
-        upd_body.contains("pg_notify('pgtrickle_wake'"),
-        "UPDATE trigger function should contain pg_notify('pgtrickle_wake')",
-    );
-
-    let del_body: String = db
-        .query_scalar(
-            "SELECT prosrc FROM pg_proc \
-             WHERE proname LIKE 'pg_trickle_cdc_del_fn_%' \
-             ORDER BY oid DESC LIMIT 1",
-        )
-        .await;
-    assert!(
-        del_body.contains("pg_notify('pgtrickle_wake'"),
-        "DELETE trigger function should contain pg_notify('pgtrickle_wake')",
-    );
+    assert_capture_functions_do_not_notify(
+        &db,
+        "wake_src",
+        &["ins_fn", "upd_fn", "del_fn", "truncate_fn"],
+    )
+    .await;
 }
 
-/// WAKE-1: Verify the TRUNCATE trigger function also includes the notify.
+/// Legacy row-level CDC and its TRUNCATE trigger must also avoid notifications.
 #[tokio::test]
-async fn test_wake_truncate_trigger_emits_notify() {
-    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+async fn test_wake_row_cdc_triggers_do_not_notify() {
+    let db = E2eDb::new().await.with_extension().await;
 
-    db.execute("CREATE TABLE trunc_src (id INT PRIMARY KEY, val TEXT)")
+    db.execute("CREATE TABLE wake_row_src (id INT PRIMARY KEY, val TEXT)")
         .await;
-    db.execute("INSERT INTO trunc_src VALUES (1, 'a')").await;
-    db.create_st("trunc_st", "SELECT id, val FROM trunc_src", "1s", "FULL")
-        .await;
+    // The GUC and creation must share a session.
+    db.execute_seq(&[
+        "SET pg_trickle.cdc_trigger_mode = 'row'",
+        "SELECT pgtrickle.create_stream_table( \
+         'wake_row_st', 'SELECT id, val FROM wake_row_src', '1m', 'DIFFERENTIAL')",
+    ])
+    .await;
 
-    let fn_body: String = db
-        .query_scalar(
-            "SELECT prosrc FROM pg_proc \
-             WHERE proname LIKE 'pg_trickle_cdc_truncate_fn_%' \
-             ORDER BY oid DESC LIMIT 1",
-        )
-        .await;
-    assert!(
-        fn_body.contains("pg_notify('pgtrickle_wake'"),
-        "TRUNCATE trigger function should contain pg_notify('pgtrickle_wake'): {}",
-        fn_body,
-    );
+    assert_capture_functions_do_not_notify(&db, "wake_row_src", &["fn", "truncate_fn"]).await;
 }
 
-/// WAKE-1: Verify that poll-based scheduling works correctly.
+/// Rebuild existing persisted PL/pgSQL bodies when upgrading a prior install.
+/// A DML-only rebuild would leave the old notifying TRUNCATE body in pg_proc.
 #[tokio::test]
-async fn test_wake_poll_fallback_works() {
+async fn test_wake_rebuild_removes_legacy_notifications() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE wake_upgrade_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.create_st(
+        "wake_upgrade_st",
+        "SELECT id, val FROM wake_upgrade_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    let source_oid = db.table_oid("wake_upgrade_src").await;
+    let stable_name: String = db
+        .query_scalar(&format!(
+            "SELECT source_stable_name FROM pgtrickle.pgt_change_tracking \
+             WHERE source_relid = {source_oid}"
+        ))
+        .await;
+
+    // Simulate the persisted DML and TRUNCATE functions from the old version.
+    for suffix in ["ins_fn", "truncate_fn"] {
+        db.execute(&format!(
+            "CREATE OR REPLACE FUNCTION \
+             pgtrickle_changes.pg_trickle_cdc_{suffix}_{stable_name}() \
+             RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER \
+             SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$ \
+             BEGIN PERFORM pg_notify('pgtrickle_wake', ''); RETURN NULL; END; $$"
+        ))
+        .await;
+        let legacy = capture_function_body(&db, "wake_upgrade_src", suffix).await;
+        assert!(
+            legacy.contains("pg_notify"),
+            "legacy fixture was not installed"
+        );
+    }
+
+    db.execute("SELECT pgtrickle.rebuild_cdc_triggers()").await;
+    assert_capture_functions_do_not_notify(
+        &db,
+        "wake_upgrade_src",
+        &["ins_fn", "upd_fn", "del_fn", "truncate_fn"],
+    )
+    .await;
+
+    // The repaired trigger still captures committed data after the rebuild.
+    db.execute("INSERT INTO wake_upgrade_src VALUES (1, 'captured')")
+        .await;
+    db.refresh_st("wake_upgrade_st").await;
+    db.assert_st_matches_query("wake_upgrade_st", "SELECT id, val FROM wake_upgrade_src")
+        .await;
+}
+
+/// Verify polling actually propagates a committed CDC mutation, not just that
+/// an initial FULL refresh was recorded in the history.
+#[cfg(not(feature = "light-e2e"))]
+#[tokio::test]
+async fn test_wake_poll_only_scheduler_propagates_committed_change() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
 
     db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 200")
@@ -147,10 +160,33 @@ async fn test_wake_poll_fallback_works() {
     db.execute("CREATE TABLE poll_src (id INT PRIMARY KEY, val TEXT)")
         .await;
     db.execute("INSERT INTO poll_src VALUES (1, 'a')").await;
-    db.create_st("poll_st", "SELECT id, val FROM poll_src", "1s", "FULL")
-        .await;
+    db.create_st(
+        "poll_st",
+        "SELECT id, val FROM poll_src",
+        "1s",
+        "DIFFERENTIAL",
+    )
+    .await;
 
-    // Poll-based refresh should still work within a reasonable time frame.
-    let ok = wait_for_n_refreshes(&db, "poll_st", 1, Duration::from_secs(30)).await;
-    assert!(ok, "Poll-based refresh did not complete within 30 s");
+    let initial = db
+        .wait_for_condition(
+            "initial poll refresh",
+            "SELECT EXISTS (SELECT 1 FROM poll_st WHERE id = 1 AND val = 'a')",
+            Duration::from_secs(30),
+            Duration::from_millis(100),
+        )
+        .await;
+    assert!(initial, "initial scheduled refresh did not complete");
+
+    db.execute("UPDATE poll_src SET val = 'b' WHERE id = 1")
+        .await;
+    let updated = db
+        .wait_for_condition(
+            "poll-only CDC refresh",
+            "SELECT EXISTS (SELECT 1 FROM poll_st WHERE id = 1 AND val = 'b')",
+            Duration::from_secs(30),
+            Duration::from_millis(100),
+        )
+        .await;
+    assert!(updated, "committed UPDATE was not reflected by polling");
 }

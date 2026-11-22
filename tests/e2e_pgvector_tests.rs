@@ -4052,11 +4052,20 @@ async fn test_centroid_cost_model_rescans_and_rebinds_safely() {
             .await
             .expect("exercise cost-rescan rollback");
     }
-    let provisional: bool = sqlx::query_scalar("SELECT c.baseline_frontier IS NULL AND c.cost_rescan_active FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) WHERE t.pgt_relid = 'centroid_policy_st'::regclass")
-        .fetch_one(&mut *conn).await.expect("inspect provisional cost marker");
+    // The transaction can still own the provisional xid marker before the
+    // durable cost-rescan flag is finalized. Either proves that the rescan
+    // selection is visible to the current transaction.
+    let (unbound, active, pending): (bool, bool, bool) = sqlx::query_as(
+        "SELECT c.baseline_frontier IS NULL, c.cost_rescan_active, c.cost_rescan_xid IS NOT NULL \
+         FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) \
+         WHERE t.pgt_relid = 'centroid_policy_st'::regclass",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("inspect provisional cost marker");
     assert!(
-        provisional,
-        "cost-rescan mode must be visible inside the transaction"
+        unbound && (active || pending),
+        "cost-rescan selection must be visible inside the transaction: baseline_unbound={unbound}, active={active}, pending_xid={pending}"
     );
     sqlx::query("ROLLBACK")
         .execute(&mut *conn)
@@ -4133,51 +4142,54 @@ async fn test_centroid_cost_model_rescans_and_rebinds_safely() {
         restarted_marker,
         "committed cost-rescan mode must survive restart"
     );
-    for statement in [
-        "UPDATE centroid_policy_src SET v = '[7,8]' WHERE id IN (1, 2)",
-        "SELECT pgtrickle.refresh_stream_table('centroid_policy_st')",
-    ] {
-        sqlx::query(statement)
-            .execute(&mut *conn)
-            .await
-            .expect("continue cost rescan");
-    }
+    sqlx::query("UPDATE centroid_policy_src SET v = '[7,8]' WHERE id IN (1, 2)")
+        .execute(&mut *conn)
+        .await
+        .expect("continue cost rescan");
     // A manual refresh may complete NO_DATA after restart if the committed
     // source delta is temporarily held back by the CDC safe frontier.  Only
-    // a real delta refresh can establish COST_MODEL_RESCAN_ACTIVE: retry the
-    // deferred window, but fail immediately on a non-NO_DATA unexpected mode.
+    // inspect a completed attempt from this transaction so a skipped refresh
+    // cannot be mistaken for an older scheduler result.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     let active = loop {
-        let (action, reason): (String, Option<String>) = sqlx::query_as(
+        sqlx::query("BEGIN")
+            .execute(&mut *conn)
+            .await
+            .expect("begin cost-rescan attempt");
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_policy_st')")
+            .execute(&mut *conn)
+            .await
+            .expect("retry deferred cost-rescan window");
+        let attempt: Option<(String, Option<String>)> = sqlx::query_as(
             "SELECT h.action, h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason'
              FROM pgtrickle.pgt_stream_tables t
-             CROSS JOIN LATERAL (
-                 SELECT action, refresh_reason_detail
-                 FROM pgtrickle.pgt_refresh_history h
-                 WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED'
-                 ORDER BY h.refresh_id DESC LIMIT 1
-             ) h
-             WHERE t.pgt_relid = 'centroid_policy_st'::regclass",
+             JOIN pgtrickle.pgt_refresh_history h ON h.pgt_id = t.pgt_id
+             WHERE t.pgt_relid = 'centroid_policy_st'::regclass
+               AND h.xmin = pg_current_xact_id()::xid
+               AND h.initiated_by = 'MANUAL' AND h.status = 'COMPLETED'
+             ORDER BY h.refresh_id DESC LIMIT 1",
         )
-        .fetch_one(&mut *conn)
+        .fetch_optional(&mut *conn)
         .await
-        .expect("inspect active cost rescan");
-        if let Some(reason) = reason {
-            break reason;
+        .expect("inspect cost-rescan attempt");
+        sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .expect("commit cost-rescan attempt");
+        if let Some((action, reason)) = attempt {
+            if let Some(reason) = reason {
+                break reason;
+            }
+            assert_eq!(
+                action, "NO_DATA",
+                "missing centroid cost reason on a non-NO_DATA refresh"
+            );
         }
-        assert_eq!(
-            action, "NO_DATA",
-            "missing centroid cost reason on a non-NO_DATA refresh"
-        );
         assert!(
             std::time::Instant::now() < deadline,
             "committed centroid delta never advanced beyond NO_DATA holdback"
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_policy_st')")
-            .execute(&mut *conn)
-            .await
-            .expect("retry deferred cost-rescan window");
     };
     assert_eq!(active, "COST_MODEL_RESCAN_ACTIVE");
     for statement in [
@@ -8334,7 +8346,7 @@ async fn test_ann_refresh_epoch_survives_database_restart() {
     .await;
     db.execute("INSERT INTO ann_epoch_restart_source VALUES (1)")
         .await;
-    db.refresh_st("ann_epoch_restart").await;
+    db.refresh_st_with_retry("ann_epoch_restart").await;
     let before: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ann_epoch_restart'").await;
     db.pool.close().await;
     let restarted = tokio::process::Command::new("docker")
@@ -8348,7 +8360,7 @@ async fn test_ann_refresh_epoch_survives_database_restart() {
     assert_eq!(after, before);
     db.execute("INSERT INTO ann_epoch_restart_source VALUES (2)")
         .await;
-    db.refresh_st("ann_epoch_restart").await;
+    db.refresh_st_with_retry("ann_epoch_restart").await;
     let next: i64 = db.query_scalar("SELECT ann_refresh_epoch FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ann_epoch_restart'").await;
     assert!(next > after);
     db.assert_st_matches_query(

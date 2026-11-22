@@ -2803,31 +2803,26 @@ pub fn execute_differential_refresh_with_tuning(
     }
 
     // ── PERF-5: Analyze the relations actually used by delta execution ──
-    // Ordinary refreshes use TABLE/FT/MV buffers. Graph SQL uses bounded
-    // stages for both base-table and stream-table dependencies.
+    // Both ordinary and graph delta SQL read the staged CDC window copies.
+    // Ordinary refreshes additionally use persistent TABLE/FT/MV buffers.
     if crate::config::pg_trickle_analyze_before_delta() {
-        let tables = if graph_same_pass {
-            // Graph delta SQL reads the bounded stages, not the shared buffers.
-            delta_stage
-                .source_tables()
-                .values()
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
+        let mut tables = delta_stage
+            .source_tables()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if !graph_same_pass {
             let cb_schema = crate::config::pg_trickle_change_buffer_schema();
-            catalog_source_oids
-                .iter()
-                .map(|&oid| {
-                    format!(
-                        "{}.{}",
-                        crate::sql_builder::ident(&cb_schema),
-                        crate::sql_builder::ident(&crate::cdc::buffer_base_name_for_oid(
-                            pg_sys::Oid::from(oid)
-                        )),
-                    )
-                })
-                .collect()
-        };
+            tables.extend(catalog_source_oids.iter().map(|&oid| {
+                format!(
+                    "{}.{}",
+                    crate::sql_builder::ident(&cb_schema),
+                    crate::sql_builder::ident(&crate::cdc::buffer_base_name_for_oid(
+                        pg_sys::Oid::from(oid)
+                    )),
+                )
+            }));
+        }
         for table in tables {
             let analyze_sql = format!("ANALYZE {table}");
             if let Err(e) = Spi::run(&analyze_sql) {

@@ -53,6 +53,14 @@ fn load_policy(pgt_id: i64) -> Result<Option<(pg_sys::Oid, RetentionState)>, PgT
     })
 }
 
+/// Preserve non-eligibility errors while giving contract violations a targeted hint.
+fn retention_eligibility_error(error: PgTrickleError) -> PgTrickleError {
+    match error {
+        PgTrickleError::InvalidArgument(reason) => PgTrickleError::RetentionQueryIneligible(reason),
+        other => other,
+    }
+}
+
 fn set_policy(
     name: &str,
     policy: &str,
@@ -115,19 +123,12 @@ fn set_policy(
     let source_oid = retention::retention_source(&st)?;
     let candidate = crate::refresh::with_stream_owner(&st, || {
         let tree = crate::dvm::parser::parse_defining_query(&st.defining_query)?;
-        let candidate =
-            retention::query_group_candidate(&tree, source_oid.to_u32(), key).map_err(|error| {
-                if error == retention::RetentionQueryError::FloatingPointSum {
-                    return PgTrickleError::InvalidArgument(
-                        "partition retention does not support floating-point SUM; use a numeric aggregate".into(),
-                    );
-                }
-                PgTrickleError::InvalidArgument(format!(
-                    "retention query is not eligible: {error:?}"
-                ))
-            })?;
-        retention::validate_retention_group_collations(&tree, source_oid)?;
-        retention::validate_builtin_aggregates(&st.defining_query, &tree)?;
+        let candidate = retention::query_group_candidate(&tree, source_oid.to_u32(), key)
+            .map_err(|error| PgTrickleError::RetentionQueryIneligible(error.to_string()))?;
+        retention::validate_retention_group_collations(&tree, source_oid)
+            .map_err(retention_eligibility_error)?;
+        retention::validate_builtin_aggregates(&st.defining_query, &tree)
+            .map_err(retention_eligibility_error)?;
         Ok(candidate)
     })?;
     let cutoff = retention::parse_retention_cutoff(candidate.source_type_oid, cutoff)?;

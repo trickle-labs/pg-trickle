@@ -193,6 +193,19 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
+        PgTrickleError::RetentionQueryIneligible(reason) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!("retention query is not eligible: {reason}"),
+                "",
+            )
+            .set_hint(
+                "See the \"Retention policies\" contract in docs/tutorials/PARTITIONED_TABLES.md#retention-policies."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
         // UX-3: Enriched reporting for InvalidArgument errors.
         PgTrickleError::InvalidArgument(msg) => {
             ErrorReport::new(
