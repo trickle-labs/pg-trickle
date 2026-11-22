@@ -126,6 +126,10 @@ fn retention_pruning_key(partition_spec: Option<&str>, group_column: &str) -> Op
 pub struct RetentionState {
     pub version: u8,
     pub mode: RetentionMode,
+    /// Internal, automatically maintained delete-with-source optimization.
+    /// It has no user-configured TRIM policy; explicit policies set this false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub automatic: bool,
     /// A source-driven retention cut needs no time horizon. Previously
     /// configured policies retain their original explicit cutoff semantics.
     #[serde(default, skip_serializing_if = "is_false", alias = "trim_unbounded")]
@@ -3289,6 +3293,7 @@ mod tests {
         RetentionState {
             version: 1,
             mode,
+            automatic: false,
             cutoff_unbounded: false,
             candidate: RetentionGroupCandidate {
                 output_column: "d".into(),

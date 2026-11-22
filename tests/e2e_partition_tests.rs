@@ -2602,6 +2602,63 @@ async fn test_retention_scoped_capture_preserves_duplicate_occurrences() {
     assert_eq!(scoped, expected);
 }
 
+
+#[tokio::test]
+async fn test_aligned_stream_deletes_with_source_without_trim_policy() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE automatic_src (id int NOT NULL, d date NOT NULL, amount int NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE automatic_old PARTITION OF automatic_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE automatic_new PARTITION OF automatic_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO automatic_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)").await;
+    let query = "SELECT d, MAX(amount) AS biggest, SUM(amount) AS total, COUNT(*) AS n FROM automatic_src GROUP BY d";
+    db.create_st("automatic_st", query, "1h", "DIFFERENTIAL").await;
+    let policy: serde_json::Value = db.query_scalar(
+        "SELECT pgtrickle.get_stream_table_partition_retention('automatic_st')"
+    ).await;
+    assert_eq!(policy["enabled"], false, "no user-configured policy: {policy}");
+    assert_eq!(policy["automatic_delete_with_source"], true, "{policy}");
+    // A write to the child must be captured after the initial protected baseline.
+    db.execute("INSERT INTO automatic_old VALUES (3,'2025-06-01',6)").await;
+    db.execute("INSERT INTO automatic_new VALUES (4,'2026-06-01',9)").await;
+    db.execute("DROP TABLE automatic_old").await;
+    let needs_reinit: bool = db.query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'automatic_st'"
+    ).await;
+    assert!(!needs_reinit, "automatic aligned deletion should not rebuild");
+    db.assert_st_matches_query("automatic_st", query).await;
+    let rows: Vec<(String, i32, i64)> = sqlx::query_as(
+        "SELECT d::text, biggest, total FROM automatic_st ORDER BY d"
+    ).fetch_all(&db.pool).await.expect("read automatically trimmed groups");
+    assert_eq!(rows, vec![("2026-06-01".into(), 9, 17)]);
+}
+
+#[tokio::test]
+async fn test_unaligned_stream_without_policy_falls_back_to_reinitialize() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE automatic_fallback_src (id int NOT NULL, d date NOT NULL, amount int NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
+    db.execute("CREATE TABLE automatic_fallback_old PARTITION OF automatic_fallback_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE automatic_fallback_live PARTITION OF automatic_fallback_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO automatic_fallback_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)").await;
+    // No partition identity in the group key: a local range delete is unsafe.
+    let query = "SELECT SUM(amount) AS total, COUNT(*) AS n FROM automatic_fallback_src";
+    db.create_st("automatic_fallback_st", query, "1h", "DIFFERENTIAL").await;
+    let policy: serde_json::Value = db.query_scalar(
+        "SELECT pgtrickle.get_stream_table_partition_retention('automatic_fallback_st')"
+    ).await;
+    assert_eq!(policy["automatic_delete_with_source"], serde_json::Value::Null);
+    db.execute("DROP TABLE automatic_fallback_old").await;
+    let needs_reinit: bool = db.query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'automatic_fallback_st'"
+    ).await;
+    assert!(needs_reinit, "unaligned aggregates must rebuild");
+    db.refresh_st_with_retry("automatic_fallback_st").await;
+    db.assert_st_matches_query("automatic_fallback_st", query).await;
+}
+
 #[tokio::test]
 async fn test_trim_without_cutoff_deletes_an_aligned_partition_independent_of_age() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
