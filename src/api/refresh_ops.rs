@@ -466,6 +466,19 @@ pub(crate) fn execute_manual_refresh(
         // Replace the inlined query and all query-derived state only after the
         // target was rebuilt from the current source definitions.
         let updated = reinit_rewrite_if_needed(st)?;
+        // Manual reinitialization must reconcile partition ancestry just like
+        // the scheduled protected FULL path. Otherwise a missed partition DDL
+        // notification keeps forcing reinitialization on later refreshes.
+        for dep in StDependency::get_for_st(st.pgt_id)? {
+            if dep.source_type == "TABLE"
+                && dep
+                    .column_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.get("partition_descendant_oids").is_some())
+            {
+                crate::catalog::store_column_snapshot_for_pgt_id(st.pgt_id, dep.source_relid)?;
+            }
+        }
         let _window_plan = crate::window_state::prepare_for_protected_refresh(&updated)?;
 
         // Clear the reinit flag after successful refresh.
@@ -474,6 +487,11 @@ pub(crate) fn execute_manual_refresh(
             updated.pgt_id,
         );
         Spi::run(&sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        // The FULL refresh held source locks while materializing a new CDC
+        // baseline. Re-arm eligible legacy streams only after clearing the
+        // reinitialization flag; an explicit OFF remains a durable opt-out.
+        super::arm_automatic_trim_after_full_snapshot(st.pgt_id)?;
 
         // Rewriting can refresh another stream and overwrite the backend-local mode.
         refresh::set_effective_mode("FULL");
