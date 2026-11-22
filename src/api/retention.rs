@@ -53,7 +53,6 @@ fn load_policy(pgt_id: i64) -> Result<Option<(pg_sys::Oid, RetentionState)>, PgT
     })
 }
 
-
 /// A FULL refresh may replace only groups outside the durable sealed ranges.
 /// The explicit sealed list is authoritative: the configured cutoff can also
 /// contain still-attached, fully reconstructible partitions.
@@ -105,7 +104,8 @@ pub(crate) fn retained_live_rebuild(
         || state.query_hash != crate::catalog::compute_defining_query_hash(&st.defining_query)
     {
         return Err(PgTrickleError::InvalidArgument(
-            "the sealed stream's query or refresh mode changed; cannot prove a live-only rebuild".into(),
+            "the sealed stream's query or refresh mode changed; cannot prove a live-only rebuild"
+                .into(),
         ));
     }
     // Re-derive the partition/group proof from the currently installed query.
@@ -130,10 +130,15 @@ pub(crate) fn retained_live_rebuild(
     retention::ensure_retention_capture(st.pgt_id)?;
     retention::ensure_no_live_sealed_overlap(source_oid, &state, None)?;
     retention::validate_retention_storage(
-        st, source_oid, &state.candidate, RetentionMode::Retain, false,
+        st,
+        source_oid,
+        &state.candidate,
+        RetentionMode::Retain,
+        false,
     )?;
     let key = crate::sql_builder::ident(&state.candidate.output_column);
     let table = crate::sql_builder::qualified(&st.pgt_schema, &st.pgt_name);
+    // nosemgrep: rust.spi.query.dynamic-format — stream table and partition key are catalog-derived and quoted via sql_builder.
     let has_null = Spi::get_one::<bool>(&format!(
         "SELECT EXISTS (SELECT 1 FROM {table} WHERE {key} IS NULL)"
     ))
