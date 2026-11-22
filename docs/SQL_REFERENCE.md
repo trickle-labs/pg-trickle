@@ -1560,7 +1560,8 @@ SELECT pgtrickle.resume_stream_table('order_totals');
 - Errors if the ST is not in `SUSPENDED` or `ERROR` state.
 - Resets `consecutive_errors` to `0` and sets `status = 'ACTIVE'`.
 - Emits a `resumed` event on the `pg_trickle_alert` NOTIFY channel.
-- After resuming a scheduled ST, the scheduler will rebuild it in its next cycle. IMMEDIATE tables are rebuilt in the resume transaction before IVM resumes.
+- For a populated DIFFERENTIAL stream with continuous CDC capture and a valid saved frontier, resume preserves that frontier and the next refresh replays buffered changes instead of rebuilding. If CDC continuity cannot be proven or source DDL requires a rebuild, the next scheduled refresh reinitializes instead. IMMEDIATE tables are rebuilt in the resume transaction before IVM resumes.
+- Sealed `RETAIN` aggregates are never discarded by resume: any required rebuild is restricted to reconstructible, unsealed groups.
 
 ---
 
@@ -1594,6 +1595,7 @@ SELECT pgtrickle.resume_stream_table('order_totals');
 **Notes:**
 - Only active (`ACTIVE`) stream tables can be paused; errors if the ST is already
   `SUSPENDED` or in `ERROR` state.
+- When CDC continuity is provable, pausing leaves capture active and the saved frontier intact so resume can replay accumulated changes. Change buffers can grow while the stream is paused.
 - Use `pgtrickle.resume_stream_table(name)` to re-enable automated refreshes.
 - Emits a `paused` event on the `pg_trickle_alert` NOTIFY channel.
 
@@ -1765,7 +1767,7 @@ SELECT pgtrickle.refresh_stream_table('order_totals');
 - Blocked if the ST is `SUSPENDED` — use `pgtrickle.resume_stream_table(name)` first.
 - Uses an advisory lock to prevent concurrent refreshes of the same ST.
 - If another refresh owns the lock, returns without refreshing and emits a NOTICE.
-- For `DIFFERENTIAL` mode, generates and applies a delta query. For `FULL` mode, truncates and reloads.
+- For `DIFFERENTIAL` mode, generates and applies a delta query. Ordinary `FULL` mode truncates and reloads; sealed `RETAIN` streams use a protected rebuild of unsealed groups only, preserving sealed aggregates.
 - Manual `DIFFERENTIAL` refreshes hold back their source frontier while an
   earlier transaction remains open. Committed changes beyond that safe bound
   are deferred until a later refresh, so late commits cannot be skipped.
