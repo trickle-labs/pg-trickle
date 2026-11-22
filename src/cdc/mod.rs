@@ -3120,21 +3120,27 @@ pub fn get_slot_positions_at_bound(
                 })?
             }
             None => {
-                // A trigger row can become visible after the coordinator's
-                // frontier probe but before this refresh takes its snapshot.
-                // Advancing directly to safe_bound would consume that row's
-                // LSN without ever evaluating it.  Cap at the highest visible
-                // buffer row; when no rows are pending, the safe bound still
-                // lets an idle source advance normally.
+                // DIFFERENTIAL refreshes must remain capped by the immutable,
+                // holdback-aware visibility bound: a trigger image may become
+                // visible after the coordinator probe but before the refresh.
+                // A protected FULL/REINITIALIZE is different.  Its source SHARE
+                // locks drain writers, and its fresh insertion bound is taken
+                // after those locks (#1417).  All visible buffer images belong
+                // to the rebuilt snapshot, including those above the *old*
+                // scheduler tick.  Do not cap FULL baselines at that tick
+                // (#1455).
                 let change_schema = crate::config::pg_trickle_change_buffer_schema();
                 let buffer = buffer_qualified_name_for_oid(&change_schema, *oid);
                 // nosemgrep: rust.spi.get_one_with_args.dynamic-format — buffer is a quoted catalog-derived identifier; safe_bound is a parameter.
                 Spi::get_one_with_args::<String>(
                     &format!(
-                        "SELECT COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn)::text \
+                        "SELECT (CASE WHEN $2::boolean \
+                            THEN COALESCE(MAX(lsn), $1::pg_lsn) \
+                            ELSE COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn) \
+                            END)::text \
                          FROM {buffer} WHERE lsn > '0/0'::pg_lsn"
                     ),
-                    &[safe_bound.into()],
+                    &[safe_bound.into(), full_baseline.into()],
                 )
                 .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
                     context: format!("trigger source OID {}", oid.to_u32()),
