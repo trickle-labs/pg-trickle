@@ -774,8 +774,7 @@ async fn test_scheduler_reinitialize_partitioned_multistatement_writer_exact() {
          FROM generate_series(1, 24) AS i",
     )
     .await;
-    let query =
-        "SELECT meter, scope_path,
+    let query = "SELECT meter, scope_path,
                 date_trunc('hour', occurred_at AT TIME ZONE 'UTC') AS hour,
                 sum(value) AS quantity, count(*) AS events, max(value) AS max_value
          FROM issue1455_src
