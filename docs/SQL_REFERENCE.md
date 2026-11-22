@@ -1681,8 +1681,11 @@ Keyed, unpartitioned streams require an immediate unique index with
 RETAIN rejects operations that would rebuild sealed history from an
 incomplete source. `OFF` is allowed only while no history has been sealed and
 no retention cut is pending.
-After sealing, automatic cost-based FULL fallbacks continue as differential
-refreshes; explicit FULL requests and hard resource limits still fail closed.
+After sealing, a protected FULL/reinitialize rebuild replaces only unsealed
+groups rather than deleting retained historical output. Failed safety proofs,
+incompatible query changes, or an unfinished retention detach still fail closed.
+Ordinary automatic cost-based FULL fallbacks may continue in DIFFERENTIAL mode
+when a scoped rebuild is unnecessary.
 Eligible concurrent DETACH operations persist a pending cut, replay CDC, and
 finish the cut in PostgreSQL's second detach transaction. If interrupted,
 complete the detach with `ALTER TABLE ... DETACH PARTITION ... FINALIZE`.
@@ -1884,7 +1887,10 @@ pgtrickle.reinitialize_stream_table(name text) → text
 ```
 
 The command validates dependencies, resets the frontier, rebuilds missing CDC
-infrastructure, and schedules a protected full refresh.
+infrastructure, and schedules a protected full refresh. On a stream with sealed
+`RETAIN` history, it preserves sealed aggregate rows and rebuilds only
+reconstructible groups, provided the stored query and retention proofs remain
+valid; it does not replace the storage table.
 
 ---
 
