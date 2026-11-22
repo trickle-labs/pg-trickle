@@ -125,12 +125,35 @@ async fn refresh_for_mode(db: &E2eDb, st_name: &str, query: &str, mode: Schedule
                 let Err(diff) = e2e::oracle::compare_st_to_query(db, st_name, query).await else {
                     return;
                 };
-                assert!(
-                    diff.schema_mismatch.is_none()
-                        && diff.comparison_error.is_none()
-                        && std::time::Instant::now() < deadline,
-                    "[{mode}] scheduler did not converge '{st_name}': {diff}"
-                );
+                if diff.schema_mismatch.is_some()
+                    || diff.comparison_error.is_some()
+                    || std::time::Instant::now() >= deadline
+                {
+                    // A content-only timeout cannot distinguish a dormant
+                    // scheduler from a rejected or repeatedly retried refresh.
+                    // Report bounded catalog evidence without manually
+                    // refreshing the stream (which would mask the failure).
+                    let states: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+                        "SELECT pgt_name, status::text, needs_reinit, last_refresh_at::text
+                         FROM pgtrickle.pgt_stream_tables ORDER BY pgt_name",
+                    )
+                    .fetch_all(&db.pool)
+                    .await
+                    .unwrap_or_default();
+                    let recent: Vec<(String, String)> = sqlx::query_as(
+                        "SELECT st.pgt_name, to_jsonb(h)::text
+                         FROM pgtrickle.pgt_refresh_history h
+                         JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = h.pgt_id
+                         ORDER BY h.refresh_id DESC LIMIT 12",
+                    )
+                    .fetch_all(&db.pool)
+                    .await
+                    .unwrap_or_default();
+                    panic!(
+                        "[{mode}] scheduler did not converge '{st_name}': {diff}\\n\
+                         stream states: {states:?}\\nrecent refreshes: {recent:?}"
+                    );
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
