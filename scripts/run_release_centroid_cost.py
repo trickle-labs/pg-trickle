@@ -144,13 +144,12 @@ def run_case(dimensions: int, changed_rows: int, cache_mode: str, concurrent_wri
             "PGVECTOR_CENTROID_CACHE_MODE": cache_mode,
             "PGVECTOR_CENTROID_CONCURRENT_WRITER": "1" if concurrent_writer else "0",
             "PGVECTOR_EXPECTED_VERSION": "0.8.7",
+            "PGT_RELEASE_NEXTEST_RETRIES": "0",
         }
     )
     command = [
         "bash",
         "scripts/run_e2e_tests.sh",
-        "--retries",
-        "0",
         "--no-capture",
         "--run-ignored",
         "all",

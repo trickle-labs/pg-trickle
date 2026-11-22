@@ -48,6 +48,7 @@ PGVECTOR_CASES = {
         "test_centroid_unsafe_rebase_remains_unbound_without_retry_storm",
         "test_centroid_refresh_serializes_concurrent_source_writer",
         "test_centroid_cost_model_accepts_real_refresh_history",
+        "test_centroid_source_ahead_fallback_is_reported",
         "test_pgvector_compat_installed_version",
         "test_pgvector_distance_types_and_functions_differential",
         "test_embedding_stream_table_v2_metrics_and_options",
@@ -58,6 +59,11 @@ PGVECTOR_CASES = {
         "test_distance_subscription_concurrent_commit_and_rollback",
         "test_distance_subscription_trigger_concurrent_commit_and_rollback",
         "test_ann_worker_allows_reads_and_refresh_during_concurrent_reindex",
+        "test_ann_worker_rebuilds_only_the_requested_index",
+        "test_ann_worker_rebuilds_only_the_requested_partition_leaf",
+        "test_ann_worker_rejects_a_replaced_index",
+        "test_ann_worker_revalidates_index_after_claim",
+        "test_ann_worker_records_backend_cancellation",
         "test_ann_supervisor_allows_restricted_reads_and_writes_during_reindex",
         "test_ann_worker_records_lock_timeout_and_can_retry",
         "test_ann_worker_retries_after_restart_during_concurrent_reindex",
@@ -65,6 +71,10 @@ PGVECTOR_CASES = {
         "test_ann_supervisor_processes_authorized_request",
         "test_ann_supervisor_reconnects_after_database_restart",
         "test_ann_supervisor_bounds_repeated_failures",
+        "test_ann_supervisor_waits_for_natural_worker_cooldown",
+        "test_ann_supervisor_natural_repeated_failure_backoff",
+        "test_ann_worker_sustains_reads_and_refresh_during_concurrent_reindex",
+        "test_ann_supervisor_sustains_reads_and_refresh_during_concurrent_reindex",
     )
 } | {
     "e2e_bench_tests::pgvector_workload::centroid_benchmark_oracle_rejects_missing_components",
@@ -123,9 +133,12 @@ def check_pgvector_contract(contract: dict) -> None:
     centroid_cost = suites.get("centroid-cost-matrix", {})
     prior.shared.require(
         centroid_cost.get("kind") == "measurement"
+        and centroid_cost.get("artifact_id") == "linux-amd64"
         and centroid_cost.get("required") is True
         and centroid_cost.get("runtime") is True
+        and centroid_cost.get("upgrade") is False
         and centroid_cost.get("requires_postgresql") is True
+        and centroid_cost.get("suite_version") == "0.109.0"
         and centroid_cost.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
         and centroid_cost.get("command_argv") == ["python3", "scripts/run_release_centroid_cost.py"]
         and centroid_cost.get("measurement_file") == "qualification-logs/raw/centroid-cost-matrix.json"
@@ -144,6 +157,7 @@ def check_pgvector_contract(contract: dict) -> None:
 def check_live_rag_contract(contract: dict) -> None:
     suite = next((item for item in contract["required_suites"] if item["id"] == "live-rag-100k"), None)
     workflow = (prior.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    runner = (prior.ROOT / "benchmarks/pgvector/run_release_live_rag.py").read_text(encoding="utf-8")
     prior.shared.require(
         suite is not None
         and suite.get("kind") == "measurement"
@@ -160,9 +174,16 @@ def check_live_rag_contract(contract: dict) -> None:
         and suite.get("measurement_file") == "qualification-logs/raw/live-rag-100k.json"
         and suite.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
         and not suite.get("required_cases")
+        and all(marker in runner for marker in (
+            "live-rag-100k-decision-table.md",
+            "live-rag-100k-maintenance-p50.svg",
+            "live-rag-100k-hybrid-recall.svg",
+            '"raw_evidence_files"',
+        ))
         and "timeout-minutes: 360" in workflow,
-        "release qualification must measure the exact package at 10,000 and 100,000 RAG documents without a 1M case",
+        "release qualification must measure the exact package at 10,000 and 100,000 RAG documents, retain the decision table and plots, and omit a 1M case",
     )
+
 
 def check_pgvector_upgrade_script(script: str) -> None:
     for marker in (
@@ -251,8 +272,8 @@ def check_subscription_scale_contract(contract: dict) -> None:
         and suite.get("e2e_image") == "pg_trickle_e2e_pgvector:0.8.7"
         and suite.get("nextest_retries") == 0
         and suite.get("workload")
-        == "exact-package 384-dimensional 1k/10k/100k source-row subscription matrix with 100k-row plan controls; not a RAG benchmark",
-        "subscription scale must measure the exact release package separately from RAG",
+        == "exact-package 384-dimensional 1k/10k/100k source-row subscription matrix plus 100k-row analyzed trigger-free controls at 384/768 dimensions; not a RAG benchmark",
+        "subscription scale must measure the exact release package through 100,000 rows separately from RAG",
     )
 
 
@@ -273,13 +294,53 @@ def check_retention_contract(contract: dict) -> None:
         "partition-retention qualification must execute the TRIM and RETAIN cases against the release candidate",
     )
     script = (prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8")
+    check_retention_upgrade_script(script)
+    upgrade_1084 = next(
+        (item for item in contract["required_suites"] if item["id"] == "retention-upgrade-1084"),
+        None,
+    )
+    prior.shared.require(upgrade_1084 is not None, "qualification contract is missing the v0.108.4 retention upgrade")
+    assert upgrade_1084 is not None
+    prior.shared.require(
+        upgrade_1084["command_argv"] == [
+            "bash", "scripts/qualify_live_package_upgrade.sh", "0.108.4", "0.109.0"
+        ]
+        and upgrade_1084["artifact_id"] == "linux-amd64"
+        and upgrade_1084["runtime"] is True
+        and upgrade_1084["upgrade"] is True
+        and upgrade_1084["requires_postgresql"] is True
+        and "archived v0.108.4 install catalog" in upgrade_1084["workload"],
+        "retention qualification must execute a direct v0.108.4 catalog upgrade against the candidate",
+    )
+    for version in ("0.108.3", "0.108.4"):
+        migration = (prior.ROOT / f"sql/pg_trickle--{version}--0.109.0.sql").read_text(encoding="utf-8")
+        for marker in (
+            "CREATE OR REPLACE FUNCTION pgtrickle.set_stream_table_partition_retention(",
+            "CREATE OR REPLACE FUNCTION pgtrickle.get_stream_table_partition_retention(",
+            "CREATE OR REPLACE FUNCTION pgtrickle.create_stream_table_with_retention(",
+            "CREATE EVENT TRIGGER pg_trickle_ddl_start_tracker",
+            "REVOKE EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention",
+            "GRANT EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention",
+        ):
+            prior.shared.require(marker in migration, f"v{version} upgrade is missing retention marker {marker}")
+
+
+def check_retention_upgrade_script(script: str) -> None:
     for marker in (
         "to_regprocedure('pgtrickle.set_stream_table_partition_retention(text,text,text,text)')",
         "to_regprocedure('pgtrickle.get_stream_table_partition_retention(text)')",
         "to_regprocedure('pgtrickle.create_stream_table_with_retention(text,text,text,text,text,text)')",
         "evtname='pg_trickle_ddl_start_tracker'",
+        "get_stream_table_partition_retention('retention_upgrade_st')->>'enabled'",
+        "set_stream_table_partition_retention(\n        'retention_upgrade_st', 'RETAIN', 'd', '2026-01-01')",
+        "DETACH PARTITION public.retention_upgrade_old CONCURRENTLY",
+        "retention_upgrade_st')->'sealed_ranges'",
+        'FROM_VERSION" == "0.108.4"',
+        "sql/archive/pg_trickle--0.108.4.sql",
+        "SYNTHETIC_BASELINE=true",
+        'FROM_VERSION" == "0.108.3" || "$FROM_VERSION" == "0.108.4"',
     ):
-        prior.shared.require(marker in script, f"published upgrade check is missing retention marker {marker}")
+        prior.shared.require(marker in script, f"published upgrade runtime check is missing retention marker {marker}")
 
 
 def main() -> None:
@@ -290,16 +351,16 @@ def main() -> None:
     prior.REQUIRED_CASES = prior.REQUIRED_CASES | CASES | PAUSE_CASES
     prior.REQUIRED_SHARDS = prior.REQUIRED_SHARDS | {"wal-retirement"}
     prior.EXPECTED_SUITES = prior.EXPECTED_SUITES | {
-        "wal-retirement", "wal-retirement-upgrade", "partition-retention",
-        "pgvector-0.8.1", "pgvector-0.8.7", "pgvector-catalog-upgrade",
-        "live-rag-100k", "centroid-cost-matrix", "subscription-scale-100k",
+        "wal-retirement", "wal-retirement-upgrade", "pgvector-0.8.1", "pgvector-0.8.7",
+        "pgvector-catalog-upgrade", "live-rag-100k", "subscription-scale-100k",
+        "centroid-cost-matrix", "partition-retention", "retention-upgrade-1084",
     }
     contract = json.loads((prior.ROOT / "tests/release/v0.109.0-qualification.json").read_text())
     check_retirement_contract(contract)
     check_retention_contract(contract)
     check_pgvector_contract(contract)
-    check_live_rag_contract(contract)
     check_ann_packaging_workflow((prior.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    check_live_rag_contract(contract)
     check_subscription_scale_contract(contract)
     check_pgvector_upgrade_script((prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8"))
     prior.main()

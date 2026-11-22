@@ -696,8 +696,8 @@ async fn test_live_rag_unblocked_writes_and_reads_during_refresh() {
         .parse()
         .expect("PGT_RAG_LOAD_CHANGES must be an integer");
     assert!(
-        (1000..=1_000_000).contains(&rows),
-        "rows must be between 1000 and 1000000"
+        (1000..=100_000).contains(&rows),
+        "rows must be between 1000 and 100000"
     );
     assert!(
         [384, 768, 1536].contains(&dimensions),

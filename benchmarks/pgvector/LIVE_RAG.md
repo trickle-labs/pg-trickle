@@ -262,3 +262,13 @@ unvalidated.
 Larger-load recovery-to-searchability and final integrated-package reruns remain
 outstanding. The report records a scoped comparison and limitations; do not
 infer a universal performance advantage from these synthetic cases.
+
+The exact-package runner retains a machine-readable JSON report, a Markdown
+decision table and two SVG plots with the qualification artifact. The table
+compares p50 maintenance time against the batched application and periodic-full
+baselines, and separately reports exact corpus checks, planner HNSW use,
+forced-plan ANN recall and hybrid recall. Forced recall is shown only when the
+forced plan actually uses HNSW. The table and plots are partial if the six-case
+matrix fails or is interrupted; use the JSON and raw checkpoints for full
+per-cycle results. The maintenance comparison does not measure concurrent
+writer throughput or host lock behavior.
