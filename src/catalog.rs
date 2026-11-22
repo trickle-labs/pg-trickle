@@ -2456,6 +2456,8 @@ pub fn query_partition_descendant_oids(
 
 /// Level-triggered partition-DDL recovery compares durable membership and
 /// bounds to the current recursive tree before processing a differential delta.
+/// Only actual partitioned roots participate: plain TABLE dependencies are
+/// common in scheduled refreshes and have no partition ancestry to reconcile.
 /// The saved catalog tracks range metadata as well as child OIDs. A missed
 /// hook must force a protected rebuild (or fail closed with sealed RETAIN).
 #[cfg(not(test))]
@@ -2464,6 +2466,7 @@ pub(crate) fn partition_snapshot_changed(pgt_id: i64) -> Result<bool, PgTrickleE
         r#"WITH RECURSIVE descendants(root_oid, relid, parent_oid) AS (
              SELECT dep.source_relid, inh.inhrelid, inh.inhparent
                FROM pgtrickle.pgt_dependencies dep
+               JOIN pg_catalog.pg_partitioned_table p ON p.partrelid = dep.source_relid
                JOIN pg_catalog.pg_inherits inh ON inh.inhparent = dep.source_relid
               WHERE dep.pgt_id = $1 AND dep.source_type = 'TABLE'
              UNION ALL
@@ -2487,6 +2490,10 @@ pub(crate) fn partition_snapshot_changed(pgt_id: i64) -> Result<bool, PgTrickleE
              SELECT 1 FROM pgtrickle.pgt_dependencies dep
              LEFT JOIN current_children children ON children.root_oid = dep.source_relid
              WHERE dep.pgt_id = $1 AND dep.source_type = 'TABLE'
+               AND EXISTS (
+                 SELECT 1 FROM pg_catalog.pg_partitioned_table p
+                  WHERE p.partrelid = dep.source_relid
+               )
                AND (
                  (dep.column_snapshot ? 'partition_descendant_oids'
                   AND dep.column_snapshot->'partition_descendant_oids'
