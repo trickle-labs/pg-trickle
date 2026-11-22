@@ -1387,6 +1387,13 @@
       "identity_arguments": "text, anyelement",
       "class": "public_read",
       "execution_policy": "capability_specific"
+    },
+    "pgtrickle.would_replace_stream_table_storage(text, text)": {
+      "schema": "pgtrickle",
+      "name": "would_replace_stream_table_storage",
+      "identity_arguments": "text, text",
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     }
   }
 }

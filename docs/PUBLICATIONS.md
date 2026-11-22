@@ -209,6 +209,58 @@ pg_trickle.publication_lag_warn_bytes = 67108864   # 64 MB
 
 ---
 
+## Declarative deployments with publications
+
+A defining-query change in `create_or_replace_stream_table` may replace the
+stream table's **storage relation OID** using an atomic shadow swap. PostgreSQL
+publications and subscribers are bound to relation identities, so pg_trickle
+**rejects replacement while a downstream publication is attached** instead of
+silently migrating a binding or leaving subscribers pointing at old storage.
+A configuration-only change or unchanged (including whitespace-only) query
+does not require detaching the publication.
+
+To decide before changing anything, call the read-only
+`pgtrickle.would_replace_stream_table_storage(name, query)`. It matches the
+declarative API's rewrite and change detection, returning `true` only when the
+new query would require storage replacement. Invalid changed queries error
+instead of returning a misleading result. This example assumes the stream
+table already has a publication and the caller owns both objects:
+
+```sql
+DO $$
+DECLARE
+    definition text := $query$
+        SELECT grp, sum(value) AS total, count(*) AS n,
+               max(value) AS peak
+        FROM event GROUP BY grp
+    $query$;
+    replace_storage boolean;
+BEGIN
+    replace_storage :=
+        pgtrickle.would_replace_stream_table_storage('public.totals', definition);
+    IF replace_storage THEN
+        PERFORM pgtrickle.drop_stream_table_publication('public.totals');
+    END IF;
+
+    PERFORM pgtrickle.create_or_replace_stream_table(
+        'public.totals', definition, '1h', 'DIFFERENTIAL');
+
+    IF replace_storage THEN
+        PERFORM pgtrickle.stream_table_to_publication('public.totals');
+    END IF;
+END $$;
+```
+
+This leaves the publication attached on routine no-op and config-only deployments.
+When re-attachment is necessary, consumers may need a subscription publication
+refresh, compatible destination schema, or resnapshot for changed columns;
+dropping and recreating a publication is **not** transparent replication of
+shadow-table contents. Coordinate the change with subscribers. A preflight is
+advisory when concurrent DDL can change the definition before the subsequent
+replace.
+
+---
+
 ## Removing a publication
 
 ```sql
@@ -289,6 +341,9 @@ GRANT SELECT ON public.order_totals TO replicator;
 - Only one publication per stream table. Calling `stream_table_to_publication`
   twice returns an error. Use a single publication with multiple subscribers
   instead.
+- A query change requiring replacement storage is refused while a downstream
+  publication is attached. Use `would_replace_stream_table_storage` to guard
+  only the deployments that need detach, replace, and re-attach.
 - `wal_level = logical` is required. This is not the default in all managed
   PostgreSQL providers — check your provider's documentation.
 - Subscribers must handle `INSERT`, `UPDATE`, and `DELETE` events from
