@@ -711,8 +711,7 @@ async fn test_refresh_worker_sigterm_interrupts_spi_and_recovers() {
 
     db.execute("CREATE TABLE sigterm_src (id INT PRIMARY KEY, delay_seconds FLOAT8 NOT NULL)")
         .await;
-    db.execute("INSERT INTO sigterm_src VALUES (1, 0)")
-        .await;
+    db.execute("INSERT INTO sigterm_src VALUES (1, 0)").await;
     // FULL refresh executes this as one statement. Initially sleep(0)
     // ensures that creating the stream table does not delay the test.
     db.create_st(
@@ -728,8 +727,7 @@ async fn test_refresh_worker_sigterm_interrupts_spi_and_recovers() {
 
     // Make the next scheduled refresh spend 30 seconds inside PostgreSQL,
     // where polling BackgroundWorker::sigterm_received() is not possible.
-    db.execute("INSERT INTO sigterm_src VALUES (2, 30)")
-        .await;
+    db.execute("INSERT INTO sigterm_src VALUES (2, 30)").await;
     let worker_pid = tokio::time::timeout(Duration::from_secs(90), async {
         loop {
             let pid: Option<i32> = sqlx::query_scalar(
@@ -778,13 +776,12 @@ async fn test_refresh_worker_sigterm_interrupts_spi_and_recovers() {
     // remained in pg_stat_activity until pg_sleep returned.
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let alive: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
-            )
-            .bind(worker_pid)
-            .fetch_one(&db.pool)
-            .await
-            .expect("check whether terminated worker exited");
+            let alive: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1)")
+                    .bind(worker_pid)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("check whether terminated worker exited");
             if !alive {
                 break;
             }
