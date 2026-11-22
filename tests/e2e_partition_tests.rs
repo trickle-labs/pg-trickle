@@ -1994,6 +1994,20 @@ async fn test_retained_live_rebuild_preserves_discontiguous_history_and_downstre
     assert_eq!(sealed["sealed_ranges"], serde_json::json!([
         {"lower":"2024-01-01","upper":"2025-01-01"}
     ]));
+
+    // Explicit reinitialize_stream_table must avoid ALTER QUERY's destructive
+    // shadow-table replacement and retain the same sealed group.
+    db.execute("UPDATE live_rebuild_src SET amount=33 WHERE id=2").await;
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('live_rebuild_st')").await;
+    db.refresh_st_with_retry("live_rebuild_st").await;
+    let after_explicit: Vec<(String,i64,i64)> = sqlx::query_as(
+        "SELECT d::text,total,n FROM live_rebuild_st ORDER BY d"
+    ).fetch_all(&db.pool).await.expect("read explicit scoped reinitialize");
+    assert_eq!(after_explicit, vec![
+        ("2024-06-01".into(),10,1),
+        ("2025-06-01".into(),33,1),
+        ("2026-06-01".into(),7,1),
+    ]);
 }
 
 #[tokio::test]
