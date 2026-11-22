@@ -3580,13 +3580,18 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     let replay = !st.refresh_mode.is_immediate()
         && !st.needs_reinit
         && st.is_populated
-        && st.frontier.as_ref().is_some_and(|frontier| !frontier.is_empty())
-        && deps.iter().all(|dep| {
-            matches!(dep.source_type.as_str(), "TABLE" | "STREAM_TABLE")
-        })
+        && st
+            .frontier
+            .as_ref()
+            .is_some_and(|frontier| !frontier.is_empty())
+        && deps
+            .iter()
+            .all(|dep| matches!(dep.source_type.as_str(), "TABLE" | "STREAM_TABLE"))
         && (paused_with_replay || sealed_rebuild.is_some())
         && cdc::validate_required_change_buffers(&st, &deps).is_ok()
-        && deps.iter().filter(|dep| dep.source_type == "TABLE")
+        && deps
+            .iter()
+            .filter(|dep| dep.source_type == "TABLE")
             .all(|dep| cdc::trigger_exists(dep.source_relid).unwrap_or(false));
     // Restore capture before publishing ACTIVE. If capture was lost, retain
     // the protected rebuild requirement rather than advancing a stale frontier.
@@ -4108,12 +4113,17 @@ fn pause_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     let replayable = !st.refresh_mode.is_immediate()
         && !st.needs_reinit
         && st.is_populated
-        && st.frontier.as_ref().is_some_and(|frontier| !frontier.is_empty())
-        && deps.iter().all(|dep| {
-            matches!(dep.source_type.as_str(), "TABLE" | "STREAM_TABLE")
-        })
+        && st
+            .frontier
+            .as_ref()
+            .is_some_and(|frontier| !frontier.is_empty())
+        && deps
+            .iter()
+            .all(|dep| matches!(dep.source_type.as_str(), "TABLE" | "STREAM_TABLE"))
         && cdc::validate_required_change_buffers(&st, &deps).is_ok()
-        && deps.iter().filter(|dep| dep.source_type == "TABLE")
+        && deps
+            .iter()
+            .filter(|dep| dep.source_type == "TABLE")
             .all(|dep| cdc::trigger_exists(dep.source_relid).unwrap_or(false));
     if !replayable {
         // A previous capture gap cannot be repaired by CDC replay.
