@@ -463,6 +463,75 @@ fn create_or_replace_stream_table(
     }
 }
 
+fn replacement_query_changed(
+    existing_query: &str,
+    rewritten_query: &str,
+) -> Result<bool, PgTrickleError> {
+    // TopK stores only the base query, not its ORDER BY/LIMIT wrapper.
+    let topk_info = crate::dvm::detect_topk_pattern(rewritten_query)?;
+    let effective_query = topk_info
+        .as_ref()
+        .map_or(rewritten_query, |info| info.base_query.as_str());
+    Ok(normalized_query_differs(existing_query, effective_query))
+}
+
+fn normalized_query_differs(existing_query: &str, proposed_query: &str) -> bool {
+    normalize_sql_whitespace(existing_query) != normalize_sql_whitespace(proposed_query)
+}
+
+/// Read-only preflight for the storage swap implied by a declarative query change.
+///
+/// Missing stream tables are created, not replaced. A true result predicts the
+/// shadow-rebuild path, not that all lifecycle constraints will permit the ALTER.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+fn would_replace_stream_table_storage(name: &str, query: &str) -> bool {
+    match would_replace_stream_table_storage_impl(name, query) {
+        Ok(would_replace) => would_replace,
+        Err(e) => raise_error_with_context(e),
+    }
+}
+
+fn would_replace_stream_table_storage_impl(
+    name: &str,
+    query: &str,
+) -> Result<bool, PgTrickleError> {
+    let caller =
+        security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?;
+    let (_, _, existing) =
+        match super::helpers::resolve_owned_stream_table_with_caller(name, &caller) {
+            Ok(found) => found,
+            Err(PgTrickleError::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+
+    // Use the caller's search_path and the exact comparison used by
+    // create_or_replace_stream_table, including TopK and whitespace handling.
+    let rw = with_invoker_search_path(&caller.search_path, || {
+        run_query_rewrite_pipeline(query)
+    })?;
+    if !replacement_query_changed(&existing.defining_query, &rw.query)? {
+        return Ok(false);
+    }
+
+    // A meaningful change reaches ALTER QUERY's validation and, if accepted,
+    // its protected shadow-rebuild path. Validate without mutating any state.
+    let mut refresh_mode = existing.refresh_mode;
+    let owner = relation_owner(existing.pgt_relid)?;
+    let vq = with_invoker_search_path(&caller.search_path, || {
+        validate_and_parse_query(
+            &rw.query,
+            query,
+            &mut refresh_mode,
+            false,
+            rw.had_nested_window_rewrite,
+            owner,
+        )
+    })?;
+    check_for_cycles_alter(existing.pgt_id, &vq.source_relids, &rw.query)?;
+    Ok(true)
+}
+
 /// Tracks which config parameters differ between an existing stream table
 /// and a `create_or_replace` call.  Fields are `Some` only when changed.
 pub(crate) struct ConfigDiff<'a> {
@@ -621,21 +690,7 @@ fn create_or_replace_stream_table_impl(
             let rw = with_invoker_search_path(&caller.search_path, || {
                 run_query_rewrite_pipeline(query)
             })?;
-            let new_query_rewritten = rw.query;
-
-            // TopK detection: if the new query is TopK, compare against the
-            // base query (ORDER BY/LIMIT stripped) since that's what is stored
-            // in `defining_query`.
-            let topk_info = crate::dvm::detect_topk_pattern(&new_query_rewritten)?;
-            let effective_new_query = match &topk_info {
-                Some(info) => &info.base_query,
-                None => &new_query_rewritten,
-            };
-
-            // Normalize whitespace before comparison so cosmetic differences
-            // (extra spaces, newlines, tabs) are treated as no-ops.
-            let query_changed = normalize_sql_whitespace(&existing.defining_query)
-                != normalize_sql_whitespace(effective_new_query);
+            let query_changed = replacement_query_changed(&existing.defining_query, &rw.query)?;
 
             let config_diff = compute_config_diff(
                 &existing,
@@ -893,5 +948,26 @@ fn create_stream_table_cost_optimized(
     });
     if let Err(e) = result {
         raise_error_with_context(e);
+    }
+}
+
+#[cfg(test)]
+mod storage_preflight_tests {
+    use super::normalized_query_differs;
+
+    #[test]
+    fn test_preflight_whitespace_only_change_is_noop() {
+        assert!(!normalized_query_differs(
+            "SELECT grp, sum(value) AS total FROM events GROUP BY grp",
+            "  SELECT   grp,  sum(value) AS total FROM events  GROUP BY grp  "
+        ));
+    }
+
+    #[test]
+    fn test_preflight_new_aggregate_changes_definition() {
+        assert!(normalized_query_differs(
+            "SELECT grp, sum(value) AS total FROM events GROUP BY grp",
+            "SELECT grp, sum(value) AS total, max(value) AS peak FROM events GROUP BY grp"
+        ));
     }
 }
