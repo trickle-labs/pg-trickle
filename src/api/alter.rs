@@ -3554,8 +3554,6 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
              finish DETACH PARTITION CONCURRENTLY or FINALIZE first"
         )));
     }
-    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
-
     let deps = StDependency::get_for_st(st.pgt_id)?;
     let source_oids: Vec<_> = deps
         .iter()
@@ -3566,8 +3564,29 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
         .map(|dep| dep.source_relid)
         .collect();
     cdc::lock_source_relations(&source_oids)?;
-    // Restore capture before exposing the consumer as ACTIVE. Changes made
-    // while the source was inactive are intentionally repaired by FULL refresh.
+    // A persisted pause marker proves capture was left enabled while the
+    // stream was suspended. Sealed RETAIN also keeps capture unconditionally
+    // active, including after an automatic error suspension.
+    let paused_with_replay = Spi::get_one_with_args::<bool>(
+        "SELECT refresh_reason = 'CDC_REPLAY_PAUSE' FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    let sealed_rebuild = crate::api::retention::retained_live_rebuild(&st)?;
+    let replay = !st.refresh_mode.is_immediate()
+        && !st.needs_reinit
+        && st.is_populated
+        && st.frontier.as_ref().is_some_and(|frontier| !frontier.is_empty())
+        && deps.iter().all(|dep| {
+            matches!(dep.source_type.as_str(), "TABLE" | "STREAM_TABLE")
+        })
+        && (paused_with_replay || sealed_rebuild.is_some())
+        && cdc::validate_required_change_buffers(&st, &deps).is_ok()
+        && deps.iter().filter(|dep| dep.source_type == "TABLE")
+            .all(|dep| cdc::trigger_exists(dep.source_relid).unwrap_or(false));
+    // Restore capture before publishing ACTIVE. If capture was lost, retain
+    // the protected rebuild requirement rather than advancing a stale frontier.
     for dep in &deps {
         if st.refresh_mode.is_immediate() && crate::ivm::is_ivm_trigger_source(&dep.source_type) {
             ensure_immediate_ivm_triggers(&st, dep.source_relid)?;
@@ -3578,7 +3597,9 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
             cdc::refresh_capture_body_for_source(dep.source_relid, true)?;
         }
     }
-    StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;
+    if !replay {
+        StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;
+    }
     if st.refresh_mode.is_immediate() {
         // IMMEDIATE has no scheduler cycle to repair writes made while paused.
         // Rebuild under the source locks before exposing the table as ACTIVE.
@@ -3595,6 +3616,8 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
         "UPDATE pgtrickle.pgt_stream_tables \
          SET status = 'ACTIVE', consecutive_errors = 0, \
          recovery_generation = recovery_generation + 1, \
+         refresh_reason_detail = CASE WHEN refresh_reason = 'CDC_REPLAY_PAUSE' THEN NULL ELSE refresh_reason_detail END, \
+         refresh_reason = CASE WHEN refresh_reason = 'CDC_REPLAY_PAUSE' THEN NULL ELSE refresh_reason END, \
          last_error_message = NULL, last_error_at = NULL, updated_at = now() \
          WHERE pgt_id = $1",
         &[st.pgt_id.into()],
@@ -4032,8 +4055,6 @@ fn pause_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
             "stream table changed while acquiring its lock".into(),
         ));
     }
-    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
-
     if st.status != StStatus::Active {
         return Err(PgTrickleError::InvalidArgument(format!(
             "stream table {}.{} is not ACTIVE (current status: {}); \
@@ -4054,10 +4075,34 @@ fn pause_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
         .map(|dep| dep.source_relid)
         .collect();
     cdc::lock_source_relations(&source_oids)?;
-    // Establish the repair contract before disabling capture. This keeps an
-    // uncaptured interval from being mistaken for a differential catch-up.
-    StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;
+    // Reject pending retention detach, and verify any sealed snapshot is
+    // intact before suspending the consumer.
+    let _sealed = crate::api::retention::retained_live_rebuild(&st)?;
+    let replayable = !st.refresh_mode.is_immediate()
+        && !st.needs_reinit
+        && st.is_populated
+        && st.frontier.as_ref().is_some_and(|frontier| !frontier.is_empty())
+        && deps.iter().all(|dep| {
+            matches!(dep.source_type.as_str(), "TABLE" | "STREAM_TABLE")
+        })
+        && cdc::validate_required_change_buffers(&st, &deps).is_ok()
+        && deps.iter().filter(|dep| dep.source_type == "TABLE")
+            .all(|dep| cdc::trigger_exists(dep.source_relid).unwrap_or(false));
+    if !replayable {
+        // A previous capture gap cannot be repaired by CDC replay.
+        StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;
+    }
     StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended)?;
+    if replayable {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables \
+             SET refresh_reason = 'CDC_REPLAY_PAUSE', \
+                 refresh_reason_detail = 'CDC is retained while the consumer is suspended' \
+             WHERE pgt_id = $1",
+            &[st.pgt_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    }
     for dep in &deps {
         if matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE") {
             cdc::sync_capture_body_for_source(dep.source_relid)?;
