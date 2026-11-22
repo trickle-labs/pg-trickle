@@ -3752,19 +3752,19 @@ pub fn compute_safe_upper_bound(
                             context: "frontier probe xid".to_string(),
                             reason: "active transaction ID was NULL".to_string(),
                         })?;
-                    let xid = xid
-                        .parse::<u64>()
-                        .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                    let xid = xid.parse::<u64>().map_err(|e| {
+                        PgTrickleError::SafeFrontierUnavailable {
                             context: "frontier probe xid".to_string(),
                             reason: format!("malformed transaction ID '{xid}': {e}"),
-                        })?;
+                        }
+                    })?;
                     active_xids.insert(xid);
-                    let age = row
-                        .get::<i64>(2)
-                        .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                            context: "frontier probe transaction age".to_string(),
-                            reason: e.to_string(),
-                        })?;
+                    let age =
+                        row.get::<i64>(2)
+                            .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                                context: "frontier probe transaction age".to_string(),
+                                reason: e.to_string(),
+                            })?;
                     oldest_age_secs = oldest_age_secs.max(frontier_transaction_age(age));
                 }
                 Ok::<_, PgTrickleError>((active_xids, oldest_age_secs))
