@@ -205,6 +205,12 @@ def check_ann_packaging_workflow(workflow: str) -> None:
         prior.shared.require(name in tar_section and name in zip_section, f"release archives must include {path}")
     prior.shared.require("run: python scripts/check_ann_release_payload.py" in workflow,
                          "release archives must verify the packaged ANN operator files")
+    prior.shared.require(
+        'ARCHIVE_SQL="sql/archive/pg_trickle--${VERSION}.sql"' in workflow
+        and 'cp "$ARCHIVE_SQL" "$PKG_SQL"' in workflow
+        and 'cmp -s "$ARCHIVE_SQL" "$PKG_SQL"' in workflow,
+        "release packages must install the checked-in SQL catalog for their version",
+    )
 
 
 def check_retirement_contract(contract: dict) -> None:
@@ -360,6 +366,16 @@ def main() -> None:
     check_retention_contract(contract)
     check_pgvector_contract(contract)
     check_ann_packaging_workflow((prior.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    prior.shared.require(
+        "would_replace_stream_table_storage" not in
+        (prior.ROOT / "sql/archive/pg_trickle--0.109.0.sql").read_text(encoding="utf-8"),
+        "#1474's v0.110.2 API must stay out of the v0.109.0 install catalog",
+    )
+    prior.shared.require(
+        "would_replace_stream_table_storage" not in
+        (prior.ROOT / "docs/SQL_REFERENCE.md").read_text(encoding="utf-8"),
+        "v0.109.0's installed SQL reference must match its packaged API",
+    )
     check_live_rag_contract(contract)
     check_subscription_scale_contract(contract)
     check_pgvector_upgrade_script((prior.ROOT / "scripts/qualify_live_package_upgrade.sh").read_text(encoding="utf-8"))

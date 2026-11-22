@@ -272,6 +272,13 @@ if [[ -n "$PACKAGE_DIR" ]]; then
         fi
         if [[ -n "$PKG_SQL" ]]; then
             check_pass "packaged install SQL exists: $PKG_SQL"
+            if [[ -f "$ARCHIVE_SQL" ]]; then
+                if cmp -s "$PKG_SQL" "$ARCHIVE_SQL"; then
+                    check_pass "packaged install SQL matches archived versioned catalog"
+                else
+                    check_fail "packaged install SQL differs from $ARCHIVE_SQL"
+                fi
+            fi
         else
             check_fail "packaged install SQL pg_trickle--${VERSION}.sql not found under $PACKAGE_DIR"
         fi
