@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**182 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**183 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -192,4 +192,5 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.watermarks()` | `pgtrickle` | `SetOf row` | Return the current watermark state for all registered sources. |
 | `pgtrickle.worker_allocation_status()` | `pgtrickle` | `SetOf row` | Columns: - `db_name`: The current database name. |
 | `pgtrickle.worker_pool_status()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.worker_pool_status()`. |
+| `pgtrickle.would_replace_stream_table_storage()` | `pgtrickle` | `boolean` | Read-only preflight for the storage swap implied by a declarative query change. |
 | `pgtrickle.write_and_refresh()` | `pgtrickle` | `` | Calling `pgtrickle.write_and_refresh(sql, name)` guarantees that the refresh completes after seeing the writes from `sql`. |
