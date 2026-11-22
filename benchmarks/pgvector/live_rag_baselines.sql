@@ -10,7 +10,7 @@ CREATE TABLE live_rag.access (
 -- This is the authoritative eligible corpus, not an approximate search result.
 CREATE VIEW live_rag.truth AS
 SELECT d.id, a.tenant_id, d.body, e.incarnation, e.revision,
-       e.chunk_version, e.model_version, e.embedding::vector AS embedding
+       e.chunk_version, e.model_version, e.embedding
 FROM embedding_demo.documents d
 JOIN live_rag.access a ON a.document_id = d.id
 JOIN embedding_demo.results e ON e.document_id = d.id

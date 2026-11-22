@@ -391,6 +391,9 @@ if [[ "$RETENTION_UPGRADE" == true ]]; then
 
     # Existing streams stay unconfigured after upgrade. Then exercise RETAIN
     # through the migrated API and DDL hook on the same upgraded catalog.
+    # The SUM query is marked needs_reinit because older materializations lack
+    # the differential aggregate state added in v0.109.0.
+    psql "SELECT pgtrickle.refresh_stream_table('retention_upgrade_st')" >/dev/null
     psql "SELECT pgtrickle.get_stream_table_partition_retention('retention_upgrade_st')->>'enabled'" | grep -qx false
     psql "SELECT pgtrickle.set_stream_table_partition_retention(
         'retention_upgrade_st', 'RETAIN', 'd', '2026-01-01')" >/dev/null
