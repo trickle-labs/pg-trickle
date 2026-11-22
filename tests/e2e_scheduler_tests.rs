@@ -344,8 +344,43 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
     }
     db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name IN ('replay_up', 'replay_leaf')")
         .await;
-    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['replay_up', 'replay_leaf'])")
-        .await;
+    // A missing-frontier leaf can run its FULL baseline before the upstream
+    // refresh has published any CDC rows. If both are resumed together, the
+    // test may see only the buffer's 0/0 sentinel instead of the change it
+    // intends to verify. Materialize the upstream first in this case; the
+    // other baselines still cover same-tick upstream/leaf execution.
+    if baseline == "FRONTIER_MISSING" && change_upstream {
+        db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['replay_up'])")
+            .await;
+        let upstream_id: i64 = db
+            .query_scalar(
+                "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'replay_up'",
+            )
+            .await;
+        let captured = format!(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle_changes.changes_pgt_{upstream_id}
+                WHERE action = 'I' AND lsn > '0/0'::pg_lsn
+            )"
+        );
+        assert!(
+            db.wait_for_condition(
+                "upstream CDC before missing-frontier baseline",
+                &captured,
+                Duration::from_secs(60),
+                Duration::from_millis(50),
+            )
+            .await,
+            "upstream FULL must publish its change before the leaf baseline"
+        );
+        db.assert_st_matches_query("replay_up", "SELECT id, grp FROM replay_src")
+            .await;
+        db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['replay_leaf'])")
+            .await;
+    } else {
+        db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['replay_up', 'replay_leaf'])")
+            .await;
+    }
     assert!(
         db.wait_for_condition(
             "scheduled baseline",
@@ -393,16 +428,21 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
     // case SQL equality evaluates to NULL, not false. Assert transaction
     // equality when both IDs are available, and keep the frontier/buffer
     // and exact-result checks below as the mandatory no-replay evidence.
-    if change_upstream && !witness["same_transaction"].is_null() {
+    if change_upstream && baseline != "FRONTIER_MISSING" && !witness["same_transaction"].is_null() {
         assert_eq!(witness["same_transaction"], true, "{diagnostics}");
     }
     if baseline == "FALLBACK" {
         assert_eq!(witness["fallback"], true, "{diagnostics}");
     }
     if change_upstream {
-        assert!(db.query_scalar::<bool>(&format!(
-            "SELECT MAX(lsn) > (SELECT tick_watermark_lsn FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'replay_leaf' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) FROM {buffer}"
-        )).await, "upstream capture must exceed the tick bound: {diagnostics}");
+        // The missing-frontier case starts the leaf on a later tick, after the
+        // upstream capture was witnessed. Other baselines must still prove
+        // that their same-tick capture exceeds the leaf's original tick bound.
+        if baseline != "FRONTIER_MISSING" {
+            assert!(db.query_scalar::<bool>(&format!(
+                "SELECT MAX(lsn) > (SELECT tick_watermark_lsn FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'replay_leaf' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) FROM {buffer}"
+            )).await, "upstream capture must exceed the tick bound: {diagnostics}");
+        }
         assert_eq!(
             db.query_scalar::<i64>(&format!("SELECT COUNT(*) FROM {buffer} WHERE action = 'I'"))
                 .await,

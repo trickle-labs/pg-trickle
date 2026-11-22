@@ -4511,6 +4511,19 @@ AS 'MODULE_PATHNAME', 'create_or_replace_stream_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- src/api/create.rs:486
+-- pg_trickle::api::create::would_replace_stream_table_storage
+CREATE  FUNCTION pgtrickle."would_replace_stream_table_storage"(
+	"name" TEXT, /* & str */
+	"query" TEXT /* & str */
+) RETURNS bool /* bool */
+STRICT SECURITY DEFINER 
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'would_replace_stream_table_storage_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- src/api/diagnostics.rs:2609
 -- pg_trickle::api::diagnostics::explain
 CREATE  FUNCTION pgtrickle."explain"(
@@ -4725,6 +4738,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.subscribe(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.subscribe_distance(text, text, text, text, text, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.unsubscribe(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.unsubscribe_distance(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.would_replace_stream_table_storage(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.stat_reset(bigint) FROM PUBLIC;
 
 -- public_read

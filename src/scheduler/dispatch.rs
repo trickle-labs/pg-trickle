@@ -30,6 +30,15 @@ use super::{
     execute_worker_singleton, is_load_shed_exempt, load_st_by_id,
 };
 
+// Register PostgreSQL's native handler rather than pg_sys::die: pgrx
+// exposes the latter as a Rust-ABI guarded wrapper, which is not a C signal
+// callback. The native function only sets PostgreSQL's interrupt flags and
+// wakes its latch; it is safe for the signal-delivery context.
+unsafe extern "C-unwind" {
+    #[link_name = "die"]
+    fn postgres_die(signal: i32);
+}
+
 // ── Dynamic Refresh Worker (Phase 3) ──────────────────────────────────────
 
 /// Spawn a dynamic refresh worker for a specific job.
@@ -95,7 +104,21 @@ pub fn spawn_refresh_worker(
 #[pg_guard]
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
-    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
+    // A refresh can spend minutes inside a single SPI statement. pgrx's
+    // SIGTERM handler only sets a flag and wakes the latch, which cannot
+    // interrupt that statement. PostgreSQL's die() handler instead sets
+    // ProcDiePending, so CHECK_FOR_INTERRUPTS() aborts the current statement
+    // and rolls back the transaction.
+    //
+    // Install it while signals are still blocked, before pgrx's SIGHUP
+    // registration unblocks them. Do not rely on PostgreSQL 18's default
+    // bgworker SIGTERM handler: it raises FATAL inside the signal handler.
+    // SAFETY: We are in a registered background worker and signals are still
+    // blocked. postgres_die is PostgreSQL 18's native SIGTERM handler.
+    unsafe {
+        pg_sys::pqsignal_be(pg_sys::SIGTERM as i32, Some(postgres_die));
+    }
+    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP);
 
     // Parse bgw_extra: "db_name\0job_id"
     let extra = BackgroundWorker::get_extra();
