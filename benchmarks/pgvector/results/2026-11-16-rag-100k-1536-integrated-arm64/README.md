@@ -66,11 +66,12 @@ not be presented as proof of HNSW quality.
 
 ## Scope
 
-The 1M-row RAG run was deferred on this 7.748-GiB Docker host. Initial setup
-alone took about 95 minutes at 100k rows. Earlier 1M subscription evidence used
-a separate 32-GiB host, an earlier package, and a different workload, so it does
-not qualify this integrated candidate. The official qualification workflow
-was run separately on package SHA
+A 1M-document RAG run is outside the v0.109.0 scope: the required corpus
+matrix stops at 100,000 documents, and larger corpora remain unvalidated.
+Earlier 1M-source-row subscription samples are historical evidence from a
+separate workload and do not qualify this RAG run. Initial setup alone took
+about 95 minutes at 100k rows. The official qualification workflow was run
+separately on package SHA
 `3ac73e99674ee291acd7b73a79945e09974dd3a6`; it failed the Criterion regression
 budget and published no release artifacts. That package SHA is not this
 integrated benchmark SHA.

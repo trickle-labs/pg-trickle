@@ -69,5 +69,6 @@ report, run log, and resource samples are in [`100k-768.json`](100k-768.json),
 [`100k-768-run.log`](100k-768-run.log), and
 [`100k-768-docker-stats.csv`](100k-768-docker-stats.csv).
 
-Exact-package 100k/1536 and 1m/384 runs remain outstanding, as do
-package-bound concurrent-write and recovery measurements.
+Exact-package 100k/1536, package-bound concurrent-write and recovery
+measurements remain outstanding. A 1m/384 RAG run is outside the v0.109.0
+scope.
