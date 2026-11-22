@@ -838,7 +838,6 @@ fn alter_stream_table_query(
     caller_search_path: &str,
 ) -> Result<(), PgTrickleError> {
     lock_alter_target(st.pgt_id)?;
-    crate::dvm::retention::ensure_query_change_allowed(st.pgt_id)?;
     resume_or_rollback_shadow_build(st.pgt_id, schema)?;
     let st = StreamTableMeta::get_by_id(st.pgt_id)?
         .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={}", st.pgt_id)))?;
@@ -986,6 +985,10 @@ fn alter_stream_table_query(
         }
         return Ok(());
     }
+    // Compatible, byte-identical query definitions need no storage rebuild and
+    // must be allowed for RETAIN (including explicit reinitialization).
+    // Everything else still uses a shadow swap and must reject sealed history.
+    crate::dvm::retention::ensure_query_change_allowed(st.pgt_id)?;
     let expression_index = Spi::get_one_with_args::<String>(
         "SELECT (SELECT c.relname::text FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid JOIN pg_catalog.pg_am am ON am.oid = c.relam WHERE i.indrelid = $1 AND (i.indexprs IS NOT NULL OR am.amname IN ('hnsw', 'ivfflat')) AND c.relname <> $2::name ORDER BY c.oid LIMIT 1)",
         &[st.pgt_relid.into(), format!("{table_name}_row_id_idx").as_str().into()],
@@ -3933,7 +3936,31 @@ fn repair_stream_table_impl(name: &str, refresh_immediate: bool) -> Result<Strin
 #[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn reinitialize_stream_table(name: &str) -> String {
     let result = (|| {
+        // Verify the sealed-query contract before resetting frontiers or
+        // changing capture. A protected live-range rebuild will replace only
+        // unsealed groups after the next refresh.
+        let caller = security_context::capture_caller_context(
+            security_context::EntryContext::SecurityDefiner,
+        )?;
+        let (_, _, before) = super::helpers::resolve_owned_stream_table_with_caller(name, &caller)?;
+        let sealed = crate::dvm::retention::has_unreconstructible_history(before.pgt_id)?;
+        if sealed {
+            let deps = StDependency::get_for_st(before.pgt_id)?;
+            let source_oids = deps
+                .iter()
+                .filter(|dep| dep.source_type == "TABLE")
+                .map(|dep| dep.source_relid)
+                .collect::<Vec<_>>();
+            cdc::lock_source_relations(&source_oids)?;
+            let _ = crate::api::retention::retained_live_rebuild(&before)?;
+        }
         let summary = repair_stream_table_impl(name, false)?;
+        if sealed {
+            // Do not invoke ALTER QUERY's shadow relation replacement: it
+            // would discard unreconstructible historical groups. The repair
+            // above already scheduled a scoped protected refresh.
+            return Ok::<_, PgTrickleError>(summary);
+        }
         let caller = security_context::capture_caller_context(
             security_context::EntryContext::SecurityDefiner,
         )?;
