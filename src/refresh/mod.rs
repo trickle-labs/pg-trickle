@@ -238,6 +238,15 @@ pub(crate) fn ensure_full_policy(
     transition: &str,
 ) -> Result<(), PgTrickleError> {
     crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
+    ensure_scoped_full_policy(st, transition)
+}
+
+/// Permit a protected FULL replacement only when the caller separately proves
+/// which groups can be reconstructed without touching sealed history.
+pub(crate) fn ensure_scoped_full_policy(
+    st: &StreamTableMeta,
+    transition: &str,
+) -> Result<(), PgTrickleError> {
     if current_full_policy() == FullPolicy::Error {
         return Err(PgTrickleError::IntegrationError {
             code: "PGT_EXT_FULL_POLICY",
