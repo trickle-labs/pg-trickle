@@ -1063,6 +1063,10 @@ pub fn refresh_graph_strict(
                 }
             }
         }
+        let graph_sources_locked = graph_dependencies
+            .values()
+            .flatten()
+            .all(|dependency| matches!(dependency.source_type.as_str(), "TABLE" | "STREAM_TABLE"));
         let source_oids = source_oids
             .into_iter()
             .map(pg_sys::Oid::from)
@@ -1108,6 +1112,7 @@ pub fn refresh_graph_strict(
                     &safe_bound,
                     full_policy,
                     graph_refresh_id,
+                    graph_sources_locked,
                     boundary_digest.to_vec(),
                 ),
                 || {

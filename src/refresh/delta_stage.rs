@@ -253,18 +253,19 @@ impl DeltaStage {
             ))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         }
-        // Stage the logical source at new_lsn as well as the bounded delta.
-        // Both the lock-free inverse view and materialized table read the live
-        // relation and future CDC in ONE statement, sharing one MVCC snapshot.
-        self.stage_bounded_source(
-            st,
-            dependency,
-            &source,
-            new_lsn,
-            owner,
-            &source_table,
-            &hash_columns,
-        )?;
+        // The graph executor already holds every source lock across its shared
+        // cut, so the live source is the exact NEW-frontier state.
+        if !crate::refresh::current_graph_sources_locked() {
+            self.stage_bounded_source(
+                st,
+                dependency,
+                &source,
+                new_lsn,
+                owner,
+                &source_table,
+                &hash_columns,
+            )?;
+        }
         self.names.insert(source_oid, qualified_name);
         Ok(())
     }
@@ -283,6 +284,9 @@ impl DeltaStage {
         st: &StreamTableMeta,
         dependencies: &[StDependency],
     ) -> Result<(), PgTrickleError> {
+        if crate::refresh::current_graph_sources_locked() {
+            return Ok(());
+        }
         self.bounded_view_guards.clear();
         let owner = quote_ident(&crate::refresh::stream_owner_name(st)?);
         for dependency in dependencies {

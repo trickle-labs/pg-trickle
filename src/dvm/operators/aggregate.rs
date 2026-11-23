@@ -7427,6 +7427,7 @@ mod tests {
                 "0/10",
                 crate::refresh::FullPolicy::Error,
                 1,
+                false,
                 vec![],
             ),
             || Ok(child_to_from_sql_in_context(&child, &ctx, true)),

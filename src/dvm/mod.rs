@@ -921,43 +921,44 @@ fn generate_delta_query_impl(
         );
     }
 
-    // Every live source access in a deferred delta must use the state at the
-    // NEW LSN, not the current MERGE snapshot. DeltaStage prepares these
-    // relations under a source lock before any refresh SQL is executed.
-    if let Some(pgt_id) = stage_pgt_id {
-        ctx.set_source_bound_tables(
-            source_oids
-                .iter()
-                .map(|oid| {
-                    (
-                        *oid,
-                        format!(
-                            "pg_temp.{}",
-                            diff::quote_ident(
-                                &crate::refresh::delta_stage::DeltaStage::bounded_table_name(
-                                    pgt_id, *oid
+    // A locked graph refresh already holds every source at the shared cut;
+    // other paths need the staged NEW-frontier snapshots.
+    if !crate::refresh::current_graph_sources_locked() {
+        if let Some(pgt_id) = stage_pgt_id {
+            ctx.set_source_bound_tables(
+                source_oids
+                    .iter()
+                    .map(|oid| {
+                        (
+                            *oid,
+                            format!(
+                                "pg_temp.{}",
+                                diff::quote_ident(
+                                    &crate::refresh::delta_stage::DeltaStage::bounded_table_name(
+                                        pgt_id, *oid
+                                    )
                                 )
-                            )
-                        ),
-                    )
-                })
-                .collect(),
-        );
-    } else if let Some(tables) = source_stage_tables {
-        // The centroid path uses per-execution suffixed stage names.
-        // Its bounded snapshot is created using the same nonce.
-        ctx.set_source_bound_tables(
-            tables
-                .iter()
-                .map(|(oid, name)| {
-                    (
-                        *oid,
-                        name.replace("__pgt_cd_", "__pgt_bound_")
-                            .replace("__pgt_cdc_", "__pgt_bound_"),
-                    )
-                })
-                .collect(),
-        );
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+        } else if let Some(tables) = source_stage_tables {
+            // The centroid path uses per-execution suffixed stage names.
+            // Its bounded snapshot is created using the same nonce.
+            ctx.set_source_bound_tables(
+                tables
+                    .iter()
+                    .map(|(oid, name)| {
+                        (
+                            *oid,
+                            name.replace("__pgt_cd_", "__pgt_bound_")
+                                .replace("__pgt_cdc_", "__pgt_bound_"),
+                        )
+                    })
+                    .collect(),
+            );
+        }
     }
 
     // P5/direct-aggregate paths do not invoke diff_scan for every leaf.

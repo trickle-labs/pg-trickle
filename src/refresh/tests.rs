@@ -267,6 +267,32 @@ fn test_refresh_context_restores_nested_state_on_error() {
 }
 
 #[test]
+fn test_graph_sources_are_usable_live_only_when_lock_coverage_is_proven() {
+    assert!(!current_graph_sources_locked());
+    with_refresh_context(RefreshContext::graph("0/10", FullPolicy::Error), || {
+        assert!(!current_graph_sources_locked());
+        Ok::<_, PgTrickleError>(())
+    })
+    .unwrap();
+    with_refresh_context(
+        RefreshContext::graph_result("0/10", FullPolicy::Error, 7, true, vec![]),
+        || {
+            assert!(current_graph_sources_locked());
+            Ok::<_, PgTrickleError>(())
+        },
+    )
+    .unwrap();
+    with_refresh_context(
+        RefreshContext::graph_result("0/10", FullPolicy::Error, 7, false, vec![]),
+        || {
+            assert!(!current_graph_sources_locked());
+            Ok::<_, PgTrickleError>(())
+        },
+    )
+    .unwrap();
+}
+
+#[test]
 fn test_full_policy_rejects_whole_query_transition() {
     let st = test_st(RefreshMode::Differential, false);
     let result = with_refresh_context(RefreshContext::graph("0/10", FullPolicy::Error), || {

@@ -3567,20 +3567,24 @@ pub fn execute_differential_refresh_with_tuning(
         let accumulator = format!("pg_temp.{accumulator_basename}");
         let raw_delta = format!("pg_temp.{delta_table_basename}");
         let target = format!("{schema}.{name}");
-        // The MT-8 fast path has its own MIN/MAX rescan SQL, outside the
-        // regular DVM source-rewrite machinery. Pass the same bounded
-        // source that the delta stage froze at this refresh's NEW LSN.
-        let bounded_source = format!(
-            "pg_temp.{}",
-            crate::refresh::delta_stage::DeltaStage::bounded_table_name(st.pgt_id, plan.source_oid)
-        );
+        // Graph sources are locked at the shared cut, so their live relation
+        // already has the same contents as the bounded stage.
+        let bounded_source = (!crate::refresh::current_graph_sources_locked()).then(|| {
+            format!(
+                "pg_temp.{}",
+                crate::refresh::delta_stage::DeltaStage::bounded_table_name(
+                    st.pgt_id,
+                    plan.source_oid,
+                )
+            )
+        });
         let finalize = crate::refresh::vectorized_agg::algebraic_finalize_sql(
             &plan,
             &target,
             &accumulator,
             &raw_delta,
             insert_only_minmax,
-            Some(&bounded_source),
+            bounded_source.as_deref(),
         )?;
         Some((plan, accumulator, raw_delta, finalize, insert_only_minmax))
     } else {

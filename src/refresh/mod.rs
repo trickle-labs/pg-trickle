@@ -87,6 +87,7 @@ pub(crate) struct RefreshContext {
     pub(crate) safe_bound: Option<String>,
     pub(crate) full_policy: FullPolicy,
     pub(crate) graph_refresh_id: Option<i64>,
+    pub(crate) graph_sources_locked: bool,
     pub(crate) source_boundary_digest: Option<Vec<u8>>,
     pub(crate) retention_catchup: bool,
     pub(crate) retention_partition_key: Option<(i64, String)>,
@@ -98,6 +99,7 @@ impl RefreshContext {
             safe_bound: None,
             full_policy: FullPolicy::Allow,
             graph_refresh_id: None,
+            graph_sources_locked: false,
             source_boundary_digest: None,
             retention_catchup: false,
             retention_partition_key: None,
@@ -109,6 +111,7 @@ impl RefreshContext {
             safe_bound: Some(safe_bound.to_string()),
             full_policy,
             graph_refresh_id: None,
+            graph_sources_locked: false,
             source_boundary_digest: None,
             retention_catchup: false,
             retention_partition_key: None,
@@ -127,12 +130,14 @@ impl RefreshContext {
         safe_bound: &str,
         full_policy: FullPolicy,
         graph_refresh_id: i64,
+        graph_sources_locked: bool,
         source_boundary_digest: Vec<u8>,
     ) -> Self {
         Self {
             safe_bound: Some(safe_bound.to_string()),
             full_policy,
             graph_refresh_id: Some(graph_refresh_id),
+            graph_sources_locked,
             source_boundary_digest: Some(source_boundary_digest),
             retention_catchup: false,
             retention_partition_key: None,
@@ -202,6 +207,16 @@ pub(crate) fn retention_partition_key(pgt_id: i64) -> Option<String> {
 
 pub(crate) fn current_graph_refresh_id() -> Option<i64> {
     ACTIVE_CONTEXT.with(|context| context.borrow().as_ref().and_then(|c| c.graph_refresh_id))
+}
+
+/// True when every graph source is locked across the shared refresh cut.
+pub(crate) fn current_graph_sources_locked() -> bool {
+    ACTIVE_CONTEXT.with(|context| {
+        context
+            .borrow()
+            .as_ref()
+            .is_some_and(|c| c.graph_refresh_id.is_some() && c.graph_sources_locked)
+    })
 }
 
 pub(crate) fn current_source_boundary_digest() -> Option<Vec<u8>> {
