@@ -1178,6 +1178,17 @@ fn alter_stream_table_query(
                     &[query_hash.into(), st.pgt_id.into()],
                 )
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                let window_strategy = vq.parsed_tree.as_ref().map(|parsed| {
+                    parsed
+                        .window_strategy
+                        .clone()
+                        .unwrap_or_else(|| {
+                            crate::dvm::parser::WindowStrategyPlan::empty(query_hash)
+                        })
+                        .with_query_hash(query_hash)
+                        .with_state_names(st.pgt_id)
+                });
+                crate::window_state::persist_plan(st.pgt_id, window_strategy.as_ref())?;
                 template_cache::invalidate(st.pgt_id);
                 refresh::invalidate_merge_cache(st.pgt_id);
                 shmem::bump_cache_generation();

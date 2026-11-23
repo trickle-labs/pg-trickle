@@ -2012,6 +2012,7 @@ async fn test_retained_query_alter_where_rebuilds_live_only_with_sealed_history(
     assert_eq!(rows, expected);
     let consistent_hash: bool = db.query_scalar(
         "SELECT (dep.column_snapshot->'partition_retention'->>'query_hash')::bigint = st.defining_query_hash
+                AND (st.window_strategy->>'query_hash')::bigint = st.defining_query_hash
          FROM pgtrickle.pgt_dependencies dep JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
          WHERE st.pgt_name='retain_alter_st' AND dep.source_relid='retain_alter_src'::regclass"
     ).await;
@@ -2030,21 +2031,25 @@ async fn test_retained_query_alter_where_rebuilds_live_only_with_sealed_history(
     // The new predicate is also used by ordinary DIFFERENTIAL refreshes.
     db.execute("UPDATE retain_alter_src SET amount=8 WHERE id=2")
         .await;
-    db.refresh_st_until_converged("retain_alter_st").await;
+    db.refresh_st_with_retry("retain_alter_st").await;
+    let expected_after_update = vec![
+        ("2024-06-01".into(), 10, 1),
+        ("2025-06-01".into(), 15, 2),
+        ("2026-06-01".into(), 30, 1),
+    ];
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM retain_alter_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read refreshed retained groups");
+    assert_eq!(rows, expected_after_update);
     db.refresh_st_until_converged("retain_alter_down").await;
     let rows: Vec<(String, i64, i64)> =
         sqlx::query_as("SELECT d::text,total,n FROM retain_alter_down ORDER BY d")
             .fetch_all(&db.pool)
             .await
             .expect("read replayed filtered groups");
-    assert_eq!(
-        rows,
-        vec![
-            ("2024-06-01".into(), 10, 1),
-            ("2025-06-01".into(), 15, 2),
-            ("2026-06-01".into(), 30, 1),
-        ]
-    );
+    assert_eq!(rows, expected_after_update);
 
     // Aggregate and output-schema changes still fail closed even though the
     // source and partition grouping remain unchanged.
