@@ -395,6 +395,119 @@ async fn wait_for_control_rows(db: &E2eDb, expected: i64, timeout: Duration) -> 
     }
 }
 
+/// An index vacuum can hold RowExclusiveLock on a CDC-buffer index while only
+/// holding ShareUpdateExclusiveLock on the buffer table. The index lock must
+/// not hold a differential frontier at 0/0 as if a source writer were active.
+#[tokio::test]
+async fn test_refresh_manual_ignores_cdc_index_vacuum_lock_and_catches_up() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_scheduler(&db).await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "differential",
+        "differential",
+    )
+    .await;
+    db.alter_system_set_and_wait("pg_trickle.prediction_min_samples", "0", "0")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.scheduler_interval_ms", "1000", "1000")
+        .await;
+    db.execute(
+        "CREATE TABLE issue1455_vacuum_src (
+             id BIGINT PRIMARY KEY, meter INT NOT NULL, value INT NOT NULL
+         )",
+    )
+    .await;
+    db.create_st(
+        "issue1455_vacuum_st",
+        "SELECT meter, count(*) AS events, sum(value) AS quantity \
+         FROM issue1455_vacuum_src GROUP BY meter",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['issue1455_vacuum_st'])")
+        .await;
+    db.execute(
+        "INSERT INTO issue1455_vacuum_src
+         SELECT i, (i % 12)::int, (i % 7)::int FROM generate_series(1, 50000) i",
+    )
+    .await;
+    E2eDb::refresh_st_with_retry_on(&db.pool, "issue1455_vacuum_st").await;
+    db.execute(
+        "INSERT INTO issue1455_vacuum_src
+         SELECT i, (i % 12)::int, (i % 7)::int FROM generate_series(50001, 100000) i",
+    )
+    .await;
+
+    let buffer: String = db
+        .query_scalar(
+            "SELECT format('%I.%I', 'pgtrickle_changes', 'changes_' || source_stable_name)
+             FROM pgtrickle.pgt_change_tracking
+             WHERE source_relid = 'issue1455_vacuum_src'::regclass",
+        )
+        .await;
+    let vacuum_pool = db.pool.clone();
+    let vacuum_buffer = buffer.clone();
+    let vacuum = tokio::spawn(async move {
+        let mut conn = vacuum_pool
+            .acquire()
+            .await
+            .expect("acquire vacuum connection");
+        sqlx::query("SET application_name = 'issue1455_vacuum_probe'")
+            .execute(&mut *conn)
+            .await
+            .expect("identify vacuum connection");
+        sqlx::query("SET vacuum_cost_delay = '20ms'")
+            .execute(&mut *conn)
+            .await
+            .expect("slow vacuum for observable index-lock barrier");
+        sqlx::query("SET vacuum_cost_limit = 1")
+            .execute(&mut *conn)
+            .await
+            .expect("set vacuum cost limit");
+        sqlx::query(AssertSqlSafe(format!("VACUUM {vacuum_buffer}")))
+            .execute(&mut *conn)
+            .await
+            .expect("vacuum CDC buffer");
+    });
+
+    let index_lock = format!(
+        "WITH RECURSIVE buffers(oid) AS (
+             SELECT '{buffer}'::regclass::oid
+             UNION SELECT i.inhrelid FROM pg_inherits i JOIN buffers b ON i.inhparent = b.oid
+         ), indexes AS (
+             SELECT indexrelid FROM pg_index WHERE indrelid IN (SELECT oid FROM buffers)
+         )
+         SELECT EXISTS (
+             SELECT 1 FROM pg_locks l JOIN pg_stat_activity a USING (pid)
+             WHERE l.relation IN (SELECT indexrelid FROM indexes)
+               AND l.mode = 'RowExclusiveLock' AND l.granted
+               AND a.application_name = 'issue1455_vacuum_probe'
+         )"
+    );
+    assert!(
+        db.wait_for_condition(
+            "VACUUM holds a CDC-buffer index RowExclusiveLock",
+            &index_lock,
+            Duration::from_secs(45),
+            Duration::from_millis(10),
+        )
+        .await,
+        "vacuum did not expose the index-only writer-fence lock"
+    );
+
+    E2eDb::refresh_st_with_retry_on(&db.pool, "issue1455_vacuum_st").await;
+    let query = "SELECT meter, count(*) AS events, sum(value) AS quantity \
+                 FROM issue1455_vacuum_src GROUP BY meter";
+    let exact = oracle::compare_st_to_query(&db, "issue1455_vacuum_st", query).await;
+    vacuum.await.expect("join vacuum task");
+    assert!(
+        exact.is_ok(),
+        "manual differential missed CDC under index vacuum: {exact:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_scheduler_pause_rejects_dispatch_queued_after_pause_returns() {
     run_scheduler_pending_dispatch_case(false).await;

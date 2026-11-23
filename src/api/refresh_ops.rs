@@ -1222,7 +1222,10 @@ fn execute_manual_differential_refresh(
                    AND l.pid IS DISTINCT FROM pg_backend_pid()
                    AND l.mode IN ('RowExclusiveLock', 'ShareRowExclusiveLock',
                                   'ExclusiveLock', 'AccessExclusiveLock')
-                   AND (l.relation IN (SELECT oid FROM sources) OR n.nspname = $2)
+                   -- Ignore index locks held by autovacuum; only source/buffer tables
+                   -- can prove an uncommitted CDC writer is still active.
+                   AND (l.relation IN (SELECT oid FROM sources)
+                        OR (n.nspname = $2 AND c.relkind IN ('r', 'p')))
              ) END",
             &[
                 st.pgt_id.into(),
@@ -1262,7 +1265,6 @@ fn execute_manual_differential_refresh(
             schema, table_name
         ))
     })?;
-
     // Execute the differential refresh via the DVM engine.
     // DI-7: When QueryTooComplex is returned (e.g. join count exceeds
     // max_differential_joins, or CORRELATED_SUBQUERY_DELTA_QUADRATIC / DVM-2
