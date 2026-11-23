@@ -2329,9 +2329,34 @@ async fn test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh() {
         "SET pg_trickle.differential_max_change_ratio = 0",
         "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
         "UPDATE centroid_rewrite_src SET v = '[3]'",
-        "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
     ])
     .await;
+    // The first post-write refresh can legitimately have an older CDC safe
+    // bound. Check the guard evidence on the refresh that actually consumes
+    // the rewrite, rather than asserting against a preceding no-data tick.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        db.execute_seq(&[
+            "SET pg_trickle.enable_vector_agg = on",
+            "SET pg_trickle.enable_centroid_state = on",
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+            "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
+        ])
+        .await;
+        let applied: bool = db.query_scalar(
+            "SELECT public.vector_send(s.centroid) = public.vector_send(\
+             (SELECT avg(v) FROM centroid_rewrite_src)) FROM centroid_rewrite_st s",
+        ).await;
+        if applied {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "post-restart centroid refresh did not consume the large rewrite"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     let suppressed: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND h.merge_strategy_used <> 'centroid_rebase_group_rescan' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome' = 'unbound' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'rebuild' = 'suppressed_consecutive_change_limit' AND public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_rewrite_src)) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_rewrite_st s WHERE t.pgt_relid = 'centroid_rewrite_st'::regclass").await;
     assert!(
         suppressed,

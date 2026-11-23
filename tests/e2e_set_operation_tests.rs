@@ -74,7 +74,9 @@ async fn test_full_set_operation_legacy_index_excludes_variable_width_columns() 
         .await;
     db.execute("UPDATE wide_set_left SET payload = (SELECT string_agg(md5(n::text), '') FROM generate_series(1, 20) n)")
         .await;
-    db.refresh_st("wide_set_stream").await;
+    // A busy manual refresh returns a NOTICE rather than running. Require the
+    // FULL refresh to complete and the changed payload to become visible.
+    db.refresh_st_until_converged("wide_set_stream").await;
     db.assert_st_matches_query("wide_set_stream", query).await;
     let safe_index: bool = db
         .query_scalar(
