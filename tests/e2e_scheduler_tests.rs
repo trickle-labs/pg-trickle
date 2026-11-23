@@ -806,13 +806,18 @@ async fn test_scheduler_reinitialize_partitioned_multistatement_writer_exact() {
         .await;
     db.execute("SELECT pgtrickle.resume_stream_table('issue1455_hourly')")
         .await;
+    // The normal pause path can keep CDC replay active and therefore need no
+    // reinitialize. Request a protected repair explicitly so this test always
+    // reaches the scheduler FULL/REINITIALIZE boundary it is meant to cover.
+    db.execute("SELECT pgtrickle.repair_stream_table('issue1455_hourly')")
+        .await;
     let needs_reinit: bool = db
         .query_scalar(
             "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables
              WHERE pgt_name = 'issue1455_hourly'",
         )
         .await;
-    assert!(needs_reinit, "resume must require a protected REINITIALIZE");
+    assert!(needs_reinit, "repair must request a protected REINITIALIZE");
 
     let source_oid: i64 = db
         .query_scalar("SELECT 'issue1455_src'::regclass::oid::bigint")
