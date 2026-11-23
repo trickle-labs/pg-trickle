@@ -8404,12 +8404,14 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
         .expect("identify the connection holding the upstream read lock");
 
     let pool = db.pool.clone();
+    let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
     let alter = tokio::spawn(async move {
         let mut conn = pool.acquire().await.expect("acquire ALTER session");
-        sqlx::query("SET application_name = 'guard_repartition_wait'")
-            .execute(&mut *conn)
+        let alter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *conn)
             .await
-            .expect("identify ALTER backend for lock observation");
+            .expect("identify ALTER backend");
+        pid_sender.send(alter_pid).expect("report ALTER backend PID");
         sqlx::query(
             "SELECT pgtrickle.alter_stream_table(
                 'guard_race_up', partition_by => 'event_day')",
@@ -8418,18 +8420,25 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
         .await
         .map(|_| ())
     });
+    let alter_pid = tokio::time::timeout(std::time::Duration::from_secs(20), pid_receiver)
+        .await
+        .expect("ALTER backend must start")
+        .expect("ALTER task must report its PID");
 
-    // A witnessed lock wait, not a sleep alone, proves the race is exercised.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    // Observe the real backend's ungranted lock, rather than relying on
+    // application_name and pg_stat_activity's separately sampled wait state.
+    // A witnessed lock wait (not just a sleep) proves that the concurrent
+    // CREATE is still holding the relation while ALTER attempts replacement.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut observed_wait = false;
     while std::time::Instant::now() < deadline {
         let waiting: bool = sqlx::query_scalar(
             "SELECT EXISTS (
-                SELECT 1 FROM pg_catalog.pg_stat_activity a
-                WHERE a.application_name = 'guard_repartition_wait'
-                  AND a.wait_event_type = 'Lock'
-                  AND $1::integer = ANY(pg_catalog.pg_blocking_pids(a.pid)))",
+                SELECT 1 FROM pg_catalog.pg_locks l
+                WHERE l.pid = $1 AND NOT l.granted
+                  AND $2::integer = ANY(pg_catalog.pg_blocking_pids(l.pid)))",
         )
+        .bind(alter_pid)
         .bind(creator_pid)
         .fetch_one(&db.pool)
         .await
@@ -8445,7 +8454,8 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
     }
     assert!(
         observed_wait,
-        "repartition request did not wait for the concurrent downstream registration"
+        "repartition request did not wait for the concurrent downstream registration (ALTER pid={alter_pid}, finished={})",
+        alter.is_finished()
     );
 
     create_tx
