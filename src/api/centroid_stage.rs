@@ -396,6 +396,39 @@ pub(crate) fn bind_materialized_frontier(
     }.map_err(|error| PgTrickleError::SpiError(error.to_string()))
 }
 
+fn ordinary_trigger_buffer(
+    dependency: &crate::catalog::StDependency,
+) -> Result<Option<String>, PgTrickleError> {
+    if dependency.source_type != "TABLE"
+        || dependency.cdc_mode != crate::catalog::CdcMode::Trigger
+        || dependency.source_placement != "local"
+    {
+        return Ok(None);
+    }
+    let oid = dependency.source_relid;
+    let ordinary = Spi::get_one_with_args::<bool>(
+        "SELECT COALESCE((SELECT c.relkind = 'r' AND NOT c.relrowsecurity AND NOT EXISTS \
+         (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = c.oid) \
+         FROM pg_catalog.pg_class c WHERE c.oid = $1), false)",
+        &[oid.into()],
+    )
+    .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
+    .unwrap_or(false);
+    if !ordinary {
+        return Ok(None);
+    }
+    let buffer = crate::cdc::buffer_qualified_name_for_oid(
+        &crate::config::pg_trickle_change_buffer_schema(),
+        oid,
+    );
+    let exists = Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT pg_catalog.to_regclass($1)::oid",
+        &[buffer.as_str().into()],
+    )
+    .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
+    Ok(exists.map(|_| buffer))
+}
+
 /// Check a frontier against source relations already locked against writes.
 pub(crate) fn sources_at_frontier(
     dependencies: &[crate::catalog::StDependency],
@@ -403,40 +436,16 @@ pub(crate) fn sources_at_frontier(
 ) -> Result<bool, PgTrickleError> {
     let mut safe = !dependencies.is_empty();
     for dependency in dependencies {
-        if dependency.source_type != "TABLE"
-            || dependency.cdc_mode != crate::catalog::CdcMode::Trigger
-            || dependency.source_placement != "local"
-        {
+        let Some(buffer) = ordinary_trigger_buffer(dependency)? else {
             safe = false;
             break;
-        }
+        };
         let oid = dependency.source_relid;
-        let ordinary = Spi::get_one_with_args::<bool>(
-            "SELECT COALESCE((SELECT c.relkind = 'r' AND NOT c.relrowsecurity AND NOT EXISTS \
-             (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = c.oid) \
-             FROM pg_catalog.pg_class c WHERE c.oid = $1), false)",
-            &[oid.into()],
-        )
-        .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
-        .unwrap_or(false);
         let Some(position) = frontier.sources.get(&oid.to_u32().to_string()) else {
             safe = false;
             break;
         };
-        if !ordinary || crate::lsn::Lsn::parse(&position.lsn).is_err() {
-            safe = false;
-            break;
-        }
-        let buffer = crate::cdc::buffer_qualified_name_for_oid(
-            &crate::config::pg_trickle_change_buffer_schema(),
-            oid,
-        );
-        let exists = Spi::get_one_with_args::<pg_sys::Oid>(
-            "SELECT pg_catalog.to_regclass($1)::oid",
-            &[buffer.as_str().into()],
-        )
-        .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
-        if exists.is_none() {
+        if crate::lsn::Lsn::parse(&position.lsn).is_err() {
             safe = false;
             break;
         }
@@ -448,6 +457,57 @@ pub(crate) fn sources_at_frontier(
         .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
         .unwrap_or(true);
         if ahead {
+            safe = false;
+            break;
+        }
+    }
+    Ok(safe)
+}
+
+/// Check that ordinary trigger-CDC sources have no buffered rows in `(previous, next]`,
+/// even when newer commits already wrote rows beyond `next`.
+fn sources_unchanged_between_frontiers(
+    dependencies: &[crate::catalog::StDependency],
+    previous: &crate::version::Frontier,
+    next: &crate::version::Frontier,
+) -> Result<bool, PgTrickleError> {
+    let mut safe = !dependencies.is_empty();
+    for dependency in dependencies {
+        let Some(buffer) = ordinary_trigger_buffer(dependency)? else {
+            safe = false;
+            break;
+        };
+        let oid_key = dependency.source_relid.to_u32().to_string();
+        let (Some(prev_pos), Some(next_pos)) =
+            (previous.sources.get(&oid_key), next.sources.get(&oid_key))
+        else {
+            safe = false;
+            break;
+        };
+        let (Ok(prev_lsn), Ok(next_lsn)) = (
+            crate::lsn::Lsn::parse(&prev_pos.lsn),
+            crate::lsn::Lsn::parse(&next_pos.lsn),
+        ) else {
+            safe = false;
+            break;
+        };
+        if next_lsn < prev_lsn {
+            safe = false;
+            break;
+        }
+        if next_lsn == prev_lsn {
+            continue;
+        }
+        // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- buffer is catalog-derived and quoted; the frontier bounds are parameters.
+        let changed = Spi::get_one_with_args::<bool>(
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND lsn <= $2::pg_lsn)"
+            ),
+            &[prev_pos.lsn.as_str().into(), next_pos.lsn.as_str().into()],
+        )
+        .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
+        .unwrap_or(true);
+        if changed {
             safe = false;
             break;
         }
@@ -998,7 +1058,7 @@ pub(crate) fn advance_empty_frontier(
     previous: &crate::version::Frontier,
     next: &crate::version::Frontier,
 ) -> Result<(), PgTrickleError> {
-    let previous = serde_json::to_value(previous).map_err(|error| {
+    let previous_json = serde_json::to_value(previous).map_err(|error| {
         PgTrickleError::InternalError(format!("serialize centroid frontier: {error}"))
     })?;
     let next_json = serde_json::to_value(next).map_err(|error| {
@@ -1011,7 +1071,7 @@ pub(crate) fn advance_empty_frontier(
            AND c.stream_relid = t.pgt_relid \
            AND c.defining_query = t.defining_query AND c.contract_generation = t.contract_generation \
            AND c.schema_version = 1 AND c.status = 'BUILDING')",
-        &[st.pgt_id.into(), pgrx::JsonB(previous.clone()).into()],
+        &[st.pgt_id.into(), pgrx::JsonB(previous_json.clone()).into()],
     ).map_err(|error| PgTrickleError::SpiError(error.to_string()))?.unwrap_or(false);
     if bound {
         let oids = dependencies
@@ -1019,7 +1079,7 @@ pub(crate) fn advance_empty_frontier(
             .map(|dependency| dependency.source_relid)
             .collect::<Vec<_>>();
         crate::cdc::lock_source_relations(&oids)?;
-        if sources_at_frontier(dependencies, next)? {
+        if sources_unchanged_between_frontiers(dependencies, previous, next)? {
             Spi::run_with_args(
                 "UPDATE pgtrickle.pgt_centroid_states c SET baseline_frontier = $2 \
                  FROM pgtrickle.pgt_stream_tables t WHERE c.pgt_id = $1 AND t.pgt_id = c.pgt_id \
@@ -1031,7 +1091,7 @@ pub(crate) fn advance_empty_frontier(
                 &[
                     st.pgt_id.into(),
                     pgrx::JsonB(next_json).into(),
-                    pgrx::JsonB(previous).into(),
+                    pgrx::JsonB(previous_json).into(),
                 ],
             )
             .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
