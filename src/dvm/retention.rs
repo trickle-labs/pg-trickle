@@ -3113,14 +3113,14 @@ mod tests {
         let OpTree::Aggregate { child, .. } = child.as_mut() else {
             unreachable!()
         };
-        *child = Box::new(OpTree::Filter {
+        **child = OpTree::Filter {
             predicate: Expr::BinaryOp {
                 op: ">".into(),
                 left: Box::new(col("occurred")),
                 right: Box::new(Expr::Literal("0".into())),
             },
             child: child.clone(),
-        });
+        };
         assert!(query_group_candidate(&tree, 42, "occurred").is_ok());
 
         // HAVING (a filter above Aggregate) can discard whole groups and
