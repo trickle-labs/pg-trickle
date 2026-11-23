@@ -1955,6 +1955,134 @@ async fn test_retained_history_blocks_rebuild_query_change_and_restore() {
 }
 
 #[tokio::test]
+async fn test_retained_query_alter_where_rebuilds_live_only_with_sealed_history() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE retain_alter_src (id integer NOT NULL, d date NOT NULL, amount integer NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE retain_alter_2024 PARTITION OF retain_alter_src FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')").await;
+    db.execute("CREATE TABLE retain_alter_2025 PARTITION OF retain_alter_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE retain_alter_2026 PARTITION OF retain_alter_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO retain_alter_src VALUES (1,'2024-06-01',10),(2,'2025-06-01',3),(3,'2025-06-01',7),(4,'2026-06-01',30)").await;
+    let original_query =
+        "SELECT d, SUM(amount) AS total, COUNT(*) AS n FROM retain_alter_src GROUP BY d";
+    db.create_st("retain_alter_st", original_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('retain_alter_st','RETAIN','d','2026-01-01')").await;
+    db.create_st(
+        "retain_alter_down",
+        "SELECT d,total,n FROM retain_alter_st",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("ALTER TABLE retain_alter_src DETACH PARTITION retain_alter_2024")
+        .await;
+
+    let before: (i64, String) = sqlx::query_as(
+        "SELECT s.pgt_relid::bigint, t.__pgt_row_id::text FROM pgtrickle.pgt_stream_tables s JOIN retain_alter_st t ON t.d='2024-06-01' WHERE s.pgt_name='retain_alter_st'"
+    ).fetch_one(&db.pool).await.expect("read retained storage identity");
+    let changed_query = "SELECT d, SUM(amount) AS total, COUNT(*) AS n FROM retain_alter_src WHERE amount >= 5 GROUP BY d";
+    db.execute(&format!(
+        "SELECT pgtrickle.alter_stream_table('retain_alter_st', query => '{}')",
+        changed_query,
+    ))
+    .await;
+
+    // The old detached partition is gone, so any shadow-table replacement or
+    // full TRUNCATE would lose this historical row. Live groups follow WHERE.
+    let after: (i64, String) = sqlx::query_as(
+        "SELECT s.pgt_relid::bigint, t.__pgt_row_id::text FROM pgtrickle.pgt_stream_tables s JOIN retain_alter_st t ON t.d='2024-06-01' WHERE s.pgt_name='retain_alter_st'"
+    ).fetch_one(&db.pool).await.expect("read retained identity after ALTER");
+    assert_eq!(
+        after, before,
+        "ALTER must preserve storage and sealed row identity"
+    );
+    let expected = vec![
+        ("2024-06-01".to_string(), 10_i64, 1_i64),
+        ("2025-06-01".to_string(), 7, 1),
+        ("2026-06-01".to_string(), 30, 1),
+    ];
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM retain_alter_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read scoped ALTER results");
+    assert_eq!(rows, expected);
+    let consistent_hash: bool = db.query_scalar(
+        "SELECT (dep.column_snapshot->'partition_retention'->>'query_hash')::bigint = st.defining_query_hash
+                AND (st.window_strategy->>'query_hash')::bigint = st.defining_query_hash
+         FROM pgtrickle.pgt_dependencies dep JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+         WHERE st.pgt_name='retain_alter_st' AND dep.source_relid='retain_alter_src'::regclass"
+    ).await;
+    assert!(
+        consistent_hash,
+        "sealed query identity must advance atomically"
+    );
+    db.refresh_st_until_converged("retain_alter_down").await;
+    let downstream: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM retain_alter_down ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read changed downstream groups");
+    assert_eq!(downstream, expected);
+
+    // The new predicate is also used by ordinary DIFFERENTIAL refreshes.
+    db.execute("UPDATE retain_alter_src SET amount=8 WHERE id=2")
+        .await;
+    db.refresh_st_with_retry("retain_alter_st").await;
+    let expected_after_update = vec![
+        ("2024-06-01".into(), 10, 1),
+        ("2025-06-01".into(), 15, 2),
+        ("2026-06-01".into(), 30, 1),
+    ];
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM retain_alter_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read refreshed retained groups");
+    assert_eq!(rows, expected_after_update);
+    db.refresh_st_until_converged("retain_alter_down").await;
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM retain_alter_down ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read replayed filtered groups");
+    assert_eq!(rows, expected_after_update);
+
+    // Aggregate and output-schema changes still fail closed even though the
+    // source and partition grouping remain unchanged.
+    let err = db.try_execute(
+        "SELECT pgtrickle.alter_stream_table('retain_alter_st', query => 'SELECT d, COUNT(amount) AS total, COUNT(*) AS n FROM retain_alter_src WHERE amount >= 5 GROUP BY d')"
+    ).await.expect_err("changing historical aggregate meaning must be rejected");
+    assert!(
+        err.to_string().contains("disable partition retention"),
+        "{err}"
+    );
+    let err = db.try_execute(
+        "SELECT pgtrickle.alter_stream_table('retain_alter_st', query => 'SELECT d, SUM(amount) AS total, COUNT(*) AS n, SUM(amount) AS extra FROM retain_alter_src WHERE amount >= 5 GROUP BY d')"
+    ).await.expect_err("new historical output columns must be rejected");
+    assert!(
+        err.to_string().contains("disable partition retention"),
+        "{err}"
+    );
+    let unchanged: String = db.query_scalar(
+        "SELECT defining_query FROM pgtrickle.pgt_stream_tables WHERE pgt_name='retain_alter_st'"
+    ).await;
+    assert_eq!(unchanged, changed_query);
+    let sealed: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('retain_alter_st')")
+        .await;
+    assert_eq!(
+        sealed["sealed_ranges"],
+        serde_json::json!([
+            {"lower":"2024-01-01","upper":"2025-01-01"}
+        ])
+    );
+}
+
+#[tokio::test]
 async fn test_retained_live_rebuild_preserves_discontiguous_history_and_downstream() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
