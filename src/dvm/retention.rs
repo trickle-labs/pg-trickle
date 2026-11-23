@@ -3157,10 +3157,9 @@ mod tests {
             unreachable!()
         };
         aggregates[0].is_distinct = true;
-        assert!(matches!(
-            query_group_candidate(&distinct, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedAggregate(_))
-        ));
+        // DISTINCT does not affect which source partition owns a group.
+        // Aggregate support is validated separately by ordinary DVM checks.
+        assert!(query_group_candidate(&distinct, 42, "occurred").is_ok());
 
         let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
         let OpTree::Project { child, .. } = &mut tree else {
