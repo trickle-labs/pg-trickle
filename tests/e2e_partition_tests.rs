@@ -8403,27 +8403,22 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
         .await
         .expect("identify the connection holding the upstream read lock");
 
-    let pool = db.pool.clone();
-    let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+    // Acquire the ALTER session before starting the task: under a busy CI
+    // pool, the observer must not race the task for its connection.
+    let mut alter_conn = db.pool.acquire().await.expect("acquire ALTER session");
+    let alter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *alter_conn)
+        .await
+        .expect("identify ALTER backend");
     let alter = tokio::spawn(async move {
-        let mut conn = pool.acquire().await.expect("acquire ALTER session");
-        let alter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *conn)
-            .await
-            .expect("identify ALTER backend");
-        pid_sender.send(alter_pid).expect("report ALTER backend PID");
         sqlx::query(
             "SELECT pgtrickle.alter_stream_table(
                 'guard_race_up', partition_by => 'event_day')",
         )
-        .execute(&mut *conn)
+        .execute(&mut *alter_conn)
         .await
         .map(|_| ())
     });
-    let alter_pid = tokio::time::timeout(std::time::Duration::from_secs(20), pid_receiver)
-        .await
-        .expect("ALTER backend must start")
-        .expect("ALTER task must report its PID");
 
     // Observe the real backend's ungranted lock, rather than relying on
     // application_name and pg_stat_activity's separately sampled wait state.
