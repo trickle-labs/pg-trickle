@@ -3119,29 +3119,25 @@ pub fn get_slot_positions_at_bound(
                     reason: "polling baseline frontier was NULL".to_string(),
                 })?
             }
-            None if full_baseline => {
-                // A protected FULL/REINITIALIZE holds SHARE locks on every
-                // source and samples safe_bound *after* draining writers.
-                // The rebuilt snapshot includes every trigger image at or
-                // below that bound, even if the old scheduler tick was lower.
-                // Never use MAX(buffer.lsn) here: an ahead-of-cut buffer row
-                // must not make an unproven snapshot frontier look safe
-                // (notably for centroid baseline binding).
-                safe_bound.to_string()
-            }
             None => {
-                // DIFFERENTIAL refreshes must remain capped by the immutable,
-                // holdback-aware visibility bound: a trigger image may become
-                // visible after the coordinator probe but before the refresh.
+                // Protected FULL/REINITIALIZE snapshots hold source SHARE
+                // locks and use an insertion LSN sampled *after* those locks.
+                // That post-lock cut covers even changes above the old tick,
+                // but a buffer row ahead of the cut must never extend it:
+                // centroid state binding needs to see that unsafe row.
+                // DIFFERENTIAL instead uses its immutable, holdback-aware
+                // visibility bound and caps the visible buffer high-water mark.
                 let change_schema = crate::config::pg_trickle_change_buffer_schema();
                 let buffer = buffer_qualified_name_for_oid(&change_schema, *oid);
                 // nosemgrep: rust.spi.get_one_with_args.dynamic-format — buffer is a quoted catalog-derived identifier; safe_bound is a parameter.
                 Spi::get_one_with_args::<String>(
                     &format!(
-                        "SELECT COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn)::text \
+                        "SELECT (CASE WHEN $2::boolean THEN $1::pg_lsn \
+                                ELSE COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn) \
+                                END)::text \
                          FROM {buffer} WHERE lsn > '0/0'::pg_lsn"
                     ),
-                    &[safe_bound.into()],
+                    &[safe_bound.into(), full_baseline.into()],
                 )
                 .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
                     context: format!("trigger source OID {}", oid.to_u32()),
