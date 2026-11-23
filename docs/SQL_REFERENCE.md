@@ -1357,7 +1357,8 @@ SELECT pgtrickle.alter_stream_table('order_totals', status => 'ACTIVE');
 - When `query` is provided, the function runs the full query rewrite pipeline (view inlining, DISTINCT ON, GROUPING SETS, etc.) and validates the new query before applying changes.
 - The entire ALTER QUERY operation runs within a single transaction. If any step fails, the stream table is left unchanged.
 - If a query change requires a shadow-table rebuild and the stream table has an expression or ANN index, the change is rejected to prevent silently losing that index. Drop the index explicitly, perform the change, and recreate it.
-- An identical compatible query retains the storage table and its OID. A semantic query change, including one with the same output schema, rebuilds storage and changes its OID. Dependent objects can prevent the rebuild.
+- An identical compatible query retains the storage table and its OID. Ordinarily a semantic query change, including one with the same output schema, rebuilds storage and changes its OID. Dependent objects can prevent the rebuild.
+- **Sealed `RETAIN` exception:** a DIFFERENTIAL stream may change only the source-level `WHERE` clause when its source, grouping keys, projected columns (names, types and order), aggregate expressions, and already-captured source columns remain unchanged. The ALTER runs a protected live-only FULL rebuild on the existing storage OID. Sealed rows retain their original values, even if the new predicate would have excluded them; the changed filter affects only reconstructible groups. Other query changes fail closed.
 - Query rebuilds and `partition_by` changes reject storage with table or column grants, row-security flags, or policies (including on partitions), and reject applicable default table privileges for the creating role. Remove these explicitly before the change and reapply them afterward in the same transaction. Attached downstream publications also prevent replacement.
 - The stream table is temporarily suspended during query migration to prevent concurrent scheduler refreshes.
 
@@ -1684,6 +1685,9 @@ no retention cut is pending.
 After sealing, a protected FULL/reinitialize rebuild replaces only unsealed
 groups rather than deleting retained historical output. Failed safety proofs,
 incompatible query changes, or an unfinished retention detach still fail closed.
+A WHERE-only query ALTER with unchanged source, grouping, aggregates, output schema,
+and captured columns can rebuild live groups in place. Sealed rows retain the
+values computed under their original predicate.
 Ordinary automatic cost-based FULL fallbacks may continue in DIFFERENTIAL mode
 when a scoped rebuild is unnecessary.
 Eligible concurrent DETACH operations persist a pending cut, replay CDC, and

@@ -767,6 +767,11 @@ async fn test_scheduler_reinitialize_partitioned_multistatement_writer_exact() {
     )
     .await;
     db.execute(
+        "CREATE TABLE issue1455_empty PARTITION OF issue1455_src
+         FOR VALUES FROM ('2026-11-19') TO ('2026-11-20')",
+    )
+    .await;
+    db.execute(
         "INSERT INTO issue1455_src (id, day, meter, scope_path, occurred_at, value)
          SELECT i, '2026-11-20', i % 2, 'tenant',
                 TIMESTAMPTZ '2026-11-20 00:00:00+00' + (i % 12) * INTERVAL '1 hour',
@@ -798,21 +803,28 @@ async fn test_scheduler_reinitialize_partitioned_multistatement_writer_exact() {
     .await;
     db.assert_st_matches_query("issue1455_hourly", query).await;
 
-    // Pause/resume disables and then restores capture, explicitly requesting
-    // the scheduler's protected FULL REINITIALIZE.
+    // Pause/resume can preserve CDC and legitimately avoid a rebuild. Detach an
+    // empty source partition while the scheduler is paused to explicitly require
+    // a protected REINITIALIZE without changing the live source data.
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['issue1455_hourly'])")
         .await;
     db.execute("SELECT pgtrickle.pause_stream_table('issue1455_hourly')")
         .await;
     db.execute("SELECT pgtrickle.resume_stream_table('issue1455_hourly')")
         .await;
+    db.execute("ALTER TABLE issue1455_src DETACH PARTITION issue1455_empty")
+        .await;
+    db.execute("DROP TABLE issue1455_empty").await;
     let needs_reinit: bool = db
         .query_scalar(
             "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables
              WHERE pgt_name = 'issue1455_hourly'",
         )
         .await;
-    assert!(needs_reinit, "resume must require a protected REINITIALIZE");
+    assert!(
+        needs_reinit,
+        "detaching a partition must require a protected REINITIALIZE"
+    );
 
     let source_oid: i64 = db
         .query_scalar("SELECT 'issue1455_src'::regclass::oid::bigint")

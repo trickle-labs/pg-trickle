@@ -349,6 +349,112 @@ fn classify_alter_query(
     }
 }
 
+/// Compare a retention query's historical output contract while deliberately
+/// ignoring only a WHERE immediately below the aggregate. Group identity,
+/// aggregate inputs/aliases and projection must stay unchanged. The old sealed
+/// rows are immutable snapshots; a different WHERE takes effect only while
+/// source partitions remain live. In particular, this must not accept HAVING,
+/// a changed aggregate or a changed group key.
+fn same_retained_aggregate_contract(
+    old: &crate::dvm::parser::OpTree,
+    new: &crate::dvm::parser::OpTree,
+) -> bool {
+    use crate::dvm::parser::OpTree;
+    match (old, new) {
+        (
+            OpTree::Project {
+                expressions: old_exprs,
+                aliases: old_aliases,
+                child: old_child,
+            },
+            OpTree::Project {
+                expressions: new_exprs,
+                aliases: new_aliases,
+                child: new_child,
+            },
+        ) => {
+            old_aliases == new_aliases
+                && old_exprs.len() == new_exprs.len()
+                && old_exprs
+                    .iter()
+                    .zip(new_exprs)
+                    .all(|(a, b)| a.to_sql() == b.to_sql())
+                && same_retained_aggregate_contract(old_child, new_child)
+        }
+        (
+            OpTree::Aggregate {
+                group_by: old_groups,
+                aggregates: old_aggs,
+                child: old_child,
+            },
+            OpTree::Aggregate {
+                group_by: new_groups,
+                aggregates: new_aggs,
+                child: new_child,
+            },
+        ) => {
+            let old_scan = match old_child.as_ref() {
+                OpTree::Filter { child, .. } => child.as_ref(),
+                other => other,
+            };
+            let new_scan = match new_child.as_ref() {
+                OpTree::Filter { child, .. } => child.as_ref(),
+                other => other,
+            };
+            old_groups.len() == new_groups.len()
+                && old_groups
+                    .iter()
+                    .zip(new_groups)
+                    .all(|(a, b)| a.to_sql() == b.to_sql())
+                && old_aggs.len() == new_aggs.len()
+                && old_aggs.iter().zip(new_aggs).all(|(a, b)| {
+                    a.function == b.function
+                        && a.alias == b.alias
+                        && a.argument.as_ref().map(|e| e.to_sql())
+                            == b.argument.as_ref().map(|e| e.to_sql())
+                        && !a.is_distinct
+                        && !b.is_distinct
+                        && a.filter.is_none()
+                        && b.filter.is_none()
+                        && a.second_arg.is_none()
+                        && b.second_arg.is_none()
+                        && a.order_within_group.is_none()
+                        && b.order_within_group.is_none()
+                })
+                && same_retained_aggregate_contract(old_scan, new_scan)
+        }
+        (
+            OpTree::Scan {
+                table_oid: old_oid,
+                schema: old_schema,
+                table_name: old_table,
+                alias: old_alias,
+                columns: old_columns,
+                pk_columns: old_pk,
+            },
+            OpTree::Scan {
+                table_oid: new_oid,
+                schema: new_schema,
+                table_name: new_table,
+                alias: new_alias,
+                columns: new_columns,
+                pk_columns: new_pk,
+            },
+        ) => {
+            old_oid == new_oid
+                && old_schema == new_schema
+                && old_table == new_table
+                && old_alias == new_alias
+                && old_pk == new_pk
+                && old_columns.len() == new_columns.len()
+                && old_columns.iter().zip(new_columns).all(|(a, b)| {
+                    a.name == b.name && a.type_oid == b.type_oid && a.is_nullable == b.is_nullable
+                })
+        }
+        _ => false,
+    }
+}
+
 fn explain_alter_impl(name: &str, new_query: &str) -> Result<pgrx::JsonB, PgTrickleError> {
     let (schema, table_name) = parse_qualified_name(name)?;
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
@@ -985,9 +1091,142 @@ fn alter_stream_table_query(
         }
         return Ok(());
     }
-    // Compatible, byte-identical query definitions need no storage rebuild and
-    // must be allowed for RETAIN (including explicit reinitialization).
-    // Everything else still uses a shadow swap and must reject sealed history.
+    // For sealed RETAIN, only a source-level WHERE change is eligible for a
+    // scoped, in-place rebuild. Reuse no stale frontier or shadow relation:
+    // the sealed rows must survive unchanged, and the live groups are
+    // materialized under the existing source-lock/baseline protocol.
+    if crate::dvm::retention::has_unreconstructible_history(st.pgt_id)? {
+        let old_tree = refresh::with_stream_owner(&st, || {
+            crate::dvm::parser::parse_defining_query(&st.defining_query)
+        })?;
+        let same_columns = old_columns.len() == vq.columns.len()
+            && old_columns
+                .iter()
+                .zip(&vq.columns)
+                .all(|(a, b)| a.name == b.name && a.type_oid == b.type_oid && a.typmod == b.typmod);
+        let new_columns_used = vq
+            .parsed_tree
+            .as_ref()
+            .map(|parsed| parsed.source_columns_used())
+            .unwrap_or_default();
+        // Existing CDC buffers may contain only columns previously used by
+        // the query. A WHERE change must not begin reading uncaptured columns.
+        let capture_sufficient = old_deps.iter().all(|dep| {
+            dep.columns_used.as_ref().is_none_or(|old_columns| {
+                new_columns_used
+                    .get(&dep.source_relid.to_u32())
+                    .is_none_or(|columns| columns.iter().all(|col| old_columns.contains(col)))
+            })
+        });
+        if st.refresh_mode == RefreshMode::Differential
+            && refresh_mode == st.refresh_mode
+            && st.is_populated
+            && same_columns
+            && capture_sufficient
+            && dep_diff.added.is_empty()
+            && dep_diff.removed.is_empty()
+            && vq
+                .parsed_tree
+                .as_ref()
+                .is_some_and(|new_tree| same_retained_aggregate_contract(&old_tree, &new_tree.tree))
+        {
+            let source_oids = old_deps
+                .iter()
+                .filter(|dep| dep.source_type == "TABLE")
+                .map(|dep| dep.source_relid)
+                .collect::<Vec<_>>();
+            cdc::lock_source_relations(&source_oids)?;
+            // Validate the *old* stored contract before any mutation.
+            if crate::api::retention::retained_live_rebuild(&st)?.is_some() {
+                let distance_snapshot = LifecycleDistanceSnapshot::begin(&st);
+                StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended)?;
+                let defining_query = if vq.topk_info.is_some() {
+                    &vq.effective_query
+                } else {
+                    &rewritten_query
+                };
+                let query_hash = crate::catalog::compute_defining_query_hash(defining_query);
+                let original_query =
+                    (original_new_query != *defining_query).then_some(original_new_query.as_str());
+                let functions_used = vq
+                    .parsed_tree
+                    .as_ref()
+                    .map(|parsed| parsed.functions_used());
+                Spi::run_with_args(
+                    "UPDATE pgtrickle.pgt_stream_tables SET
+                         defining_query = $1, original_query = $2,
+                         functions_used = $3, defining_query_hash = $4,
+                         defining_search_path = $5, frontier = NULL,
+                         needs_reinit = true, updated_at = now()
+                       WHERE pgt_id = $6",
+                    &[
+                        defining_query.into(),
+                        original_query.into(),
+                        functions_used.into(),
+                        query_hash.into(),
+                        caller_search_path.into(),
+                        st.pgt_id.into(),
+                    ],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                // Keep the durable sealed interval list, cutoff, and group
+                // candidate intact. Only the validated query identity moves.
+                Spi::run_with_args(
+                    "UPDATE pgtrickle.pgt_dependencies SET column_snapshot =
+                         jsonb_set(column_snapshot, '{partition_retention,query_hash}', to_jsonb($1::bigint))
+                       WHERE pgt_id = $2 AND column_snapshot ? 'partition_retention'",
+                    &[query_hash.into(), st.pgt_id.into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                let window_strategy = vq.parsed_tree.as_ref().map(|parsed| {
+                    parsed
+                        .window_strategy
+                        .clone()
+                        .unwrap_or_else(|| {
+                            crate::dvm::parser::WindowStrategyPlan::empty(query_hash)
+                        })
+                        .with_query_hash(query_hash)
+                        .with_state_names(st.pgt_id)
+                });
+                crate::window_state::persist_plan(st.pgt_id, window_strategy.as_ref())?;
+                template_cache::invalidate(st.pgt_id);
+                refresh::invalidate_merge_cache(st.pgt_id);
+                shmem::bump_cache_generation();
+
+                let updated_st = StreamTableMeta::get_by_id(st.pgt_id)?
+                    .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={}", st.pgt_id)))?;
+                // Check the *new* parser/candidate/storage contract under the
+                // newly stored search path. Errors roll back both catalog
+                // changes and any attempted storage mutations.
+                if crate::api::retention::retained_live_rebuild(&updated_st)?.is_none() {
+                    return Err(PgTrickleError::InvalidArgument(
+                        "sealed retention state disappeared during ALTER QUERY".into(),
+                    ));
+                }
+                let (rows_inserted, _) = execute_manual_full_refresh_with_distance_snapshot(
+                    &updated_st,
+                    schema,
+                    table_name,
+                    &source_oids,
+                )?;
+                let refreshed = StreamTableMeta::get_by_id(st.pgt_id)?
+                    .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={}", st.pgt_id)))?;
+                distance_snapshot.finish(&refreshed, rows_inserted);
+                let _ = StreamTableMeta::clear_error_state(st.pgt_id);
+                StreamTableMeta::update_status(st.pgt_id, StStatus::Active)?;
+                shmem::signal_dag_invalidation(st.pgt_id);
+                pgrx::warning!(
+                    "pg_trickle: ALTER QUERY rebuilt only live groups of {}.{}; sealed RETAIN rows retain their original values",
+                    schema,
+                    table_name,
+                );
+                return Ok(());
+            }
+        }
+    }
+    // Compatible, byte-identical query definitions need no storage rebuild.
+    // All other query changes still require a destructive shadow swap and
+    // must fail closed when retention history has been sealed.
     crate::dvm::retention::ensure_query_change_allowed(st.pgt_id)?;
     let expression_index = Spi::get_one_with_args::<String>(
         "SELECT (SELECT c.relname::text FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid JOIN pg_catalog.pg_am am ON am.oid = c.relam WHERE i.indrelid = $1 AND (i.indexprs IS NOT NULL OR am.amname IN ('hnsw', 'ivfflat')) AND c.relname <> $2::name ORDER BY c.oid LIMIT 1)",
