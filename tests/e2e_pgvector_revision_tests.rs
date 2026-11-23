@@ -627,11 +627,15 @@ async fn test_live_rag_paced_writes_and_tenant_reads_during_refresh() {
         .expect("assume reader role");
     let started = Instant::now();
     for id in 2_i64..=101 {
-        let updated = sqlx::query("UPDATE live_rag.access SET visible=false WHERE document_id=$1")
-            .bind(id)
-            .execute(&db.pool)
-            .await
-            .expect("commit visibility change");
+        let updated = tokio::time::timeout(
+            Duration::from_secs(15),
+            sqlx::query("UPDATE live_rag.access SET visible=false WHERE document_id=$1")
+                .bind(id)
+                .execute(&db.pool),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("visibility change for document_id={id} blocked during refresh"))
+        .expect("commit visibility change");
         assert_eq!(updated.rows_affected(), 1);
         let leaked: i64 = sqlx::query_scalar("SELECT count(*) FROM live_rag.differential_authorized WHERE tenant_id <> 10 OR id <= $1")
             .bind(id).fetch_one(&mut *reader).await.expect("check tenant and visibility");

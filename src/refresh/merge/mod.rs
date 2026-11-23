@@ -3081,7 +3081,7 @@ pub fn execute_differential_refresh_with_tuning(
             // so we must record it here before returning.
             crate::shmem::record_diff_refresh(crate::dvm::is_delta_deduplicated(st.pgt_id));
 
-            delta_stage.cleanup_bounded_views()?;
+            delta_stage.verify_and_cleanup_bounded_views()?;
             return Ok((rows_inserted, 0));
         }
     }
@@ -4698,10 +4698,10 @@ pub fn execute_differential_refresh_with_tuning(
         }
     }
 
-    // CREATE TEMP VIEW has no ON COMMIT DROP. Clean the fast-path views
-    // after the final DVM read so they cannot pin source table DDL across
-    // transactions or pooled backend reuse.
-    delta_stage.cleanup_bounded_views()?;
+    // CREATE TEMP VIEW has no ON COMMIT DROP. Verify no post-bound TRUNCATE
+    // invalidated the lock-free inverse views, then clean them up after the
+    // final DVM read so they cannot pin source table DDL across transactions.
+    delta_stage.verify_and_cleanup_bounded_views()?;
     Ok((effective_count, 0))
 }
 
