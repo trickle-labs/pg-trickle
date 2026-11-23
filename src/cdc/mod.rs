@@ -3142,7 +3142,8 @@ pub fn get_slot_positions_at_bound(
                          FROM {buffer} WHERE lsn > '0/0'::pg_lsn"
                     ),
                     &[safe_bound.into()],
-                )                .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                )
+                .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
                     context: format!("trigger source OID {}", oid.to_u32()),
                     reason: format!("visible buffer frontier lookup failed: {e}"),
                 })?
