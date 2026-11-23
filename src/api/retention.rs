@@ -104,7 +104,7 @@ pub(crate) fn retained_live_rebuild(
         || state.query_hash != crate::catalog::compute_defining_query_hash(&st.defining_query)
     {
         return Err(PgTrickleError::InvalidArgument(
-            "the sealed stream's query or refresh mode changed; cannot prove a live-only rebuild"
+            "retained partition history is not reconstructible: the sealed stream's query or refresh mode changed; cannot prove a live-only rebuild"
                 .into(),
         ));
     }
