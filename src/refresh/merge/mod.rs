@@ -69,7 +69,7 @@ fn is_independent_union_all(tree: &dvm::parser::OpTree) -> bool {
 }
 
 pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
-    crate::refresh::ensure_full_policy(st, "differential strategy fallback")?;
+    crate::refresh::ensure_scoped_full_policy(st, "differential strategy fallback")?;
     let result = execute_full_refresh_target(st)?;
     let _window_plan = crate::window_state::prepare_for_protected_refresh(st)?;
     Ok(result)
@@ -78,7 +78,8 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
 pub(crate) fn execute_full_refresh_target(
     st: &StreamTableMeta,
 ) -> Result<(i64, i64), PgTrickleError> {
-    crate::refresh::ensure_full_policy(st, "full refresh")?;
+    crate::dvm::retention::ensure_retention_capture(st.pgt_id)?;
+    crate::refresh::ensure_scoped_full_policy(st, "full refresh")?;
     crate::cdc::validate_stream_table_row_identity(st)?;
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
     if !st.refresh_mode.is_immediate() {
@@ -96,6 +97,7 @@ pub(crate) fn execute_full_refresh_target(
         .collect();
     crate::cdc::lock_source_relations(&source_oids)?;
     crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
+    let retained_live = crate::api::retention::retained_live_rebuild(st)?;
     crate::api::prepare_distance_snapshot(st);
 
     // G12-ERM-1: Record the effective mode for this execution path.
@@ -248,8 +250,17 @@ pub(crate) fn execute_full_refresh_target(
             })?;
         }
 
-        // Truncate
-        Spi::run(&format!("TRUNCATE {quoted_table}")) // nosemgrep: rust.spi.run.dynamic-format — TRUNCATE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
+        // A sealed RETAIN stream cannot be truncated. Delete only its live
+        // groups, then repopulate them under the same protected source locks.
+        let replacement_sql = if let Some(spec) = &retained_live {
+            format!(
+                "DELETE FROM {quoted_table} AS pgt_old WHERE {}",
+                spec.live_predicate("pgt_old")
+            )
+        } else {
+            format!("TRUNCATE {quoted_table}")
+        };
+        Spi::run(&replacement_sql) // nosemgrep: rust.spi.run.dynamic-format — TRUNCATE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
         // Compute row_id using the same hash formula as the delta query so
@@ -277,6 +288,14 @@ pub(crate) fn execute_full_refresh_target(
             format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
         };
 
+        let insert_body = if let Some(spec) = &retained_live {
+            format!(
+                "SELECT * FROM ({insert_body}) AS pgt_new WHERE {}",
+                spec.live_predicate("pgt_new")
+            )
+        } else {
+            insert_body
+        };
         // Existing storage can have auxiliary columns in an older physical
         // order. Name the targets explicitly instead of relying on SELECT
         // position (the manual FULL path already does this).
@@ -446,7 +465,8 @@ pub fn poll_foreign_table_sources_for_st(st: &StreamTableMeta) -> Result<(), PgT
 }
 
 /// Execute a NO_DATA refresh: just advance the data timestamp.
-pub fn execute_no_data_refresh(_st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+pub fn execute_no_data_refresh(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+    crate::dvm::retention::ensure_retention_capture(st.pgt_id)?;
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("NO_DATA");
 
@@ -800,6 +820,7 @@ pub fn execute_differential_refresh_with_tuning(
     new_frontier: &Frontier,
     tuning: &crate::catalog::RefreshRuntimeTuning,
 ) -> Result<(i64, i64), PgTrickleError> {
+    crate::dvm::retention::ensure_retention_capture(st.pgt_id)?;
     crate::refresh::clear_last_cost_evidence();
     crate::refresh::set_last_ann_churn_operations(None);
     set_effective_mode("DIFFERENTIAL");
@@ -1724,7 +1745,12 @@ pub fn execute_differential_refresh_with_tuning(
     } else {
         None
     };
-    let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential;
+    // Cost heuristics must not select a rebuild when historical rows are gone.
+    let unreconstructible_history =
+        crate::dvm::retention::has_unreconstructible_history(st.pgt_id)?;
+    let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential
+        || crate::refresh::is_retention_catchup()
+        || unreconstructible_history;
     // Only additive UNION ALL scans can safely use one combined denominator.
     // In a join, a tiny changed dimension could affect most of the output,
     // so its independent per-source threshold must remain in force.
@@ -2320,7 +2346,7 @@ pub fn execute_differential_refresh_with_tuning(
     let query_hash: u64 = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        "v0.108.3-deferred-history:nonfinite-state:raw-aggregate-columns-v1:join-endpoints-v1"
+        "v0.108.3-deferred-history:nonfinite-state:raw-aggregate-columns-v1:join-endpoints-v1:partitioned-insert-v2"
             .hash(&mut hasher);
         if std::ptr::eq(
             effective_defining_query.as_ref() as *const str,
@@ -2576,20 +2602,54 @@ pub fn execute_differential_refresh_with_tuning(
         // EC-06: Keyless storage uses counted DELETE + plain INSERT.
         // Delta deduplication does not make the target row-id index unique.
         let use_keyless = st.has_keyless_source;
-        let trigger_delete_template =
-            build_trigger_delete_sql(&quoted_table, st.pgt_id, use_keyless);
+        let scoped_retention = crate::refresh::is_retention_catchup();
+        let retention_key = crate::refresh::retention_partition_key(st.pgt_id)
+            .filter(|key| user_cols.contains(key));
+        // shortcut: row-level DML pruning only works when output partitions use the validated retention key.
+        let retention_output_key = retention_key.as_deref().filter(|key| {
+            st.st_partition_key.as_deref().is_some_and(|partition_by| {
+                crate::api::helpers::parse_partition_key_columns(partition_by) == [key.to_string()]
+            })
+        });
+        let trigger_delete_template = if scoped_retention {
+            build_retention_trigger_delete_sql(&quoted_table, st.pgt_id, retention_output_key)
+        } else {
+            build_trigger_delete_sql(&quoted_table, st.pgt_id, use_keyless)
+        };
 
         // EC-06: Use normal UPDATE template for keyless sources — see
         // prewarm_merge_cache comment for full rationale.
-        let trigger_update_template =
-            build_trigger_update_sql(&quoted_table, st.pgt_id, &user_cols);
+        let trigger_update_template = if scoped_retention {
+            build_retention_trigger_update_sql(
+                &quoted_table,
+                st.pgt_id,
+                &user_cols,
+                retention_output_key,
+            )
+        } else {
+            build_trigger_update_sql(&quoted_table, st.pgt_id, &user_cols)
+        };
 
-        let trigger_insert_template =
-            if use_keyless && (is_dedup || user_cols.iter().any(|c| c == "__pgt_count")) {
-                build_trigger_insert_sql_no_conflict(&quoted_table, st.pgt_id, &user_cols)
-            } else {
-                build_trigger_insert_sql(&quoted_table, st.pgt_id, &user_cols, use_keyless)
-            };
+        let trigger_insert_template = if scoped_retention
+            && ((use_keyless && (is_dedup || user_cols.iter().any(|c| c == "__pgt_count")))
+                || (st.st_partition_key.is_some() && !use_keyless))
+        {
+            build_retention_trigger_insert_sql(
+                &quoted_table,
+                st.pgt_id,
+                &user_cols,
+                retention_output_key,
+            )
+        } else {
+            build_trigger_insert_for_storage(
+                &quoted_table,
+                st.pgt_id,
+                &user_cols,
+                use_keyless,
+                is_dedup,
+                st.st_partition_key.is_some(),
+            )
+        };
 
         // Store templates in the cache for subsequent refreshes.
         if !concrete_delta {
@@ -2761,31 +2821,26 @@ pub fn execute_differential_refresh_with_tuning(
     }
 
     // ── PERF-5: Analyze the relations actually used by delta execution ──
-    // Ordinary refreshes use TABLE/FT/MV buffers. Graph SQL uses bounded
-    // stages for both base-table and stream-table dependencies.
+    // Both ordinary and graph delta SQL read the staged CDC window copies.
+    // Ordinary refreshes additionally use persistent TABLE/FT/MV buffers.
     if crate::config::pg_trickle_analyze_before_delta() {
-        let tables = if graph_same_pass {
-            // Graph delta SQL reads the bounded stages, not the shared buffers.
-            delta_stage
-                .source_tables()
-                .values()
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
+        let mut tables = delta_stage
+            .source_tables()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if !graph_same_pass {
             let cb_schema = crate::config::pg_trickle_change_buffer_schema();
-            catalog_source_oids
-                .iter()
-                .map(|&oid| {
-                    format!(
-                        "{}.{}",
-                        crate::sql_builder::ident(&cb_schema),
-                        crate::sql_builder::ident(&crate::cdc::buffer_base_name_for_oid(
-                            pg_sys::Oid::from(oid)
-                        )),
-                    )
-                })
-                .collect()
-        };
+            tables.extend(catalog_source_oids.iter().map(|&oid| {
+                format!(
+                    "{}.{}",
+                    crate::sql_builder::ident(&cb_schema),
+                    crate::sql_builder::ident(&crate::cdc::buffer_base_name_for_oid(
+                        pg_sys::Oid::from(oid)
+                    )),
+                )
+            }));
+        }
         for table in tables {
             let analyze_sql = format!("ANALYZE {table}");
             if let Err(e) = Spi::run(&analyze_sql) {
@@ -2836,8 +2891,13 @@ pub fn execute_differential_refresh_with_tuning(
     // SET LOCAL hints that are automatically reset at transaction end.
     // Deep joins (5+ tables) get aggressive hints to avoid pathological
     // plans that spill excessive temp files.
-    let work_mem_cap_exceeded =
-        apply_planner_hints(total_change_count, st.pgt_relid, scan_count, tuning);
+    let work_mem_cap_exceeded = apply_planner_hints(
+        total_change_count,
+        st.pgt_relid,
+        scan_count,
+        tuning,
+        unreconstructible_history,
+    );
 
     // ── SCAL-3: Work-mem cap exceeded — fall back to FULL ───────────
     if work_mem_cap_exceeded {
@@ -3088,7 +3148,11 @@ pub fn execute_differential_refresh_with_tuning(
     // ── B-3: Strategy selection ──────────────────────────────────────
     // PH-D1: Choose between MERGE and DELETE+INSERT based on the
     // merge_strategy GUC and the delta-to-target ratio heuristic.
-    let merge_strategy = crate::config::pg_trickle_merge_strategy();
+    let merge_strategy = if crate::refresh::is_retention_catchup() {
+        crate::config::MergeStrategy::Merge
+    } else {
+        crate::config::pg_trickle_merge_strategy()
+    };
     let use_delete_insert = match merge_strategy {
         crate::config::MergeStrategy::Merge => false,
         crate::config::MergeStrategy::Auto => {
@@ -3393,19 +3457,24 @@ pub fn execute_differential_refresh_with_tuning(
     let hash_merge_result: Option<(usize, &str)> = if let Some(ref pk) = st.st_partition_key {
         let method = crate::api::parse_partition_method(pk);
         if method == crate::api::PartitionMethod::Hash {
-            // A1-3b: Parent-level MERGE for HASH partitioned STs.
-            let count = with_stream_owner(st, || {
-                execute_hash_partitioned_merge(
-                    &resolved.merge_sql,
-                    &resolved.resolved_delta_sql,
-                    schema,
-                    name,
-                    st.pgt_relid,
-                    pk,
-                    st.pgt_id,
-                )
-            })?;
-            Some((count, "hash_merge"))
+            if use_explicit_dml {
+                // Downstream capture and trigger semantics require explicit DML.
+                None
+            } else {
+                // A1-3b: Parent-level MERGE for HASH partitioned STs.
+                let count = with_stream_owner(st, || {
+                    execute_hash_partitioned_merge(
+                        &resolved.merge_sql,
+                        &resolved.resolved_delta_sql,
+                        schema,
+                        name,
+                        st.pgt_relid,
+                        pk,
+                        st.pgt_id,
+                    )
+                })?;
+                Some((count, "hash_merge"))
+            }
         } else {
             // RANGE / LIST: extract bounds and inject predicate.
             match with_stream_owner(st, || {
@@ -3960,13 +4029,26 @@ pub fn execute_differential_refresh_with_tuning(
                     name.replace('"', "\"\""),
                 );
                 let pre_table = format!("__pgt_pre_{}", st.pgt_id);
-                let snapshot_sql = format!(
-                    "INSERT INTO {pre_table} \
-                     SELECT st.__pgt_row_id, {col_list} FROM {qt} st \
-                     WHERE EXISTS (SELECT 1 FROM {delta_table} d \
-                       WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
-                         AND st.__pgt_row_id = d.__pgt_row_id)"
-                );
+                let snapshot_sql = if crate::refresh::is_retention_catchup() {
+                    format!(
+                        "INSERT INTO {pre_table} {}",
+                        retention_scoped_rows_sql(
+                            &qt,
+                            &delta_table,
+                            &cols,
+                            false,
+                            crate::refresh::retention_partition_key(st.pgt_id).as_deref(),
+                        )
+                    )
+                } else {
+                    format!(
+                        "INSERT INTO {pre_table} \
+                         SELECT st.__pgt_row_id, {col_list} FROM {qt} st \
+                         WHERE EXISTS (SELECT 1 FROM {delta_table} d \
+                           WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
+                             AND st.__pgt_row_id = d.__pgt_row_id)"
+                    )
+                };
                 if cols.is_empty() {
                     Vec::new()
                 } else if let Err(e) = Spi::run(&snapshot_sql) {

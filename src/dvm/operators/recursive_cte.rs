@@ -160,13 +160,13 @@ pub fn diff_recursive_cte(
     let source_oids = op.source_oids();
     let has_deletes = check_for_delete_changes(ctx, &source_oids)?;
 
-    if has_deletes && !*union_all {
-        // Set recursion can have alternative paths and self-supporting cycles.
-        // The storage-based DRed cascade assumes parent/join columns are stored;
-        // reachability(node) does not contain edges(src, dst). Recompute the
-        // least fixed point, then emit only its difference from storage. This
-        // also handles mixed batches without expanding from now-unreachable
-        // rows in the old result. Keep the stream table in DIFFERENTIAL mode.
+    if has_deletes && (!*union_all || !dred_cascade_is_safe(base, recursive, columns)) {
+        // DRed rewrites every recursive source Scan to the stream table.
+        // That is valid only for a single-parent adjacency list whose complete
+        // source rows are stored verbatim, with one derivation per row.
+        // Joins to separate edge relations, renames, derived columns and
+        // multiple derivations must recompute and diff the fixed point.
+        // The UNION ALL fallback keeps bag multiplicities (unlike set EXCEPT).
         return generate_recomputation_delta(ctx, alias, columns, base, recursive, *union_all);
     }
 
@@ -211,6 +211,178 @@ pub fn diff_recursive_cte(
         // INSERT-only changes → semi-naive propagation.
         generate_semi_naive_delta(ctx, alias, columns, &base_delta, recursive, *union_all)
     }
+}
+
+/// DRed's storage-based cascade is valid only when the recursive Scan is
+/// interchangeable with the stored CTE row. Matching *output* column names
+/// alone does not prove that: a reachability query can select e.dst AS node
+/// while its source also needs e.src, which is absent from storage.
+///
+/// Be deliberately conservative: admit only a single-parent adjacency list
+/// with a primary-key node, a NULL-parent seed, and verbatim projections of
+/// the same complete source row on both sides. This also proves that UNION
+/// ALL has at most one derivation per node, so DRed's set-based over-delete
+/// and rederivation are safe. Every other shape uses a bag-aware diff.
+fn dred_cascade_is_safe(base: &OpTree, recursive: &OpTree, columns: &[String]) -> bool {
+    use crate::dvm::parser::Expr;
+
+    let OpTree::Project {
+        expressions,
+        aliases,
+        child,
+    } = recursive
+    else {
+        return false;
+    };
+    if aliases.as_slice() != columns {
+        return false;
+    }
+    let OpTree::InnerJoin {
+        condition,
+        left,
+        right,
+    } = child.as_ref()
+    else {
+        return false;
+    };
+    let (source_oid, source_alias, source_cols, pk_cols, self_alias, self_cols) =
+        match (left.as_ref(), right.as_ref()) {
+            (
+                OpTree::Scan {
+                    table_oid,
+                    alias,
+                    columns,
+                    pk_columns,
+                    ..
+                },
+                OpTree::RecursiveSelfRef {
+                    alias: self_alias,
+                    columns: self_cols,
+                    ..
+                },
+            )
+            | (
+                OpTree::RecursiveSelfRef {
+                    alias: self_alias,
+                    columns: self_cols,
+                    ..
+                },
+                OpTree::Scan {
+                    table_oid,
+                    alias,
+                    columns,
+                    pk_columns,
+                    ..
+                },
+            ) => (table_oid, alias, columns, pk_columns, self_alias, self_cols),
+            _ => return false,
+        };
+
+    if pk_cols.len() != 1 || self_cols.as_slice() != columns {
+        return false;
+    }
+    let source_names: Vec<String> = source_cols.iter().map(|c| c.name.clone()).collect();
+    if source_names.as_slice() != columns {
+        return false;
+    }
+
+    // Every column read from the recursive source must have the same
+    // name and value in the stream table. No renames or computed values.
+    let direct_projection = |exprs: &[Expr], names: &[String], scan_alias: &str| {
+        exprs.len() == source_names.len()
+            && names == source_names.as_slice()
+            && exprs.iter().zip(names).all(|(expr, name)| {
+                matches!(
+                    expr,
+                    Expr::ColumnRef {
+                        table_alias,
+                        column_name,
+                    } if column_name == name
+                        && table_alias.as_deref().is_none_or(|a| a == scan_alias)
+                )
+            })
+    };
+    if !direct_projection(expressions, aliases, source_alias) {
+        return false;
+    }
+
+    let join_parent = match condition {
+        Expr::BinaryOp { op, left, right } if op == "=" => {
+            let parent_from = |scan_expr: &Expr, self_expr: &Expr| match (scan_expr, self_expr) {
+                (
+                    Expr::ColumnRef {
+                        table_alias: Some(scan_alias),
+                        column_name: parent,
+                    },
+                    Expr::ColumnRef {
+                        table_alias: Some(rec_alias),
+                        column_name: key,
+                    },
+                ) if scan_alias == source_alias
+                    && rec_alias == self_alias
+                    && key == &pk_cols[0] =>
+                {
+                    Some(parent.to_string())
+                }
+                _ => None,
+            };
+            parent_from(left, right).or_else(|| parent_from(right, left))
+        }
+        _ => None,
+    };
+    let Some(parent) = join_parent else {
+        return false;
+    };
+    if parent == pk_cols[0] || !source_names.iter().any(|name| name == &parent) {
+        return false;
+    }
+
+    // Seeds must be exactly the roots of this same single-parent table.
+    // Otherwise a row may be both a seed and a descendant (or have more
+    // than one path), and set-based DRed would lose UNION ALL copies.
+    let (base_exprs, base_aliases, seed_predicate, seed_scan) = match base {
+        OpTree::Project {
+            expressions,
+            aliases,
+            child,
+        } => match child.as_ref() {
+            OpTree::Filter { predicate, child } => {
+                (expressions, aliases, predicate, child.as_ref())
+            }
+            _ => return false,
+        },
+        OpTree::Filter { predicate, child } => match child.as_ref() {
+            OpTree::Project {
+                expressions,
+                aliases,
+                child,
+            } => (expressions, aliases, predicate, child.as_ref()),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    let OpTree::Scan {
+        table_oid: base_oid,
+        alias: base_alias,
+        columns: base_cols,
+        ..
+    } = seed_scan
+    else {
+        return false;
+    };
+    if base_oid != source_oid
+        || base_cols.iter().map(|c| &c.name).collect::<Vec<_>>()
+            != source_cols.iter().map(|c| &c.name).collect::<Vec<_>>()
+        || !direct_projection(base_exprs, base_aliases, base_alias)
+    {
+        return false;
+    }
+
+    let mut seed_filter = seed_predicate.to_sql().to_ascii_lowercase();
+    seed_filter.retain(|c| !c.is_ascii_whitespace() && c != '"' && c != '(' && c != ')');
+    let parent = parent.to_ascii_lowercase();
+    seed_filter == format!("{parent}isnull")
+        || seed_filter == format!("{}.{parent}isnull", base_alias.to_ascii_lowercase())
 }
 
 /// Check if any of the given source tables have DELETE or UPDATE changes
@@ -358,7 +530,10 @@ fn generate_recomputation_delta(
         .iter()
         .map(|c| format!("sub.{}", quote_ident(c)))
         .collect();
-    let row_id_hash = crate::dvm::operators::scan::build_hash_expr(&hash_exprs);
+    let row_id_hash = ctx
+        .st_full_row_identity_expr
+        .clone()
+        .unwrap_or_else(|| crate::dvm::operators::scan::build_hash_expr(&hash_exprs));
 
     let recomp_cte = ctx.next_cte_name(&format!("rc_recomp_{alias}"));
     let recomp_sql = format!(
@@ -367,37 +542,85 @@ fn generate_recomputation_delta(
     );
     ctx.add_cte(recomp_cte.clone(), recomp_sql);
 
-    // CTE 2: find INSERTs (in recomputed but not in storage)
+    // CTEs 2 and 3: bag-preserving delta against the currently stored rows.
+    // UNION ALL can derive the same tuple along independent paths. A LEFT
+    // JOIN solely on row identity would miss changes from 2 copies to 1 or
+    // 1 to 2. Pair occurrences by (row_id, ordinal) so that only the excess
+    // copies are inserted or deleted. This works for payloads without SQL
+    // equality operators as well (e.g. json), unlike EXCEPT ALL on columns.
     let ins_cte = ctx.next_cte_name(&format!("rc_ins_{alias}"));
-    let ins_sql = format!(
-        "SELECT n.__pgt_row_id, 'I'::text AS __pgt_action, {n_cols}\n\
-         FROM {recomp_cte} n\n\
-         LEFT JOIN {st_table} s ON pgtrickle.row_probe_v1(s.__pgt_row_id) = pgtrickle.row_probe_v1(n.__pgt_row_id)\n\
-             AND s.__pgt_row_id = n.__pgt_row_id\n\
-         WHERE s.__pgt_row_id IS NULL",
-        n_cols = out_cols
-            .iter()
-            .map(|c| format!("n.{}", quote_ident(c)))
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    ctx.add_cte(ins_cte.clone(), ins_sql);
-
-    // CTE 3: find DELETEs (in storage but not in recomputed)
     let del_cte = ctx.next_cte_name(&format!("rc_del_{alias}"));
-    let del_sql = format!(
-        "SELECT s.__pgt_row_id, 'D'::text AS __pgt_action, {s_cols}\n\
-         FROM {st_table} s\n\
-         LEFT JOIN {recomp_cte} n ON pgtrickle.row_probe_v1(n.__pgt_row_id) = pgtrickle.row_probe_v1(s.__pgt_row_id)\n\
-             AND n.__pgt_row_id = s.__pgt_row_id\n\
-         WHERE n.__pgt_row_id IS NULL",
-        s_cols = out_cols
-            .iter()
-            .map(|c| format!("s.{}", quote_ident(c)))
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    ctx.add_cte(del_cte.clone(), del_sql);
+    let n_cols = out_cols
+        .iter()
+        .map(|c| format!("n.{}", quote_ident(c)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let s_cols = out_cols
+        .iter()
+        .map(|c| format!("s.{}", quote_ident(c)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if union_all {
+        // The FULL materialization and the recomputation use the same
+        // row identity formula. Identical copies have the same row_id.
+        let ins_sql = format!(
+            "SELECT n.__pgt_row_id, 'I'::text AS __pgt_action, {n_cols}\n\
+             FROM (\n\
+               SELECT __pgt_row_id, {col_list},\n\
+                      row_number() OVER (PARTITION BY __pgt_row_id ORDER BY __pgt_row_id) AS __pgt_occurrence\n\
+               FROM {recomp_cte}\n\
+             ) n\n\
+             LEFT JOIN (\n\
+               SELECT __pgt_row_id,\n\
+                      row_number() OVER (PARTITION BY __pgt_row_id ORDER BY __pgt_row_id) AS __pgt_occurrence\n\
+               FROM {st_table}\n\
+             ) s ON s.__pgt_row_id = n.__pgt_row_id\n\
+                AND s.__pgt_occurrence = n.__pgt_occurrence\n\
+             WHERE s.__pgt_row_id IS NULL",
+            col_list = col_list(&out_cols),
+        );
+        ctx.add_cte(ins_cte.clone(), ins_sql);
+
+        let del_sql = format!(
+            "SELECT s.__pgt_row_id, 'D'::text AS __pgt_action, {s_cols}\n\
+             FROM (\n\
+               SELECT __pgt_row_id, {col_list},\n\
+                      row_number() OVER (PARTITION BY __pgt_row_id ORDER BY __pgt_row_id) AS __pgt_occurrence\n\
+               FROM {st_table}\n\
+             ) s\n\
+             LEFT JOIN (\n\
+               SELECT __pgt_row_id,\n\
+                      row_number() OVER (PARTITION BY __pgt_row_id ORDER BY __pgt_row_id) AS __pgt_occurrence\n\
+               FROM {recomp_cte}\n\
+             ) n ON n.__pgt_row_id = s.__pgt_row_id\n\
+                AND n.__pgt_occurrence = s.__pgt_occurrence\n\
+             WHERE n.__pgt_row_id IS NULL",
+            col_list = col_list(&out_cols),
+        );
+        ctx.add_cte(del_cte.clone(), del_sql);
+    } else {
+        // Keep the existing set-recursion anti-joins unchanged.
+        ctx.add_cte(
+            ins_cte.clone(),
+            format!(
+                "SELECT n.__pgt_row_id, 'I'::text AS __pgt_action, {n_cols}\n\
+                 FROM {recomp_cte} n\n\
+                 LEFT JOIN {st_table} s ON pgtrickle.row_probe_v1(s.__pgt_row_id) = pgtrickle.row_probe_v1(n.__pgt_row_id)\n\
+                     AND s.__pgt_row_id = n.__pgt_row_id\n\
+                 WHERE s.__pgt_row_id IS NULL"
+            ),
+        );
+        ctx.add_cte(
+            del_cte.clone(),
+            format!(
+                "SELECT s.__pgt_row_id, 'D'::text AS __pgt_action, {s_cols}\n\
+                 FROM {st_table} s\n\
+                 LEFT JOIN {recomp_cte} n ON pgtrickle.row_probe_v1(n.__pgt_row_id) = pgtrickle.row_probe_v1(s.__pgt_row_id)\n\
+                     AND n.__pgt_row_id = s.__pgt_row_id\n\
+                 WHERE n.__pgt_row_id IS NULL"
+            ),
+        );
+    }
 
     // CTE 4: combine INSERTs and DELETEs
     let final_cte = ctx.next_cte_name(&format!("rc_delta_{alias}"));
@@ -3591,6 +3814,129 @@ mod tests {
         assert!(sql.contains("\"public\".\"st\" AS \"t\""));
         assert!(sql.contains("JOIN"));
         assert!(!sql.contains("__p"));
+    }
+
+    // ── Issue #1427: source provenance and bag-preserving SQL ───────
+
+    #[test]
+    fn test_dred_rejects_recursive_edge_scan_outside_stream_projection() {
+        let base = make_scan(1, "roots", "public", "r", &["node"]);
+        let mut edges = make_scan(2, "edges", "public", "e", &["src", "dst"]);
+        if let OpTree::Scan { pk_columns, .. } = &mut edges {
+            *pk_columns = vec!["src".into(), "dst".into()];
+        }
+        let recursive = OpTree::Project {
+            expressions: vec![Expr::ColumnRef {
+                table_alias: Some("e".into()),
+                column_name: "dst".into(),
+            }],
+            aliases: vec!["node".into()],
+            child: Box::new(OpTree::InnerJoin {
+                condition: Expr::BinaryOp {
+                    op: "=".into(),
+                    left: Box::new(Expr::ColumnRef {
+                        table_alias: Some("e".into()),
+                        column_name: "src".into(),
+                    }),
+                    right: Box::new(Expr::ColumnRef {
+                        table_alias: Some("d".into()),
+                        column_name: "node".into(),
+                    }),
+                },
+                left: Box::new(edges),
+                right: Box::new(make_self_ref("d", "d", &["node"])),
+            }),
+        };
+        // CTE columns match storage, yet e.src/e.dst do not exist there.
+        assert!(!dred_cascade_is_safe(&base, &recursive, &["node".into()]));
+    }
+
+    #[test]
+    fn test_dred_accepts_verbatim_single_parent_tree_and_rejects_computed_columns() {
+        let mut seed = make_scan(10, "nodes", "public", "root", &["id", "parent_id"]);
+        let mut nodes = make_scan(10, "nodes", "public", "n", &["id", "parent_id"]);
+        for source in [&mut seed, &mut nodes] {
+            if let OpTree::Scan { pk_columns, .. } = source {
+                *pk_columns = vec!["id".into()];
+            }
+        }
+        let columns: Vec<String> = vec!["id".into(), "parent_id".into()];
+        let base = OpTree::Project {
+            expressions: ["id", "parent_id"]
+                .iter()
+                .map(|name| Expr::ColumnRef {
+                    table_alias: Some("root".into()),
+                    column_name: (*name).into(),
+                })
+                .collect(),
+            aliases: columns.clone(),
+            child: Box::new(OpTree::Filter {
+                predicate: Expr::Raw("root.parent_id IS NULL".into()),
+                child: Box::new(seed),
+            }),
+        };
+        let mut recursive = OpTree::Project {
+            expressions: ["id", "parent_id"]
+                .iter()
+                .map(|name| Expr::ColumnRef {
+                    table_alias: Some("n".into()),
+                    column_name: (*name).into(),
+                })
+                .collect(),
+            aliases: columns.clone(),
+            child: Box::new(OpTree::InnerJoin {
+                condition: Expr::BinaryOp {
+                    op: "=".into(),
+                    left: Box::new(Expr::ColumnRef {
+                        table_alias: Some("n".into()),
+                        column_name: "parent_id".into(),
+                    }),
+                    right: Box::new(Expr::ColumnRef {
+                        table_alias: Some("t".into()),
+                        column_name: "id".into(),
+                    }),
+                },
+                left: Box::new(nodes),
+                right: Box::new(make_self_ref("t", "t", &["id", "parent_id"])),
+            }),
+        };
+        assert!(dred_cascade_is_safe(&base, &recursive, &columns));
+        if let OpTree::Project { expressions, .. } = &mut recursive {
+            expressions[1] = Expr::Raw("n.parent_id + 1".into());
+        }
+        assert!(!dred_cascade_is_safe(&base, &recursive, &columns));
+    }
+
+    #[test]
+    fn test_recursive_recomputation_delta_counts_all_bag_occurrences() {
+        let mut ctx = test_ctx();
+        ctx.st_qualified_name = Some("\"public\".\"reach\"".into());
+        ctx.defining_query = Some(
+            "WITH RECURSIVE d AS (SELECT 0 AS node UNION ALL SELECT node + 1 FROM d WHERE node < 3) \
+             SELECT node FROM d"
+                .into(),
+        );
+        ctx.st_user_columns = Some(vec!["node".into()]);
+        ctx.st_full_row_identity_expr =
+            Some("pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(sub.\"node\"))".into());
+        let result = generate_recomputation_delta(
+            &mut ctx,
+            "d",
+            &["node".into()],
+            &make_scan(1, "roots", "public", "r", &["node"]),
+            &make_self_ref("d", "d", &["node"]),
+            true,
+        )
+        .unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_eq!(
+            sql.matches("row_number() OVER (PARTITION BY __pgt_row_id")
+                .count(),
+            4
+        );
+        assert_eq!(sql.matches("__pgt_occurrence =").count(), 2);
+        assert!(sql.contains("pgtrickle.encode_row_id_v3('SCAN_KEY'"));
+        assert!(!result.is_deduplicated);
     }
 
     // ── Strategy selection: column matching ──────────────────────────

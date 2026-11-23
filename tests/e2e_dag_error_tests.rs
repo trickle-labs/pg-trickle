@@ -213,18 +213,36 @@ async fn test_consecutive_errors_tracked_and_reset() {
     // manual refresh_stream_table() calls (a failed SQL function call rolls back
     // the entire transaction, including any catalog writes).
     for i in 1..=3 {
-        db.execute("INSERT INTO err_cnt_src (val, denom) VALUES (10, 0)")
-            .await;
-        let result = db
-            .try_execute("SELECT pgtrickle.refresh_stream_table('err_cnt_st')")
-            .await;
-        let error = result.expect_err(&format!("Refresh attempt {i} should fail"));
-        assert!(
-            error
-                .as_database_error()
-                .is_some_and(|error| error.code().as_deref() == Some("22012")),
-            "Refresh attempt {i} should fail with division by zero: {error}"
-        );
+        // Writer holdback can complete a manual refresh with NO_DATA before
+        // the just-committed CDC row is eligible. Such a no-op is not a
+        // failure attempt: add a new bad row and retry until PostgreSQL has
+        // actually evaluated the division, without weakening the SQLSTATE check.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            db.execute("INSERT INTO err_cnt_src (val, denom) VALUES (10, 0)")
+                .await;
+            match db
+                .try_execute("SELECT pgtrickle.refresh_stream_table('err_cnt_st')")
+                .await
+            {
+                Err(error) => {
+                    assert!(
+                        error
+                            .as_database_error()
+                            .is_some_and(|error| error.code().as_deref() == Some("22012")),
+                        "Refresh attempt {i} should fail with division by zero: {error}"
+                    );
+                    break;
+                }
+                Ok(()) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Refresh attempt {i} never evaluated the intentionally invalid CDC input"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
     }
 
     // Simulate scheduler tracking errors

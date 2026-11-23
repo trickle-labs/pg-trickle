@@ -975,6 +975,11 @@ WHERE ct.source_placement = 'distributed';
 -- Create event trigger functions with correct RETURNS event_trigger type.
 -- pgrx's #[pg_extern] generates RETURNS void, which PostgreSQL rejects for
 -- event triggers. We create them manually here with the correct return type.
+CREATE FUNCTION pgtrickle."_on_ddl_start"()
+    RETURNS event_trigger
+    LANGUAGE c
+    AS 'MODULE_PATHNAME', 'pg_trickle_on_ddl_start_wrapper';
+
 CREATE FUNCTION pgtrickle."_on_ddl_end"()
     RETURNS event_trigger
     SECURITY DEFINER -- nosemgrep: sql.security-definer.present — event trigger runs with pinned pgtrickle catalog search_path below.
@@ -990,6 +995,10 @@ CREATE FUNCTION pgtrickle."_on_sql_drop"()
     AS 'MODULE_PATHNAME', 'pg_trickle_on_sql_drop_wrapper';
 
 -- Event trigger: track ALTER TABLE on upstream sources
+CREATE EVENT TRIGGER pg_trickle_ddl_start_tracker
+    ON ddl_command_start
+    EXECUTE FUNCTION pgtrickle._on_ddl_start();
+
 CREATE EVENT TRIGGER pg_trickle_ddl_tracker
     ON ddl_command_end
     EXECUTE FUNCTION pgtrickle._on_ddl_end();
@@ -999,6 +1008,24 @@ CREATE EVENT TRIGGER pg_trickle_drop_tracker
     ON sql_drop
     EXECUTE FUNCTION pgtrickle._on_sql_drop();
 /* </end connected objects> */
+
+CREATE FUNCTION pgtrickle."set_stream_table_partition_retention"(
+    "name" text, "policy" text, "source_column" text DEFAULT NULL, "cutoff" text DEFAULT NULL
+) RETURNS void SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', 'set_stream_table_partition_retention_wrapper';
+
+CREATE FUNCTION pgtrickle."get_stream_table_partition_retention"("name" text)
+RETURNS jsonb STRICT SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', 'get_stream_table_partition_retention_wrapper';
+
+CREATE FUNCTION pgtrickle."create_stream_table_with_retention"(
+    "name" text, "query" text, "policy" text, "source_column" text, "cutoff" text,
+    "schedule" text DEFAULT 'calculated'
+) RETURNS void SECURITY DEFINER
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c AS 'MODULE_PATHNAME', 'create_stream_table_with_retention_wrapper';
 
 /* <begin connected objects> */
 -- src/lib.rs:1027
@@ -4484,6 +4511,19 @@ AS 'MODULE_PATHNAME', 'create_or_replace_stream_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- src/api/create.rs:486
+-- pg_trickle::api::create::would_replace_stream_table_storage
+CREATE  FUNCTION pgtrickle."would_replace_stream_table_storage"(
+	"name" TEXT, /* & str */
+	"query" TEXT /* & str */
+) RETURNS bool /* bool */
+STRICT SECURITY DEFINER 
+SET search_path TO pgtrickle, pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'would_replace_stream_table_storage_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- src/api/diagnostics.rs:2609
 -- pg_trickle::api::diagnostics::explain
 CREATE  FUNCTION pgtrickle."explain"(
@@ -4556,6 +4596,9 @@ GRANT EXECUTE ON FUNCTION pgtrickle.alter_stream_table(
     double precision, text
 ) TO pgtrickle_admin;
 GRANT EXECUTE ON FUNCTION pgtrickle.drop_stream_table(text, boolean) TO pgtrickle_admin;
+GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, text, text, text, text, text) TO pgtrickle_admin;
+GRANT EXECUTE ON FUNCTION pgtrickle.get_stream_table_partition_retention(text) TO pgtrickle_admin;
+GRANT EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention(text, text, text, text) TO pgtrickle_admin;
 
 
 -- src/lib.rs:2138
@@ -4643,6 +4686,9 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_apply_delta_enr(bigint, integer, bo
 REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_handle_truncate(bigint) FROM PUBLIC;
 
 -- owner_lifecycle
+REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, text, text, text, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.get_stream_table_partition_retention(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention(text, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.ann_maintenance_request(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.cancel_ann_maintenance(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.claim_ann_maintenance(bigint) FROM PUBLIC;
@@ -4692,6 +4738,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.subscribe(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.subscribe_distance(text, text, text, text, text, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.unsubscribe(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.unsubscribe_distance(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.would_replace_stream_table_storage(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.stat_reset(bigint) FROM PUBLIC;
 
 -- public_read
@@ -4786,6 +4833,7 @@ GRANT EXECUTE ON FUNCTION pgtrickle.worker_allocation_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.worker_pool_status() TO PUBLIC;
 
 -- trigger_entry
+REVOKE EXECUTE ON FUNCTION pgtrickle._on_ddl_start() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_ddl_end() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_sql_drop() FROM PUBLIC;
 

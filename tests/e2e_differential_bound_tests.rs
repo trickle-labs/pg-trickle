@@ -406,3 +406,142 @@ async fn exists_grouped_count_excludes_future_partner_until_next_window() {
     db.assert_st_matches_query("bound_q04_st", query).await;
     assert_no_full_fallback(&db, "bound_q04_st").await;
 }
+
+// Regression for #1453: a normal DIFFERENTIAL refresh must ANALYZE the
+// materialized CDC window read by the delta query, even without planner hints.
+// Inspect the staged table before COMMIT (it is ON COMMIT DROP). The negative
+// control also verifies that analyze_before_delta = off still disables ANALYZE.
+async fn inspect_issue_1453_stage_statistics(db: &E2eDb, analyze: bool) {
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin inspectable CDC refresh");
+    sqlx::query("SET LOCAL pg_trickle.refresh_strategy = 'differential'")
+        .execute(&mut *tx)
+        .await
+        .expect("force differential refresh");
+    sqlx::query("SET LOCAL pg_trickle.planner_aggressive = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable planner hints");
+    sqlx::query(if analyze {
+        "SET LOCAL pg_trickle.analyze_before_delta = on"
+    } else {
+        "SET LOCAL pg_trickle.analyze_before_delta = off"
+    })
+    .execute(&mut *tx)
+    .await
+    .expect("configure pre-delta ANALYZE");
+
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('analyze1453_hourly')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh staged CDC aggregate");
+
+    let (stage_name, lsn_stats): (String, i64) = sqlx::query_as(
+        "SELECT c.relname::text,
+                (SELECT count(*)::bigint
+                 FROM pg_catalog.pg_statistic s
+                 JOIN pg_catalog.pg_attribute a
+                   ON a.attrelid = s.starelid AND a.attnum = s.staattnum
+                 WHERE s.starelid = c.oid AND a.attname = 'lsn')
+         FROM pg_catalog.pg_class c
+         WHERE c.relnamespace = pg_catalog.pg_my_temp_schema()
+           AND c.relname LIKE '__pgt_cdc_%'",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("find the ordinary refresh's staged CDC table");
+
+    assert!(stage_name.starts_with("__pgt_cdc_"));
+    let window_rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*)::bigint FROM pg_temp.\"{stage_name}\""
+    )))
+    .fetch_one(&mut *tx)
+    .await
+    .expect("count the bounded CDC rows");
+    assert!(window_rows > 0, "test must exercise a nonempty CDC window");
+
+    assert_eq!(
+        lsn_stats > 0,
+        analyze,
+        "staged table {stage_name} ({window_rows} rows) has {lsn_stats} lsn statistics"
+    );
+    let action: String = sqlx::query_scalar(
+        "SELECT h.action::text
+         FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables t USING (pgt_id)
+         WHERE t.pgt_name = 'analyze1453_hourly'
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read refresh action");
+    assert_eq!(
+        action, "DIFFERENTIAL",
+        "the regression must not fall back to FULL"
+    );
+
+    tx.commit().await.expect("commit inspected refresh");
+}
+
+#[tokio::test]
+async fn test_issue_1453_staged_cdc_analyzed_in_ordinary_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE analyze1453_usage (
+            request_id text NOT NULL,
+            event_day date NOT NULL,
+            occurred_at timestamptz NOT NULL,
+            scope_path text NOT NULL,
+            meter text NOT NULL,
+            value numeric NOT NULL,
+            PRIMARY KEY (request_id, meter, event_day)
+         ) PARTITION BY RANGE (event_day)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE analyze1453_usage_all PARTITION OF analyze1453_usage
+         FOR VALUES FROM ('2020-01-01') TO ('2100-01-01')",
+    )
+    .await;
+    let query = "SELECT meter, scope_path,
+                        date_trunc('hour', occurred_at AT TIME ZONE 'UTC') AS hour,
+                        sum(value) AS quantity, count(*) AS events
+                 FROM analyze1453_usage
+                 GROUP BY meter, scope_path,
+                          date_trunc('hour', occurred_at AT TIME ZONE 'UTC')";
+    db.create_st("analyze1453_hourly", query, "1h", "DIFFERENTIAL")
+        .await;
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.analyze1453_hourly'])")
+        .await;
+
+    db.execute(
+        "INSERT INTO analyze1453_usage
+         SELECT 'on-' || g, DATE '2025-01-01',
+                TIMESTAMPTZ '2025-01-01 10:00+00',
+                'scope-' || (g % 20), 'm' || (g % 5), (1 + g % 5)::numeric
+         FROM generate_series(1, 1200) g",
+    )
+    .await;
+    inspect_issue_1453_stage_statistics(&db, true).await;
+    db.refresh_st_until_converged("analyze1453_hourly").await;
+    db.assert_st_matches_query("analyze1453_hourly", query)
+        .await;
+
+    // A new CDC copy must not inherit statistics from the previous window.
+    db.execute(
+        "INSERT INTO analyze1453_usage
+         SELECT 'off-' || g, DATE '2025-01-01',
+                TIMESTAMPTZ '2025-01-01 10:00+00',
+                'scope-' || (g % 20), 'm' || (g % 5), (1 + g % 5)::numeric
+         FROM generate_series(1, 120) g",
+    )
+    .await;
+    inspect_issue_1453_stage_statistics(&db, false).await;
+    db.refresh_st_until_converged("analyze1453_hourly").await;
+    db.assert_st_matches_query("analyze1453_hourly", query)
+        .await;
+}

@@ -7,7 +7,7 @@
 //!   - Stable memory usage (RSS growth < 20% over the test duration)
 //!   - Correctness: stream table contents match defining queries
 //!
-//! These tests are `#[ignore]`d to skip in normal `cargo test` runs.
+//! The long soak is `#[ignore]`d; bounded correctness regression tests run in normal E2E suites.
 //! Run manually or via CI:
 //!
 //! ```bash
@@ -25,7 +25,7 @@
 
 mod e2e;
 
-use e2e::E2eDb;
+use e2e::{E2eDb, oracle};
 use std::time::{Duration, Instant};
 
 // ── Configuration ──────────────────────────────────────────────────────
@@ -200,8 +200,11 @@ async fn apply_dml_batch(db: &E2eDb, source_idx: usize, batch: usize, cycle: u64
     ))
     .await;
 
-    // DELETE ~10% of the batch size
-    let delete_count = (batch as f64 * 0.1).max(1.0) as usize;
+    // Keep the number of source rows constant: otherwise the many-to-many
+    // join grows quadratically during a long soak, and RSS growth primarily
+    // measures a larger working set rather than retained backend memory.
+    // Each batch still exercises INSERT, UPDATE and DELETE.
+    let delete_count = batch;
     db.execute(&format!(
         "DELETE FROM {table}
          WHERE id IN (
@@ -270,177 +273,233 @@ async fn check_worker_alive(db: &E2eDb) -> Result<(), String> {
     Ok(())
 }
 
-/// Get the current RSS of the PostgreSQL backend (in KB).
-/// Returns None if the platform doesn't support this.
-async fn get_rss_kb(db: &E2eDb) -> Option<i64> {
-    // Use /proc/self/status on Linux (Docker container)
-    db.try_execute(
-        "CREATE OR REPLACE FUNCTION pg_temp.get_rss_kb()
-         RETURNS BIGINT LANGUAGE plpgsql AS $$
-         DECLARE
-             line TEXT;
-             rss_kb BIGINT;
-         BEGIN
-             FOR line IN SELECT pg_read_file('/proc/self/status') LOOP
-                 IF line LIKE 'VmRSS:%' THEN
-                     rss_kb := regexp_replace(line, '[^0-9]', '', 'g')::bigint;
-                     RETURN rss_kb;
-                 END IF;
-             END LOOP;
-             RETURN NULL;
-         EXCEPTION WHEN OTHERS THEN
-             RETURN NULL;
-         END; $$",
-    )
-    .await
-    .ok()?;
+const RSS_GROWTH_LIMIT_PCT: i64 = 20;
 
-    let rss: Option<i64> = sqlx::query_scalar("SELECT pg_temp.get_rss_kb()")
-        .fetch_one(&db.pool)
-        .await
-        .ok()?;
-
-    rss
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RssSample {
+    backend_pid: i32,
+    rss_kb: i64,
 }
 
-/// Verify stream table correctness by comparing contents to defining query.
-async fn verify_correctness(db: &E2eDb, st_name: &str) -> Result<(), String> {
-    verify_correctness_inner(db, st_name, false).await
-}
-
-/// Verify stream table correctness using a FULL refresh first.
-///
-/// A FULL refresh (TRUNCATE + INSERT) guarantees the stream table exactly
-/// matches the defining query, bypassing any incremental-maintenance drift.
-async fn verify_correctness_full(db: &E2eDb, st_name: &str) -> Result<(), String> {
-    verify_correctness_inner(db, st_name, true).await
-}
-
-async fn verify_correctness_inner(
-    db: &E2eDb,
-    st_name: &str,
-    force_full: bool,
-) -> Result<(), String> {
-    if force_full {
-        // Switch to FULL, refresh, then switch back to DIFFERENTIAL.
-        // FULL refresh is TRUNCATE + INSERT — guaranteed ground truth.
-        for attempt in 0u8..5 {
-            match db
-                .try_execute(&format!(
-                    "SELECT pgtrickle.alter_stream_table('{st_name}', refresh_mode => 'FULL')"
-                ))
-                .await
-            {
-                Ok(()) => break,
-                Err(_) if attempt < 4 => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                }
-                Err(e) => {
-                    return Err(format!("alter to FULL failed for {st_name}: {e}"));
-                }
-            }
-        }
-        for attempt in 0u8..5 {
-            match db
-                .try_execute(&format!(
-                    "SELECT pgtrickle.refresh_stream_table('{st_name}')"
-                ))
-                .await
-            {
-                Ok(()) => {
-                    if attempt < 4 {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                        continue;
-                    }
-                    break;
-                }
-                Err(_) if attempt < 4 => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                }
-                Err(e) => {
-                    return Err(format!("FULL refresh failed for {st_name}: {e}"));
-                }
-            }
-        }
-        // Restore DIFFERENTIAL mode for subsequent soak cycles.
-        let _ = db
-            .try_execute(&format!(
-                "SELECT pgtrickle.alter_stream_table('{st_name}', refresh_mode => 'DIFFERENTIAL')"
-            ))
-            .await;
-    } else {
-        // DIFFERENTIAL refresh path (original logic).
-        // Retry up to 5 times with a short back-off because:
-        //   (a) The background worker may hold the catalog row lock, making
-        //       refresh_stream_table return RefreshSkipped (silently as Ok).  A
-        //       second call after the worker commits ensures a real refresh.
-        //   (b) A transient deadlock (cycles 162/167 pattern) can cause the
-        //       refresh to fail; retrying recovers without marking a false
-        //       correctness violation.
-        for attempt in 0u8..5 {
-            match db
-                .try_execute(&format!(
-                    "SELECT pgtrickle.refresh_stream_table('{st_name}')"
-                ))
-                .await
-            {
-                Ok(()) => {
-                    if attempt < 4 {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                        continue;
-                    }
-                    break;
-                }
-                Err(e) if attempt < 4 => {
-                    eprintln!("  [verify_correctness] retry {attempt}: {e}");
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                }
-                Err(e) => return Err(format!("refresh failed for {st_name}: {e}")),
-            }
-        }
+/// Extract the one positive VmRSS value (in kB) from Linux /proc/self/status.
+/// pg_read_file returns the *whole* document, not one row per line.
+fn parse_rss_kb(status: &str) -> Result<i64, String> {
+    let mut fields = status
+        .lines()
+        .filter_map(|line| line.strip_prefix("VmRSS:"));
+    let field = fields
+        .next()
+        .ok_or_else(|| "VmRSS field missing from /proc/self/status".to_string())?;
+    if fields.next().is_some() {
+        return Err("multiple VmRSS fields in /proc/self/status".into());
     }
 
-    // Get defining query
-    let defining_query: String = db
-        .query_scalar(&format!(
-            "SELECT defining_query FROM pgtrickle.pgt_stream_tables
-             WHERE pgt_name = '{st_name}'"
-        ))
-        .await;
-
-    // Get user-visible columns
-    let cols: String = db
-        .query_scalar(&format!(
-            "SELECT string_agg(column_name, ', ' ORDER BY ordinal_position)
-             FROM information_schema.columns
-             WHERE table_name = '{st_name}'
-               AND left(column_name, 6) <> '__pgt_'"
-        ))
-        .await;
-
-    // Multiset equality check
-    let matches: bool = db
-        .query_scalar(&format!(
-            "SELECT NOT EXISTS (
-                (SELECT {cols} FROM public.{st_name} EXCEPT ALL ({defining_query}))
-                UNION ALL
-                (({defining_query}) EXCEPT ALL SELECT {cols} FROM public.{st_name})
-            )"
-        ))
-        .await;
-
-    if !matches {
-        let st_count: i64 = db
-            .query_scalar(&format!("SELECT count(*) FROM public.{st_name}"))
-            .await;
-        let q_count: i64 = db
-            .query_scalar(&format!("SELECT count(*) FROM ({defining_query}) _q"))
-            .await;
+    let mut parts = field.split_whitespace();
+    let value = parts
+        .next()
+        .ok_or_else(|| "VmRSS value missing from /proc/self/status".to_string())?;
+    let rss_kb = value
+        .parse::<i64>()
+        .map_err(|e| format!("invalid VmRSS value {field:?}: {e}"))?;
+    if rss_kb <= 0 || parts.next() != Some("kB") || parts.next().is_some() {
         return Err(format!(
-            "CORRECTNESS VIOLATION: {st_name} has {st_count} rows, query returns {q_count}"
+            "invalid VmRSS value {field:?}: expected a positive integer followed by kB"
         ));
     }
-    Ok(())
+    Ok(rss_kb)
+}
+
+/// Read RSS and PID in one query on a caller-owned, pinned PostgreSQL
+/// connection. Errors are fatal to qualification, not an absent sample.
+async fn get_rss_sample(conn: &mut sqlx::PgConnection) -> Result<RssSample, String> {
+    let (backend_pid, status): (i32, String) =
+        sqlx::query_as("SELECT pg_backend_pid(), pg_read_file('/proc/self/status')")
+            .fetch_one(conn)
+            .await
+            .map_err(|e| {
+                format!("cannot read PostgreSQL /proc/self/status (Linux required): {e}")
+            })?;
+
+    let rss_kb =
+        parse_rss_kb(&status).map_err(|e| format!("PostgreSQL backend PID {backend_pid}: {e}"))?;
+    Ok(RssSample {
+        backend_pid,
+        rss_kb,
+    })
+}
+
+/// Calculate growth only for positive RSS readings from the same backend.
+fn rss_growth_percent(initial: RssSample, latest: RssSample) -> Result<f64, String> {
+    let details = format!(
+        "initial backend PID {}: {} kB; latest backend PID {}: {} kB",
+        initial.backend_pid, initial.rss_kb, latest.backend_pid, latest.rss_kb
+    );
+    if initial.backend_pid <= 0 || latest.backend_pid <= 0 {
+        return Err(format!("invalid PostgreSQL backend PID: {details}"));
+    }
+    if initial.backend_pid != latest.backend_pid {
+        return Err(format!(
+            "RSS samples came from different backends: {details}"
+        ));
+    }
+    if initial.rss_kb <= 0 || latest.rss_kb <= 0 {
+        return Err(format!("RSS samples must be positive: {details}"));
+    }
+    Ok((latest.rss_kb as f64 / initial.rss_kb as f64 - 1.0) * 100.0)
+}
+
+/// Enforce the strict <20% growth limit without floating-point rounding.
+fn validate_rss_growth(initial: RssSample, final_rss: RssSample) -> Result<f64, String> {
+    let growth_pct = rss_growth_percent(initial, final_rss)?;
+    if i128::from(final_rss.rss_kb) * 100
+        >= i128::from(initial.rss_kb) * (100 + i128::from(RSS_GROWTH_LIMIT_PCT))
+    {
+        return Err(format!(
+            "RSS growth {growth_pct:.1}% violates the <{RSS_GROWTH_LIMIT_PCT}% threshold: \
+             backend PID {}, initial={} kB, final={} kB",
+            initial.backend_pid, initial.rss_kb, final_rss.rss_kb
+        ));
+    }
+    Ok(growth_pct)
+}
+
+/// The completed action, status, path and affected-row witness stored in the
+/// refresh history. Keep the SQL row type named to make its intent explicit.
+type RefreshHistoryRecord = (String, String, bool, Option<String>, i64, i64, i64);
+
+/// Evidence from a completed manual refresh at a quiescent checkpoint.
+#[derive(Debug)]
+struct RefreshWitness {
+    action: String,
+    affected_rows: i64,
+}
+
+/// Catch up a stream with a manual refresh and compare its *maintained* public
+/// result against its defining query. The scheduler must already be paused and
+/// drained. In particular, never switch to FULL or repair a mismatched result.
+///
+/// A manual refresh can return Ok when it was actually skipped. Insist on a
+/// new, completed history record and reject implicit FULL fallbacks so this
+/// checkpoint cannot certify correctness by rebuilding the stream table.
+async fn verify_correctness(db: &E2eDb, st_name: &str) -> Result<RefreshWitness, String> {
+    let before: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(h.refresh_id), 0)
+         FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+         WHERE st.pgt_schema = 'public' AND st.pgt_name = $1",
+    )
+    .bind(st_name)
+    .fetch_one(&db.pool)
+    .await
+    .map_err(|e| format!("refresh history lookup failed for {st_name}: {e}"))?;
+
+    db.try_execute(&format!(
+        "SELECT pgtrickle.refresh_stream_table('public.{st_name}')"
+    ))
+    .await
+    .map_err(|e| format!("refresh failed for {st_name}: {e}"))?;
+
+    let record: Option<RefreshHistoryRecord> = sqlx::query_as(
+        "SELECT h.action, h.status, h.was_full_fallback, h.merge_strategy_used,
+                    COALESCE(h.rows_inserted, 0), COALESCE(h.rows_updated, 0),
+                    COALESCE(h.rows_deleted, 0)
+             FROM pgtrickle.pgt_refresh_history h
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+             WHERE st.pgt_schema = 'public' AND st.pgt_name = $1
+               AND h.refresh_id > $2
+             ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .bind(st_name)
+    .bind(before)
+    .fetch_optional(&db.pool)
+    .await
+    .map_err(|e| format!("refresh witness lookup failed for {st_name}: {e}"))?;
+    let (action, status, full_fallback, merge_strategy, inserted, updated, deleted) = record
+        .ok_or_else(|| {
+            format!("refresh for {st_name} returned without a new history record (skipped?)")
+        })?;
+    if status != "COMPLETED"
+        || !matches!(action.as_str(), "DIFFERENTIAL" | "NO_DATA")
+        || full_fallback
+        || merge_strategy.as_deref() == Some("FULL")
+    {
+        return Err(format!(
+            "unexpected refresh path for {st_name}: action={action}, status={status}, \
+             was_full_fallback={full_fallback}, merge_strategy={merge_strategy:?}"
+        ));
+    }
+
+    let defining_query: String = sqlx::query_scalar(
+        "SELECT defining_query FROM pgtrickle.pgt_stream_tables
+         WHERE pgt_schema = 'public' AND pgt_name = $1",
+    )
+    .bind(st_name)
+    .fetch_one(&db.pool)
+    .await
+    .map_err(|e| format!("defining query lookup failed for {st_name}: {e}"))?;
+
+    // Exact bag comparison, including duplicate rows, and concrete extra/missing
+    // row samples on failure. All writes are quiesced for the entire comparison.
+    oracle::compare_st_to_query(db, &format!("public.{st_name}"), &defining_query)
+        .await
+        .map_err(|e| format!("CORRECTNESS VIOLATION for {st_name}: {e}"))?;
+
+    Ok(RefreshWitness {
+        action,
+        affected_rows: inserted + updated + deleted,
+    })
+}
+
+/// Every correctness checkpoint uses the same drain/refresh/compare path.
+/// Keep failures in the caller-owned accumulator: later checks, or an optional
+/// manual recovery outside this harness, must never erase an earlier mismatch.
+async fn run_correctness_checkpoint(
+    db: &E2eDb,
+    active_sts: &[&str],
+    label: &str,
+    failures: &mut Vec<String>,
+    resume_after: bool,
+) {
+    let target_list = active_sts
+        .iter()
+        .map(|name| format!("'public.{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let pause = format!("SELECT pgtrickle.pause_scheduler(ARRAY[{target_list}])");
+    let resume = format!("SELECT pgtrickle.resume_scheduler(ARRAY[{target_list}])");
+
+    if let Err(e) = db.try_execute(&pause).await {
+        let failure = format!("[{label}] scheduler drain failed for {active_sts:?}: {e}");
+        println!("    FAIL — {failure}");
+        failures.push(failure);
+    } else {
+        for st in active_sts {
+            match verify_correctness(db, st).await {
+                Ok(witness) => println!(
+                    "    {st}: ✓ (action={}, affected_rows={})",
+                    witness.action, witness.affected_rows
+                ),
+                Err(e) => {
+                    let failure = format!("[{label}] {e}");
+                    println!("    {st}: FAIL — {failure}");
+                    failures.push(failure);
+                }
+            }
+        }
+    }
+
+    if resume_after && let Err(e) = db.try_execute(&resume).await {
+        let failure = format!("[{label}] scheduler resume failed: {e}");
+        println!("    FAIL — {failure}");
+        failures.push(failure);
+    }
+}
+
+/// This is the final-path entry point used by the long soak and the bounded
+/// regression: it runs even if the duration never reached the periodic timer.
+async fn run_final_correctness(db: &E2eDb, active_sts: &[&str], failures: &mut Vec<String>) {
+    println!("\n  Final correctness verification (DIFFERENTIAL, no rebuild)...");
+    run_correctness_checkpoint(db, active_sts, "final", failures, false).await;
 }
 
 // ── Main Soak Test ─────────────────────────────────────────────────────
@@ -452,6 +511,10 @@ async fn test_soak_stability() {
     let cycle_delay = Duration::from_millis(cycle_delay_ms());
     let batch = batch_size();
     let n_sources = num_sources();
+    assert!(
+        (1..=5).contains(&n_sources),
+        "SOAK_NUM_SOURCES must be between 1 and 5"
+    );
 
     println!("\n══════════════════════════════════════════════════════════");
     println!("  G17-SOAK: Long-Running Stability Soak Test");
@@ -490,11 +553,35 @@ async fn test_soak_stability() {
         active_sts.len()
     );
 
-    // Record initial RSS
-    let initial_rss = get_rss_kb(&db).await;
-    if let Some(rss) = initial_rss {
-        println!("  Initial RSS: {} KB", rss);
+    // Keep one backend reserved through the entire soak and run manual
+    // refreshes on it: measuring an idle connection would not exercise
+    // the extension's memory-intensive workload. DML uses the pool.
+    let mut rss_conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("Failed to reserve PostgreSQL backend for RSS measurements");
+
+    // Measure growth after warming the same backend through every refresh
+    // operator. The source set stays bounded during the measurement window,
+    // avoiding expected RSS high-water growth from ever-larger join results.
+    apply_dml_batch(&db, 1, batch, 0).await;
+    for st in &active_sts {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT pgtrickle.refresh_stream_table('{st}')"
+        )))
+        .execute(&mut *rss_conn)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to warm backend refresh for {st}: {e}"));
     }
+
+    let initial_rss = get_rss_sample(&mut rss_conn)
+        .await
+        .unwrap_or_else(|e| panic!("Initial RSS measurement failed: {e}"));
+    println!(
+        "  Initial RSS (PostgreSQL backend PID {}): {} kB",
+        initial_rss.backend_pid, initial_rss.rss_kb
+    );
 
     // ── Soak Loop ──────────────────────────────────────────────────────
     let start = Instant::now();
@@ -519,17 +606,20 @@ async fn test_soak_stability() {
         apply_dml_batch(&db, source_idx, batch, cycle).await;
         total_dml_ops += 3; // INSERT + UPDATE + DELETE
 
-        // Manual refresh on a rotating stream table.
+        // Manual refresh on the measured backend, so its RSS reflects
+        // actual extension work (rather than an idle, pinned session).
         // Retry once on transient deadlock before recording a failure.
         let st_idx = (cycle as usize - 1) % active_sts.len();
         let st = active_sts[st_idx];
+        let refresh_sql = format!("SELECT pgtrickle.refresh_stream_table('{st}')");
         let refresh_result = {
-            let r = db
-                .try_execute(&format!("SELECT pgtrickle.refresh_stream_table('{st}')"))
+            let r = sqlx::query(sqlx::AssertSqlSafe(refresh_sql.clone()))
+                .execute(&mut *rss_conn)
                 .await;
             if r.is_err() {
                 tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
-                db.try_execute(&format!("SELECT pgtrickle.refresh_stream_table('{st}')"))
+                sqlx::query(sqlx::AssertSqlSafe(refresh_sql))
+                    .execute(&mut *rss_conn)
                     .await
             } else {
                 r
@@ -562,45 +652,37 @@ async fn test_soak_stability() {
                 print!("worker OK");
             }
 
-            // RSS check
-            if let Some(rss) = get_rss_kb(&db).await {
-                print!(", RSS={rss}KB");
-                if let Some(initial) = initial_rss {
-                    let growth_pct =
-                        ((rss as f64 - initial as f64) / initial as f64 * 100.0).max(0.0);
-                    print!(" (+{growth_pct:.1}%)");
-                }
-            }
+            // RSS diagnostics are always taken from the reserved backend.
+            let rss = get_rss_sample(&mut rss_conn).await.unwrap_or_else(|e| {
+                panic!(
+                    "[{elapsed}s] RSS measurement failed for backend PID {} (initial={} kB): {e}",
+                    initial_rss.backend_pid, initial_rss.rss_kb
+                )
+            });
+            let growth_pct = rss_growth_percent(initial_rss, rss)
+                .unwrap_or_else(|e| panic!("[{elapsed}s] RSS measurement unqualified: {e}"));
+            print!(
+                ", RSS backend PID {}: {} kB (growth={growth_pct:+.1}%)",
+                rss.backend_pid, rss.rss_kb
+            );
 
             println!(", refreshes={total_refreshes}, dml_ops={total_dml_ops}");
             last_check = Instant::now();
         }
 
-        // Periodic correctness checks (every 2 min)
+        // Periodic correctness checks (every 2 min), after a quiescent
+        // scheduler boundary. JOIN violations have no special exemption.
         if last_correctness.elapsed() >= correctness_interval {
             let elapsed = start.elapsed().as_secs();
             println!("  [{elapsed}s] Running correctness check...");
-            for st in &active_sts {
-                if let Err(e) = verify_correctness(&db, st).await {
-                    if *st == "soak_join" {
-                        // Known TOCTOU limitation: many-to-many JOIN under
-                        // concurrent DML can accumulate phantom rows during
-                        // DIFFERENTIAL refresh.  The race occurs because
-                        // get_slot_positions() captures the frontier LSN in
-                        // one SPI call, but the MERGE reads the source table
-                        // (R₁) with a potentially newer READ COMMITTED
-                        // snapshot.  R₁ can see source changes beyond the
-                        // frontier that ΔR does not include, producing an
-                        // error term ΔL ⋈ ΔR_extra that accumulates across
-                        // cycles.  The final correctness check uses a FULL
-                        // refresh to verify ground-truth equality.
-                        println!("  [{elapsed}s] KNOWN JOIN DRIFT (ignored): {e}");
-                    } else {
-                        println!("  [{elapsed}s] CORRECTNESS FAIL: {e}");
-                        health_check_failures.push(format!("[{elapsed}s] {e}"));
-                    }
-                }
-            }
+            run_correctness_checkpoint(
+                &db,
+                &active_sts,
+                &format!("{elapsed}s"),
+                &mut health_check_failures,
+                true,
+            )
+            .await;
             last_correctness = Instant::now();
         }
 
@@ -616,37 +698,45 @@ async fn test_soak_stability() {
     println!("  Total DML operations: {total_dml_ops}");
     println!("  Total refreshes: {total_refreshes}");
 
-    // Final correctness check — uses FULL refresh (TRUNCATE + INSERT)
-    // to guarantee ground-truth equality, bypassing any incremental drift
-    // from the TOCTOU race in many-to-many join DIFFERENTIAL refresh.
-    println!("\n  Final correctness verification (FULL refresh)...");
-    for st in &active_sts {
-        match verify_correctness_full(&db, st).await {
-            Ok(()) => println!("    {st}: ✓"),
-            Err(e) => {
-                println!("    {st}: FAIL — {e}");
-                health_check_failures.push(format!("[final] {e}"));
-            }
-        }
-    }
-
-    // Final RSS check
-    if let (Some(initial), Some(final_rss)) = (initial_rss, get_rss_kb(&db).await) {
-        let growth_pct = ((final_rss as f64 - initial as f64) / initial as f64 * 100.0).max(0.0);
-        println!("\n  RSS: initial={initial}KB, final={final_rss}KB, growth={growth_pct:.1}%");
-        assert!(
-            growth_pct < 20.0,
-            "RSS grew by {growth_pct:.1}% (threshold: 20%): initial={initial}KB, final={final_rss}KB"
+    // A bounded workload is essential for a meaningful RSS growth limit.
+    // Without this check, growing source/join result sizes can mimic a leak.
+    for source_idx in 1..=n_sources {
+        let rows: i64 = db
+            .query_scalar(&format!("SELECT count(*) FROM source_{source_idx}"))
+            .await;
+        assert_eq!(
+            rows, 200,
+            "Source table source_{source_idx} grew during a supposedly bounded soak"
         );
     }
 
+    // Final correctness is unconditional, even for runs shorter than the
+    // periodic interval. Drain the scheduler and compare before any repair.
+    // Leave the scheduler paused so subsequent final health checks cannot
+    // change the result we just certified.
+    run_final_correctness(&db, &active_sts, &mut health_check_failures).await;
+
+    // Final RSS check — missing, invalid or cross-backend readings fail.
+    let final_rss = get_rss_sample(&mut rss_conn).await.unwrap_or_else(|e| {
+        panic!(
+            "Final RSS measurement failed for backend PID {} (initial={} kB): {e}",
+            initial_rss.backend_pid, initial_rss.rss_kb
+        )
+    });
+    let growth_pct = validate_rss_growth(initial_rss, final_rss)
+        .unwrap_or_else(|e| panic!("RSS stability check failed: {e}"));
+    println!(
+        "\n  RSS backend PID {}: initial={} kB, final={} kB, growth={growth_pct:.1}% (limit: <{RSS_GROWTH_LIMIT_PCT}%)",
+        initial_rss.backend_pid, initial_rss.rss_kb, final_rss.rss_kb
+    );
+
     // Final error state check
-    check_no_error_states(&db)
-        .await
-        .expect("Stream tables in error state at soak end");
-    check_worker_alive(&db)
-        .await
-        .expect("Background worker not alive at soak end");
+    if let Err(e) = check_no_error_states(&db).await {
+        health_check_failures.push(format!("[final] {e}"));
+    }
+    if let Err(e) = check_worker_alive(&db).await {
+        health_check_failures.push(format!("[final] {e}"));
+    }
 
     // Report
     if !health_check_failures.is_empty() {
@@ -661,4 +751,217 @@ async fn test_soak_stability() {
     }
 
     println!("\n  ✓ Soak test PASSED: {cycle} cycles, {total_refreshes} refreshes, zero failures");
+}
+
+#[cfg(test)]
+mod rss_tests {
+    use super::*;
+
+    fn sample(pid: i32, rss_kb: i64) -> RssSample {
+        RssSample {
+            backend_pid: pid,
+            rss_kb,
+        }
+    }
+
+    #[test]
+    fn parses_rss_from_realistic_multiline_status() {
+        let status =
+            "Name:\tpostgres\nUmask:\t0022\nVmSize:\t98765 kB\nVmRSS:\t12345 kB\nThreads:\t1\n";
+        assert_eq!(parse_rss_kb(status), Ok(12_345));
+    }
+
+    #[test]
+    fn accepts_positive_baseline_and_growth_below_threshold() {
+        assert!(validate_rss_growth(sample(4242, 10_000), sample(4242, 11_900)).is_ok());
+        assert!(validate_rss_growth(sample(4242, 10_000), sample(4242, 9_000)).is_ok());
+    }
+
+    #[test]
+    fn rejects_growth_at_or_above_threshold() {
+        for rss_kb in [12_000, 12_100] {
+            let err = validate_rss_growth(sample(4242, 10_000), sample(4242, rss_kb))
+                .expect_err("growth at or above 20% must fail");
+            assert!(err.contains("threshold"), "{err}");
+            assert!(err.contains("PID 4242"), "{err}");
+            assert!(err.contains("kB"), "{err}");
+        }
+    }
+
+    #[test]
+    fn rejects_missing_or_malformed_rss() {
+        for status in [
+            "Name:\tpostgres\nVmSize:\t50000 kB\n",
+            "Name:\tpostgres\nVmRSS:\tgarbage kB\n",
+            "Name:\tpostgres\nVmRSS:\t0 kB\n",
+            "Name:\tpostgres\nVmRSS:\t12345 MB\n",
+            "Name:\tpostgres\nVmRSS:\t12345 kB extra\n",
+            "Name:\tpostgres\nVmRSS:\t12345 kB\nVmRSS:\t45678 kB\n",
+        ] {
+            assert!(
+                parse_rss_kb(status).is_err(),
+                "accepted bad status: {status:?}"
+            );
+        }
+        assert!(validate_rss_growth(sample(4242, 0), sample(4242, 1)).is_err());
+        assert!(validate_rss_growth(sample(4242, 1), sample(4242, 0)).is_err());
+    }
+
+    #[test]
+    fn rejects_changed_or_invalid_backend_pid() {
+        let err = validate_rss_growth(sample(4242, 10_000), sample(4243, 10_000))
+            .expect_err("different backends cannot qualify the memory check");
+        assert!(err.contains("PID 4242"), "{err}");
+        assert!(err.contains("PID 4243"), "{err}");
+        assert!(validate_rss_growth(sample(0, 10_000), sample(0, 10_000)).is_err());
+    }
+
+    /// Check the real PostgreSQL /proc reader on the daily Linux/Docker run.
+    #[tokio::test]
+    #[ignore = "requires the full Linux PostgreSQL E2E Docker image"]
+    async fn reads_rss_from_one_pinned_postgres_backend() {
+        let db = E2eDb::new().await;
+        let mut conn = db.pool.acquire().await.expect("Failed to reserve backend");
+        let first = get_rss_sample(&mut conn)
+            .await
+            .expect("First RSS read failed");
+        let second = get_rss_sample(&mut conn)
+            .await
+            .expect("Second RSS read failed");
+        assert_eq!(first.backend_pid, second.backend_pid);
+        assert!(first.rss_kb > 0);
+        assert!(second.rss_kb > 0);
+    }
+}
+
+// ── Bounded fail-closed correctness regressions (#1430) ────────────────
+
+/// Small deterministic JOIN fixture. Pause/drain scheduler dispatch before
+/// the first manual refresh; every later checkpoint has a stable source cut.
+async fn setup_bounded_join(db: &E2eDb) {
+    db.execute(
+        "CREATE TABLE source_1 (id INT PRIMARY KEY, category INT NOT NULL, value NUMERIC(12,2))",
+    )
+    .await;
+    db.execute("CREATE TABLE source_2 (id INT PRIMARY KEY, category INT NOT NULL, label TEXT)")
+        .await;
+    db.execute("INSERT INTO source_1 VALUES (1, 1, 10), (2, 2, 20)")
+        .await;
+    db.execute("INSERT INTO source_2 VALUES (1, 1, 'a'), (2, 1, 'b'), (3, 2, 'c')")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            'soak_join',
+            'SELECT s1.id, s1.category, s1.value, s2.label AS label_2
+             FROM source_1 s1
+             JOIN source_2 s2 ON s1.category = s2.category',
+            schedule => '1s',
+            refresh_mode => 'DIFFERENTIAL'
+        )",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['soak_join'])")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('soak_join')")
+        .await;
+}
+
+/// Bypass only the stream-table DML guard in a test transaction, without
+/// changing source data. A subsequent NO_DATA refresh must not hide drift.
+async fn corrupt_one_public_join_row(db: &E2eDb) {
+    let mut tx = db.pool.begin().await.expect("begin corruption transaction");
+    sqlx::query("SET LOCAL pg_trickle.internal_refresh = 'true'")
+        .execute(&mut *tx)
+        .await
+        .expect("set test-only DML guard override");
+    let changed = sqlx::query(
+        "UPDATE public.soak_join SET value = value + 1
+         WHERE ctid = (SELECT ctid FROM public.soak_join LIMIT 1)",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("inject one incorrect public JOIN row")
+    .rows_affected();
+    assert_eq!(changed, 1, "fixture must contain a JOIN row to corrupt");
+    tx.commit().await.expect("commit injected JOIN drift");
+}
+
+#[tokio::test]
+async fn test_soak_join_dml_completes_nonempty_differential_and_matches_exactly() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_bounded_join(&db).await;
+    db.execute("INSERT INTO source_1 VALUES (3, 1, 30)").await;
+    let witness = verify_correctness(&db, "soak_join")
+        .await
+        .expect("healthy JOIN must match after DML");
+    assert_eq!(witness.action, "DIFFERENTIAL");
+    assert!(
+        witness.affected_rows > 0,
+        "a completed, nonempty differential refresh is required: {witness:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_soak_periodic_checkpoint_reports_join_row_drift() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_bounded_join(&db).await;
+    corrupt_one_public_join_row(&db).await;
+    let mut failures = Vec::new();
+    run_correctness_checkpoint(&db, &["soak_join"], "120s", &mut failures, true).await;
+    assert_eq!(failures.len(), 1, "JOIN mismatch must fail periodic checks");
+    assert!(failures[0].contains("CORRECTNESS VIOLATION for soak_join"));
+    assert!(failures[0].contains("Extra rows in ST"));
+    assert!(failures[0].contains("Missing rows from ST"));
+}
+
+#[tokio::test]
+async fn test_soak_join_refresh_error_is_not_suppressed() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_bounded_join(&db).await;
+    // An ordinary refresh error, not a row mismatch. This previously went
+    // was previously ignored for JOINs by the periodic check.
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables
+         SET status = 'ERROR' WHERE pgt_name = 'soak_join'",
+    )
+    .await;
+    let mut failures = Vec::new();
+    run_correctness_checkpoint(&db, &["soak_join"], "120s", &mut failures, false).await;
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].contains("refresh failed for soak_join"));
+    assert!(failures[0].contains("error state"));
+}
+
+#[tokio::test]
+async fn test_soak_short_final_checkpoint_keeps_failure_after_full_recovery() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_bounded_join(&db).await;
+    // No 120-second periodic checkpoint has fired. Final verification is
+    // mandatory even for a shorter soak, *before* any FULL repair.
+    corrupt_one_public_join_row(&db).await;
+    let mut failures = Vec::new();
+    run_final_correctness(&db, &["soak_join"], &mut failures).await;
+    assert_eq!(failures.len(), 1, "short soak must detect final JOIN drift");
+    assert!(failures[0].contains("[final] CORRECTNESS VIOLATION for soak_join"));
+
+    // Recovery may make the public rows equal, but cannot retroactively
+    // erase the earlier failure from the original incremental state.
+    db.execute("SELECT pgtrickle.alter_stream_table('soak_join', refresh_mode => 'FULL')")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('soak_join')")
+        .await;
+    let defining_query: String = db
+        .query_scalar(
+            "SELECT defining_query FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'soak_join'",
+        )
+        .await;
+    oracle::compare_st_to_query(&db, "public.soak_join", &defining_query)
+        .await
+        .expect("FULL recovery should restore exact equality");
+    assert_eq!(
+        failures.len(),
+        1,
+        "recovery must not clear the failing verdict"
+    );
 }

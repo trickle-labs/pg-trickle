@@ -67,8 +67,8 @@ pg_trickle is a natural fit for implementing this pattern because:
    latency via DIFFERENTIAL refresh.
 3. **IMMEDIATE mode** can provide zero-lag outbox materialization within the
    same transaction.
-4. **LISTEN/NOTIFY integration** (`pg_trickle_alert`, `pgtrickle_wake`) enables
-   push-based relay without polling overhead.
+4. **Refresh alerts** on `pgtrickle_alert` can wake a relay after a scheduled
+   refresh. The scheduler polls; CDC capture does not send write-time NOTIFY.
 5. **WAL-based CDC** can act as a built-in transaction log tailer, avoiding
    external tools like Debezium for simple topologies.
 
@@ -380,7 +380,7 @@ while True:
 ```
 
 **Throughput:** High. Wakes immediately on refresh.  
-**Latency:** ~15ms (event-driven wake) + stream table schedule.
+**Latency:** Stream table poll schedule + notification delivery after refresh.
 
 ### Strategy C: Transaction Log Tailing via WAL CDC
 

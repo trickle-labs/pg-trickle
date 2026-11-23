@@ -36,7 +36,14 @@ GUC_CATALOG_PATH = DOCS_DIR / "GUC_CATALOG.md"
 SQL_CATALOG_PATH = DOCS_DIR / "SQL_API_CATALOG.md"
 
 # Test hooks enabled only by non-default E2E features are not public API docs.
-_TEST_ONLY_SQL_FUNCTIONS = frozenset({"e2e_catch_security_context_error"})
+_TEST_ONLY_SQL_FUNCTIONS = frozenset({
+    "e2e_catch_security_context_error",
+    "retention_candidate_test",
+    "retention_capture_multiset_test",
+    "retention_detach_test",
+    "retention_layout_test",
+    "retention_prepare_test",
+})
 
 
 def _exclude_test_only_sql_functions(functions: list[dict]) -> list[dict]:

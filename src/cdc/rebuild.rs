@@ -29,7 +29,7 @@ pub fn rebuild_cdc_trigger_function(
     let sync_commit = super::buffer_uses_sync_commit(&format!("changes_{cdc_name}"))?;
 
     // Rebuild the function body(ies) for the current CDC trigger mode GUC.
-    let mode = config::pg_trickle_cdc_trigger_mode();
+    let mode = super::trigger_mode_for_source(source_oid)?;
     match mode {
         config::CdcTriggerMode::Statement => {
             let (ins_fn, upd_fn, del_fn) = super::build_stmt_trigger_fn_sql(
@@ -66,6 +66,19 @@ pub fn rebuild_cdc_trigger_function(
             })?;
         }
     }
+    // Rebuild the persisted TRUNCATE function as well as the DML functions.
+    // Otherwise a source created before this fix could keep issuing NOTIFY.
+    Spi::run(&super::build_truncate_trigger_fn_sql(
+        change_schema,
+        &cdc_name,
+        sync_commit,
+    ))
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "Failed to rebuild CDC TRUNCATE trigger function: {e}"
+        ))
+    })?;
+
     // suppress unused warning when name == oid string
     let _ = oid_u32;
 
@@ -194,6 +207,18 @@ pub fn rebuild_cdc_trigger(
     source_oid: pg_sys::Oid,
     change_schema: &str,
 ) -> Result<String, PgTrickleError> {
+    super::with_internal_trigger_ddl(|| {
+        let trigger = rebuild_cdc_trigger_inner(source_oid, change_schema)?;
+        #[cfg(not(test))]
+        crate::dvm::retention::install_partition_truncate_guards(source_oid)?;
+        Ok(trigger)
+    })
+}
+
+fn rebuild_cdc_trigger_inner(
+    source_oid: pg_sys::Oid,
+    change_schema: &str,
+) -> Result<String, PgTrickleError> {
     let pk_columns = super::resolve_pk_columns(source_oid)?;
     // F15: use the minimal column set (union of columns_used across all downstream STs,
     // always including PK columns). Falls back to full capture when any ST uses SELECT *.
@@ -213,7 +238,7 @@ pub fn rebuild_cdc_trigger(
         None => return Ok(String::new()),
     };
 
-    let mode = config::pg_trickle_cdc_trigger_mode();
+    let mode = super::trigger_mode_for_source(source_oid)?;
 
     // 1. Rebuild trigger function(s) for the current mode.
     match mode {
@@ -255,6 +280,16 @@ pub fn rebuild_cdc_trigger(
             )?;
         }
     }
+
+    // Replace the persisted TRUNCATE body too; the DML trigger rebuild alone
+    // does not remove legacy NOTIFY calls from existing source tables.
+    let sync_commit = super::buffer_uses_sync_commit(&format!("changes_{cdc_name}"))?;
+    replace_trigger_function(
+        change_schema,
+        &format!("pg_trickle_cdc_truncate_fn_{cdc_name}"),
+        &super::build_truncate_trigger_fn_sql(change_schema, &cdc_name, sync_commit),
+        "TRUNCATE",
+    )?;
 
     // 2. Drop ALL existing trigger variants (handles both row-level and
     //    statement-level triggers — whichever mode was active before).
@@ -558,7 +593,7 @@ pub fn trigger_exists(source_oid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
     // for new tables) OR the legacy OID-based name ("pg_trickle_cdc_12345").
     // Resolve the stable_name so we check both naming conventions.
     let stable_name = super::get_cdc_name_for_source(source_oid);
-    let mut events = match config::pg_trickle_cdc_trigger_mode() {
+    let mut events = match super::trigger_mode_for_source(source_oid)? {
         config::CdcTriggerMode::Statement if super::is_insert_only_table(source_oid) => {
             vec!["ins"]
         }

@@ -16,6 +16,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.create\_stream\_table\_cost\_optimized](#pgtricklecreate_stream_table_cost_optimized)
     - [pgtrickle.create\_stream\_table\_if\_not\_exists](#pgtricklecreate_stream_table_if_not_exists)
     - [pgtrickle.create\_or\_replace\_stream\_table](#pgtricklecreate_or_replace_stream_table)
+    - [pgtrickle.would\_replace\_stream\_table\_storage](#pgtricklewould_replace_stream_table_storage)
     - [pgtrickle.bulk\_create](#pgtricklebulk_create)
     - [pgtrickle.alter\_stream\_table](#pgtricklealter_stream_table)
     - [pgtrickle.explain\_alter](#pgtrickleexplain_alter)
@@ -1137,6 +1138,44 @@ SELECT pgtrickle.create_or_replace_stream_table(
 - Mirrors PostgreSQL's `CREATE OR REPLACE` convention (`CREATE OR REPLACE VIEW`, `CREATE OR REPLACE FUNCTION`).
 - Never drops the stream table — even for incompatible schema changes, the ALTER QUERY path rebuilds storage in place while preserving the catalog entry (`pgt_id`).
 - For migration scripts that should **not** modify an existing definition, use [`create_stream_table_if_not_exists`](#pgtricklecreate_stream_table_if_not_exists) instead.
+- With an attached downstream publication, use [`would_replace_stream_table_storage`](#pgtricklewould_replace_stream_table_storage) to determine whether a declarative deployment must detach and re-attach it first.
+
+---
+
+### pgtrickle.would_replace_stream_table_storage
+
+Read-only preflight for a `create_or_replace_stream_table` definition. Returns
+`true` when the proposed defining query would enter the protected shadow-storage
+replacement path, which is prohibited while a downstream publication is attached.
+Returns `false` if the stream table does not exist (creation, not replacement),
+the defining query is identical, or the changes are whitespace-only.
+Configuration-only changes do not replace storage.
+
+```sql
+pgtrickle.would_replace_stream_table_storage(name text, query text) → boolean
+```
+
+The check uses the same caller search path, rewrite, TopK base-query comparison,
+and whitespace normalization as `create_or_replace_stream_table`. Changed
+queries are validated without mutating catalog, storage, refresh state, or
+publication bindings; invalid queries raise an error instead of returning
+`true`. The caller must own an existing stream table and have permission to
+execute the preflight function.
+
+A `true` result predicts the storage path, not that the eventual ALTER will
+succeed: other lifecycle restrictions or concurrent DDL may still block it.
+
+```sql
+SELECT pgtrickle.would_replace_stream_table_storage(
+    'public.totals',
+    'SELECT grp, sum(value) AS total, count(*) AS n, max(value) AS peak
+     FROM event GROUP BY grp'
+);
+-- true if totals exists with a different defining query
+```
+
+See [Downstream Publications](PUBLICATIONS.md#declarative-deployments-with-publications)
+for a deployment guard that only re-attaches the publication when needed.
 
 ---
 
@@ -1521,7 +1560,8 @@ SELECT pgtrickle.resume_stream_table('order_totals');
 - Errors if the ST is not in `SUSPENDED` or `ERROR` state.
 - Resets `consecutive_errors` to `0` and sets `status = 'ACTIVE'`.
 - Emits a `resumed` event on the `pg_trickle_alert` NOTIFY channel.
-- After resuming a scheduled ST, the scheduler will rebuild it in its next cycle. IMMEDIATE tables are rebuilt in the resume transaction before IVM resumes.
+- For a populated DIFFERENTIAL stream with continuous CDC capture and a valid saved frontier, resume preserves that frontier and the next refresh replays buffered changes instead of rebuilding. If CDC continuity cannot be proven or source DDL requires a rebuild, the next scheduled refresh reinitializes instead. IMMEDIATE tables are rebuilt in the resume transaction before IVM resumes.
+- Sealed `RETAIN` aggregates are never discarded by resume: any required rebuild is restricted to reconstructible, unsealed groups.
 
 ---
 
@@ -1555,6 +1595,7 @@ SELECT pgtrickle.resume_stream_table('order_totals');
 **Notes:**
 - Only active (`ACTIVE`) stream tables can be paused; errors if the ST is already
   `SUSPENDED` or in `ERROR` state.
+- When CDC continuity is provable, pausing leaves capture active and the saved frontier intact so resume can replay accumulated changes. Change buffers can grow while the stream is paused.
 - Use `pgtrickle.resume_stream_table(name)` to re-enable automated refreshes.
 - Emits a `paused` event on the `pg_trickle_alert` NOTIFY channel.
 
@@ -1592,6 +1633,83 @@ SELECT pgtrickle.set_stream_table_refresh_policy('order_totals', 'DIFFERENTIAL')
   with a cleaner, intent-revealing name.
 
 ---
+
+### pgtrickle.create_stream_table_with_retention
+
+```sql
+pgtrickle.create_stream_table_with_retention(
+    name TEXT, query TEXT, policy TEXT, source_column TEXT, cutoff TEXT,
+    schedule TEXT DEFAULT 'calculated'
+) RETURNS void
+```
+
+Create an initialized, managed differential stream and configure its retention
+policy atomically. If policy validation fails, the creation rolls back. For
+additional creation options, call `create_stream_table` and then configure
+retention in the same transaction.
+
+### pgtrickle.set_stream_table_partition_retention
+
+```sql
+pgtrickle.set_stream_table_partition_retention(
+    name TEXT, policy TEXT, source_column TEXT DEFAULT NULL, cutoff TEXT DEFAULT NULL
+) RETURNS void
+```
+
+Configure an explicit cutoff for a stream whose single partitioned source and
+aggregate grouping satisfy the retention eligibility checks. `policy` is
+`TRIM`, `RETAIN`, or `OFF`. The cutoff uses PostgreSQL input syntax for the
+source partition column's date or timestamp type. Include an explicit offset
+for `timestamptz` cutoffs when the session time zone should not determine it.
+Grouping columns with nondeterministic collations are rejected because their
+equality semantics do not match the typed row identity used for maintenance.
+Floating-point `SUM` is rejected because incremental batching can change its
+rounded result; use integer or numeric inputs for `SUM`. Existing policies
+using floating-point `SUM` fail closed on refresh and may require recovery from
+complete raw history.
+Enabling retention switches the shared source to row-level CDC and performs a
+protected baseline reinitialization so direct writes to child partitions are
+captured. While enabled, source TRUNCATE and writes during lossy CDC discard
+mode are rejected. After the last policy is disabled, the source returns to
+the configured CDC trigger mode.
+
+For an eligible expired partition, TRIM removes its groups and RETAIN preserves
+them. Both policies require the stream's valid btree row-identity index; if it
+is removed or invalid, restore its original definition before a retention cut.
+Keyed, unpartitioned streams require an immediate unique index with
+`__pgt_row_id` as its only key.
+RETAIN rejects operations that would rebuild sealed history from an
+incomplete source. `OFF` is allowed only while no history has been sealed and
+no retention cut is pending.
+After sealing, a protected FULL/reinitialize rebuild replaces only unsealed
+groups rather than deleting retained historical output. Failed safety proofs,
+incompatible query changes, or an unfinished retention detach still fail closed.
+Ordinary automatic cost-based FULL fallbacks may continue in DIFFERENTIAL mode
+when a scoped rebuild is unnecessary.
+Eligible concurrent DETACH operations persist a pending cut, replay CDC, and
+finish the cut in PostgreSQL's second detach transaction. If interrupted,
+complete the detach with `ALTER TABLE ... DETACH PARTITION ... FINALIZE`.
+A TRIM removal that does not qualify falls back to reinitialization. TRIM
+currently rejects user triggers and output-delta consumers. See the
+partitioned-table tutorial for the full contract.
+
+```sql
+SELECT pgtrickle.set_stream_table_partition_retention(
+    'daily_totals', 'TRIM', 'event_day', '2026-01-01'
+);
+```
+
+### pgtrickle.get_stream_table_partition_retention
+
+```sql
+pgtrickle.get_stream_table_partition_retention(name TEXT) RETURNS jsonb
+```
+
+Return whether retention is enabled and, when enabled, the policy, source and
+group columns, cutoff, and sealed ranges. During a concurrent detach the
+`pending_detach` object reports the parent and target OIDs and the range.
+The stream owner can call this function to inspect progress before changing
+the cutoff.
 
 ### pgtrickle.set_stream_table_storage_policy
 
@@ -1652,7 +1770,7 @@ SELECT pgtrickle.refresh_stream_table('order_totals');
 - Blocked if the ST is `SUSPENDED` — use `pgtrickle.resume_stream_table(name)` first.
 - Uses an advisory lock to prevent concurrent refreshes of the same ST.
 - If another refresh owns the lock, returns without refreshing and emits a NOTICE.
-- For `DIFFERENTIAL` mode, generates and applies a delta query. For `FULL` mode, truncates and reloads.
+- For `DIFFERENTIAL` mode, generates and applies a delta query. Ordinary `FULL` mode truncates and reloads; sealed `RETAIN` streams use a protected rebuild of unsealed groups only, preserving sealed aggregates.
 - Manual `DIFFERENTIAL` refreshes hold back their source frontier while an
   earlier transaction remains open. Committed changes beyond that safe bound
   are deferred until a later refresh, so late commits cannot be skipped.
@@ -1769,7 +1887,10 @@ pgtrickle.reinitialize_stream_table(name text) → text
 ```
 
 The command validates dependencies, resets the frontier, rebuilds missing CDC
-infrastructure, and schedules a protected full refresh.
+infrastructure, and schedules a protected full refresh. On a stream with sealed
+`RETAIN` history, it preserves sealed aggregate rows and rebuilds only
+reconstructible groups, provided the stored query and retention proofs remain
+valid; it does not replace the storage table.
 
 ---
 
@@ -6449,8 +6570,12 @@ with an attached outbox.
 |---------|-----------|
 | All functions in the `pgtrickle` schema documented in this reference | Signature and return type preserved across minor releases. New optional parameters may be added with defaults that preserve existing behaviour. |
 | Catalog tables `pgtrickle.pgt_stream_tables`, `pgtrickle.pgt_dependencies`, `pgtrickle.pgt_refresh_history` | Existing columns are not renamed or removed. New columns may be added. |
-| NOTIFY channels `pg_trickle_refresh`, `pgtrickle_alert`, `pgtrickle_wake` | Channel names and JSON payload structure preserved. New keys may be added to JSON payloads. |
+| NOTIFY channels `pg_trickle_refresh`, `pgtrickle_alert` | Channel names and JSON payload structure preserved. New keys may be added to JSON payloads. |
 | GUC names listed in `docs/CONFIGURATION.md` | Names preserved; default values may change between minor releases (documented in CHANGELOG). |
+
+The former `pgtrickle_wake` channel is no longer emitted by CDC capture triggers.
+The scheduler polls on `pg_trickle.scheduler_interval_ms`; consumers must not
+rely on `LISTEN pgtrickle_wake` for change delivery.
 
 ### Unstable (may change in any release)
 

@@ -526,6 +526,143 @@ async fn test_agg_min_max_differential() {
     db.assert_st_matches_query("agg_mm_st", q).await;
 }
 
+// ── #1456: bounded, hashable rescans with nullable composite group keys ──
+
+#[tokio::test]
+async fn test_agg_mass_extreme_deletes_rescan_nullable_composite_groups() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE agg_mass_extreme_source (id int PRIMARY KEY, region text, bucket int, value int NOT NULL)",
+    )
+    .await;
+    // 1,500 group IDs (with some coalescing on NULL keys), including
+    // partially and fully NULL composite keys, to exercise the source semi-join and the rescan-to-delta join.
+    db.execute(
+        r#"INSERT INTO agg_mass_extreme_source
+           SELECT g * 10 + i,
+                  CASE WHEN g % 13 = 0 THEN NULL ELSE 'grp-' || g END,
+                  CASE WHEN g % 17 = 0 THEN NULL ELSE g % 4 END,
+                  i
+           FROM generate_series(1, 1500) AS g,
+                generate_series(1, 5) AS i"#,
+    )
+    .await;
+    db.execute("ANALYZE agg_mass_extreme_source").await;
+    let query = "SELECT region, bucket, COUNT(*) AS n, SUM(value) AS total, \
+                 MIN(value) AS low, MAX(value) AS high \
+                 FROM agg_mass_extreme_source GROUP BY region, bucket";
+    db.create_st("agg_mass_extreme_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("agg_mass_extreme_st", query)
+        .await;
+
+    // Hashes only select candidates; the exact comparison preserves NULL keys.
+    let equal_null_keys: bool = db
+        .query_scalar("SELECT ROW(NULL::text, 1::int) IS NOT DISTINCT FROM ROW(NULL::text, 1::int)")
+        .await;
+    let different_null_keys: bool = db
+        .query_scalar("SELECT ROW(NULL::text, 1::int) IS NOT DISTINCT FROM ROW('x'::text, 1::int)")
+        .await;
+    assert!(
+        equal_null_keys,
+        "two NULL group-key fields must compare equal"
+    );
+    assert!(
+        !different_null_keys,
+        "NULL and non-NULL keys must not match"
+    );
+
+    // The generated production SQL must use the same condition in BOTH
+    // the source rescan restriction and the rescan-to-delta merge.
+    let delta_sql: String = db
+        .query_scalar("SELECT pgtrickle.explain_diff_sql('agg_mass_extreme_st')")
+        .await;
+    assert!(
+        delta_sql.contains(
+            "pg_catalog.hash_record_extended(ROW(region, bucket), 0::bigint) = pg_catalog.hash_record_extended(ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\"), 0::bigint)"
+        ),
+        "{delta_sql}"
+    );
+    assert!(
+        delta_sql.contains(
+            "ROW(region, bucket) IS NOT DISTINCT FROM ROW(__pgt_d2.\"__pgt_group_0\", __pgt_d2.\"__pgt_group_1\")"
+        ),
+        "{delta_sql}"
+    );
+    assert!(
+        delta_sql.contains(
+            "pg_catalog.hash_record_extended(ROW(r.\"region\", r.\"bucket\"), 0::bigint) = pg_catalog.hash_record_extended(ROW(d.\"region\", d.\"bucket\"), 0::bigint)"
+        ),
+        "{delta_sql}"
+    );
+    assert!(
+        delta_sql.contains(
+            "ROW(r.\"region\", r.\"bucket\") IS NOT DISTINCT FROM ROW(d.\"region\", d.\"bucket\")"
+        ),
+        "{delta_sql}"
+    );
+
+    // A plan-shape check, not a wall-clock threshold: force PostgreSQL to
+    // choose between a hash join and the old quadratic nested-loop behavior.
+    let mut conn = db.pool.acquire().await.unwrap();
+    sqlx::query("SET enable_nestloop = off")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("SET enable_mergejoin = off")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let plan: serde_json::Value = sqlx::query_scalar(
+        r#"EXPLAIN (FORMAT JSON, COSTS OFF)
+           WITH affected AS MATERIALIZED (
+               SELECT region, bucket FROM agg_mass_extreme_source
+               WHERE value = 5 GROUP BY region, bucket
+           ), rescan AS MATERIALIZED (
+               SELECT s.region, s.bucket, MAX(s.value) AS high
+               FROM agg_mass_extreme_source s
+               WHERE EXISTS (
+                   SELECT 1 FROM affected d
+                   WHERE pg_catalog.hash_record_extended(ROW(s.region, s.bucket), 0::bigint) = pg_catalog.hash_record_extended(ROW(d.region, d.bucket), 0::bigint)
+                     AND ROW(s.region, s.bucket) IS NOT DISTINCT FROM ROW(d.region, d.bucket)
+               )
+               GROUP BY s.region, s.bucket
+           )
+           SELECT SUM(COALESCE(r.high, 0)) FROM affected d
+           LEFT JOIN rescan r
+             ON pg_catalog.hash_record_extended(ROW(r.region, r.bucket), 0::bigint) = pg_catalog.hash_record_extended(ROW(d.region, d.bucket), 0::bigint)
+            AND ROW(r.region, r.bucket) IS NOT DISTINCT FROM ROW(d.region, d.bucket)"#,
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert!(
+        plan.to_string().matches("\"Hash Cond\"").count() >= 2,
+        "both joins should have a hash condition: {plan}"
+    );
+    drop(conn);
+
+    // Delete all maxima in one delta, then all minima in the next.
+    // Every surviving group's extreme must come from its remaining rows.
+    db.execute("DELETE FROM agg_mass_extreme_source WHERE value = 5")
+        .await;
+    refresh_differential(&db, "agg_mass_extreme_st").await;
+    db.assert_st_matches_query("agg_mass_extreme_st", query)
+        .await;
+    db.execute("DELETE FROM agg_mass_extreme_source WHERE value = 1")
+        .await;
+    refresh_differential(&db, "agg_mass_extreme_st").await;
+    db.assert_st_matches_query("agg_mass_extreme_st", query)
+        .await;
+
+    // Change a group key (including a NULL transition) and rescan again.
+    db.execute("UPDATE agg_mass_extreme_source SET region = NULL, value = 8 WHERE id % 100 = 22")
+        .await;
+    refresh_differential(&db, "agg_mass_extreme_st").await;
+    db.assert_st_matches_query("agg_mass_extreme_st", query)
+        .await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // DISTINCT aggregates
 // ═══════════════════════════════════════════════════════════════════════
@@ -1051,4 +1188,207 @@ async fn test_agg_mixed_dml_stress() {
         .await;
     db.refresh_st("agg_stress_st").await;
     db.assert_st_matches_query("agg_stress_st", q).await;
+}
+
+// ── Regression: quoted aggregate column resolution (#1428) ─────────────
+
+async fn assert_quoted_aggregate_row(db: &E2eDb, stream_table: &str, predicate: &str) {
+    let matches: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM {stream_table} WHERE {predicate})"
+        ))
+        .await;
+    assert!(
+        matches,
+        "{stream_table}: expected row satisfying {predicate}"
+    );
+}
+
+#[tokio::test]
+async fn test_agg_quoted_columns_avg_and_filter_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        r#"CREATE TABLE qa_ident_source (
+             id INT PRIMARY KEY, grp TEXT NOT NULL, "Amount" NUMERIC,
+             "select" NUMERIC, "line item" NUMERIC, "quote""val" NUMERIC,
+             "metric(x)" NUMERIC)"#,
+    )
+    .await;
+    db.execute(
+        "INSERT INTO qa_ident_source VALUES
+         (1, 'g', 10, 4, 1, 100, 1), (2, 'g', 30, 6, 1, NULL, 2),
+         (3, 'h', 20, 8, -1, 9, 0)",
+    )
+    .await;
+    let query = r#"SELECT q.grp, AVG(q."Amount") AS mean,
+                       SUM(q."select") FILTER (WHERE q."line item" > 0) AS filtered_sum,
+                       COUNT(q."quote""val") FILTER (WHERE q."metric(x)" >= 0) AS filtered_count
+                    FROM qa_ident_source q GROUP BY q.grp"#;
+    db.create_st("qa_ident_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("qa_ident_st", query).await;
+
+    for (mutation, expected) in [
+        (
+            "INSERT INTO qa_ident_source VALUES (4, 'g', 50, 10, 1, 1, 4)",
+            "grp = 'g' AND mean = 30 AND filtered_sum = 20 AND filtered_count = 2",
+        ),
+        (
+            r#"UPDATE qa_ident_source SET "Amount" = 60, "select" = 12,
+               "line item" = -1, "quote""val" = 2, "metric(x)" = -1 WHERE id = 2"#,
+            "grp = 'g' AND mean = 40 AND filtered_sum = 14 AND filtered_count = 2",
+        ),
+        (
+            "DELETE FROM qa_ident_source WHERE id = 1",
+            "grp = 'g' AND mean = 55 AND filtered_sum = 10 AND filtered_count = 1",
+        ),
+    ] {
+        db.execute(mutation).await;
+        refresh_differential(&db, "qa_ident_st").await;
+        db.assert_st_matches_query("qa_ident_st", query).await;
+        assert_quoted_aggregate_row(&db, "qa_ident_st", expected).await;
+    }
+}
+
+#[tokio::test]
+async fn test_agg_quoted_joined_aliases_and_compound_group_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        r#"CREATE TABLE qa_join_left (
+             id INT PRIMARY KEY, "Group(key)" TEXT, "Amount" NUMERIC)"#,
+    )
+    .await;
+    db.execute(
+        r#"CREATE TABLE qa_join_right (
+             id INT PRIMARY KEY, "Group(key)" TEXT, "select" NUMERIC,
+             "line item" NUMERIC, "quote""val" TEXT)"#,
+    )
+    .await;
+    db.execute("INSERT INTO qa_join_left VALUES (1, 'A', 10), (2, NULL, 30), (3, 'B', 20)")
+        .await;
+    db.execute(
+        "INSERT INTO qa_join_right VALUES
+         (1, 'A', 2, 1, 'x'), (2, 'A', 4, 2, 'y'), (3, 'B', 8, 0, NULL)",
+    )
+    .await;
+    let query = r#"SELECT COALESCE(l."Group(key)", r."Group(key)") AS bucket,
+                       AVG(l."Amount") AS mean,
+                       SUM(r."select") FILTER (WHERE r."line item" > 0) AS positive,
+                       COUNT(r."quote""val") FILTER (WHERE r."select" >= 0) AS present
+                    FROM qa_join_left l JOIN qa_join_right r ON l.id = r.id
+                    GROUP BY COALESCE(l."Group(key)", r."Group(key)")"#;
+    db.create_st("qa_join_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("qa_join_st", query).await;
+
+    for (mutations, expected) in [
+        (
+            &[
+                "INSERT INTO qa_join_left VALUES (4, 'A', 50)",
+                "INSERT INTO qa_join_right VALUES (4, 'A', 10, 1, 'z')",
+            ][..],
+            "bucket = 'A' AND mean = 30 AND positive = 16 AND present = 3",
+        ),
+        (
+            &[
+                r#"UPDATE qa_join_left SET "Group(key)" = 'B', "Amount" = 60 WHERE id = 2"#,
+                r#"UPDATE qa_join_right SET "Group(key)" = 'B' WHERE id = 2"#,
+            ][..],
+            "bucket = 'B' AND mean = 40 AND positive = 4 AND present = 1",
+        ),
+        (
+            &["DELETE FROM qa_join_right WHERE id = 1"][..],
+            "bucket = 'A' AND mean = 50 AND positive = 10 AND present = 1",
+        ),
+    ] {
+        for mutation in mutations {
+            db.execute(mutation).await;
+        }
+        refresh_differential(&db, "qa_join_st").await;
+        db.assert_st_matches_query("qa_join_st", query).await;
+        assert_quoted_aggregate_row(&db, "qa_join_st", expected).await;
+    }
+}
+
+#[tokio::test]
+async fn test_agg_quoted_columns_immediate_insert_update_delete() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        r#"CREATE TABLE qa_immediate_source (
+             id INT PRIMARY KEY, grp TEXT, "Amount" NUMERIC, "keep me" BOOLEAN)"#,
+    )
+    .await;
+    db.execute("INSERT INTO qa_immediate_source VALUES (1, 'g', 10, true), (2, 'g', 20, false)")
+        .await;
+    let query = r#"SELECT q.grp, AVG(q."Amount") AS mean,
+                       COUNT(*) FILTER (WHERE q."keep me") AS kept
+                    FROM qa_immediate_source q GROUP BY q.grp"#;
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table('public.qa_immediate_st', $q$ {query} $q$, NULL, 'IMMEDIATE')"
+    ))
+    .await;
+    db.assert_st_matches_query("qa_immediate_st", query).await;
+
+    for (mutation, expected) in [
+        (
+            "INSERT INTO qa_immediate_source VALUES (3, 'g', 30, true)",
+            "grp = 'g' AND mean = 20 AND kept = 2",
+        ),
+        (
+            r#"UPDATE qa_immediate_source SET "Amount" = 40, "keep me" = true WHERE id = 2"#,
+            "grp = 'g' AND mean = (80::numeric / 3) AND kept = 3",
+        ),
+        (
+            "DELETE FROM qa_immediate_source WHERE id = 1",
+            "grp = 'g' AND mean = 35 AND kept = 2",
+        ),
+    ] {
+        db.execute(mutation).await;
+        // IMMEDIATE changes are visible without refresh_stream_table().
+        db.assert_st_matches_query("qa_immediate_st", query).await;
+        assert_quoted_aggregate_row(&db, "qa_immediate_st", expected).await;
+    }
+}
+
+#[tokio::test]
+async fn test_agg_quoted_identifiers_direct_sum_count_path_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        r#"CREATE TABLE qa_direct_source (
+             id INT PRIMARY KEY, "Group(key)" TEXT,
+             "Amount" NUMERIC, "select" NUMERIC)"#,
+    )
+    .await;
+    db.execute(
+        "INSERT INTO qa_direct_source VALUES
+         (1, 'A', 10, 2), (2, 'A', 20, NULL), (3, 'B', 5, 1)",
+    )
+    .await;
+    // Simple SUM/COUNT without FILTER remains P5-eligible.
+    let query = r#"SELECT s."Group(key)" AS grp, SUM(s."Amount") AS total,
+                       COUNT(s."select") AS counted
+                    FROM qa_direct_source s GROUP BY s."Group(key)""#;
+    db.create_st("qa_direct_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("qa_direct_st", query).await;
+
+    for (mutation, expected) in [
+        (
+            "INSERT INTO qa_direct_source VALUES (4, 'A', 30, 3)",
+            "grp = 'A' AND total = 60 AND counted = 2",
+        ),
+        (
+            r#"UPDATE qa_direct_source SET "Group(key)" = 'B', "Amount" = 12 WHERE id = 2"#,
+            "grp = 'A' AND total = 40 AND counted = 2",
+        ),
+        (
+            "DELETE FROM qa_direct_source WHERE id = 4",
+            "grp = 'A' AND total = 10 AND counted = 1",
+        ),
+    ] {
+        db.execute(mutation).await;
+        refresh_differential(&db, "qa_direct_st").await;
+        db.assert_st_matches_query("qa_direct_st", query).await;
+        assert_quoted_aggregate_row(&db, "qa_direct_st", expected).await;
+    }
 }

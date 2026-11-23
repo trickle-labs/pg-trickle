@@ -1881,7 +1881,9 @@ async fn test_mixed_bulk_insert_through_view() {
          FROM generate_series(1, 1000) g",
     )
     .await;
-    db.refresh_st("mb_st_bulk").await;
+    // A concurrent scheduler refresh may skip a manual attempt; wait for
+    // the materialized aggregate to actually match the defining query.
+    db.refresh_st_until_converged("mb_st_bulk").await;
 
     assert_eq!(
         db.count("public.mb_st_bulk").await,
@@ -1898,7 +1900,7 @@ async fn test_mixed_bulk_insert_through_view() {
 
     // Bulk delete half the rows
     db.execute("DELETE FROM mb_bulk WHERE id > 500").await;
-    db.refresh_st("mb_st_bulk").await;
+    db.refresh_st_until_converged("mb_st_bulk").await;
 
     db.assert_st_matches_query(
         "mb_st_bulk",

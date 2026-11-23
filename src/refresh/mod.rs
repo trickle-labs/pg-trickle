@@ -88,6 +88,8 @@ pub(crate) struct RefreshContext {
     pub(crate) full_policy: FullPolicy,
     pub(crate) graph_refresh_id: Option<i64>,
     pub(crate) source_boundary_digest: Option<Vec<u8>>,
+    pub(crate) retention_catchup: bool,
+    pub(crate) retention_partition_key: Option<(i64, String)>,
 }
 
 impl RefreshContext {
@@ -97,6 +99,8 @@ impl RefreshContext {
             full_policy: FullPolicy::Allow,
             graph_refresh_id: None,
             source_boundary_digest: None,
+            retention_catchup: false,
+            retention_partition_key: None,
         }
     }
 
@@ -106,6 +110,16 @@ impl RefreshContext {
             full_policy,
             graph_refresh_id: None,
             source_boundary_digest: None,
+            retention_catchup: false,
+            retention_partition_key: None,
+        }
+    }
+
+    pub(crate) fn retention(safe_bound: &str, partition_key: Option<(i64, String)>) -> Self {
+        Self {
+            retention_catchup: true,
+            retention_partition_key: partition_key,
+            ..Self::graph(safe_bound, FullPolicy::Error)
         }
     }
 
@@ -120,6 +134,8 @@ impl RefreshContext {
             full_policy,
             graph_refresh_id: Some(graph_refresh_id),
             source_boundary_digest: Some(source_boundary_digest),
+            retention_catchup: false,
+            retention_partition_key: None,
         }
     }
 }
@@ -165,6 +181,25 @@ pub(crate) fn current_full_policy() -> FullPolicy {
     })
 }
 
+pub(crate) fn is_retention_catchup() -> bool {
+    ACTIVE_CONTEXT.with(|context| {
+        context
+            .borrow()
+            .as_ref()
+            .is_some_and(|c| c.retention_catchup)
+    })
+}
+
+pub(crate) fn retention_partition_key(pgt_id: i64) -> Option<String> {
+    ACTIVE_CONTEXT.with(|context| {
+        context.borrow().as_ref().and_then(|c| {
+            c.retention_partition_key
+                .as_ref()
+                .and_then(|(id, key)| (*id == pgt_id).then(|| key.clone()))
+        })
+    })
+}
+
 pub(crate) fn current_graph_refresh_id() -> Option<i64> {
     ACTIVE_CONTEXT.with(|context| context.borrow().as_ref().and_then(|c| c.graph_refresh_id))
 }
@@ -184,6 +219,16 @@ pub(crate) fn current_initiated_by() -> Option<&'static str> {
 
 /// Reject a whole-query FULL transition when the active graph forbids it.
 pub(crate) fn ensure_full_policy(
+    st: &StreamTableMeta,
+    transition: &str,
+) -> Result<(), PgTrickleError> {
+    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
+    ensure_scoped_full_policy(st, transition)
+}
+
+/// Permit a protected FULL replacement only when the caller separately proves
+/// which groups can be reconstructed without touching sealed history.
+pub(crate) fn ensure_scoped_full_policy(
     st: &StreamTableMeta,
     transition: &str,
 ) -> Result<(), PgTrickleError> {
@@ -890,6 +935,7 @@ pub(crate) fn test_atomicity_barrier(
         "after_apply" => 2,
         "during_finalize" => 3,
         "snapshot_after_metadata" => 4,
+        "before_upstream_lock" => 5,
         _ => return None,
     };
     let Ok(lock_id) = i32::try_from(st.pgt_id) else {

@@ -31,6 +31,139 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     );
 }
 
+#[tokio::test]
+async fn test_scheduler_retries_full_when_upstream_is_locked() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.enable_fused_refresh", "off", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+        .await;
+    db.execute("CREATE TABLE lock_src (id INT PRIMARY KEY, amount INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO lock_src VALUES (1, 10)").await;
+    db.create_st(
+        "lock_up",
+        "SELECT id, amount FROM lock_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st("lock_down", "SELECT id, amount FROM lock_up", "1h", "FULL")
+        .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['lock_up', 'lock_down'])")
+        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_phase",
+        "'before_upstream_lock'",
+        "before_upstream_lock",
+    )
+    .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_for_table",
+        "'lock_down'",
+        "lock_down",
+    )
+    .await;
+
+    let down_id: i32 = db
+        .query_scalar(
+            "SELECT pgt_id::int FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'lock_down'",
+        )
+        .await;
+    let before: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    let mut barrier = db.pool.acquire().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1, 5)")
+        .bind(down_id)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = true WHERE pgt_name = 'lock_down'",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['lock_down'])")
+        .await;
+    let blocked = format!(
+        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name LIKE 'pgt_atomicity:{down_id}:before_upstream_lock:%' AND wait_event_type = 'Lock' AND {blocker_pid} = ANY(pg_blocking_pids(pid)))"
+    );
+    assert!(
+        db.wait_for_condition(
+            "scheduler upstream lock barrier",
+            &blocked,
+            Duration::from_secs(60),
+            Duration::from_millis(50)
+        )
+        .await
+    );
+    let scheduler_pid: i32 = db.query_scalar(&format!("SELECT pid FROM pg_stat_activity WHERE application_name LIKE 'pgt_atomicity:{down_id}:before_upstream_lock:%' AND {blocker_pid} = ANY(pg_blocking_pids(pid)) LIMIT 1")).await;
+    db.execute("INSERT INTO lock_src VALUES (2, 20)").await;
+    let mut upstream = db.pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'lock_up' FOR UPDATE",
+    )
+    .execute(&mut *upstream)
+    .await
+    .unwrap();
+    sqlx::query("SELECT pg_advisory_unlock($1, 5)")
+        .bind(down_id)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    let cleared = format!(
+        "SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = {scheduler_pid} AND application_name LIKE 'pgt_atomicity:{down_id}:before_upstream_lock:%')"
+    );
+    assert!(
+        db.wait_for_condition(
+            "scheduler skips locked upstream",
+            &cleared,
+            Duration::from_secs(30),
+            Duration::from_millis(50)
+        )
+        .await
+    );
+    let completed: i64 = db.query_scalar(&format!("SELECT count(*) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'lock_down' AND h.refresh_id > {before} AND h.status = 'COMPLETED'")).await;
+    assert_eq!(completed, 0);
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('lock_up')")
+        .execute(&mut *upstream)
+        .await
+        .unwrap();
+    upstream.commit().await.unwrap();
+    db.alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "''", "")
+        .await;
+    let completed = format!(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'lock_down' AND h.refresh_id > {before} AND h.initiated_by = 'SCHEDULER' AND h.action = 'REINITIALIZE' AND h.status = 'COMPLETED')"
+    );
+    assert!(
+        db.wait_for_condition(
+            "scheduled reinitialization after upstream commit",
+            &completed,
+            Duration::from_secs(60),
+            Duration::from_millis(50)
+        )
+        .await
+    );
+    let rows: Vec<(i32, i32)> = sqlx::query_as("SELECT id, amount FROM lock_down ORDER BY id")
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![(1, 10), (2, 20)]);
+    db.alter_system_set_and_wait(
+        "pg_trickle.test_chaos_phase",
+        "'before_apply'",
+        "before_apply",
+    )
+    .await;
+}
+
 async fn assert_clock_dependent_refresh(mode: &str, schedule_kind: &str) {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
     configure_fast_scheduler(&db).await;
@@ -211,8 +344,43 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
     }
     db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name IN ('replay_up', 'replay_leaf')")
         .await;
-    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['replay_up', 'replay_leaf'])")
-        .await;
+    // A missing-frontier leaf can run its FULL baseline before the upstream
+    // refresh has published any CDC rows. If both are resumed together, the
+    // test may see only the buffer's 0/0 sentinel instead of the change it
+    // intends to verify. Materialize the upstream first in this case; the
+    // other baselines still cover same-tick upstream/leaf execution.
+    if baseline == "FRONTIER_MISSING" && change_upstream {
+        db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['replay_up'])")
+            .await;
+        let upstream_id: i64 = db
+            .query_scalar(
+                "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'replay_up'",
+            )
+            .await;
+        let captured = format!(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle_changes.changes_pgt_{upstream_id}
+                WHERE action = 'I' AND lsn > '0/0'::pg_lsn
+            )"
+        );
+        assert!(
+            db.wait_for_condition(
+                "upstream CDC before missing-frontier baseline",
+                &captured,
+                Duration::from_secs(60),
+                Duration::from_millis(50),
+            )
+            .await,
+            "upstream FULL must publish its change before the leaf baseline"
+        );
+        db.assert_st_matches_query("replay_up", "SELECT id, grp FROM replay_src")
+            .await;
+        db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['replay_leaf'])")
+            .await;
+    } else {
+        db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['replay_up', 'replay_leaf'])")
+            .await;
+    }
     assert!(
         db.wait_for_condition(
             "scheduled baseline",
@@ -260,16 +428,21 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
     // case SQL equality evaluates to NULL, not false. Assert transaction
     // equality when both IDs are available, and keep the frontier/buffer
     // and exact-result checks below as the mandatory no-replay evidence.
-    if change_upstream && !witness["same_transaction"].is_null() {
+    if change_upstream && baseline != "FRONTIER_MISSING" && !witness["same_transaction"].is_null() {
         assert_eq!(witness["same_transaction"], true, "{diagnostics}");
     }
     if baseline == "FALLBACK" {
         assert_eq!(witness["fallback"], true, "{diagnostics}");
     }
     if change_upstream {
-        assert!(db.query_scalar::<bool>(&format!(
-            "SELECT MAX(lsn) > (SELECT tick_watermark_lsn FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'replay_leaf' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) FROM {buffer}"
-        )).await, "upstream capture must exceed the tick bound: {diagnostics}");
+        // The missing-frontier case starts the leaf on a later tick, after the
+        // upstream capture was witnessed. Other baselines must still prove
+        // that their same-tick capture exceeds the leaf's original tick bound.
+        if baseline != "FRONTIER_MISSING" {
+            assert!(db.query_scalar::<bool>(&format!(
+                "SELECT MAX(lsn) > (SELECT tick_watermark_lsn FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'replay_leaf' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) FROM {buffer}"
+            )).await, "upstream capture must exceed the tick bound: {diagnostics}");
+        }
         assert_eq!(
             db.query_scalar::<i64>(&format!("SELECT COUNT(*) FROM {buffer} WHERE action = 'I'"))
                 .await,
@@ -554,6 +727,257 @@ async fn test_scheduler_reinitialize_after_blocked_writer_does_not_replay() {
         "the post-rebuild correctness check must actually apply a differential delta"
     );
     db.assert_st_matches_query("scheduler_cut_st", query).await;
+}
+
+/// #1455: pause/resume and scheduler REINITIALIZE with a multi-statement
+/// writer against a day-partitioned source must preserve SUM, COUNT and MAX.
+/// The first writer commits *after* the scheduler's tick while its SHARE lock
+/// is blocked.  A second two-statement transaction must then be applied by
+/// an actual DIFFERENTIAL refresh, not a skipped call or another FULL.
+#[tokio::test]
+async fn test_scheduler_reinitialize_partitioned_multistatement_writer_exact() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "differential",
+        "differential",
+    )
+    .await;
+
+    db.execute(
+        "CREATE TABLE issue1455_src (
+            id BIGINT NOT NULL,
+            day DATE NOT NULL,
+            meter INT NOT NULL,
+            scope_path TEXT NOT NULL,
+            occurred_at TIMESTAMPTZ NOT NULL,
+            value BIGINT NOT NULL,
+            PRIMARY KEY (id, day)
+        ) PARTITION BY RANGE (day)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE issue1455_day PARTITION OF issue1455_src
+         FOR VALUES FROM ('2026-11-20') TO ('2026-11-21')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO issue1455_src (id, day, meter, scope_path, occurred_at, value)
+         SELECT i, '2026-11-20', i % 2, 'tenant',
+                TIMESTAMPTZ '2026-11-20 00:00:00+00' + (i % 12) * INTERVAL '1 hour',
+                (i % 7 + 1) * 10
+         FROM generate_series(1, 24) AS i",
+    )
+    .await;
+    let query = "SELECT meter, scope_path,
+                date_trunc('hour', occurred_at AT TIME ZONE 'UTC') AS hour,
+                sum(value) AS quantity, count(*) AS events, max(value) AS max_value
+         FROM issue1455_src
+         GROUP BY meter, scope_path,
+                  date_trunc('hour', occurred_at AT TIME ZONE 'UTC')";
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            name => 'issue1455_hourly',
+            query => $q$SELECT meter, scope_path,
+                               date_trunc('hour', occurred_at AT TIME ZONE 'UTC') AS hour,
+                               sum(value) AS quantity, count(*) AS events,
+                               max(value) AS max_value
+                        FROM issue1455_src
+                        GROUP BY meter, scope_path,
+                                 date_trunc('hour', occurred_at AT TIME ZONE 'UTC')$q$,
+            schedule => '1s',
+            refresh_mode => 'DIFFERENTIAL',
+            cdc_mode => 'trigger'
+        )",
+    )
+    .await;
+    db.assert_st_matches_query("issue1455_hourly", query).await;
+
+    // Pause/resume disables and then restores capture, explicitly requesting
+    // the scheduler's protected FULL REINITIALIZE.
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['issue1455_hourly'])")
+        .await;
+    db.execute("SELECT pgtrickle.pause_stream_table('issue1455_hourly')")
+        .await;
+    db.execute("SELECT pgtrickle.resume_stream_table('issue1455_hourly')")
+        .await;
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'issue1455_hourly'",
+        )
+        .await;
+    assert!(needs_reinit, "resume must require a protected REINITIALIZE");
+
+    let source_oid: i64 = db
+        .query_scalar("SELECT 'issue1455_src'::regclass::oid::bigint")
+        .await;
+    let source_buffer: String = db
+        .query_scalar(&format!(
+            "SELECT format('%I.%I', 'pgtrickle_changes',
+                           'changes_' || COALESCE(source_stable_name, {source_oid}::text))
+             FROM pgtrickle.pgt_change_tracking
+             WHERE source_relid = {source_oid}::oid"
+        ))
+        .await;
+    let mut writer = db.pool.begin().await.expect("open source writer");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("read writer PID");
+    sqlx::query("LOCK TABLE issue1455_src IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
+        .await
+        .expect("hold source lock before the tick");
+
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['issue1455_hourly'])")
+        .await;
+    let blocked = format!(
+        "SELECT EXISTS (
+            SELECT 1 FROM pg_locks l
+            WHERE l.relation = 'issue1455_src'::regclass
+              AND l.mode = 'ShareLock' AND NOT l.granted
+              AND {writer_pid} = ANY(pg_blocking_pids(l.pid))
+        )"
+    );
+    assert!(
+        db.wait_for_condition(
+            "scheduled #1455 REINITIALIZE blocked behind source writer",
+            &blocked,
+            Duration::from_secs(45),
+            Duration::from_millis(50),
+        )
+        .await,
+        "a real scheduler SHARE-lock wait is required"
+    );
+
+    // Two statements, one transaction, overlapping unique keys.  All 12
+    // hourly groups must be present in the baseline despite the old tick.
+    sqlx::query(
+        "INSERT INTO issue1455_src (id, day, meter, scope_path, occurred_at, value)
+         SELECT i, '2026-11-20', i % 2, 'tenant',
+                TIMESTAMPTZ '2026-11-20 00:00:00+00' + (i % 12) * INTERVAL '1 hour',
+                (i % 7 + 1) * 10
+         FROM generate_series(1000, 1119) AS i ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut *writer)
+    .await
+    .expect("first insert statement");
+    sqlx::query(
+        "INSERT INTO issue1455_src (id, day, meter, scope_path, occurred_at, value)
+         SELECT i, '2026-11-20', i % 2, 'tenant',
+                TIMESTAMPTZ '2026-11-20 00:00:00+00' + (i % 12) * INTERVAL '1 hour',
+                (i % 7 + 1) * 10
+         FROM generate_series(1100, 1259) AS i ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut *writer)
+    .await
+    .expect("second insert statement");
+    // The buffer relation name is derived and identifier-quoted by PostgreSQL.
+    let writer_delta_lsn: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT MAX(lsn)::text FROM {source_buffer}"
+    )))
+    .fetch_one(&mut *writer)
+    .await
+    .expect("read captured multi-statement LSN");
+    writer.commit().await.expect("commit source transaction");
+
+    assert!(
+        db.wait_for_condition(
+            "scheduled #1455 REINITIALIZE completed",
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'issue1455_hourly'
+                  AND h.action = 'REINITIALIZE' AND h.status = 'COMPLETED'
+            )",
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+        )
+        .await,
+        "the scheduler must perform the REINITIALIZE"
+    );
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['issue1455_hourly'])")
+        .await;
+    db.assert_st_matches_query("issue1455_hourly", query).await;
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT COUNT(*) FROM issue1455_hourly")
+            .await,
+        12,
+        "all 12 hourly groups must survive the rebuild"
+    );
+
+    let tick_is_older: bool = sqlx::query_scalar(
+        "SELECT h.tick_watermark_lsn < $1::pg_lsn
+         FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+         WHERE st.pgt_name = 'issue1455_hourly'
+           AND h.action = 'REINITIALIZE' AND h.status = 'COMPLETED'
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .bind(&writer_delta_lsn)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read scheduler watermark");
+    assert!(tick_is_older, "the test must witness the post-tick writer");
+    let frontier_covers_writer: bool = sqlx::query_scalar(
+        "SELECT (frontier #>> ARRAY['sources', $1::text, 'lsn'])::pg_lsn >= $2::pg_lsn
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'issue1455_hourly'",
+    )
+    .bind(source_oid.to_string())
+    .bind(&writer_delta_lsn)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read source frontier");
+    assert!(
+        frontier_covers_writer,
+        "the FULL baseline must cover the committed multi-statement CDC images"
+    );
+
+    // Another multi-statement transaction exercises real DIFFERENTIAL catch-up
+    // after the reinitialize.  A skipped manual API call must not pass.
+    let mut next_writer = db.pool.begin().await.expect("open catch-up writer");
+    for (start, end) in [(2000, 2059), (2040, 2099)] {
+        sqlx::query(
+            "INSERT INTO issue1455_src (id, day, meter, scope_path, occurred_at, value)
+             SELECT i, '2026-11-20', i % 2, 'tenant',
+                    TIMESTAMPTZ '2026-11-20 00:00:00+00' + (i % 12) * INTERVAL '1 hour',
+                    (i % 7 + 1) * 10
+             FROM generate_series($1::int, $2::int) AS i ON CONFLICT DO NOTHING",
+        )
+        .bind(start)
+        .bind(end)
+        .execute(&mut *next_writer)
+        .await
+        .expect("catch-up statement");
+    }
+    next_writer.commit().await.expect("commit catch-up writer");
+    let before_diff: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.refresh_st("issue1455_hourly").await;
+    let real_differential: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+                WHERE st.pgt_name = 'issue1455_hourly'
+                  AND h.refresh_id > {before_diff}
+                  AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED'
+                  AND NOT h.was_full_fallback
+            )"
+        ))
+        .await;
+    assert!(
+        real_differential,
+        "the post-reinitialize update must be a completed DIFFERENTIAL refresh"
+    );
+    db.assert_st_matches_query("issue1455_hourly", query).await;
 }
 
 /// #1417: a DIFFERENTIAL-to-FULL fallback also needs to replace its original

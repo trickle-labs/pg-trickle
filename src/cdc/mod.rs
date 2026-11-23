@@ -50,6 +50,33 @@ use crate::config;
 use crate::config::normalize_change_buffer_durability;
 use crate::error::PgTrickleError;
 
+#[cfg(not(test))]
+thread_local! {
+    static INTERNAL_TRIGGER_DDL: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(not(test))]
+pub(crate) fn internal_trigger_ddl_active() -> bool {
+    INTERNAL_TRIGGER_DDL.with(|depth| depth.get() != 0)
+}
+
+#[cfg(not(test))]
+pub(crate) fn with_internal_trigger_ddl<T>(
+    operation: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    INTERNAL_TRIGGER_DDL.with(|depth| depth.set(depth.get() + 1));
+    pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(operation))
+        .finally(|| INTERNAL_TRIGGER_DDL.with(|depth| depth.set(depth.get() - 1)))
+        .execute()
+}
+
+#[cfg(test)]
+pub(crate) fn with_internal_trigger_ddl<T>(
+    operation: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    operation()
+}
+
 // ── A45-7: Submodules extracted from this file ────────────────────────────
 
 /// Trigger rebuild and WAL availability helpers.
@@ -127,6 +154,25 @@ pub fn get_cdc_name_for_source(source_oid: pg_sys::Oid) -> String {
     )
     .unwrap_or(None)
     .unwrap_or_else(|| source_oid.to_u32().to_string())
+}
+
+/// Retention sources require row triggers so direct child writes are captured.
+pub(crate) fn trigger_mode_for_source(
+    source_oid: pg_sys::Oid,
+) -> Result<config::CdcTriggerMode, PgTrickleError> {
+    let retention = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies \
+         WHERE source_relid = $1 AND source_type = 'TABLE' \
+           AND column_snapshot ? 'partition_retention')",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    Ok(if retention {
+        config::CdcTriggerMode::Row
+    } else {
+        config::pg_trickle_cdc_trigger_mode()
+    })
 }
 
 fn resolve_relation_info(
@@ -216,11 +262,9 @@ pub fn lock_source_relations(source_oids: &[pg_sys::Oid]) -> Result<(), PgTrickl
     Ok(())
 }
 
-/// Lock upstream stream-table storage and catalog rows for a protected FULL
-/// baseline.  The storage lock closes the data-read window; the catalog lock
-/// prevents the upstream frontier and buffer high-water mark from changing
-/// while the downstream baseline is established.
-pub fn lock_stream_table_sources(
+/// Lock upstream metadata before storage so a competing refresh cannot wait
+/// for a storage lock while holding the catalog row needed by this baseline.
+pub fn lock_stream_table_source_catalogs(
     pgt_id: i64,
     dependencies: &[crate::catalog::StDependency],
 ) -> Result<(), PgTrickleError> {
@@ -231,12 +275,10 @@ pub fn lock_stream_table_sources(
         .collect();
     relation_oids.sort_unstable_by_key(|oid| oid.to_u32());
     relation_oids.dedup();
-    lock_source_relations(&relation_oids)?;
-
     for source_oid in relation_oids {
         let upstream_id = Spi::get_one_with_args::<i64>(
-            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
-             WHERE pgt_relid = $1 FOR UPDATE",
+            "SELECT (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_relid = $1 FOR UPDATE SKIP LOCKED)",
             &[source_oid.into()],
         )
         .map_err(|e| PgTrickleError::CdcStateInvalid {
@@ -244,16 +286,45 @@ pub fn lock_stream_table_sources(
             source_name: format!("OID {}", source_oid.to_u32()),
             buffer: "stream-table catalog row".to_string(),
             reason: format!("could not lock upstream catalog row: {e}"),
-        })?
-        .ok_or_else(|| PgTrickleError::CdcStateInvalid {
-            pgt_id,
-            source_name: format!("OID {}", source_oid.to_u32()),
-            buffer: "stream-table catalog row".to_string(),
-            reason: "upstream stream-table metadata is missing".to_string(),
         })?;
-        let _ = upstream_id;
+        if upstream_id.is_none() {
+            let exists = Spi::get_one_with_args::<bool>(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = $1)",
+                &[source_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(false);
+            if exists {
+                return Err(PgTrickleError::LockTimeout(format!(
+                    "upstream stream-table metadata for OID {} is locked; retry the refresh",
+                    source_oid.to_u32()
+                )));
+            }
+            return Err(PgTrickleError::CdcStateInvalid {
+                pgt_id,
+                source_name: format!("OID {}", source_oid.to_u32()),
+                buffer: "stream-table catalog row".to_string(),
+                reason: "upstream stream-table metadata is missing".to_string(),
+            });
+        }
     }
     Ok(())
+}
+
+/// Protect the upstream frontier and storage throughout a FULL baseline.
+pub fn lock_stream_table_sources(
+    pgt_id: i64,
+    dependencies: &[crate::catalog::StDependency],
+) -> Result<(), PgTrickleError> {
+    lock_stream_table_source_catalogs(pgt_id, dependencies)?;
+    let mut relation_oids: Vec<pg_sys::Oid> = dependencies
+        .iter()
+        .filter(|dep| dep.source_type == "STREAM_TABLE")
+        .map(|dep| dep.source_relid)
+        .collect();
+    relation_oids.sort_unstable_by_key(|oid| oid.to_u32());
+    relation_oids.dedup();
+    lock_source_relations(&relation_oids)
 }
 
 /// Returns true when the source table is INSERT-only by design and therefore
@@ -787,6 +858,37 @@ pub(crate) fn validate_stream_table_row_identity(
     }
 }
 
+/// Generate the TRUNCATE capture function for new and rebuilt CDC triggers.
+///
+/// CDC capture must not issue NOTIFY: PostgreSQL serializes transactions with
+/// queued notifications at COMMIT, while the scheduler independently polls
+/// change buffers.
+fn build_truncate_trigger_fn_sql(change_schema: &str, name: &str, sync_commit: bool) -> String {
+    let sync_guard = sync_guard_sql(sync_commit);
+    format!(
+        "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()
+         RETURNS trigger LANGUAGE plpgsql
+         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
+         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
+         BEGIN
+             {sync_guard}
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
+                 RETURN NULL;
+             END IF;
+             INSERT INTO {change_schema}.changes_{name}
+                 (lsn, action, __pgt_row_id, source_xid, source_commit_at)
+             VALUES (pg_current_wal_insert_lsn(), 'T',
+                     pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8)),
+                     NULL::xid, NULL::timestamptz);
+             RETURN NULL;
+         END;
+         $$",
+    )
+}
+
 /// Create a CDC trigger on a source table.
 ///
 /// Dispatches to statement-level (`FOR EACH STATEMENT … REFERENCING NEW TABLE
@@ -831,7 +933,7 @@ pub fn create_change_trigger(
     // CORR-4: INSERT-only tables (e.g. pgt_refresh_history) must not receive
     // UPDATE or DELETE CDC triggers — only an INSERT trigger is registered.
     let insert_only = is_insert_only_table(source_oid);
-    let mode = config::pg_trickle_cdc_trigger_mode();
+    let mode = trigger_mode_for_source(source_oid)?;
     let buffer_key = format!("changes_{stable_name}");
     let sync_commit = buffer_uses_sync_commit(&buffer_key)?;
     match mode {
@@ -941,32 +1043,7 @@ pub fn create_change_trigger(
     }
 
     // ── TRUNCATE capture (statement-level trigger) ──────────────────
-    let sync_guard = sync_guard_sql(sync_commit);
-    let truncate_fn_sql = format!(
-        "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()
-         RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
-         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
-         BEGIN
-             {sync_guard}
-             -- A07: discard mode is lossy; hold mode keeps capture active.
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
-                 AND current_setting('pg_trickle.cdc_capture_mode', true)
-                     IS DISTINCT FROM 'hold') THEN
-                 RETURN NULL;
-             END IF;
-             INSERT INTO {change_schema}.changes_{name}
-                 (lsn, action, __pgt_row_id, source_xid, source_commit_at)
-             VALUES (pg_current_wal_insert_lsn(), 'T',
-                     pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8)),
-                     NULL::xid, NULL::timestamptz);
-             PERFORM pg_notify('pgtrickle_wake', '');
-             RETURN NULL;
-         END;
-         $$",
-        change_schema = change_schema,
-        name = stable_name,
-    );
+    let truncate_fn_sql = build_truncate_trigger_fn_sql(change_schema, stable_name, sync_commit);
 
     Spi::run(&truncate_fn_sql).map_err(|e| {
         PgTrickleError::SpiError(format!(
@@ -1351,7 +1428,7 @@ pub fn resolve_st_output_columns(
                  WHERE a.attrelid = $1 \
                    AND a.attnum > 0 \
                    AND NOT a.attisdropped \
-                   AND a.attname::text NOT LIKE '__pgt_%' \
+                   AND NOT starts_with(a.attname::text, '__pgt_') \
                  ORDER BY a.attnum",
                 None,
                 &[pgt_relid.into()],
@@ -2455,10 +2532,8 @@ fn build_row_trigger_fn_sql(
         .collect::<Vec<_>>()
         .join("");
 
-    // WAKE-1: PERFORM pg_notify wakes the scheduler via LISTEN/NOTIFY
-    // when event-driven mode is active. The NOTIFY is coalesced by
-    // PostgreSQL — only one notification per transaction regardless of
-    // how many rows are affected. Cost is negligible (~0.5 µs).
+    // The scheduler polls change buffers; notifying here would serialize
+    // concurrent source transactions at COMMIT.
     //
     // F10: Capture W3C traceparent from session GUC into __pgt_trace_context.
     // current_setting returns '' when GUC is not set; NULLIF converts to NULL.
@@ -2483,7 +2558,6 @@ fn build_row_trigger_fn_sql(
                  VALUES (pg_current_wal_insert_lsn(), 'I'
                          {ip}{nv},
                          NULLIF(current_setting('pg_trickle.trace_id', true), ''));
-                 PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN NEW;
              ELSIF TG_OP = 'UPDATE' THEN
                  -- A44-10: D+I decomposition — D-row must be emitted before I-row.
@@ -2500,7 +2574,6 @@ fn build_row_trigger_fn_sql(
                  VALUES (pg_current_wal_insert_lsn(), 'I'
                          {ip}{ucv}{nv},
                          NULLIF(current_setting('pg_trickle.trace_id', true), ''));
-                 PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN NEW;
              ELSIF TG_OP = 'DELETE' THEN
                  INSERT INTO {cs}.changes_{name}
@@ -2508,7 +2581,6 @@ fn build_row_trigger_fn_sql(
                  VALUES (pg_current_wal_insert_lsn(), 'D'
                          {dp}{ov},
                          NULLIF(current_setting('pg_trickle.trace_id', true), ''));
-                 PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN OLD;
              END IF;
              RETURN NULL;
@@ -2573,7 +2645,6 @@ fn build_stmt_trigger_fn_sql(
     }
 
     // INSERT trigger function — only accesses __pgt_new transition table.
-    // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     // F10: Capture W3C traceparent from session GUC into __pgt_trace_context.
     let ins_fn = format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{name}()
@@ -2594,7 +2665,6 @@ fn build_stmt_trigger_fn_sql(
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT statement_lsn, 'I', {pkn}{ncr}, trace_context
              FROM __pgt_new n;
-             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -2604,7 +2674,6 @@ fn build_stmt_trigger_fn_sql(
 
     // UPDATE trigger function — accesses both __pgt_new and __pgt_old.
     // A44-10: D+I decomposition — emit D-row (OLD values) + I-row (NEW values).
-    // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     let upd_fn = if pk_columns.is_empty() || !pair_updates {
         // Keyless/deferred keys cannot pair transition rows uniquely by key.
         // Two separate INSERT … SELECT statements (row-level trigger cannot batch).
@@ -2633,7 +2702,6 @@ fn build_stmt_trigger_fn_sql(
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT statement_lsn, 'I', {pkn}{ncr}, trace_context
              FROM __pgt_new n;
-             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -2724,7 +2792,6 @@ fn build_stmt_trigger_fn_sql(
              FROM pair_rows p
              WHERE p.__pgt_new_present
              ORDER BY 2;
-             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -2734,7 +2801,6 @@ fn build_stmt_trigger_fn_sql(
     };
 
     // DELETE trigger function — only accesses __pgt_old transition table.
-    // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     // F10: Capture W3C traceparent from session GUC into __pgt_trace_context.
     let del_fn = format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_del_fn_{name}()
@@ -2755,7 +2821,6 @@ fn build_stmt_trigger_fn_sql(
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT statement_lsn, 'D', {pko}{ocr}, trace_context
              FROM __pgt_old o;
-             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -2802,9 +2867,7 @@ pub fn refresh_capture_body_for_source(
     let sync_commit = buffer_uses_sync_commit(&format!("changes_{name}"))?;
     let (row, insert, update, delete, truncate) =
         build_inactive_trigger_fn_sql(&change_schema, &name, sync_commit);
-    let functions = if crate::config::pg_trickle_cdc_trigger_mode()
-        == crate::config::CdcTriggerMode::Statement
-    {
+    let functions = if trigger_mode_for_source(source_oid)? == config::CdcTriggerMode::Statement {
         vec![insert, update, delete, truncate]
     } else {
         vec![row, truncate]
@@ -2830,7 +2893,10 @@ pub fn sync_capture_body_for_source(source_oid: pg_sys::Oid) -> Result<(), PgTri
                   FROM pgtrickle.pgt_dependencies d
                   JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id
                  WHERE d.source_relid = $1
-                   AND st.status IN ('ACTIVE', 'INITIALIZING')
+                   AND (st.status IN ('ACTIVE', 'INITIALIZING')
+                        OR (st.status = 'SUSPENDED' AND NOT st.needs_reinit
+                            AND st.refresh_reason = 'CDC_REPLAY_PAUSE')
+                        OR d.column_snapshot ? 'partition_retention')
             )"#,
         &[source_oid.into()],
     )
@@ -3056,21 +3122,24 @@ pub fn get_slot_positions_at_bound(
                 })?
             }
             None => {
-                // A trigger row can become visible after the coordinator's
-                // frontier probe but before this refresh takes its snapshot.
-                // Advancing directly to safe_bound would consume that row's
-                // LSN without ever evaluating it.  Cap at the highest visible
-                // buffer row; when no rows are pending, the safe bound still
-                // lets an idle source advance normally.
+                // Protected FULL/REINITIALIZE snapshots hold source SHARE
+                // locks and use an insertion LSN sampled *after* those locks.
+                // That post-lock cut covers even changes above the old tick,
+                // but a buffer row ahead of the cut must never extend it:
+                // centroid state binding needs to see that unsafe row.
+                // DIFFERENTIAL instead uses its immutable, holdback-aware
+                // visibility bound and caps the visible buffer high-water mark.
                 let change_schema = crate::config::pg_trickle_change_buffer_schema();
                 let buffer = buffer_qualified_name_for_oid(&change_schema, *oid);
                 // nosemgrep: rust.spi.get_one_with_args.dynamic-format — buffer is a quoted catalog-derived identifier; safe_bound is a parameter.
                 Spi::get_one_with_args::<String>(
                     &format!(
-                        "SELECT COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn)::text \
+                        "SELECT (CASE WHEN $2::boolean THEN $1::pg_lsn \
+                                ELSE COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn) \
+                                END)::text \
                          FROM {buffer} WHERE lsn > '0/0'::pg_lsn"
                     ),
-                    &[safe_bound.into()],
+                    &[safe_bound.into(), full_baseline.into()],
                 )
                 .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
                     context: format!("trigger source OID {}", oid.to_u32()),
@@ -3572,10 +3641,39 @@ fn frontier_transaction_age(age_secs: Option<i64>) -> u64 {
     age_secs.unwrap_or(0).max(0) as u64
 }
 
+/// Capture a frontier candidate *before* inspecting active transactions.
+///
+/// A single SQL statement with a MATERIALIZED candidate CTE does not formally
+/// guarantee that the candidate is evaluated before the activity scan.  If the
+/// scan runs first, a writer can start after it and write below the later
+/// candidate, producing a permanently skipped trigger change.  Separate
+/// ordered operations make the writer-fence proof explicit (#1455).
+fn read_frontier_probe_ordered(
+    capture_candidate: impl FnOnce() -> Result<String, PgTrickleError>,
+    capture_active: impl FnOnce() -> Result<(HashSet<u64>, u64), PgTrickleError>,
+) -> Result<(FrontierProbe, u64), PgTrickleError> {
+    let candidate_lsn = capture_candidate()?;
+    if !is_valid_lsn(&candidate_lsn) {
+        return Err(PgTrickleError::SafeFrontierUnavailable {
+            context: "frontier probe candidate".to_string(),
+            reason: format!("malformed candidate LSN '{candidate_lsn}'"),
+        });
+    }
+    let (active_xids, oldest_age_secs) = capture_active()?;
+    Ok((
+        FrontierProbe {
+            candidate_lsn,
+            active_xids,
+        },
+        oldest_age_secs,
+    ))
+}
+
 /// Probe the cluster for the current write LSN and the oldest in-progress
 /// transaction xmin, then compute the safe frontier upper bound.
 ///
-/// This performs a **single SPI round-trip** per scheduler tick.
+/// This deliberately uses two ordered SPI queries per scheduler tick, so the
+/// WAL candidate is sampled before the transaction-visibility probe.
 /// The call must be made inside a `BackgroundWorker::transaction` block.
 ///
 /// # Arguments
@@ -3595,45 +3693,13 @@ pub fn compute_safe_upper_bound(
     _prev_oldest_xmin: u64,
 ) -> Result<(String, String, u64, u64), PgTrickleError> {
     let probe_start = std::time::Instant::now();
-    let (probe, oldest_age_secs) = Spi::connect(|client| {
-        let rows = client
-            .select(
-                "WITH candidate AS MATERIALIZED (
-                    SELECT pg_current_wal_lsn()::text AS lsn
-                 ), active AS (
-                    SELECT backend_xid::text::bigint AS xid,
-                           EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
-                    FROM pg_stat_activity
-                    WHERE datname = current_database()
-                      AND pid <> pg_backend_pid() AND backend_xid IS NOT NULL
-                    UNION ALL
-                    SELECT backend_xmin::text::bigint AS xid,
-                           EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
-                    FROM pg_stat_activity
-                    WHERE datname = current_database()
-                      AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL
-                    UNION ALL
-                    SELECT \"transaction\"::text::bigint AS xid,
-                           EXTRACT(EPOCH FROM (clock_timestamp() - prepared))::bigint AS age_secs
-                    FROM pg_prepared_xacts
-                    WHERE database = current_database()
-                 )
-                 SELECT candidate.lsn, active.xid::text, active.age_secs
-                 FROM candidate LEFT JOIN active ON TRUE",
-                None,
-                &[],
-            )
-            .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                context: "frontier probe".to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let mut candidate_lsn = None;
-        let mut active_xids = HashSet::new();
-        let mut oldest_age_secs = 0_u64;
-        for row in rows {
-            let candidate = row
-                .get::<String>(1)
+    // Capture the WAL *insertion* position first: trigger CDC stamps each
+    // statement with pg_current_wal_insert_lsn().  The subsequent, separate
+    // activity scan must see every writer which could have emitted an image
+    // at or below this candidate and is still uncommitted.
+    let (probe, oldest_age_secs) = read_frontier_probe_ordered(
+        || {
+            Spi::get_one::<String>("SELECT pg_current_wal_insert_lsn()::text")
                 .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
                     context: "frontier probe candidate".to_string(),
                     reason: e.to_string(),
@@ -3641,52 +3707,69 @@ pub fn compute_safe_upper_bound(
                 .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
                     context: "frontier probe candidate".to_string(),
                     reason: "candidate LSN was NULL".to_string(),
-                })?;
-            if !is_valid_lsn(&candidate) {
-                return Err(PgTrickleError::SafeFrontierUnavailable {
-                    context: "frontier probe candidate".to_string(),
-                    reason: format!("malformed candidate LSN '{candidate}'"),
-                });
-            }
-            candidate_lsn = Some(candidate);
-
-            let xid =
-                row.get::<String>(2)
+                })
+        },
+        || {
+            Spi::connect(|client| {
+                let rows = client
+                    .select(
+                        "SELECT active.xid, active.age_secs FROM (
+                             SELECT backend_xid::text AS xid,
+                                    EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
+                             FROM pg_stat_activity
+                             WHERE datname = current_database()
+                               AND pid <> pg_backend_pid() AND backend_xid IS NOT NULL
+                             UNION ALL
+                             SELECT backend_xmin::text AS xid,
+                                    EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
+                             FROM pg_stat_activity
+                             WHERE datname = current_database()
+                               AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL
+                             UNION ALL
+                             SELECT \"transaction\"::text AS xid,
+                                    EXTRACT(EPOCH FROM (clock_timestamp() - prepared))::bigint AS age_secs
+                             FROM pg_prepared_xacts
+                             WHERE database = current_database()
+                         ) AS active",
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                        context: "frontier probe xid".to_string(),
+                        context: "frontier activity probe".to_string(),
                         reason: e.to_string(),
                     })?;
-            if let Some(xid) = xid {
-                let xid =
-                    xid.parse::<u64>()
+                let mut active_xids = HashSet::new();
+                let mut oldest_age_secs = 0_u64;
+                for row in rows {
+                    let xid = row
+                        .get::<String>(1)
                         .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
                             context: "frontier probe xid".to_string(),
-                            reason: format!("malformed transaction ID '{xid}': {e}"),
-                        })?;
-                active_xids.insert(xid);
-                let age =
-                    row.get::<i64>(3)
-                        .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                            context: "frontier probe transaction age".to_string(),
                             reason: e.to_string(),
+                        })?
+                        .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
+                            context: "frontier probe xid".to_string(),
+                            reason: "active transaction ID was NULL".to_string(),
                         })?;
-                oldest_age_secs = oldest_age_secs.max(frontier_transaction_age(age));
-            }
-        }
-
-        Ok::<_, PgTrickleError>((
-            FrontierProbe {
-                candidate_lsn: candidate_lsn.ok_or_else(|| {
-                    PgTrickleError::SafeFrontierUnavailable {
-                        context: "frontier probe".to_string(),
-                        reason: "probe returned no rows".to_string(),
-                    }
-                })?,
-                active_xids,
-            },
-            oldest_age_secs,
-        ))
-    })?;
+                    let xid = xid.parse::<u64>().map_err(|e| {
+                        PgTrickleError::SafeFrontierUnavailable {
+                            context: "frontier probe xid".to_string(),
+                            reason: format!("malformed transaction ID '{xid}': {e}"),
+                        }
+                    })?;
+                    active_xids.insert(xid);
+                    let age =
+                        row.get::<i64>(2)
+                            .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                                context: "frontier probe transaction age".to_string(),
+                                reason: e.to_string(),
+                            })?;
+                    oldest_age_secs = oldest_age_secs.max(frontier_transaction_age(age));
+                }
+                Ok::<_, PgTrickleError>((active_xids, oldest_age_secs))
+            })
+        },
+    )?;
     crate::shmem::record_holdback_probe(probe_start.elapsed().as_millis() as u64, false);
     if let Some(previous) = prev_watermark_lsn {
         crate::lsn::Lsn::parse(previous).map_err(|e| PgTrickleError::SafeFrontierUnavailable {
@@ -3742,6 +3825,60 @@ mod tests {
         assert_eq!(frontier_transaction_age(Some(0)), 0);
         assert_eq!(frontier_transaction_age(Some(120)), 120);
         assert_eq!(frontier_transaction_age(Some(i64::MAX)), i64::MAX as u64);
+    }
+
+    #[test]
+    fn frontier_probe_samples_candidate_before_active_transactions() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let (probe, age) = read_frontier_probe_ordered(
+            || {
+                order.borrow_mut().push("candidate");
+                Ok("0/20".to_string())
+            },
+            || {
+                assert_eq!(order.borrow().as_slice(), &["candidate"]);
+                order.borrow_mut().push("active");
+                Ok((HashSet::from([42_u64]), 17))
+            },
+        )
+        .expect("ordered probe");
+        assert_eq!(order.borrow().as_slice(), &["candidate", "active"]);
+        assert_eq!(probe.candidate_lsn, "0/20");
+        assert!(probe.active_xids.contains(&42));
+        assert_eq!(age, 17);
+    }
+
+    #[test]
+    fn frontier_probe_does_not_advance_on_invalid_candidate() {
+        let result = read_frontier_probe_ordered(
+            || Ok("not an LSN".to_string()),
+            || panic!("activity scan should not run with a malformed cut"),
+        );
+        assert!(matches!(
+            result,
+            Err(PgTrickleError::SafeFrontierUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn writer_fences_hold_all_statements_of_an_open_writer() {
+        let mut state = FrontierProbeState::default();
+        assert_eq!(
+            transition(&mut state, &probe("0/10", &[])),
+            SafeFrontierDecision::AdvanceTo("0/10".into())
+        );
+        assert_eq!(
+            transition(&mut state, &probe("0/30", &[42])),
+            SafeFrontierDecision::HoldAt("0/10".into())
+        );
+        assert_eq!(
+            transition(&mut state, &probe("0/70", &[42])),
+            SafeFrontierDecision::HoldAt("0/10".into())
+        );
+        assert_eq!(
+            transition(&mut state, &probe("0/90", &[])),
+            SafeFrontierDecision::AdvanceTo("0/90".into())
+        );
     }
 
     fn probe(candidate_lsn: &str, xids: &[u64]) -> FrontierProbe {
@@ -3854,6 +3991,43 @@ mod tests {
     fn test_trigger_name_for_source_large_oid() {
         let oid = pgrx::pg_sys::Oid::from(4294967295u32); // u32::MAX
         assert_eq!(trigger_name_for_source(oid), "pg_trickle_cdc_4294967295");
+    }
+
+    #[test]
+    fn test_capture_trigger_sql_never_queues_notifications() {
+        let pk = vec!["id".to_string()];
+        let columns = vec![
+            ("id".to_string(), "integer".to_string()),
+            ("value".to_string(), "text".to_string()),
+        ];
+        let row = build_row_trigger_fn_sql("pgtrickle_changes", "source", &pk, &columns);
+        let (insert, paired_update, delete) =
+            build_stmt_trigger_fn_sql("pgtrickle_changes", "source", &pk, &columns, true);
+        let (_, unpaired_update, _) =
+            build_stmt_trigger_fn_sql("pgtrickle_changes", "source", &pk, &columns, false);
+        let truncate = build_truncate_trigger_fn_sql("pgtrickle_changes", "source", false);
+
+        for (kind, sql) in [
+            ("row", row.as_str()),
+            ("insert", insert.as_str()),
+            ("paired update", paired_update.as_str()),
+            ("unpaired update", unpaired_update.as_str()),
+            ("delete", delete.as_str()),
+            ("truncate", truncate.as_str()),
+        ] {
+            assert!(
+                sql.contains("INSERT INTO"),
+                "{kind} must write to the change buffer"
+            );
+            assert!(
+                !sql.to_ascii_lowercase().contains("notify"),
+                "{kind} must not queue a commit-time notification: {sql}"
+            );
+        }
+
+        let sync_truncate = build_truncate_trigger_fn_sql("pgtrickle_changes", "source", true);
+        assert!(sync_truncate.contains("set_config('synchronous_commit', 'on', true)"));
+        assert!(!sync_truncate.to_ascii_lowercase().contains("notify"));
     }
 
     #[test]

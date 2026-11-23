@@ -143,6 +143,10 @@ pub enum PgTrickleError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// A retention defining query violates the narrow partition-retention contract.
+    #[error("retention query is not eligible: {0}")]
+    RetentionQueryIneligible(String),
+
     /// A versioned integration contract rejected the requested operation.
     #[error("{code}: {detail}")]
     IntegrationError { code: &'static str, detail: String },
@@ -769,6 +773,7 @@ impl PgTrickleError {
             | PgTrickleError::NotFound(_)
             | PgTrickleError::AlreadyExists(_)
             | PgTrickleError::InvalidArgument(_)
+            | PgTrickleError::RetentionQueryIneligible(_)
             | PgTrickleError::IntegrationError { .. }
             | PgTrickleError::FreshnessEvidenceUnavailable(_)
             | PgTrickleError::QueryTooComplex(_)

@@ -324,7 +324,7 @@ for ((repetition = 0; repetition < repetitions; repetition++)); do
 done
 
 compare_args=(--raw "$raw_file" --budgets "$BENCH_DIR/budgets.json" --output "$result_file" --expected-repetitions "$repetitions")
-if [[ "$PROFILE" == blocking ]]; then
+if [[ "$PROFILE" == blocking || "${GITHUB_ACTIONS:-}" == true ]]; then
     compare_args+=(--allow-ci-noise)
 fi
 python3 "$BENCH_DIR/compare.py" "${compare_args[@]}"

@@ -193,6 +193,19 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
+        PgTrickleError::RetentionQueryIneligible(reason) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!("retention query is not eligible: {reason}"),
+                "",
+            )
+            .set_hint(
+                "See the \"Retention policies\" contract in docs/tutorials/PARTITIONED_TABLES.md#retention-policies."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
         // UX-3: Enriched reporting for InvalidArgument errors.
         PgTrickleError::InvalidArgument(msg) => {
             ErrorReport::new(
@@ -1490,7 +1503,29 @@ fn validate_and_parse_query(
         ));
     }
 
+    // A recursive UNION ALL result can contain several copies of the same
+    // output tuple even when every underlying source table has a PRIMARY KEY
+    // (e.g. diamond reachability). It needs non-unique row identities and
+    // counted DELETEs in both DIFFERENTIAL and IMMEDIATE modes.
+    let has_recursive_union_all = parsed_tree.as_ref().is_some_and(|pr| {
+        matches!(
+            &pr.tree,
+            crate::dvm::parser::OpTree::RecursiveCte {
+                union_all: true,
+                ..
+            }
+        ) || pr.cte_registry.entries.iter().any(|(_, body)| {
+            matches!(
+                body,
+                crate::dvm::parser::OpTree::RecursiveCte {
+                    union_all: true,
+                    ..
+                }
+            )
+        })
+    });
     let has_keyless_source = has_keyless_input_source
+        || has_recursive_union_all
         || crate::dvm::query_has_incomplete_join_pk(query)
         // Nested-window rewrites can collapse distinct input rows to the same
         // visible value (for example two partitions both yielding row_number=1).
@@ -4125,6 +4160,26 @@ pub mod alter;
 pub mod create;
 pub(crate) mod recovery;
 pub mod refresh_ops;
+#[cfg(not(test))]
+pub(crate) mod retention;
+#[cfg(test)]
+pub(crate) mod retention {
+    use crate::{catalog::StreamTableMeta, error::PgTrickleError};
+
+    pub(crate) struct RetainedLiveRebuild;
+
+    impl RetainedLiveRebuild {
+        pub(crate) fn live_predicate(&self, _alias: &str) -> String {
+            unreachable!("retained live rebuild is disabled in unit tests")
+        }
+    }
+
+    pub(crate) fn retained_live_rebuild(
+        _st: &StreamTableMeta,
+    ) -> Result<Option<RetainedLiveRebuild>, PgTrickleError> {
+        Ok(None)
+    }
+}
 
 // Re-export from submodules for backward-compatible crate::api:: paths.
 pub use refresh_ops::reinit_rewrite_if_needed;
