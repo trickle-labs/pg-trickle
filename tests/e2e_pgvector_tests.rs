@@ -3075,8 +3075,35 @@ async fn test_centroid_change_limit_rebase_rejects_untouched_visible_mismatch() 
         "UPDATE pgtrickle.pgt_centroid_groups SET state[2] = 4096, state[3] = 4096 WHERE row_id = (SELECT __pgt_row_id FROM centroid_limit_mismatch_st WHERE grp = 2)",
         "UPDATE pgtrickle.pgt_centroid_groups SET state_checksum = pg_catalog.md5(pg_catalog.int8send(pgt_id) || row_id || pg_catalog.int8send(group_count) || pg_catalog.array_send(state)) WHERE row_id = (SELECT __pgt_row_id FROM centroid_limit_mismatch_st WHERE grp = 2)",
         "UPDATE centroid_limit_mismatch_src SET v = '[5,6]' WHERE id = 2",
-        "SELECT pgtrickle.refresh_stream_table('centroid_limit_mismatch_st')",
     ]).await;
+    // The first refresh can stop at a CDC safe bound that precedes the source
+    // update. Assert the rebase guard on the refresh that actually consumes it,
+    // not on an intervening no-data tick.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        db.execute_seq(&[
+            "SET pg_trickle.enable_vector_agg = on",
+            "SET pg_trickle.enable_centroid_state = on",
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+            "SELECT pgtrickle.refresh_stream_table('centroid_limit_mismatch_st')",
+        ])
+        .await;
+        let consumed: bool = db
+            .query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM centroid_limit_mismatch_st \
+                 WHERE grp = 2 AND centroid::text = '[5,6]')",
+            )
+            .await;
+        if consumed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "centroid refresh did not consume the change-limit fixture source update"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     let safe: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'outcome' = 'unbound' AND h.refresh_reason_detail::jsonb->'centroid_rebase'->>'reason' LIKE '%ChangeLimit%' AND EXISTS (SELECT 1 FROM centroid_limit_mismatch_st WHERE grp = 1 AND centroid::text = '[99,99]') AND EXISTS (SELECT 1 FROM centroid_limit_mismatch_st WHERE grp = 2 AND centroid::text = '[5,6]') FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_limit_mismatch_st'::regclass").await;
     assert!(
         safe,
