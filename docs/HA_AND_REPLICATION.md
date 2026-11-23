@@ -90,10 +90,14 @@ If you want a *downstream* system to receive stream-table changes
 SELECT pgtrickle.stream_table_to_publication('order_totals');
 ```
 
-The publication exposes the storage table's INSERT/DELETE events,
-including the `__pgt_row_id` column. Subscribers receive the
-materialised data only — they do not need to know that pg_trickle
-is generating it.
+The publication exposes the storage table's `INSERT`, `UPDATE`, and
+`DELETE` operations, including the `__pgt_row_id` column. A reinitialize
+also sends `TRUNCATE` followed by refill `INSERT` events. Subscribers
+receive the materialised data only — they do not need to know that
+pg_trickle is generating it. Give each destination table its own
+stream-table publication unless the consumer explicitly handles the
+table-wide effects of `TRUNCATE`; see the
+[publication limitations](PUBLICATIONS.md#limitations).
 
 ---
 

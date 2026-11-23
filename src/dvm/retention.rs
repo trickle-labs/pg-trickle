@@ -1657,7 +1657,6 @@ pub fn prepare_retention_cut(
     })
 }
 
-#[cfg(not(test))]
 pub(crate) fn retention_bound_sql(bound: RetentionBound) -> String {
     match bound {
         RetentionBound::Date(days) => format!("(DATE '2000-01-01' OPERATOR(pg_catalog.+) {days})"),

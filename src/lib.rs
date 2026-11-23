@@ -2355,6 +2355,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.subscribe(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.subscribe_distance(text, text, text, text, text, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.unsubscribe(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.unsubscribe_distance(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.would_replace_stream_table_storage(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.stat_reset(bigint) FROM PUBLIC;
 
 -- public_read
@@ -2475,6 +2476,7 @@ SELECT pgtrickle._signal_launcher_rescan();
         create_stream_table_realtime,
         create_stream_table_batch,
         create_stream_table_cost_optimized,
+        would_replace_stream_table_storage,
     ],
     finalize,
 );

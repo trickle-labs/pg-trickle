@@ -646,3 +646,212 @@ async fn test_cor_invalid_query_fails() {
         err_msg
     );
 }
+
+// Regression for #1463: inspect an aggregate-list change before detaching a
+// publication, without changing the storage or publication binding.
+#[tokio::test]
+async fn test_cor_published_aggregate_preflight_and_guarded_replace() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE pub1463_events (id BIGINT PRIMARY KEY, grp TEXT NOT NULL, value NUMERIC NOT NULL)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pub1463_events SELECT g, 'g' || (g % 5), g FROM generate_series(1, 100) g",
+    )
+    .await;
+
+    let original =
+        "SELECT grp, sum(value) AS total, count(*) AS n FROM pub1463_events GROUP BY grp";
+    let with_peak = "SELECT grp, sum(value) AS total, count(*) AS n, max(value) AS peak FROM pub1463_events GROUP BY grp";
+    create_or_replace(&db, "pub1463_totals", original, "1h", "DIFFERENTIAL").await;
+    db.execute("CREATE UNIQUE INDEX pub1463_totals_grp ON pub1463_totals (grp)")
+        .await;
+    db.execute("ALTER TABLE pub1463_totals REPLICA IDENTITY FULL")
+        .await;
+    db.execute("SELECT pgtrickle.stream_table_to_publication('pub1463_totals')")
+        .await;
+
+    let storage_oid_before = db.table_oid("pub1463_totals").await;
+    let publication_oid_before: i64 = db
+        .query_scalar(
+            "SELECT oid::bigint FROM pg_publication WHERE pubname = 'pgt_pub_pub1463_totals'",
+        )
+        .await;
+    let updated_before: String = db
+        .query_scalar(
+            "SELECT updated_at::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'pub1463_totals'",
+        )
+        .await;
+
+    let same: bool = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.would_replace_stream_table_storage('pub1463_totals', $q${original}$q$)"
+        ))
+        .await;
+    assert!(!same, "identical definition must be a no-op");
+    let cosmetic: bool = db
+        .query_scalar(
+            "SELECT pgtrickle.would_replace_stream_table_storage('public.pub1463_totals', $q$SELECT  grp,  sum(value) AS total, count(*) AS n FROM pub1463_events  GROUP BY grp$q$)",
+        )
+        .await;
+    assert!(
+        !cosmetic,
+        "whitespace-only changes must not replace storage"
+    );
+
+    let new_aggregate: bool = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.would_replace_stream_table_storage('pub1463_totals', $q${with_peak}$q$)"
+        ))
+        .await;
+    assert!(new_aggregate, "the extra aggregate requires new storage");
+
+    let semantic: bool = db
+        .query_scalar(
+            "SELECT pgtrickle.would_replace_stream_table_storage('pub1463_totals', $q$SELECT grp, sum(value) AS total, count(*) AS n FROM pub1463_events WHERE value > 10 GROUP BY grp$q$)",
+        )
+        .await;
+    assert!(
+        semantic,
+        "semantic changes with unchanged columns also rebuild"
+    );
+
+    assert_eq!(storage_oid_before, db.table_oid("pub1463_totals").await);
+    let updated_after: String = db
+        .query_scalar(
+            "SELECT updated_at::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'pub1463_totals'",
+        )
+        .await;
+    assert_eq!(updated_before, updated_after);
+    let publication_oid_after: i64 = db
+        .query_scalar(
+            "SELECT oid::bigint FROM pg_publication WHERE pubname = 'pgt_pub_pub1463_totals'",
+        )
+        .await;
+    assert_eq!(publication_oid_before, publication_oid_after);
+
+    // Bind the replacement query rather than interpolating dynamic SQL.
+    let refused = sqlx::query(
+        "SELECT pgtrickle.create_or_replace_stream_table('pub1463_totals', $1, '1h', 'DIFFERENTIAL')",
+    )
+    .bind(with_peak)
+    .execute(&db.pool)
+    .await;
+    assert!(refused.is_err(), "unguarded replacement must fail closed");
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("drop the publication first"),
+        "published replacement should explain why it was blocked"
+    );
+    assert_eq!(storage_oid_before, db.table_oid("pub1463_totals").await);
+    assert_eq!(db.count("pub1463_totals").await, 5);
+
+    // Config-only changes do not replace storage and can retain the publication.
+    create_or_replace(&db, "pub1463_totals", original, "2h", "DIFFERENTIAL").await;
+    assert_eq!(storage_oid_before, db.table_oid("pub1463_totals").await);
+
+    db.execute("SELECT pgtrickle.drop_stream_table_publication('pub1463_totals')")
+        .await;
+    create_or_replace(&db, "pub1463_totals", with_peak, "2h", "DIFFERENTIAL").await;
+    assert_ne!(storage_oid_before, db.table_oid("pub1463_totals").await);
+    let peak: String = db
+        .query_scalar("SELECT peak::text FROM pub1463_totals WHERE grp = 'g0'")
+        .await;
+    assert_eq!(peak, "100");
+
+    let now_noop: bool = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.would_replace_stream_table_storage('pub1463_totals', $q${with_peak}$q$)"
+        ))
+        .await;
+    assert!(!now_noop);
+    db.execute("SELECT pgtrickle.stream_table_to_publication('pub1463_totals')")
+        .await;
+    let rebound: bool = db
+        .query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_publication_bindings b \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             JOIN pg_catalog.pg_publication_rel pr ON pr.prpubid = b.publication_oid \
+             WHERE st.pgt_name = 'pub1463_totals' AND b.stream_relid = st.pgt_relid \
+               AND pr.prrelid = st.pgt_relid)",
+        )
+        .await;
+    assert!(rebound, "publication must bind to replacement storage");
+}
+
+#[tokio::test]
+async fn test_cor_storage_preflight_missing_and_invalid_queries() {
+    let db = E2eDb::new().await.with_extension().await;
+    let missing: bool = db
+        .query_scalar(
+            "SELECT pgtrickle.would_replace_stream_table_storage('pub1463_missing', 'SELECT 1')",
+        )
+        .await;
+    assert!(
+        !missing,
+        "creating a missing table does not replace storage"
+    );
+
+    db.execute("CREATE TABLE pub1463_source (id INT PRIMARY KEY, value INT)")
+        .await;
+    db.execute("INSERT INTO pub1463_source VALUES (1, 10)")
+        .await;
+    create_or_replace(
+        &db,
+        "pub1463_snapshot",
+        "SELECT id, value FROM pub1463_source",
+        "1m",
+        "FULL",
+    )
+    .await;
+    let original_oid = db.table_oid("pub1463_snapshot").await;
+    let invalid = sqlx::query_scalar::<_, bool>(
+        "SELECT pgtrickle.would_replace_stream_table_storage('pub1463_snapshot', 'SELECT missing_column FROM pub1463_source')",
+    )
+    .fetch_one(&db.pool)
+    .await;
+    assert!(
+        invalid.is_err(),
+        "invalid changed queries must raise an error"
+    );
+    assert_eq!(original_oid, db.table_oid("pub1463_snapshot").await);
+    assert_eq!(db.count("pub1463_snapshot").await, 1);
+}
+
+#[tokio::test]
+async fn test_cor_storage_preflight_rejects_non_owner() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE pub1463_source (id INT PRIMARY KEY)")
+        .await;
+    create_or_replace(
+        &db,
+        "pub1463_private",
+        "SELECT id FROM pub1463_source",
+        "1m",
+        "FULL",
+    )
+    .await;
+
+    db.execute("CREATE ROLE pub1463_nonowner LOGIN").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO pub1463_nonowner")
+        .await;
+    db.execute(
+        "GRANT EXECUTE ON FUNCTION pgtrickle.would_replace_stream_table_storage(text, text) TO pub1463_nonowner",
+    )
+    .await;
+    let result = db
+        .try_execute_with_role(
+            "SET ROLE pub1463_nonowner",
+            "SELECT pgtrickle.would_replace_stream_table_storage('pub1463_private', 'SELECT id FROM pub1463_source')",
+            "RESET ROLE",
+        )
+        .await;
+    assert!(result.is_err(), "preflight must enforce stream ownership");
+    assert!(
+        result.unwrap_err().to_string().contains("must be owner"),
+        "the owner check, not catalog privilege, should reject this call"
+    );
+}

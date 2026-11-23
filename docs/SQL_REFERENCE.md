@@ -16,6 +16,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.create\_stream\_table\_cost\_optimized](#pgtricklecreate_stream_table_cost_optimized)
     - [pgtrickle.create\_stream\_table\_if\_not\_exists](#pgtricklecreate_stream_table_if_not_exists)
     - [pgtrickle.create\_or\_replace\_stream\_table](#pgtricklecreate_or_replace_stream_table)
+    - [pgtrickle.would\_replace\_stream\_table\_storage](#pgtricklewould_replace_stream_table_storage)
     - [pgtrickle.bulk\_create](#pgtricklebulk_create)
     - [pgtrickle.alter\_stream\_table](#pgtricklealter_stream_table)
     - [pgtrickle.explain\_alter](#pgtrickleexplain_alter)
@@ -1137,6 +1138,44 @@ SELECT pgtrickle.create_or_replace_stream_table(
 - Mirrors PostgreSQL's `CREATE OR REPLACE` convention (`CREATE OR REPLACE VIEW`, `CREATE OR REPLACE FUNCTION`).
 - Never drops the stream table — even for incompatible schema changes, the ALTER QUERY path rebuilds storage in place while preserving the catalog entry (`pgt_id`).
 - For migration scripts that should **not** modify an existing definition, use [`create_stream_table_if_not_exists`](#pgtricklecreate_stream_table_if_not_exists) instead.
+- With an attached downstream publication, use [`would_replace_stream_table_storage`](#pgtricklewould_replace_stream_table_storage) to determine whether a declarative deployment must detach and re-attach it first.
+
+---
+
+### pgtrickle.would_replace_stream_table_storage
+
+Read-only preflight for a `create_or_replace_stream_table` definition. Returns
+`true` when the proposed defining query would enter the protected shadow-storage
+replacement path, which is prohibited while a downstream publication is attached.
+Returns `false` if the stream table does not exist (creation, not replacement),
+the defining query is identical, or the changes are whitespace-only.
+Configuration-only changes do not replace storage.
+
+```sql
+pgtrickle.would_replace_stream_table_storage(name text, query text) → boolean
+```
+
+The check uses the same caller search path, rewrite, TopK base-query comparison,
+and whitespace normalization as `create_or_replace_stream_table`. Changed
+queries are validated without mutating catalog, storage, refresh state, or
+publication bindings; invalid queries raise an error instead of returning
+`true`. The caller must own an existing stream table and have permission to
+execute the preflight function.
+
+A `true` result predicts the storage path, not that the eventual ALTER will
+succeed: other lifecycle restrictions or concurrent DDL may still block it.
+
+```sql
+SELECT pgtrickle.would_replace_stream_table_storage(
+    'public.totals',
+    'SELECT grp, sum(value) AS total, count(*) AS n, max(value) AS peak
+     FROM event GROUP BY grp'
+);
+-- true if totals exists with a different defining query
+```
+
+See [Downstream Publications](PUBLICATIONS.md#declarative-deployments-with-publications)
+for a deployment guard that only re-attaches the publication when needed.
 
 ---
 
@@ -1521,7 +1560,8 @@ SELECT pgtrickle.resume_stream_table('order_totals');
 - Errors if the ST is not in `SUSPENDED` or `ERROR` state.
 - Resets `consecutive_errors` to `0` and sets `status = 'ACTIVE'`.
 - Emits a `resumed` event on the `pg_trickle_alert` NOTIFY channel.
-- After resuming a scheduled ST, the scheduler will rebuild it in its next cycle. IMMEDIATE tables are rebuilt in the resume transaction before IVM resumes.
+- For a populated DIFFERENTIAL stream with continuous CDC capture and a valid saved frontier, resume preserves that frontier and the next refresh replays buffered changes instead of rebuilding. If CDC continuity cannot be proven or source DDL requires a rebuild, the next scheduled refresh reinitializes instead. IMMEDIATE tables are rebuilt in the resume transaction before IVM resumes.
+- Sealed `RETAIN` aggregates are never discarded by resume: any required rebuild is restricted to reconstructible, unsealed groups.
 
 ---
 
@@ -1555,6 +1595,7 @@ SELECT pgtrickle.resume_stream_table('order_totals');
 **Notes:**
 - Only active (`ACTIVE`) stream tables can be paused; errors if the ST is already
   `SUSPENDED` or in `ERROR` state.
+- When CDC continuity is provable, pausing leaves capture active and the saved frontier intact so resume can replay accumulated changes. Change buffers can grow while the stream is paused.
 - Use `pgtrickle.resume_stream_table(name)` to re-enable automated refreshes.
 - Emits a `paused` event on the `pg_trickle_alert` NOTIFY channel.
 
@@ -1640,8 +1681,11 @@ Keyed, unpartitioned streams require an immediate unique index with
 RETAIN rejects operations that would rebuild sealed history from an
 incomplete source. `OFF` is allowed only while no history has been sealed and
 no retention cut is pending.
-After sealing, automatic cost-based FULL fallbacks continue as differential
-refreshes; explicit FULL requests and hard resource limits still fail closed.
+After sealing, a protected FULL/reinitialize rebuild replaces only unsealed
+groups rather than deleting retained historical output. Failed safety proofs,
+incompatible query changes, or an unfinished retention detach still fail closed.
+Ordinary automatic cost-based FULL fallbacks may continue in DIFFERENTIAL mode
+when a scoped rebuild is unnecessary.
 Eligible concurrent DETACH operations persist a pending cut, replay CDC, and
 finish the cut in PostgreSQL's second detach transaction. If interrupted,
 complete the detach with `ALTER TABLE ... DETACH PARTITION ... FINALIZE`.
@@ -1726,7 +1770,7 @@ SELECT pgtrickle.refresh_stream_table('order_totals');
 - Blocked if the ST is `SUSPENDED` — use `pgtrickle.resume_stream_table(name)` first.
 - Uses an advisory lock to prevent concurrent refreshes of the same ST.
 - If another refresh owns the lock, returns without refreshing and emits a NOTICE.
-- For `DIFFERENTIAL` mode, generates and applies a delta query. For `FULL` mode, truncates and reloads.
+- For `DIFFERENTIAL` mode, generates and applies a delta query. Ordinary `FULL` mode truncates and reloads; sealed `RETAIN` streams use a protected rebuild of unsealed groups only, preserving sealed aggregates.
 - Manual `DIFFERENTIAL` refreshes hold back their source frontier while an
   earlier transaction remains open. Committed changes beyond that safe bound
   are deferred until a later refresh, so late commits cannot be skipped.
@@ -1843,7 +1887,10 @@ pgtrickle.reinitialize_stream_table(name text) → text
 ```
 
 The command validates dependencies, resets the frontier, rebuilds missing CDC
-infrastructure, and schedules a protected full refresh.
+infrastructure, and schedules a protected full refresh. On a stream with sealed
+`RETAIN` history, it preserves sealed aggregate rows and rebuilds only
+reconstructible groups, provided the stored query and retention proofs remain
+valid; it does not replace the storage table.
 
 ---
 

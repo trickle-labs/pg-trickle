@@ -374,7 +374,7 @@ pub(crate) fn execute_manual_refresh(
     }
 
     if manual_requires_whole_query_full(st) {
-        refresh::ensure_full_policy(st, "manual refresh")?;
+        refresh::ensure_scoped_full_policy(st, "manual refresh")?;
         let dependencies = StDependency::get_for_st(st.pgt_id)?;
         crate::cdc::lock_stream_table_source_catalogs(st.pgt_id, &dependencies)?;
     }
@@ -699,7 +699,7 @@ fn execute_manual_full_refresh_target(
     lock_sources: bool,
     distance_snapshot_prepared: bool,
 ) -> Result<(i64, i64), PgTrickleError> {
-    refresh::ensure_full_policy(st, "manual refresh")?;
+    refresh::ensure_scoped_full_policy(st, "manual refresh")?;
     refresh::set_effective_mode("FULL");
     crate::cdc::validate_stream_table_row_identity(st)?;
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
@@ -710,6 +710,15 @@ fn execute_manual_full_refresh_target(
         crate::cdc::lock_source_relations(source_oids)?;
         crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
     }
+    // Replacing a shadow/other target is still a whole-table operation and
+    // must never be allowed to discard retained history. Only the actual
+    // materialization can use the sealed-safe live-group replacement.
+    let retained_live = if schema == st.pgt_schema && table_name == st.pgt_name {
+        crate::api::retention::retained_live_rebuild(st)?
+    } else {
+        crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
+        None
+    };
     // An extension upgrade may introduce private aggregate columns absent from
     // the existing relation. Reconcile them before TRUNCATE/INSERT, but only
     // when a protected FULL reinitialization will populate their state.
@@ -870,9 +879,16 @@ fn execute_manual_full_refresh_target(
     } else {
         None
     };
-    let truncate_sql = format!("TRUNCATE {quoted_table}");
+    let replacement_sql = if let Some(spec) = &retained_live {
+        format!(
+            "DELETE FROM {quoted_table} AS pgt_old WHERE {}",
+            spec.live_predicate("pgt_old")
+        )
+    } else {
+        format!("TRUNCATE {quoted_table}")
+    };
     refresh::with_stream_owner(st, || {
-        Spi::run(&truncate_sql) // nosemgrep: rust.spi.run.dynamic-format — buffer name is catalog-derived.
+        Spi::run(&replacement_sql) // nosemgrep: rust.spi.run.dynamic-format — buffer name is catalog-derived.
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))
     })?;
 
@@ -950,6 +966,14 @@ fn execute_manual_full_refresh_target(
         }
     })?;
 
+    let insert_body = if let Some(spec) = &retained_live {
+        format!(
+            "SELECT * FROM ({insert_body}) AS pgt_new WHERE {}",
+            spec.live_predicate("pgt_new")
+        )
+    } else {
+        insert_body
+    };
     let insert_sql = if st.refresh_mode.is_immediate() || centroid_insert.is_some() {
         format!("INSERT INTO {quoted_table} {insert_body}")
     } else {

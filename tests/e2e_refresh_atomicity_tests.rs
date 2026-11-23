@@ -171,6 +171,10 @@ async fn test_scheduler_pause_drain_protects_transitive_immediate_descendant() {
 async fn run_scheduler_pause_drain_case(immediate: bool) {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
     configure_scheduler(&db).await;
+    // Quiesce background dispatch before building the IMMEDIATE dependency
+    // chain. An initial scheduler tick can otherwise hold an upstream catalog
+    // row while the next descendant takes its protected FULL baseline.
+    assert!(db.query_scalar::<bool>("SELECT pgtrickle.drain(30)").await);
     db.alter_system_set_and_wait("pg_trickle.scheduler_drain_timeout", "1", "1")
         .await;
     db.execute("CREATE TABLE pause_drain_source(id int PRIMARY KEY,value text)")
@@ -190,7 +194,6 @@ async fn run_scheduler_pause_drain_case(immediate: bool) {
     db.create_st("pause_drain_control", query, "1h", "DIFFERENTIAL")
         .await;
     let id = pgt_id(&db, stream).await;
-    assert!(db.query_scalar::<bool>("SELECT pgtrickle.drain(30)").await);
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['pause_drain_st'])")
         .await;
     db.execute("INSERT INTO pause_drain_source VALUES(2,'pending-inline')")

@@ -2894,6 +2894,8 @@ pub fn sync_capture_body_for_source(source_oid: pg_sys::Oid) -> Result<(), PgTri
                   JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id
                  WHERE d.source_relid = $1
                    AND (st.status IN ('ACTIVE', 'INITIALIZING')
+                        OR (st.status = 'SUSPENDED' AND NOT st.needs_reinit
+                            AND st.refresh_reason = 'CDC_REPLAY_PAUSE')
                         OR d.column_snapshot ? 'partition_retention')
             )"#,
         &[source_oid.into()],
@@ -3120,21 +3122,24 @@ pub fn get_slot_positions_at_bound(
                 })?
             }
             None => {
-                // A trigger row can become visible after the coordinator's
-                // frontier probe but before this refresh takes its snapshot.
-                // Advancing directly to safe_bound would consume that row's
-                // LSN without ever evaluating it.  Cap at the highest visible
-                // buffer row; when no rows are pending, the safe bound still
-                // lets an idle source advance normally.
+                // Protected FULL/REINITIALIZE snapshots hold source SHARE
+                // locks and use an insertion LSN sampled *after* those locks.
+                // That post-lock cut covers even changes above the old tick,
+                // but a buffer row ahead of the cut must never extend it:
+                // centroid state binding needs to see that unsafe row.
+                // DIFFERENTIAL instead uses its immutable, holdback-aware
+                // visibility bound and caps the visible buffer high-water mark.
                 let change_schema = crate::config::pg_trickle_change_buffer_schema();
                 let buffer = buffer_qualified_name_for_oid(&change_schema, *oid);
                 // nosemgrep: rust.spi.get_one_with_args.dynamic-format — buffer is a quoted catalog-derived identifier; safe_bound is a parameter.
                 Spi::get_one_with_args::<String>(
                     &format!(
-                        "SELECT COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn)::text \
+                        "SELECT (CASE WHEN $2::boolean THEN $1::pg_lsn \
+                                ELSE COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn) \
+                                END)::text \
                          FROM {buffer} WHERE lsn > '0/0'::pg_lsn"
                     ),
-                    &[safe_bound.into()],
+                    &[safe_bound.into(), full_baseline.into()],
                 )
                 .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
                     context: format!("trigger source OID {}", oid.to_u32()),
@@ -3636,10 +3641,39 @@ fn frontier_transaction_age(age_secs: Option<i64>) -> u64 {
     age_secs.unwrap_or(0).max(0) as u64
 }
 
+/// Capture a frontier candidate *before* inspecting active transactions.
+///
+/// A single SQL statement with a MATERIALIZED candidate CTE does not formally
+/// guarantee that the candidate is evaluated before the activity scan.  If the
+/// scan runs first, a writer can start after it and write below the later
+/// candidate, producing a permanently skipped trigger change.  Separate
+/// ordered operations make the writer-fence proof explicit (#1455).
+fn read_frontier_probe_ordered(
+    capture_candidate: impl FnOnce() -> Result<String, PgTrickleError>,
+    capture_active: impl FnOnce() -> Result<(HashSet<u64>, u64), PgTrickleError>,
+) -> Result<(FrontierProbe, u64), PgTrickleError> {
+    let candidate_lsn = capture_candidate()?;
+    if !is_valid_lsn(&candidate_lsn) {
+        return Err(PgTrickleError::SafeFrontierUnavailable {
+            context: "frontier probe candidate".to_string(),
+            reason: format!("malformed candidate LSN '{candidate_lsn}'"),
+        });
+    }
+    let (active_xids, oldest_age_secs) = capture_active()?;
+    Ok((
+        FrontierProbe {
+            candidate_lsn,
+            active_xids,
+        },
+        oldest_age_secs,
+    ))
+}
+
 /// Probe the cluster for the current write LSN and the oldest in-progress
 /// transaction xmin, then compute the safe frontier upper bound.
 ///
-/// This performs a **single SPI round-trip** per scheduler tick.
+/// This deliberately uses two ordered SPI queries per scheduler tick, so the
+/// WAL candidate is sampled before the transaction-visibility probe.
 /// The call must be made inside a `BackgroundWorker::transaction` block.
 ///
 /// # Arguments
@@ -3659,45 +3693,13 @@ pub fn compute_safe_upper_bound(
     _prev_oldest_xmin: u64,
 ) -> Result<(String, String, u64, u64), PgTrickleError> {
     let probe_start = std::time::Instant::now();
-    let (probe, oldest_age_secs) = Spi::connect(|client| {
-        let rows = client
-            .select(
-                "WITH candidate AS MATERIALIZED (
-                    SELECT pg_current_wal_lsn()::text AS lsn
-                 ), active AS (
-                    SELECT backend_xid::text::bigint AS xid,
-                           EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
-                    FROM pg_stat_activity
-                    WHERE datname = current_database()
-                      AND pid <> pg_backend_pid() AND backend_xid IS NOT NULL
-                    UNION ALL
-                    SELECT backend_xmin::text::bigint AS xid,
-                           EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
-                    FROM pg_stat_activity
-                    WHERE datname = current_database()
-                      AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL
-                    UNION ALL
-                    SELECT \"transaction\"::text::bigint AS xid,
-                           EXTRACT(EPOCH FROM (clock_timestamp() - prepared))::bigint AS age_secs
-                    FROM pg_prepared_xacts
-                    WHERE database = current_database()
-                 )
-                 SELECT candidate.lsn, active.xid::text, active.age_secs
-                 FROM candidate LEFT JOIN active ON TRUE",
-                None,
-                &[],
-            )
-            .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                context: "frontier probe".to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let mut candidate_lsn = None;
-        let mut active_xids = HashSet::new();
-        let mut oldest_age_secs = 0_u64;
-        for row in rows {
-            let candidate = row
-                .get::<String>(1)
+    // Capture the WAL *insertion* position first: trigger CDC stamps each
+    // statement with pg_current_wal_insert_lsn().  The subsequent, separate
+    // activity scan must see every writer which could have emitted an image
+    // at or below this candidate and is still uncommitted.
+    let (probe, oldest_age_secs) = read_frontier_probe_ordered(
+        || {
+            Spi::get_one::<String>("SELECT pg_current_wal_insert_lsn()::text")
                 .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
                     context: "frontier probe candidate".to_string(),
                     reason: e.to_string(),
@@ -3705,52 +3707,69 @@ pub fn compute_safe_upper_bound(
                 .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
                     context: "frontier probe candidate".to_string(),
                     reason: "candidate LSN was NULL".to_string(),
-                })?;
-            if !is_valid_lsn(&candidate) {
-                return Err(PgTrickleError::SafeFrontierUnavailable {
-                    context: "frontier probe candidate".to_string(),
-                    reason: format!("malformed candidate LSN '{candidate}'"),
-                });
-            }
-            candidate_lsn = Some(candidate);
-
-            let xid =
-                row.get::<String>(2)
+                })
+        },
+        || {
+            Spi::connect(|client| {
+                let rows = client
+                    .select(
+                        "SELECT active.xid, active.age_secs FROM (
+                             SELECT backend_xid::text AS xid,
+                                    EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
+                             FROM pg_stat_activity
+                             WHERE datname = current_database()
+                               AND pid <> pg_backend_pid() AND backend_xid IS NOT NULL
+                             UNION ALL
+                             SELECT backend_xmin::text AS xid,
+                                    EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
+                             FROM pg_stat_activity
+                             WHERE datname = current_database()
+                               AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL
+                             UNION ALL
+                             SELECT \"transaction\"::text AS xid,
+                                    EXTRACT(EPOCH FROM (clock_timestamp() - prepared))::bigint AS age_secs
+                             FROM pg_prepared_xacts
+                             WHERE database = current_database()
+                         ) AS active",
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                        context: "frontier probe xid".to_string(),
+                        context: "frontier activity probe".to_string(),
                         reason: e.to_string(),
                     })?;
-            if let Some(xid) = xid {
-                let xid =
-                    xid.parse::<u64>()
+                let mut active_xids = HashSet::new();
+                let mut oldest_age_secs = 0_u64;
+                for row in rows {
+                    let xid = row
+                        .get::<String>(1)
                         .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
                             context: "frontier probe xid".to_string(),
-                            reason: format!("malformed transaction ID '{xid}': {e}"),
-                        })?;
-                active_xids.insert(xid);
-                let age =
-                    row.get::<i64>(3)
-                        .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                            context: "frontier probe transaction age".to_string(),
                             reason: e.to_string(),
+                        })?
+                        .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
+                            context: "frontier probe xid".to_string(),
+                            reason: "active transaction ID was NULL".to_string(),
                         })?;
-                oldest_age_secs = oldest_age_secs.max(frontier_transaction_age(age));
-            }
-        }
-
-        Ok::<_, PgTrickleError>((
-            FrontierProbe {
-                candidate_lsn: candidate_lsn.ok_or_else(|| {
-                    PgTrickleError::SafeFrontierUnavailable {
-                        context: "frontier probe".to_string(),
-                        reason: "probe returned no rows".to_string(),
-                    }
-                })?,
-                active_xids,
-            },
-            oldest_age_secs,
-        ))
-    })?;
+                    let xid = xid.parse::<u64>().map_err(|e| {
+                        PgTrickleError::SafeFrontierUnavailable {
+                            context: "frontier probe xid".to_string(),
+                            reason: format!("malformed transaction ID '{xid}': {e}"),
+                        }
+                    })?;
+                    active_xids.insert(xid);
+                    let age =
+                        row.get::<i64>(2)
+                            .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                                context: "frontier probe transaction age".to_string(),
+                                reason: e.to_string(),
+                            })?;
+                    oldest_age_secs = oldest_age_secs.max(frontier_transaction_age(age));
+                }
+                Ok::<_, PgTrickleError>((active_xids, oldest_age_secs))
+            })
+        },
+    )?;
     crate::shmem::record_holdback_probe(probe_start.elapsed().as_millis() as u64, false);
     if let Some(previous) = prev_watermark_lsn {
         crate::lsn::Lsn::parse(previous).map_err(|e| PgTrickleError::SafeFrontierUnavailable {
@@ -3806,6 +3825,60 @@ mod tests {
         assert_eq!(frontier_transaction_age(Some(0)), 0);
         assert_eq!(frontier_transaction_age(Some(120)), 120);
         assert_eq!(frontier_transaction_age(Some(i64::MAX)), i64::MAX as u64);
+    }
+
+    #[test]
+    fn frontier_probe_samples_candidate_before_active_transactions() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let (probe, age) = read_frontier_probe_ordered(
+            || {
+                order.borrow_mut().push("candidate");
+                Ok("0/20".to_string())
+            },
+            || {
+                assert_eq!(order.borrow().as_slice(), &["candidate"]);
+                order.borrow_mut().push("active");
+                Ok((HashSet::from([42_u64]), 17))
+            },
+        )
+        .expect("ordered probe");
+        assert_eq!(order.borrow().as_slice(), &["candidate", "active"]);
+        assert_eq!(probe.candidate_lsn, "0/20");
+        assert!(probe.active_xids.contains(&42));
+        assert_eq!(age, 17);
+    }
+
+    #[test]
+    fn frontier_probe_does_not_advance_on_invalid_candidate() {
+        let result = read_frontier_probe_ordered(
+            || Ok("not an LSN".to_string()),
+            || panic!("activity scan should not run with a malformed cut"),
+        );
+        assert!(matches!(
+            result,
+            Err(PgTrickleError::SafeFrontierUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn writer_fences_hold_all_statements_of_an_open_writer() {
+        let mut state = FrontierProbeState::default();
+        assert_eq!(
+            transition(&mut state, &probe("0/10", &[])),
+            SafeFrontierDecision::AdvanceTo("0/10".into())
+        );
+        assert_eq!(
+            transition(&mut state, &probe("0/30", &[42])),
+            SafeFrontierDecision::HoldAt("0/10".into())
+        );
+        assert_eq!(
+            transition(&mut state, &probe("0/70", &[42])),
+            SafeFrontierDecision::HoldAt("0/10".into())
+        );
+        assert_eq!(
+            transition(&mut state, &probe("0/90", &[])),
+            SafeFrontierDecision::AdvanceTo("0/90".into())
+        );
     }
 
     fn probe(candidate_lsn: &str, xids: &[u64]) -> FrontierProbe {

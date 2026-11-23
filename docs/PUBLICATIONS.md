@@ -14,9 +14,11 @@ CDC pipeline.
 ## Why use downstream publications?
 
 Stream tables are already the result of incremental view maintenance — every
-refresh produces a well-defined diff of inserted and deleted rows. Exposing
-that diff via logical replication means external systems get exactly the same
-granular change events that pg_trickle computes internally, without extra work.
+refresh applies changes to the stream table's storage. Exposing that storage
+through logical replication lets external systems consume the resulting SQL
+row changes without a separate CDC pipeline. The published events reflect the
+storage operations, which are not necessarily the same as pg_trickle's internal
+delta representation.
 
 | Use case | Tool |
 |----------|------|
@@ -35,18 +37,26 @@ PostgreSQL publication named `pgt_pub_<stream_table_name>` that covers the
 stream table's underlying storage table.
 
 ```
-Stream table refresh (MERGE)
+Stream table refresh (MERGE) or reinitialize (TRUNCATE + refill)
         │
         ▼
-  Rows inserted / deleted in stream table storage
+  Storage INSERT / UPDATE / DELETE / TRUNCATE operations
         │
         ▼
-  PostgreSQL logical replication
+  PostgreSQL logical replication (pgoutput)
         │
         ▼
-  Subscribers receive INSERT / DELETE events
-  (standard pgoutput protocol)
+  Subscribers receive the published storage operations
 ```
+
+A differential refresh may insert a new group, update an existing group's
+values, or delete a group that disappears. Although internal delta processing
+may represent replacements as delete/insert pairs, **the replication stream is
+not guaranteed to contain delete/insert pairs**: a storage `UPDATE` is emitted
+as an `UPDATE`. A full refresh or reinitialization that truncates storage emits
+`TRUNCATE`, followed by `INSERT` events as the table is refilled. These events
+are subject to the publication's `publish` settings; filtering out `TRUNCATE`
+does not make the subscriber's existing rows disappear.
 
 The publication is named `pgt_pub_<stream_table_name>`. The caller must own the
 stream table and have `CREATE` on the current database. PostgreSQL creates the
@@ -164,7 +174,7 @@ FROM pgtrickle.pgt_stream_tables
 WHERE pgt_name = 'order_totals';
 
 -- Via PostgreSQL catalog
-SELECT pubname, puballtables, pubinsert, pubupdate, pubdelete
+SELECT pubname, puballtables, pubinsert, pubupdate, pubdelete, pubtruncate
 FROM pg_publication
 WHERE pubname = 'pgt_pub_order_totals';
 ```
@@ -196,6 +206,58 @@ Configure the threshold:
 ```
 pg_trickle.publication_lag_warn_bytes = 67108864   # 64 MB
 ```
+
+---
+
+## Declarative deployments with publications
+
+A defining-query change in `create_or_replace_stream_table` may replace the
+stream table's **storage relation OID** using an atomic shadow swap. PostgreSQL
+publications and subscribers are bound to relation identities, so pg_trickle
+**rejects replacement while a downstream publication is attached** instead of
+silently migrating a binding or leaving subscribers pointing at old storage.
+A configuration-only change or unchanged (including whitespace-only) query
+does not require detaching the publication.
+
+To decide before changing anything, call the read-only
+`pgtrickle.would_replace_stream_table_storage(name, query)`. It matches the
+declarative API's rewrite and change detection, returning `true` only when the
+new query would require storage replacement. Invalid changed queries error
+instead of returning a misleading result. This example assumes the stream
+table already has a publication and the caller owns both objects:
+
+```sql
+DO $$
+DECLARE
+    definition text := $query$
+        SELECT grp, sum(value) AS total, count(*) AS n,
+               max(value) AS peak
+        FROM event GROUP BY grp
+    $query$;
+    replace_storage boolean;
+BEGIN
+    replace_storage :=
+        pgtrickle.would_replace_stream_table_storage('public.totals', definition);
+    IF replace_storage THEN
+        PERFORM pgtrickle.drop_stream_table_publication('public.totals');
+    END IF;
+
+    PERFORM pgtrickle.create_or_replace_stream_table(
+        'public.totals', definition, '1h', 'DIFFERENTIAL');
+
+    IF replace_storage THEN
+        PERFORM pgtrickle.stream_table_to_publication('public.totals');
+    END IF;
+END $$;
+```
+
+This leaves the publication attached on routine no-op and config-only deployments.
+When re-attachment is necessary, consumers may need a subscription publication
+refresh, compatible destination schema, or resnapshot for changed columns;
+dropping and recreating a publication is **not** transparent replication of
+shadow-table contents. Coordinate the change with subscribers. A preflight is
+advisory when concurrent DDL can change the definition before the subsequent
+replace.
 
 ---
 
@@ -279,11 +341,32 @@ GRANT SELECT ON public.order_totals TO replicator;
 - Only one publication per stream table. Calling `stream_table_to_publication`
   twice returns an error. Use a single publication with multiple subscribers
   instead.
+- A query change requiring replacement storage is refused while a downstream
+  publication is attached. Use `would_replace_stream_table_storage` to guard
+  only the deployments that need detach, replace, and re-attach.
 - `wal_level = logical` is required. This is not the default in all managed
   PostgreSQL providers — check your provider's documentation.
-- Subscribers must be able to handle `INSERT` and `DELETE` events (stream
-  tables do not use `UPDATE` — every change is expressed as a delete + insert
-  pair in the logical replication stream).
+- Subscribers must handle `INSERT`, `UPDATE`, and `DELETE` events from
+  differential refreshes. For example, a new aggregate group produces an
+  `INSERT`, a changed total for an existing group can produce a single
+  `UPDATE`, and removing the last source row of a group produces a `DELETE`.
+  Do not assume that a changed row is always a delete/insert pair.
+- A reinitialization (and any full storage replacement using `TRUNCATE`)
+  publishes `TRUNCATE` followed by the refill's `INSERT` events. Make sure the
+  publication publishes truncates (the default for `CREATE PUBLICATION`) and
+  the consumer supports them. Excluding `truncate` from the publication's
+  `publish` option does **not** turn a reinitialization into row-level deletes:
+  the subscriber retains stale rows, and refill inserts may conflict with
+  existing keys and stop replication.
+- For PostgreSQL subscribers, provision a compatible destination table with
+  an appropriate primary key or replica identity for `UPDATE` and `DELETE`.
+  Verify the publisher's replica identity is suitable for the emitted row
+  changes, especially when using a custom logical decoding consumer.
+- Prefer **one stream-table publication per destination table**. A replicated
+  `TRUNCATE` clears the *entire* destination table, including rows populated
+  by other publications; it is not scoped to the originating publication.
+  Sharing a destination table requires explicit consumer-side isolation or
+  safe handling of `TRUNCATE` and refill.
 
 ---
 

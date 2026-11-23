@@ -1967,8 +1967,12 @@ async fn test_retained_history_blocks_rebuild_query_change_and_restore() {
     let error = db
         .try_execute("SELECT pgtrickle.refresh_stream_table('retained_guard_st')")
         .await
-        .expect_err("FULL must reject sealed history");
-    assert!(error.to_string().contains("retained partition history"));
+        .expect_err("an invalid sealed query contract must reject FULL");
+    assert!(
+        error
+            .to_string()
+            .contains("sealed stream's query or refresh mode")
+    );
     let error = db
         .try_execute("SELECT pgtrickle.alter_stream_table('retained_guard_st', query => 'SELECT d, COUNT(*) AS n FROM retained_guard_src GROUP BY d')")
         .await
@@ -1991,8 +1995,12 @@ async fn test_retained_history_blocks_rebuild_query_change_and_restore() {
     let error = db
         .try_execute("SELECT pgtrickle.resume_stream_table('retained_guard_st')")
         .await
-        .expect_err("resume cannot trigger a rebuild of sealed history");
-    assert!(error.to_string().contains("retained partition history"));
+        .expect_err("resume must reject an invalid sealed query contract");
+    assert!(
+        error
+            .to_string()
+            .contains("sealed stream's query or refresh mode")
+    );
     let after: serde_json::Value = db
         .query_scalar(
             "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retained_guard_st'",
@@ -2005,6 +2013,205 @@ async fn test_retained_history_blocks_rebuild_query_change_and_restore() {
             .await
             .expect("read protected retained output");
     assert_eq!(rows, vec![("2025-01-01".into(), 10)]);
+}
+
+#[tokio::test]
+async fn test_retained_live_rebuild_preserves_discontiguous_history_and_downstream() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE live_rebuild_src (id integer NOT NULL, d date NOT NULL, amount integer NOT NULL, PRIMARY KEY (id,d)) PARTITION BY RANGE (d)").await;
+    db.execute("CREATE TABLE live_rebuild_2024 PARTITION OF live_rebuild_src FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')").await;
+    db.execute("CREATE TABLE live_rebuild_2025 PARTITION OF live_rebuild_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
+    db.execute("CREATE TABLE live_rebuild_2026 PARTITION OF live_rebuild_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
+    db.execute("INSERT INTO live_rebuild_src VALUES (1,'2024-06-01',10),(2,'2025-06-01',20),(3,'2026-06-01',30)").await;
+    let query = "SELECT d, sum(amount) AS total, count(*) AS n FROM live_rebuild_src GROUP BY d";
+    db.create_st("live_rebuild_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("SELECT pgtrickle.set_stream_table_partition_retention('live_rebuild_st','RETAIN','d','2026-01-01')").await;
+    db.create_st(
+        "live_rebuild_down",
+        "SELECT d,total,n FROM live_rebuild_st",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("ALTER TABLE live_rebuild_src DETACH PARTITION live_rebuild_2024")
+        .await;
+
+    // The 2025 partition lies below the cutoff but is not sealed and must
+    // still be reconstructed; 2024 is sealed and must never be touched.
+    db.execute("UPDATE live_rebuild_src SET amount=25 WHERE id=2")
+        .await;
+    db.execute("DELETE FROM live_rebuild_src WHERE id=3").await;
+    db.execute("INSERT INTO live_rebuild_src VALUES (4,'2026-06-01',7)")
+        .await;
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables SET needs_reinit=true WHERE pgt_name='live_rebuild_st'",
+    )
+    .await;
+    db.refresh_st_with_retry("live_rebuild_st").await;
+    let expected = vec![
+        ("2024-06-01".to_string(), 10_i64, 1_i64),
+        ("2025-06-01".to_string(), 25, 1),
+        ("2026-06-01".to_string(), 7, 1),
+    ];
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM live_rebuild_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read sealed-safe rebuild");
+    assert_eq!(rows, expected);
+    let last: (String,String) = sqlx::query_as(
+        "SELECT h.action,h.status FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='live_rebuild_st' ORDER BY h.refresh_id DESC LIMIT 1"
+    ).fetch_one(&db.pool).await.expect("rebuild action");
+    assert_eq!(last, ("REINITIALIZE".into(), "COMPLETED".into()));
+    db.refresh_st_until_converged("live_rebuild_down").await;
+    let downstream: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM live_rebuild_down ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read downstream after live rebuild");
+    assert_eq!(downstream, expected);
+    let sealed: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('live_rebuild_st')")
+        .await;
+    assert_eq!(
+        sealed["sealed_ranges"],
+        serde_json::json!([
+            {"lower":"2024-01-01","upper":"2025-01-01"}
+        ])
+    );
+
+    // Explicit reinitialize_stream_table must avoid ALTER QUERY's destructive
+    // shadow-table replacement and retain the same sealed group.
+    db.execute("UPDATE live_rebuild_src SET amount=33 WHERE id=2")
+        .await;
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('live_rebuild_st')")
+        .await;
+    db.refresh_st_with_retry("live_rebuild_st").await;
+    let after_explicit: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text,total,n FROM live_rebuild_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read explicit scoped reinitialize");
+    assert_eq!(
+        after_explicit,
+        vec![
+            ("2024-06-01".into(), 10, 1),
+            ("2025-06-01".into(), 33, 1),
+            ("2026-06-01".into(), 7, 1),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_replay_pause_resume_preserves_frontier_for_regular_stream() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE resume_replay_src (id integer PRIMARY KEY, amount integer NOT NULL)")
+        .await;
+    db.execute("INSERT INTO resume_replay_src VALUES (1,5)")
+        .await;
+    db.create_st(
+        "resume_replay_st",
+        "SELECT sum(amount) AS total, count(*) AS n FROM resume_replay_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let frontier: serde_json::Value = db
+        .query_scalar(
+            "SELECT frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name='resume_replay_st'",
+        )
+        .await;
+    db.execute("SELECT pgtrickle.pause_stream_table('resume_replay_st')")
+        .await;
+    let suspended: (bool,String) = sqlx::query_as(
+        "SELECT needs_reinit,refresh_reason FROM pgtrickle.pgt_stream_tables WHERE pgt_name='resume_replay_st'"
+    ).fetch_one(&db.pool).await.expect("replay marker");
+    assert_eq!(suspended, (false, "CDC_REPLAY_PAUSE".into()));
+    db.execute("UPDATE resume_replay_src SET amount=6 WHERE id=1")
+        .await;
+    db.execute("INSERT INTO resume_replay_src VALUES (2,9)")
+        .await;
+    db.execute("SELECT pgtrickle.resume_stream_table('resume_replay_st')")
+        .await;
+    let resumed: (bool,serde_json::Value) = sqlx::query_as(
+        "SELECT needs_reinit,frontier FROM pgtrickle.pgt_stream_tables WHERE pgt_name='resume_replay_st'"
+    ).fetch_one(&db.pool).await.expect("frontier after resume");
+    assert!(!resumed.0, "resume must not force whole-query rebuild");
+    assert_eq!(
+        resumed.1, frontier,
+        "resume must preserve pending CDC frontier"
+    );
+    db.refresh_st_with_retry("resume_replay_st").await;
+    let actual: (i64, i64) = sqlx::query_as("SELECT total,n FROM resume_replay_st")
+        .fetch_one(&db.pool)
+        .await
+        .expect("replayed result");
+    assert_eq!(actual, (15, 2));
+}
+
+#[tokio::test]
+async fn test_replay_resume_falls_back_after_reinitialization_required() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute(
+        "CREATE TABLE resume_fallback_src (id integer PRIMARY KEY, amount integer NOT NULL)",
+    )
+    .await;
+    db.execute("INSERT INTO resume_fallback_src VALUES (1,4)")
+        .await;
+    db.create_st(
+        "resume_fallback_st",
+        "SELECT id, amount FROM resume_fallback_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.pause_stream_table('resume_fallback_st')")
+        .await;
+    // Simulate DDL invalidation while paused: replay is no longer sufficient.
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = true WHERE pgt_name='resume_fallback_st'").await;
+    db.execute("INSERT INTO resume_fallback_src VALUES (2,7)")
+        .await;
+    db.execute("SELECT pgtrickle.resume_stream_table('resume_fallback_st')")
+        .await;
+    let needs_reinit: bool = db.query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name='resume_fallback_st'"
+    ).await;
+    assert!(
+        needs_reinit,
+        "the invalidated pause must retain full-rebuild requirement"
+    );
+    db.refresh_st_with_retry("resume_fallback_st").await;
+    let rows: Vec<(i32, i32)> =
+        sqlx::query_as("SELECT id,amount FROM resume_fallback_st ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("reinitialized rows");
+    assert_eq!(rows, vec![(1, 4), (2, 7)]);
+
+    // A change-buffer identity/version loss also prevents replay even if the
+    // frontier exists. Retain the protected baseline requirement on resume.
+    db.execute("SELECT pgtrickle.pause_stream_table('resume_fallback_st')")
+        .await;
+    db.execute("UPDATE pgtrickle.pgt_change_buffers SET row_probe_version = NULL WHERE source_kind = 'BASE' AND source_id = 'resume_fallback_src'::regclass::oid::bigint").await;
+    db.execute("SELECT pgtrickle.resume_stream_table('resume_fallback_st')")
+        .await;
+    let needs_reinit: bool = db.query_scalar(
+        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name='resume_fallback_st'"
+    ).await;
+    assert!(
+        needs_reinit,
+        "invalid CDC-buffer metadata must forbid replay"
+    );
 }
 
 #[tokio::test]
@@ -4939,13 +5146,25 @@ async fn test_retention_captures_direct_partition_writes() {
     );
     db.execute("ALTER TABLE retention_direct_src DETACH PARTITION retention_direct_old")
         .await;
-    let error = db
-        .try_execute("SELECT pgtrickle.pause_stream_table('retention_direct_st')")
-        .await
-        .expect_err("pausing must not make retained history require reconstruction");
-    assert!(
-        error.to_string().contains("retained partition history"),
-        "{error}"
+    db.execute("SELECT pgtrickle.pause_stream_table('retention_direct_st')")
+        .await;
+    let replay_flag: (bool, String) = sqlx::query_as(
+        "SELECT needs_reinit, refresh_reason FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retention_direct_st'"
+    ).fetch_one(&db.pool).await.expect("inspect replayable retention pause");
+    assert_eq!(replay_flag, (false, "CDC_REPLAY_PAUSE".into()));
+    db.execute("INSERT INTO retention_direct_live VALUES (5,'2026-06-01',3)")
+        .await;
+    db.execute("SELECT pgtrickle.resume_stream_table('retention_direct_st')")
+        .await;
+    db.refresh_st_until_converged("retention_direct_st").await;
+    let resumed: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT d::text, total, n FROM retention_direct_st ORDER BY d")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read retained history after replayed resume");
+    assert_eq!(
+        resumed,
+        vec![("2025-06-01".into(), 20, 2), ("2026-06-01".into(), 28, 3),]
     );
     let mut paused = db.pool.begin().await.expect("begin lossy CDC test");
     sqlx::query("SET LOCAL pg_trickle.cdc_paused = on")
@@ -5457,6 +5676,38 @@ async fn test_retention_scheduled_refresh_preserves_sealed_history() {
         assert!(
             std::time::Instant::now() < deadline,
             "scheduled refresh did not preserve retained rows: {rows:?}, differential completed: {completed}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Force the scheduler's protected REINITIALIZE path as well as the normal
+    // differential path. The old partition is no longer available, so any
+    // whole-table TRUNCATE would irretrievably lose its sealed aggregate.
+    let marker: i64 = db
+        .query_scalar("SELECT COALESCE(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    db.execute("UPDATE retention_scheduled_src SET amount = amount + 2 WHERE amount = 20")
+        .await;
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = true WHERE pgt_name = 'retention_scheduled_st'")
+        .await;
+    expected[1].2 += 2;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+    loop {
+        let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+            "SELECT d::text, account, total, n FROM retention_scheduled_st ORDER BY d, account",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .expect("read scheduler scoped reinitialization");
+        let completed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='retention_scheduled_st' AND h.refresh_id > $1 AND h.initiated_by='SCHEDULER' AND h.action='REINITIALIZE' AND h.status='COMPLETED')"
+        ).bind(marker).fetch_one(&db.pool).await.expect("read scheduler reinitialize action");
+        if rows == expected && completed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "scheduler live-only reinit failed: {rows:?}, completed: {completed}"
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -8872,33 +9123,37 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
         .await
         .expect("identify the connection holding the upstream read lock");
 
-    let pool = db.pool.clone();
+    // Acquire the ALTER session before starting the task: under a busy CI
+    // pool, the observer must not race the task for its connection.
+    let mut alter_conn = db.pool.acquire().await.expect("acquire ALTER session");
+    let alter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *alter_conn)
+        .await
+        .expect("identify ALTER backend");
     let alter = tokio::spawn(async move {
-        let mut conn = pool.acquire().await.expect("acquire ALTER session");
-        sqlx::query("SET application_name = 'guard_repartition_wait'")
-            .execute(&mut *conn)
-            .await
-            .expect("identify ALTER backend for lock observation");
         sqlx::query(
             "SELECT pgtrickle.alter_stream_table(
                 'guard_race_up', partition_by => 'event_day')",
         )
-        .execute(&mut *conn)
+        .execute(&mut *alter_conn)
         .await
         .map(|_| ())
     });
 
-    // A witnessed lock wait, not a sleep alone, proves the race is exercised.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    // Observe the real backend's ungranted lock, rather than relying on
+    // application_name and pg_stat_activity's separately sampled wait state.
+    // A witnessed lock wait (not just a sleep) proves that the concurrent
+    // CREATE is still holding the relation while ALTER attempts replacement.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut observed_wait = false;
     while std::time::Instant::now() < deadline {
         let waiting: bool = sqlx::query_scalar(
             "SELECT EXISTS (
-                SELECT 1 FROM pg_catalog.pg_stat_activity a
-                WHERE a.application_name = 'guard_repartition_wait'
-                  AND a.wait_event_type = 'Lock'
-                  AND $1::integer = ANY(pg_catalog.pg_blocking_pids(a.pid)))",
+                SELECT 1 FROM pg_catalog.pg_locks l
+                WHERE l.pid = $1 AND NOT l.granted
+                  AND $2::integer = ANY(pg_catalog.pg_blocking_pids(l.pid)))",
         )
+        .bind(alter_pid)
         .bind(creator_pid)
         .fetch_one(&db.pool)
         .await
@@ -8914,7 +9169,8 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
     }
     assert!(
         observed_wait,
-        "repartition request did not wait for the concurrent downstream registration"
+        "repartition request did not wait for the concurrent downstream registration (ALTER pid={alter_pid}, finished={})",
+        alter.is_finished()
     );
 
     create_tx

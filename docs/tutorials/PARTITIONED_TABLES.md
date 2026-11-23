@@ -159,20 +159,32 @@ settings on success or error. Other storage keys keep the ordinary identity
 probe and may visit more output partitions.
 
 For `RETAIN`, removal seals the expired range and preserves its aggregate
-rows. Later differential refreshes continue to update live groups. Sealed
-history cannot be reconstructed from the surviving raw source: FULL refresh,
-reinitialization, policy removal, incompatible query changes and restore paths
-that would replace it are rejected. Pausing a stream with sealed history is
-also rejected because the normal resume path requires reinitialization. Save
-the raw events externally if you need
-to rebuild or correct historical aggregates; deleting and recreating the
-stream deliberately discards its retained history. The whole-table TRUNCATE
-refresh optimization is rejected once history has been sealed because it
-cannot distinguish live from retained groups.
-Automatic change-ratio and cost heuristics continue with DIFFERENTIAL instead
-of choosing an unreconstructible FULL refresh. Explicit FULL requests and
-hard buffer or delta-size limits can still reject refresh; inspect the error
-and adjust those limits or restore the source history before retrying.
+rows. Later differential refreshes continue to update live groups. A protected
+FULL refresh or reinitialization can rebuild **only unsealed groups** from the
+surviving source partitions while leaving sealed aggregate rows in place.
+The persisted list of sealed ranges, **not the retention cutoff**, defines
+which groups must be preserved: a partition below the cutoff that has not
+been detached or dropped is still reconstructible. The scoped replacement
+keeps the protected source-lock/frontier protocol and emits output changes
+for downstream stream tables.
+
+Sealed history cannot be reconstructed from surviving raw rows. Rebuilds fail
+closed when the defining-query contract, partition alignment, capture guards,
+or durable storage proof cannot be verified or a partition detach is pending.
+Query changes that would replace sealed rows, policy removal, destructive
+storage replacement and incompatible restore paths remain rejected. Save raw
+events externally if you must correct sealed aggregates; deleting and
+recreating a stream deliberately discards its retained history.
+
+An initialized DIFFERENTIAL stream with complete CDC capture can be paused
+without invalidating its frontier. Capture remains active while it is
+suspended; `resume_stream_table` keeps the frontier and processes pending
+changes in the next differential refresh. If a source DDL or lost CDC
+invalidates replay, resumption instead requires a protected rebuild of the
+reconstructible live range. Ineligible operations fail closed rather than
+discarding sealed rows. Monitoring and sizing the change buffer is important
+during long pauses. The whole-table TRUNCATE optimization is never used on
+a stream with sealed history.
 
 The contract is intentionally narrow:
 

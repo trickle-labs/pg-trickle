@@ -69,7 +69,7 @@ fn is_independent_union_all(tree: &dvm::parser::OpTree) -> bool {
 }
 
 pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
-    crate::refresh::ensure_full_policy(st, "differential strategy fallback")?;
+    crate::refresh::ensure_scoped_full_policy(st, "differential strategy fallback")?;
     let result = execute_full_refresh_target(st)?;
     let _window_plan = crate::window_state::prepare_for_protected_refresh(st)?;
     Ok(result)
@@ -79,7 +79,7 @@ pub(crate) fn execute_full_refresh_target(
     st: &StreamTableMeta,
 ) -> Result<(i64, i64), PgTrickleError> {
     crate::dvm::retention::ensure_retention_capture(st.pgt_id)?;
-    crate::refresh::ensure_full_policy(st, "full refresh")?;
+    crate::refresh::ensure_scoped_full_policy(st, "full refresh")?;
     crate::cdc::validate_stream_table_row_identity(st)?;
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
     if !st.refresh_mode.is_immediate() {
@@ -97,6 +97,7 @@ pub(crate) fn execute_full_refresh_target(
         .collect();
     crate::cdc::lock_source_relations(&source_oids)?;
     crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
+    let retained_live = crate::api::retention::retained_live_rebuild(st)?;
     crate::api::prepare_distance_snapshot(st);
 
     // G12-ERM-1: Record the effective mode for this execution path.
@@ -249,8 +250,17 @@ pub(crate) fn execute_full_refresh_target(
             })?;
         }
 
-        // Truncate
-        Spi::run(&format!("TRUNCATE {quoted_table}")) // nosemgrep: rust.spi.run.dynamic-format — TRUNCATE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
+        // A sealed RETAIN stream cannot be truncated. Delete only its live
+        // groups, then repopulate them under the same protected source locks.
+        let replacement_sql = if let Some(spec) = &retained_live {
+            format!(
+                "DELETE FROM {quoted_table} AS pgt_old WHERE {}",
+                spec.live_predicate("pgt_old")
+            )
+        } else {
+            format!("TRUNCATE {quoted_table}")
+        };
+        Spi::run(&replacement_sql) // nosemgrep: rust.spi.run.dynamic-format — TRUNCATE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
         // Compute row_id using the same hash formula as the delta query so
@@ -278,6 +288,14 @@ pub(crate) fn execute_full_refresh_target(
             format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
         };
 
+        let insert_body = if let Some(spec) = &retained_live {
+            format!(
+                "SELECT * FROM ({insert_body}) AS pgt_new WHERE {}",
+                spec.live_predicate("pgt_new")
+            )
+        } else {
+            insert_body
+        };
         // Existing storage can have auxiliary columns in an older physical
         // order. Name the targets explicitly instead of relying on SELECT
         // position (the manual FULL path already does this).
@@ -2803,31 +2821,26 @@ pub fn execute_differential_refresh_with_tuning(
     }
 
     // ── PERF-5: Analyze the relations actually used by delta execution ──
-    // Ordinary refreshes use TABLE/FT/MV buffers. Graph SQL uses bounded
-    // stages for both base-table and stream-table dependencies.
+    // Both ordinary and graph delta SQL read the staged CDC window copies.
+    // Ordinary refreshes additionally use persistent TABLE/FT/MV buffers.
     if crate::config::pg_trickle_analyze_before_delta() {
-        let tables = if graph_same_pass {
-            // Graph delta SQL reads the bounded stages, not the shared buffers.
-            delta_stage
-                .source_tables()
-                .values()
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
+        let mut tables = delta_stage
+            .source_tables()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if !graph_same_pass {
             let cb_schema = crate::config::pg_trickle_change_buffer_schema();
-            catalog_source_oids
-                .iter()
-                .map(|&oid| {
-                    format!(
-                        "{}.{}",
-                        crate::sql_builder::ident(&cb_schema),
-                        crate::sql_builder::ident(&crate::cdc::buffer_base_name_for_oid(
-                            pg_sys::Oid::from(oid)
-                        )),
-                    )
-                })
-                .collect()
-        };
+            tables.extend(catalog_source_oids.iter().map(|&oid| {
+                format!(
+                    "{}.{}",
+                    crate::sql_builder::ident(&cb_schema),
+                    crate::sql_builder::ident(&crate::cdc::buffer_base_name_for_oid(
+                        pg_sys::Oid::from(oid)
+                    )),
+                )
+            }));
+        }
         for table in tables {
             let analyze_sql = format!("ANALYZE {table}");
             if let Err(e) = Spi::run(&analyze_sql) {
