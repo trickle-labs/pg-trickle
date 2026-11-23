@@ -53,6 +53,108 @@ fn load_policy(pgt_id: i64) -> Result<Option<(pg_sys::Oid, RetentionState)>, PgT
     })
 }
 
+/// A FULL refresh may replace only groups outside the durable sealed ranges.
+/// The explicit sealed list is authoritative: the configured cutoff can also
+/// contain still-attached, fully reconstructible partitions.
+#[derive(Debug, Clone)]
+pub(crate) struct RetainedLiveRebuild {
+    output_column: String,
+    sealed: Vec<retention::SealedRange>,
+}
+
+impl RetainedLiveRebuild {
+    /// Build a typed, fail-closed predicate for either a storage DELETE or a
+    /// SELECT over freshly computed groups. The alias is not user supplied.
+    pub(crate) fn live_predicate(&self, alias: &str) -> String {
+        let key = format!(
+            "{}.{}",
+            crate::sql_builder::ident(alias),
+            crate::sql_builder::ident(&self.output_column)
+        );
+        let sealed = self.sealed.iter().map(|range| {
+            let lower = retention::retention_bound_sql(range.lower);
+            let upper = retention::retention_bound_sql(range.upper);
+            format!(
+                "({key} OPERATOR(pg_catalog.>=) {lower} AND {key} OPERATOR(pg_catalog.<) {upper})"
+            )
+        }).collect::<Vec<_>>().join(" OR ");
+        format!("({key} IS NOT NULL AND NOT ({sealed}))")
+    }
+}
+
+/// Called only after acquiring the source locks used by protected FULL. Never
+/// downgrade a failed proof to an ordinary TRUNCATE: sealed history is gone
+/// from the source and is not reconstructible.
+#[cfg(not(test))]
+pub(crate) fn retained_live_rebuild(
+    st: &StreamTableMeta,
+) -> Result<Option<RetainedLiveRebuild>, PgTrickleError> {
+    let Some((source_oid, state)) = load_policy(st.pgt_id)? else {
+        return Ok(None);
+    };
+    if state.pending.is_some() {
+        return Err(PgTrickleError::InvalidArgument(
+            "cannot rebuild while a retention detach is pending; FINALIZE it first".into(),
+        ));
+    }
+    if state.mode != RetentionMode::Retain || state.sealed.is_empty() {
+        return Ok(None);
+    }
+    if st.refresh_mode != crate::dag::RefreshMode::Differential
+        || state.query_hash != crate::catalog::compute_defining_query_hash(&st.defining_query)
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "retained partition history is not reconstructible: the sealed stream's query or refresh mode changed; cannot prove a live-only rebuild"
+                .into(),
+        ));
+    }
+    // Re-derive the partition/group proof from the currently installed query.
+    // A matching stored hash alone is not a substitute for query validation.
+    let actual_candidate = crate::refresh::with_stream_owner(st, || {
+        let tree = crate::dvm::parser::parse_defining_query(&st.defining_query)?;
+        let candidate = retention::query_group_candidate(
+            &tree,
+            source_oid.to_u32(),
+            &state.candidate.source_column,
+        )
+        .map_err(|error| PgTrickleError::RetentionQueryIneligible(error.to_string()))?;
+        retention::validate_retention_group_collations(&tree, source_oid)?;
+        retention::validate_builtin_aggregates(&st.defining_query, &tree)?;
+        Ok(candidate)
+    })?;
+    if actual_candidate != state.candidate {
+        return Err(PgTrickleError::InvalidArgument(
+            "retained group mapping no longer matches the defining query".into(),
+        ));
+    }
+    retention::ensure_retention_capture(st.pgt_id)?;
+    retention::ensure_no_live_sealed_overlap(source_oid, &state, None)?;
+    retention::validate_retention_storage(
+        st,
+        source_oid,
+        &state.candidate,
+        RetentionMode::Retain,
+        false,
+    )?;
+    let key = crate::sql_builder::ident(&state.candidate.output_column);
+    let table = crate::sql_builder::qualified(&st.pgt_schema, &st.pgt_name);
+    // nosemgrep: rust.spi.query.dynamic-format — stream table and partition key are catalog-derived and quoted via sql_builder.
+    let has_null = Spi::get_one::<bool>(&format!(
+        "SELECT EXISTS (SELECT 1 FROM {table} WHERE {key} IS NULL)"
+    ))
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(true);
+    if has_null {
+        return Err(PgTrickleError::InvalidArgument(
+            "retained stream storage contains NULL partition-group keys".into(),
+        ));
+    }
+    Ok(Some(RetainedLiveRebuild {
+        output_column: state.candidate.output_column,
+        sealed: state.sealed,
+    }))
+}
+
 /// Preserve non-eligibility errors while giving contract violations a targeted hint.
 fn retention_eligibility_error(error: PgTrickleError) -> PgTrickleError {
     match error {
