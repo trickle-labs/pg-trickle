@@ -960,8 +960,8 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
         && ctx.has_builtin_equality(oid)
         && let (OpTree::Scan { table_oid: lo, .. }, OpTree::Scan { table_oid: ro, .. }) =
             (left.as_ref(), right.as_ref())
-        && ctx.source_endpoint_is_fenced(*lo)
-        && ctx.source_endpoint_is_fenced(*ro)
+        && (ctx.source_endpoint_is_fenced(*lo) || ctx.source_endpoint_is_bounded(*lo))
+        && (ctx.source_endpoint_is_fenced(*ro) || ctx.source_endpoint_is_bounded(*ro))
         && matches!(
             ctx.delta_source(),
             crate::dvm::diff::DeltaSource::ChangeBuffer

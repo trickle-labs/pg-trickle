@@ -798,6 +798,10 @@ impl DiffContext {
         self.cdc.fenced_endpoint_sources.contains(&oid)
     }
 
+    pub(crate) fn source_endpoint_is_bounded(&self, oid: u32) -> bool {
+        self.cdc.source_bound_tables.contains_key(&oid)
+    }
+
     pub(crate) fn set_fenced_endpoint_sources(&mut self, sources: HashSet<u32>) {
         self.cdc.fenced_endpoint_sources = sources;
     }
