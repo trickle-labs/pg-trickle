@@ -87,7 +87,7 @@ def replay_logs(name, path):
         replay_path.unlink(missing_ok=True)
 
 
-def finish_log_capture(name, path, follower, stream):
+def finish_log_capture(name, path, follower, stream, harness_finished=False):
     try:
         code = follower.wait(timeout=30)
     except subprocess.TimeoutExpired:
@@ -97,6 +97,12 @@ def finish_log_capture(name, path, follower, stream):
     finally:
         stream.close()
     if code != 0:
+        inspected = subprocess.run(["docker", "inspect", "--format", "{{.State.Running}}", name],
+                                   capture_output=True, text=True, timeout=15)
+        if harness_finished and inspected.returncode != 0 and container_has_exited(
+                inspected.returncode, inspected.stdout, inspected.stderr):
+            # The completed harness may remove a container after streaming its logs.
+            return
         replay_logs(name, path)
 
 
@@ -151,8 +157,10 @@ def main(image, run_name, profile_cases=None):
             log_followers = {}
 
             def finish_logs():
+                harness_finished = process.poll() is not None
                 for name, (follower, stream) in log_followers.items():
-                    finish_log_capture(name, run / f"{name}-full.log", follower, stream)
+                    finish_log_capture(name, run / f"{name}-full.log", follower, stream,
+                                       harness_finished)
 
             cleanup.callback(finish_logs)
 

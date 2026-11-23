@@ -44,13 +44,16 @@ for replay_code in (0, 1):
         stream = path.open("a")
         replay = Mock()
         replay.wait.return_value = replay_code
+        inspection = Mock(return_value=subprocess.CompletedProcess(
+            ["docker", "inspect", "--format", "{{.State.Running}}", name], 0, "true\n", ""))
 
         def popen(args, stdout, **kwargs):
             assert args == ["docker", "logs", "--timestamps", name], args
             stdout.write("complete retained log\n")
             return replay
 
-        with patch.object(bounded.subprocess, "Popen", side_effect=popen):
+        with patch.object(bounded.subprocess, "Popen", side_effect=popen), \
+             patch.object(bounded.subprocess, "run", inspection):
             try:
                 bounded.finish_log_capture(name, path, follower, stream)
             except RuntimeError as error:
@@ -59,8 +62,53 @@ for replay_code in (0, 1):
             else:
                 assert replay_code == 0
                 assert path.read_text() == "complete retained log\n"
+            inspection.assert_called_once()
             assert stream.closed
             assert not path.with_suffix(path.suffix + ".replay").exists()
+
+with tempfile.TemporaryDirectory(prefix="issue1168-removed-log-") as directory:
+    path = Path(directory) / "full.log"
+    path.write_text("captured while running\n")
+    follower = Mock()
+    follower.wait.return_value = 1
+    stream = path.open("a")
+    inspection = subprocess.CompletedProcess(
+        ["docker", "inspect", "--format", "{{.State.Running}}", name], 1, "",
+        f"Error: No such object: {name}")
+    with patch.object(bounded.subprocess, "run", return_value=inspection) as inspect, \
+         patch.object(bounded.subprocess, "Popen") as popen:
+        bounded.finish_log_capture(name, path, follower, stream, harness_finished=True)
+        assert inspect.call_args.args[0] == ["docker", "inspect", "--format", "{{.State.Running}}", name]
+        popen.assert_not_called()
+    assert stream.closed
+    assert path.read_text() == "captured while running\n"
+
+with tempfile.TemporaryDirectory(prefix="issue1168-live-removed-log-") as directory:
+    path = Path(directory) / "full.log"
+    follower = Mock()
+    follower.wait.return_value = 1
+    stream = path.open("a")
+    inspection = subprocess.CompletedProcess(
+        ["docker", "inspect", "--format", "{{.State.Running}}", name], 1, "",
+        f"Error: No such object: {name}")
+    replay = Mock()
+    replay.wait.return_value = 1
+
+    def fail_replay(args, stdout, **kwargs):
+        assert args == ["docker", "logs", "--timestamps", name], args
+        stdout.write("replay unavailable\n")
+        return replay
+
+    with patch.object(bounded.subprocess, "run", return_value=inspection), \
+         patch.object(bounded.subprocess, "Popen", side_effect=fail_replay) as popen:
+        try:
+            bounded.finish_log_capture(name, path, follower, stream)
+        except RuntimeError as error:
+            assert str(error) == "container log replay failed: 1"
+        else:
+            raise AssertionError("removed container logs are required while the harness is running")
+        popen.assert_called_once()
+    assert stream.closed
 
 for failure in ("timeout", "daemon"):
     stopped = []
