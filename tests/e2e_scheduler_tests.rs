@@ -766,7 +766,6 @@ async fn test_scheduler_reinitialize_partitioned_multistatement_writer_exact() {
          FOR VALUES FROM ('2026-11-20') TO ('2026-11-21')",
     )
     .await;
-    // This empty neighbor can be detached without changing any test data.
     db.execute(
         "CREATE TABLE issue1455_empty PARTITION OF issue1455_src
          FOR VALUES FROM ('2026-11-19') TO ('2026-11-20')",
@@ -804,9 +803,9 @@ async fn test_scheduler_reinitialize_partitioned_multistatement_writer_exact() {
     .await;
     db.assert_st_matches_query("issue1455_hourly", query).await;
 
-    // Healthy pause/resume retains CDC and does not require a rebuild.
-    // Detach an empty partition while the scheduler is paused to request
-    // a real protected REINITIALIZE without changing the query result.
+    // Pause/resume can preserve CDC and legitimately avoid a rebuild. Detach an
+    // empty source partition while the scheduler is paused to explicitly require
+    // a protected REINITIALIZE without changing the live source data.
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['issue1455_hourly'])")
         .await;
     db.execute("SELECT pgtrickle.pause_stream_table('issue1455_hourly')")
@@ -824,7 +823,7 @@ async fn test_scheduler_reinitialize_partitioned_multistatement_writer_exact() {
         .await;
     assert!(
         needs_reinit,
-        "partition detach must require a protected REINITIALIZE"
+        "detaching a partition must require a protected REINITIALIZE"
     );
 
     let source_oid: i64 = db
