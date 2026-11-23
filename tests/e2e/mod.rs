@@ -1563,8 +1563,10 @@ impl E2eDb {
 
     /// Refresh a stream table, retrying when a concurrent background refresh holds the lock.
     ///
-    /// Busy refreshes return a NOTICE, not an error. Require a completed manual
-    /// history row from this attempt's transaction before returning success.
+    /// Busy refreshes usually return a NOTICE. A concurrent upstream refresh
+    /// may instead raise SQLSTATE 55P03 while locking stream-table metadata;
+    /// retry that transient error after rolling back the failed transaction.
+    /// Require a completed manual history row before returning success.
     /// Writer holdback can still defer changes in a completed attempt; use
     /// `wait_for_condition` when asserting eventual scheduler propagation.
     pub async fn refresh_st_with_retry(&self, name: &str) {
@@ -1573,14 +1575,28 @@ impl E2eDb {
 
     /// Retry a manual refresh through a replacement pool after PostgreSQL restarts.
     pub async fn refresh_st_with_retry_on(pool: &PgPool, name: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let mut tx = pool.begin().await.expect("begin refresh attempt");
-            sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
+            match sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
                 .bind(name)
                 .execute(&mut *tx)
                 .await
-                .unwrap_or_else(|e| panic!("refresh_stream_table('{name}') failed: {e:?}"));
+            {
+                Ok(_) => {}
+                Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("55P03") => {
+                    tx.rollback()
+                        .await
+                        .expect("rollback refresh after upstream metadata lock timeout");
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "refresh_st_with_retry: timed out retrying metadata lock on '{name}'"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+                Err(e) => panic!("refresh_stream_table('{name}') failed: {e:?}"),
+            }
             let completed: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history \
                  WHERE xmin = pg_current_xact_id()::xid \

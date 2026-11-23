@@ -336,6 +336,77 @@ async fn join_counts_future_partner_only_in_next_window() {
     assert_no_full_fallback(&db, "bound_join_st").await;
 }
 
+#[tokio::test]
+async fn exists_grouped_count_excludes_future_partner_until_next_window() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE bound_q04_orders(\
+           o_orderkey int PRIMARY KEY, o_orderdate date NOT NULL, o_orderpriority text NOT NULL)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE bound_q04_lineitem(\
+           l_orderkey int NOT NULL, l_commitdate date NOT NULL, l_receiptdate date NOT NULL)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO bound_q04_orders VALUES \
+                (1, DATE '1993-08-01', '1-URGENT'), \
+                (2, DATE '1993-08-01', '1-URGENT')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO bound_q04_lineitem VALUES \
+                (1, DATE '1993-09-01', DATE '1993-09-02')",
+    )
+    .await;
+
+    let query = "SELECT o.o_orderpriority, count(*) AS order_count \
+                 FROM bound_q04_orders o \
+                 WHERE o.o_orderdate >= DATE '1993-07-01' \
+                   AND o.o_orderdate < DATE '1993-07-01' + INTERVAL '3 months' \
+                   AND EXISTS (SELECT 1 FROM bound_q04_lineitem l \
+                               WHERE l.l_orderkey = o.o_orderkey \
+                                 AND l.l_commitdate < l.l_receiptdate) \
+                 GROUP BY o.o_orderpriority";
+    db.create_st("bound_q04_st", query, "1h", "DIFFERENTIAL")
+        .await;
+
+    // The new order is in this window, but its matching EXISTS partner is not.
+    db.execute(
+        "INSERT INTO bound_q04_orders VALUES \
+                (3, DATE '1993-08-01', '1-URGENT')",
+    )
+    .await;
+    let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_q04_st").await;
+    db.execute(
+        "INSERT INTO bound_q04_lineitem VALUES \
+                (3, DATE '1993-09-01', DATE '1993-09-02')",
+    )
+    .await;
+    finish_bounded_refresh(&mut blocker, id, refresh).await;
+
+    let before: i64 = sqlx::query_scalar(
+        "SELECT order_count FROM bound_q04_st WHERE o_orderpriority = '1-URGENT'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read q04 count at the captured frontier");
+    assert_eq!(before, 1, "future EXISTS partner must not count early");
+
+    refresh_normally(&db, "bound_q04_st").await;
+    refresh_normally(&db, "bound_q04_st").await;
+    let after: i64 = sqlx::query_scalar(
+        "SELECT order_count FROM bound_q04_st WHERE o_orderpriority = '1-URGENT'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read q04 count after replaying the future partner");
+    assert_eq!(after, 2);
+    db.assert_st_matches_query("bound_q04_st", query).await;
+    assert_no_full_fallback(&db, "bound_q04_st").await;
+}
+
 // Regression for #1453: a normal DIFFERENTIAL refresh must ANALYZE the
 // materialized CDC window read by the delta query, even without planner hints.
 // Inspect the staged table before COMMIT (it is ON COMMIT DROP). The negative
