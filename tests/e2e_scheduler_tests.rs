@@ -1532,9 +1532,11 @@ async fn test_scheduler_fanout_shared_matview_changes_refresh_both_consumers() {
     // A failed remote poll must not starve the independent MATVIEW group.
     db.execute("CREATE EXTENSION postgres_fdw").await;
     let db_name: String = db.query_scalar("SELECT current_database()").await;
+    // Keep the deliberately failed poll bounded so the test measures scheduler
+    // isolation instead of the runner's TCP connect timeout.
     db.execute(&format!(
         "CREATE SERVER fanout_remote FOREIGN DATA WRAPPER postgres_fdw \
-         OPTIONS (dbname '{db_name}', host '127.0.0.1', port '5432')"
+         OPTIONS (dbname '{db_name}', host '127.0.0.1', port '5432', connect_timeout '1')"
     ))
     .await;
     db.execute(
