@@ -122,41 +122,85 @@ fn resolve_expr_for_child(expr: &Expr, child_cols: &[String]) -> String {
 /// Compare GROUP BY keys with a hash key and an exact NULL-safe check.
 ///
 /// Both sides must contain corresponding keys in the same order and types.
+fn push_hashable_group_match(out: &mut String, left: &str, right: &str) {
+    out.push_str("pg_catalog.hash_record_extended(ROW(");
+    out.push_str(left);
+    out.push_str("), 0::bigint) = pg_catalog.hash_record_extended(ROW(");
+    out.push_str(right);
+    out.push_str("), 0::bigint) AND ROW(");
+    out.push_str(left);
+    out.push_str(") IS NOT DISTINCT FROM ROW(");
+    out.push_str(right);
+    out.push(')');
+}
+
 fn hashable_group_match(left: &[String], right: &[String]) -> String {
-    let left = left.join(", ");
-    let right = right.join(", ");
-    format!(
-        "pg_catalog.hash_record_extended(ROW({left}), 0::bigint) = pg_catalog.hash_record_extended(ROW({right}), 0::bigint) AND ROW({left}) IS NOT DISTINCT FROM ROW({right})"
-    )
+    let left_joined = left.join(", ");
+    let right_joined = right.join(", ");
+    let mut out = String::with_capacity(140 + (left_joined.len() + right_joined.len()) * 2);
+    push_hashable_group_match(&mut out, &left_joined, &right_joined);
+    out
 }
 
 /// Build a NULL-safe affected-group filter without shadowing source columns.
 ///
 /// The delta columns are renamed inside the subquery, while the source side
 /// uses the original GROUP BY expressions so joins keep their qualifiers.
+fn build_group_filter_from_joined(
+    delta_cte: &str,
+    source_keys_joined: &str,
+    group_count: usize,
+    delta_filter: Option<&str>,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut delta_cols = String::with_capacity(group_count * 18);
+    let mut delta_keys = String::with_capacity(group_count * 28);
+    for index in 0..group_count {
+        if index > 0 {
+            delta_cols.push_str(", ");
+            delta_keys.push_str(", ");
+        }
+        let _ = write!(delta_cols, "\"__pgt_group_{index}\"");
+        let _ = write!(delta_keys, "__pgt_d2.\"__pgt_group_{index}\"");
+    }
+
+    let extra_filter_len = delta_filter.map_or(0, |f| f.len() + 7);
+    let mut out = String::with_capacity(
+        200 + delta_cte.len()
+            + delta_cols.len()
+            + (source_keys_joined.len() + delta_keys.len()) * 2
+            + extra_filter_len,
+    );
+    out.push_str("EXISTS (SELECT 1 FROM ");
+    out.push_str(delta_cte);
+    out.push_str(" AS __pgt_d2(");
+    out.push_str(&delta_cols);
+    out.push_str(") WHERE ");
+    push_hashable_group_match(&mut out, source_keys_joined, &delta_keys);
+    if let Some(filter) = delta_filter {
+        out.push_str(" AND (");
+        out.push_str(filter);
+        out.push(')');
+    }
+    out.push(')');
+    out
+}
+
 fn build_group_filter(
     delta_cte: &str,
     group_by: &[Expr],
     group_output: &[String],
     delta_filter: Option<&str>,
 ) -> String {
-    let delta_cols = group_output
-        .iter()
-        .enumerate()
-        .map(|(index, _)| quote_ident(&format!("__pgt_group_{index}")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let source_keys: Vec<String> = group_by.iter().map(Expr::to_sql).collect();
-    let delta_keys: Vec<String> = (0..group_output.len())
-        .map(|index| format!("__pgt_d2.{}", quote_ident(&format!("__pgt_group_{index}"))))
-        .collect();
-    let condition = hashable_group_match(&source_keys, &delta_keys);
-    let delta_filter = delta_filter
-        .map(|filter| format!(" AND ({filter})"))
-        .unwrap_or_default();
-    format!(
-        "EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_cols}) WHERE {condition}{delta_filter})"
-    )
+    let mut source_keys = String::with_capacity(group_by.len() * 16);
+    for (index, expr) in group_by.iter().enumerate() {
+        if index > 0 {
+            source_keys.push_str(", ");
+        }
+        source_keys.push_str(&expr.to_sql());
+    }
+    build_group_filter_from_joined(delta_cte, &source_keys, group_output.len(), delta_filter)
 }
 
 fn special_aggregate_delta_filter(aggregates: &[AggExpr], child: &OpTree) -> Option<String> {
@@ -1744,12 +1788,21 @@ fn build_rescan_cte(
         }
     }
 
-    // Build GROUP BY clause
+    // Build GROUP BY clause (and reuse the joined expressions for build_group_filter)
+    let mut group_by_exprs = String::new();
     let group_by_sql = if group_by.is_empty() {
         String::new()
     } else {
-        let gb: Vec<String> = group_by.iter().map(|e| e.to_sql()).collect();
-        format!("\nGROUP BY {}", gb.join(", "))
+        for (index, expr) in group_by.iter().enumerate() {
+            if index > 0 {
+                group_by_exprs.push_str(", ");
+            }
+            group_by_exprs.push_str(&expr.to_sql());
+        }
+        let mut sql = String::with_capacity(10 + group_by_exprs.len());
+        sql.push_str("\nGROUP BY ");
+        sql.push_str(&group_by_exprs);
+        sql
     };
 
     // Try to reconstruct the FROM clause from the child OpTree
@@ -1764,10 +1817,10 @@ fn build_rescan_cte(
                 })
                 .unwrap_or_default()
         } else {
-            build_group_filter(
+            build_group_filter_from_joined(
                 delta_cte,
-                group_by,
-                group_output,
+                &group_by_exprs,
+                group_output.len(),
                 config.special_value_filter,
             )
         };

@@ -235,6 +235,7 @@ def validate_trigger_free_strategies(cases: list[dict]) -> None:
             and case["rows"] == 100_000
             and case["statistics"] == "analyzed"
             and not case["force_explicit_with_noop_trigger"]
+            and case.get("mutation_shape", "single_update") == "single_update"
         ]
         if {case["subscriptions"] for case in selected} != expected_subscriptions:
             raise ValueError(

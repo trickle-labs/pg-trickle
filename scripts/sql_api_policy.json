@@ -2,6 +2,132 @@
   "policy_version": 2,
   "generated_from": "sql/archive/pg_trickle--0.109.0.sql",
   "functions": {
+    "pgtrickle._centroid_candidate_sql(oid, text, text)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_candidate_sql",
+      "identity_arguments": "oid, text, text",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_check_count(double precision[], bigint, integer)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_check_count",
+      "identity_arguments": "double precision[], bigint, integer",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_delta_sql(oid, text, text)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_delta_sql",
+      "identity_arguments": "oid, text, text",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_delta_step(double precision[], real[], smallint)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_delta_step",
+      "identity_arguments": "double precision[], real[], smallint",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_finalize(double precision[], integer)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_finalize",
+      "identity_arguments": "double precision[], integer",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_finalize_raw(double precision[], integer)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_finalize_raw",
+      "identity_arguments": "double precision[], integer",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_init(double precision[], integer)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_init",
+      "identity_arguments": "double precision[], integer",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_init_raw(double precision[], integer)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_init_raw",
+      "identity_arguments": "double precision[], integer",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_initialization_sql(text)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_initialization_sql",
+      "identity_arguments": "text",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_merge(double precision[], double precision[], integer, boolean)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_merge",
+      "identity_arguments": "double precision[], double precision[], integer, boolean",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_merge_raw(double precision[], double precision[], integer, boolean)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_merge_raw",
+      "identity_arguments": "double precision[], double precision[], integer, boolean",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_prepare_state(oid)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_prepare_state",
+      "identity_arguments": "oid",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_rebase_reason(bigint, bigint, bigint, double precision[], double precision[])": {
+      "schema": "pgtrickle",
+      "name": "_centroid_rebase_reason",
+      "identity_arguments": "bigint, bigint, bigint, double precision[], double precision[]",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_rebase_reason_raw(bigint, bigint, bigint, double precision[], double precision[])": {
+      "schema": "pgtrickle",
+      "name": "_centroid_rebase_reason_raw",
+      "identity_arguments": "bigint, bigint, bigint, double precision[], double precision[]",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_stage_candidates(oid, text, text)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_stage_candidates",
+      "identity_arguments": "oid, text, text",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_stage_delta(oid, text, text)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_stage_delta",
+      "identity_arguments": "oid, text, text",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_stage_state(oid)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_stage_state",
+      "identity_arguments": "oid",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._centroid_staging_sql(text)": {
+      "schema": "pgtrickle",
+      "name": "_centroid_staging_sql",
+      "identity_arguments": "text",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
     "pgtrickle._on_ddl_start()": {
       "schema": "pgtrickle",
       "name": "_on_ddl_start",

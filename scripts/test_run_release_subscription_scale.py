@@ -176,8 +176,23 @@ class SubscriptionScaleTests(unittest.TestCase):
             for dimensions in scale.DIMENSIONS
             for subscriptions in scale.SUBSCRIPTIONS
         ]
+        cases.append(
+            {
+                "dimensions": 384,
+                "rows": 100_000,
+                "statistics": "analyzed",
+                "subscriptions": 10,
+                "force_explicit_with_noop_trigger": False,
+                "mutation_shape": "repeated_updates_delete",
+                "report": {
+                    "measurements": [
+                        {"samples": [{"merge_strategy": "explicit_dml"}]}
+                    ]
+                },
+            }
+        )
         scale.validate_trigger_free_strategies(cases)
-        cases[-1]["report"]["measurements"][0]["samples"][0]["merge_strategy"] = "explicit_dml"
+        cases[-2]["report"]["measurements"][0]["samples"][0]["merge_strategy"] = "explicit_dml"
         with self.assertRaisesRegex(ValueError, "changed merge strategy"):
             scale.validate_trigger_free_strategies(cases)
 
