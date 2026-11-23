@@ -1126,19 +1126,48 @@ async fn advance_scheduler_watermark(db: &E2eDb, stream: &str, query: &str, afte
         db.query_scalar::<bool>("SELECT pgtrickle.resume_after_drain()")
             .await
     );
-    assert!(
-        db.wait_for_condition(
-            "independent scheduled refresh after source write",
-            &format!(
-                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
-                   WHERE pgt_id = {id} AND refresh_id > {after} AND status = 'COMPLETED')"
-            ),
-            Duration::from_secs(15),
-            Duration::from_millis(50),
+    // The first completed scheduled refresh may have selected a tick watermark
+    // just before the source write committed. Require a *newer* completed
+    // scheduler cut until the independent control actually consumes the row.
+    // Never repair the control through a manual refresh: that would conceal
+    // a real scheduler regression.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut after = after;
+    loop {
+        assert!(
+            db.wait_for_condition(
+                "independent scheduled refresh after source write",
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
+                     WHERE pgt_id = {id} AND refresh_id > {after} AND status = 'COMPLETED')"
+                ),
+                Duration::from_secs(15),
+                Duration::from_millis(50),
+            )
+            .await,
+            "control did not complete a newer scheduled refresh for {stream}"
+        );
+        let refreshed: i64 = sqlx::query_scalar(
+            "SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = $1 AND status = 'COMPLETED'",
         )
+        .bind(id)
+        .fetch_one(&db.pool)
         .await
-    );
-    db.assert_st_matches_query(stream, query).await;
+        .expect("read latest completed control refresh");
+
+        let Err(diff) = e2e::oracle::compare_st_to_query(db, stream, query).await else {
+            break;
+        };
+        assert!(
+            diff.schema_mismatch.is_none()
+                && diff.comparison_error.is_none()
+                && std::time::Instant::now() < deadline,
+            "control scheduler did not converge for {stream}: {diff}"
+        );
+        after = refreshed;
+        make_scheduler_due(db, &[stream]).await;
+    }
     db.execute(&format!(
         "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
     ))
