@@ -1584,9 +1584,7 @@ impl E2eDb {
                 .await
             {
                 Ok(_) => {}
-                Err(sqlx::Error::Database(db_err))
-                    if db_err.code().as_deref() == Some("55P03") =>
-                {
+                Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("55P03") => {
                     tx.rollback()
                         .await
                         .expect("rollback refresh after upstream metadata lock timeout");
