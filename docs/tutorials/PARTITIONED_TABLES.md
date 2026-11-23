@@ -158,10 +158,18 @@ for downstream stream tables.
 Sealed history cannot be reconstructed from surviving raw rows. Rebuilds fail
 closed when the defining-query contract, partition alignment, capture guards,
 or durable storage proof cannot be verified or a partition detach is pending.
-Query changes that would replace sealed rows, policy removal, destructive
-storage replacement and incompatible restore paths remain rejected. Save raw
-events externally if you must correct sealed aggregates; deleting and
-recreating a stream deliberately discards its retained history.
+Only a narrowly compatible query change is permitted after sealing: the
+source, grouping, aggregate expressions, projected output columns and CDC
+capture coverage must remain identical, while the source-level `WHERE`
+predicate may change. `alter_stream_table(..., query => ...)` then performs
+an in-place, protected rebuild of **unsealed** groups. The historical rows
+keep their original values even if the new filter would have excluded them:
+this is a prospective change to the live range, **not** a retroactive edit to
+sealed aggregates. An output-schema, aggregate, grouping, or source change,
+policy removal, destructive storage replacement or incompatible restore
+continues to fail closed. Save raw events externally if you must correct
+sealed aggregates; deleting and recreating a stream deliberately discards
+its retained history.
 
 An initialized DIFFERENTIAL stream with complete CDC capture can be paused
 without invalidating its frontier. Capture remains active while it is
@@ -179,6 +187,9 @@ The contract is intentionally narrow:
   non-null `date`, `timestamp`, or `timestamptz` partition column, the default
   btree operator class, finite bounds, and no default partition. Descendants
   must be durable local tables.
+- An optional source-level `WHERE` filter is allowed; `HAVING` and
+  predicates that mix groups across partitions are not. An ALTER of this
+  filter must not require newly uncaptured source columns.
 - The defining query is a single-source grouped aggregate with `COUNT(*)`,
   `COUNT(column)` and/or `SUM(column)`, using PostgreSQL's built-in aggregates
   without DISTINCT or aggregate filters. `SUM` accepts built-in integer and
