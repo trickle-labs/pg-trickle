@@ -1162,8 +1162,9 @@ fn execute_manual_differential_refresh(
                     reason: "manual differential endpoint fence requires READ COMMITTED isolation".into(),
                 });
             }
-            // A live endpoint and its capture cut must describe the same source state.
-            crate::cdc::lock_source_relations(source_oids)?;
+            // Bounded inverse views reconstruct the endpoint under each DVM
+            // statement's MVCC snapshot, so a SHARE lock would block writes
+            // without adding consistency.
             true
         } else {
             false
