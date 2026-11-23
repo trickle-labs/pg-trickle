@@ -1126,7 +1126,7 @@ fn alter_stream_table_query(
             && dep_diff.added.is_empty()
             && dep_diff.removed.is_empty()
             && vq.parsed_tree.as_ref().is_some_and(|new_tree| {
-                same_retained_aggregate_contract(&old_tree.tree, &new_tree.tree)
+                same_retained_aggregate_contract(&old_tree.tree, new_tree)
             })
         {
             let source_oids = old_deps
