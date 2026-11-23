@@ -239,11 +239,16 @@ The CDC frontier (`pgt_stream_tables.frontier`) is advanced based on **LSN order
 Without holdback, a transaction that inserts into a tracked table and commits *after* the scheduler has captured the tick watermark (`pg_current_wal_lsn()`) will have its change-buffer row permanently skipped on the next tick, because the frontier advanced past the row's LSN while the row was still uncommitted.
 
 **Fix — one mandatory safe-frontier probe:**
-Before computing the tick watermark, the scheduler captures a materialized WAL
-candidate and probes `backend_xid`, `backend_xmin`, and prepared transactions.
-Writer fences hold the frontier until every potentially invisible buffer write
-has a proven bound. Permission or malformed-result failures hold dispatch
-closed; no holdback mode can bypass this proof.
+Before computing the tick watermark, the scheduler samples
+`pg_current_wal_insert_lsn()` (the LSN coordinate used by trigger CDC) and
+**then**, in a separate ordered SPI operation, probes `backend_xid`,
+`backend_xmin`, and prepared transactions. The order matters: a writer that
+begins after the candidate sample cannot emit a captured change at or below
+that sample. A single materialized CTE would not guarantee that the activity
+scan actually executes second. Writer fences hold the frontier until every
+potentially invisible buffer write has a proven bound. Permission or
+malformed-result failures hold dispatch closed; no holdback mode can bypass
+this proof.
 
 Transaction ages are best-effort diagnostics. PostgreSQL samples activity
 timestamps separately from transaction IDs, so a live writer may have a NULL
