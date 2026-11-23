@@ -2478,7 +2478,11 @@ fn has_floating_sum(tree: &OpTree) -> bool {
     else {
         return false;
     };
-    let OpTree::Scan { columns, .. } = child.as_ref() else {
+    let scan = match child.as_ref() {
+        OpTree::Filter { child, .. } => child.as_ref(),
+        other => other,
+    };
+    let OpTree::Scan { columns, .. } = scan else {
         return false;
     };
     aggregates.iter().any(|aggregate| {
@@ -2555,16 +2559,23 @@ pub fn query_group_candidate(
             retention_operator_name(aggregate)
         )));
     };
+    // A WHERE filter cannot mix output groups across source partitions:
+    // the partition key still determines each aggregate group. HAVING
+    // remains disallowed because it would operate on completed groups.
+    let scan = match child.as_ref() {
+        OpTree::Filter { child, .. } => child.as_ref(),
+        other => other,
+    };
     let OpTree::Scan {
         table_oid,
         columns,
         alias,
         ..
-    } = child.as_ref()
+    } = scan
     else {
         return Err(RetentionQueryError::UnsupportedShape(format!(
-            "aggregate input contains a {}; retention requires a direct scan of a single source table",
-            retention_operator_name(child)
+            "aggregate input contains a {}; retention requires an optional WHERE over a direct scan of one source table",
+            retention_operator_name(scan)
         )));
     };
     if has_floating_sum(tree) {
@@ -3091,6 +3102,37 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn filtered_single_source_groups_remain_partition_local() {
+        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
+        let OpTree::Project { child, .. } = &mut tree else {
+            unreachable!()
+        };
+        let OpTree::Aggregate { child, .. } = child.as_mut() else {
+            unreachable!()
+        };
+        *child = Box::new(OpTree::Filter {
+            predicate: Expr::BinaryOp {
+                op: ">".into(),
+                left: Box::new(col("occurred")),
+                right: Box::new(Expr::Literal("0".into())),
+            },
+            child: child.clone(),
+        });
+        assert!(query_group_candidate(&tree, 42, "occurred").is_ok());
+
+        // HAVING (a filter above Aggregate) can discard whole groups and
+        // is not covered by this WHERE-only partition-locality proof.
+        let having = OpTree::Filter {
+            predicate: Expr::Literal("true".into()),
+            child: Box::new(tree),
+        };
+        assert!(matches!(
+            query_group_candidate(&having, 42, "occurred"),
+            Err(RetentionQueryError::UnsupportedShape(_))
+        ));
     }
 
     #[test]
