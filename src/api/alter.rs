@@ -448,9 +448,7 @@ fn same_retained_aggregate_contract(
                 && old_pk == new_pk
                 && old_columns.len() == new_columns.len()
                 && old_columns.iter().zip(new_columns).all(|(a, b)| {
-                    a.name == b.name
-                        && a.type_oid == b.type_oid
-                        && a.is_nullable == b.is_nullable
+                    a.name == b.name && a.type_oid == b.type_oid && a.is_nullable == b.is_nullable
                 })
         }
         _ => false,
@@ -1102,9 +1100,10 @@ fn alter_stream_table_query(
             crate::dvm::parser::parse_defining_query(&st.defining_query)
         })?;
         let same_columns = old_columns.len() == vq.columns.len()
-            && old_columns.iter().zip(&vq.columns).all(|(a, b)| {
-                a.name == b.name && a.type_oid == b.type_oid && a.typmod == b.typmod
-            });
+            && old_columns
+                .iter()
+                .zip(&vq.columns)
+                .all(|(a, b)| a.name == b.name && a.type_oid == b.type_oid && a.typmod == b.typmod);
         let new_columns_used = vq
             .parsed_tree
             .as_ref()
@@ -1146,9 +1145,12 @@ fn alter_stream_table_query(
                     &rewritten_query
                 };
                 let query_hash = crate::catalog::compute_defining_query_hash(defining_query);
-                let original_query = (original_new_query != *defining_query)
-                    .then_some(original_new_query.as_str());
-                let functions_used = vq.parsed_tree.as_ref().map(|parsed| parsed.functions_used());
+                let original_query =
+                    (original_new_query != *defining_query).then_some(original_new_query.as_str());
+                let functions_used = vq
+                    .parsed_tree
+                    .as_ref()
+                    .map(|parsed| parsed.functions_used());
                 Spi::run_with_args(
                     "UPDATE pgtrickle.pgt_stream_tables SET
                          defining_query = $1, original_query = $2,
