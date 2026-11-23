@@ -2344,10 +2344,12 @@ async fn test_centroid_repeated_large_rewrites_do_not_rebase_every_refresh() {
             "SELECT pgtrickle.refresh_stream_table('centroid_rewrite_st')",
         ])
         .await;
-        let applied: bool = db.query_scalar(
-            "SELECT public.vector_send(s.centroid) = public.vector_send(\
+        let applied: bool = db
+            .query_scalar(
+                "SELECT public.vector_send(s.centroid) = public.vector_send(\
              (SELECT avg(v) FROM centroid_rewrite_src)) FROM centroid_rewrite_st s",
-        ).await;
+            )
+            .await;
         if applied {
             break;
         }
