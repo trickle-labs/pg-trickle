@@ -188,8 +188,16 @@ assert not bounded.postgres_is_restarting(subprocess.CompletedProcess([], 1, "",
 docker_transition = subprocess.CompletedProcess(
     [], 1, "", "Error response from daemon: container " + "a" * 64 + " is not running\n")
 assert bounded.postgres_is_restarting(docker_transition)
+runtime_transition = subprocess.CompletedProcess(
+    [], 128, "FailedPrecondition: container " + "b" * 64
+    + " init process is not running: failed precondition\n", "")
+assert bounded.postgres_is_restarting(runtime_transition)
 healthy_after_restart = subprocess.CompletedProcess([], 0, '{"database_bytes":1,"wal_bytes":2}', "")
 with patch.object(bounded.subprocess, "run", side_effect=[docker_transition, healthy_after_restart]) as run_mock, \
+     patch.object(bounded.time, "sleep") as sleep_mock:
+    assert bounded.postgres_metrics(["docker", "exec", name, "psql"]) is healthy_after_restart
+    assert run_mock.call_count == 2 and sleep_mock.call_count == 1
+with patch.object(bounded.subprocess, "run", side_effect=[runtime_transition, healthy_after_restart]) as run_mock, \
      patch.object(bounded.time, "sleep") as sleep_mock:
     assert bounded.postgres_metrics(["docker", "exec", name, "psql"]) is healthy_after_restart
     assert run_mock.call_count == 2 and sleep_mock.call_count == 1

@@ -31,7 +31,12 @@ def postgres_is_restarting(result):
         r"Error response from daemon: container [0-9a-f]{64} is not running",
         result.stderr.strip(),
     )
+    runtime_transition = re.fullmatch(
+        r"FailedPrecondition: container [0-9a-f]{64} init process is not running: failed precondition",
+        result.stdout.strip(),
+    )
     return (result.returncode != 0 and (bool(docker_transition) or
+            bool(runtime_transition) or
             ('connection to server' in result.stderr
              and any(message in result.stderr for message in (
                  'No such file or directory', 'the database system is starting up',
