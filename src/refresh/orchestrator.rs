@@ -197,7 +197,11 @@ pub(crate) fn query_refresh_history_stats(
                         SELECT EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0 AS ms
                         FROM pgtrickle.pgt_refresh_history h
                         JOIN pgtrickle.pgt_refresh_summary s USING (pgt_id)
+                        JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
                         WHERE h.pgt_id = $1 AND h.start_time >= s.stats_reset_at
+                          AND h.plan_identity = st.defining_query_hash
+                          AND h.contract_generation = st.contract_generation
+                          AND h.start_time >= now() - make_interval(mins => $5)
                           AND h.status = 'COMPLETED' AND h.end_time > h.start_time
                           AND (h.action = 'FULL' OR h.merge_strategy_used = 'FULL')
                           AND h.rows_inserted > 0
@@ -574,6 +578,26 @@ mod tests {
             Spi::run_with_args(sql, &[pgt_id.into()]).expect("seed cost history");
         }
 
+        // Legacy FULL history is not comparable until provenance is established.
+        assert!(query_refresh_history_stats(pgt_id, 1_000).is_none());
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_refresh_history h
+                SET plan_identity = st.defining_query_hash,
+                    contract_generation = st.contract_generation - 1
+               FROM pgtrickle.pgt_stream_tables st
+              WHERE h.pgt_id = $1 AND st.pgt_id = $1 AND h.action = 'FULL'",
+            &[pgt_id.into()],
+        )
+        .expect("seed obsolete FULL contract");
+        assert!(query_refresh_history_stats(pgt_id, 1_000).is_none());
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_refresh_history h
+                SET contract_generation = st.contract_generation
+               FROM pgtrickle.pgt_stream_tables st
+              WHERE h.pgt_id = $1 AND st.pgt_id = $1 AND h.action = 'FULL'",
+            &[pgt_id.into()],
+        )
+        .expect("bind FULL evidence to current contract");
         let stats = query_refresh_history_stats(pgt_id, 1_000).expect("comparable samples");
         assert!((stats.diff_ms - 1_000.0).abs() < 0.01);
         assert!((stats.full_ms - 60_000.0).abs() < 0.01);
