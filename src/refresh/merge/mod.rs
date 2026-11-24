@@ -1115,49 +1115,9 @@ pub fn execute_differential_refresh_with_tuning(
         catalog_source_oids,
     );
 
-    // ── DI-7: Delta fraction guard ──────────────────────────────────
-    // When the user has configured `max_delta_fraction`, compare the
-    // total change buffer row count against the ST's estimated row count
-    // (pg_class.reltuples). If the ratio exceeds the threshold, reject
-    // the differential refresh so the scheduler can fall back to FULL —
-    // TRUNCATE + INSERT is faster than applying a large fraction of the
-    // table as individual deltas.
-    if let Some(max_frac) = st.max_delta_fraction
-        && max_frac > 0.0
-    {
-        let total_changes: i64 = catalog_source_oids
-            .iter()
-            .map(|&oid| {
-                let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
-                let q = format!("SELECT count(*)::bigint FROM \"{change_schema}\".{buf_name}");
-                Spi::get_one::<i64>(&q).unwrap_or(Some(0)).unwrap_or(0)
-            })
-            .sum();
-
-        if total_changes > 0 {
-            let estimated_rows: f64 = Spi::get_one::<f32>(&format!(
-                "SELECT reltuples FROM pg_class WHERE oid = {}::oid",
-                st.pgt_relid.to_u32(),
-            ))
-            .unwrap_or(Some(0.0))
-            .unwrap_or(0.0) as f64;
-
-            // Only check when reltuples > 0 (avoids division by zero and
-            // ANALYZE-not-yet-run edge case).
-            if estimated_rows > 0.0
-                && delta_fraction_exceeds_threshold(total_changes, estimated_rows, max_frac)
-            {
-                let fraction = total_changes as f64 / estimated_rows;
-                return Err(PgTrickleError::QueryTooComplex(format!(
-                    "delta fraction ({:.2}%) exceeds max_delta_fraction ({:.2}%) \
-                     for {schema}.{name} ({total_changes} changes / \
-                     {estimated_rows:.0} estimated rows); falling back to FULL refresh",
-                    fraction * 100.0,
-                    max_frac * 100.0,
-                )));
-            }
-        }
-    }
+    // max_delta_fraction is a consumer-window ratio override. Do not
+    // compare the physical shared buffer (including another consumer's
+    // retained history) to this stream's storage cardinality.
 
     // C-1: Drain any deferred cleanups from the previous refresh cycle.
     // This runs before the decision query so stale rows are removed
@@ -1731,7 +1691,7 @@ pub fn execute_differential_refresh_with_tuning(
     // adaptive heuristic.
     let strategy = crate::config::pg_trickle_refresh_strategy();
     let global_ratio = crate::config::pg_trickle_differential_max_change_ratio();
-    let max_ratio = st.auto_threshold.unwrap_or(global_ratio);
+    let max_ratio = st.max_delta_fraction.or(st.auto_threshold).unwrap_or(global_ratio);
     let mut fallback_reason = if crate::config::pg_trickle_force_full_refresh() {
         Some(crate::refresh::FullRefreshReason::new(
             crate::refresh::FullRefreshReasonCode::ForceFullRefresh,
@@ -1791,7 +1751,7 @@ pub fn execute_differential_refresh_with_tuning(
         let new_lsn = new_frontier.get_lsn(*oid);
         let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
 
-        let max_ratio_lit = if max_ratio > 0.0 {
+        let max_ratio_lit = if !skip_ratio_check && max_ratio > 0.0 {
             format!("{max_ratio}")
         } else {
             "0".to_string()
@@ -1806,7 +1766,7 @@ pub fn execute_differential_refresh_with_tuning(
         let sql = format!(
             "SELECT sz.table_size, cnt.change_count, \
                     ({max_ratio_lit} > 0 AND cnt.change_count >= \
-                       ({ratio_base}::double precision * {max_ratio_lit})::bigint + 1) \
+                       CEIL({ratio_base}::double precision * {max_ratio_lit})::bigint + 1) \
              FROM (SELECT GREATEST(reltuples::bigint, 1000) AS table_size \
                    FROM pg_class WHERE oid = {oid}::oid) sz, \
              LATERAL (SELECT count(*)::bigint AS change_count FROM (\
@@ -1814,7 +1774,7 @@ pub fn execute_differential_refresh_with_tuning(
                 WHERE lsn > '{prev_lsn}'::pg_lsn \
                 AND lsn <= '{new_lsn}'::pg_lsn \
                 LIMIT CASE WHEN {max_ratio_lit} > 0 \
-                      THEN ({ratio_base}::double precision * {max_ratio_lit})::bigint + 1 \
+                      THEN CEIL({ratio_base}::double precision * {max_ratio_lit})::bigint + 1 \
                       ELSE 9223372036854775807 END\
              ) __pgt_capped) cnt",
         );
@@ -2069,35 +2029,8 @@ pub fn execute_differential_refresh_with_tuning(
         }
     }
 
-    // ── DI-2: Per-leaf conditional fallback ──────────────────────────
-    // When `max_delta_fraction` is configured, check whether any
-    // individual source table's delta exceeds the threshold. Those
-    // leaves switch from NOT EXISTS (index-based) to EXCEPT ALL
-    // (hash-based) in the snapshot construction, while unaffected
-    // leaves keep the faster NOT EXISTS path.
-    if let Some(max_frac) = st.max_delta_fraction
-        && max_frac > 0.0
-    {
-        let mut fallback = std::collections::HashSet::new();
-        for &(oid, change_count, table_size) in &per_source_stats {
-            if table_size > 0 && change_count > 0 {
-                let frac = change_count as f64 / table_size as f64;
-                if frac > max_frac {
-                    fallback.insert(oid);
-                    pgrx::debug1!(
-                        "[pg_trickle] DI-2: per-leaf fallback for source OID {} \
-                         ({:.1}% > {:.1}% threshold)",
-                        oid,
-                        frac * 100.0,
-                        max_frac * 100.0,
-                    );
-                }
-            }
-        }
-        if !fallback.is_empty() {
-            set_fallback_leaf_oids(fallback);
-        }
-    }
+    // Per-leaf snapshot strategy is not a second interpretation of the
+    // user-configured FULL ratio. Keep the ordinary proven snapshot path.
 
     // Production plans keep runtime window state disabled because the v0.89
     // benchmark rejected the candidate. A manually enabled plan is used only
@@ -4860,6 +4793,7 @@ fn read_trace_context_from_change_buffer(
 //
 // Precondition: caller must ensure `estimated_rows > 0.0` to avoid division
 // by zero (the condition in execute_differential_refresh guards this).
+#[cfg(test)]
 pub(crate) fn delta_fraction_exceeds_threshold(
     total_changes: i64,
     estimated_rows: f64,
