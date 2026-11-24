@@ -447,6 +447,43 @@ impl DeltaStage {
         let pk_columns = crate::cdc::resolve_pk_columns(dependency.source_relid)?;
         let is_st = dependency.source_type == "STREAM_TABLE";
         let keyless = !is_st && pk_columns.is_empty();
+        // Stream-table storage may contain repeated identities; its row-id
+        // index is not necessarily unique. A deferred base primary key also
+        // permits an INSERT of a replacement before DELETE of the old image.
+        // Only an immediately enforced, unique identity justifies inferring
+        // the old state from the first future event.
+        let unique_st_identity = if is_st {
+            Spi::get_one_with_args::<bool>(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_index i
+                    JOIN pg_catalog.pg_attribute a
+                      ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+                    WHERE i.indrelid = $1 AND a.attname = '__pgt_row_id'
+                      AND i.indisunique AND i.indisvalid AND i.indimmediate
+                      AND i.indnkeyatts = 1 AND i.indpred IS NULL
+                      AND i.indexprs IS NULL
+                 )",
+                &[dependency.source_relid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(false)
+        } else {
+            false
+        };
+        let deferred_key = if !is_st && !keyless {
+            Spi::get_one_with_args::<bool>(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_constraint
+                    WHERE conrelid = $1 AND contype = 'p' AND condeferrable
+                 )",
+                &[dependency.source_relid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(true)
+        } else {
+            false
+        };
+        let signed_bag = (is_st && !unique_st_identity) || deferred_key;
 
         // Use the real column order, but only columns captured in CDC.
         // The change buffer can track a superset of this ST's columns;
@@ -557,7 +594,101 @@ impl DeltaStage {
                WHERE c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')\
              ), __pgt_first AS ({first})"
         );
-        let select = if keyless {
+        let select = if signed_bag {
+            // Match complete binary row images, not a logical key alone.
+            // Numeric scale and floating-point bit patterns can be observable
+            // even when PostgreSQL equality or canonical row identity agrees.
+            // record_send invokes type send functions, so never use an
+            // arbitrary user-defined sender from privileged staging SQL.
+            let vector_senders = crate::dvm::pgvector_binary_senders()?;
+            let type_info = Spi::connect(|client| {
+                let rows = client.select(
+                    "SELECT a.attname::text, a.atttypid::bigint,
+                            (t.typtype = 'e' AND p.pronamespace = 'pg_catalog'::regnamespace)
+                            OR (t.typnamespace = 'pg_catalog'::regnamespace
+                                AND p.pronamespace = 'pg_catalog'::regnamespace
+                                AND t.typtype = 'b') AS trusted
+                     FROM pg_catalog.pg_attribute a
+                     JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+                     LEFT JOIN pg_catalog.pg_proc p ON p.oid = t.typsend
+                     WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped",
+                    None,
+                    &[dependency.source_relid.into()],
+                )?;
+                let mut result = HashMap::new();
+                for row in rows {
+                    if let (Some(name), Some(oid)) =
+                        (row.get::<String>(1)?, row.get::<i64>(2)?)
+                    {
+                        result.insert(name, (oid as u32, row.get::<bool>(3)?.unwrap_or(false)));
+                    }
+                }
+                Ok::<_, pgrx::spi::Error>(result)
+            })
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            for col in &cols {
+                if !type_info.get(col).is_some_and(|(oid, trusted)| {
+                    *trusted || vector_senders.contains_key(oid)
+                }) {
+                    return Err(PgTrickleError::UnsupportedOperator(format!(
+                        "cannot safely compare binary CDC payload for source OID {source_oid}, column {col}"
+                    )));
+                }
+            }
+            let cdc_cols = cols
+                .iter()
+                .map(|c| {
+                    let buffer_col = if is_st && c == "__pgt_row_id" {
+                        c.clone()
+                    } else {
+                        crate::cdc::cb_col_name(c)
+                    };
+                    format!("c.{}", quote_ident(&buffer_col))
+                })
+                .collect::<Vec<_>>();
+            let future_projection = cdc_cols
+                .iter()
+                .zip(&cols)
+                .map(|(expr, col)| format!("{expr} AS {}", quote_ident(col)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let future_payload = cdc_cols.join(", ");
+            let result_cols = cols
+                .iter()
+                .map(|c| format!("l.{}", quote_ident(c)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            // Invert the signed future bag: remove net insert occurrences
+            // from live, restore net delete occurrences. The no-future arm
+            // avoids ranking the live relation when there is no history to undo.
+            format!(
+                "WITH __pgt_future AS MATERIALIZED (\
+                   SELECT c.action AS __pgt_event_action, c.change_id AS __pgt_event_sequence, \
+                     pg_catalog.record_send(ROW({future_payload})) AS __pgt_event_payload, \
+                     {future_projection} FROM {buffer} c \
+                   WHERE c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')\
+                 ), __pgt_net AS MATERIALIZED (\
+                   SELECT __pgt_event_payload, \
+                     SUM(CASE WHEN __pgt_event_action = 'I' THEN 1 ELSE -1 END)::bigint AS net \
+                   FROM __pgt_future GROUP BY __pgt_event_payload \
+                   HAVING SUM(CASE WHEN __pgt_event_action = 'I' THEN 1 ELSE -1 END) <> 0\
+                 ), __pgt_first AS (\
+                   SELECT DISTINCT ON (__pgt_event_payload) * FROM __pgt_future \
+                   ORDER BY __pgt_event_payload, __pgt_event_sequence\
+                 ), __pgt_live AS (\
+                   SELECT {live_cols}, pg_catalog.record_send(ROW({live_cols})) AS __pgt_bound_payload, \
+                     ROW_NUMBER() OVER (PARTITION BY pg_catalog.record_send(ROW({live_cols}))) AS __pgt_bound_rn \
+                   FROM {source_table} s WHERE EXISTS (SELECT 1 FROM __pgt_net)\
+                 ) \
+                 SELECT {live_cols} FROM {source_table} s WHERE NOT EXISTS (SELECT 1 FROM __pgt_net) \
+                 UNION ALL SELECT {result_cols} FROM __pgt_live l \
+                 LEFT JOIN __pgt_net n ON n.__pgt_event_payload = l.__pgt_bound_payload \
+                 WHERE l.__pgt_bound_rn > GREATEST(COALESCE(n.net, 0), 0) \
+                 UNION ALL SELECT {first_cols} FROM __pgt_first f \
+                 JOIN __pgt_net n USING (__pgt_event_payload) \
+                 CROSS JOIN LATERAL generate_series(1::bigint, GREATEST(-n.net, 0)) g"
+            )
+        } else if keyless {
             let identity = crate::refresh::codegen::build_content_hash_expr_for_domain(
                 "s.",
                 hash_columns,
