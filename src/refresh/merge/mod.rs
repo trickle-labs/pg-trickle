@@ -1974,9 +1974,9 @@ fn execute_differential_refresh_inner(
             i64::MAX / 2
         };
 
-        total_change_count = total_change_count.checked_add(change_count).ok_or_else(|| {
-            PgTrickleError::InternalError("CDC input count overflow".into())
-        })?;
+        total_change_count = total_change_count
+            .checked_add(change_count)
+            .ok_or_else(|| PgTrickleError::InternalError("CDC input count overflow".into()))?;
         _total_table_size = _total_table_size.saturating_add(table_size);
 
         // DI-2: Save per-source stats for per-leaf fallback decision.
@@ -2034,6 +2034,11 @@ fn execute_differential_refresh_inner(
         ));
     }
 
+    // Keep upstream-derived estimates ineligible for learning until the
+    // staged source provenance is guaranteed (including the DAG-4 removal
+    // in #1489). Their eligible durable count is still useful for planning.
+    input_delta_rows_may_be_incomplete = !st_source_pgt_ids.is_empty();
+
     // Upstream stream tables have their own durable CDC windows. Count the
     // eligible events, not the physical size of the shared retained buffer.
     // Keep this out of the independent base-source UNION ratio calculation.
@@ -2065,9 +2070,9 @@ fn execute_differential_refresh_inner(
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .ok_or_else(|| PgTrickleError::InternalError("missing upstream CDC count".into()))?;
-            total_change_count = total_change_count.checked_add(count).ok_or_else(|| {
-                PgTrickleError::InternalError("CDC input count overflow".into())
-            })?;
+            total_change_count = total_change_count
+                .checked_add(count)
+                .ok_or_else(|| PgTrickleError::InternalError("CDC input count overflow".into()))?;
         }
     }
 
