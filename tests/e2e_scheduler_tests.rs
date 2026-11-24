@@ -2170,7 +2170,6 @@ async fn test_pause_scheduler_drain_timeout() {
         .await;
 }
 
-
 #[tokio::test]
 async fn test_scheduled_reinitialize_arms_automatic_partition_retention() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
@@ -2180,17 +2179,21 @@ async fn test_scheduled_reinitialize_arms_automatic_partition_retention() {
     db.execute("CREATE TABLE arm1499_src (id int NOT NULL, d date NOT NULL, amount int NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
     db.execute("CREATE TABLE arm1499_old PARTITION OF arm1499_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
     db.execute("CREATE TABLE arm1499_live PARTITION OF arm1499_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
-    db.execute("CREATE TABLE arm1499_default PARTITION OF arm1499_src DEFAULT").await;
-    db.execute("INSERT INTO arm1499_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)").await;
+    db.execute("CREATE TABLE arm1499_default PARTITION OF arm1499_src DEFAULT")
+        .await;
+    db.execute("INSERT INTO arm1499_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)")
+        .await;
     let query = "SELECT d, SUM(amount) AS total, COUNT(*) AS n FROM arm1499_src GROUP BY d";
-    db.create_st("arm1499_st", query, "1h", "DIFFERENTIAL").await;
-    let policy: serde_json::Value = db.query_scalar(
-        "SELECT pgtrickle.get_stream_table_partition_retention('arm1499_st')",
-    ).await;
+    db.create_st("arm1499_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    let policy: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('arm1499_st')")
+        .await;
     assert_ne!(policy["automatic_delete_with_source"], true);
 
     db.execute("DROP TABLE arm1499_default").await;
-    db.execute("SELECT pgtrickle.reinitialize_stream_table('arm1499_st')").await;
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('arm1499_st')")
+        .await;
     assert!(
         db.wait_for_condition(
             "scheduler protected reinitialization completed",
@@ -2203,16 +2206,21 @@ async fn test_scheduled_reinitialize_arms_automatic_partition_retention() {
             )",
             Duration::from_secs(90),
             Duration::from_millis(100),
-        ).await
+        )
+        .await
     );
-    let policy: serde_json::Value = db.query_scalar(
-        "SELECT pgtrickle.get_stream_table_partition_retention('arm1499_st')",
-    ).await;
+    let policy: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('arm1499_st')")
+        .await;
     assert_eq!(policy["automatic_delete_with_source"], true, "{policy}");
-    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.arm1499_st'])").await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.arm1499_st'])")
+        .await;
     db.execute("DROP TABLE arm1499_old").await;
     db.assert_st_matches_query("arm1499_st", query).await;
-    assert!(!db.query_scalar::<bool>(
-        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'arm1499_st'",
-    ).await);
+    assert!(
+        !db.query_scalar::<bool>(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'arm1499_st'",
+        )
+        .await
+    );
 }
