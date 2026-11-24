@@ -560,7 +560,7 @@ pub static PGS_TEST_CHAOS_FOR_TABLE: GucSetting<Option<std::ffi::CString>> =
 
 /// TEST-MODE only. Selects the refresh, snapshot, or WAL receipt phase used by
 /// `test_chaos_for_table`. Refresh phases are `before_apply` (default),
-/// `input_boundary`, `after_apply`, `during_finalize`,
+/// `input_boundary`, `after_apply`, `during_finalize`, `before_downstream_capture`,
 /// `control_early_progress`, and `control_partial_finalization`. WAL phases
 /// are `before_receipt`, `before_replay`, `before_ack`, `after_slot_advance`,
 /// `before_slot_retirement`, `after_slot_retirement`, `slot_retirement_kept`,
@@ -1280,7 +1280,7 @@ pub fn register_scheduler_gucs() {
           before_receipt, before_replay, before_ack, after_slot_advance, \
           before_slot_retirement, after_slot_retirement, slot_retirement_kept, \
           before_slot_adoption, snapshot_after_metadata, before_upstream_lock; \
-          after_apply and during_finalize inject a failure after their barrier; \
+          before_downstream_capture, after_apply and during_finalize inject a failure after their barrier; \
           control phases run the finalization barrier without failure and inject \
           their named semantic control. \
           Requires SELECT pg_reload_conf() after ALTER SYSTEM SET. Default: \

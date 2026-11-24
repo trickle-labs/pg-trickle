@@ -2610,3 +2610,77 @@ async fn test_snapshot_metadata_and_rows_match_a_concurrent_refresh() {
         );
     }
 }
+
+/// Fail inside the actual post-apply CDC publication path, before it can
+/// return success and before the shared finalizer moves the frontier.
+#[tokio::test]
+async fn test_refresh_downstream_capture_failure_rolls_back_and_retries() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    configure_scheduler(&db).await;
+    db.execute("CREATE TABLE capture_src (id INT PRIMARY KEY, value INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO capture_src VALUES (1, 10)").await;
+    let up_query = "SELECT id, value FROM capture_src";
+    let down_query = "SELECT count(*) AS n, sum(value) AS total FROM capture_up";
+    db.create_st("capture_up", up_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st("capture_down", down_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['capture_up','capture_down'])")
+        .await;
+    let up_id = pgt_id(&db, "capture_up").await;
+    let down_id = pgt_id(&db, "capture_down").await;
+    snapshot_table(&db, "capture_up", "capture_up_checkpoint").await;
+    snapshot_table(&db, "capture_down", "capture_down_checkpoint").await;
+    let before_up = progress(&db, up_id).await;
+    let before_down = progress(&db, down_id).await;
+    let buffer = format!("pgtrickle_changes.changes_pgt_{up_id}");
+    let before_buffer: i64 = db
+        .query_scalar(&format!("SELECT count(*) FROM {buffer}"))
+        .await;
+
+    db.execute("INSERT INTO capture_src VALUES (2, 20)").await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    sqlx::query("SET pg_trickle.refresh_strategy = 'differential'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("SET pg_trickle.test_chaos_for_table = 'capture_up'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("SET pg_trickle.test_chaos_phase = 'before_downstream_capture'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let error = sqlx::query("SELECT pgtrickle.refresh_stream_table('capture_up')")
+        .execute(&mut *conn)
+        .await
+        .expect_err("publication failure must abort, not acknowledge incomplete CDC")
+        .to_string();
+    assert!(error.contains("PGT_TEST_FAILPOINT_REACHED"), "{error}");
+    assert!(error.contains("before_downstream_capture"), "{error}");
+    sqlx::query("RESET pg_trickle.test_chaos_for_table")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("RESET pg_trickle.test_chaos_phase")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    assert_committed_checkpoint(&db, up_id, "capture_up", "capture_up_checkpoint", &before_up)
+        .await;
+    assert_committed_checkpoint(
+        &db, down_id, "capture_down", "capture_down_checkpoint", &before_down,
+    )
+    .await;
+    assert_eq!(
+        db.query_scalar::<i64>(&format!("SELECT count(*) FROM {buffer}")).await,
+        before_buffer
+    );
+    db.refresh_st("capture_up").await;
+    assert_recovered_action(&db, "capture_up", up_query, "DIFFERENTIAL").await;
+    db.refresh_st("capture_down").await;
+    assert_recovered_action(&db, "capture_down", down_query, "DIFFERENTIAL").await;
+}
