@@ -163,6 +163,152 @@ fn retention_eligibility_error(error: PgTrickleError) -> PgTrickleError {
     }
 }
 
+/// Arm automatic delete-with-source after a protected FULL materialization.
+///
+/// Initial population and reinitialization lock the source before reading
+/// it and retain the locks through commit. Only such a baseline authorizes
+/// automatic capture; never retrofit an unverified live CDC frontier.
+#[cfg(not(test))]
+pub(crate) fn arm_automatic_trim_after_full_snapshot(pgt_id: i64) -> Result<(), PgTrickleError> {
+    use crate::dag::RefreshMode;
+
+    let st = StreamTableMeta::get_by_id(pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
+    let opted_out = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies
+         WHERE pgt_id = $1 AND column_snapshot->>'partition_auto_disabled' = 'true')",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if st.refresh_mode != RefreshMode::Differential
+        || !st.is_populated
+        || st.needs_reinit
+        || opted_out
+        || load_policy(pgt_id)?.is_some()
+    {
+        return Ok(());
+    }
+    let source_oid = match retention::retention_source(&st) {
+        Ok(source) => source,
+        Err(PgTrickleError::InvalidArgument(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    // Only a plain single-column RANGE key is a safe range-delete predicate.
+    // The partition layout validator below additionally rejects default,
+    // overlapping, non-durable and unaligned descendants.
+    // A plain table or a non-RANGE partitioned table has no eligible key.
+    // Keep a result row even in that case: pgrx's get_one_with_args returns
+    // SpiError::InvalidPosition when the query itself yields zero rows.
+    let key = Spi::get_one_with_args::<String>(
+        "SELECT (
+           SELECT a.attname::text FROM pg_catalog.pg_partitioned_table p
+           JOIN pg_catalog.pg_attribute a
+             ON a.attrelid = p.partrelid AND a.attnum = p.partattrs[0]
+           WHERE p.partrelid = $1 AND p.partstrat = 'r'
+             AND p.partnatts = 1 AND p.partexprs IS NULL
+             AND a.attnotnull AND NOT a.attisdropped
+         )",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let Some(key) = key else { return Ok(()) };
+
+    let candidate = crate::refresh::with_stream_owner(&st, || {
+        let tree = crate::dvm::parser::parse_defining_query(&st.defining_query)?;
+        let candidate = match retention::query_group_candidate(&tree, source_oid.to_u32(), &key) {
+            Ok(candidate) => candidate,
+            Err(_) => return Ok(None),
+        };
+        for result in [
+            retention::validate_retention_group_collations(&tree, source_oid),
+            retention::validate_builtin_aggregates(&st.defining_query, &tree),
+        ] {
+            match result {
+                Ok(()) => {}
+                Err(PgTrickleError::InvalidArgument(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Some(candidate))
+    })?;
+    let Some(candidate) = candidate else {
+        return Ok(());
+    };
+
+    let cutoff = match candidate.source_type_oid {
+        1082 => RetentionBound::Date(0),
+        1114 => RetentionBound::Timestamp(0),
+        1184 => RetentionBound::Timestamptz(0),
+        _ => return Ok(()),
+    };
+    match retention::validate_partition_layout_trusted(source_oid, &candidate, cutoff) {
+        Ok(_) => {}
+        Err(PgTrickleError::InvalidArgument(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    match retention::validate_retention_storage(
+        &st,
+        source_oid,
+        &candidate,
+        RetentionMode::Trim,
+        true,
+    ) {
+        Ok(()) => {}
+        Err(PgTrickleError::InvalidArgument(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    }
+
+    let state = RetentionState {
+        version: 1,
+        mode: RetentionMode::Trim,
+        automatic: true,
+        cutoff_unbounded: true,
+        candidate,
+        cutoff,
+        query_hash: crate::catalog::compute_defining_query_hash(&st.defining_query),
+        sealed: Vec::new(),
+        pending: None,
+    };
+    state.validate().map_err(|e| {
+        PgTrickleError::InvalidArgument(format!("invalid automatic retention state: {e:?}"))
+    })?;
+    // This write and trigger installation are atomic with the initial FULL
+    // materialization. A failed setup aborts CREATE rather than trusting a
+    // partial capture or silently switching to an unsafe range delete.
+    crate::catalog::store_column_snapshot_for_pgt_id(pgt_id, source_oid)?;
+    let value = pgrx::JsonB(
+        serde_json::to_value(&state).map_err(|e| PgTrickleError::InternalError(e.to_string()))?,
+    );
+    let updated = Spi::get_one_with_args::<i64>(
+        "UPDATE pgtrickle.pgt_dependencies SET column_snapshot =
+         pg_catalog.jsonb_set(column_snapshot, '{partition_retention}', $3, true)
+         WHERE pgt_id = $1 AND source_relid = $2 AND source_type = 'TABLE'
+           AND NOT (column_snapshot ? 'partition_retention')
+         RETURNING pgt_id",
+        &[pgt_id.into(), source_oid.into(), value.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    if updated != Some(pgt_id) {
+        return Err(PgTrickleError::InvalidArgument(
+            "automatic partition capture was changed during initialization".into(),
+        ));
+    }
+    crate::cdc::rebuild_cdc_trigger(
+        source_oid,
+        &crate::config::pg_trickle_change_buffer_schema(),
+    )?;
+    retention::install_partition_truncate_guards(source_oid)?;
+    retention::ensure_retention_capture(pgt_id)?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn arm_automatic_trim_after_full_snapshot(_pgt_id: i64) -> Result<(), PgTrickleError> {
+    Ok(())
+}
+
 fn set_policy(
     name: &str,
     policy: &str,
@@ -192,10 +338,14 @@ fn set_policy(
             crate::cdc::lock_source_relations(&[*source_oid])?;
         }
         Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_dependencies SET column_snapshot = column_snapshot - 'partition_retention' \
-             WHERE pgt_id = $1 AND column_snapshot ? 'partition_retention'",
+            "UPDATE pgtrickle.pgt_dependencies
+             SET column_snapshot = pg_catalog.jsonb_set(
+                 COALESCE(column_snapshot, '{}'::jsonb) - 'partition_retention',
+                 '{partition_auto_disabled}', 'true'::jsonb, true)
+             WHERE pgt_id = $1 AND source_type = 'TABLE'",
             &[st.pgt_id.into()],
-        ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         if let Some((source_oid, _)) = previous {
             crate::cdc::rebuild_cdc_trigger(
                 source_oid,
@@ -219,9 +369,10 @@ fn set_policy(
     let key = source_column.filter(|key| !key.is_empty()).ok_or_else(|| {
         PgTrickleError::InvalidArgument("retention requires a source column".into())
     })?;
-    let cutoff = cutoff.filter(|cutoff| !cutoff.is_empty()).ok_or_else(|| {
-        PgTrickleError::InvalidArgument("retention requires an explicit cutoff".into())
-    })?;
+    // Omitted cutoffs make partition removal itself the retention signal.
+    // Use a typed placeholder in persisted state (v1) for compatibility;
+    // alignment and the live/sealed boundary remain independently validated.
+    let supplied_cutoff = cutoff.filter(|cutoff| !cutoff.is_empty());
     let source_oid = retention::retention_source(&st)?;
     let candidate = crate::refresh::with_stream_owner(&st, || {
         let tree = crate::dvm::parser::parse_defining_query(&st.defining_query)?;
@@ -233,7 +384,22 @@ fn set_policy(
             .map_err(retention_eligibility_error)?;
         Ok(candidate)
     })?;
-    let cutoff = retention::parse_retention_cutoff(candidate.source_type_oid, cutoff)?;
+    let implicit_trim_cutoff = match candidate.source_type_oid {
+        1082 => "2000-01-01",
+        1114 => "2000-01-01 00:00:00",
+        1184 => "2000-01-01 00:00:00+00",
+        _ => {
+            return Err(PgTrickleError::InvalidArgument(
+                "unsupported retention key type".into(),
+            ));
+        }
+    };
+    let cutoff_text = match supplied_cutoff {
+        Some(value) => value,
+        None => implicit_trim_cutoff,
+    };
+    let cutoff = retention::parse_retention_cutoff(candidate.source_type_oid, cutoff_text)?;
+    let cutoff_unbounded = supplied_cutoff.is_none();
     let query_hash = crate::catalog::compute_defining_query_hash(&st.defining_query);
     let previous = load_policy(st.pgt_id)?;
     if previous
@@ -248,6 +414,7 @@ fn set_policy(
     let state = if let Some((previous_source, mut previous)) = previous {
         if !previous.sealed.is_empty() {
             if previous.mode != mode
+                || previous.cutoff_unbounded != cutoff_unbounded
                 || previous_source != source_oid
                 || previous.candidate != candidate
                 || previous.query_hash != query_hash
@@ -264,6 +431,8 @@ fn set_policy(
             RetentionState {
                 version: 1,
                 mode,
+                automatic: false,
+                cutoff_unbounded,
                 candidate,
                 cutoff,
                 query_hash,
@@ -275,6 +444,8 @@ fn set_policy(
         RetentionState {
             version: 1,
             mode,
+            automatic: false,
+            cutoff_unbounded,
             candidate,
             cutoff,
             query_hash,
@@ -321,7 +492,7 @@ fn set_policy(
     );
     let updated = Spi::get_one_with_args::<i64>(
         "UPDATE pgtrickle.pgt_dependencies SET column_snapshot = \
-         pg_catalog.jsonb_set(COALESCE(column_snapshot, '{}'::jsonb), '{partition_retention}', $3, true) \
+         pg_catalog.jsonb_set(COALESCE(column_snapshot, '{}'::jsonb) - 'partition_auto_disabled', '{partition_retention}', $3, true) \
          WHERE pgt_id = $1 AND source_relid = $2 RETURNING pgt_id",
         &[st.pgt_id.into(), source_oid.into(), value.into()],
     ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
@@ -389,7 +560,7 @@ fn create_stream_table_with_retention(
     query: &str,
     policy: &str,
     source_column: &str,
-    cutoff: &str,
+    cutoff: default!(Option<&str>, "NULL"),
     schedule: default!(Option<&str>, "'calculated'"),
 ) {
     let result = (|| -> Result<(), PgTrickleError> {
@@ -411,7 +582,7 @@ fn create_stream_table_with_retention(
             entry_context: Some(security_context::EntryContext::SecurityDefiner),
             ..Default::default()
         })?;
-        set_policy(name, policy, Some(source_column), Some(cutoff))
+        set_policy(name, policy, Some(source_column), cutoff)
     })();
     if let Err(error) = result {
         super::raise_error_with_context(error);
@@ -434,6 +605,16 @@ fn get_stream_table_partition_retention(name: &str) -> pgrx::JsonB {
         let Some((source, state)) = load_policy(st.pgt_id)? else {
             return Ok(pgrx::JsonB(serde_json::json!({"enabled": false})));
         };
+        // The internal delete-with-source fast path is not an explicit TRIM
+        // policy. Report it separately so users can distinguish it from RETAIN.
+        if state.automatic {
+            return Ok(pgrx::JsonB(serde_json::json!({
+                "enabled": false,
+                "automatic_delete_with_source": true,
+                "source_column": state.candidate.source_column,
+                "group_column": state.candidate.output_column,
+            })));
+        }
         let source_name = Spi::get_one_with_args::<String>(
             "SELECT pg_catalog.format('%I.%I', n.nspname, c.relname) FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1",
@@ -453,7 +634,9 @@ fn get_stream_table_partition_retention(name: &str) -> pgrx::JsonB {
         let mut result = serde_json::json!({
             "enabled": true, "policy": state.mode, "source": source_name,
             "source_column": state.candidate.source_column, "group_column": state.candidate.output_column,
-            "bucket": state.candidate.bucket, "cutoff": display_bound(state.cutoff)?, "sealed_ranges": ranges,
+            "bucket": state.candidate.bucket,
+            "cutoff": if state.cutoff_unbounded { None } else { Some(display_bound(state.cutoff)?) },
+            "sealed_ranges": ranges,
         });
         if let Some(pending) = state.pending {
             result["pending_detach"] = serde_json::json!({
