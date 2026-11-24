@@ -57,7 +57,7 @@ predicted_diff_ms = base_diff_overhead
 predicted_full_ms = last_full_ms × source_growth_factor
 ```
 
-`AUTO` chooses the cheaper one (after applying the safety margin).
+The execution-time B-4 fallback check reads committed history for the current stream table on each decision. It uses the median duration of up to ten completed differential samples within a factor of two of the current change count, requiring at least three comparable samples, and the median of up to five completed FULL samples. Both windows honor `stat_reset`; an absent comparable sample set falls back to the ordinary ratio heuristic. This deliberately avoids extrapolating fixed overhead or a pathological plan from small batches to large ones. The periodic cost summary remains a monitoring estimate, not the authoritative B-4 decision input. FULL still holds source and target locks; duration alone is not an availability guarantee.
 
 ---
 
