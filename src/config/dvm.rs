@@ -384,7 +384,7 @@ pub static PGS_DELTA_ENABLE_NESTLOOP: GucSetting<bool> = GucSetting::<bool>::new
 
 /// PERF-5: Analyze staged CDC windows before every delta execution.
 /// Ordinary refreshes also analyze persistent source change buffers;
-/// graph refreshes additionally analyze materialized deltas.
+/// and materialized delta apply paths analyze their output deltas.
 pub static PGS_ANALYZE_BEFORE_DELTA: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// UX-7: DIFF output row format for aggregate UPDATE-splits.
@@ -432,8 +432,8 @@ pub(crate) fn normalize_diff_output_format(value: Option<String>) -> DiffOutputF
 /// | Value | Meaning |
 /// |-------|---------|
 /// | `"xmin"` (default) | Probe `pg_stat_activity` + `pg_prepared_xacts` once per tick and cap the frontier to the safe upper bound. |
-/// | `"none"` | No holdback — current fast behaviour. Can silently lose rows under long-running transactions. |
-/// | `"lsn:<N>"` | Hold back the frontier by exactly N bytes for debugging. |
+/// | `"none"` | No additional margin; the mandatory writer-visibility proof remains active. |
+/// | `"lsn:<N>"` | Apply an additional N-byte cap for debugging. |
 pub static PGS_FRONTIER_HOLDBACK_MODE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"xmin"));
 
@@ -446,9 +446,9 @@ pub static PGS_FRONTIER_HOLDBACK_WARN_SECONDS: GucSetting<i32> = GucSetting::<i3
 pub enum FrontierHoldbackMode {
     /// Probe pg_stat_activity + pg_prepared_xacts and cap to safe LSN (default).
     Xmin,
-    /// No holdback — fast but can lose rows under long transactions.
+    /// No additional margin; mandatory writer-visibility proof remains active.
     None,
-    /// Hold back the frontier by exactly N bytes (debugging only).
+    /// Apply an additional N-byte cap (debugging only).
     LsnBytes(u64),
     /// Sentinel: `lsn:<value>` was present but the number failed to parse.
     /// The accessor converts this to `Xmin` after emitting a WARNING.
@@ -965,7 +965,7 @@ pub fn register_dvm_gucs() {
         c"Analyze relations used by delta execution.",
         c"When true (default), every refresh analyzes its staged CDC windows. \
            Ordinary refreshes also analyze persistent source change buffers, \
-           while graph refreshes analyze materialized deltas.",
+           and materialized apply paths analyze their output deltas.",
         &PGS_ANALYZE_BEFORE_DELTA,
         GucContext::Suset,
         GucFlags::default(),
@@ -989,8 +989,8 @@ pub fn register_dvm_gucs() {
         c"'xmin' (default): probe pg_stat_activity + pg_prepared_xacts once per tick and \
            cap the frontier to the safe upper bound, preventing change-buffer rows from \
            uncommitted transactions from being silently skipped. \
-           'none': no holdback (fast but can lose rows under long-lived transactions). \
-           'lsn:<N>': hold back by exactly N bytes (debugging only).",
+           'none': no additional margin; mandatory writer visibility remains active. \
+           'lsn:<N>': apply an additional N-byte cap (debugging only).",
         &PGS_FRONTIER_HOLDBACK_MODE,
         GucContext::Suset,
         GucFlags::default(),
