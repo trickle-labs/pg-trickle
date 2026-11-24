@@ -1753,22 +1753,54 @@ fn check_cdc_transition_health() {
 
 // ── FUSE-5: Fuse circuit breaker pre-check ─────────────────────────────────
 
-/// Count total pending change buffer rows across all TABLE/FOREIGN_TABLE
-/// sources for a stream table.
-fn count_pending_changes(st: &StreamTableMeta) -> i64 {
-    let change_schema = config::pg_trickle_change_buffer_schema();
-    let source_oids = get_source_oids_for_st(st.pgt_id);
-
-    let mut total: i64 = 0;
-    for oid in &source_oids {
-        // v0.32.0+: buffer table uses stable hash name; fall back to OID if untracked.
-        let buf = crate::cdc::buffer_qualified_name_for_oid(&change_schema, *oid);
-        let count = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {buf}")) // nosemgrep: rust.spi.query.dynamic-format
-            .unwrap_or(Some(0))
-            .unwrap_or(0);
+/// Count only this consumer's unconsumed committed CDC events. A bounded
+/// probe is enough to establish a breach; another consumer's retained
+/// history and the crash-recovery sentinel are not work for this stream.
+fn count_pending_changes(
+    st: &StreamTableMeta,
+    ceiling: i64,
+) -> Result<i64, crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    let Some(frontier) = st.frontier.as_ref() else {
+        // An uninitialized stream needs a baseline, not CDC replay.
+        return Ok(0);
+    };
+    let schema = config::pg_trickle_change_buffer_schema();
+    let mut total = 0_i64;
+    for dep in crate::catalog::StDependency::get_for_st(st.pgt_id)? {
+        let (buffer, previous) = match dep.source_type.as_str() {
+            "TABLE" | "FOREIGN_TABLE" | "MATVIEW" => (
+                crate::cdc::buffer_qualified_name_for_oid(&schema, dep.source_relid),
+                frontier.get_lsn(dep.source_relid.to_u32()),
+            ),
+            "STREAM_TABLE" => {
+                let id = StreamTableMeta::pgt_id_for_relid(dep.source_relid)
+                    .ok_or_else(|| PgTrickleError::InternalError("missing upstream stream".into()))?;
+                (
+                    crate::sql_builder::qualified(&schema, &format!("changes_pgt_{id}")),
+                    frontier.get_st_lsn(id),
+                )
+            }
+            _ => continue,
+        };
+        let remaining = ceiling.saturating_sub(total).saturating_add(1);
+        // nosemgrep: rust.spi.get_one_with_args.dynamic-format — buffer is a quoted catalog-derived relation; bound and limit are parameters.
+        let count = Spi::get_one_with_args::<i64>(
+            &format!(
+                "SELECT count(*) FROM (SELECT 1 FROM {buffer}
+                   WHERE action IN ('I','D','T') AND lsn > $1::pg_lsn
+                   LIMIT $2) pending"
+            ),
+            &[previous.as_str().into(), remaining.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .ok_or_else(|| PgTrickleError::InternalError("missing fuse backlog count".into()))?;
         total = total.saturating_add(count);
+        if total > ceiling {
+            break;
+        }
     }
-    total
+    Ok(total)
 }
 
 /// Evaluate the fuse circuit breaker for a stream table.
@@ -1788,6 +1820,29 @@ fn evaluate_fuse(st: &StreamTableMeta) -> bool {
         return false;
     }
 
+    // Serialize observations with configuration changes and refreshes.
+    // Do not block the scheduler behind a busy stream catalog row.
+    let locked = Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1
+         FOR UPDATE SKIP LOCKED",
+        &[st.pgt_id.into()],
+    )
+    .unwrap_or(None)
+    .is_some();
+    if !locked {
+        return false;
+    }
+    let Some(current) = load_st_by_id(st.pgt_id) else {
+        return false;
+    };
+    let st = &current;
+    if st.fuse_state == "blown" {
+        return true;
+    }
+    if st.fuse_mode == "off" || st.fuse_state != "armed" || st.needs_reinit {
+        return false;
+    }
+
     // Determine effective ceiling
     let global_ceiling = config::pg_trickle_fuse_default_ceiling();
     let effective_ceiling = match st.fuse_ceiling {
@@ -1796,28 +1851,43 @@ fn evaluate_fuse(st: &StreamTableMeta) -> bool {
         _ => return false, // No ceiling configured — fuse is a no-op
     };
 
-    // Count pending changes
-    let pending = count_pending_changes(st);
-    if pending <= effective_ceiling {
+    let pending = match count_pending_changes(st, effective_ceiling) {
+        Ok(count) => count,
+        Err(e) => {
+            pgrx::warning!(
+                "pg_trickle: fuse backlog inspection failed for {}.{}: {e}",
+                st.pgt_schema, st.pgt_name,
+            );
+            // The ordinary refresh path validates CDC independently.
+            // Do not claim a zero-count or a threshold breach on failure.
+            return false;
+        }
+    };
+    let sensitivity = st.fuse_sensitivity.unwrap_or(1).max(1);
+    let consecutive = match Spi::get_one_with_args::<i32>(
+        "UPDATE pgtrickle.pgt_stream_tables
+            SET fuse_over_ceiling_cycles = CASE WHEN $2::bool
+                  THEN LEAST(fuse_over_ceiling_cycles::bigint + 1, $3::bigint)::int
+                  ELSE 0 END
+          WHERE pgt_id = $1 AND fuse_state = 'armed'
+          RETURNING fuse_over_ceiling_cycles",
+        &[st.pgt_id.into(), (pending > effective_ceiling).into(), sensitivity.into()],
+    ) {
+        Ok(Some(count)) => count,
+        Ok(None) => return false,
+        Err(e) => {
+            pgrx::warning!("pg_trickle: fuse observation update failed: {e}");
+            return false;
+        }
+    };
+    if consecutive < sensitivity {
         return false;
     }
 
-    // Sensitivity check: only blow after N consecutive over-ceiling observations.
-    // For now, each scheduler tick is one observation. Sensitivity > 1 requires
-    // tracking a counter in the catalog, which we skip for v1 (sensitivity
-    // defaults to 1 = blow immediately on first over-ceiling observation).
-    let sensitivity = st.fuse_sensitivity.unwrap_or(1);
-    if sensitivity > 1 {
-        // Future: track observation count in catalog. For now, blow immediately
-        // since we don't yet have a per-tick counter column.
-        // This is correct for sensitivity=1 (the default).
-    }
-    let _ = sensitivity; // suppress unused warning
-
     // BLOW the fuse
     let reason = format!(
-        "change buffer count ({}) exceeded ceiling ({})",
-        pending, effective_ceiling
+        "consumer backlog (at least {}) exceeded ceiling ({}) for {} consecutive observations",
+        pending, effective_ceiling, consecutive
     );
     pgrx::warning!(
         "pg_trickle: FUSE BLOWN for {}.{} — {}",
@@ -1833,6 +1903,7 @@ fn evaluate_fuse(st: &StreamTableMeta) -> bool {
             st.pgt_name,
             e,
         );
+        return false;
     }
 
     let _ = monitor::emit_alert(
