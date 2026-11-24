@@ -1235,17 +1235,16 @@ fn execute_manual_differential_refresh(
         // A writer can stamp the same insertion LSN after the sample,
         // especially with unlogged relations. Exclude the equal endpoint.
         // Any older invisible CDC must still hold a relevant writer lock.
-        let candidate = Spi::get_one::<String>(
-            "SELECT (pg_current_wal_insert_lsn() - 1::numeric)::text",
-        )
-        .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-            context: format!("manual refresh of {schema}.{table_name}"),
-            reason: format!("sample strict WAL bound: {e}"),
-        })?
-        .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
-            context: format!("manual refresh of {schema}.{table_name}"),
-            reason: "missing WAL bound".into(),
-        })?;
+        let candidate =
+            Spi::get_one::<String>("SELECT (pg_current_wal_insert_lsn() - 1::numeric)::text")
+                .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                    context: format!("manual refresh of {schema}.{table_name}"),
+                    reason: format!("sample strict WAL bound: {e}"),
+                })?
+                .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
+                    context: format!("manual refresh of {schema}.{table_name}"),
+                    reason: "missing WAL bound".into(),
+                })?;
         let has_writer = Spi::get_one_with_args::<bool>(
             "WITH RECURSIVE deps AS MATERIALIZED (
                  SELECT source_type, source_relid
