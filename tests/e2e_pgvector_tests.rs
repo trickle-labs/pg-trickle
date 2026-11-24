@@ -4631,7 +4631,7 @@ async fn test_centroid_source_ahead_fallback_is_reported() {
     .expect("complete window can be replayed");
     db.assert_st_matches_query(
         "centroid_ahead_live_st",
-        "SELECT grp, avg(v) AS centroid FROM centroid_ahead_live_src GROUP BY grp",
+        "SELECT grp, avg(v)::vector(2) AS centroid FROM centroid_ahead_live_src GROUP BY grp",
     )
     .await;
 }
