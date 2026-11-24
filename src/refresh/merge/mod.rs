@@ -1902,7 +1902,7 @@ fn execute_differential_refresh_inner(
     };
     let mut total_change_count: i64 = 0;
     let mut _total_table_size: i64 = 0;
-    let mut input_delta_rows_may_be_incomplete = !st_source_pgt_ids.is_empty();
+    let mut input_delta_rows_may_be_incomplete = false;
     // DI-2: Collect per-source (change_count, table_size) for the per-leaf
     // fallback decision after the P2 loop completes.
     let mut per_source_stats: Vec<(u32, i64, i64)> = Vec::new();
@@ -1914,7 +1914,10 @@ fn execute_differential_refresh_inner(
         let new_lsn = new_frontier.get_lsn(*oid);
         let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
 
-        let max_ratio_lit = if max_ratio > 0.0 {
+        // Only cap the threshold probe if reaching the cap will select FULL.
+        // Forced differential and protected retention paths require the actual
+        // cardinality for planner hints, resource guards, and cost evidence.
+        let max_ratio_lit = if !skip_ratio_check && max_ratio > 0.0 {
             format!("{max_ratio}")
         } else {
             "0".to_string()
@@ -1929,7 +1932,7 @@ fn execute_differential_refresh_inner(
         let sql = format!(
             "SELECT sz.table_size, cnt.change_count, \
                     ({max_ratio_lit} > 0 AND cnt.change_count >= \
-                       ({ratio_base}::double precision * {max_ratio_lit})::bigint + 1) \
+                       CEIL({ratio_base}::double precision * {max_ratio_lit})::bigint + 1) \
              FROM (SELECT GREATEST(reltuples::bigint, 1000) AS table_size \
                    FROM pg_class WHERE oid = {oid}::oid) sz, \
              LATERAL (SELECT count(*)::bigint AS change_count FROM (\
@@ -1937,35 +1940,32 @@ fn execute_differential_refresh_inner(
                 WHERE lsn > '{prev_lsn}'::pg_lsn \
                 AND lsn <= '{new_lsn}'::pg_lsn \
                 LIMIT CASE WHEN {max_ratio_lit} > 0 \
-                      THEN ({ratio_base}::double precision * {max_ratio_lit})::bigint + 1 \
+                      THEN CEIL({ratio_base}::double precision * {max_ratio_lit})::bigint + 1 \
                       ELSE 9223372036854775807 END\
              ) __pgt_capped) cnt",
         );
 
-        // Defensive: if the change-buffer table was dropped between the
-        // EXISTS check and this threshold query (e.g., during concurrent
-        // DROP STREAM TABLE), treat it as zero changes rather than
-        // propagating a "relation does not exist" error.
-        let (table_size, change_count, may_be_capped) = match Spi::connect(|client| {
+        // Missing/unreadable input is not an empty window. Do not prune the
+        // source branch or publish progress on a failed count.
+        let (table_size, change_count, may_be_capped) = Spi::connect(|client| {
             let row = client
                 .select(&sql, None, &[])
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .first();
-            let ts: i64 = row.get::<i64>(1).unwrap_or(Some(1000)).unwrap_or(1000);
-            let cc: i64 = row.get::<i64>(2).unwrap_or(Some(0)).unwrap_or(0);
-            let capped = row.get::<bool>(3).unwrap_or(Some(true)).unwrap_or(true);
-            Ok::<(i64, i64, bool), PgTrickleError>((ts, cc, capped))
-        }) {
-            Ok(pair) => pair,
-            Err(e) => {
-                pgrx::debug1!(
-                    "[pg_trickle] Threshold check for {} failed (table dropped?): {}",
-                    buf_name,
-                    e,
-                );
-                (1000, 0, true)
-            }
-        };
+            let ts: i64 = row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("missing source size".into()))?;
+            let cc: i64 = row
+                .get::<i64>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("missing CDC count".into()))?;
+            let capped: bool = row
+                .get::<bool>(3)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("missing CDC count bound".into()))?;
+            Ok::<_, PgTrickleError>((ts, cc, capped))
+        })?;
         input_delta_rows_may_be_incomplete |= may_be_capped;
 
         let threshold_rows = if max_ratio > 0.0 {
@@ -1974,8 +1974,10 @@ fn execute_differential_refresh_inner(
             i64::MAX / 2
         };
 
-        total_change_count += change_count;
-        _total_table_size += table_size;
+        total_change_count = total_change_count.checked_add(change_count).ok_or_else(|| {
+            PgTrickleError::InternalError("CDC input count overflow".into())
+        })?;
+        _total_table_size = _total_table_size.saturating_add(table_size);
 
         // DI-2: Save per-source stats for per-leaf fallback decision.
         per_source_stats.push((*oid, change_count, table_size));
@@ -2021,6 +2023,51 @@ fn execute_differential_refresh_inner(
                      UNION ALL source threshold."
                 ),
             ));
+        }
+    }
+
+    // A capped count is only valid as proof that an automatic ratio
+    // threshold was crossed. It must never reach the execution planner.
+    if fallback_reason.is_none() && input_delta_rows_may_be_incomplete {
+        return Err(PgTrickleError::InternalError(
+            "capped CDC count without a FULL decision".into(),
+        ));
+    }
+
+    // Upstream stream tables have their own durable CDC windows. Count the
+    // eligible events, not the physical size of the shared retained buffer.
+    // Keep this out of the independent base-source UNION ratio calculation.
+    if fallback_reason.is_none() {
+        for &upstream_pgt_id in &st_source_pgt_ids {
+            let key = format!("pgt_{upstream_pgt_id}");
+            let prev_lsn = prev_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.as_str())
+                .unwrap_or("0/0");
+            let new_lsn = new_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.as_str())
+                .unwrap_or("0/0");
+            let buffer = format!(
+                "{}.{}",
+                crate::sql_builder::ident(&change_schema),
+                crate::sql_builder::ident(&format!("changes_pgt_{upstream_pgt_id}")),
+            );
+            // nosemgrep: rust.spi.query.dynamic-format — buffer identifiers are quoted; LSNs are bound parameters.
+            let count = Spi::get_one_with_args::<i64>(
+                &format!(
+                    "SELECT count(*)::bigint FROM {buffer}
+                      WHERE lsn > $1::pg_lsn AND lsn <= $2::pg_lsn"
+                ),
+                &[prev_lsn.into(), new_lsn.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::InternalError("missing upstream CDC count".into()))?;
+            total_change_count = total_change_count.checked_add(count).ok_or_else(|| {
+                PgTrickleError::InternalError("CDC input count overflow".into())
+            })?;
         }
     }
 
