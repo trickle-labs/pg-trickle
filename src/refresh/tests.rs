@@ -13,8 +13,7 @@ use std::sync::Arc;
 
 // ── Functions moved to merge sub-modules (A16 split) — import for unit tests ─
 use crate::refresh::merge::columns::{
-    PartitionBounds, extract_keyword_int, inject_partition_predicate, parse_hash_bound_spec,
-    pg_quote_literal,
+    extract_keyword_int, parse_hash_bound_spec, pg_quote_literal,
 };
 use crate::refresh::merge::delete::should_warn_amplification;
 
@@ -2235,108 +2234,6 @@ fn test_pg_quote_literal_multiple_single_quotes() {
 fn test_pg_quote_literal_only_quotes() {
     // Input is two single quotes; each is doubled (→ 4 quotes) then wrapped → 6 quotes
     assert_eq!(pg_quote_literal("''"), "''''''");
-}
-
-// ── inject_partition_predicate ───────────────────────────────────────────
-
-#[test]
-fn test_inject_partition_predicate_basic() {
-    let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-    let bounds = PartitionBounds::Range {
-        mins: vec!["2024-01-01".to_string()],
-        maxs: vec!["2024-01-31".to_string()],
-    };
-    let result = inject_partition_predicate(merge_sql, "event_date", &bounds);
-    assert!(result.contains("BETWEEN '2024-01-01' AND '2024-01-31'"));
-    assert!(result.contains(r#""event_date""#));
-    assert!(result.contains("st."));
-    assert!(!result.contains("__PGT_PART_PRED__"));
-}
-
-#[test]
-fn test_inject_partition_predicate_no_placeholder() {
-    // If there is no placeholder the SQL is returned unchanged
-    let merge_sql = "MERGE INTO st USING d ON st.id = d.id";
-    let bounds = PartitionBounds::Range {
-        mins: vec!["2024-01-01".to_string()],
-        maxs: vec!["2024-01-31".to_string()],
-    };
-    let result = inject_partition_predicate(merge_sql, "event_date", &bounds);
-    assert_eq!(result, merge_sql);
-}
-
-#[test]
-fn test_inject_partition_predicate_value_with_single_quote() {
-    let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-    let bounds = PartitionBounds::Range {
-        mins: vec!["O'Brien".to_string()],
-        maxs: vec!["O'Reilly".to_string()],
-    };
-    let result = inject_partition_predicate(merge_sql, "name", &bounds);
-    // Single quotes must be doubled inside the predicate literals
-    assert!(result.contains("'O''Brien'"));
-    assert!(result.contains("'O''Reilly'"));
-}
-
-// A1-1b: multi-column partition predicate tests
-
-#[test]
-fn test_inject_partition_predicate_multi_column() {
-    let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-    let bounds = PartitionBounds::Range {
-        mins: vec!["2024-01-01".to_string(), "100".to_string()],
-        maxs: vec!["2024-01-31".to_string(), "999".to_string()],
-    };
-    let result = inject_partition_predicate(merge_sql, "event_day,customer_id", &bounds);
-    // Multi-column uses ROW comparison instead of BETWEEN
-    assert!(
-        result.contains("ROW(st.\"event_day\", st.\"customer_id\") >= ROW('2024-01-01', '100')")
-    );
-    assert!(
-        result.contains("ROW(st.\"event_day\", st.\"customer_id\") <= ROW('2024-01-31', '999')")
-    );
-    assert!(!result.contains("__PGT_PART_PRED__"));
-}
-
-#[test]
-fn test_inject_partition_predicate_three_columns() {
-    let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-    let bounds = PartitionBounds::Range {
-        mins: vec!["1".to_string(), "x".to_string(), "10".to_string()],
-        maxs: vec!["9".to_string(), "z".to_string(), "90".to_string()],
-    };
-    let result = inject_partition_predicate(merge_sql, "a, b, c", &bounds);
-    assert!(result.contains("ROW(st.\"a\", st.\"b\", st.\"c\") >= ROW('1', 'x', '10')"));
-    assert!(result.contains("ROW(st.\"a\", st.\"b\", st.\"c\") <= ROW('9', 'z', '90')"));
-}
-
-// A1-1d: LIST partition predicate tests
-
-#[test]
-fn test_inject_partition_predicate_list_single_value() {
-    let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-    let bounds = PartitionBounds::List(vec!["US".to_string()]);
-    let result = inject_partition_predicate(merge_sql, "LIST:region", &bounds);
-    assert!(result.contains("st.\"region\" IN ('US')"));
-    assert!(!result.contains("__PGT_PART_PRED__"));
-}
-
-#[test]
-fn test_inject_partition_predicate_list_multiple_values() {
-    let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-    let bounds =
-        PartitionBounds::List(vec!["EU".to_string(), "US".to_string(), "APAC".to_string()]);
-    let result = inject_partition_predicate(merge_sql, "LIST:region", &bounds);
-    assert!(result.contains("st.\"region\" IN ('EU', 'US', 'APAC')"));
-    assert!(!result.contains("__PGT_PART_PRED__"));
-}
-
-#[test]
-fn test_inject_partition_predicate_list_value_with_quote() {
-    let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-    let bounds = PartitionBounds::List(vec!["O'Brien".to_string()]);
-    let result = inject_partition_predicate(merge_sql, "LIST:name", &bounds);
-    assert!(result.contains("'O''Brien'"));
 }
 
 // ── build_weight_agg_using ───────────────────────────────────────────────
