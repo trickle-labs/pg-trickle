@@ -70,6 +70,24 @@ async fn refresh_with_optional_barrier(pool: &PgPool, st: &'static str, barrier:
             "post-bound D image must restore the pre-frontier row in {stage}",
         );
     }
+    if matches!(st, "bound_bag_down" | "bound_bag_delete_down") && barrier {
+        let stage: String = sqlx::query_scalar(
+            "SELECT relname::text FROM pg_catalog.pg_class
+             WHERE relnamespace = pg_my_temp_schema()
+               AND relname LIKE '__pgt_bound_%'
+             ORDER BY relname LIMIT 1",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .expect("find bounded upstream stream-table stage");
+        let copies: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM pg_temp.\"{stage}\" WHERE v = 20",
+        )))
+        .fetch_one(&mut *connection)
+        .await
+        .expect("count exact duplicate occurrences in the bounded stage");
+        assert_eq!(copies, if st == "bound_bag_down" { 2 } else { 3 });
+    }
     if barrier {
         sqlx::query("COMMIT")
             .execute(&mut *connection)
@@ -620,4 +638,48 @@ async fn test_bound_duplicate_stream_table_occurrences_preserve_extrema() {
     refresh_normally(&db, "bound_bag_down").await;
     db.assert_st_matches_query("bound_bag_down", down_query).await;
     assert_no_full_fallback(&db, "bound_bag_down").await;
+}
+
+/// Undoing multiple future deletions must restore every missing occurrence,
+/// not just the first D image for the logical row identity.
+#[tokio::test]
+async fn test_bound_duplicate_stream_table_deletes_restore_every_occurrence() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE bound_bag_delete_src(g int, v int)").await;
+    db.execute("INSERT INTO bound_bag_delete_src VALUES (1, 30), (1, 20), (1, 20), (1, 20), (1, 10)")
+        .await;
+    let up_query = "SELECT g, v FROM bound_bag_delete_src";
+    let down_query = "SELECT g, max(v) AS ex, count(*) AS n FROM bound_bag_delete_up GROUP BY g";
+    db.create_st("bound_bag_delete_up", up_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st("bound_bag_delete_down", down_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("DELETE FROM bound_bag_delete_src WHERE v = 30").await;
+    refresh_normally(&db, "bound_bag_delete_up").await;
+    let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_bag_delete_down").await;
+    db.execute(
+        "DELETE FROM bound_bag_delete_src WHERE ctid IN (
+            SELECT ctid FROM bound_bag_delete_src WHERE v = 20 LIMIT 2
+        )",
+    )
+    .await;
+    refresh_normally(&db, "bound_bag_delete_up").await;
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT count(*) FROM bound_bag_delete_up WHERE v = 20")
+            .await,
+        1
+    );
+    // The barrier helper also inspects the materialized historical stage:
+    // all three copies must be restored there even though live has one.
+    finish_bounded_refresh(&mut blocker, id, refresh).await;
+    let bounded: (i32, i64) = sqlx::query_as(
+        "SELECT ex, n FROM bound_bag_delete_down WHERE g = 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read downstream at its old cut");
+    assert_eq!(bounded, (20, 4));
+    refresh_normally(&db, "bound_bag_delete_down").await;
+    db.assert_st_matches_query("bound_bag_delete_down", down_query).await;
+    assert_no_full_fallback(&db, "bound_bag_delete_down").await;
 }
