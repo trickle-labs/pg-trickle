@@ -31,6 +31,6 @@ src/scheduler/citus.rs 1
 src/scheduler/dispatch.rs 8
 src/scheduler/mod.rs 12
 src/scheduler/scheduler_loop.rs 5
-src/shmem.rs 51
+src/shmem.rs 52
 src/wal_decoder.rs 5
 
