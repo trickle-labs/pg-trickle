@@ -2928,17 +2928,23 @@ pub(super) fn stat_reset(pgt_id: i64) {
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run_with_args(
             "INSERT INTO pgtrickle.pgt_refresh_summary (pgt_id, stats_reset_at)
-             VALUES ($1, now())
+             VALUES ($1, clock_timestamp())
              ON CONFLICT (pgt_id) DO UPDATE SET
                  total_refreshes = 0, successful_refreshes = 0, failed_refreshes = 0,
                  total_rows_inserted = 0, total_rows_updated = 0, total_rows_deleted = 0,
                  total_duration_ms = 0, total_full_refreshes = 0, total_diff_refreshes = 0,
-                 total_delta_rows_processed = 0, stats_reset_at = now(), updated_at = now()",
+                 total_delta_rows_processed = 0, stats_reset_at = clock_timestamp(), updated_at = now()",
             &[pgt_id.into()],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run_with_args(
             "DELETE FROM pgtrickle.pgt_cost_model_summary WHERE pgt_id = $1",
+            &[pgt_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables
+                SET auto_threshold = NULL, last_full_ms = NULL WHERE pgt_id = $1",
             &[pgt_id.into()],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
@@ -2976,11 +2982,16 @@ pub(super) fn stat_reset_all() {
                   SET total_refreshes = 0, successful_refreshes = 0, failed_refreshes = 0,
                       total_rows_inserted = 0, total_rows_updated = 0, total_rows_deleted = 0,
                       total_duration_ms = 0, total_full_refreshes = 0, total_diff_refreshes = 0,
-                      total_delta_rows_processed = 0, stats_reset_at = now(), updated_at = now()",
+                      total_delta_rows_processed = 0, stats_reset_at = clock_timestamp(), updated_at = now()",
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("DELETE FROM pgtrickle.pgt_cost_model_summary")
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run(
+            "UPDATE pgtrickle.pgt_stream_tables
+                SET auto_threshold = NULL, last_full_ms = NULL",
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         crate::shmem::invalidate_cost_model(None);
         Ok::<(), PgTrickleError>(())
     })();
