@@ -858,10 +858,16 @@ impl DiffContext {
     /// only recorded leaf relations avoids replacing similarly named tables
     /// in expressions or source SQL from an unrelated scope.
     pub(crate) fn register_source_scan(&mut self, oid: u32, schema: &str, table: &str) {
-        self.cache.source_scan_relations.insert(
-            oid,
-            format!("{}.{}", quote_ident(schema), quote_ident(table)),
-        );
+        if self.cdc.source_bound_tables.is_empty()
+            || self.cache.source_scan_relations.contains_key(&oid)
+        {
+            return;
+        }
+        let mut relation = String::with_capacity(schema.len() + table.len() + 5);
+        push_quoted_ident(&mut relation, schema);
+        relation.push('.');
+        push_quoted_ident(&mut relation, table);
+        self.cache.source_scan_relations.insert(oid, relation);
     }
 
     /// Register every parsed source, including leaves optimized away by P5

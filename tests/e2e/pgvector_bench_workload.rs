@@ -1555,13 +1555,32 @@ async fn test_pgvector_filtered_ann_workload() {
                 );
                 let (refresh_plan, elapsed_ms, writer_lock_wait_ms, writer_transaction_ms) =
                     if centroid_concurrent_writer && round >= warmup_rounds {
-                        centroid_refresh_with_writer_lock(
-                            &db,
-                            &mut conn,
-                            &refresh_sql,
-                            centroid_writer_id,
+                        let (plan, elapsed, lock_wait, writer_tx) =
+                            centroid_refresh_with_writer_lock(
+                                &db,
+                                &mut conn,
+                                &refresh_sql,
+                                centroid_writer_id,
+                            )
+                            .await;
+                        // Manual differential refreshes hold the frontier when an active writer holds a relation lock; catch up once the writer commits.
+                        let held_back: bool = sqlx::query_scalar(
+                            "SELECT h.rows_inserted = 0 AND h.rows_deleted = 0 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = $1 AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1",
                         )
+                        .bind(&stream)
+                        .fetch_one(&mut *conn)
                         .await
+                        .expect("check concurrent centroid refresh progress");
+                        if held_back {
+                            let catchup: serde_json::Value =
+                                sqlx::query_scalar(sqlx::AssertSqlSafe(refresh_sql.clone()))
+                                    .fetch_one(&mut *conn)
+                                    .await
+                                    .expect("catch up centroid refresh after writer commit");
+                            (catchup, elapsed, lock_wait, writer_tx)
+                        } else {
+                            (plan, elapsed, lock_wait, writer_tx)
+                        }
                     } else {
                         let plan: serde_json::Value =
                             sqlx::query_scalar(sqlx::AssertSqlSafe(refresh_sql))

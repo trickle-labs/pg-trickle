@@ -244,6 +244,7 @@ def validate_trigger_free_strategies(cases: list[dict]) -> None:
         strategies = {
             case["report"]["measurements"][0]["samples"][0]["merge_strategy"]
             for case in selected
+            if case["subscriptions"] > 0
         }
         if len(strategies) != 1:
             raise ValueError(

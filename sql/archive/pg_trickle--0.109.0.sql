@@ -643,11 +643,6 @@ RETURNS double precision[] LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
              THEN NULL::double precision[] ELSE $1 END, $2)
 $$;
 
-GRANT EXECUTE ON FUNCTION pgtrickle._centroid_delta_step(double precision[], real[], smallint) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION pgtrickle._centroid_delta(real[], smallint) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION pgtrickle._centroid_init_raw(double precision[], integer) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION pgtrickle._centroid_init(double precision[], integer) TO PUBLIC;
-
 CREATE FUNCTION pgtrickle._centroid_finalize_raw("state" double precision[], "dimensions" integer)
 RETURNS real[] IMMUTABLE PARALLEL SAFE
 LANGUAGE c AS 'MODULE_PATHNAME', '_centroid_finalize_raw_wrapper';
@@ -4987,6 +4982,12 @@ GRANT EXECUTE ON FUNCTION pgtrickle.worker_pool_status() TO PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_ddl_start() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_ddl_end() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_sql_drop() FROM PUBLIC;
+
+-- Pure arithmetic used while staging under the stream owner's role.
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_delta_step(double precision[], real[], smallint) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_delta(real[], smallint) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_init_raw(double precision[], integer) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle._centroid_init(double precision[], integer) TO PUBLIC;
 
 SELECT pgtrickle._signal_launcher_rescan();
 /* </end connected objects> */

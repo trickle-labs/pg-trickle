@@ -169,7 +169,15 @@ class SubscriptionScaleTests(unittest.TestCase):
                 "force_explicit_with_noop_trigger": False,
                 "report": {
                     "measurements": [
-                        {"samples": [{"merge_strategy": "delete_insert"}]}
+                        {
+                            "samples": [
+                                {
+                                    "merge_strategy": "delete_insert"
+                                    if subscriptions == 0
+                                    else "explicit_dml"
+                                }
+                            ]
+                        }
                     ]
                 },
             }
@@ -186,13 +194,13 @@ class SubscriptionScaleTests(unittest.TestCase):
                 "mutation_shape": "repeated_updates_delete",
                 "report": {
                     "measurements": [
-                        {"samples": [{"merge_strategy": "explicit_dml"}]}
+                        {"samples": [{"merge_strategy": "delete_insert"}]}
                     ]
                 },
             }
         )
         scale.validate_trigger_free_strategies(cases)
-        cases[-2]["report"]["measurements"][0]["samples"][0]["merge_strategy"] = "explicit_dml"
+        cases[-2]["report"]["measurements"][0]["samples"][0]["merge_strategy"] = "delete_insert"
         with self.assertRaisesRegex(ValueError, "changed merge strategy"):
             scale.validate_trigger_free_strategies(cases)
 

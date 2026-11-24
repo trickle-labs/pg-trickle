@@ -693,14 +693,11 @@ SELECT * FROM {multi_cte}",
         ""
     };
     let key_changed_col_ins = key_changed_col_del; // Same for both branches.
-    let first_delete_guard = crate::cdc_elision::scan_initial_row_present_sql("s.__first_action");
-    let last_insert_guard = crate::cdc_elision::scan_final_row_present_sql("s.__last_action");
-    let delete_candidate_filter =
-        crate::cdc_elision::scan_delete_candidate_sql("s.__first_action", "s.action");
-    let insert_candidate_filter =
-        crate::cdc_elision::scan_insert_candidate_sql("s.__last_action", "s.action");
 
     let sql = if ctx.merge_safe_dedup {
+        let first_delete_guard =
+            crate::cdc_elision::scan_initial_row_present_sql("s.__first_action");
+        let last_insert_guard = crate::cdc_elision::scan_final_row_present_sql("s.__last_action");
         // ── Merge-safe dedup mode ──────────────────────────────────────
         // Emit at most ONE row per PK: DELETE only for true deletes OR
         // when the row ID changed (keyless table UPDATE). INSERT for any
@@ -745,6 +742,10 @@ FROM (
             last_insert_guard = last_insert_guard,
         )
     } else {
+        let delete_candidate_filter =
+            crate::cdc_elision::scan_delete_candidate_sql("s.__first_action", "s.action");
+        let insert_candidate_filter =
+            crate::cdc_elision::scan_insert_candidate_sql("s.__last_action", "s.action");
         // ── Standard mode (D+I pairs for updates) ──────────────────────
         // Required when aggregate/join/union consumes the scan delta.
         is_deduplicated = false;

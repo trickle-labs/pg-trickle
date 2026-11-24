@@ -505,9 +505,88 @@ jobs:
         run: docker rm -f smoketest 2>/dev/null || true
 
   # ── Publish GitHub Release ──────────────────────────────────────────────
+  qualification-heavy:
+    name: Packaged release qualification (heavy vector/RAG)
+    needs: [build-release, test-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Download release packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist/
+
+      - name: Build candidate PostgreSQL image for live workloads
+        run: |
+          ARCHIVE="$(find dist/release-linux-amd64 -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          test -n "$ARCHIVE"
+          mkdir -p candidate
+          tar xzf "$ARCHIVE" -C candidate --strip-components=1
+          test -f candidate/extension/pg_trickle.control
+          test -f candidate/lib/pg_trickle.so
+          docker build -t pg_trickle_release_candidate:local \
+            -f tests/Dockerfile.release-e2e .
+          PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_pgvector_image.sh 0.8.7
+
+      - name: Run heavy vector/RAG suites against the exact Linux package
+        id: qualify-heavy
+        env:
+          QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
+        run: |
+          set +e
+          mkdir -p qualification-logs/logs qualification-logs/results qualification-logs/raw
+          ARCHIVE="$(find dist/release-linux-amd64 -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
+            VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          fi
+          QUALIFICATION="tests/release/v${VERSION}-qualification.json"
+          FAILED=0
+          for suite in live-rag-100k subscription-scale-100k centroid-cost-matrix; do
+            echo "=== Qualification suite: ${suite} ==="
+            python3 scripts/run_release_suite.py \
+              --qualification "$QUALIFICATION" \
+              --suite "$suite" \
+              --artifact "$ARCHIVE" \
+              --candidate-commit "$GITHUB_SHA" \
+              --log "qualification-logs/logs/${suite}.log" \
+              --result "qualification-logs/results/${suite}.json"
+            if [[ $? -ne 0 ]]; then
+              FAILED=1
+            fi
+          done
+          echo "failed=${FAILED}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Retain heavy qualification logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qualification-evidence-heavy
+          path: qualification-logs/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Require all heavy qualification suites to pass
+        if: always()
+        run: |
+          if [[ "${{ steps.qualify-heavy.outputs.failed }}" != "0" ]]; then
+            echo "One or more heavy package qualification suites failed."
+            exit 1
+          fi
+
   qualification:
     name: Packaged release qualification
-    needs: [build-release, test-release]
+    needs: [build-release, test-release, qualification-heavy]
+    if: always() && needs.build-release.result == 'success' && needs.test-release.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -553,6 +632,9 @@ jobs:
           mapfile -t SUITES < <(python3 -c 'import json, sys; print("\n".join(s["id"] for s in json.load(open(sys.argv[1]))["required_suites"]))' "$QUALIFICATION")
           FAILED=0
           for suite in "${SUITES[@]}"; do
+            if [[ "$suite" == "live-rag-100k" || "$suite" == "subscription-scale-100k" || "$suite" == "centroid-cost-matrix" ]]; then
+              continue
+            fi
             echo "=== Qualification suite: ${suite} ==="
             python3 scripts/run_release_suite.py \
               --qualification "$QUALIFICATION" \
@@ -591,6 +673,14 @@ jobs:
           python3 scripts/v0_109_0_release_gate.py
           --unsafe-asan-log qualification-logs/unsafe-asan/workloads.log
 
+      - name: Download heavy qualification logs
+        if: always()
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: qualification-evidence-heavy
+          path: qualification-logs/
+
       - name: Write candidate-bound release evidence
         if: always()
         env:
@@ -626,7 +716,7 @@ jobs:
       - name: Require all qualification suites to pass
         if: always()
         run: |
-          if [[ "${{ steps.qualify.outputs.failed }}" != "0" || "${{ steps.unsafe-asan.outcome }}" != "success" ]]; then
+          if [[ "${{ needs.qualification-heavy.result }}" != "success" || "${{ steps.qualify.outputs.failed }}" != "0" || "${{ steps.unsafe-asan.outcome }}" != "success" ]]; then
             echo "One or more package or separate instrumented qualification suites failed."
             exit 1
           fi
@@ -634,7 +724,7 @@ jobs:
   publish-release:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.qualification_only != true }}
     name: Publish GitHub Release
-    needs: [build-release, test-release, qualification]
+    needs: [build-release, test-release, qualification-heavy, qualification]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -715,7 +805,7 @@ jobs:
   publish-docker-arch:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.qualification_only != true }}
     name: Docker image (${{ matrix.arch }})
-    needs: [build-release, test-release, qualification]
+    needs: [build-release, test-release, qualification-heavy, qualification]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     strategy:
@@ -835,13 +925,14 @@ jobs:
   publication-result:
     name: Require every release stage to succeed
     if: always()
-    needs: [build-release, test-release, qualification, publish-release, publish-docker-arch, publish-docker]
+    needs: [build-release, test-release, qualification-heavy, qualification, publish-release, publish-docker-arch, publish-docker]
     runs-on: ubuntu-latest
     steps:
       - name: Reject failed or skipped release stages
         env:
           BUILD: ${{ needs.build-release.result }}
           SMOKE: ${{ needs.test-release.result }}
+          QUALIFICATION_HEAVY: ${{ needs.qualification-heavy.result }}
           QUALIFICATION: ${{ needs.qualification.result }}
           GITHUB_RELEASE: ${{ needs.publish-release.result }}
           CNPG_IMAGES: ${{ needs.publish-docker-arch.result }}
@@ -849,7 +940,7 @@ jobs:
           QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
         run: |
           if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
-            for stage in "$BUILD" "$SMOKE" "$QUALIFICATION"; do
+            for stage in "$BUILD" "$SMOKE" "$QUALIFICATION_HEAVY" "$QUALIFICATION"; do
               if [[ "$stage" != "success" ]]; then
                 echo "Qualification-only stage ended as $stage."
                 exit 1
@@ -864,7 +955,7 @@ jobs:
             echo "Candidate qualification passed; publication jobs were skipped."
             exit 0
           fi
-          for stage in "$BUILD" "$SMOKE" "$QUALIFICATION" "$GITHUB_RELEASE" "$CNPG_IMAGES" "$CNPG_MANIFEST"; do
+          for stage in "$BUILD" "$SMOKE" "$QUALIFICATION_HEAVY" "$QUALIFICATION" "$GITHUB_RELEASE" "$CNPG_IMAGES" "$CNPG_MANIFEST"; do
             if [[ "$stage" != "success" ]]; then
               echo "Release stage ended as $stage; release workflow must not be successful."
               exit 1
