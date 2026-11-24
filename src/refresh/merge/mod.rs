@@ -3439,70 +3439,32 @@ pub fn execute_differential_refresh_with_tuning(
         && crate::config::pg_trickle_diff_output_format() == crate::config::DiffOutputFormat::Split;
     drop(parsed_query);
 
-    // ── A1-2/A1-3: Partition-key range predicate injection ───────────
-    // For partitioned stream tables, compute the MIN/MAX of the partition
-    // key across the current delta and inject it as a literal range
-    // predicate into the MERGE ON clause. This enables PostgreSQL partition
-    // pruning: only partitions overlapping [min, max] are visited, reducing
-    // MERGE I/O proportionally to the number of affected partitions.
-    //
-    // HASH partitions use a parent-level MERGE; PostgreSQL routes rows to
-    // the correct child, and hash functions cannot provide range predicates.
-    //
-    // If the delta is empty (all changes cancel out), return early —
-    // there is nothing to MERGE.
+    // Generic partition keys are not necessarily part of the stream row
+    // identity. A value-only UPDATE may move a row to a new partition even
+    // when the normalized delta contains only its new image. NULL keys can
+    // also reside in the default partition. Do not infer old-row locations
+    // from the new delta's extrema or interpret NULL extrema as no data.
+    // PostgreSQL routes parent MERGE updates/inserts to the correct child.
+    // Retention's explicit DML still uses its independently proved group key.
     let hash_merge_result: Option<(usize, &str)> = if let Some(ref pk) = st.st_partition_key {
-        let method = crate::api::parse_partition_method(pk);
-        if method == crate::api::PartitionMethod::Hash {
-            if use_explicit_dml {
-                // Downstream capture and trigger semantics require explicit DML.
-                None
-            } else {
-                // A1-3b: Parent-level MERGE for HASH partitioned STs.
-                let count = with_stream_owner(st, || {
-                    execute_hash_partitioned_merge(
-                        &resolved.merge_sql,
-                        &resolved.resolved_delta_sql,
-                        schema,
-                        name,
-                        st.pgt_relid,
-                        pk,
-                        st.pgt_id,
-                    )
-                })?;
-                Some((count, "hash_merge"))
-            }
+        resolved.merge_sql = resolved.merge_sql.replace("__PGT_PART_PRED__", "");
+        if crate::api::parse_partition_method(pk) == crate::api::PartitionMethod::Hash
+            && !use_explicit_dml
+        {
+            let count = with_stream_owner(st, || {
+                execute_hash_partitioned_merge(
+                    &resolved.merge_sql,
+                    &resolved.resolved_delta_sql,
+                    schema,
+                    name,
+                    st.pgt_relid,
+                    pk,
+                    st.pgt_id,
+                )
+            })?;
+            Some((count, "hash_merge"))
         } else {
-            // RANGE / LIST: extract bounds and inject predicate.
-            match with_stream_owner(st, || {
-                extract_partition_bounds(&resolved.resolved_delta_sql, pk)
-            })? {
-                None => {
-                    // Delta produced no rows for the partition key — fast path.
-                    pgrx::debug1!(
-                        "[pg_trickle] A1-3: empty partition-key delta for {}.{}, skipping MERGE",
-                        schema,
-                        name,
-                    );
-                    delta_stage.cleanup_bounded_views()?;
-                    return Ok((0, 0));
-                }
-                Some(bounds) => {
-                    pgrx::debug1!(
-                        "[pg_trickle] A1-3: partition bounds for {}.{}: {:?}",
-                        schema,
-                        name,
-                        match &bounds {
-                            PartitionBounds::Range { mins, maxs } =>
-                                format!("RANGE [{mins:?}, {maxs:?}]"),
-                            PartitionBounds::List(vals) => format!("LIST {:?}", vals),
-                        },
-                    );
-                    resolved.merge_sql =
-                        inject_partition_predicate(&resolved.merge_sql, pk, &bounds);
-                    None
-                }
-            }
+            None
         }
     } else {
         None
