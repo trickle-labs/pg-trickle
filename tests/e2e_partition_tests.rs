@@ -9844,7 +9844,6 @@ async fn test_scale2_multi_db_worker_pool_hot_tier_refreshes_within_sla() {
         .await;
 }
 
-
 #[tokio::test]
 async fn test_retention_create_omitted_cutoff_uses_source_driven_trim() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
@@ -9855,12 +9854,16 @@ async fn test_retention_create_omitted_cutoff_uses_source_driven_trim() {
         "SELECT pronargdefaults FROM pg_catalog.pg_proc
           WHERE oid = 'pgtrickle.create_stream_table_with_retention(text,text,text,text,text,text)'::regprocedure",
     ).await;
-    assert_eq!(defaults, 2, "installed SQL must default cutoff and schedule");
+    assert_eq!(
+        defaults, 2,
+        "installed SQL must default cutoff and schedule"
+    );
 
     db.execute("CREATE TABLE cutoff1500_src (id int NOT NULL, d date NOT NULL, amount int NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
     db.execute("CREATE TABLE cutoff1500_old PARTITION OF cutoff1500_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
     db.execute("CREATE TABLE cutoff1500_live PARTITION OF cutoff1500_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
-    db.execute("INSERT INTO cutoff1500_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)").await;
+    db.execute("INSERT INTO cutoff1500_src VALUES (1,'2025-06-01',4),(2,'2026-06-01',8)")
+        .await;
     let query = "SELECT d, SUM(amount) AS total, COUNT(*) AS n FROM cutoff1500_src GROUP BY d";
     sqlx::query(
         "SELECT pgtrickle.create_stream_table_with_retention(
@@ -9873,7 +9876,10 @@ async fn test_retention_create_omitted_cutoff_uses_source_driven_trim() {
     .expect("installed signature accepts omitted cutoff");
     db.execute("DROP TABLE cutoff1500_old").await;
     db.assert_st_matches_query("cutoff1500_st", query).await;
-    assert!(!db.query_scalar::<bool>(
-        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'cutoff1500_st'",
-    ).await);
+    assert!(
+        !db.query_scalar::<bool>(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'cutoff1500_st'",
+        )
+        .await
+    );
 }
