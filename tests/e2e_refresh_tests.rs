@@ -1478,3 +1478,82 @@ async fn test_fused_refresh_scheduler_audit_trail() {
          (COR-001: CHECK constraint should include SCHEDULER_FUSED)"
     );
 }
+
+/// A pure source reset must publish the old output deletions through every
+/// downstream edge and must not delete the scalar aggregate's empty-input row.
+#[tokio::test]
+async fn test_pure_truncate_preserves_scalar_and_cascade_semantics() {
+    let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
+    db.execute("CREATE TABLE reset_src(id int PRIMARY KEY, v int NOT NULL)")
+        .await;
+    db.execute("INSERT INTO reset_src VALUES (1, 10), (2, 20), (3, 30)")
+        .await;
+    let up_query = "SELECT id, v FROM reset_src";
+    let middle_query = "SELECT id, v FROM reset_up";
+    let down_query = "SELECT count(*) AS n, sum(v) AS total FROM reset_middle";
+    let scalar_query = "SELECT count(*) AS n, sum(v) AS total FROM reset_src";
+    db.create_st("reset_up", up_query, "1h", "DIFFERENTIAL").await;
+    db.create_st("reset_middle", middle_query, "1h", "DIFFERENTIAL").await;
+    db.create_st("reset_down", down_query, "1h", "DIFFERENTIAL").await;
+    db.create_st("reset_scalar", scalar_query, "1h", "DIFFERENTIAL").await;
+    db.execute("TRUNCATE reset_src").await;
+    db.execute_seq(&[
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('reset_up')",
+        "SELECT pgtrickle.refresh_stream_table('reset_middle')",
+        "SELECT pgtrickle.refresh_stream_table('reset_down')",
+        "SELECT pgtrickle.refresh_stream_table('reset_scalar')",
+    ]).await;
+    for (name, query) in [
+        ("reset_up", up_query),
+        ("reset_middle", middle_query),
+        ("reset_down", down_query),
+        ("reset_scalar", scalar_query),
+    ] {
+        db.assert_st_matches_query(name, query).await;
+    }
+    assert_eq!(db.count("reset_scalar").await, 1);
+    assert_eq!(db.query_scalar::<i64>("SELECT n FROM reset_scalar").await, 0);
+    assert!(db.query_scalar::<bool>("SELECT total IS NULL FROM reset_scalar").await);
+    assert!(db.query_scalar::<bool>(
+        "SELECT was_full_fallback FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+         WHERE s.pgt_name = 'reset_up' AND h.status = 'COMPLETED' \
+         ORDER BY refresh_id DESC LIMIT 1"
+    ).await);
+    // Replay after the protected reset must not double-apply or lose the new batch.
+    db.execute("INSERT INTO reset_src VALUES (4, 40)").await;
+    for (name, query) in [
+        ("reset_up", up_query),
+        ("reset_middle", middle_query),
+        ("reset_down", down_query),
+        ("reset_scalar", scalar_query),
+    ] {
+        db.refresh_st_with_retry(name).await;
+        db.assert_st_matches_query(name, query).await;
+    }
+}
+
+#[tokio::test]
+async fn test_pure_truncate_with_stream_source_preserves_other_union_branch() {
+    let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
+    db.execute("CREATE TABLE reset_a(id int PRIMARY KEY, v int)")
+        .await;
+    db.execute("CREATE TABLE reset_b(id int PRIMARY KEY, v int)")
+        .await;
+    db.execute("INSERT INTO reset_a VALUES (1, 10)").await;
+    db.execute("INSERT INTO reset_b VALUES (2, 20)").await;
+    db.create_st("reset_other", "SELECT id, v FROM reset_b", "1h", "DIFFERENTIAL")
+        .await;
+    let query = "SELECT id, v FROM reset_a UNION ALL SELECT id, v FROM reset_other";
+    db.create_st("reset_union", query, "1h", "DIFFERENTIAL").await;
+    db.execute("TRUNCATE reset_a").await;
+    db.execute_seq(&[
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('reset_union')",
+    ]).await;
+    db.assert_st_matches_query("reset_union", query).await;
+    assert_eq!(db.count("reset_union").await, 1);
+}

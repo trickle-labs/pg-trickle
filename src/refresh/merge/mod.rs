@@ -1682,29 +1682,10 @@ pub fn execute_differential_refresh_with_tuning(
     });
 
     if has_truncate {
-        let is_single_source = catalog_source_oids.len() == 1;
-        let is_pure_truncate = is_single_source && {
-            let oid = catalog_source_oids[0];
-            let prev_lsn = prev_frontier.get_lsn(oid);
-            let new_lsn = new_frontier.get_lsn(oid);
-            let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
-            !Spi::get_one::<bool>(&format!(
-                "SELECT EXISTS(\
-                   SELECT 1 FROM \"{change_schema}\".{buf_name} \
-                   WHERE lsn > '{prev_lsn}'::pg_lsn \
-                   AND lsn <= '{new_lsn}'::pg_lsn \
-                   AND action != 'T' \
-                   LIMIT 1\
-                 )",
-            ))
-            .unwrap_or(Some(false))
-            .unwrap_or(false)
-        };
-
-        if is_pure_truncate {
-            return execute_incremental_truncate_delete(st);
-        }
-
+        // A reset cannot be represented as a blind target DELETE. Scalar
+        // aggregates can produce rows on empty input, other dependencies can
+        // still contribute, and downstream consumers need effective output
+        // changes. Rebuild through the protected FULL protocol instead.
         pgrx::info!(
             "[pg_trickle] Source table TRUNCATE detected — falling back to FULL refresh for {}.{}",
             schema,
@@ -3439,70 +3420,31 @@ pub fn execute_differential_refresh_with_tuning(
         && crate::config::pg_trickle_diff_output_format() == crate::config::DiffOutputFormat::Split;
     drop(parsed_query);
 
-    // ── A1-2/A1-3: Partition-key range predicate injection ───────────
-    // For partitioned stream tables, compute the MIN/MAX of the partition
-    // key across the current delta and inject it as a literal range
-    // predicate into the MERGE ON clause. This enables PostgreSQL partition
-    // pruning: only partitions overlapping [min, max] are visited, reducing
-    // MERGE I/O proportionally to the number of affected partitions.
-    //
-    // HASH partitions use a parent-level MERGE; PostgreSQL routes rows to
-    // the correct child, and hash functions cannot provide range predicates.
-    //
-    // If the delta is empty (all changes cancel out), return early —
-    // there is nothing to MERGE.
+    // A delta's partition keys are not a proof of where the old target
+    // identity resides (NULL/default partitions and partition-key moves).
+    // Never infer an empty delta from NULL extrema, or restrict target
+    // matching to the new key range. PostgreSQL routes parent-level DML.
+    // Retain the HASH-specific apply path, but remove speculative RANGE/LIST
+    // pruning until both old and new target locations can be proved.
     let hash_merge_result: Option<(usize, &str)> = if let Some(ref pk) = st.st_partition_key {
-        let method = crate::api::parse_partition_method(pk);
-        if method == crate::api::PartitionMethod::Hash {
-            if use_explicit_dml {
-                // Downstream capture and trigger semantics require explicit DML.
-                None
-            } else {
-                // A1-3b: Parent-level MERGE for HASH partitioned STs.
-                let count = with_stream_owner(st, || {
-                    execute_hash_partitioned_merge(
-                        &resolved.merge_sql,
-                        &resolved.resolved_delta_sql,
-                        schema,
-                        name,
-                        st.pgt_relid,
-                        pk,
-                        st.pgt_id,
-                    )
-                })?;
-                Some((count, "hash_merge"))
-            }
+        resolved.merge_sql = resolved.merge_sql.replace("__PGT_PART_PRED__", "");
+        if crate::api::parse_partition_method(pk) == crate::api::PartitionMethod::Hash
+            && !use_explicit_dml
+        {
+            let count = with_stream_owner(st, || {
+                execute_hash_partitioned_merge(
+                    &resolved.merge_sql,
+                    &resolved.resolved_delta_sql,
+                    schema,
+                    name,
+                    st.pgt_relid,
+                    pk,
+                    st.pgt_id,
+                )
+            })?;
+            Some((count, "hash_merge"))
         } else {
-            // RANGE / LIST: extract bounds and inject predicate.
-            match with_stream_owner(st, || {
-                extract_partition_bounds(&resolved.resolved_delta_sql, pk)
-            })? {
-                None => {
-                    // Delta produced no rows for the partition key — fast path.
-                    pgrx::debug1!(
-                        "[pg_trickle] A1-3: empty partition-key delta for {}.{}, skipping MERGE",
-                        schema,
-                        name,
-                    );
-                    delta_stage.cleanup_bounded_views()?;
-                    return Ok((0, 0));
-                }
-                Some(bounds) => {
-                    pgrx::debug1!(
-                        "[pg_trickle] A1-3: partition bounds for {}.{}: {:?}",
-                        schema,
-                        name,
-                        match &bounds {
-                            PartitionBounds::Range { mins, maxs } =>
-                                format!("RANGE [{mins:?}, {maxs:?}]"),
-                            PartitionBounds::List(vals) => format!("LIST {:?}", vals),
-                        },
-                    );
-                    resolved.merge_sql =
-                        inject_partition_predicate(&resolved.merge_sql, pk, &bounds);
-                    None
-                }
-            }
+            None
         }
     } else {
         None

@@ -9843,3 +9843,46 @@ async fn test_scale2_multi_db_worker_pool_hot_tier_refreshes_within_sla() {
         .execute("ALTER SYSTEM RESET pg_trickle.tiered_scheduling")
         .await;
 }
+
+/// A nonempty delta containing only NULL partition keys is not an empty
+/// delta. Mixed keys and moves between default and explicit partitions must
+/// match existing target identities, not just their new partition keys.
+#[tokio::test]
+async fn test_nullable_partition_keys_and_moves_preserve_differential_rows() {
+    let db = E2eDb::new().await.with_extension().await;
+    e2e::disable_scheduler(&db).await;
+    db.execute("CREATE TABLE null_partition_src(id int PRIMARY KEY, bucket int, v int)")
+        .await;
+    db.execute("INSERT INTO null_partition_src VALUES (1, NULL, 10), (2, 1, 20)")
+        .await;
+    let query = "SELECT id, bucket, v FROM null_partition_src";
+    db.create_st_partitioned("null_range", query, "1h", "DIFFERENTIAL", "bucket")
+        .await;
+    db.create_st_partitioned("null_list", query, "1h", "DIFFERENTIAL", "LIST:bucket")
+        .await;
+    for mutation in [
+        "INSERT INTO null_partition_src VALUES (3, NULL, 30)",
+        "UPDATE null_partition_src SET v = 31 WHERE id = 3",
+        "UPDATE null_partition_src SET bucket = 2 WHERE id = 1",
+        "UPDATE null_partition_src SET bucket = NULL WHERE id = 2",
+        "UPDATE null_partition_src SET v = v + 1",
+        "DELETE FROM null_partition_src WHERE bucket IS NULL",
+    ] {
+        db.execute(mutation).await;
+        db.execute_seq(&[
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SELECT pgtrickle.refresh_stream_table('null_range')",
+            "SELECT pgtrickle.refresh_stream_table('null_list')",
+        ]).await;
+        for name in ["null_range", "null_list"] {
+            db.assert_st_matches_query(name, query).await;
+            let action: (String, bool) = sqlx::query_as(
+                "SELECT action, was_full_fallback FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name=$1 AND h.status='COMPLETED' ORDER BY refresh_id DESC LIMIT 1",
+            )
+            .bind(name).fetch_one(&db.pool).await.unwrap();
+            assert_eq!(action, ("DIFFERENTIAL".to_string(), false), "{mutation}: {name}");
+        }
+    }
+}
