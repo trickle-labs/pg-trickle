@@ -2340,7 +2340,25 @@ async fn assert_fused_chain_consumes_complete_cdc_windows(aggregate_query: &str)
                    AND merge_strategy_used <> 'FULL'"
             ))
             .await;
-        assert_eq!(differential_count, if tick < 2 { 2 } else { 1 });
+        // The upstream can legitimately run a zero-delta differential pass
+        // on the quiet tick if already-consumed source CDC has not been
+        // cleaned up yet. Only the downstream differential pass is mandatory
+        // on that tick.
+        if tick < 2 {
+            assert_eq!(
+                differential_count, 2,
+                "tick {tick}: both members must apply deltas"
+            );
+        } else {
+            assert!(db.query_scalar::<bool>(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
+                 WHERE refresh_id > {before_refresh} AND pgt_id = {down_id} \
+                   AND tick_watermark_lsn = '{watermark}'::pg_lsn \
+                   AND initiated_by = 'SCHEDULER' AND status = 'COMPLETED' \
+                   AND action = 'DIFFERENTIAL' AND NOT was_full_fallback \
+                   AND merge_strategy_used <> 'FULL')"
+            )).await, "the final backlog must be consumed differentially");
+        }
         assert!(db.query_scalar::<bool>(&format!(
             "SELECT NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
              WHERE refresh_id > {before_refresh} AND pgt_id = ANY({members}) \
