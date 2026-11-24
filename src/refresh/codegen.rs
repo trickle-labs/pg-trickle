@@ -797,8 +797,9 @@ pub(crate) fn apply_planner_hints(
     unreconstructible_history: bool,
 ) -> bool {
     if crate::refresh::is_retention_catchup() {
-        // Prefer probing affected groups over scanning the materialized history.
-        apply_fixed_join_strategy(crate::config::MergeJoinStrategy::NestedLoop, tuning);
+        // Delta construction joins staged CDC rows to per-key CTEs. Both
+        // inputs can be large and unindexed. Permit set-oriented generation;
+        // the materialized apply phase installs indexed storage probes.
         return false;
     }
     if !crate::config::pg_trickle_merge_planner_hints() {
