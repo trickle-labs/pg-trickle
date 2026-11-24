@@ -9873,7 +9873,8 @@ async fn test_nullable_partition_keys_and_moves_preserve_differential_rows() {
             "SET pg_trickle.refresh_strategy = 'differential'",
             "SELECT pgtrickle.refresh_stream_table('null_range')",
             "SELECT pgtrickle.refresh_stream_table('null_list')",
-        ]).await;
+        ])
+        .await;
         for name in ["null_range", "null_list"] {
             db.assert_st_matches_query(name, query).await;
             let action: (String, bool) = sqlx::query_as(
@@ -9881,8 +9882,15 @@ async fn test_nullable_partition_keys_and_moves_preserve_differential_rows() {
                  JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
                  WHERE s.pgt_name=$1 AND h.status='COMPLETED' ORDER BY refresh_id DESC LIMIT 1",
             )
-            .bind(name).fetch_one(&db.pool).await.unwrap();
-            assert_eq!(action, ("DIFFERENTIAL".to_string(), false), "{mutation}: {name}");
+            .bind(name)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                action,
+                ("DIFFERENTIAL".to_string(), false),
+                "{mutation}: {name}"
+            );
         }
     }
 }

@@ -1493,10 +1493,14 @@ async fn test_pure_truncate_preserves_scalar_and_cascade_semantics() {
     let middle_query = "SELECT id, v FROM reset_up";
     let down_query = "SELECT count(*) AS n, sum(v) AS total FROM reset_middle";
     let scalar_query = "SELECT count(*) AS n, sum(v) AS total FROM reset_src";
-    db.create_st("reset_up", up_query, "1h", "DIFFERENTIAL").await;
-    db.create_st("reset_middle", middle_query, "1h", "DIFFERENTIAL").await;
-    db.create_st("reset_down", down_query, "1h", "DIFFERENTIAL").await;
-    db.create_st("reset_scalar", scalar_query, "1h", "DIFFERENTIAL").await;
+    db.create_st("reset_up", up_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st("reset_middle", middle_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st("reset_down", down_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st("reset_scalar", scalar_query, "1h", "DIFFERENTIAL")
+        .await;
     db.execute("TRUNCATE reset_src").await;
     db.execute_seq(&[
         "SET pg_trickle.refresh_strategy = 'differential'",
@@ -1504,7 +1508,8 @@ async fn test_pure_truncate_preserves_scalar_and_cascade_semantics() {
         "SELECT pgtrickle.refresh_stream_table('reset_middle')",
         "SELECT pgtrickle.refresh_stream_table('reset_down')",
         "SELECT pgtrickle.refresh_stream_table('reset_scalar')",
-    ]).await;
+    ])
+    .await;
     for (name, query) in [
         ("reset_up", up_query),
         ("reset_middle", middle_query),
@@ -1514,14 +1519,23 @@ async fn test_pure_truncate_preserves_scalar_and_cascade_semantics() {
         db.assert_st_matches_query(name, query).await;
     }
     assert_eq!(db.count("reset_scalar").await, 1);
-    assert_eq!(db.query_scalar::<i64>("SELECT n FROM reset_scalar").await, 0);
-    assert!(db.query_scalar::<bool>("SELECT total IS NULL FROM reset_scalar").await);
-    assert!(db.query_scalar::<bool>(
-        "SELECT was_full_fallback FROM pgtrickle.pgt_refresh_history h \
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT n FROM reset_scalar").await,
+        0
+    );
+    assert!(
+        db.query_scalar::<bool>("SELECT total IS NULL FROM reset_scalar")
+            .await
+    );
+    assert!(
+        db.query_scalar::<bool>(
+            "SELECT was_full_fallback FROM pgtrickle.pgt_refresh_history h \
          JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
          WHERE s.pgt_name = 'reset_up' AND h.status = 'COMPLETED' \
          ORDER BY refresh_id DESC LIMIT 1"
-    ).await);
+        )
+        .await
+    );
     // Replay after the protected reset must not double-apply or lose the new batch.
     db.execute("INSERT INTO reset_src VALUES (4, 40)").await;
     for (name, query) in [
@@ -1545,15 +1559,22 @@ async fn test_pure_truncate_with_stream_source_preserves_other_union_branch() {
         .await;
     db.execute("INSERT INTO reset_a VALUES (1, 10)").await;
     db.execute("INSERT INTO reset_b VALUES (2, 20)").await;
-    db.create_st("reset_other", "SELECT id, v FROM reset_b", "1h", "DIFFERENTIAL")
-        .await;
+    db.create_st(
+        "reset_other",
+        "SELECT id, v FROM reset_b",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
     let query = "SELECT id, v FROM reset_a UNION ALL SELECT id, v FROM reset_other";
-    db.create_st("reset_union", query, "1h", "DIFFERENTIAL").await;
+    db.create_st("reset_union", query, "1h", "DIFFERENTIAL")
+        .await;
     db.execute("TRUNCATE reset_a").await;
     db.execute_seq(&[
         "SET pg_trickle.refresh_strategy = 'differential'",
         "SELECT pgtrickle.refresh_stream_table('reset_union')",
-    ]).await;
+    ])
+    .await;
     db.assert_st_matches_query("reset_union", query).await;
     assert_eq!(db.count("reset_union").await, 1);
 }
