@@ -3120,8 +3120,12 @@ async fn test_perf2_auto_mode_preserves_live_capture_relation() {
     ])
     .await;
 
-    let buffer = db.change_buffer_table(i64::from(db.table_oid("perf2_promo_src").await)).await;
-    let oid_before: i64 = db.query_scalar(&format!("SELECT '{buffer}'::regclass::oid::bigint")).await;
+    let buffer = db
+        .change_buffer_table(i64::from(db.table_oid("perf2_promo_src").await))
+        .await;
+    let oid_before: i64 = db
+        .query_scalar(&format!("SELECT '{buffer}'::regclass::oid::bigint"))
+        .await;
     // Verify buffer starts unpartitioned.
     let is_part_before: bool = db
         .query_scalar("SELECT is_partitioned FROM pgtrickle.shared_buffer_stats() LIMIT 1")
@@ -3155,7 +3159,9 @@ async fn test_perf2_auto_mode_preserves_live_capture_relation() {
         "refresh must not replace a live capture buffer"
     );
 
-    let oid_after: i64 = db.query_scalar(&format!("SELECT '{buffer}'::regclass::oid::bigint")).await;
+    let oid_after: i64 = db
+        .query_scalar(&format!("SELECT '{buffer}'::regclass::oid::bigint"))
+        .await;
     assert_eq!(oid_before, oid_after);
     // Verify exact results after a window above the former threshold.
     let cnt: i64 = db.query_scalar("SELECT cnt FROM perf2_promo_cnt").await;
@@ -3174,41 +3180,50 @@ async fn test_perf2_auto_mode_preserves_live_capture_relation() {
     assert_eq!(cnt_after, 102, "post-burst differential refresh");
 }
 
-
 /// Partitioned buffers initially receive all events in DEFAULT. Reclaim
 /// consumed rows without deleting the sentinel or a lagging sibling's history.
 #[tokio::test]
 async fn test_partitioned_buffer_default_cleanup_preserves_lagging_consumer() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
-    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false").await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
     db.execute("SELECT pg_reload_conf()").await;
-    db.execute("CREATE TABLE cleanup1486_src (id int PRIMARY KEY, v int)").await;
+    db.execute("CREATE TABLE cleanup1486_src (id int PRIMARY KEY, v int)")
+        .await;
     db.execute("INSERT INTO cleanup1486_src VALUES (1,1)").await;
     db.execute_seq(&[
         "SET pg_trickle.buffer_partitioning = 'on'",
         "SELECT pgtrickle.create_stream_table('cleanup1486_fast', 'SELECT id,v FROM cleanup1486_src', '1h', 'DIFFERENTIAL')",
         "SELECT pgtrickle.create_stream_table('cleanup1486_slow', 'SELECT id,v FROM cleanup1486_src', '1h', 'DIFFERENTIAL')",
     ]).await;
-    let buffer = db.change_buffer_table(i64::from(db.table_oid("cleanup1486_src").await)).await;
+    let buffer = db
+        .change_buffer_table(i64::from(db.table_oid("cleanup1486_src").await))
+        .await;
     let changes_sql = format!("SELECT count(*) FROM {buffer} WHERE action IN ('I','D','T')");
     for n in 2..=6 {
-        db.execute(&format!("INSERT INTO cleanup1486_src VALUES ({n},{n})")).await;
+        db.execute(&format!("INSERT INTO cleanup1486_src VALUES ({n},{n})"))
+            .await;
         db.refresh_st_until_converged("cleanup1486_fast").await;
     }
     assert!(db.query_scalar::<i64>(&changes_sql).await >= 5);
     assert_eq!(db.count("cleanup1486_slow").await, 1);
     db.refresh_st_until_converged("cleanup1486_slow").await;
-    db.assert_st_matches_query("cleanup1486_slow", "SELECT id,v FROM cleanup1486_src").await;
+    db.assert_st_matches_query("cleanup1486_slow", "SELECT id,v FROM cleanup1486_src")
+        .await;
     // A later refresh drains eligible history using the now-shared frontier.
     db.refresh_st("cleanup1486_fast").await;
     assert_eq!(db.query_scalar::<i64>(&changes_sql).await, 0);
-    assert_eq!(db.query_scalar::<i64>(&format!(
-        "SELECT count(*) FROM {buffer} WHERE action = 'S'"
-    )).await, 1);
-    db.execute("UPDATE cleanup1486_src SET v = 100 WHERE id = 1").await;
+    assert_eq!(
+        db.query_scalar::<i64>(&format!("SELECT count(*) FROM {buffer} WHERE action = 'S'"))
+            .await,
+        1
+    );
+    db.execute("UPDATE cleanup1486_src SET v = 100 WHERE id = 1")
+        .await;
     db.refresh_st_until_converged("cleanup1486_fast").await;
     db.refresh_st_until_converged("cleanup1486_slow").await;
-    for stream in ["cleanup1486_fast","cleanup1486_slow"] {
-        db.assert_st_matches_query(stream, "SELECT id,v FROM cleanup1486_src").await;
+    for stream in ["cleanup1486_fast", "cleanup1486_slow"] {
+        db.assert_st_matches_query(stream, "SELECT id,v FROM cleanup1486_src")
+            .await;
     }
 }
