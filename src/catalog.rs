@@ -3324,9 +3324,10 @@ impl RefreshRecord {
               rows_inserted, rows_deleted, error_message, \
               initiated_by, freshness_deadline, \
               delta_row_count, merge_strategy_used, was_full_fallback, tick_watermark_lsn,
-              source_commit_at, plan_identity) \
+              source_commit_at, plan_identity, contract_generation) \
              VALUES ($1, $2, clock_timestamp(), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::pg_lsn, $14, \
-                     (SELECT defining_query_hash FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1)) \
+                     (SELECT defining_query_hash FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1), \
+                     (SELECT contract_generation FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1)) \
              RETURNING refresh_id",
             &[
                 pgt_id.into(),
