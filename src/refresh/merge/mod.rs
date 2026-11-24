@@ -4248,7 +4248,7 @@ pub fn execute_differential_refresh_with_tuning(
         let capture_result = if let Some(message) = crate::refresh::test_atomicity_barrier(
             st,
             "before_downstream_capture",
-            effective_count,
+            merge_count as i64,
         ) {
             Err(PgTrickleError::TestAtomicityFailpoint(message))
         } else if diff_capture_cols.is_empty() {
