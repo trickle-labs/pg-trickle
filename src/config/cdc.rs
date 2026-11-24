@@ -128,10 +128,10 @@ pub static PGS_CDC_TRIGGER_MODE: GucSetting<Option<std::ffi::CString>> =
 ///
 /// Controls whether change buffer tables use `PARTITION BY RANGE (lsn)`:
 /// - `"off"` (default): Unpartitioned heap tables (current behaviour).
-/// - `"on"`: Always partition. After each refresh cycle, old partitions
-///   are detached and dropped (O(1), no VACUUM needed).
-/// - `"auto"`: Enable partitioning for sources whose effective refresh
-///   schedule is >= 30 s (below that, DDL overhead exceeds VACUUM savings).
+/// - `"on"`: Create partitioned buffers; detach fully consumed ranges and
+///   DELETE remaining consumed rows, including those in DEFAULT.
+/// - `"auto"`: Choose partitioning at creation for sources with effective
+///   refresh schedules >= 30 s. Never replace a live capture relation.
 pub static PGS_BUFFER_PARTITIONING: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"off"));
 
@@ -533,7 +533,8 @@ pub fn register_cdc_gucs() {
         c"Buffer table partitioning mode: off, on, or auto.",
         c"'off' uses unpartitioned heap tables (default). \
            'on' always uses PARTITION BY RANGE (lsn) for change buffers. \
-           'auto' enables partitioning for sources with refresh cycles >= 30s.",
+           'auto' chooses partitioning at creation for refresh cycles >= 30s; \
+           existing capture relations are not replaced.",
         &PGS_BUFFER_PARTITIONING,
         GucContext::Suset,
         GucFlags::default(),
