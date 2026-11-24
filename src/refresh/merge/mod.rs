@@ -1907,7 +1907,15 @@ fn execute_differential_refresh_inner(
     // Cost heuristics must not select a rebuild when historical rows are gone.
     let unreconstructible_history =
         crate::dvm::retention::has_unreconstructible_history(st.pgt_id)?;
+    // AUTO can resolve to DIFFERENTIAL but still permits elective FULL.
+    let requested_mode = Spi::get_one_with_args::<String>(
+        "SELECT requested_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential
+        || requested_mode.as_deref() != Some("AUTO")
+        || crate::refresh::current_full_policy() == crate::refresh::FullPolicy::Error
         || crate::refresh::is_retention_catchup()
         || unreconstructible_history;
     // Only additive UNION ALL scans can safely use one combined denominator.
@@ -3097,7 +3105,7 @@ fn execute_differential_refresh_inner(
         st.pgt_relid,
         scan_count,
         tuning,
-        unreconstructible_history,
+        skip_ratio_check,
     );
 
     // ── SCAL-3: Work-mem cap exceeded — fall back to FULL ───────────
