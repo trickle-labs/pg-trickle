@@ -3074,7 +3074,7 @@ pub fn get_slot_positions_at_bound(
                       THEN LEAST(COALESCE(decoder_confirmed_lsn, '0/0'::pg_lsn), $1::pg_lsn)::text \
                     WHEN cdc_mode = 'TRANSITIONING' \
                       THEN LEAST(COALESCE(decoder_confirmed_lsn, '0/0'::pg_lsn), \
-                                COALESCE(cutover_lsn, $1::pg_lsn))::text \
+                                COALESCE(cutover_lsn, $1::pg_lsn), $1::pg_lsn)::text \
                     ELSE NULL END \
              FROM pgtrickle.pgt_dependencies \
              WHERE source_relid = $2::oid \

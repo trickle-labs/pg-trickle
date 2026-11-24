@@ -146,6 +146,17 @@ impl DeltaStage {
         };
         let qualified_name = format!("pg_temp.{}", quote_ident(&name));
         let source = quote_qualified(source_buffer)?;
+        if matches!(dependency.source_type.as_str(), "FOREIGN_TABLE" | "MATVIEW") {
+            // Match the poller's transaction lock: a snapshot and its CDC
+            // publication must never straddle two different polling passes.
+            Spi::run_with_args(
+                "SELECT pg_catalog.pg_advisory_xact_lock( \
+                     (SELECT oid::int4 FROM pg_catalog.pg_database \
+                      WHERE datname = current_database()), $1::int4)",
+                &[i64::from(source_oid).into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
         if self.centroid_nonce.is_some() {
             let existing = Spi::get_one_with_args::<pg_sys::Oid>(
                 "SELECT pg_catalog.to_regclass($1)::oid",
@@ -270,72 +281,6 @@ impl DeltaStage {
         Ok(())
     }
 
-    /// The vector-centroid source-ahead fallback deliberately recomputes the
-    /// output from the *current* source, without binding its private state.
-    /// An LSN window that splits one UPDATE's D/I images cannot describe an
-    /// as-of relation: reversing only its post-bound D image may resurrect an
-    /// obsolete row. This special fallback must retain its existing current-
-    /// state rescan contract; other DIFFERENTIAL operations stay LSN-bounded.
-    ///
-    /// Caller holds SHARE source locks from prepare_inner, so the live
-    /// relations remain stable through the subsequent MERGE.
-    pub(crate) fn use_live_sources_for_centroid_rescan(
-        &mut self,
-        st: &StreamTableMeta,
-        dependencies: &[StDependency],
-    ) -> Result<(), PgTrickleError> {
-        if crate::refresh::current_graph_sources_locked() {
-            return Ok(());
-        }
-        self.bounded_view_guards.clear();
-        let owner = quote_ident(&crate::refresh::stream_owner_name(st)?);
-        for dependency in dependencies {
-            let oid = dependency.source_relid.to_u32();
-            if !self.names.contains_key(&oid) {
-                continue;
-            }
-            let bound = format!(
-                "pg_temp.{}",
-                quote_ident(&self.bounded_name(st.pgt_id, oid))
-            );
-            let kind = Spi::get_one_with_args::<String>(
-                "SELECT (SELECT relkind::text FROM pg_catalog.pg_class \
-                 WHERE oid = pg_catalog.to_regclass($1))",
-                &[bound.as_str().into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            match kind.as_deref() {
-                Some("v") => {
-                    // nosemgrep: rust.spi.run.dynamic-format -- numeric-ID-scoped quoted temp view.
-                    Spi::run(&format!("DROP VIEW {bound}"))
-                }
-                Some("r") => {
-                    // nosemgrep: rust.spi.run.dynamic-format -- numeric-ID-scoped quoted temp table.
-                    Spi::run(&format!("DROP TABLE {bound}"))
-                }
-                _ => {
-                    return Err(PgTrickleError::InternalError(format!(
-                        "missing bounded source stage for OID {oid}"
-                    )));
-                }
-            }
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            let (source, _) = crate::refresh::source_visibility_key(dependency.source_relid)?;
-            // nosemgrep: rust.spi.run.dynamic-format -- source is catalog-qualified, bound is quoted.
-            Spi::run(&format!(
-                "CREATE TEMP VIEW {bound} AS SELECT * FROM {source}"
-            ))
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            // nosemgrep: rust.spi.run.dynamic-format -- bound and owner are quoted identifiers.
-            Spi::run(&format!("GRANT SELECT ON TABLE {bound} TO {owner}"))
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            if !self.bounded_views.contains(&bound) {
-                self.bounded_views.push(bound);
-            }
-        }
-        Ok(())
-    }
-
     /// Drop source-dependent session-local views after the last DVM read.
     /// Unlike CREATE TEMP TABLE ... ON COMMIT DROP, PostgreSQL temporary
     /// views survive commit and can prevent DROP TABLE on the base source.
@@ -399,6 +344,21 @@ impl DeltaStage {
         crate::lsn::Lsn::parse(new_lsn).map_err(|error| {
             PgTrickleError::InvalidArgument(format!("invalid bounded source frontier LSN: {error}"))
         })?;
+
+        // Polling CDC describes the persisted poll image, not subsequent
+        // changes to a remote relation or a materialized view. Undo future
+        // captured events against that image while holding the poll lock.
+        let polling_snapshot = if matches!(dependency.source_type.as_str(), "FOREIGN_TABLE" | "MATVIEW") {
+            let stable_name = crate::citus::stable_name_for_oid(dependency.source_relid)
+                .unwrap_or_else(|_| source_oid.to_string());
+            Some(crate::sql_builder::qualified(
+                &crate::config::pg_trickle_change_buffer_schema(),
+                &format!("snapshot_{stable_name}"),
+            ))
+        } else {
+            None
+        };
+        let source_table = polling_snapshot.as_deref().unwrap_or(source_table);
 
         // A previous no-gap refresh in a pooled backend may have left a
         // session-local VIEW. A table is ON COMMIT DROP instead.

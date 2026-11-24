@@ -545,3 +545,50 @@ async fn test_issue_1453_staged_cdc_analyzed_in_ordinary_refresh() {
     db.assert_st_matches_query("analyze1453_hourly", query)
         .await;
 }
+
+#[tokio::test]
+async fn polling_rescan_uses_the_captured_matview_image() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE bound_poll_src(id int PRIMARY KEY, v int NOT NULL)").await;
+    db.execute("INSERT INTO bound_poll_src VALUES (1, 10), (2, 20), (3, 30)").await;
+    db.execute("CREATE MATERIALIZED VIEW bound_poll_mv AS SELECT * FROM bound_poll_src").await;
+    db.execute("CREATE UNIQUE INDEX bound_poll_mv_id ON bound_poll_mv(id)").await;
+    let query = "SELECT max(v) AS ex, count(*) AS n FROM bound_poll_mv";
+    db.create_st("bound_poll_st", query, "1h", "DIFFERENTIAL").await;
+    db.execute("DELETE FROM bound_poll_src WHERE id = 3").await;
+    db.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY bound_poll_mv").await;
+    let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_poll_st").await;
+    // The local poll has completed. A new matview image is visible, but its
+    // insert has not been published to polling CDC.
+    db.execute("INSERT INTO bound_poll_src VALUES (4, 1000)").await;
+    db.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY bound_poll_mv").await;
+    finish_bounded_refresh(&mut blocker, id, refresh).await;
+    let (ex, n): (i32, i64) = sqlx::query_as("SELECT ex, n FROM bound_poll_st")
+        .fetch_one(&db.pool).await.unwrap();
+    assert_eq!((ex, n), (20, 2), "rescan must read the durable poll image");
+    refresh_normally(&db, "bound_poll_st").await;
+    db.assert_st_matches_query("bound_poll_st", query).await;
+    assert_no_full_fallback(&db, "bound_poll_st").await;
+}
+
+#[tokio::test]
+async fn phantom_reconciliation_does_not_publish_rows_past_its_cut() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE bound_recon_left(k int, v int)").await;
+    db.execute("CREATE TABLE bound_recon_right(k int, v int)").await;
+    db.execute("INSERT INTO bound_recon_left VALUES (1, 10), (1, 10)").await;
+    db.execute("INSERT INTO bound_recon_right VALUES (1, 20)").await;
+    let query = "SELECT l.k, l.v AS lv, r.v AS rv FROM bound_recon_left l JOIN bound_recon_right r ON l.k = r.k";
+    db.create_st("bound_recon_st", query, "1h", "DIFFERENTIAL").await;
+    db.execute("INSERT INTO bound_recon_left VALUES (1, 11)").await;
+    let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_recon_st").await;
+    db.execute("INSERT INTO bound_recon_right VALUES (1, 21)").await;
+    finish_bounded_refresh(&mut blocker, id, refresh).await;
+    let fallback: bool = db.query_scalar(
+        "SELECT was_full_fallback FROM pgtrickle.pgt_refresh_history WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'bound_recon_st') AND status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1",
+    ).await;
+    assert!(fallback, "live reconciliation must move to a protected baseline");
+    db.assert_st_matches_query("bound_recon_st", query).await;
+    refresh_normally(&db, "bound_recon_st").await;
+    db.assert_st_matches_query("bound_recon_st", query).await;
+}

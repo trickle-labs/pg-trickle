@@ -4213,3 +4213,36 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
         )).await, "PGT_LIFECYCLE_FAILURE:lagging_source_cut; history: {}", path.display());
     }
 }
+
+#[tokio::test]
+async fn wal_aggregate_with_undecoded_source_change_uses_protected_baseline() {
+    let fixture = setup_wal_fixture("boundlag").await;
+    let db = &fixture.db;
+    let query = format!("SELECT max(value) AS ex, count(*) AS n FROM public.{}", fixture.source);
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table(name => 'wal_boundlag_agg', query => $$ {query} $$, schedule => '1h', refresh_mode => 'DIFFERENTIAL', cdc_mode => 'wal')"
+    )).await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.wal_boundlag_agg'])").await;
+    commit_row(db, &fixture.source, &fixture.journal, 2, "decoded_batch").await;
+    wait_for_receipt(&db.pool, fixture.oid, "ACKNOWLEDGED", "decoded_batch").await;
+    disable_wal_scheduler(&fixture).await;
+    commit_row(db, &fixture.source, &fixture.journal, 3, "zz_undecoded_extreme").await;
+    let missing = matching_receipts(&db.pool, fixture.oid, "ACKNOWLEDGED", "zz_undecoded_extreme").await;
+    assert_eq!(missing, 0, "decoder must not have acknowledged the last change");
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy = 'differential'"],
+        "SELECT pgtrickle.refresh_stream_table('wal_boundlag_agg')",
+    ).await.expect("protected FULL may advance to the actual live cut");
+    let fallback: bool = db.query_scalar(
+        "SELECT was_full_fallback FROM pgtrickle.pgt_refresh_history WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'wal_boundlag_agg') AND status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1",
+    ).await;
+    assert!(fallback, "unproven WAL endpoint must not use inverse live reconstruction");
+    db.assert_st_matches_query("wal_boundlag_agg", &query).await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "true", "on").await;
+    wait_for_receipt(&db.pool, fixture.oid, "ACKNOWLEDGED", "zz_undecoded_extreme").await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy = 'differential'"],
+        "SELECT pgtrickle.refresh_stream_table('wal_boundlag_agg')",
+    ).await.expect("catch-up must not replay the protected baseline");
+    db.assert_st_matches_query("wal_boundlag_agg", &query).await;
+}
