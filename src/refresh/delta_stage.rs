@@ -180,7 +180,7 @@ impl DeltaStage {
         // a valid insert deleted after the immutable input cut, and first/last
         // compaction could also discard duplicate occurrences.
         crate::refresh::with_stream_owner(st, || {
-            Spi::run(&access_sql) // nosemgrep: sql.row-security.disabled -- source is catalog-qualified; owner permissions are enforced.
+            Spi::run(&access_sql) // nosemgrep: rust.spi.run.dynamic-format -- source is catalog-qualified; owner permissions are enforced.
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             let active = Spi::get_one_with_args::<bool>(
                 "SELECT pg_catalog.row_security_active($1::oid)",
