@@ -1691,7 +1691,10 @@ pub fn execute_differential_refresh_with_tuning(
     // adaptive heuristic.
     let strategy = crate::config::pg_trickle_refresh_strategy();
     let global_ratio = crate::config::pg_trickle_differential_max_change_ratio();
-    let max_ratio = st.max_delta_fraction.or(st.auto_threshold).unwrap_or(global_ratio);
+    let max_ratio = st
+        .max_delta_fraction
+        .or(st.auto_threshold)
+        .unwrap_or(global_ratio);
     let mut fallback_reason = if crate::config::pg_trickle_force_full_refresh() {
         Some(crate::refresh::FullRefreshReason::new(
             crate::refresh::FullRefreshReasonCode::ForceFullRefresh,
