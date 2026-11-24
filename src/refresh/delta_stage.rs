@@ -617,9 +617,7 @@ impl DeltaStage {
                 )?;
                 let mut result = HashMap::new();
                 for row in rows {
-                    if let (Some(name), Some(oid)) =
-                        (row.get::<String>(1)?, row.get::<i64>(2)?)
-                    {
+                    if let (Some(name), Some(oid)) = (row.get::<String>(1)?, row.get::<i64>(2)?) {
                         result.insert(name, (oid as u32, row.get::<bool>(3)?.unwrap_or(false)));
                     }
                 }
@@ -627,9 +625,10 @@ impl DeltaStage {
             })
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             for col in &cols {
-                if !type_info.get(col).is_some_and(|(oid, trusted)| {
-                    *trusted || vector_senders.contains_key(oid)
-                }) {
+                if !type_info
+                    .get(col)
+                    .is_some_and(|(oid, trusted)| *trusted || vector_senders.contains_key(oid))
+                {
                     return Err(PgTrickleError::UnsupportedOperator(format!(
                         "cannot safely compare binary CDC payload for source OID {source_oid}, column {col}"
                     )));

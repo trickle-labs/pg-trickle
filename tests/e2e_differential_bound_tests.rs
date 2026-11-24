@@ -580,7 +580,8 @@ async fn test_bound_deferred_primary_key_replacement_preserves_old_image() {
     let query = "SELECT g, max(v) AS ex, count(*) AS n FROM bound_deferred_src GROUP BY g";
     db.create_st("bound_deferred_st", query, "1h", "DIFFERENTIAL")
         .await;
-    db.execute("DELETE FROM bound_deferred_src WHERE id = 30").await;
+    db.execute("DELETE FROM bound_deferred_src WHERE id = 30")
+        .await;
     let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_deferred_st").await;
     let mut writer = db.pool.begin().await.unwrap();
     sqlx::query("INSERT INTO bound_deferred_src VALUES (29, 1, 1000)")
@@ -593,11 +594,10 @@ async fn test_bound_deferred_primary_key_replacement_preserves_old_image() {
         .unwrap();
     writer.commit().await.unwrap();
     finish_bounded_refresh(&mut blocker, id, refresh).await;
-    let bounded: (i32, i64) =
-        sqlx::query_as("SELECT ex, n FROM bound_deferred_st WHERE g = 1")
-            .fetch_one(&db.pool)
-            .await
-            .expect("read bounded deferred-key aggregate");
+    let bounded: (i32, i64) = sqlx::query_as("SELECT ex, n FROM bound_deferred_st WHERE g = 1")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read bounded deferred-key aggregate");
     assert_eq!(bounded, (29, 29));
     refresh_normally(&db, "bound_deferred_st").await;
     db.assert_st_matches_query("bound_deferred_st", query).await;
@@ -621,7 +621,8 @@ async fn test_bound_duplicate_stream_table_occurrences_preserve_extrema() {
     assert!(
         db.query_scalar::<bool>(
             "SELECT EXISTS (SELECT 1 FROM bound_bag_up GROUP BY __pgt_row_id HAVING count(*) > 1)"
-        ).await,
+        )
+        .await,
         "fixture must have duplicate stored identities"
     );
     db.execute("DELETE FROM bound_bag_src WHERE v = 30").await;
@@ -636,7 +637,8 @@ async fn test_bound_duplicate_stream_table_occurrences_preserve_extrema() {
         .expect("read downstream at its old cut");
     assert_eq!(bounded, (20, 3));
     refresh_normally(&db, "bound_bag_down").await;
-    db.assert_st_matches_query("bound_bag_down", down_query).await;
+    db.assert_st_matches_query("bound_bag_down", down_query)
+        .await;
     assert_no_full_fallback(&db, "bound_bag_down").await;
 }
 
@@ -645,16 +647,20 @@ async fn test_bound_duplicate_stream_table_occurrences_preserve_extrema() {
 #[tokio::test]
 async fn test_bound_duplicate_stream_table_deletes_restore_every_occurrence() {
     let db = E2eDb::new().await.with_extension().await;
-    db.execute("CREATE TABLE bound_bag_delete_src(g int, v int)").await;
-    db.execute("INSERT INTO bound_bag_delete_src VALUES (1, 30), (1, 20), (1, 20), (1, 20), (1, 10)")
+    db.execute("CREATE TABLE bound_bag_delete_src(g int, v int)")
         .await;
+    db.execute(
+        "INSERT INTO bound_bag_delete_src VALUES (1, 30), (1, 20), (1, 20), (1, 20), (1, 10)",
+    )
+    .await;
     let up_query = "SELECT g, v FROM bound_bag_delete_src";
     let down_query = "SELECT g, max(v) AS ex, count(*) AS n FROM bound_bag_delete_up GROUP BY g";
     db.create_st("bound_bag_delete_up", up_query, "1h", "DIFFERENTIAL")
         .await;
     db.create_st("bound_bag_delete_down", down_query, "1h", "DIFFERENTIAL")
         .await;
-    db.execute("DELETE FROM bound_bag_delete_src WHERE v = 30").await;
+    db.execute("DELETE FROM bound_bag_delete_src WHERE v = 30")
+        .await;
     refresh_normally(&db, "bound_bag_delete_up").await;
     let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_bag_delete_down").await;
     db.execute(
@@ -672,14 +678,13 @@ async fn test_bound_duplicate_stream_table_deletes_restore_every_occurrence() {
     // The barrier helper also inspects the materialized historical stage:
     // all three copies must be restored there even though live has one.
     finish_bounded_refresh(&mut blocker, id, refresh).await;
-    let bounded: (i32, i64) = sqlx::query_as(
-        "SELECT ex, n FROM bound_bag_delete_down WHERE g = 1",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .expect("read downstream at its old cut");
+    let bounded: (i32, i64) = sqlx::query_as("SELECT ex, n FROM bound_bag_delete_down WHERE g = 1")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read downstream at its old cut");
     assert_eq!(bounded, (20, 4));
     refresh_normally(&db, "bound_bag_delete_down").await;
-    db.assert_st_matches_query("bound_bag_delete_down", down_query).await;
+    db.assert_st_matches_query("bound_bag_delete_down", down_query)
+        .await;
     assert_no_full_fallback(&db, "bound_bag_delete_down").await;
 }
