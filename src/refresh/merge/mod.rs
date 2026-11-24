@@ -821,6 +821,9 @@ fn distinct_aggregate_max_values(
 struct MaterializedApplyPlanner {
     enable_nestloop: bool,
     enable_seqscan: bool,
+    work_mem: String,
+    join_collapse_limit: String,
+    from_collapse_limit: String,
 }
 
 impl MaterializedApplyPlanner {
@@ -829,7 +832,10 @@ impl MaterializedApplyPlanner {
             let row = client
                 .select(
                     "SELECT current_setting('enable_nestloop') = 'on',
-                            current_setting('enable_seqscan') = 'on'",
+                            current_setting('enable_seqscan') = 'on',
+                            current_setting('work_mem'),
+                            current_setting('join_collapse_limit'),
+                            current_setting('from_collapse_limit')",
                     None,
                     &[],
                 )
@@ -844,6 +850,22 @@ impl MaterializedApplyPlanner {
                     .get::<bool>(2)
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                     .unwrap_or(true),
+                work_mem: row
+                    .get::<String>(3)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| PgTrickleError::InternalError("missing work_mem".into()))?,
+                join_collapse_limit: row
+                    .get::<String>(4)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError("missing join_collapse_limit".into())
+                    })?,
+                from_collapse_limit: row
+                    .get::<String>(5)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError("missing from_collapse_limit".into())
+                    })?,
             })
         })
     }
@@ -867,8 +889,22 @@ impl MaterializedApplyPlanner {
             return Ok(());
         }
 
-        // The owner execution context restores these SET LOCAL changes on
-        // exit. Do not override explicit caller-level disables.
+        // Restore generation-specific memory and join-search preferences.
+        // set_config accepts the captured exact textual GUC values, and the
+        // enclosing owner/batch scope restores the settings on exit.
+        Spi::run_with_args(
+            "SELECT pg_catalog.set_config('work_mem', $1, true),
+                    pg_catalog.set_config('join_collapse_limit', $2, true),
+                    pg_catalog.set_config('from_collapse_limit', $3, true)",
+            &[
+                self.work_mem.as_str().into(),
+                self.join_collapse_limit.as_str().into(),
+                self.from_collapse_limit.as_str().into(),
+            ],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        // Do not override explicit caller-level disables.
         Spi::run(if self.enable_nestloop {
             "SET LOCAL enable_nestloop = on"
         } else {
