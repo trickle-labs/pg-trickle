@@ -134,7 +134,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.scheduler_maintenance_batch_size` | `int4` | `1000` | v0.85.0: Maximum rows processed by one scheduler maintenance category per tick. |
 | `pg_trickle.self_heal_lock_timeout` | `bool` | `true` | When `true`, a refresh error containing "lock timeout" doubles the effective refresh interval for the affected stream table (exponential backoff). |
 | `pg_trickle.self_heal_oom` | `bool` | `true` | When `true`, a refresh error containing "out of memory" causes the scheduler to reduce the effective `merge_work_mem_mb` for the affected stream table by 25% on the next tick and retry. |
-| `pg_trickle.self_monitoring_auto_apply` | `text` | `"off"` | Controls when self-monitoring insights are automatically applied: - `"off"` (default): Never auto-apply. |
+| `pg_trickle.self_monitoring_auto_apply` | `text` | `"off"` | Non-off values enable anomaly notifications, not automatic cost threshold changes. |
 | `pg_trickle.sla_window_hours` | `int4` | `24` | Default: 24 hours. |
 | `pg_trickle.slot_lag_critical_threshold_mb` | `int4` | `1024` | When a WAL-mode source retains more than this amount of WAL, `pgtrickle.check_cdc_health()` reports a `slot_lag_exceeds_threshold` alert for the source. |
 | `pg_trickle.slot_lag_warning_threshold_mb` | `int4` | `100` | When a WAL-mode source retains more than this amount of WAL, pg_trickle: - emits a `slot_lag_warning` NOTIFY event from the scheduler, and - reports a WARN row in `pgtrickle.health_check()`. |
