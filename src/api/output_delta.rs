@@ -574,8 +574,77 @@ pub(crate) fn invalidate_after_snapshot_restore(pgt_id: i64) -> Result<(), PgTri
     ))
 }
 
+fn capture_before_table(pgt_id: i64) -> String {
+    format!("pg_temp.{}", quoted_ident(&format!("__pgt_output_before_{pgt_id}")))
+}
+
+/// Keep an independent typed checkpoint for external consumers. The common
+/// finalizer compares complete signed output images, not executor row counts.
+/// The scratch relation is privileged and transaction-local, so application
+/// triggers or owner SQL cannot alter the witness.
+fn snapshot_capture_before(meta: &StreamTableMeta) -> Result<(), PgTrickleError> {
+    let columns = output_columns(meta)?;
+    let cols = std::iter::once("__pgt_row_id".to_string())
+        .chain(columns.iter().map(|(name, _)| quoted_ident(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let storage = crate::sql_builder::qualified(&meta.pgt_schema, &meta.pgt_name);
+    let before = capture_before_table(meta.pgt_id);
+    // nosemgrep: rust.spi.run.dynamic-format -- numeric ID and quoted catalog identifiers.
+    spi(Spi::run(&format!("DROP TABLE IF EXISTS {before}")))?;
+    // nosemgrep: rust.spi.run.dynamic-format -- numeric ID and quoted catalog identifiers.
+    spi(Spi::run(&format!(
+        "CREATE TEMP TABLE {before} ON COMMIT DROP AS SELECT {cols} FROM {storage}"
+    )))
+}
+
+/// Prove after - before = captured I - captured D as a multiset of complete
+/// identity/payload images. Binary-record ordering distinguishes NULLs,
+/// duplicates, numeric representations and types without scalar equality.
+fn capture_matches_effective_output(
+    meta: &StreamTableMeta,
+    columns: &[(String, String)],
+    source: &str,
+    start: i64,
+) -> Result<bool, PgTrickleError> {
+    let before = capture_before_table(meta.pgt_id);
+    let storage = crate::sql_builder::qualified(&meta.pgt_schema, &meta.pgt_name);
+    let cols = std::iter::once("__pgt_row_id".to_string())
+        .chain(columns.iter().map(|(name, _)| quoted_ident(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let buffer_cols = std::iter::once("b.__pgt_row_id".to_string())
+        .chain(columns.iter().map(|(name, _)| {
+            format!("b.{}", quoted_ident(&crate::cdc::cb_col_name(name)))
+        }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let exists = spi(Spi::get_one_with_args::<bool>(
+        "SELECT pg_catalog.to_regclass($1) IS NOT NULL",
+        &[before.as_str().into()],
+    ))?.unwrap_or(false);
+    if !exists {
+        return Ok(false);
+    }
+    let sql = format!(
+        "WITH images AS (\
+           SELECT ROW({cols}) AS image, -1::bigint AS weight FROM {before} \
+           UNION ALL SELECT ROW({cols}), 1::bigint FROM {storage} \
+           UNION ALL SELECT ROW({buffer_cols}), \
+             CASE b.action WHEN 'I' THEN -1::bigint ELSE 1::bigint END \
+           FROM {source} b WHERE b.change_id > $1 AND b.action IN ('I','D')\
+         ), ranked AS (\
+           SELECT weight, dense_rank() OVER (ORDER BY image USING OPERATOR(pg_catalog.*<)) AS image_rank \
+           FROM images\
+         ) SELECT NOT EXISTS (SELECT 1 FROM ranked GROUP BY image_rank HAVING SUM(weight) <> 0)"
+    );
+    // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- all identifiers are catalog-derived and quoted; start is bound.
+    Ok(spi(Spi::get_one_with_args::<bool>(&sql, &[start.into()]))?.unwrap_or(false))
+}
+
 /// Start the output capture window immediately before a refresh executor runs.
 pub(crate) fn begin_capture(pgt_id: i64) -> Result<(), PgTrickleError> {
+    CAPTURE_STARTS.with(|starts| starts.borrow_mut().remove(&pgt_id));
     if !has_consumer(pgt_id)? {
         return Ok(());
     }
@@ -587,6 +656,9 @@ pub(crate) fn begin_capture(pgt_id: i64) -> Result<(), PgTrickleError> {
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
     .unwrap_or(0);
+    let meta = StreamTableMeta::get_by_id(pgt_id)?
+        .ok_or_else(|| delta_error("PGT_EXT_CONSUMER_BLOCKED", "stream table metadata is missing"))?;
+    snapshot_capture_before(&meta)?;
     CAPTURE_STARTS.with(|starts| starts.borrow_mut().insert(pgt_id, (max_id, false)));
     Ok(())
 }
@@ -614,7 +686,7 @@ pub(crate) fn has_consumer(pgt_id: i64) -> Result<bool, PgTrickleError> {
 pub(crate) fn finalize(
     meta: &StreamTableMeta,
     refresh_id: i64,
-    rows_changed: i64,
+    _rows_changed: i64,
     capture_complete: bool,
 ) -> Result<(), PgTrickleError> {
     if !has_consumer(meta.pgt_id)? {
@@ -622,23 +694,10 @@ pub(crate) fn finalize(
     }
     super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
     let capture = CAPTURE_STARTS.with(|starts| starts.borrow_mut().remove(&meta.pgt_id));
-    // Legacy refresh counters can signal input work even when explicit DML wrote no output.
-    let rows_changed = if capture.is_some_and(|(_, empty)| empty) {
-        0
-    } else {
-        rows_changed
-    };
+    // The independent checkpoint, not the legacy work counter or a nonempty
+    // CDC buffer, determines whether an EXACT publication is justified.
     let captured_start = capture.map(|(start, _)| start);
-    let start = captured_start.unwrap_or_else(|| {
-        let schema = crate::config::pg_trickle_change_buffer_schema();
-        Spi::get_one::<i64>(&format!(
-            "SELECT COALESCE(max(change_id), 0) FROM {}.changes_pgt_{}",
-            quoted_ident(&schema),
-            meta.pgt_id
-        ))
-        .unwrap_or(Some(0))
-        .unwrap_or(0)
-    });
+    let mut start = captured_start.unwrap_or(0);
     let digest = spi(Spi::get_one_with_args::<Vec<u8>>(
         "SELECT output_contract_digest FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1 FOR UPDATE",
         &[meta.pgt_id.into()],
@@ -658,7 +717,7 @@ pub(crate) fn finalize(
         .join(", ");
     let col_refs = columns
         .iter()
-        .map(|(name, _)| format!("b.{}", quoted_ident(name)))
+        .map(|(name, _)| format!("b.{}", quoted_ident(&crate::cdc::cb_col_name(name))))
         .collect::<Vec<_>>()
         .join(", ");
     let schema = crate::config::pg_trickle_change_buffer_schema();
@@ -667,7 +726,19 @@ pub(crate) fn finalize(
         "pgtrickle_changes.{}",
         quoted_ident(&payload_name(meta.pgt_id))
     );
-    let (changed_rows, unsupported_rows) = if rows_changed > 0 || captured_start.is_some() {
+    // TEST-MODE negative control: omit the first event from the proposed
+    // publication without touching persistent CDC or the materialized target.
+    if captured_start.is_some()
+        && crate::config::pg_trickle_test_chaos_for_table() == meta.pgt_name
+        && crate::config::pg_trickle_test_chaos_phase() == "control_partial_output_capture"
+    {
+        // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- source is catalog-qualified; cursor is a parameter.
+        start = spi(Spi::get_one_with_args::<i64>(
+            &format!("SELECT min(change_id) FROM {source} WHERE change_id > $1"),
+            &[start.into()],
+        ))?.unwrap_or(start);
+    }
+    let (changed_rows, unsupported_rows) = if capture_complete && captured_start.is_some() {
         // nosemgrep: rust.spi.get_one_with_args.dynamic-format — source is assembled from a quoted schema and OID-derived relation name.
         let changed_rows = spi(Spi::get_one_with_args::<i64>(
             &format!("SELECT count(*)::bigint FROM {source} b WHERE b.change_id > $1"),
@@ -684,12 +755,15 @@ pub(crate) fn finalize(
     } else {
         (0, 0)
     };
-    let mode = batch_mode(
-        capture_complete
-            && captured_start.is_some()
-            && unsupported_rows == 0
-            && (rows_changed == 0 || changed_rows > 0),
-    );
+    let exact = capture_complete
+        && captured_start.is_some()
+        && unsupported_rows == 0
+        && capture_matches_effective_output(meta, &columns, &source, start)?;
+    let mode = batch_mode(exact);
+    // The witness is never reused across successful refreshes.
+    let before = capture_before_table(meta.pgt_id);
+    // nosemgrep: rust.spi.run.dynamic-format -- numeric-ID-scoped temp table.
+    spi(Spi::run(&format!("DROP TABLE IF EXISTS {before}")))?;
     let (payload_rows, inserted, deleted) = if mode == "EXACT" && changed_rows > 0 {
         let target_cols = if col_names.is_empty() {
             "batch_token, ordinal, action, row_identity".to_string()
