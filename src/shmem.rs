@@ -2489,9 +2489,7 @@ impl CostModelCache {
         // Scan every slot: a different backend may have used another
         // effective capacity, and invalidation must clear every matching key.
         for entry in &mut self.entries {
-            if entry.database_oid == database_oid
-                && pgt_id.is_none_or(|id| entry.pgt_id == id)
-            {
+            if entry.database_oid == database_oid && pgt_id.is_none_or(|id| entry.pgt_id == id) {
                 *entry = CostModelEntry::default();
             }
         }
@@ -2563,14 +2561,14 @@ mod tests {
         let mut cache = super::CostModelCache::default();
         cache.update(10, 1, 256, Some(100.0), None);
         cache.update(11, 1, 256, Some(900.0), None);
-        cache.update(10, 2, 16, None, Some(50.0));
+        cache.update(10, 3, 16, None, Some(50.0));
         assert_eq!(cache.read(10, 1, 256), Some((100.0, 0.0)));
         assert_eq!(cache.read(11, 1, 256), Some((900.0, 0.0)));
         cache.invalidate(10, Some(1));
         assert_eq!(cache.read(10, 1, 256), None);
-        assert_eq!(cache.read(10, 2, 16), Some((0.0, 50.0)));
+        assert_eq!(cache.read(10, 3, 16), Some((0.0, 50.0)));
         cache.invalidate(10, None);
-        assert_eq!(cache.read(10, 2, 16), None);
+        assert_eq!(cache.read(10, 3, 16), None);
         assert_eq!(cache.read(11, 1, 256), Some((900.0, 0.0)));
         // Same slot and local ID in different databases must not inherit costs.
         cache.update(267, 1, 256, None, Some(20.0));
