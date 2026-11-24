@@ -217,11 +217,7 @@ pub static PGS_BACKPRESSURE_CONSECUTIVE_LIMIT: GucSetting<i32> = GucSetting::<i3
 pub static PGS_REFRESH_STRATEGY: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"auto"));
 
-/// B-4: Cost-model safety margin for the FULL vs. DIFFERENTIAL decision.
-///
-/// Elective FULL requires DIFF duration to exceed FULL duration times the
-/// maximum of 1.0, prediction_ratio, and cost_model_safety_margin. Higher
-/// values favor DIFFERENTIAL; the default 0.8 retains compatibility.
+/// Elective FULL requires DIFF duration to exceed FULL duration times the maximum of 1.0, prediction_ratio, and cost_model_safety_margin.
 pub static PGS_COST_MODEL_SAFETY_MARGIN: GucSetting<f64> = GucSetting::<f64>::new(0.8);
 
 /// B-4: Refresh strategy enum.
