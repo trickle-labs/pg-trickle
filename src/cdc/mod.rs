@@ -1948,6 +1948,7 @@ pub fn detach_consumed_partitions(
             // Keep the crash-recovery sentinel even if an administrator
             // placed it in an explicit low-LSN partition rather than DEFAULT.
             let child = crate::sql_builder::qualified(change_schema, part_name);
+            // nosemgrep: rust.spi.query.dynamic-format — child uses qualified() to quote both identifiers; action is a fixed literal.
             let has_sentinel = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS (SELECT 1 FROM {child} WHERE action = 'S')"
             ))
