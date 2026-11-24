@@ -1628,6 +1628,7 @@ async fn test_pgvector_filtered_ann_workload() {
                             "centroid_algebraic"
                                 | "centroid_rebase_group_rescan"
                                 | "centroid_group_rescan"
+                                | "merge"
                         )
                     };
                     if !allowed {
