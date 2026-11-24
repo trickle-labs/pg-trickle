@@ -387,15 +387,14 @@ pub(crate) fn compute_adaptive_threshold(current: f64, incr_ms: f64, full_ms: f6
     adjusted.clamp(0.01, 0.80)
 }
 
-/// P-3 (v0.78.0): Batch-update the cost-model summary table.
-///
-/// Runs a single aggregating INSERT ... ON CONFLICT DO UPDATE that
-/// replaces N per-ST history subqueries with one grouped query.
-/// Called once per scheduler tick instead of once per stream table.
-///
-/// The summary table `pgtrickle.pgt_cost_model_summary` must already
-/// exist (created by the v0.77.0→0.78.0 migration).
-pub(crate) fn batch_update_cost_model_summary() {
+/// Update the completed stream's monitoring averages in the refresh transaction.
+/// The periodic scheduler pass only backfills missing rows and refreshes
+/// percentiles: it must not overwrite fresher per-stream averages.
+pub(crate) fn update_cost_model_summary_for_st(pgt_id: i64) -> Result<(), PgTrickleError> {
+    update_cost_model_summary(Some(pgt_id))
+}
+
+fn update_cost_model_summary(pgt_id: Option<i64>) -> Result<(), PgTrickleError> {
     let sql = "
         INSERT INTO pgtrickle.pgt_cost_model_summary
             (pgt_id, avg_full_ms, avg_diff_ms, sample_count, updated_at)
@@ -442,14 +441,25 @@ pub(crate) fn batch_update_cost_model_summary() {
                 LIMIT 10
             ) recent_diff
         ) diff_samples ON true
+        WHERE s.pgt_id = $1::bigint
+           OR ($1::bigint IS NULL AND NOT EXISTS (
+               SELECT 1 FROM pgtrickle.pgt_cost_model_summary c WHERE c.pgt_id = s.pgt_id
+           ))
         ON CONFLICT (pgt_id) DO UPDATE
             SET avg_full_ms   = EXCLUDED.avg_full_ms,
                 avg_diff_ms   = EXCLUDED.avg_diff_ms,
                 sample_count  = EXCLUDED.sample_count,
                 updated_at    = EXCLUDED.updated_at
+            WHERE $1::bigint IS NOT NULL
     ";
-    if let Err(e) = pgrx::Spi::run(sql) {
-        pgrx::warning!("[pg_trickle] P-3: failed to batch-update pgt_cost_model_summary: {e}");
+    Spi::run_with_args(sql, &[pgt_id.into()])
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+/// Backfill missing monitoring rows and refresh historical percentiles.
+pub(crate) fn batch_update_cost_model_summary() {
+    if let Err(e) = update_cost_model_summary(None) {
+        pgrx::warning!("[pg_trickle] P-3: failed to backfill pgt_cost_model_summary: {e}");
     }
     let percentile_sql = "
         UPDATE pgtrickle.pgt_cost_model_summary c
@@ -637,7 +647,7 @@ mod tests {
         )
         .expect("seed differential-only history");
 
-        batch_update_cost_model_summary();
+        update_cost_model_summary_for_st(pgt_id).expect("update completed stream summary");
         let (avg_full_ms, avg_diff_ms, sample_count) = read_cost_summary(pgt_id);
         assert!((avg_full_ms - 321.0).abs() < 0.01, "{avg_full_ms}");
         assert!((avg_diff_ms - 2.0).abs() < 0.01, "{avg_diff_ms}");
