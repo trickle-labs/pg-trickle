@@ -384,16 +384,15 @@ ALTER SYSTEM SET pg_trickle.cost_model_safety_margin = 0.30;
 SELECT pg_reload_conf();
 ```
 
-**Recipe — Use self-monitoring analytics to auto-tune:**
+**Recipe — Inspect self-monitoring analytics:**
 
 ```sql
--- Let pg_trickle automatically apply threshold recommendations
-ALTER SYSTEM SET pg_trickle.self_monitoring_auto_apply = 'threshold_only';
-SELECT pg_reload_conf();
+SELECT * FROM pgtrickle.df_threshold_advice;
 ```
 
-With `threshold_only`, pg_trickle applies `max_delta_fraction` changes
-from `pgtrickle.df_threshold_advice` when confidence is HIGH.
+Historical averages are observational. The legacy self-monitoring modes
+no longer automatically write thresholds; refresh cost decisions use
+comparable evidence for the current contract and pending change count.
 
 ---
 
