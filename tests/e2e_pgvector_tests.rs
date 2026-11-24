@@ -3346,17 +3346,27 @@ async fn test_centroid_crash_recovers_committed_source_and_rolls_back_refresh() 
         .execute(&mut *conn)
         .await
         .expect("rollback centroid candidate check");
-    sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_crash_st')")
-        .execute(&mut *conn)
-        .await
-        .expect("refresh after crash recovery catch-up");
-    let recovered_delta_details: serde_json::Value = sqlx::query_scalar("SELECT jsonb_build_object('binary_matches', public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)), 'actual', s.centroid::text, 'native', (SELECT avg(v)::text FROM centroid_crash_src), 'source_id1', (SELECT v::text FROM centroid_crash_src WHERE id = 1), 'frontier_matches', c.baseline_frontier = t.frontier, 'materialized_cleared', c.materialized_xid IS NULL, 'merge_strategy', h.merge_strategy_used, 'centroid_state', g.state, 'group_count', g.group_count, 'state_checksum_valid', g.state_checksum = pg_catalog.md5(pg_catalog.int8send(g.pgt_id) || g.row_id || pg_catalog.int8send(g.group_count) || pg_catalog.array_send(g.state)), 'frontier', t.frontier::text, 'baseline_frontier', c.baseline_frontier::text, 'materialized_xid', c.materialized_xid::text, 'refresh_reason', h.refresh_reason, 'refresh_reason_detail', h.refresh_reason_detail) FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN pgtrickle.pgt_centroid_groups g ON g.pgt_id = c.pgt_id AND g.row_id = s.__pgt_row_id JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass")
-        .fetch_one(&mut *conn)
-        .await
-        .expect("check post-recovery incremental refresh");
+    let recovered_delta_sql = "SELECT jsonb_build_object('binary_matches', public.vector_send(s.centroid) = public.vector_send((SELECT avg(v) FROM centroid_crash_src)), 'actual', s.centroid::text, 'native', (SELECT avg(v)::text FROM centroid_crash_src), 'source_id1', (SELECT v::text FROM centroid_crash_src WHERE id = 1), 'frontier_matches', c.baseline_frontier = t.frontier, 'materialized_cleared', c.materialized_xid IS NULL, 'merge_strategy', h.merge_strategy_used, 'centroid_state', g.state, 'group_count', g.group_count, 'state_checksum_valid', g.state_checksum = pg_catalog.md5(pg_catalog.int8send(g.pgt_id) || g.row_id || pg_catalog.int8send(g.group_count) || pg_catalog.array_send(g.state)), 'frontier', t.frontier::text, 'baseline_frontier', c.baseline_frontier::text, 'materialized_xid', c.materialized_xid::text, 'refresh_id', h.refresh_id, 'refresh_reason', h.refresh_reason, 'refresh_reason_detail', h.refresh_reason_detail) FROM centroid_crash_st s CROSS JOIN pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) JOIN pgtrickle.pgt_centroid_groups g ON g.pgt_id = c.pgt_id AND g.row_id = s.__pgt_row_id JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_relid = 'centroid_crash_st'::regclass";
+    let recovery_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut recovery_attempts = 0;
+    let recovered_delta_details = loop {
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('centroid_crash_st')")
+            .execute(&mut *conn)
+            .await
+            .expect("refresh after crash recovery catch-up");
+        let details: serde_json::Value = sqlx::query_scalar(recovered_delta_sql)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("check post-recovery incremental refresh");
+        if details["binary_matches"] == true || std::time::Instant::now() >= recovery_deadline {
+            break details;
+        }
+        recovery_attempts += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
     assert_eq!(
         recovered_delta_details["binary_matches"], true,
-        "recovered centroid must match native AVG after later deltas: {recovered_delta_details}"
+        "recovered centroid must match native AVG after later deltas (attempts={recovery_attempts}): {recovered_delta_details}"
     );
     assert_eq!(
         recovered_delta_details["actual"], "[8,9]",

@@ -61,13 +61,22 @@ else
     echo "Synthetic v0.108.4 baseline: archived install SQL SHA-256 $(shasum -a 256 sql/archive/pg_trickle--0.108.4.sql | cut -d' ' -f1)"
 fi
 
+EXTRA_PG_ARGS=()
+if [[ "$SYNTHETIC_BASELINE" == true ]]; then
+    # Keep the candidate worker idle while its binary is loaded against the
+    # intentionally older synthetic catalog; this fixture carries CDC backlog
+    # across the upgrade and has no running refresh to quiesce.
+    EXTRA_PG_ARGS=(-c pg_trickle.enabled=off)
+fi
+
 CONTAINER_ID="$(docker create \
     -e POSTGRES_PASSWORD=postgres "$POSTGRES_IMAGE" \
     -c shared_preload_libraries=pg_trickle \
     -c track_commit_timestamp=on \
     -c wal_level=logical \
     -c max_replication_slots=10 \
-    -c max_worker_processes=32)"
+    -c max_worker_processes=32 \
+    "${EXTRA_PG_ARGS[@]}")"
 docker cp "$WORK_DIR/previous/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"
 docker cp "$WORK_DIR/previous/extension/." "$CONTAINER_ID:/usr/share/postgresql/18/extension/"
 docker start "$CONTAINER_ID" >/dev/null

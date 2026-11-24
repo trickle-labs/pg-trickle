@@ -583,9 +583,62 @@ jobs:
             exit 1
           fi
 
+  qualification-unsafe-asan:
+    name: Unsafe-boundary ASan qualification
+    needs: [build-release, test-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Run separate unsafe-boundary ASan qualification
+        id: unsafe-asan
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p qualification-logs/unsafe-asan
+          # Bookworm's ASan runtime can hang at startup with 32-bit mmap randomization.
+          sudo sysctl -w vm.mmap_rnd_bits=28
+          docker build --platform=linux/amd64 \
+            -f tests/Dockerfile.e2e-asan \
+            -t pg_trickle_e2e_asan:contract . 2>&1 | \
+            tee qualification-logs/unsafe-asan/image-build.log
+          PGS_E2E_IMAGE=pg_trickle_e2e_asan:contract \
+            cargo test --test e2e_unsafe_boundary_tests \
+              --features pg18,e2e-unsafe-test-hooks -- --test-threads=1 --nocapture 2>&1 | \
+            tee qualification-logs/unsafe-asan/workloads.log
+
+      - name: Require every declared instrumented case to pass
+        if: always()
+        run: >
+          python3 scripts/v0_109_0_release_gate.py
+          --unsafe-asan-log qualification-logs/unsafe-asan/workloads.log
+
+      - name: Retain ASan qualification logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qualification-evidence-unsafe-asan
+          path: qualification-logs/unsafe-asan/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Require the ASan workload step to succeed
+        if: always()
+        run: |
+          if [[ "${{ steps.unsafe-asan.outcome }}" != "success" ]]; then
+            echo "Unsafe-boundary ASan qualification failed."
+            exit 1
+          fi
+
   qualification:
     name: Packaged release qualification
-    needs: [build-release, test-release, qualification-heavy]
+    needs: [build-release, test-release, qualification-heavy, qualification-unsafe-asan]
     if: always() && needs.build-release.result == 'success' && needs.test-release.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -650,29 +703,6 @@ jobs:
           echo "failed=${FAILED}" >> "$GITHUB_OUTPUT"
           exit 0
 
-      - name: Run separate unsafe-boundary ASan qualification
-        id: unsafe-asan
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          mkdir -p qualification-logs/unsafe-asan
-          # Bookworm's ASan runtime can hang at startup with 32-bit mmap randomization.
-          sudo sysctl -w vm.mmap_rnd_bits=28
-          docker build --platform=linux/amd64 \
-            -f tests/Dockerfile.e2e-asan \
-            -t pg_trickle_e2e_asan:contract . 2>&1 | \
-            tee qualification-logs/unsafe-asan/image-build.log
-          PGS_E2E_IMAGE=pg_trickle_e2e_asan:contract \
-            cargo test --test e2e_unsafe_boundary_tests \
-              --features pg18,e2e-unsafe-test-hooks -- --test-threads=1 --nocapture 2>&1 | \
-            tee qualification-logs/unsafe-asan/workloads.log
-
-      - name: Require every declared instrumented case to pass
-        if: always()
-        run: >
-          python3 scripts/v0_109_0_release_gate.py
-          --unsafe-asan-log qualification-logs/unsafe-asan/workloads.log
-
       - name: Download heavy qualification logs
         if: always()
         uses: actions/download-artifact@v8
@@ -680,6 +710,14 @@ jobs:
         with:
           name: qualification-evidence-heavy
           path: qualification-logs/
+
+      - name: Download unsafe-boundary ASan logs
+        if: always()
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: qualification-evidence-unsafe-asan
+          path: qualification-logs/unsafe-asan/
 
       - name: Write candidate-bound release evidence
         if: always()
@@ -716,7 +754,7 @@ jobs:
       - name: Require all qualification suites to pass
         if: always()
         run: |
-          if [[ "${{ needs.qualification-heavy.result }}" != "success" || "${{ steps.qualify.outputs.failed }}" != "0" || "${{ steps.unsafe-asan.outcome }}" != "success" ]]; then
+          if [[ "${{ needs.qualification-heavy.result }}" != "success" || "${{ steps.qualify.outputs.failed }}" != "0" || "${{ needs.qualification-unsafe-asan.result }}" != "success" ]]; then
             echo "One or more package or separate instrumented qualification suites failed."
             exit 1
           fi
