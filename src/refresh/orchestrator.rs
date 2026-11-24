@@ -166,8 +166,11 @@ pub(crate) fn query_refresh_history_stats(
         let result = (|| {
             let row = client
                 .select(
-                    "WITH recent_diff AS (
-                        SELECT EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0 AS ms
+                    "WITH recent_diff_history AS MATERIALIZED (
+                        SELECT h.refresh_id,
+                               EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0 AS ms,
+                               CASE WHEN pg_catalog.pg_input_is_valid(h.refresh_reason_detail, 'jsonb')
+                                    THEN h.refresh_reason_detail::jsonb END AS evidence
                         FROM pgtrickle.pgt_refresh_history h
                         JOIN pgtrickle.pgt_refresh_summary s USING (pgt_id)
                         WHERE h.pgt_id = $1 AND h.start_time >= s.stats_reset_at
@@ -175,8 +178,14 @@ pub(crate) fn query_refresh_history_stats(
                           AND h.merge_strategy_used IS DISTINCT FROM 'FULL'
                           AND h.merge_strategy_used IS DISTINCT FROM 'TOP_K'
                           AND NOT h.was_full_fallback AND h.end_time > h.start_time
-                          AND h.delta_row_count BETWEEN $2 AND $3
-                        ORDER BY h.refresh_id DESC LIMIT 10
+                        ORDER BY h.refresh_id DESC LIMIT 50
+                    ), recent_diff AS (
+                        SELECT ms FROM recent_diff_history
+                        WHERE evidence->'schema_version' = '1'::jsonb
+                          AND evidence->'input_delta_rows_may_be_incomplete' = 'false'::jsonb
+                          AND (CASE WHEN jsonb_typeof(evidence->'input_delta_rows') = 'number'
+                                    THEN (evidence->>'input_delta_rows')::numeric END) BETWEEN $2 AND $3
+                        ORDER BY refresh_id DESC LIMIT 10
                     ), recent_full AS (
                         SELECT EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0 AS ms
                         FROM pgtrickle.pgt_refresh_history h
@@ -666,11 +675,28 @@ mod tests {
                ($1, now(), now() - interval '2 minutes', now() - interval '1 minute',
                 'FULL', 'COMPLETED', 25000000, 1, 'FULL', false),
                ($1, now(), now() - interval '2 minutes', now() - interval '119 seconds',
-                'DIFFERENTIAL', 'COMPLETED', 1000, 1000, 'explicit_dml', false),
+                'DIFFERENTIAL', 'COMPLETED', 1, 1, 'explicit_dml', false),
                ($1, now(), now() - interval '2 minutes', now() - interval '119 seconds',
-                'DIFFERENTIAL', 'COMPLETED', 1000, 1000, 'explicit_dml', false),
+                'DIFFERENTIAL', 'COMPLETED', 50000, 50000, 'explicit_dml', false),
                ($1, now(), now() - interval '2 minutes', now() - interval '61 seconds',
-                'DIFFERENTIAL', 'COMPLETED', 1000, 1000, 'explicit_dml', false)",
+                'DIFFERENTIAL', 'COMPLETED', 1, 1, 'explicit_dml', false)",
+            "UPDATE pgtrickle.pgt_refresh_history
+                SET refresh_reason_detail = jsonb_build_object(
+                    'schema_version', 1, 'input_delta_rows', 1000,
+                    'input_delta_rows_may_be_incomplete', false)::text
+              WHERE pgt_id = $1 AND action = 'DIFFERENTIAL'",
+            "INSERT INTO pgtrickle.pgt_refresh_history
+                (pgt_id, data_timestamp, start_time, end_time, action, status,
+                 rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback,
+                 refresh_reason_detail)
+             VALUES
+               ($1, now(), now() - interval '2 minutes', now(),
+                'DIFFERENTIAL', 'COMPLETED', 1000, 1000, 'explicit_dml', false,
+                jsonb_build_object('schema_version', 1, 'input_delta_rows', 1000,
+                    'input_delta_rows_may_be_incomplete', true)::text),
+               ($1, now(), now() - interval '2 minutes', now(),
+                'DIFFERENTIAL', 'COMPLETED', 1000, 1000, 'explicit_dml', false,
+                'legacy diagnostic, not JSON')",
         ] {
             Spi::run_with_args(sql, &[pgt_id.into()]).expect("seed cost history");
         }
