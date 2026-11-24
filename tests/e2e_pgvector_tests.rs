@@ -2591,6 +2591,8 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
         restored,
         "rollback must restore visible rows and the state frontier"
     );
+    // Even above the automatic ratio threshold, forced DIFFERENTIAL must
+    // retain the exact input cardinality for execution and cost evidence.
     for sql in [
         "BEGIN",
         "SET LOCAL pg_trickle.differential_max_change_ratio = 0.001",
@@ -2601,13 +2603,15 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
         sqlx::query(sql)
             .execute(&mut *conn)
             .await
-            .expect("exercise the bounded change probe");
+            .expect("exercise forced differential above the ratio threshold");
     }
     let bounded: String = sqlx::query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
-        .fetch_one(&mut *conn).await.expect("read bounded cost evidence");
+        .fetch_one(&mut *conn).await.expect("read exact cost evidence above the ratio threshold");
     let bounded: serde_json::Value =
-        serde_json::from_str(&bounded).expect("parse bounded cost evidence");
-    assert_eq!(bounded["input_delta_rows_may_be_incomplete"], true);
+        serde_json::from_str(&bounded).expect("parse exact cost evidence above the ratio threshold");
+    assert_eq!(bounded["input_delta_rows_may_be_incomplete"], false);
+    assert_eq!(bounded["input_delta_rows"], 2);
+    assert_eq!(bounded["merge_strategy"], "centroid_algebraic");
     sqlx::query("ROLLBACK")
         .execute(&mut *conn)
         .await
