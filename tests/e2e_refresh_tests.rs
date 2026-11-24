@@ -258,7 +258,7 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
         "rf_cost_st",
         "SELECT id, val FROM rf_cost_src",
         "1h",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
     // Keep the cost-model assertion deterministic when the scheduler is active.
@@ -1501,4 +1501,51 @@ async fn test_fused_refresh_scheduler_audit_trail() {
         "Inserting a row with initiated_by = 'SCHEDULER_FUSED' must succeed \
          (COR-001: CHECK constraint should include SCHEDULER_FUSED)"
     );
+}
+
+#[tokio::test]
+async fn test_explicit_differential_policy_avoids_elective_full() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE rf_policy_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO rf_policy_src SELECT n, n FROM generate_series(1, 1000) n")
+        .await;
+    db.create_st(
+        "rf_policy_st",
+        "SELECT id, val FROM rf_policy_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_policy_st'])")
+        .await;
+    db.execute("ANALYZE rf_policy_src").await;
+    db.execute("UPDATE rf_policy_src SET val = val + 1 WHERE id <= 500")
+        .await;
+    let mut tx = db.pool.begin().await.expect("transaction");
+    for setting in [
+        "SET LOCAL pg_trickle.refresh_strategy = 'auto'",
+        "SET LOCAL pg_trickle.differential_max_change_ratio = 0.01",
+    ] {
+        sqlx::query(setting).execute(&mut *tx).await.unwrap();
+    }
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('rf_policy_st')")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let (action, fallback): (String, bool) = sqlx::query_as(
+        "SELECT h.action, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id)
+         WHERE s.pgt_name = 'rf_policy_st' AND h.initiated_by = 'MANUAL' AND h.status = 'COMPLETED'
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(action, "DIFFERENTIAL");
+    assert!(!fallback);
+    tx.commit().await.unwrap();
+    db.assert_st_matches_query("rf_policy_st", "SELECT id, val FROM rf_policy_src")
+        .await;
 }
