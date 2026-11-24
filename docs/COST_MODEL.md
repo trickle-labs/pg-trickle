@@ -29,35 +29,30 @@ it is wrong in either direction for many real queries:
 - A query whose source has just doubled in size will see different
   trade-offs from yesterday's plan.
 
-The cost model uses *measured* `last_full_ms` and `last_diff_ms`
-together with the *current* change ratio to make a per-refresh
-decision.
-
----
+The authoritative cost check runs inside differential execution for the
+actual CDC window. The scheduler does not independently preempt to FULL.
 
 ## Inputs the model uses
 
-For each stream table, on each scheduler tick:
+- Complete input CDC event counts, not output rows or whole-buffer estimates.
+- Recent successful differential durations within a factor of two of the
+  current input size, for the same query identity and contract generation.
+- The median of the last five eligible completed FULL durations.
+- The configured prediction window and minimum sample count (at least three).
+- The statistics-reset boundary.
 
-| Input | Source |
-|---|---|
-| `change_ratio_current` | `pending_changes / source_row_count` |
-| `last_full_ms` | most recent full refresh duration |
-| `last_diff_ms` | most recent differential refresh duration |
-| `pending_rows` | size of the change buffer |
-| `delta_amplification_factor` | learned multiplier: estimated delta volume given pending changes |
-| `cost_model_safety_margin` (GUC) | bias toward FULL or DIFF |
-
-It then computes:
+Use the median comparable differential duration directly; it already includes
+fixed overhead and query complexity. Do not extrapolate across distant batch
+sizes or multiply by a complexity coefficient. Cost-based FULL requires
 
 ```
-predicted_diff_ms = base_diff_overhead
-                  + per_row_diff_cost × pending_rows × delta_amplification_factor
-
-predicted_full_ms = last_full_ms × source_growth_factor
+median_diff_ms > median_full_ms × max(1.0, prediction_ratio, cost_model_safety_margin)
 ```
 
-The execution-time B-4 fallback check reads committed history for the current stream table on each decision. It uses the median duration of up to ten completed differential samples within a factor of two of the current change count, requiring at least three comparable samples, and the median of up to five completed FULL samples. Both windows honor `stat_reset`; an absent comparable sample set falls back to the ordinary ratio heuristic. This deliberately avoids extrapolating fixed overhead or a pathological plan from small batches to large ones. The periodic cost summary remains a monitoring estimate, not the authoritative B-4 decision input. FULL still holds source and target locks; duration alone is not an availability guarantee.
+The default effective margin is 1.5. Missing or incomplete evidence never
+authorizes a cost-driven FULL. Configured change-ratio and resource limits,
+explicit FULL requests, and correctness recovery remain distinct decisions.
+Monitoring summaries are not authoritative decision inputs.
 
 ---
 
@@ -83,27 +78,15 @@ FROM pgtrickle.recommend_refresh_mode_all();
 
 | GUC | Default | Effect |
 |---|---|---|
-| `pg_trickle.cost_model_safety_margin` | `1.20` | Multiplier on the predicted DIFF cost. > 1.0 biases toward FULL. |
-| `pg_trickle.differential_max_change_ratio` | `0.50` | Hard cap: never pick DIFF above this ratio. |
-| `pg_trickle.adaptive_full_threshold` | `0.50` | Force FULL when change ratio exceeds this (legacy fallback). |
-| `pg_trickle.delta_amplification_threshold` | `5.0` | When `delta_volume / pending_changes > T`, prefer FULL. |
-| `pg_trickle.max_delta_estimate_rows` | `10000000` | Cap on the model's estimate; above this, prefer FULL. |
-| `pg_trickle.planner_aggressive` | `off` | Allow the model to override per-table refresh-mode hints. |
+| `pg_trickle.prediction_window` | `60` | Age limit in minutes for differential observations. |
+| `pg_trickle.prediction_min_samples` | `5` | Required comparable samples; zero disables cost fallback. |
+| `pg_trickle.prediction_ratio` | `1.5` | Minimum duration advantage for elective FULL. |
+| `pg_trickle.cost_model_safety_margin` | `0.8` | Additional lower bound on the effective margin. |
+| `pg_trickle.differential_max_change_ratio` | `0.15` | Separate configured change-ratio guard; zero disables that guard. |
+| `pg_trickle.refresh_strategy` | `auto` | Set to differential to bypass elective ratio and cost fallback. |
 
-A typical "trust the model" setup:
-
-```sql
-ALTER SYSTEM SET pg_trickle.cost_model_safety_margin = '1.0';
-ALTER SYSTEM SET pg_trickle.planner_aggressive       = 'on';
-SELECT pg_reload_conf();
-```
-
-A typical "be conservative" setup (prefer FULL on uncertainty):
-
-```sql
-ALTER SYSTEM SET pg_trickle.cost_model_safety_margin       = '1.5';
-ALTER SYSTEM SET pg_trickle.differential_max_change_ratio  = '0.30';
-```
+Higher margins favor differential execution. FULL still holds source and
+target locks, so its duration alone is not an availability guarantee.
 
 ---
 
@@ -127,8 +110,7 @@ Pin a mode with:
 SELECT pgtrickle.alter_stream_table('order_totals', refresh_mode => 'FULL');
 ```
 
-The model will not override a manually-pinned mode unless
-`planner_aggressive = on`.
+The FULL mode is explicitly configured. Use the cluster-wide `refresh_strategy = 'differential'` to suppress elective differential-to-FULL fallback; correctness and resource guards still apply.
 
 ---
 
