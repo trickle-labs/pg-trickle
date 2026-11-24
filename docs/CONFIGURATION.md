@@ -3308,19 +3308,12 @@ Maximum tolerated decoder lag before the source is returned to trigger capture.
 | **Type** | `bool` |
 | **Default** | `false` |
 
-Controls whether pg_trickle uses the "fused refresh" optimisation: when multiple
-stream tables in the same DAG are ready to refresh, their delta pipelines are
-merged into a single query plan so that shared source scans and joins are
-executed only once.
-
-Disable (`false`) if a specific DAG shape causes unexpected planner behaviour
-or if you need to isolate which refresh is consuming resources.
-
-```sql
--- Temporarily disable fused refresh for diagnosis
-ALTER SYSTEM SET pg_trickle.enable_fused_refresh = off;
-SELECT pg_reload_conf();
-```
+Deprecated compatibility setting. Both values are accepted but no longer
+enable the separate CTE-fused MERGE executor: it could finalize frontiers
+without publishing effective downstream changes or maintaining auxiliary
+state. Parallel worker grouping and the ordinary topological refresh
+executor remain supported. The legacy `pg_trickle.fused_refresh_max_delta_rows`
+setting is likewise accepted but has no effect.
 
 ---
 

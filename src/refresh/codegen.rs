@@ -1760,40 +1760,6 @@ fn enforce_template_cache_byte_cap(
     }
 }
 
-/// PERF-2 (v0.63.0): Retrieve the delta SQL template and source OIDs from the
-/// MERGE template cache for fused refresh eligibility checks.
-///
-/// Returns `Some((delta_sql_template, source_oids, user_cols_needed, is_deduplicated))`
-/// when a valid, non-stale cache entry exists for `pgt_id`.
-/// Returns `None` when the cache is cold or the entry is stale (hash mismatch).
-pub(crate) fn get_fused_refresh_template(
-    pgt_id: i64,
-    defining_query_hash: u64,
-) -> Option<(String, Vec<u32>, bool)> {
-    let cached = MERGE_TEMPLATE_CACHE.with(|cache| {
-        cache
-            .borrow()
-            .peek(&pgt_id)
-            .filter(|entry| {
-                entry.defining_query_hash == defining_query_hash
-                    && entry.planning_version == crate::dvm::planner::FORMAT_VERSION
-            })
-            .cloned()
-    });
-    cached
-        .filter(|entry| {
-            entry.statistics_epoch
-                == crate::dvm::planner::statistics_epoch_for_sources(&entry.source_oids)
-        })
-        .map(|entry| {
-            (
-                entry.delta_sql_template.as_ref().to_owned(),
-                entry.source_oids,
-                entry.is_deduplicated,
-            )
-        })
-}
-
 pub fn invalidate_merge_cache(pgt_id: i64) {
     MERGE_TEMPLATE_CACHE.with(|cache| {
         let mut c = cache.borrow_mut();

@@ -2174,13 +2174,17 @@ async fn test_pause_scheduler_drain_timeout() {
 /// for its downstream member. Drive the real scheduler with an already
 /// accumulated upstream backlog and new changes in the same worker tick.
 /// The downstream must consume the backlog, not the above-bound new batch.
-async fn assert_fused_chain_consumes_complete_cdc_windows(aggregate_query: &str) {
+async fn assert_fused_chain_consumes_complete_cdc_windows(
+    aggregate_query: &str,
+    legacy_cte_fusion: bool,
+) {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
     configure_fast_scheduler(&db).await;
     db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "'on'", "on")
         .await;
-    // Exercise DAG-4 worker grouping, not the optional PERF-2 CTE executor.
-    db.alter_system_set_and_wait("pg_trickle.enable_fused_refresh", "off", "off")
+    // Both the default and legacy opt-in must execute the same safe worker path.
+    let setting = if legacy_cte_fusion { "on" } else { "off" };
+    db.alter_system_set_and_wait("pg_trickle.enable_fused_refresh", setting, setting)
         .await;
     db.alter_system_set_and_wait("pg_trickle.cdc_mode", "trigger", "trigger")
         .await;
@@ -2393,6 +2397,7 @@ async fn test_scheduler_fused_chain_preserves_backlog_and_frontier() {
     assert_fused_chain_consumes_complete_cdc_windows(
         "SELECT u.k, SUM(u.v) AS total, COUNT(*) AS n \
          FROM (SELECT k, v FROM fused_up) u GROUP BY u.k",
+        false,
     )
     .await;
 }
@@ -2402,6 +2407,19 @@ async fn test_scheduler_fused_chain_rescans_use_complete_bounded_history() {
     assert_fused_chain_consumes_complete_cdc_windows(
         "SELECT k, SUM(v) AS total, COUNT(*) AS n, MIN(v) AS lo, MAX(v) AS hi \
          FROM fused_up GROUP BY k",
+        false,
+    )
+    .await;
+}
+
+/// Legacy PERF-2 opt-in must never route a worker around the normal CDC,
+/// auxiliary-state, and frontier finalization protocol.
+#[tokio::test]
+async fn test_scheduler_legacy_cte_fusion_setting_preserves_cdc() {
+    assert_fused_chain_consumes_complete_cdc_windows(
+        "SELECT k, SUM(v) AS total, COUNT(*) AS n, MIN(v) AS lo, MAX(v) AS hi \
+         FROM fused_up GROUP BY k",
+        true,
     )
     .await;
 }

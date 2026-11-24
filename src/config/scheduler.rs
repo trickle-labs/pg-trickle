@@ -362,28 +362,11 @@ pub static PGS_INVALIDATION_RING_CAPACITY: GucSetting<i32> = GucSetting::<i32>::
 /// Default: 0.20. Range: 0.01–1.0.
 pub static PGS_REINDEX_DRIFT_THRESHOLD: GucSetting<f64> = GucSetting::<f64>::new(0.20);
 
-/// PERF-2 (v0.63.0): Enable CTE-fused multi-node refresh.
-///
-/// When `true`, the scheduler composes the delta SQL for multiple
-/// DIFFERENTIAL-mode stream tables in the same tick into a single
-/// `WITH … MERGE; MERGE; …` CTE chain.  This reduces the number of
-/// planner invocations, executor setups, and round-trips for multi-node DAGs.
-///
-/// Disable if a specific DAG shape causes unexpected planner behaviour.
-/// Please file an issue with the problematic query if you need to disable
-/// fusion — we want to fix planner interaction problems rather than leave
-/// them as permanent opt-outs.
+/// Deprecated compatibility setting; CTE-fused execution is disabled for correctness.
+/// Worker-chain grouping continues to execute through the ordinary refresh path.
 pub static PGS_ENABLE_FUSED_REFRESH: GucSetting<bool> = GucSetting::<bool>::new(false);
 
-/// PERF-2 (v0.63.0): Maximum estimated delta rows for a node to be
-/// fusion-eligible.
-///
-/// Nodes whose estimated pending change count exceeds this threshold are
-/// excluded from the fused CTE chain and refreshed sequentially.  Very
-/// large deltas produce very large CTEs; the planner may choose a worse
-/// plan for the composed statement than for two independent statements.
-///
-/// Default: 500 000. Set to 0 to disable the cardinality gate (always fuse).
+/// Deprecated compatibility setting; the retired CTE-fusion executor ignores this limit.
 pub static PGS_FUSED_REFRESH_MAX_DELTA_ROWS: GucSetting<i32> = GucSetting::<i32>::new(500_000);
 
 /// PERF-1 (v0.62.0): Deduplicate change-buffer scans across all stream tables
@@ -1206,11 +1189,9 @@ pub fn register_scheduler_gucs() {
     // PERF-2: CTE-fused multi-node refresh.
     GucRegistry::define_bool_guc(
         c"pg_trickle.enable_fused_refresh",
-        c"PERF-2: Enable CTE-fused multi-node refresh (v0.63.0).",
-        c"When true, the scheduler composes the delta SQL for multiple \
-          DIFFERENTIAL-mode stream tables in the same tick into a single \
-          WITH … MERGE CTE chain, reducing planner invocations and round-trips. \
-          Disable if a specific DAG shape causes unexpected planner behaviour.",
+        c"Deprecated CTE-fusion compatibility setting (no effect).",
+        c"Accepted for configuration compatibility. All worker-chain members \
+          use the ordinary refresh executor regardless of this setting.",
         &PGS_ENABLE_FUSED_REFRESH,
         GucContext::Suset,
         GucFlags::default(),
@@ -1219,11 +1200,8 @@ pub fn register_scheduler_gucs() {
     // PERF-2: Fused refresh max delta rows cardinality gate.
     GucRegistry::define_int_guc(
         c"pg_trickle.fused_refresh_max_delta_rows",
-        c"PERF-2: Max estimated pending rows for a node to be fusion-eligible (v0.63.0).",
-        c"Nodes whose pending change count exceeds this threshold are excluded from \
-          the fused CTE chain and refreshed sequentially. Very large deltas produce \
-          very large CTEs where separate statements may plan better. \
-          Default: 500000. Set to 0 to disable the cardinality gate.",
+        c"Deprecated CTE-fusion row limit (no effect).",
+        c"Accepted for configuration compatibility; the retired executor is unavailable.",
         &PGS_FUSED_REFRESH_MAX_DELTA_ROWS,
         0,          // min (0 = disabled)
         10_000_000, // max
@@ -1488,18 +1466,6 @@ pub fn pg_trickle_enable_change_buffer_fanout() -> bool {
 /// API-1/2 (v0.62.0): Returns the pause_scheduler drain timeout in seconds.
 pub fn pg_trickle_scheduler_drain_timeout() -> i32 {
     PGS_SCHEDULER_DRAIN_TIMEOUT.get().clamp(1, 3_600)
-}
-
-/// PERF-2 (v0.63.0): Returns whether CTE-fused multi-node refresh is enabled.
-pub fn pg_trickle_enable_fused_refresh() -> bool {
-    PGS_ENABLE_FUSED_REFRESH.get()
-}
-
-/// PERF-2 (v0.63.0): Returns the maximum delta-row cardinality for fusion eligibility.
-/// Returns `None` when the limit is disabled (value == 0).
-pub fn pg_trickle_fused_refresh_max_delta_rows() -> Option<i64> {
-    let v = PGS_FUSED_REFRESH_MAX_DELTA_ROWS.get();
-    if v > 0 { Some(v as i64) } else { None }
 }
 
 /// PAR-2: Returns the maximum parallel refresh workers (0 = serial).

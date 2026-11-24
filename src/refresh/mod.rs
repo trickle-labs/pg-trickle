@@ -32,7 +32,9 @@ use std::cell::RefCell;
 pub(crate) mod centroid_cost;
 pub(crate) mod codegen;
 pub(crate) mod delta_stage;
-pub(crate) mod fused;
+// Retain the historical SQL composer only as a test fixture, not an executor.
+#[cfg(test)]
+mod fused;
 pub(crate) mod merge;
 pub(crate) mod orchestrator;
 pub(crate) mod phd1;
@@ -51,7 +53,6 @@ pub(crate) mod vectorized_agg;
 // Precedence: explicit `pub use` overrides the `pub(crate) use *` glob for
 // the same name, giving those items public (not just crate) visibility.
 pub(crate) use codegen::*;
-pub(crate) use fused::{NodeSpec, fuse_diff_batch};
 pub(crate) use orchestrator::*;
 
 // ── External public API surface ─────────────────────────────────────────
