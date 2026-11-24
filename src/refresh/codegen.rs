@@ -2031,12 +2031,14 @@ pub fn flush_local_template_cache() {
 /// Compare complete value representations, not SQL equality or a text hash.
 /// PostgreSQL's record-image operators compare binary datum images, including
 /// NULL framing, without invoking a type's user-defined equality or send
-/// function. If the DVM widens an expression's type, conservatively apply it
+/// function. Call the record comparison functions directly: comparing two
+/// ROW constructors with an operator invokes SQL row-wise operator resolution.
+/// If the DVM widens an expression's type, conservatively apply it
 /// instead of comparing unlike record field types or discarding a change.
 pub(crate) fn observable_change_sql(old: &str, new: &str) -> String {
     format!(
         "(CASE WHEN pg_catalog.pg_typeof({old}) = pg_catalog.pg_typeof({new}) \
-         THEN ROW({old}) OPERATOR(pg_catalog.*<>) ROW({new}) ELSE TRUE END)"
+         THEN pg_catalog.record_image_ne(ROW({old}), ROW({new})) ELSE TRUE END)"
     )
 }
 
@@ -2409,7 +2411,7 @@ pub(crate) fn build_keyless_image_delete_template(
                    FROM __pgt_delta_{pgt_id} WHERE __pgt_action = 'D') ranked\
            ) d CROSS JOIN LATERAL (\
              SELECT st2.tableoid, st2.ctid FROM {quoted_table} st2 \
-             WHERE {identity_match} AND ROW({st_cols}) OPERATOR(pg_catalog.*=) ROW({d_cols}) \
+             WHERE {identity_match} AND pg_catalog.record_image_eq(ROW({st_cols}), ROW({d_cols})) \
              ORDER BY st2.tableoid, st2.ctid LIMIT d.{count}\
            ) matched WHERE d.{occurrence} = 1\
          ) chosen WHERE st.tableoid = chosen.tableoid AND st.ctid = chosen.ctid",

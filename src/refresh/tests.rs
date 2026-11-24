@@ -1195,7 +1195,7 @@ fn test_build_is_distinct_clause_retains_every_column_at_any_width() {
     for width in [1, 50, 51, 100, 188] {
         let cols: Vec<String> = (0..width).map(|i| format!("col{i}")).collect();
         let sql = build_is_distinct_clause(&cols);
-        assert_eq!(sql.matches("OPERATOR(pg_catalog.*<>)").count(), width);
+        assert_eq!(sql.matches("pg_catalog.record_image_ne(").count(), width);
         assert!(!sql.contains("pg_trickle_hash"));
         assert!(!sql.contains("COALESCE"));
         assert!(sql.contains(&format!("st.\"col{}\"", width - 1)));
@@ -1276,8 +1276,8 @@ fn test_build_merge_sql_column_quoting() {
 fn test_build_merge_sql_is_distinct_from_guard() {
     let cols = vec!["a".to_string(), "b".to_string()];
     let sql = build_merge_sql("\"public\".\"t\"", "(delta)", &cols, false);
-    assert!(sql.contains("OPERATOR(pg_catalog.*<>)"));
-    assert!(sql.contains("ROW(st.\"a\") OPERATOR(pg_catalog.*<>) ROW(d.\"a\")"));
+    assert!(sql.contains("pg_catalog.record_image_ne("));
+    assert!(sql.contains("pg_catalog.record_image_ne(ROW(st.\"a\"), ROW(d.\"a\"))"));
 }
 
 // ── TG2-MERGE: format helpers ───────────────────────────────────
@@ -1343,7 +1343,7 @@ fn test_retention_dml_probes_affected_rows() {
     );
     assert_eq!(
         build_retention_trigger_update_sql("\"public\".\"t\"", 7, &cols, None),
-        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"public\".\"t\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid AND d.__pgt_action = 'I' AND ((CASE WHEN pg_catalog.pg_typeof(st.\"val\") = pg_catalog.pg_typeof(d.\"val\") THEN ROW(st.\"val\") OPERATOR(pg_catalog.*<>) ROW(d.\"val\") ELSE TRUE END))"
+        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"public\".\"t\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid AND d.__pgt_action = 'I' AND ((CASE WHEN pg_catalog.pg_typeof(st.\"val\") = pg_catalog.pg_typeof(d.\"val\") THEN pg_catalog.record_image_ne(ROW(st.\"val\"), ROW(d.\"val\")) ELSE TRUE END))"
     );
     assert_eq!(
         build_retention_trigger_insert_sql("\"public\".\"t\"", 7, &cols, None),
@@ -1360,7 +1360,7 @@ fn test_retention_dml_prunes_by_proven_partition_key() {
     );
     assert_eq!(
         build_retention_trigger_update_sql("\"public\".\"t\"", 7, &cols, Some("d")),
-        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\" AND d.__pgt_action = 'I' AND ((CASE WHEN pg_catalog.pg_typeof(st.\"val\") = pg_catalog.pg_typeof(d.\"val\") THEN ROW(st.\"val\") OPERATOR(pg_catalog.*<>) ROW(d.\"val\") ELSE TRUE END))"
+        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\" AND d.__pgt_action = 'I' AND ((CASE WHEN pg_catalog.pg_typeof(st.\"val\") = pg_catalog.pg_typeof(d.\"val\") THEN pg_catalog.record_image_ne(ROW(st.\"val\"), ROW(d.\"val\")) ELSE TRUE END))"
     );
     assert_eq!(
         build_retention_trigger_insert_sql("\"public\".\"t\"", 7, &cols, Some("d")),
@@ -2113,14 +2113,14 @@ fn test_st_bypass_thread_local_set_get_clear() {
 #[test]
 fn test_build_is_distinct_clause_single_col() {
     let clause = build_is_distinct_clause(&["price".to_string()]);
-    assert!(clause.contains(r#"ROW(st."price") OPERATOR(pg_catalog.*<>) ROW(d."price")"#));
+    assert!(clause.contains(r#"pg_catalog.record_image_ne(ROW(st."price"), ROW(d."price"))"#));
     assert!(clause.contains("ELSE TRUE"));
 }
 
 #[test]
 fn test_build_is_distinct_clause_multi_col() {
     let clause = build_is_distinct_clause(&["a".to_string(), "b".to_string()]);
-    assert_eq!(clause.matches("OPERATOR(pg_catalog.*<>)").count(), 2);
+    assert_eq!(clause.matches("pg_catalog.record_image_ne(").count(), 2);
     assert!(clause.contains(" OR "));
 }
 
@@ -2128,7 +2128,7 @@ fn test_build_is_distinct_clause_multi_col() {
 fn test_build_is_distinct_clause_col_with_double_quote() {
     let clause = build_is_distinct_clause(&["col\"name".to_string()]);
     assert!(clause.contains(r#""col""name""#));
-    assert!(clause.contains("OPERATOR(pg_catalog.*<>)"));
+    assert!(clause.contains("pg_catalog.record_image_ne("));
 }
 
 #[test]
@@ -3021,7 +3021,7 @@ fn test_keyless_image_delete_matches_payload_and_partition_tuple() {
     let columns = vec!["n".to_string(), "f".to_string()];
     let sql = build_keyless_image_delete_template("\"public\".\"s\"", 5, &columns);
     assert!(
-        sql.contains("ROW(st2.\"n\", st2.\"f\") OPERATOR(pg_catalog.*=) ROW(d.\"n\", d.\"f\")")
+        sql.contains("pg_catalog.record_image_eq(ROW(st2.\"n\", st2.\"f\"), ROW(d.\"n\", d.\"f\"))")
     );
     assert!(sql.contains("LIMIT d.__pgt_del_image_count"));
     assert!(sql.contains("st.tableoid = chosen.tableoid AND st.ctid = chosen.ctid"));
