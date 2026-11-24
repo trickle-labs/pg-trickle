@@ -3669,11 +3669,10 @@ fn read_frontier_probe_ordered(
     ))
 }
 
-/// Probe the cluster for the current write LSN and the oldest in-progress
-/// transaction xmin, then compute the safe frontier upper bound.
+/// Probe the cluster for a strict WAL upper bound and active writer XIDs.
 ///
-/// This deliberately uses two ordered SPI queries per scheduler tick, so the
-/// WAL candidate is sampled before the transaction-visibility probe.
+/// Ordered SPI queries sample the candidate before live XIDs and prepared
+/// transactions. Read-only snapshot horizons do not fence captured writes.
 /// The call must be made inside a `BackgroundWorker::transaction` block.
 ///
 /// # Arguments
@@ -3693,13 +3692,14 @@ pub fn compute_safe_upper_bound(
     _prev_oldest_xmin: u64,
 ) -> Result<(String, String, u64, u64), PgTrickleError> {
     let probe_start = std::time::Instant::now();
-    // Capture the WAL *insertion* position first: trigger CDC stamps each
-    // statement with pg_current_wal_insert_lsn().  The subsequent, separate
-    // activity scan must see every writer which could have emitted an image
-    // at or below this candidate and is still uncommitted.
+    // Capture a strict upper bound below the WAL insertion position first.
+    // Trigger CDC stamps rows with pg_current_wal_insert_lsn(); a new writer
+    // can share the current insertion position (notably with unlogged data).
+    // Excluding that endpoint prevents an equal-LSN event after this sample
+    // from being skipped by the inclusive delta window.
     let (probe, oldest_age_secs) = read_frontier_probe_ordered(
         || {
-            Spi::get_one::<String>("SELECT pg_current_wal_insert_lsn()::text")
+            Spi::get_one::<String>("SELECT (pg_current_wal_insert_lsn() - 1::numeric)::text")
                 .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
                     context: "frontier probe candidate".to_string(),
                     reason: e.to_string(),
@@ -3710,61 +3710,64 @@ pub fn compute_safe_upper_bound(
                 })
         },
         || {
+            // Do not reuse an activity snapshot taken before the candidate.
+            Spi::run("SELECT pg_catalog.pg_stat_clear_snapshot()").map_err(|e| {
+                PgTrickleError::SafeFrontierUnavailable {
+                    context: "clear frontier activity snapshot".to_string(),
+                    reason: e.to_string(),
+                }
+            })?;
             Spi::connect(|client| {
-                let rows = client
-                    .select(
-                        "SELECT active.xid, active.age_secs FROM (
-                             SELECT backend_xid::text AS xid,
-                                    EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
-                             FROM pg_stat_activity
-                             WHERE datname = current_database()
-                               AND pid <> pg_backend_pid() AND backend_xid IS NOT NULL
-                             UNION ALL
-                             SELECT backend_xmin::text AS xid,
-                                    EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint AS age_secs
-                             FROM pg_stat_activity
-                             WHERE datname = current_database()
-                               AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL
-                             UNION ALL
-                             SELECT \"transaction\"::text AS xid,
-                                    EXTRACT(EPOCH FROM (clock_timestamp() - prepared))::bigint AS age_secs
-                             FROM pg_prepared_xacts
-                             WHERE database = current_database()
-                         ) AS active",
-                        None,
-                        &[],
-                    )
-                    .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                        context: "frontier activity probe".to_string(),
-                        reason: e.to_string(),
-                    })?;
                 let mut active_xids = HashSet::new();
                 let mut oldest_age_secs = 0_u64;
-                for row in rows {
-                    let xid = row
-                        .get::<String>(1)
-                        .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                            context: "frontier probe xid".to_string(),
-                            reason: e.to_string(),
-                        })?
-                        .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
-                            context: "frontier probe xid".to_string(),
-                            reason: "active transaction ID was NULL".to_string(),
-                        })?;
-                    let xid = xid.parse::<u64>().map_err(|e| {
+                // A backend_xmin is a visibility horizon, not a writer's
+                // identity. Every transaction that can have emitted a trigger
+                // CDC row already has a top-level XID (also for subtransactions).
+                // Scan live XIDs first, then prepared transactions: a writer
+                // moving into 2PC between the scans is seen by the second scan.
+                for sql in [
+                    "SELECT backend_xid::text,
+                            EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint
+                     FROM pg_catalog.pg_stat_activity
+                     WHERE datname = current_database()
+                       AND pid <> pg_backend_pid() AND backend_xid IS NOT NULL",
+                    "SELECT \"transaction\"::text,
+                            EXTRACT(EPOCH FROM (clock_timestamp() - prepared))::bigint
+                     FROM pg_catalog.pg_prepared_xacts
+                     WHERE database = current_database()",
+                ] {
+                    let rows = client.select(sql, None, &[]).map_err(|e| {
                         PgTrickleError::SafeFrontierUnavailable {
-                            context: "frontier probe xid".to_string(),
-                            reason: format!("malformed transaction ID '{xid}': {e}"),
+                            context: "frontier activity probe".to_string(),
+                            reason: e.to_string(),
                         }
                     })?;
-                    active_xids.insert(xid);
-                    let age =
-                        row.get::<i64>(2)
+                    for row in rows {
+                        let xid = row
+                            .get::<String>(1)
                             .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                                context: "frontier probe transaction age".to_string(),
+                                context: "frontier probe xid".to_string(),
                                 reason: e.to_string(),
+                            })?
+                            .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
+                                context: "frontier probe xid".to_string(),
+                                reason: "active transaction ID was NULL".to_string(),
                             })?;
-                    oldest_age_secs = oldest_age_secs.max(frontier_transaction_age(age));
+                        let xid = xid.parse::<u64>().map_err(|e| {
+                            PgTrickleError::SafeFrontierUnavailable {
+                                context: "frontier probe xid".to_string(),
+                                reason: format!("malformed transaction ID '{xid}': {e}"),
+                            }
+                        })?;
+                        active_xids.insert(xid);
+                        let age =
+                            row.get::<i64>(2)
+                                .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                                    context: "frontier probe transaction age".to_string(),
+                                    reason: e.to_string(),
+                                })?;
+                        oldest_age_secs = oldest_age_secs.max(frontier_transaction_age(age));
+                    }
                 }
                 Ok::<_, PgTrickleError>((active_xids, oldest_age_secs))
             })
