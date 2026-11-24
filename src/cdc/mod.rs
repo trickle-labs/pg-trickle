@@ -3760,12 +3760,12 @@ pub fn compute_safe_upper_bound(
                             }
                         })?;
                         active_xids.insert(xid);
-                        let age =
-                            row.get::<i64>(2)
-                                .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
-                                    context: "frontier probe transaction age".to_string(),
-                                    reason: e.to_string(),
-                                })?;
+                        let age = row.get::<i64>(2).map_err(|e| {
+                            PgTrickleError::SafeFrontierUnavailable {
+                                context: "frontier probe transaction age".to_string(),
+                                reason: e.to_string(),
+                            }
+                        })?;
                         oldest_age_secs = oldest_age_secs.max(frontier_transaction_age(age));
                     }
                 }

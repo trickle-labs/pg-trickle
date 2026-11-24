@@ -918,10 +918,18 @@ mod materialized_apply_tests {
 
     #[test]
     fn test_materialized_apply_prefers_index_for_sparse_large_target() {
-        assert!(prefer_indexed_materialized_apply(20_000, 25_000_000.0, 0.001));
+        assert!(prefer_indexed_materialized_apply(
+            20_000,
+            25_000_000.0,
+            0.001
+        ));
         assert!(!prefer_indexed_materialized_apply(20_000, 100_000.0, 0.001));
         assert!(!prefer_indexed_materialized_apply(20_000, -1.0, 0.001));
-        assert!(!prefer_indexed_materialized_apply(20_000, 25_000_000.0, 0.0));
+        assert!(!prefer_indexed_materialized_apply(
+            20_000,
+            25_000_000.0,
+            0.0
+        ));
         assert!(!prefer_indexed_materialized_apply(0, 25_000_000.0, 0.001));
     }
 }
@@ -3970,7 +3978,11 @@ fn execute_differential_refresh_inner(
 
             let delta_rows = Spi::connect_mut(|client| {
                 let result = client
-                    .update(&format!("INSERT INTO {delta_table} {delta_select}"), None, &[])
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
@@ -4075,7 +4087,11 @@ fn execute_differential_refresh_inner(
 
             let delta_rows = Spi::connect_mut(|client| {
                 let result = client
-                    .update(&format!("INSERT INTO {delta_table} {delta_select}"), None, &[])
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
@@ -4138,7 +4154,11 @@ fn execute_differential_refresh_inner(
 
             let delta_rows = Spi::connect_mut(|client| {
                 let result = client
-                    .update(&format!("INSERT INTO {delta_table} {delta_select}"), None, &[])
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
