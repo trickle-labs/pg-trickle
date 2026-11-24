@@ -3143,11 +3143,10 @@ pub fn execute_differential_refresh_with_tuning(
     // The explicit DML path materializes the delta into __pgt_delta_{pgt_id},
     // which we then capture into the ST's change buffer for downstream use.
     let needs_downstream_capture = has_downstream_st_consumers(st.pgt_id);
-    let use_explicit_dml =
-        use_explicit_dml
-            || needs_downstream_capture
-            || bounded_distance_snapshot
-            || crate::refresh::is_retention_catchup();
+    let use_explicit_dml = use_explicit_dml
+        || needs_downstream_capture
+        || bounded_distance_snapshot
+        || crate::refresh::is_retention_catchup();
 
     // When user_triggers = 'off' but there ARE user triggers on the ST,
     // suppress them during the MERGE to prevent spurious firing.

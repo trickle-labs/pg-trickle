@@ -9844,7 +9844,6 @@ async fn test_scale2_multi_db_worker_pool_hot_tier_refreshes_within_sla() {
         .await;
 }
 
-
 /// Exercise the real DDL catch-up with enough rows that a cross-product
 /// nested loop is pathological. The plan witness is stronger than wall time.
 #[cfg(not(feature = "light-e2e"))]
@@ -9856,14 +9855,22 @@ async fn test_retention_catchup_uses_set_oriented_delta_generation() {
     db.execute("CREATE TABLE catch1498_src (id int NOT NULL, d date NOT NULL, grp int NOT NULL, amount int NOT NULL, PRIMARY KEY(id,d)) PARTITION BY RANGE(d)").await;
     db.execute("CREATE TABLE catch1498_old PARTITION OF catch1498_src FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')").await;
     db.execute("CREATE TABLE catch1498_live PARTITION OF catch1498_src FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')").await;
-    db.execute("INSERT INTO catch1498_src SELECT n,'2025-06-01',n/2,1 FROM generate_series(1,100) n").await;
-    let query = "SELECT d, grp, SUM(amount) AS total, COUNT(*) AS n FROM catch1498_src GROUP BY d,grp";
-    db.create_st("catch1498_st", query, "1h", "DIFFERENTIAL").await;
-    let policy: serde_json::Value = db.query_scalar(
-        "SELECT pgtrickle.get_stream_table_partition_retention('catch1498_st')",
-    ).await;
+    db.execute(
+        "INSERT INTO catch1498_src SELECT n,'2025-06-01',n/2,1 FROM generate_series(1,100) n",
+    )
+    .await;
+    let query =
+        "SELECT d, grp, SUM(amount) AS total, COUNT(*) AS n FROM catch1498_src GROUP BY d,grp";
+    db.create_st("catch1498_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    let policy: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.get_stream_table_partition_retention('catch1498_st')")
+        .await;
     assert_eq!(policy["automatic_delete_with_source"], true);
-    db.execute("INSERT INTO catch1498_src SELECT n,'2026-06-01',n/2,1 FROM generate_series(1,10000) n").await;
+    db.execute(
+        "INSERT INTO catch1498_src SELECT n,'2026-06-01',n/2,1 FROM generate_series(1,10000) n",
+    )
+    .await;
 
     let mut tx = db.pool.begin().await.expect("DDL transaction");
     for statement in [
@@ -9881,29 +9888,54 @@ async fn test_retention_catchup_uses_set_oriented_delta_generation() {
     ] {
         sqlx::query(statement).execute(&mut *tx).await.unwrap();
     }
-    sqlx::query("DROP TABLE catch1498_old").execute(&mut *tx).await
+    sqlx::query("DROP TABLE catch1498_old")
+        .execute(&mut *tx)
+        .await
         .expect("catch up and remove the partition");
     let settings: (String, String) = sqlx::query_as(
         "SELECT current_setting('enable_hashjoin'), current_setting('enable_mergejoin')",
-    ).fetch_one(&mut *tx).await.unwrap();
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
     assert_eq!(settings, ("off".into(), "off".into()));
     tx.commit().await.unwrap();
     db.assert_st_matches_query("catch1498_st", query).await;
-    assert!(!db.query_scalar::<bool>(
-        "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'catch1498_st'",
-    ).await);
+    assert!(
+        !db.query_scalar::<bool>(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'catch1498_st'",
+        )
+        .await
+    );
 
     let output = std::process::Command::new("docker")
         .args(["logs", db.container_id()])
-        .output().expect("read PostgreSQL plans");
+        .output()
+        .expect("read PostgreSQL plans");
     assert!(output.status.success());
-    let logs = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-    let generation: Vec<_> = logs.split("Query Text: ").filter(|plan| {
-        plan.lines().next().is_some_and(|sql|
-            sql.contains("INSERT INTO") && sql.contains("__pgt_delta_")
-                && sql.contains("__pgt_cte_pk_stats_"))
-    }).collect();
-    assert!(!generation.is_empty(), "must witness actual CDC delta materialization");
-    assert!(generation.iter().any(|plan| plan.contains("Hash Join") || plan.contains("Merge Join")),
-        "CDC generation must permit set-oriented joins");
+    let logs = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let generation: Vec<_> = logs
+        .split("Query Text: ")
+        .filter(|plan| {
+            plan.lines().next().is_some_and(|sql| {
+                sql.contains("INSERT INTO")
+                    && sql.contains("__pgt_delta_")
+                    && sql.contains("__pgt_cte_pk_stats_")
+            })
+        })
+        .collect();
+    assert!(
+        !generation.is_empty(),
+        "must witness actual CDC delta materialization"
+    );
+    assert!(
+        generation
+            .iter()
+            .any(|plan| plan.contains("Hash Join") || plan.contains("Merge Join")),
+        "CDC generation must permit set-oriented joins"
+    );
 }
