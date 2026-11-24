@@ -932,6 +932,17 @@ pub fn execute_differential_refresh_with_tuning(
     new_frontier: &Frontier,
     tuning: &crate::catalog::RefreshRuntimeTuning,
 ) -> Result<(i64, i64), PgTrickleError> {
+    crate::api::security_context::with_refresh_guc_scope(|| {
+        execute_differential_refresh_inner(st, prev_frontier, new_frontier, tuning)
+    })
+}
+
+fn execute_differential_refresh_inner(
+    st: &StreamTableMeta,
+    prev_frontier: &Frontier,
+    new_frontier: &Frontier,
+    tuning: &crate::catalog::RefreshRuntimeTuning,
+) -> Result<(i64, i64), PgTrickleError> {
     crate::dvm::retention::ensure_retention_capture(st.pgt_id)?;
     crate::refresh::clear_last_cost_evidence();
     crate::refresh::set_last_ann_churn_operations(None);
