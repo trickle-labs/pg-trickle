@@ -269,14 +269,38 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
     let buffer = db.change_buffer_table(source_oid).await;
 
     db.execute(
-        "INSERT INTO pgtrickle.pgt_cost_model_summary
-            (pgt_id, avg_full_ms, avg_diff_ms, sample_count)
-         SELECT pgt_id, 0.1, 100.0, 3
-           FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_cost_st'
-         ON CONFLICT (pgt_id) DO UPDATE
-             SET avg_full_ms = EXCLUDED.avg_full_ms,
-                 avg_diff_ms = EXCLUDED.avg_diff_ms,
-                 sample_count = EXCLUDED.sample_count",
+        "UPDATE pgtrickle.pgt_refresh_summary
+            SET stats_reset_at = now() - interval '10 minutes'
+          WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                          WHERE pgt_name = 'rf_cost_st')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_refresh_history
+            (pgt_id, data_timestamp, start_time, end_time, action, status,
+             rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback,
+             refresh_reason_detail)
+         SELECT pgt_id, now(), now() - interval '2 minutes',
+                now() - interval '119 seconds', 'DIFFERENTIAL', 'COMPLETED',
+                1, 1, 'explicit_dml', false,
+                jsonb_build_object(
+                    'schema_version', 1, 'input_delta_rows', 1,
+                    'input_delta_rows_may_be_incomplete', false,
+                    'plan_identity', defining_query_hash,
+                    'contract_generation', contract_generation
+                )::text
+           FROM pgtrickle.pgt_stream_tables CROSS JOIN generate_series(1, 5)
+          WHERE pgt_name = 'rf_cost_st'",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_refresh_history
+            (pgt_id, data_timestamp, start_time, end_time, action, status,
+             rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback)
+         SELECT pgt_id, now(), now() - interval '1 minute',
+                now() - interval '1 minute' + interval '100 milliseconds',
+                'FULL', 'COMPLETED', 2, 2, 'FULL', false
+           FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_cost_st'",
     )
     .await;
     db.execute("INSERT INTO rf_cost_src VALUES (3, 'c')").await;
