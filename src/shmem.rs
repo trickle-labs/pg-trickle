@@ -2531,7 +2531,9 @@ pub fn invalidate_cost_model(pgt_id: Option<i64>) {
     }
     // SAFETY: MyDatabaseId is valid in a connected PostgreSQL backend.
     let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
-    COST_MODEL_STATE.exclusive().invalidate(database_oid, pgt_id);
+    COST_MODEL_STATE
+        .exclusive()
+        .invalidate(database_oid, pgt_id);
 }
 
 /// Flag indicating whether shared memory was initialized via _PG_init.

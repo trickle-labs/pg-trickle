@@ -334,9 +334,9 @@ pub fn execute_merge_pipeline(
             let changed = crate::api::security_context::with_refresh_guc_scope(|| {
                 prepare_apply(&quoted_relation, fetched)?;
                 Spi::connect_mut(|client| {
-                    let result = client
-                        .update(&batch_sql, None, &[])
-                        .map_err(|e| PgTrickleError::SpiError(format!("pipeline batch apply: {e}")))?;
+                    let result = client.update(&batch_sql, None, &[]).map_err(|e| {
+                        PgTrickleError::SpiError(format!("pipeline batch apply: {e}"))
+                    })?;
                     Ok::<usize, PgTrickleError>(result.len())
                 })
             })?;
@@ -420,5 +420,4 @@ mod tests {
         );
         assert!(replace_merge_source(&sql, "(SELECT 1)", "pg_temp.batch").is_err());
     }
-
 }

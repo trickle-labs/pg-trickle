@@ -606,10 +606,7 @@ async fn test_holdback_read_only_snapshot_does_not_block_progress() {
                 Duration::from_millis(200),
             )
             .await;
-        sqlx::query("COMMIT")
-            .execute(&mut *reader)
-            .await
-            .unwrap();
+        sqlx::query("COMMIT").execute(&mut *reader).await.unwrap();
         assert!(progressed, "snapshot-only reader blocked mode {mode}");
         db.assert_st_matches_query("ltv_reader_st", "SELECT id FROM ltv_reader_src")
             .await;
@@ -677,10 +674,7 @@ async fn test_holdback_reader_that_becomes_writer_preserves_late_commit() {
             .await,
         0
     );
-    sqlx::query("COMMIT")
-        .execute(&mut *reader)
-        .await
-        .unwrap();
+    sqlx::query("COMMIT").execute(&mut *reader).await.unwrap();
     assert!(
         db.wait_for_condition(
             "promoted writer's late commit is consumed",

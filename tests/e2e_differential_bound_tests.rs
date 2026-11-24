@@ -546,7 +546,6 @@ async fn test_issue_1453_staged_cdc_analyzed_in_ordinary_refresh() {
         .await;
 }
 
-
 /// The ratio threshold is deliberately below 100 events; it must not
 /// truncate the cardinality used by a forced differential refresh.
 #[tokio::test]
@@ -554,10 +553,8 @@ async fn test_issue_1486_forced_diff_counts_the_complete_window() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE cardinality1486_src (id int PRIMARY KEY, v int)")
         .await;
-    db.execute(
-        "INSERT INTO cardinality1486_src SELECT g, g FROM generate_series(1, 1000) g",
-    )
-    .await;
+    db.execute("INSERT INTO cardinality1486_src SELECT g, g FROM generate_series(1, 1000) g")
+        .await;
     db.execute("ANALYZE cardinality1486_src").await;
     let query = "SELECT id, v FROM cardinality1486_src";
     db.create_st("cardinality1486_st", query, "1h", "DIFFERENTIAL")
@@ -614,9 +611,9 @@ async fn test_issue_1486_forced_diff_counts_the_complete_window() {
     assert_eq!(recorded_input, input_rows);
     assert!(!incomplete);
     tx.commit().await.expect("commit refresh");
-    db.assert_st_matches_query("cardinality1486_st", query).await;
+    db.assert_st_matches_query("cardinality1486_st", query)
+        .await;
 }
-
 
 /// Witness the actual nested MERGE plan, not just the elapsed time or final
 /// result. A sparse pipeline batch must probe the indexed large target.
@@ -626,10 +623,8 @@ async fn test_issue_1486_pipeline_apply_uses_indexed_target_probes() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE plan1486_src (id int PRIMARY KEY, v int)")
         .await;
-    db.execute(
-        "INSERT INTO plan1486_src SELECT g, g FROM generate_series(1, 100000) g",
-    )
-    .await;
+    db.execute("INSERT INTO plan1486_src SELECT g, g FROM generate_series(1, 100000) g")
+        .await;
     db.execute("ANALYZE plan1486_src").await;
     let query = "SELECT id, v FROM plan1486_src";
     db.create_st("plan1486_st", query, "1h", "DIFFERENTIAL")
@@ -709,15 +704,21 @@ async fn test_issue_1486_pipeline_apply_uses_indexed_target_probes() {
             })
         })
         .collect();
-    assert!(plans.len() > 1, "expected several actual pipeline MERGE plans");
+    assert!(
+        plans.len() > 1,
+        "expected several actual pipeline MERGE plans"
+    );
     for plan in plans {
         let indexed_target = plan.lines().any(|line| {
             (line.contains("Index Scan using") || line.contains("Bitmap Heap Scan on"))
                 && line.contains("plan1486_st")
         });
-        let sequential_target = plan.lines().any(|line| {
-            line.contains("Seq Scan on") && line.contains("plan1486_st")
-        });
-        assert!(indexed_target && !sequential_target, "sparse batch plan: {plan}");
+        let sequential_target = plan
+            .lines()
+            .any(|line| line.contains("Seq Scan on") && line.contains("plan1486_st"));
+        assert!(
+            indexed_target && !sequential_target,
+            "sparse batch plan: {plan}"
+        );
     }
 }
