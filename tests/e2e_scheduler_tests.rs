@@ -2334,6 +2334,15 @@ async fn assert_fused_chain_consumes_complete_cdc_windows(
         // The old implementation either omitted the eligible backlog or
         // failed when the bounded-source code tried to read change_id from
         // the bypass table. A FULL fallback must not mask either failure.
+        assert!(
+            !db.query_scalar::<bool>(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
+                 WHERE refresh_id > {before_refresh} AND pgt_id = ANY({members}) \
+                   AND initiated_by = 'SCHEDULER_FUSED')"
+            ))
+            .await,
+            "retired CTE fusion must not execute, regardless of the legacy GUC"
+        );
         let differential_count: i64 = db
             .query_scalar(&format!(
                 "SELECT COUNT(DISTINCT pgt_id) FROM pgtrickle.pgt_refresh_history \
