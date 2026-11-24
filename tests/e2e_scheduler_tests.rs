@@ -1517,6 +1517,9 @@ async fn test_scheduler_fanout_shared_matview_changes_refresh_both_consumers() {
     configure_fast_scheduler(&db).await;
     db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
         .await;
+    // This test asserts scheduled refreshes, so host load must not defer them.
+    db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+        .await;
     db.alter_system_set_and_wait("pg_trickle.enable_change_buffer_fanout", "on", "on")
         .await;
     db.execute("CREATE TABLE fanout_mv_src (id INT PRIMARY KEY, val INT)")
