@@ -204,25 +204,24 @@ fn build_group_filter(
 }
 
 fn special_aggregate_delta_filter(aggregates: &[AggExpr], child: &OpTree) -> Option<String> {
-    let filters: Vec<String> = aggregates
-        .iter()
-        .filter(|agg| needs_special_value_rescan(agg, child))
-        .map(|agg| {
-            let state_guard = if agg.uses_incremental_nonfinite_state(child) {
-                format!(
-                    " AND pg_catalog.jsonb_typeof(__pgt_d2.{}) IS DISTINCT FROM 'object'",
-                    quote_ident(&format!("__ins_special_{}", agg.alias))
-                )
-            } else {
-                String::new()
-            };
-            format!(
-                "COALESCE(__pgt_d2.{}, 0) > 0{state_guard}",
-                quote_ident(&format!("__special_{}", agg.alias)),
-            )
-        })
-        .collect();
-    (!filters.is_empty()).then(|| filters.join(" OR "))
+    let mut filter = String::new();
+    for agg in aggregates {
+        if !needs_special_value_rescan(agg, child) {
+            continue;
+        }
+        if !filter.is_empty() {
+            filter.push_str(" OR ");
+        }
+        filter.push_str("COALESCE(__pgt_d2.");
+        filter.push_str(&quote_ident(&format!("__special_{}", agg.alias)));
+        filter.push_str(", 0) > 0");
+        if agg.uses_incremental_nonfinite_state(child) {
+            filter.push_str(" AND pg_catalog.jsonb_typeof(__pgt_d2.");
+            filter.push_str(&quote_ident(&format!("__ins_special_{}", agg.alias)));
+            filter.push_str(") IS DISTINCT FROM 'object'");
+        }
+    }
+    (!filter.is_empty()).then_some(filter)
 }
 
 fn special_state_delta_exprs(
@@ -241,6 +240,23 @@ fn special_state_delta_exprs(
     (state_for("I"), state_for("D"))
 }
 
+fn expr_is_exact_integer(expr: &Expr, child: &OpTree) -> bool {
+    match expr {
+        Expr::ColumnRef {
+            table_alias,
+            column_name,
+        } => source_column_type_oid(child, table_alias.as_deref(), column_name)
+            .ok()
+            .flatten()
+            .is_some_and(|type_oid| matches!(type_oid, 20 | 21 | 23)),
+        Expr::Literal(raw) => raw.trim().parse::<i64>().is_ok(),
+        Expr::BinaryOp { op, left, right } if matches!(op.as_str(), "+" | "-" | "*") => {
+            expr_is_exact_integer(left, child) && expr_is_exact_integer(right, child)
+        }
+        _ => false,
+    }
+}
+
 fn needs_special_value_rescan(agg: &AggExpr, child: &OpTree) -> bool {
     if agg.is_distinct
         || !(matches!(agg.function, AggFunc::Sum | AggFunc::Avg)
@@ -249,24 +265,17 @@ fn needs_special_value_rescan(agg: &AggExpr, child: &OpTree) -> bool {
         return false;
     }
 
-    let type_oid = if let Some(argument) = agg
+    if let Some(argument) = agg
         .analyzed_argument
         .as_ref()
         .filter(|argument| argument.type_oid != 0)
     {
-        Some(argument.type_oid)
-    } else if let Some(Expr::ColumnRef {
-        table_alias,
-        column_name,
-    }) = agg.argument.as_ref()
-    {
-        source_column_type_oid(child, table_alias.as_deref(), column_name)
-            .ok()
-            .flatten()
-    } else {
-        None
-    };
-    !type_oid.is_some_and(|type_oid| matches!(type_oid, 20 | 21 | 23))
+        return !matches!(argument.type_oid, 20 | 21 | 23);
+    }
+
+    !agg.argument
+        .as_ref()
+        .is_some_and(|expr| expr_is_exact_integer(expr, child))
 }
 
 /// Resolve a source column only through tree shapes where scan type metadata
@@ -1583,13 +1592,13 @@ fn build_rescan_cte(
     // When `force_all_aggs` is true (HAVING context), include ALL aggregates
     // so that the merge CTE can use the correct full aggregate value for
     // groups that were absent from the ST (below the HAVING threshold).
+    if !aggregates.iter().any(|agg| config.includes(agg, child)) {
+        return None;
+    }
     let rescan_aggs: Vec<&AggExpr> = aggregates
         .iter()
         .filter(|agg| config.includes(agg, child))
         .collect();
-    if rescan_aggs.is_empty() {
-        return None;
-    }
 
     let source_from = child_to_from_sql_in_context(child, ctx, false);
 
@@ -2189,69 +2198,35 @@ fn generate_direct_agg_delta(
     // Collect group-by column names
     let group_output: Vec<String> = group_by.iter().map(|e| e.output_name()).collect();
 
-    // A44-2 (v0.43.0): Gather CDC columns for DI-2 CASE-expression rewrite.
-    let cdc_cols_for_case = ctx
-        .source_cdc_columns()
-        .get(table_oid)
-        .cloned()
-        .unwrap_or_default();
-
-    // Collect unique aggregate argument column names.
-    // A44-2: For SUM(CASE ...) aggregates, extract the column names referenced
-    // inside the CASE expression and include them individually in arg_cols, then
-    // record the rewritten CASE for use in the SELECT expressions.
-    let mut arg_cols: Vec<String> = Vec::new();
-    // Maps aggregate alias -> rewritten CASE expression using v.val_{col} refs.
+    // Maps aggregate alias -> rewritten CASE expression using c."col" refs.
     let mut case_rewrites: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    // Track whether any aggregate has a CASE argument (was used by V-row optimization,
-    // now only kept for case_rewrites population).
-    let mut _has_case_aggregate = false;
-
-    for agg in aggregates {
-        if let Some(arg) = &agg.argument {
-            match arg {
-                Expr::ColumnRef { .. } => {
-                    let name = arg.output_name();
-                    if !arg_cols.contains(&name) {
-                        arg_cols.push(name);
-                    }
-                }
-                Expr::Raw(case_sql)
-                    if matches!(agg.function, AggFunc::Sum) && expr_contains_case(arg) =>
-                {
-                    // A44-2: DI-2 UPDATE split for SUM(CASE ...).
-                    // Extract column refs from the CASE expression and
-                    // rewrite it to use LATERAL VALUES aliases.
-                    let case_cols = extract_case_columns(case_sql, &cdc_cols_for_case);
-                    if !case_cols.is_empty() {
-                        for col in &case_cols {
-                            if !arg_cols.contains(*col) {
-                                arg_cols.push((*col).clone());
-                            }
-                        }
-                        let rewritten = rewrite_case_for_lateral(case_sql, &case_cols);
-                        case_rewrites.insert(agg.alias.clone(), rewritten);
-                        _has_case_aggregate = true;
-                    } else {
-                        // is_direct_agg_eligible guards this path: if it returned
-                        // true, CDC columns were verified to be non-empty.  If we
-                        // somehow reach here with no columns extracted, it is an
-                        // internal invariant violation.
-                        return Err(PgTrickleError::InternalError(format!(
-                            "A44-2: generate_direct_agg_delta reached with CASE aggregate \
-                             '{}' but no CASE columns could be extracted — CDC column \
-                             metadata missing. This should have been caught by \
-                             is_direct_agg_eligible.",
-                            agg.alias
-                        )));
-                    }
-                }
-                _ => {
-                    let name = arg.output_name();
-                    if !arg_cols.contains(&name) {
-                        arg_cols.push(name);
-                    }
+    let has_raw_sum = aggregates.iter().any(|agg| {
+        matches!(agg.function, AggFunc::Sum) && matches!(&agg.argument, Some(Expr::Raw(_)))
+    });
+    if has_raw_sum {
+        let cdc_cols_for_case = ctx
+            .source_cdc_columns()
+            .get(table_oid)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        for agg in aggregates {
+            if let Some(arg @ Expr::Raw(case_sql)) = &agg.argument
+                && matches!(agg.function, AggFunc::Sum)
+                && expr_contains_case(arg)
+            {
+                let case_cols = extract_case_columns(case_sql, cdc_cols_for_case);
+                if !case_cols.is_empty() {
+                    let rewritten = rewrite_case_for_lateral(case_sql, &case_cols);
+                    case_rewrites.insert(agg.alias.clone(), rewritten);
+                } else {
+                    return Err(PgTrickleError::InternalError(format!(
+                        "A44-2: generate_direct_agg_delta reached with CASE aggregate \
+                         '{}' but no CASE columns could be extracted — CDC column \
+                         metadata missing. This should have been caught by \
+                         is_direct_agg_eligible.",
+                        agg.alias
+                    )));
                 }
             }
         }

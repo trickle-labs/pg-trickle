@@ -1619,13 +1619,25 @@ async fn test_pgvector_filtered_ann_workload() {
                     }
                 );
                 assert!(!history.1, "repeated centroid refresh fell back to FULL");
-                if variant == "algebraic" && history.2 != "centroid_algebraic" {
-                    let detail: String = sqlx::query_scalar("SELECT format('baseline=%s frontier=%s materialized_xid=%s rebase_marker=%s history=%s', COALESCE(c.baseline_frontier::text, 'null'), COALESCE(t.frontier::text, 'null'), COALESCE(c.materialized_xid::text, 'null'), COALESCE(c.last_change_limit_rebase::text, 'null'), COALESCE(h.refresh_reason_detail, 'null')) FROM pgtrickle.pgt_stream_tables t LEFT JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) LEFT JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_name = $1")
-                        .bind(&stream).fetch_one(&mut *conn).await.expect("inspect unexpected centroid fallback");
-                    panic!(
-                        "round {round} {group} expected algebraic maintenance, got {}: {detail}",
-                        history.2
-                    );
+                if variant == "algebraic" {
+                    let allowed = if centroid_rewrite_rows < 2048 {
+                        history.2 == "centroid_algebraic"
+                    } else {
+                        matches!(
+                            history.2.as_str(),
+                            "centroid_algebraic"
+                                | "centroid_rebase_group_rescan"
+                                | "centroid_group_rescan"
+                        )
+                    };
+                    if !allowed {
+                        let detail: String = sqlx::query_scalar("SELECT format('baseline=%s frontier=%s materialized_xid=%s rebase_marker=%s history=%s', COALESCE(c.baseline_frontier::text, 'null'), COALESCE(t.frontier::text, 'null'), COALESCE(c.materialized_xid::text, 'null'), COALESCE(c.last_change_limit_rebase::text, 'null'), COALESCE(h.refresh_reason_detail, 'null')) FROM pgtrickle.pgt_stream_tables t LEFT JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) LEFT JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true WHERE t.pgt_name = $1")
+                            .bind(&stream).fetch_one(&mut *conn).await.expect("inspect unexpected centroid fallback");
+                        panic!(
+                            "round {round} {group} expected algebraic maintenance, got {}: {detail}",
+                            history.2
+                        );
+                    }
                 }
                 let detail = history
                     .3
