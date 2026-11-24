@@ -14,15 +14,15 @@
 //!
 //! With `frontier_holdback_mode = 'xmin'` (the default), the scheduler probes
 //! `pg_stat_activity` + `pg_prepared_xacts` and refuses to advance the frontier
-//! past the last safe LSN while any in-progress transaction exists.
+//! past the last safe LSN while a transaction with a writer XID exists.
 //!
 //! **Test matrix:**
 //! 1. `test_holdback_gucs_registered` — GUC defaults are correct.
 //! 2. `test_holdback_read_committed_long_txn` — READ COMMITTED txn spanning a tick.
 //! 3. `test_holdback_repeatable_read_long_txn` — REPEATABLE READ txn spanning ticks.
 //! 4. `test_holdback_prepared_transaction` — 2PC PREPARE spanning many ticks.
-//! 5. `test_holdback_none_mode_regression_guard` — demonstrates data loss with
-//!    `frontier_holdback_mode = 'none'` (regression guard).
+//! 5. `test_holdback_none_mode_regression_guard` — mandatory proof in `none` mode.
+//! 6. Snapshot-only reader and reader-to-writer promotion regressions.
 //!
 //! These tests require the full E2E Docker image (scheduler background worker).
 
@@ -264,15 +264,25 @@ async fn test_holdback_unknown_age_writer_preserves_late_commit() {
 }
 
 async fn read_committed_long_txn(disable_activity_tracking: bool) {
+    read_committed_long_txn_with_mode(disable_activity_tracking, "xmin").await;
+}
+
+async fn read_committed_long_txn_with_mode(disable_activity_tracking: bool, mode: &str) {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
     configure_fast_scheduler(&db).await;
 
-    // Ensure holdback mode is enabled (the default).
-    db.execute("ALTER SYSTEM SET pg_trickle.frontier_holdback_mode = 'xmin'")
-        .await;
-    db.reload_config_and_wait().await;
-    db.wait_for_setting("pg_trickle.frontier_holdback_mode", "xmin")
-        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.frontier_holdback_mode",
+        &format!("'{mode}'"),
+        mode,
+    )
+    .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "'differential'",
+        "differential",
+    )
+    .await;
 
     // Create source table + stream table.
     db.execute("CREATE TABLE ltv_rc_src (id INT PRIMARY KEY, val TEXT NOT NULL)")
@@ -321,14 +331,7 @@ async fn read_committed_long_txn(disable_activity_tracking: bool) {
     // --- Phase 2: wait for 3+ scheduler ticks while the txn is open ---
     // With frontier_holdback_mode = 'xmin', the scheduler must NOT advance
     // the frontier past the row's LSN.
-    tokio::time::sleep(if disable_activity_tracking {
-        // Span multiple scheduled refreshes, not just coordinator probes, so
-        // dropping this unknown-age blocker would lose its late commit.
-        Duration::from_secs(3)
-    } else {
-        Duration::from_millis(500)
-    })
-    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Stream table should still have only 1 row (txn not committed).
     let count_before_commit: i64 = db.count("public.ltv_rc_st").await;
@@ -538,99 +541,155 @@ async fn test_holdback_prepared_transaction() {
     );
 }
 
-/// Regression guard: with `frontier_holdback_mode = 'none'`, the bug
-/// described in Issue #536 (silent data loss) can still occur.
-///
-/// This test demonstrates the unsafe behaviour so the fix can be compared
-/// against the baseline:
-/// - With `mode = 'none'`, a long-running transaction that spans a tick
-///   causes its change-buffer row to be silently skipped.
-///
-/// **This test is expected to detect data loss and FAIL when holdback is
-/// working.**  It is kept as a regression guard to verify that `mode = 'none'`
-/// truly reverts to the old unsafe behaviour (the unsafe escape hatch must
-/// remain unsafe so that benchmark operators know what they're opting into).
-///
-/// The test is marked `#[ignore]` so it does not run in normal CI.  Run it
-/// explicitly to confirm the unsafe mode still behaves as documented:
-///
-/// ```bash
-/// cargo test --test e2e_long_txn_visibility_tests test_holdback_none_mode_regression_guard -- --ignored --nocapture
-/// ```
+/// The compatibility setting "none" must not disable the mandatory proof.
 #[tokio::test]
-#[ignore]
 async fn test_holdback_none_mode_regression_guard() {
+    read_committed_long_txn_with_mode(false, "none").await;
+}
+
+/// A snapshot without a writer XID must not block committed changes, even
+/// in an unrelated repeatable-read BI session. Test both compatibility modes.
+#[tokio::test]
+async fn test_holdback_read_only_snapshot_does_not_block_progress() {
+    for mode in ["xmin", "none"] {
+        let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+        configure_fast_scheduler(&db).await;
+        db.alter_system_set_and_wait(
+            "pg_trickle.frontier_holdback_mode",
+            &format!("'{mode}'"),
+            mode,
+        )
+        .await;
+        db.alter_system_set_and_wait(
+            "pg_trickle.refresh_strategy",
+            "'differential'",
+            "differential",
+        )
+        .await;
+        db.execute("CREATE TABLE ltv_reader_src (id INT PRIMARY KEY)")
+            .await;
+        db.execute("CREATE TABLE ltv_unrelated (id INT PRIMARY KEY)")
+            .await;
+        db.execute("INSERT INTO ltv_reader_src VALUES (1)").await;
+        db.create_st(
+            "ltv_reader_st",
+            "SELECT id FROM ltv_reader_src",
+            "1s",
+            "DIFFERENTIAL",
+        )
+        .await;
+
+        let mut reader = db.pool.acquire().await.expect("acquire reader");
+        sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *reader)
+            .await
+            .unwrap();
+        let _: i64 = sqlx::query_scalar("SELECT count(*) FROM ltv_unrelated")
+            .fetch_one(&mut *reader)
+            .await
+            .unwrap();
+        let snapshot_only: bool = sqlx::query_scalar(
+            "SELECT backend_xmin IS NOT NULL AND backend_xid IS NULL
+               FROM pg_stat_activity WHERE pid = pg_backend_pid()",
+        )
+        .fetch_one(&mut *reader)
+        .await
+        .unwrap();
+        assert!(snapshot_only, "reader must hold an xmin without an XID");
+
+        db.execute("INSERT INTO ltv_reader_src VALUES (2)").await;
+        let progressed = db
+            .wait_for_condition(
+                "scheduled refresh while reader snapshot is still open",
+                "SELECT count(*) = 2 FROM ltv_reader_st",
+                Duration::from_secs(20),
+                Duration::from_millis(200),
+            )
+            .await;
+        sqlx::query("COMMIT")
+            .execute(&mut *reader)
+            .await
+            .unwrap();
+        assert!(progressed, "snapshot-only reader blocked mode {mode}");
+        db.assert_st_matches_query("ltv_reader_st", "SELECT id FROM ltv_reader_src")
+            .await;
+    }
+}
+
+/// A reader can acquire an XID after the initial snapshot-only observation.
+/// A later write must still be fenced until commit.
+#[tokio::test]
+async fn test_holdback_reader_that_becomes_writer_preserves_late_commit() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
     configure_fast_scheduler(&db).await;
-
-    // Disable holdback — revert to the pre-fix unsafe behaviour.
-    db.execute("ALTER SYSTEM SET pg_trickle.frontier_holdback_mode = 'none'")
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "'differential'",
+        "differential",
+    )
+    .await;
+    db.execute("CREATE TABLE ltv_promote_src (id INT PRIMARY KEY)")
         .await;
-    db.reload_config_and_wait().await;
-    db.wait_for_setting("pg_trickle.frontier_holdback_mode", "none")
-        .await;
-
-    db.execute("CREATE TABLE ltv_none_src (id INT PRIMARY KEY, val TEXT NOT NULL)")
-        .await;
-    db.execute("INSERT INTO ltv_none_src VALUES (1, 'initial')")
-        .await;
+    db.execute("INSERT INTO ltv_promote_src VALUES (1)").await;
     db.create_st(
-        "ltv_none_st",
-        "SELECT id, val FROM ltv_none_src",
+        "ltv_promote_st",
+        "SELECT id FROM ltv_promote_src",
         "1s",
         "DIFFERENTIAL",
     )
     .await;
 
-    let ok = db
-        .wait_for_condition(
-            "ltv_none_st initial population",
-            "SELECT is_populated FROM pgtrickle.pgt_stream_tables \
-             WHERE pgt_name = 'ltv_none_st'",
-            Duration::from_secs(30),
+    let mut reader = db.pool.acquire().await.expect("acquire reader");
+    sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *reader)
+        .await
+        .unwrap();
+    let _: i64 = sqlx::query_scalar("SELECT count(*) FROM ltv_promote_src")
+        .fetch_one(&mut *reader)
+        .await
+        .unwrap();
+    let xidless: bool = sqlx::query_scalar("SELECT pg_current_xact_id_if_assigned() IS NULL")
+        .fetch_one(&mut *reader)
+        .await
+        .unwrap();
+    assert!(xidless);
+
+    db.execute("INSERT INTO ltv_promote_src VALUES (2)").await;
+    assert!(
+        db.wait_for_condition(
+            "snapshot-only reader permits first refresh",
+            "SELECT count(*) = 2 FROM ltv_promote_st",
+            Duration::from_secs(20),
             Duration::from_millis(200),
         )
-        .await;
-    assert!(ok, "ST should be populated within 30 s");
-    assert_eq!(db.count("public.ltv_none_st").await, 1);
-
-    // Begin transaction, insert row (CDC fires, records LSN X), hold open.
-    let pool = db.pool.clone();
-    let mut long_txn_conn = pool.acquire().await.expect("acquire long-txn connection");
-    sqlx::query("BEGIN")
-        .execute(&mut *long_txn_conn)
         .await
-        .unwrap();
-    sqlx::query("INSERT INTO ltv_none_src VALUES (2, 'lost_row')")
-        .execute(&mut *long_txn_conn)
-        .await
-        .unwrap();
-
-    // With mode = 'none', the scheduler fires multiple ticks here and
-    // advances the frontier PAST the row's LSN (the row is still uncommitted
-    // so MVCC hides it from the delta query).
-    tokio::time::sleep(Duration::from_millis(600)).await;
-
-    // Commit the transaction.
-    sqlx::query("COMMIT")
-        .execute(&mut *long_txn_conn)
-        .await
-        .unwrap();
-    drop(long_txn_conn);
-
-    // Wait for a couple more ticks.
-    tokio::time::sleep(Duration::from_millis(400)).await;
-
-    // With mode = 'none', the row may be permanently skipped (data loss).
-    // This assertion documents the UNSAFE behaviour — it may pass OR fail
-    // depending on exact timing, but it demonstrates the risk.
-    let final_count: i64 = db.count("public.ltv_none_st").await;
-    // If the row was lost (expected with mode=none), count = 1.
-    // If timing was lucky and no tick happened during the window, count = 2.
-    eprintln!(
-        "test_holdback_none_mode_regression_guard: final row count = {final_count} \
-         (expected 1 with data loss, 2 if timing allowed capture)"
     );
-    // We don't hard-assert here because the race is timing-dependent.
-    // The intent is to show operators what 'none' mode implies.
+
+    sqlx::query("INSERT INTO ltv_promote_src VALUES (3)")
+        .execute(&mut *reader)
+        .await
+        .unwrap();
+    db.execute("INSERT INTO ltv_promote_src VALUES (4)").await;
+    // Span multiple scheduled refreshes with the newly assigned writer XID.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT count(*) FROM ltv_promote_st WHERE id = 3")
+            .await,
+        0
+    );
+    sqlx::query("COMMIT")
+        .execute(&mut *reader)
+        .await
+        .unwrap();
+    assert!(
+        db.wait_for_condition(
+            "promoted writer's late commit is consumed",
+            "SELECT count(*) = 4 FROM ltv_promote_st",
+            Duration::from_secs(20),
+            Duration::from_millis(200),
+        )
+        .await
+    );
+    db.assert_st_matches_query("ltv_promote_st", "SELECT id FROM ltv_promote_src")
+        .await;
 }
