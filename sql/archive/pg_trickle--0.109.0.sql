@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
                      CHECK (fuse_state IN ('armed', 'blown', 'disabled')),
     fuse_ceiling    BIGINT,
     fuse_sensitivity INT,
+    fuse_over_ceiling_cycles INT NOT NULL DEFAULT 0 CHECK (fuse_over_ceiling_cycles >= 0),
     blown_at        TIMESTAMPTZ,
     blow_reason     TEXT,
     last_error_message TEXT,
