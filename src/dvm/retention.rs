@@ -2070,13 +2070,7 @@ pub(crate) fn ensure_no_live_sealed_overlap(
 fn with_retention_guc_scope<T>(
     operation: impl FnOnce() -> Result<T, crate::error::PgTrickleError>,
 ) -> Result<T, crate::error::PgTrickleError> {
-    // SAFETY: The GUC nest is restored even if PostgreSQL reports an error.
-    unsafe {
-        let level = pg_sys::NewGUCNestLevel();
-        pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(operation))
-            .finally(move || pg_sys::AtEOXact_GUC(false, level))
-            .execute()
-    }
+    crate::api::security_context::with_refresh_guc_scope(operation)
 }
 
 #[cfg(not(test))]
