@@ -2221,9 +2221,7 @@ async fn assert_fused_chain_consumes_complete_cdc_windows(
         .await;
 
     let up_id: i64 = db
-        .query_scalar(
-            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fused_up'",
-        )
+        .query_scalar("SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fused_up'")
         .await;
     let down_id: i64 = db
         .query_scalar(
@@ -2237,21 +2235,20 @@ async fn assert_fused_chain_consumes_complete_cdc_windows(
     // INSERT, DELETE, and two changes to the same logical row.
     db.execute("INSERT INTO fused_a VALUES (1001, 1, 7), (1002, 2, 8)")
         .await;
-    db.execute("UPDATE fused_a SET v = 20 WHERE id = 1")
-        .await;
+    db.execute("UPDATE fused_a SET v = 20 WHERE id = 1").await;
     db.execute("DELETE FROM fused_a WHERE id = 2").await;
     db.refresh_st_with_retry("fused_up").await;
-    db.assert_st_matches_query("fused_up", upstream_query)
-        .await;
+    db.assert_st_matches_query("fused_up", upstream_query).await;
     db.execute("UPDATE fused_a SET k = 3, v = 30 WHERE id = 1")
         .await;
     db.execute("INSERT INTO fused_b VALUES (11, 1, 9)").await;
     db.refresh_st_with_retry("fused_up").await;
-    db.assert_st_matches_query("fused_up", upstream_query)
-        .await;
-    assert!(db.query_scalar::<bool>(&format!(
-        "SELECT COUNT(DISTINCT lsn) >= 2 FROM {buffer}"
-    )).await, "the test must accumulate more than one upstream refresh");
+    db.assert_st_matches_query("fused_up", upstream_query).await;
+    assert!(
+        db.query_scalar::<bool>(&format!("SELECT COUNT(DISTINCT lsn) >= 2 FROM {buffer}"))
+            .await,
+        "the test must accumulate more than one upstream refresh"
+    );
 
     // The oracle for each tick is the upstream's state BEFORE that tick's
     // new writes. In the ordinary scheduler its publication LSN is above
@@ -2278,10 +2275,8 @@ async fn assert_fused_chain_consumes_complete_cdc_windows(
                 .await;
         } else if tick == 1 {
             db.execute("DELETE FROM fused_a WHERE id = 1003").await;
-            db.execute("UPDATE fused_a SET v = 42 WHERE id = 1")
-                .await;
-            db.execute("UPDATE fused_b SET v = 99 WHERE id = 11")
-                .await;
+            db.execute("UPDATE fused_a SET v = 42 WHERE id = 1").await;
+            db.execute("UPDATE fused_b SET v = 99 WHERE id = 11").await;
         }
 
         let before_job: i64 = db
@@ -2363,34 +2358,49 @@ async fn assert_fused_chain_consumes_complete_cdc_windows(
                 "tick {tick}: both members must apply deltas"
             );
         } else {
-            assert!(db.query_scalar::<bool>(&format!(
-                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
+            assert!(
+                db.query_scalar::<bool>(&format!(
+                    "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
                  WHERE refresh_id > {before_refresh} AND pgt_id = {down_id} \
                    AND tick_watermark_lsn = '{watermark}'::pg_lsn \
                    AND initiated_by = 'SCHEDULER' AND status = 'COMPLETED' \
                    AND action = 'DIFFERENTIAL' AND NOT was_full_fallback \
                    AND merge_strategy_used <> 'FULL')"
-            )).await, "the final backlog must be consumed differentially");
+                ))
+                .await,
+                "the final backlog must be consumed differentially"
+            );
         }
-        assert!(db.query_scalar::<bool>(&format!(
-            "SELECT NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
+        assert!(
+            db.query_scalar::<bool>(&format!(
+                "SELECT NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
              WHERE refresh_id > {before_refresh} AND pgt_id = ANY({members}) \
                AND (action IN ('FULL', 'REINITIALIZE') OR was_full_fallback))"
-        )).await, "tick {tick}: no full refresh may repair the result");
+            ))
+            .await,
+            "tick {tick}: no full refresh may repair the result"
+        );
 
-        assert!(db.query_scalar::<bool>(&format!(
-            "SELECT (frontier #>> '{{sources,pgt_{up_id},lsn}}')::pg_lsn \
+        assert!(
+            db.query_scalar::<bool>(&format!(
+                "SELECT (frontier #>> '{{sources,pgt_{up_id},lsn}}')::pg_lsn \
                  BETWEEN '{eligible_lsn}'::pg_lsn AND '{watermark}'::pg_lsn \
              FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {down_id}"
-        )).await, "tick {tick}: frontier must acknowledge the backlog but not cross the tick bound");
+            ))
+            .await,
+            "tick {tick}: frontier must acknowledge the backlog but not cross the tick bound"
+        );
         if tick < 2 {
-            assert!(db.query_scalar::<bool>(&format!(
-                "SELECT COALESCE(MAX(lsn) > '{watermark}'::pg_lsn, false) FROM {buffer}"
-            )).await, "tick {tick}: fresh same-tick upstream publication must remain above the watermark");
+            assert!(
+                db.query_scalar::<bool>(&format!(
+                    "SELECT COALESCE(MAX(lsn) > '{watermark}'::pg_lsn, false) FROM {buffer}"
+                ))
+                .await,
+                "tick {tick}: fresh same-tick upstream publication must remain above the watermark"
+            );
         }
 
-        db.assert_st_matches_query("fused_up", upstream_query)
-            .await;
+        db.assert_st_matches_query("fused_up", upstream_query).await;
         db.assert_st_matches_query("fused_down", "SELECT * FROM fused_expected")
             .await;
     }
