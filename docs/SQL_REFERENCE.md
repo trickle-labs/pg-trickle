@@ -1592,6 +1592,7 @@ SELECT pgtrickle.set_stream_table_refresh_policy('order_totals', 'DIFFERENTIAL')
 
 **Notes:**
 - Valid values are `'DIFFERENTIAL'`, `'FULL'`, and `'AUTO'`.
+- Explicit `'DIFFERENTIAL'` avoids elective cost, change-ratio, aggregate-saturation and planner-hint FULL fallbacks. `'AUTO'` permits those optimizations. Initialization, correctness recovery, hard resource limits and explicit administrative FULL overrides may still require FULL. Strict graph refreshes with FULL forbidden continue to enforce that policy.
 - The change takes effect on the next scheduled or manual refresh.
 - Equivalent to `pgtrickle.alter_stream_table(name, refresh_mode => '...')` but
   with a cleaner, intent-revealing name.
