@@ -3427,6 +3427,7 @@ fn refresh_single_st(
         // start) if the shmem slot is empty.
         let last_full_cost = crate::shmem::read_cost_model(st.pgt_id)
             .map(|(full_ms, _)| full_ms)
+            .filter(|ms| ms.is_finite() && *ms > 0.0)
             .or(st.last_full_ms);
         if base_action == RefreshAction::Differential
             && let Some(last_full) = last_full_cost
