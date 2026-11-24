@@ -2309,34 +2309,16 @@ SET pg_trickle.max_fixpoint_iterations = 50;
 
 ### pg_trickle.self_monitoring_auto_apply
 
-Controls whether the self-monitoring analytics stream tables can automatically
-adjust stream table configuration.
-
-| Value | Behaviour |
-|-------|-----------|
-| `off` (default) | Advisory only — no automatic changes. Dog-feeding stream tables produce analytics that operators and dashboards can read, but nothing is applied automatically. |
-| `threshold_only` | After each 10-minute auto-apply cycle, reads `df_threshold_advice`. If a recommendation has HIGH confidence and the recommended threshold differs from the current threshold by more than 5%, applies `ALTER STREAM TABLE ... SET auto_threshold = <recommended>`. Changes are logged with `initiated_by = 'SELF_MONITOR'`. |
-| `full` | Same as `threshold_only`, plus applies scheduling hints from `df_scheduling_interference` (future enhancement). |
-
-**Default:** `off`
+Legacy self-monitoring mode. The `off` value (default) disables periodic
+monitoring notifications; `threshold_only` and `full` retain anomaly
+notifications for compatibility. None of these modes automatically changes
+refresh thresholds. Aggregated historical durations are observational only,
+not comparable cost evidence for a refresh decision. Previously materialized
+advice cannot overwrite configured thresholds.
 
 ```sql
--- Enable threshold auto-apply.
-SET pg_trickle.self_monitoring_auto_apply = 'threshold_only';
-
--- Check current setting.
-SHOW pg_trickle.self_monitoring_auto_apply;
+SET pg_trickle.self_monitoring_auto_apply = 'off';
 ```
-
-**Prerequisites:** Dog-feeding stream tables must be created first via
-`SELECT pgtrickle.setup_self_monitoring()`. If the stream tables do not exist,
-the auto-apply worker is a no-op.
-
-**Rate limiting:** At most one threshold change per stream table per 10 minutes.
-
-**Audit trail:** All auto-apply changes are recorded in `pgt_refresh_history`
-with `initiated_by = 'SELF_MONITOR'` and a SKIP action describing the old and new
-threshold values.
 
 ---
 
