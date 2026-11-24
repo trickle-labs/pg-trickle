@@ -578,6 +578,31 @@ mod tests {
         assert!((stats.diff_ms - 1_000.0).abs() < 0.01);
         assert!((stats.full_ms - 60_000.0).abs() < 0.01);
         assert!(query_refresh_history_stats(pgt_id, 50_000).is_none());
+        Spi::run("SET LOCAL pg_trickle.prediction_min_samples = 0").expect("disable predictor");
+        assert!(query_refresh_history_stats(pgt_id, 1_000).is_none());
+        Spi::run("SET LOCAL pg_trickle.prediction_min_samples = 3").expect("enable predictor");
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_refresh_history
+                SET refresh_reason_detail =
+                    jsonb_set(refresh_reason_detail::jsonb, '{contract_generation}', '-1'::jsonb)::text
+              WHERE pgt_id = $1 AND action = 'DIFFERENTIAL'
+                AND pg_input_is_valid(refresh_reason_detail, 'jsonb')",
+            &[pgt_id.into()],
+        )
+        .expect("invalidate the sampled contract");
+        assert!(query_refresh_history_stats(pgt_id, 1_000).is_none());
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_refresh_history h
+                SET refresh_reason_detail = jsonb_set(
+                    h.refresh_reason_detail::jsonb, '{contract_generation}',
+                    to_jsonb(st.contract_generation))::text
+               FROM pgtrickle.pgt_stream_tables st
+              WHERE h.pgt_id = $1 AND st.pgt_id = $1 AND h.action = 'DIFFERENTIAL'
+                AND pg_input_is_valid(h.refresh_reason_detail, 'jsonb')",
+            &[pgt_id.into()],
+        )
+        .expect("restore comparable contract");
+        assert!(query_refresh_history_stats(pgt_id, 1_000).is_some());
 
         batch_update_cost_model_summary();
         Spi::run_with_args(
@@ -586,8 +611,6 @@ mod tests {
             &[pgt_id.into()],
         )
         .expect("reset cost history");
-        assert!(query_refresh_history_stats(pgt_id, 1_000).is_none());
-        Spi::run("SET LOCAL pg_trickle.prediction_min_samples = 0").expect("disable predictor");
         assert!(query_refresh_history_stats(pgt_id, 1_000).is_none());
     }
 
