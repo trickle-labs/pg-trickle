@@ -2941,7 +2941,9 @@ pub(super) fn stat_reset(pgt_id: i64) {
             "DELETE FROM pgtrickle.pgt_cost_model_summary WHERE pgt_id = $1",
             &[pgt_id.into()],
         )
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        crate::shmem::invalidate_cost_model(Some(pgt_id));
+        Ok::<(), PgTrickleError>(())
     })();
     if let Err(error) = result {
         raise_error_with_context(error);
@@ -2978,7 +2980,9 @@ pub(super) fn stat_reset_all() {
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run("DELETE FROM pgtrickle.pgt_cost_model_summary")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        crate::shmem::invalidate_cost_model(None);
+        Ok::<(), PgTrickleError>(())
     })();
     if let Err(error) = result {
         raise_error_with_context(error);
