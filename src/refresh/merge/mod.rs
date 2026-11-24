@@ -3266,6 +3266,31 @@ fn execute_differential_refresh_inner(
 
             // G12-ERM-1: Record the effective mode for this execution path.
             set_effective_mode("APPEND_ONLY");
+            let mut cost_evidence = crate::refresh::build_differential_cost_evidence(
+                total_change_count,
+                rows_inserted,
+            );
+            if let Some(fields) = cost_evidence.as_object_mut() {
+                fields.insert(
+                    "input_delta_rows_may_be_incomplete".into(),
+                    serde_json::json!(input_delta_rows_may_be_incomplete),
+                );
+                fields.insert("plan_identity".into(), serde_json::json!(st.defining_query_hash));
+                fields.insert(
+                    "contract_generation".into(),
+                    serde_json::json!(st.contract_generation),
+                );
+                fields.insert("merge_strategy".into(), serde_json::json!("append_only"));
+                fields.insert(
+                    "source_rows_estimate".into(),
+                    serde_json::json!(_total_table_size.max(0)),
+                );
+            }
+            crate::refresh::set_last_cost_evidence(
+                serde_json::to_string(&cost_evidence).map_err(|e| {
+                    PgTrickleError::InternalError(format!("serialize cost evidence: {e}"))
+                })?,
+            );
             crate::refresh::set_last_ann_churn_operations(
                 (!user_triggers_active).then_some(rows_inserted),
             );
