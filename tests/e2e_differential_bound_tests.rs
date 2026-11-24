@@ -616,3 +616,108 @@ async fn test_issue_1486_forced_diff_counts_the_complete_window() {
     tx.commit().await.expect("commit refresh");
     db.assert_st_matches_query("cardinality1486_st", query).await;
 }
+
+
+/// Witness the actual nested MERGE plan, not just the elapsed time or final
+/// result. A sparse pipeline batch must probe the indexed large target.
+#[cfg(not(feature = "light-e2e"))]
+#[tokio::test]
+async fn test_issue_1486_pipeline_apply_uses_indexed_target_probes() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE plan1486_src (id int PRIMARY KEY, v int)")
+        .await;
+    db.execute(
+        "INSERT INTO plan1486_src SELECT g, g FROM generate_series(1, 100000) g",
+    )
+    .await;
+    db.execute("ANALYZE plan1486_src").await;
+    let query = "SELECT id, v FROM plan1486_src";
+    db.create_st("plan1486_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.plan1486_st'])")
+        .await;
+    db.execute("ANALYZE plan1486_st").await;
+    db.execute("UPDATE plan1486_src SET v = -v WHERE id <= 600")
+        .await;
+
+    let mut tx = db.pool.begin().await.expect("begin inspected refresh");
+    for statement in [
+        "LOAD 'auto_explain'",
+        "SET LOCAL auto_explain.log_min_duration = 0",
+        "SET LOCAL auto_explain.log_analyze = on",
+        "SET LOCAL auto_explain.log_timing = off",
+        "SET LOCAL auto_explain.log_nested_statements = on",
+        "SET LOCAL auto_explain.log_format = 'text'",
+        "SET LOCAL pg_trickle.refresh_strategy = 'differential'",
+        "SET LOCAL pg_trickle.merge_strategy = 'merge'",
+        "SET LOCAL pg_trickle.merge_join_strategy = 'auto'",
+        "SET LOCAL pg_trickle.planner_aggressive = on",
+        "SET LOCAL pg_trickle.analyze_before_delta = on",
+        "SET LOCAL pg_trickle.pipeline_batch_size = 128",
+        "SET LOCAL pg_trickle.merge_seqscan_threshold = 0.01",
+        "SET LOCAL enable_nestloop = on",
+        "SET LOCAL enable_seqscan = on",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *tx)
+            .await
+            .expect("configure production plan witness");
+    }
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('plan1486_st')")
+        .execute(&mut *tx)
+        .await
+        .expect("refresh through the bounded pipeline");
+    let (action, strategy): (String, String) = sqlx::query_as(
+        "SELECT h.action, h.merge_strategy_used
+           FROM pgtrickle.pgt_refresh_history h
+           JOIN pgtrickle.pgt_stream_tables t USING (pgt_id)
+          WHERE t.pgt_name = 'plan1486_st'
+          ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("verify actual refresh strategy");
+    assert_eq!(action, "DIFFERENTIAL");
+    assert_eq!(strategy, "pipeline");
+    let settings: (String, String) = sqlx::query_as(
+        "SELECT current_setting('enable_nestloop'), current_setting('enable_seqscan')",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read caller planner settings");
+    assert_eq!(settings, ("on".to_string(), "on".to_string()));
+    tx.commit().await.expect("commit pipeline refresh");
+    db.assert_st_matches_query("plan1486_st", query).await;
+
+    let logs = std::process::Command::new("docker")
+        .args(["logs", db.container_id()])
+        .output()
+        .expect("read installed PostgreSQL container logs");
+    assert!(logs.status.success(), "docker logs failed");
+    let logs = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&logs.stdout),
+        String::from_utf8_lossy(&logs.stderr)
+    );
+    let plans: Vec<_> = logs
+        .split("Query Text: ")
+        .filter(|plan| {
+            plan.lines().next().is_some_and(|sql| {
+                sql.contains("MERGE INTO")
+                    && sql.contains("plan1486_st")
+                    && sql.contains("__pgt_pipeline_")
+            })
+        })
+        .collect();
+    assert!(plans.len() > 1, "expected several actual pipeline MERGE plans");
+    for plan in plans {
+        let indexed_target = plan.lines().any(|line| {
+            (line.contains("Index Scan using") || line.contains("Bitmap Heap Scan on"))
+                && line.contains("plan1486_st")
+        });
+        let sequential_target = plan.lines().any(|line| {
+            line.contains("Seq Scan on") && line.contains("plan1486_st")
+        });
+        assert!(indexed_target && !sequential_target, "sparse batch plan: {plan}");
+    }
+}
