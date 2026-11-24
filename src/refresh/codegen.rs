@@ -794,7 +794,7 @@ pub(crate) fn apply_planner_hints(
     st_relid: pg_sys::Oid,
     scan_count: usize,
     tuning: &crate::catalog::RefreshRuntimeTuning,
-    unreconstructible_history: bool,
+    avoid_elective_full: bool,
 ) -> bool {
     if crate::refresh::is_retention_catchup() {
         // Prefer probing affected groups over scanning the materialized history.
@@ -921,7 +921,7 @@ pub(crate) fn apply_planner_hints(
         let (mb, fallback_to_full) = planner_work_mem(
             requested_mb,
             cap,
-            if unreconstructible_history {
+            if avoid_elective_full {
                 crate::refresh::FullPolicy::Error
             } else {
                 crate::refresh::current_full_policy()
