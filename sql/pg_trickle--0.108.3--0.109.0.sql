@@ -383,3 +383,8 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, te
 GRANT EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention(text, text, text, text) TO pgtrickle_admin;
 GRANT EXECUTE ON FUNCTION pgtrickle.get_stream_table_partition_retention(text) TO pgtrickle_admin;
 GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, text, text, text, text, text) TO pgtrickle_admin;
+
+-- Consumer fuse observation state is durable across scheduler workers.
+ALTER TABLE pgtrickle.pgt_stream_tables
+    ADD COLUMN IF NOT EXISTS fuse_over_ceiling_cycles INT NOT NULL DEFAULT 0
+        CHECK (fuse_over_ceiling_cycles >= 0);
