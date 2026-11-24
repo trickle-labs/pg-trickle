@@ -3977,6 +3977,7 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
                     .update(
                         &format!("INSERT INTO {delta_table} {delta_select}"),
@@ -4086,6 +4087,7 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
                     .update(
                         &format!("INSERT INTO {delta_table} {delta_select}"),
@@ -4153,6 +4155,7 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
                     .update(
                         &format!("INSERT INTO {delta_table} {delta_select}"),
