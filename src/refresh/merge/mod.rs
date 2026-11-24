@@ -527,19 +527,22 @@ fn live_sources_at_refresh_cut(
     }
     if dependencies.iter().any(|dep| {
         dep.source_type != "STREAM_TABLE"
-            && (dep.source_type != "TABLE"
-                || dep.cdc_mode != crate::catalog::CdcMode::Trigger)
+            && (dep.source_type != "TABLE" || dep.cdc_mode != crate::catalog::CdcMode::Trigger)
     }) {
         return Ok(false);
     }
     crate::cdc::lock_stream_table_source_catalogs(st.pgt_id, dependencies)?;
-    let oids = dependencies.iter().map(|dep| dep.source_relid).collect::<Vec<_>>();
+    let oids = dependencies
+        .iter()
+        .map(|dep| dep.source_relid)
+        .collect::<Vec<_>>();
     crate::cdc::lock_source_relations(&oids)?;
     let schema = crate::config::pg_trickle_change_buffer_schema();
     for dep in dependencies {
         let (buffer, key) = if dep.source_type == "STREAM_TABLE" {
-            let id = StreamTableMeta::pgt_id_for_relid(dep.source_relid)
-                .ok_or_else(|| PgTrickleError::InternalError("missing upstream stream table".into()))?;
+            let id = StreamTableMeta::pgt_id_for_relid(dep.source_relid).ok_or_else(|| {
+                PgTrickleError::InternalError("missing upstream stream table".into())
+            })?;
             (
                 crate::sql_builder::qualified(&schema, &format!("changes_pgt_{id}")),
                 format!("pgt_{id}"),
@@ -574,7 +577,10 @@ fn source_boundary_fallback(
     dependencies: &[StDependency],
     reason: &str,
 ) -> Result<(i64, i64), PgTrickleError> {
-    if dependencies.iter().any(|dep| dep.source_type == "FOREIGN_TABLE") {
+    if dependencies
+        .iter()
+        .any(|dep| dep.source_type == "FOREIGN_TABLE")
+    {
         return Err(PgTrickleError::SafeFrontierUnavailable {
             context: format!("{}.{}", st.pgt_schema, st.pgt_name),
             reason: reason.to_string(),
@@ -807,10 +813,15 @@ fn parse_and_enforce_distinct_aggregate_bounds(
         } else {
             Some(crate::sql_builder::qualified(
                 "pg_temp",
-                &crate::refresh::delta_stage::DeltaStage::bounded_table_name(st.pgt_id, check.source_oid),
+                &crate::refresh::delta_stage::DeltaStage::bounded_table_name(
+                    st.pgt_id,
+                    check.source_oid,
+                ),
             ))
         };
-        let observed = with_stream_owner(st, || distinct_aggregate_max_values(&check, buffer, source.as_deref()))?;
+        let observed = with_stream_owner(st, || {
+            distinct_aggregate_max_values(&check, buffer, source.as_deref())
+        })?;
         if observed > max_values {
             return Err(PgTrickleError::QueryTooComplex(format!(
                 "DISTINCT_AGG_BOUNDED_STATE_FULL_FALLBACK: {}.{} {}(DISTINCT) '{}' has {observed} distinct non-NULL value(s) in an affected group, exceeding pg_trickle.distinct_agg_max_values_per_group={max_values}; falling back to FULL refresh",
@@ -828,9 +839,9 @@ fn distinct_aggregate_max_values(
     bounded_source: Option<&str>,
 ) -> Result<i64, PgTrickleError> {
     let q = crate::api::quote_identifier;
-    let relation = bounded_source.map(str::to_string).unwrap_or_else(|| {
-        format!("{}.{}", q(&check.source_schema), q(&check.source_table))
-    });
+    let relation = bounded_source
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}.{}", q(&check.source_schema), q(&check.source_table)));
     let source = format!("{} AS {}", relation, q(&check.source_alias));
     let changed_predicate = "c.action IN ('I', 'D')";
     let affected = if check.group_keys.is_empty() {
@@ -1528,14 +1539,17 @@ pub fn execute_differential_refresh_with_tuning(
     // therefore cannot prove an old endpoint. Only row-local plans that read
     // their complete captured images (no CTEs or hidden sublinks) may use
     // that cut. Other plans establish a new protected FULL baseline.
-    if dependencies.iter().any(|dep| {
-        dep.source_type == "TABLE" && dep.cdc_mode != crate::catalog::CdcMode::Trigger
-    }) {
+    if dependencies
+        .iter()
+        .any(|dep| dep.source_type == "TABLE" && dep.cdc_mode != crate::catalog::CdcMode::Trigger)
+    {
         let row_local = with_stream_owner(st, || {
             let parsed = dvm::parse_defining_query_full(&effective_defining_query)?;
             Ok(dvm::is_rowwise_scan_tree(&parsed.tree)
                 && parsed.cte_registry.entries.is_empty()
-                && crate::api::defining_query_is_immutable_without_sublinks(&effective_defining_query)?)
+                && crate::api::defining_query_is_immutable_without_sublinks(
+                    &effective_defining_query,
+                )?)
         })?;
         if !row_local {
             return source_boundary_fallback(
@@ -3485,8 +3499,9 @@ pub fn execute_differential_refresh_with_tuning(
         }
     };
     let use_vector_agg = vector_plan.is_some();
-    let reconciled_baseline =
-        crate::refresh::current_graph_sources_locked() && query_has_join && super::phd1::has_reconciled_baseline(st.pgt_id)?;
+    let reconciled_baseline = crate::refresh::current_graph_sources_locked()
+        && query_has_join
+        && super::phd1::has_reconciled_baseline(st.pgt_id)?;
     let exact_pointwise_scans = super::phd1::exact_rowwise_join_scan_count(&parsed_query.tree);
     let exact_pointwise = crate::refresh::current_graph_sources_locked()
         && (query_has_join || !resolved.is_deduplicated)

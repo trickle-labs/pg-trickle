@@ -348,16 +348,17 @@ impl DeltaStage {
         // Polling CDC describes the persisted poll image, not subsequent
         // changes to a remote relation or a materialized view. Undo future
         // captured events against that image while holding the poll lock.
-        let polling_snapshot = if matches!(dependency.source_type.as_str(), "FOREIGN_TABLE" | "MATVIEW") {
-            let stable_name = crate::citus::stable_name_for_oid(dependency.source_relid)
-                .unwrap_or_else(|_| source_oid.to_string());
-            Some(crate::sql_builder::qualified(
-                &crate::config::pg_trickle_change_buffer_schema(),
-                &format!("snapshot_{stable_name}"),
-            ))
-        } else {
-            None
-        };
+        let polling_snapshot =
+            if matches!(dependency.source_type.as_str(), "FOREIGN_TABLE" | "MATVIEW") {
+                let stable_name = crate::citus::stable_name_for_oid(dependency.source_relid)
+                    .unwrap_or_else(|_| source_oid.to_string());
+                Some(crate::sql_builder::qualified(
+                    &crate::config::pg_trickle_change_buffer_schema(),
+                    &format!("snapshot_{stable_name}"),
+                ))
+            } else {
+                None
+            };
         let source_table = polling_snapshot.as_deref().unwrap_or(source_table);
 
         // A previous no-gap refresh in a pooled backend may have left a
