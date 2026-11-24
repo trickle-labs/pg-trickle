@@ -2169,3 +2169,221 @@ async fn test_pause_scheduler_drain_timeout() {
     db.alter_system_reset_and_wait("pg_trickle.scheduler_drain_timeout", "30")
         .await;
 }
+
+/// #1488: a fused worker's current upstream delta is not the complete history
+/// for its downstream member. Drive the real scheduler with an already
+/// accumulated upstream backlog and new changes in the same worker tick.
+/// The downstream must consume the backlog, not the above-bound new batch.
+async fn assert_fused_chain_consumes_complete_cdc_windows(aggregate_query: &str) {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "'on'", "on")
+        .await;
+    // Exercise DAG-4 worker grouping, not the optional PERF-2 CTE executor.
+    db.alter_system_set_and_wait("pg_trickle.enable_fused_refresh", "off", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "trigger", "trigger")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_trigger_mode", "row", "row")
+        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "differential",
+        "differential",
+    )
+    .await;
+
+    for name in ["fused_a", "fused_b"] {
+        db.execute(&format!(
+            "CREATE TABLE {name} (id INT PRIMARY KEY, k INT NOT NULL, v INT NOT NULL)"
+        ))
+        .await;
+    }
+    db.execute("INSERT INTO fused_a SELECT g, g % 4, g FROM generate_series(1, 1000) g")
+        .await;
+    db.execute("INSERT INTO fused_b SELECT g, g % 4, g FROM generate_series(1, 10) g")
+        .await;
+    let upstream_query = "SELECT 'a'::text AS src, id, k, v FROM fused_a \
+                          UNION ALL SELECT 'b'::text AS src, id, k, v FROM fused_b";
+    // Long schedules plus explicit pause/drain and due timestamps make each
+    // dispatch independent of sleeps or a race with the next periodic tick.
+    db.create_st("fused_up", upstream_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st("fused_down", aggregate_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['fused_up', 'fused_down'])")
+        .await;
+    db.assert_st_matches_query("fused_down", aggregate_query)
+        .await;
+
+    let up_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fused_up'",
+        )
+        .await;
+    let down_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fused_down'",
+        )
+        .await;
+    let buffer = format!("pgtrickle_changes.changes_pgt_{up_id}");
+    let members = format!("ARRAY[{up_id}, {down_id}]::bigint[]");
+
+    // Two independent upstream refreshes while the consumer is paused:
+    // INSERT, DELETE, and two changes to the same logical row.
+    db.execute("INSERT INTO fused_a VALUES (1001, 1, 7), (1002, 2, 8)")
+        .await;
+    db.execute("UPDATE fused_a SET v = 20 WHERE id = 1")
+        .await;
+    db.execute("DELETE FROM fused_a WHERE id = 2").await;
+    db.refresh_st_with_retry("fused_up").await;
+    db.assert_st_matches_query("fused_up", upstream_query)
+        .await;
+    db.execute("UPDATE fused_a SET k = 3, v = 30 WHERE id = 1")
+        .await;
+    db.execute("INSERT INTO fused_b VALUES (11, 1, 9)").await;
+    db.refresh_st_with_retry("fused_up").await;
+    db.assert_st_matches_query("fused_up", upstream_query)
+        .await;
+    assert!(db.query_scalar::<bool>(&format!(
+        "SELECT COUNT(DISTINCT lsn) >= 2 FROM {buffer}"
+    )).await, "the test must accumulate more than one upstream refresh");
+
+    // The oracle for each tick is the upstream's state BEFORE that tick's
+    // new writes. In the ordinary scheduler its publication LSN is above
+    // the immutable tick watermark, so its new delta must wait for the
+    // following window. After the final quiet tick the live query is exact.
+    db.execute(&format!("CREATE TABLE fused_expected AS {aggregate_query}"))
+        .await;
+    for tick in 0..3 {
+        db.execute("TRUNCATE fused_expected").await;
+        db.execute(&format!("INSERT INTO fused_expected {aggregate_query}"))
+            .await;
+        let eligible_lsn: String = db
+            .query_scalar(&format!("SELECT MAX(lsn)::text FROM {buffer}"))
+            .await;
+        assert!(db.query_scalar::<bool>(&format!(
+            "SELECT COALESCE((frontier #>> '{{sources,pgt_{up_id},lsn}}')::pg_lsn, '0/0'::pg_lsn) \
+                 < '{eligible_lsn}'::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {down_id}"
+        )).await, "tick {tick}: a real unconsumed backlog must exist");
+
+        if tick == 0 {
+            db.execute("INSERT INTO fused_a VALUES (1003, 1, 100000), (1004, 2, 12)")
+                .await;
+            db.execute("UPDATE fused_a SET k = 0, v = -100000 WHERE id = 1")
+                .await;
+        } else if tick == 1 {
+            db.execute("DELETE FROM fused_a WHERE id = 1003").await;
+            db.execute("UPDATE fused_a SET v = 42 WHERE id = 1")
+                .await;
+            db.execute("UPDATE fused_b SET v = 99 WHERE id = 11")
+                .await;
+        }
+
+        let before_job: i64 = db
+            .query_scalar("SELECT COALESCE(MAX(job_id), 0) FROM pgtrickle.pgt_scheduler_jobs")
+            .await;
+        let before_refresh: i64 = db
+            .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        db.execute(
+            "UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' \
+             WHERE pgt_name IN ('fused_up', 'fused_down')",
+        )
+        .await;
+        db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['fused_up', 'fused_down'])")
+            .await;
+
+        let succeeded = format!(
+            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_scheduler_jobs \
+             WHERE job_id > {before_job} AND unit_kind = 'fused_chain' \
+               AND member_pgt_ids = {members} AND status = 'SUCCEEDED')"
+        );
+        assert!(
+            db.wait_for_condition(
+                "fused-chain worker completion",
+                &succeeded,
+                Duration::from_secs(60),
+                Duration::from_millis(50),
+            )
+            .await,
+            "tick {tick}: must execute a real fused worker"
+        );
+        db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['fused_up', 'fused_down'])")
+            .await;
+        let watermark: String = db
+            .query_scalar(&format!(
+                "SELECT tick_watermark_lsn::text FROM pgtrickle.pgt_scheduler_jobs \
+                 WHERE job_id > {before_job} AND unit_kind = 'fused_chain' \
+                   AND member_pgt_ids = {members} AND status = 'SUCCEEDED' \
+                 ORDER BY job_id LIMIT 1"
+            ))
+            .await;
+        assert!(
+            db.query_scalar::<bool>(&format!(
+                "SELECT '{eligible_lsn}'::pg_lsn <= '{watermark}'::pg_lsn"
+            ))
+            .await,
+            "tick {tick}: the earlier backlog must be inside the worker's window"
+        );
+
+        // The old implementation either omitted the eligible backlog or
+        // failed when the bounded-source code tried to read change_id from
+        // the bypass table. A FULL fallback must not mask either failure.
+        let differential_count: i64 = db
+            .query_scalar(&format!(
+                "SELECT COUNT(DISTINCT pgt_id) FROM pgtrickle.pgt_refresh_history \
+                 WHERE refresh_id > {before_refresh} AND pgt_id = ANY({members}) \
+                   AND tick_watermark_lsn = '{watermark}'::pg_lsn \
+                   AND initiated_by = 'SCHEDULER' AND status = 'COMPLETED' \
+                   AND action = 'DIFFERENTIAL' AND NOT was_full_fallback \
+                   AND merge_strategy_used <> 'FULL'"
+            ))
+            .await;
+        assert_eq!(differential_count, if tick < 2 { 2 } else { 1 });
+        assert!(db.query_scalar::<bool>(&format!(
+            "SELECT NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history \
+             WHERE refresh_id > {before_refresh} AND pgt_id = ANY({members}) \
+               AND (action IN ('FULL', 'REINITIALIZE') OR was_full_fallback))"
+        )).await, "tick {tick}: no full refresh may repair the result");
+
+        assert!(db.query_scalar::<bool>(&format!(
+            "SELECT (frontier #>> '{{sources,pgt_{up_id},lsn}}')::pg_lsn \
+                 BETWEEN '{eligible_lsn}'::pg_lsn AND '{watermark}'::pg_lsn \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {down_id}"
+        )).await, "tick {tick}: frontier must acknowledge the backlog but not cross the tick bound");
+        if tick < 2 {
+            assert!(db.query_scalar::<bool>(&format!(
+                "SELECT COALESCE(MAX(lsn) > '{watermark}'::pg_lsn, false) FROM {buffer}"
+            )).await, "tick {tick}: fresh same-tick upstream publication must remain above the watermark");
+        }
+
+        db.assert_st_matches_query("fused_up", upstream_query)
+            .await;
+        db.assert_st_matches_query("fused_down", "SELECT * FROM fused_expected")
+            .await;
+    }
+
+    // Drain without a FULL baseline; the omitted old batches must not
+    // survive as permanent drift after the consumer reaches the last cut.
+    db.assert_st_matches_query("fused_down", aggregate_query)
+        .await;
+}
+
+#[tokio::test]
+async fn test_scheduler_fused_chain_preserves_backlog_and_frontier() {
+    assert_fused_chain_consumes_complete_cdc_windows(
+        "SELECT u.k, SUM(u.v) AS total, COUNT(*) AS n \
+         FROM (SELECT k, v FROM fused_up) u GROUP BY u.k",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_scheduler_fused_chain_rescans_use_complete_bounded_history() {
+    assert_fused_chain_consumes_complete_cdc_windows(
+        "SELECT k, SUM(v) AS total, COUNT(*) AS n, MIN(v) AS lo, MAX(v) AS hi \
+         FROM fused_up GROUP BY k",
+    )
+    .await;
+}

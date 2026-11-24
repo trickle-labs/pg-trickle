@@ -225,6 +225,14 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ### Fixes
 
+- Prevent silent downstream data loss in parallel fused-worker chains by
+  consuming the complete persistent ST change-buffer window, including backlog
+  from earlier upstream refreshes, and using that same history for bounded
+  source reconstruction (#1488). The unsafe temporary CDC bypass is removed;
+  worker grouping and immutable tick bounds are preserved. Previously affected
+  downstream tables must be verified and, if divergent, reinitialized in
+  dependency order; upgrading alone does not repair their materialized state.
+
 - Keep successful stream-table resumes from being undone by late refresh-worker
   failures or the dispatcher's failure safety net, using per-member recovery
   generation fences (#1438).
