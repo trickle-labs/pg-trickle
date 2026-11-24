@@ -53,6 +53,7 @@ fn phase_code(phase: &str) -> i32 {
         "after_apply" => 2,
         "during_finalize" => 3,
         "snapshot_after_metadata" => 4,
+        "before_downstream_capture" => 6,
         _ => panic!("unknown atomicity phase {phase}"),
     }
 }
@@ -2683,4 +2684,91 @@ async fn test_refresh_downstream_capture_failure_rolls_back_and_retries() {
     assert_recovered_action(&db, "capture_up", up_query, "DIFFERENTIAL").await;
     db.refresh_st("capture_down").await;
     assert_recovered_action(&db, "capture_down", down_query, "DIFFERENTIAL").await;
+}
+
+/// The scheduler must not commit storage, downstream CDC or a successful
+/// frontier when post-apply CDC publication fails.
+#[tokio::test]
+async fn test_scheduler_downstream_capture_failure_preserves_checkpoint() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    configure_scheduler(&db).await;
+    db.execute("CREATE TABLE sched_capture_src (id INT PRIMARY KEY, value INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO sched_capture_src VALUES (1, 10)").await;
+    let up = "sched_capture_up";
+    let down = "sched_capture_down";
+    let up_query = "SELECT id, value FROM sched_capture_src";
+    let down_query = "SELECT count(*) AS n, sum(value) AS total FROM sched_capture_up";
+    db.create_st(up, up_query, "1h", "DIFFERENTIAL").await;
+    db.create_st(down, down_query, "1h", "DIFFERENTIAL").await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['sched_capture_up','sched_capture_down'])")
+        .await;
+    let up_id = pgt_id(&db, up).await;
+    let down_id = pgt_id(&db, down).await;
+    let buffer = format!("pgtrickle_changes.changes_pgt_{up_id}");
+    snapshot_table(&db, up, "sched_capture_up_checkpoint").await;
+    snapshot_table(&db, down, "sched_capture_down_checkpoint").await;
+    let before_buffer: i64 = db
+        .query_scalar(&format!("SELECT count(*) FROM {buffer}"))
+        .await;
+    let before_down = progress(&db, down_id).await;
+
+    db.execute("INSERT INTO sched_capture_src VALUES (2, 20)").await;
+    let phase = "before_downstream_capture";
+    set_chaos(&db, up, phase).await;
+    let (mut blocker, blocker_pid) = hold_barrier(&db, up_id, phase).await;
+    make_scheduler_due(&db, &[up]).await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['sched_capture_up'])")
+        .await;
+    let witness = wait_for_barrier(
+        &db, up_id, phase, blocker_pid, Duration::from_secs(90),
+    );
+    tokio::pin!(witness);
+    // Keep due across a possible no-data tick with an old watermark.
+    let observed = loop {
+        tokio::select! {
+            result = &mut witness => break result,
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                sqlx::query(
+                    "WITH due AS (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                         WHERE pgt_id = $1 AND last_refresh_at > now() - interval '1 hour' \
+                         FOR UPDATE SKIP LOCKED) \
+                     UPDATE pgtrickle.pgt_stream_tables st \
+                         SET last_refresh_at = now() - interval '2 hours' \
+                         FROM due WHERE st.pgt_id = due.pgt_id",
+                )
+                .bind(up_id)
+                .execute(&db.pool)
+                .await
+                .expect("keep the faulted publication due");
+            }
+        }
+    };
+    assert!(observed.blockers.contains(&blocker_pid));
+    let before_up = progress(&db, up_id).await;
+    assert_committed_checkpoint(&db, up_id, up, "sched_capture_up_checkpoint", &before_up)
+        .await;
+    release_barrier(&mut blocker, up_id, phase).await;
+    let (failed_id, action, message) = wait_for_scheduler_failure(&db, up_id).await;
+    assert_eq!(action, "DIFFERENTIAL", "{message}");
+    assert!(message.contains("before_downstream_capture"), "{message}");
+    clear_chaos(&db).await;
+    wait_for_scheduler_status(&db, up, "SUSPENDED").await;
+    assert_committed_checkpoint(&db, up_id, up, "sched_capture_up_checkpoint", &before_up)
+        .await;
+    assert_committed_checkpoint(
+        &db, down_id, down, "sched_capture_down_checkpoint", &before_down,
+    )
+    .await;
+    assert_eq!(
+        db.query_scalar::<i64>(&format!("SELECT count(*) FROM {buffer}")).await,
+        before_buffer
+    );
+
+    db.execute("SELECT pgtrickle.resume_stream_table('public.sched_capture_up')")
+        .await;
+    wait_for_scheduler_recovery(&db, up_id, failed_id).await;
+    db.assert_st_matches_query(up, up_query).await;
+    db.refresh_st(down).await;
+    db.assert_st_matches_query(down, down_query).await;
 }
