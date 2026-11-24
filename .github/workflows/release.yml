@@ -141,6 +141,9 @@ jobs:
       - name: Validate monitoring contract
         run: python3 scripts/check_monitoring_contract.py
 
+      - name: Test ANN release payload verification
+        run: python3 scripts/test_ann_release_payload.py
+
   # ── Build release artifacts for each platform ───────────────────────────
   build-release:
     name: Build (${{ matrix.artifact_suffix }})
@@ -158,7 +161,7 @@ jobs:
           - os: ubuntu-24.04-arm
             artifact_suffix: linux-arm64
             archive_ext: tar.gz
-          - os: macos-14
+          - os: macos-15
             artifact_suffix: macos-arm64
             archive_ext: tar.gz
           - os: windows-2022
@@ -166,6 +169,10 @@ jobs:
             archive_ext: zip
     steps:
       - uses: actions/checkout@v7
+
+      - name: Verify macOS ARM64 runner
+        if: matrix.artifact_suffix == 'macos-arm64'
+        run: test "$(uname -m)" = arm64
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -191,8 +198,20 @@ jobs:
           # 'cargo pgrx info path pg18' returns the installation prefix dir;
           # the pg_config binary lives under bin/ inside that directory.
           PG_CONFIG_PATH="$(cargo pgrx info path pg18)/bin/pg_config"
+          rm -rf target/release/pg_trickle-pg18
           cargo pgrx package --pg-config "${PG_CONFIG_PATH}"
 
+      - name: Stage the checked-in versioned install catalog
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCHIVE_SQL="sql/archive/pg_trickle--${VERSION}.sql"
+          PKG_DIR=$(find target/release -maxdepth 1 -name 'pg_trickle-pg*' -type d | head -1)
+          PKG_SQL=$(find "${PKG_DIR}" -name "pg_trickle--${VERSION}.sql" | head -1)
+          test -f "$ARCHIVE_SQL" && test -n "$PKG_SQL"
+          # Keep later Rust exports out of this release's installed SQL surface.
+          cp "$ARCHIVE_SQL" "$PKG_SQL"
+          cmp -s "$ARCHIVE_SQL" "$PKG_SQL"
 
       - name: Create archive (tar.gz)
         if: matrix.archive_ext == 'tar.gz'
@@ -214,13 +233,35 @@ jobs:
             cp "$f" "dist/${ARCHIVE_NAME}/lib/"
           done
 
-          # Copy extension control + SQL files
+          # Keep future migration SQL out of an older version's release package.
+          version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
           find "${PKG_DIR}" -name '*.control' -o -name '*.sql' | while read f; do
+            base=${f##*/}
+            if [[ "$base" == pg_trickle--* ]]; then
+              version=${base#pg_trickle--}
+              if [[ "$version" == *--* ]]; then
+                version=${version#*--}
+                version=${version%.sql}
+              else
+                version=${version%.sql}
+                if [[ "$version" != "$VERSION" ]]; then
+                  echo "Excluding install SQL for v${version} from v${VERSION} package"
+                  continue
+                fi
+              fi
+              if ! version_le "$version" "$VERSION"; then
+                echo "Excluding future migration SQL $base from v${VERSION} package"
+                continue
+              fi
+            fi
             cp "$f" "dist/${ARCHIVE_NAME}/extension/"
           done
 
           # Copy docs
           cp README.md LICENSE INSTALL.md "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
+          mkdir -p "dist/${ARCHIVE_NAME}/scripts" "dist/${ARCHIVE_NAME}/docs"
+          cp scripts/ann_maintenance_supervisor.py scripts/ann_maintenance_worker.sql scripts/ann_threshold_request.sql "dist/${ARCHIVE_NAME}/scripts/"
+          cp docs/ANN_MAINTENANCE.md docs/SQL_REFERENCE.md "dist/${ARCHIVE_NAME}/docs/"
 
           test -z "${RUSTFLAGS:-}"
           printf '{"candidate_commit":"%s","build_kind":"exact-release","feature_scope":"default-release","build_provenance":{"workflow":"release.yml","cargo_profile":"release","instrumentation":"none"}}\n' \
@@ -285,11 +326,23 @@ jobs:
 
           # Copy control + SQL
           Get-ChildItem -Path $pkgDir.FullName -Recurse -Include "*.control","*.sql" | ForEach-Object {
+            if ($_.Name -match '^pg_trickle--\d+\.\d+\.\d+--(\d+\.\d+\.\d+)\.sql$') {
+              if ([version]$Matches[1] -gt [version]$version) {
+                Write-Host "Excluding future migration SQL $($_.Name) from v${version} package"
+                return
+              }
+            } elseif ($_.Name -match '^pg_trickle--(\d+\.\d+\.\d+)\.sql$' -and $Matches[1] -ne $version) {
+              Write-Host "Excluding install SQL for v$($Matches[1]) from v${version} package"
+              return
+            }
             Copy-Item $_.FullName "dist\${archiveName}\extension\"
           }
 
           # Copy docs
           Copy-Item README.md, LICENSE, INSTALL.md "dist\${archiveName}\" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path "dist\${archiveName}\scripts", "dist\${archiveName}\docs" -Force
+          Copy-Item scripts/ann_maintenance_supervisor.py, scripts/ann_maintenance_worker.sql, scripts/ann_threshold_request.sql "dist\${archiveName}\scripts\"
+          Copy-Item docs/ANN_MAINTENANCE.md, docs/SQL_REFERENCE.md "dist\${archiveName}\docs\"
 
           if ($env:RUSTFLAGS) { throw "release builds must not set RUSTFLAGS" }
           '{"candidate_commit":"${{ github.sha }}","build_kind":"exact-release","feature_scope":"default-release","build_provenance":{"workflow":"release.yml","cargo_profile":"release","instrumentation":"none"}}' |
@@ -297,6 +350,14 @@ jobs:
 
           Compress-Archive -Path "dist\${archiveName}" -DestinationPath "dist\${archiveName}.zip"
           Write-Host "Archive: ${archiveName}.zip"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Verify packaged ANN operator files
+        shell: bash
+        run: python scripts/check_ann_release_payload.py "dist/pg_trickle-${{ steps.version.outputs.version }}-pg${{ env.PG_VERSION }}-${{ matrix.artifact_suffix }}.${{ matrix.archive_ext }}"
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v7
@@ -444,11 +505,11 @@ jobs:
         run: docker rm -f smoketest 2>/dev/null || true
 
   # ── Publish GitHub Release ──────────────────────────────────────────────
-  qualification:
-    name: Packaged release qualification
+  qualification-heavy:
+    name: Packaged release qualification (heavy vector/RAG)
     needs: [build-release, test-release]
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
         with:
@@ -473,9 +534,10 @@ jobs:
           test -f candidate/lib/pg_trickle.so
           docker build -t pg_trickle_release_candidate:local \
             -f tests/Dockerfile.release-e2e .
+          PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_pgvector_image.sh 0.8.7
 
-      - name: Run contract suites against the exact Linux package
-        id: qualify
+      - name: Run heavy vector/RAG suites against the exact Linux package
+        id: qualify-heavy
         env:
           QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
         run: |
@@ -487,9 +549,8 @@ jobs:
             VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
           fi
           QUALIFICATION="tests/release/v${VERSION}-qualification.json"
-          mapfile -t SUITES < <(python3 -c 'import json, sys; print("\n".join(s["id"] for s in json.load(open(sys.argv[1]))["required_suites"]))' "$QUALIFICATION")
           FAILED=0
-          for suite in "${SUITES[@]}"; do
+          for suite in live-rag-100k subscription-scale-100k centroid-cost-matrix; do
             echo "=== Qualification suite: ${suite} ==="
             python3 scripts/run_release_suite.py \
               --qualification "$QUALIFICATION" \
@@ -504,6 +565,36 @@ jobs:
           done
           echo "failed=${FAILED}" >> "$GITHUB_OUTPUT"
           exit 0
+
+      - name: Retain heavy qualification logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qualification-evidence-heavy
+          path: qualification-logs/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Require all heavy qualification suites to pass
+        if: always()
+        run: |
+          if [[ "${{ steps.qualify-heavy.outputs.failed }}" != "0" ]]; then
+            echo "One or more heavy package qualification suites failed."
+            exit 1
+          fi
+
+  qualification-unsafe-asan:
+    name: Unsafe-boundary ASan qualification
+    needs: [build-release, test-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
 
       - name: Run separate unsafe-boundary ASan qualification
         id: unsafe-asan
@@ -527,6 +618,106 @@ jobs:
         run: >
           python3 scripts/v0_109_0_release_gate.py
           --unsafe-asan-log qualification-logs/unsafe-asan/workloads.log
+
+      - name: Retain ASan qualification logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qualification-evidence-unsafe-asan
+          path: qualification-logs/unsafe-asan/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Require the ASan workload step to succeed
+        if: always()
+        run: |
+          if [[ "${{ steps.unsafe-asan.outcome }}" != "success" ]]; then
+            echo "Unsafe-boundary ASan qualification failed."
+            exit 1
+          fi
+
+  qualification:
+    name: Packaged release qualification
+    needs: [build-release, test-release, qualification-heavy, qualification-unsafe-asan]
+    if: always() && needs.build-release.result == 'success' && needs.test-release.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Download release packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist/
+
+      - name: Build candidate PostgreSQL image for live workloads
+        run: |
+          ARCHIVE="$(find dist/release-linux-amd64 -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          test -n "$ARCHIVE"
+          mkdir -p candidate
+          tar xzf "$ARCHIVE" -C candidate --strip-components=1
+          test -f candidate/extension/pg_trickle.control
+          test -f candidate/lib/pg_trickle.so
+          docker build -t pg_trickle_release_candidate:local \
+            -f tests/Dockerfile.release-e2e .
+          PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_pgvector_image.sh 0.8.1
+          PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_pgvector_image.sh 0.8.7
+
+      - name: Run contract suites against the exact Linux package
+        id: qualify
+        env:
+          QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
+        run: |
+          set +e
+          mkdir -p qualification-logs/logs qualification-logs/results qualification-logs/raw
+          ARCHIVE="$(find dist/release-linux-amd64 -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
+            VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          fi
+          QUALIFICATION="tests/release/v${VERSION}-qualification.json"
+          mapfile -t SUITES < <(python3 -c 'import json, sys; print("\n".join(s["id"] for s in json.load(open(sys.argv[1]))["required_suites"]))' "$QUALIFICATION")
+          FAILED=0
+          for suite in "${SUITES[@]}"; do
+            if [[ "$suite" == "live-rag-100k" || "$suite" == "subscription-scale-100k" || "$suite" == "centroid-cost-matrix" ]]; then
+              continue
+            fi
+            echo "=== Qualification suite: ${suite} ==="
+            python3 scripts/run_release_suite.py \
+              --qualification "$QUALIFICATION" \
+              --suite "$suite" \
+              --artifact "$ARCHIVE" \
+              --candidate-commit "$GITHUB_SHA" \
+              --log "qualification-logs/logs/${suite}.log" \
+              --result "qualification-logs/results/${suite}.json"
+            if [[ $? -ne 0 ]]; then
+              FAILED=1
+            fi
+          done
+          echo "failed=${FAILED}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Download heavy qualification logs
+        if: always()
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: qualification-evidence-heavy
+          path: qualification-logs/
+
+      - name: Download unsafe-boundary ASan logs
+        if: always()
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: qualification-evidence-unsafe-asan
+          path: qualification-logs/unsafe-asan/
 
       - name: Write candidate-bound release evidence
         if: always()
@@ -563,7 +754,7 @@ jobs:
       - name: Require all qualification suites to pass
         if: always()
         run: |
-          if [[ "${{ steps.qualify.outputs.failed }}" != "0" || "${{ steps.unsafe-asan.outcome }}" != "success" ]]; then
+          if [[ "${{ needs.qualification-heavy.result }}" != "success" || "${{ steps.qualify.outputs.failed }}" != "0" || "${{ needs.qualification-unsafe-asan.result }}" != "success" ]]; then
             echo "One or more package or separate instrumented qualification suites failed."
             exit 1
           fi
@@ -571,7 +762,7 @@ jobs:
   publish-release:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.qualification_only != true }}
     name: Publish GitHub Release
-    needs: [build-release, test-release, qualification]
+    needs: [build-release, test-release, qualification-heavy, qualification]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -652,7 +843,7 @@ jobs:
   publish-docker-arch:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.qualification_only != true }}
     name: Docker image (${{ matrix.arch }})
-    needs: [build-release, test-release, qualification]
+    needs: [build-release, test-release, qualification-heavy, qualification]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     strategy:
@@ -772,13 +963,14 @@ jobs:
   publication-result:
     name: Require every release stage to succeed
     if: always()
-    needs: [build-release, test-release, qualification, publish-release, publish-docker-arch, publish-docker]
+    needs: [build-release, test-release, qualification-heavy, qualification, publish-release, publish-docker-arch, publish-docker]
     runs-on: ubuntu-latest
     steps:
       - name: Reject failed or skipped release stages
         env:
           BUILD: ${{ needs.build-release.result }}
           SMOKE: ${{ needs.test-release.result }}
+          QUALIFICATION_HEAVY: ${{ needs.qualification-heavy.result }}
           QUALIFICATION: ${{ needs.qualification.result }}
           GITHUB_RELEASE: ${{ needs.publish-release.result }}
           CNPG_IMAGES: ${{ needs.publish-docker-arch.result }}
@@ -786,7 +978,7 @@ jobs:
           QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
         run: |
           if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
-            for stage in "$BUILD" "$SMOKE" "$QUALIFICATION"; do
+            for stage in "$BUILD" "$SMOKE" "$QUALIFICATION_HEAVY" "$QUALIFICATION"; do
               if [[ "$stage" != "success" ]]; then
                 echo "Qualification-only stage ended as $stage."
                 exit 1
@@ -801,7 +993,7 @@ jobs:
             echo "Candidate qualification passed; publication jobs were skipped."
             exit 0
           fi
-          for stage in "$BUILD" "$SMOKE" "$QUALIFICATION" "$GITHUB_RELEASE" "$CNPG_IMAGES" "$CNPG_MANIFEST"; do
+          for stage in "$BUILD" "$SMOKE" "$QUALIFICATION_HEAVY" "$QUALIFICATION" "$GITHUB_RELEASE" "$CNPG_IMAGES" "$CNPG_MANIFEST"; do
             if [[ "$stage" != "success" ]]; then
               echo "Release stage ended as $stage; release workflow must not be successful."
               exit 1

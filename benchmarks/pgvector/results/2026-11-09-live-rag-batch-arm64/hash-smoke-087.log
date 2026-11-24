@@ -1,0 +1,9 @@
+   Compiling pg_trickle v0.109.0 (/private/tmp/pg-trickle-task-1399)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.41s
+     Running tests/e2e_pgvector_revision_tests.rs (target/debug/deps/e2e_pgvector_revision_tests-7ac7530d67ba7c77)
+
+running 1 test
+test test_live_rag_batched_benchmark_compares_equivalent_corpora ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 3.82s
+

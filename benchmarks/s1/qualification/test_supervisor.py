@@ -35,6 +35,81 @@ with tempfile.TemporaryDirectory(prefix="issue1168-logs-") as directory:
     else:
         raise AssertionError("failed log capture must fail supervision")
 
+for replay_code in (0, 1):
+    with tempfile.TemporaryDirectory(prefix="issue1168-log-replay-") as directory:
+        path = Path(directory) / "full.log"
+        path.write_text("partial log\n")
+        follower = Mock()
+        follower.wait.return_value = 1
+        stream = path.open("a")
+        replay = Mock()
+        replay.wait.return_value = replay_code
+        inspection = Mock(return_value=subprocess.CompletedProcess(
+            ["docker", "inspect", "--format", "{{.State.Running}}", name], 0, "true\n", ""))
+
+        def popen(args, stdout, **kwargs):
+            assert args == ["docker", "logs", "--timestamps", name], args
+            stdout.write("complete retained log\n")
+            return replay
+
+        with patch.object(bounded.subprocess, "Popen", side_effect=popen), \
+             patch.object(bounded.subprocess, "run", inspection):
+            try:
+                bounded.finish_log_capture(name, path, follower, stream)
+            except RuntimeError as error:
+                assert replay_code == 1 and str(error) == "container log replay failed: 1"
+                assert path.read_text() == "partial log\n"
+            else:
+                assert replay_code == 0
+                assert path.read_text() == "complete retained log\n"
+            inspection.assert_called_once()
+            assert stream.closed
+            assert not path.with_suffix(path.suffix + ".replay").exists()
+
+with tempfile.TemporaryDirectory(prefix="issue1168-removed-log-") as directory:
+    path = Path(directory) / "full.log"
+    path.write_text("captured while running\n")
+    follower = Mock()
+    follower.wait.return_value = 1
+    stream = path.open("a")
+    inspection = subprocess.CompletedProcess(
+        ["docker", "inspect", "--format", "{{.State.Running}}", name], 1, "",
+        f"Error: No such object: {name}")
+    with patch.object(bounded.subprocess, "run", return_value=inspection) as inspect, \
+         patch.object(bounded.subprocess, "Popen") as popen:
+        bounded.finish_log_capture(name, path, follower, stream, harness_finished=True)
+        assert inspect.call_args.args[0] == ["docker", "inspect", "--format", "{{.State.Running}}", name]
+        popen.assert_not_called()
+    assert stream.closed
+    assert path.read_text() == "captured while running\n"
+
+with tempfile.TemporaryDirectory(prefix="issue1168-live-removed-log-") as directory:
+    path = Path(directory) / "full.log"
+    follower = Mock()
+    follower.wait.return_value = 1
+    stream = path.open("a")
+    inspection = subprocess.CompletedProcess(
+        ["docker", "inspect", "--format", "{{.State.Running}}", name], 1, "",
+        f"Error: No such object: {name}")
+    replay = Mock()
+    replay.wait.return_value = 1
+
+    def fail_replay(args, stdout, **kwargs):
+        assert args == ["docker", "logs", "--timestamps", name], args
+        stdout.write("replay unavailable\n")
+        return replay
+
+    with patch.object(bounded.subprocess, "run", return_value=inspection), \
+         patch.object(bounded.subprocess, "Popen", side_effect=fail_replay) as popen:
+        try:
+            bounded.finish_log_capture(name, path, follower, stream)
+        except RuntimeError as error:
+            assert str(error) == "container log replay failed: 1"
+        else:
+            raise AssertionError("removed container logs are required while the harness is running")
+        popen.assert_called_once()
+    assert stream.closed
+
 for failure in ("timeout", "daemon"):
     stopped = []
 
@@ -87,6 +162,7 @@ for failure in ("timeout", "daemon"):
         if failure == "timeout":
             assert (root / failure / f"{name}-full.log").read_text() == "retained full log\n"
 
+silent_exit = subprocess.CompletedProcess([], -9, "", "")
 for failures, expected_calls in ((2, 3), (5, 5)):
     failed = subprocess.CompletedProcess([], 2, "", "psql: error: connection to server failed: No such file or directory")
     healthy = subprocess.CompletedProcess([], 0, '{"database_bytes":1,"wal_bytes":2}', "")
@@ -96,6 +172,13 @@ for failures, expected_calls in ((2, 3), (5, 5)):
     assert run_mock.call_count == expected_calls
     assert sleep_mock.call_count == expected_calls - 1
     assert result is (healthy if failures == 2 else failed)
+for failures, expected_calls in ((2, 3), (5, 5)):
+    with patch.object(bounded.subprocess, "run", side_effect=[silent_exit] * failures + [healthy]) as run_mock, \
+         patch.object(bounded.time, "sleep") as sleep_mock:
+        result = bounded.postgres_metrics(["docker", "exec", name, "psql"])
+    assert run_mock.call_count == expected_calls
+    assert sleep_mock.call_count == expected_calls - 1
+    assert result is (healthy if failures == 2 else silent_exit)
 with patch.object(bounded.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "permission denied")) as run_mock:
     assert bounded.postgres_metrics([]).returncode == 1
     assert run_mock.call_count == 1
@@ -105,8 +188,16 @@ assert not bounded.postgres_is_restarting(subprocess.CompletedProcess([], 1, "",
 docker_transition = subprocess.CompletedProcess(
     [], 1, "", "Error response from daemon: container " + "a" * 64 + " is not running\n")
 assert bounded.postgres_is_restarting(docker_transition)
+runtime_transition = subprocess.CompletedProcess(
+    [], 128, "FailedPrecondition: container " + "b" * 64
+    + " init process is not running: failed precondition\n", "")
+assert bounded.postgres_is_restarting(runtime_transition)
 healthy_after_restart = subprocess.CompletedProcess([], 0, '{"database_bytes":1,"wal_bytes":2}', "")
 with patch.object(bounded.subprocess, "run", side_effect=[docker_transition, healthy_after_restart]) as run_mock, \
+     patch.object(bounded.time, "sleep") as sleep_mock:
+    assert bounded.postgres_metrics(["docker", "exec", name, "psql"]) is healthy_after_restart
+    assert run_mock.call_count == 2 and sleep_mock.call_count == 1
+with patch.object(bounded.subprocess, "run", side_effect=[runtime_transition, healthy_after_restart]) as run_mock, \
      patch.object(bounded.time, "sleep") as sleep_mock:
     assert bounded.postgres_metrics(["docker", "exec", name, "psql"]) is healthy_after_restart
     assert run_mock.call_count == 2 and sleep_mock.call_count == 1
@@ -204,6 +295,14 @@ with patch.object(bounded.subprocess, "run", side_effect=[vanished_internal, hea
      patch.object(bounded.time, "sleep") as sleep_mock:
     assert bounded.disk_metrics(["docker", "exec", name, "sh"]) is healthy
     assert run_mock.call_count == 2 and sleep_mock.call_count == 1
+
+for failures, expected_calls in ((2, 3), (5, 5)):
+    with patch.object(bounded.subprocess, "run", side_effect=[silent_exit] * failures + [healthy]) as run_mock, \
+         patch.object(bounded.time, "sleep") as sleep_mock:
+        result = bounded.disk_metrics(["docker", "exec", name, "sh"])
+    assert run_mock.call_count == expected_calls
+    assert sleep_mock.call_count == expected_calls - 1
+    assert result is (healthy if failures == 2 else silent_exit)
 
 for message in ("permission denied", "du: cannot access '/data/global/pg_control': No such file or directory",
                 vanished.stderr + "permission denied"):

@@ -115,6 +115,20 @@ def machine_summary(output: str) -> tuple[int, int, int] | None:
     )
 
 
+def attempt_records(case_attempts: list[list[dict[str, str]]], returncode: int, log: dict) -> list[dict]:
+    attempts = case_attempts or [[]]
+    return [
+        {
+            "attempt": index,
+            "status": "passed" if index == len(attempts) and returncode == 0 and all(case["status"] == "passed" for case in cases) else "failed",
+            "exit_code": returncode if index == len(attempts) else 1,
+            "log": log,
+            "cases": cases,
+        }
+        for index, cases in enumerate(attempts, start=1)
+    ]
+
+
 def package_directory(artifact: Path, destination: Path) -> Path:
     extraction = destination / "archive"
     extraction.mkdir(parents=True)
@@ -140,6 +154,8 @@ def package_directory(artifact: Path, destination: Path) -> Path:
     result = destination / "candidate"
     shutil.copytree(package / "extension", result / "usr/share/postgresql/18/extension")
     shutil.copytree(package / "lib", result / "usr/lib/postgresql/18/lib")
+    if (package / "scripts").is_dir():
+        shutil.copytree(package / "scripts", result / "scripts")
     if not (result / "usr/share/postgresql/18/extension/pg_trickle.control").is_file():
         raise ValueError("release package is missing pg_trickle.control")
     if not list((result / "usr/lib/postgresql/18/lib").glob("pg_trickle.*")):
@@ -224,6 +240,7 @@ def main() -> int:
                 {
                     "PGT_EXTENSION_DIR": str(extension_dir),
                     "PGT_RELEASE_CANDIDATE_COMMIT": args.candidate_commit,
+                    "PGT_RELEASE_CANDIDATE_ARCHIVE": str(artifact),
                     "PGT_RELEASE_ARTIFACT_ID": artifact_spec["id"],
                     "PGT_RELEASE_ARTIFACT_SHA256": artifact_digest,
                     "PGT_RELEASE_PLATFORM": artifact_spec["platform"],
@@ -244,16 +261,24 @@ def main() -> int:
                 measurement_path.unlink(missing_ok=True)
                 environment["PGS_RELEASE_MEASUREMENT_JSON"] = str(measurement_path)
 
-            completed = subprocess.run(
-                command,
-                cwd=ROOT,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            output = completed.stdout.decode("utf-8", errors="replace")
-            args.log.write_bytes(completed.stdout)
-            sys.stdout.buffer.write(completed.stdout)
+            output_bytes = bytearray()
+            with args.log.open("wb") as log_file:
+                completed = subprocess.Popen(
+                    command,
+                    cwd=ROOT,
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                assert completed.stdout is not None
+                while chunk := completed.stdout.read1(64 * 1024):
+                    log_file.write(chunk)
+                    log_file.flush()
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+                    output_bytes.extend(chunk)
+                completed.wait()
+            output = output_bytes.decode("utf-8", errors="replace")
             machine_results = machine_summary(output)
             summaries = TEST_SUMMARY.findall(output)
             if machine_results is not None:
@@ -377,16 +402,7 @@ def main() -> int:
             attempt_case_results = [[]]
         if required_cases:
             skipped = sum(case["status"] in {"skipped", "missing"} for case in observed_case_results)
-        attempts = [
-            {
-                "attempt": index,
-                "status": "passed" if all(case["status"] == "passed" for case in cases) else "failed",
-                "exit_code": completed.returncode if index == len(attempt_case_results) else 1,
-                "log": log,
-                "cases": cases,
-            }
-            for index, cases in enumerate(attempt_case_results, start=1)
-        ]
+        attempts = attempt_records(attempt_case_results, completed.returncode, log)
         retry_count = len(attempts) - 1
         record = {
             "suite_id": suite["id"],

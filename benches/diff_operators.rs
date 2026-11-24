@@ -7,7 +7,9 @@
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use pg_trickle::dvm::diff::DiffContext;
-use pg_trickle::dvm::parser::{AggExpr, AggFunc, Column, Expr, OpTree, SortExpr, WindowExpr};
+use pg_trickle::dvm::parser::{
+    AggExpr, AggFunc, AnalyzedAggregateArgument, Column, Expr, OpTree, SortExpr, WindowExpr,
+};
 use pg_trickle::version::Frontier;
 use std::time::Duration;
 
@@ -566,7 +568,14 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 statistical_support: None,
             },
             AggExpr {
-                analyzed_argument: None,
+                // The synthetic scans use int4 columns, so this expression is int4 too.
+                analyzed_argument: Some(AnalyzedAggregateArgument {
+                    location: -1,
+                    type_oid: 23,
+                    typmod: -1,
+                    type_schema: "pg_catalog".to_string(),
+                    type_name: "int4".to_string(),
+                }),
                 function: AggFunc::Sum,
                 argument: Some(Expr::BinaryOp {
                     op: "*".to_string(),

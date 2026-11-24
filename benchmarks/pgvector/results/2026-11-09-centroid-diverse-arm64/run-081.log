@@ -1,0 +1,20 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.46s
+     Running tests/e2e_pgvector_tests.rs (/private/tmp/pg-trickle-task-1399/target/debug/deps/e2e_pgvector_tests-0b480014c9ba917b)
+
+running 1 test
+test test_centroid_diverse_high_dimensional_drift_matches_native_avg has been running for over 60 seconds
+
+thread 'test_centroid_diverse_high_dimensional_drift_matches_native_avg' (2970638) panicked at tests/e2e_pgvector_tests.rs:1965:9:
+churn state became unbound at step 1468, algebraic=false
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test test_centroid_diverse_high_dimensional_drift_matches_native_avg ... FAILED
+
+failures:
+
+failures:
+    test_centroid_diverse_high_dimensional_drift_matches_native_avg
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 139 filtered out; finished in 402.71s
+
+error: test failed, to rerun pass `--test e2e_pgvector_tests`

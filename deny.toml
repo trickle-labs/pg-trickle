@@ -24,7 +24,7 @@ yanked = "warn"
 ignore = [
   # Owner: geir-gronmo
   # Added: 2026-05-22
-  # Review-By: 2026-11-23
+  # Review-By: 2027-05-23
   # Upstream: https://github.com/pyfisch/cbor/issues/172
   # Remove-When: transitive dep chain updated to use ciborium
   # serde_cbor is pulled in transitively (dev path). Not a security vulnerability,

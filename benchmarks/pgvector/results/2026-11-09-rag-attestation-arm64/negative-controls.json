@@ -1,0 +1,5 @@
+{
+  "archive_digest": "candidate archive SHA-256 does not match",
+  "different_database": "benchmark connection and attested container are different PostgreSQL instances",
+  "installed_payload": "installed extension payload differs from the candidate archive"
+}

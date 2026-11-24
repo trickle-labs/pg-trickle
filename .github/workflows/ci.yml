@@ -82,6 +82,7 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
+      candidate_commit: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       runtime: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.paths.outputs.runtime == 'true' || steps.paths.outputs.harness == 'true' }}
       benchmarks: ${{ steps.paths.outputs.benchmarks }}
       shipping: ${{ steps.paths.outputs.shipping }}
@@ -92,6 +93,10 @@ jobs:
       intersect_mutants: ${{ steps.paths.outputs.intersect_mutants }}
     steps:
       - uses: actions/checkout@v7
+        # Release contracts describe the exact candidate version, not a PR merge
+        # that may combine it with APIs targeting a later package release.
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Select checks for changed files
         id: paths
@@ -281,7 +286,7 @@ jobs:
     name: Unit tests (scheduled/manual, macos-arm64)
     needs: release-qualification-contract
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -495,6 +500,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-qualification-contract.outputs.candidate_commit }}
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -514,11 +521,15 @@ jobs:
 
   release-evidence-runtime:
     name: Release evidence runtime controls
-    needs: light-e2e-package
+    needs: [light-e2e-package, release-qualification-contract]
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      PGT_RELEASE_CANDIDATE_COMMIT: ${{ needs.release-qualification-contract.outputs.candidate_commit }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-qualification-contract.outputs.candidate_commit }}
 
       - name: Prepare runner disk space
         run: bash scripts/ci_prepare_disk.sh
@@ -542,7 +553,7 @@ jobs:
         run: |
           python3 scripts/run_release_proof.py \
             --package-dir target/release/pg_trickle-pg18 \
-            --candidate-commit "$GITHUB_SHA"
+            --candidate-commit "$PGT_RELEASE_CANDIDATE_COMMIT"
 
       - name: Upload release proof records
         uses: actions/upload-artifact@v7
@@ -559,7 +570,7 @@ jobs:
   # to reduce PR wall-clock time.
   light-e2e-tests:
     name: Light E2E tests (${{ matrix.shard_name }})
-    needs: light-e2e-package
+    needs: [light-e2e-package, release-qualification-contract]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -577,6 +588,8 @@ jobs:
             shard_name: 3/3
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-qualification-contract.outputs.candidate_commit }}
 
       - name: Prepare runner disk space
         run: bash scripts/ci_prepare_disk.sh
@@ -598,7 +611,7 @@ jobs:
 
       - name: Run light-E2E test suite
         env:
-          PGT_RELEASE_CANDIDATE_COMMIT: ${{ github.sha }}
+          PGT_RELEASE_CANDIDATE_COMMIT: ${{ needs.release-qualification-contract.outputs.candidate_commit }}
         run: |
           bash ./scripts/run_light_e2e_tests.sh \
             --shard-index ${{ matrix.shard_index }} \
@@ -616,12 +629,14 @@ jobs:
   # Ordinary same-version E2E tests cannot reproduce old physical SUM/AVG state.
   legacy-aggregate-upgrade:
     name: Published v0.108.3 SUM/AVG upgrade
-    needs: light-e2e-package
+    needs: [light-e2e-package, release-qualification-contract]
     if: github.event_name == 'pull_request' && !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-qualification-contract.outputs.candidate_commit }}
 
       - name: Prepare runner disk space
         run: bash scripts/ci_prepare_disk.sh
@@ -650,11 +665,13 @@ jobs:
     timeout-minutes: 45
     env:
       PGT_RELEASE_ATTESTATION_PATH: target/lsn-install-attestation.json
-      PGT_RELEASE_CANDIDATE_COMMIT: ${{ github.sha }}
+      PGT_RELEASE_CANDIDATE_COMMIT: ${{ needs.release-qualification-contract.outputs.candidate_commit }}
       PGT_RELEASE_BUILD_KIND: ci-package
       PGT_RELEASE_FEATURE_SCOPE: pg18
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-qualification-contract.outputs.candidate_commit }}
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -728,7 +745,7 @@ jobs:
             --proof-record .p2p/work/issue-1097-verified-production-lsn/evidence/lsn-verification.json \
             --package-dir target/release/pg_trickle-pg18 \
             --installation target/lsn-full-install-attestation.json \
-            --candidate-commit "$GITHUB_SHA" \
+            --candidate-commit "$PGT_RELEASE_CANDIDATE_COMMIT" \
             --runtime-case e2e_lsn_contract_tests::test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers \
             --runtime-case e2e_lsn_contract_tests::test_lsn_scheduler_preserves_malformed_frontier_and_recovers \
             --runtime-case e2e_lsn_contract_tests::test_lsn_scheduler_cdc_holdback_recovers_after_long_writer \
@@ -753,7 +770,7 @@ jobs:
             --proof-record .p2p/work/issue-1222-receipt-prefix/evidence/receipt-verification.json \
             --package-dir target/release/pg_trickle-pg18 \
             --installation target/receipt-full-install-attestation.json \
-            --candidate-commit "$GITHUB_SHA" \
+            --candidate-commit "$PGT_RELEASE_CANDIDATE_COMMIT" \
             --runtime-case e2e_wal_receipt_recovery_tests::test_wal_receipt_small_limits_preserve_complete_transactions \
             --runtime-case e2e_wal_receipt_recovery_tests::test_wal_receipts_do_not_recursively_capture_their_own_payloads \
             --runtime-case e2e_wal_receipt_recovery_tests::test_wal_receipt_commit_order_preserves_late_old_lsn_transaction \
@@ -786,7 +803,7 @@ jobs:
             --proof-record .p2p/work/issue-1220-aggregate-lifecycle/evidence/lifecycle-verification.json \
             --package-dir target/release/pg_trickle-pg18 \
             --installation target/lifecycle-full-install-attestation.json \
-            --candidate-commit "$GITHUB_SHA" \
+            --candidate-commit "$PGT_RELEASE_CANDIDATE_COMMIT" \
             --runtime-case e2e_having_transition_tests::test_having_all_nine_truth_transitions_match_postgresql \
             --runtime-case e2e_having_transition_tests::test_having_grouped_and_global_empty_lifecycle_match_postgresql \
             --output .p2p/work/issue-1220-aggregate-lifecycle/evidence/lifecycle-candidate-binding.json
@@ -802,7 +819,7 @@ jobs:
             --proof-record .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-verification.json \
             --package-dir target/release/pg_trickle-pg18 \
             --installation target/cdc-elision-full-install-attestation.json \
-            --candidate-commit "$GITHUB_SHA" \
+            --candidate-commit "$PGT_RELEASE_CANDIDATE_COMMIT" \
             --runtime-case e2e_keyless_tests::test_keyless_multiset_same_window_insert_delete_preserves_multiplicity \
             --runtime-case e2e_shared_buffer_tests::test_shared_domain_over_admitted_base_retains_changed_bit \
             --runtime-case e2e_shared_buffer_tests::test_shared_float_images_preserve_sql_equal_distinct_binary_values \
@@ -845,7 +862,7 @@ jobs:
             --proof-record .p2p/work/issue-1223-join-checker/evidence/join-plan-verification.json \
             --package-dir target/release/pg_trickle-pg18 \
             --installation target/join-plan-full-install-attestation.json \
-            --candidate-commit "$GITHUB_SHA" \
+            --candidate-commit "$PGT_RELEASE_CANDIDATE_COMMIT" \
             --runtime-case e2e_join_tests::test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows \
             --runtime-case e2e_refresh_atomicity_tests::test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut \
             --runtime-case e2e_join_tests::test_nested_inner_join_correction_in_semijoin_context_matches_postgres \
@@ -862,7 +879,7 @@ jobs:
             --proof-record .p2p/work/issue-1224-identity-framing/evidence/identity-frame-verification.json \
             --package-dir target/release/pg_trickle-pg18 \
             --installation target/identity-frame-full-install-attestation.json \
-            --candidate-commit "$GITHUB_SHA" \
+            --candidate-commit "$PGT_RELEASE_CANDIDATE_COMMIT" \
             --runtime-case e2e_row_id_v2_tests::test_identity_scalar_frames_preserve_installed_v2_v3_bytes \
             --runtime-case e2e_row_id_v2_tests::test_identity_colliding_probes_preserve_merge_and_join_complete_ids \
             --output .p2p/work/issue-1224-identity-framing/evidence/identity-frame-candidate-binding.json
@@ -1109,9 +1126,12 @@ jobs:
           # Scripts with a from-version older than SUPPORT_CUTOFF are kept in
           # sql/ for PostgreSQL chain compatibility but are not re-validated in
           # CI (they are stable, fully-tested historical scripts).
+          # Future-targeted migrations remain in the tree for later package versions.
           SUPPORT_CUTOFF="0.40.0"
           # Returns 0 if version $1 >= $2 (uses sort -V for correctness).
           version_ge() { printf '%s\n%s' "$2" "$1" | sort -V -C; }
+          # Returns 0 if version $1 <= $2.
+          version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
           current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           pairs=()
           for f in sql/pg_trickle--*--*.sql; do
@@ -1119,6 +1139,9 @@ jobs:
             from=${base#pg_trickle--}
             to=${from#*--}
             from=${from%%--*}
+            if ! version_le "$to" "$current_version"; then
+              continue
+            fi
             if version_ge "$from" "$SUPPORT_CUTOFF"; then
               pairs+=("$from $to")
             fi
@@ -1185,8 +1208,19 @@ jobs:
         if: steps.changes.outputs.run_upgrade_slice == 'true'
         id: pair
         run: |
-          # Find the most recent X→Y SQL upgrade script (highest Y).
-          latest=$(ls sql/pg_trickle--*--*.sql | sort -V | tail -1)
+          # Select the latest migration that belongs to this package version.
+          version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
+          current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          latest=$(for f in sql/pg_trickle--*--*.sql; do
+            base=$(basename "$f" .sql)
+            from=${base#pg_trickle--}
+            to=${from#*--}
+            if version_le "$to" "$current_version"; then echo "$f"; fi
+          done | sort -V | tail -1)
+          if [[ -z "$latest" ]]; then
+            echo "ERROR: no upgrade script targets v${current_version} or earlier"
+            exit 1
+          fi
           base=$(basename "$latest" .sql)
           from=${base#pg_trickle--}
           to=${from#*--}
@@ -1200,6 +1234,7 @@ jobs:
         run: |
           # Build the extension artifacts via cargo pgrx package so we can
           # create a lite base Docker image without the full ~10-min builder.
+          rm -rf target/release/pg_trickle-pg18
           cargo pgrx package --features pg18 \
             --pg-config /usr/lib/postgresql/18/bin/pg_config
           # Stage into _e2e_pkg/ — target/ is excluded by .dockerignore so
@@ -1269,6 +1304,8 @@ jobs:
           SUPPORT_CUTOFF="0.40.0"
           # Returns 0 if version $1 >= $2 (sort -V for correctness).
           version_ge() { printf '%s\n%s' "$2" "$1" | sort -V -C; }
+          # Returns 0 if version $1 <= $2.
+          version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
           current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           items='['
           first=true
@@ -1277,6 +1314,9 @@ jobs:
             from=${base#pg_trickle--}
             to=${from#*--}
             from=${from%%--*}
+            if ! version_le "$to" "$current_version"; then
+              continue
+            fi
             # Skip pairs whose from-version predates the support cutoff.
             if ! version_ge "$from" "$SUPPORT_CUTOFF"; then
               continue

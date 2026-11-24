@@ -67,6 +67,7 @@ COPY pg_trickle.control ./
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/build/target,sharing=locked \
+    rm -rf target/release/pg_trickle-pg18 && \
     cargo clean --release -p pg_trickle && \
     if [ -n "$E2E_FEATURES" ]; then \
       cargo pgrx package --pg-config /usr/bin/pg_config --features "$E2E_FEATURES"; \

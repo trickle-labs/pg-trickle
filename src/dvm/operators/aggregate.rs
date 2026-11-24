@@ -9,13 +9,21 @@
 //! - Vanishes (new_count ≤ 0, was > 0) → DELETE
 //! - Changes value → UPDATE (emitted as DELETE + INSERT pair)
 
-use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
+use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, push_quoted_ident, quote_ident};
 use crate::dvm::operators::join_common::{
     build_snapshot_inline_from, build_snapshot_sql, snapshot_join_column_name,
 };
 use crate::dvm::operators::scan::build_hash_expr_for_domain;
 use crate::dvm::parser::{AggExpr, AggFunc, CteRegistry, Expr, OpTree, apply_column_aliases};
 use crate::error::PgTrickleError;
+
+fn qualified_column(prefix: &str, name: &str) -> String {
+    let mut result = String::with_capacity(prefix.len() + name.len() + 3);
+    result.push_str(prefix);
+    result.push('.');
+    push_quoted_ident(&mut result, name);
+    result
+}
 
 /// Resolve a column reference expression against child CTE column names.
 ///
@@ -114,47 +122,91 @@ fn resolve_expr_for_child(expr: &Expr, child_cols: &[String]) -> String {
 /// Compare GROUP BY keys with a hash key and an exact NULL-safe check.
 ///
 /// Both sides must contain corresponding keys in the same order and types.
+fn push_hashable_group_match(out: &mut String, left: &str, right: &str) {
+    out.push_str("pg_catalog.hash_record_extended(ROW(");
+    out.push_str(left);
+    out.push_str("), 0::bigint) = pg_catalog.hash_record_extended(ROW(");
+    out.push_str(right);
+    out.push_str("), 0::bigint) AND ROW(");
+    out.push_str(left);
+    out.push_str(") IS NOT DISTINCT FROM ROW(");
+    out.push_str(right);
+    out.push(')');
+}
+
 fn hashable_group_match(left: &[String], right: &[String]) -> String {
-    let left = left.join(", ");
-    let right = right.join(", ");
-    format!(
-        "pg_catalog.hash_record_extended(ROW({left}), 0::bigint) = pg_catalog.hash_record_extended(ROW({right}), 0::bigint) AND ROW({left}) IS NOT DISTINCT FROM ROW({right})"
-    )
+    let left_joined = left.join(", ");
+    let right_joined = right.join(", ");
+    let mut out = String::with_capacity(140 + (left_joined.len() + right_joined.len()) * 2);
+    push_hashable_group_match(&mut out, &left_joined, &right_joined);
+    out
 }
 
 /// Build a NULL-safe affected-group filter without shadowing source columns.
 ///
 /// The delta columns are renamed inside the subquery, while the source side
 /// uses the original GROUP BY expressions so joins keep their qualifiers.
+fn build_group_filter_from_joined(
+    delta_cte: &str,
+    source_keys_joined: &str,
+    group_count: usize,
+    delta_filter: Option<&str>,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut delta_cols = String::with_capacity(group_count * 18);
+    let mut delta_keys = String::with_capacity(group_count * 28);
+    for index in 0..group_count {
+        if index > 0 {
+            delta_cols.push_str(", ");
+            delta_keys.push_str(", ");
+        }
+        let _ = write!(delta_cols, "\"__pgt_group_{index}\"");
+        let _ = write!(delta_keys, "__pgt_d2.\"__pgt_group_{index}\"");
+    }
+
+    let extra_filter_len = delta_filter.map_or(0, |f| f.len() + 7);
+    let mut out = String::with_capacity(
+        200 + delta_cte.len()
+            + delta_cols.len()
+            + (source_keys_joined.len() + delta_keys.len()) * 2
+            + extra_filter_len,
+    );
+    out.push_str("EXISTS (SELECT 1 FROM ");
+    out.push_str(delta_cte);
+    out.push_str(" AS __pgt_d2(");
+    out.push_str(&delta_cols);
+    out.push_str(") WHERE ");
+    push_hashable_group_match(&mut out, source_keys_joined, &delta_keys);
+    if let Some(filter) = delta_filter {
+        out.push_str(" AND (");
+        out.push_str(filter);
+        out.push(')');
+    }
+    out.push(')');
+    out
+}
+
 fn build_group_filter(
     delta_cte: &str,
     group_by: &[Expr],
     group_output: &[String],
     delta_filter: Option<&str>,
 ) -> String {
-    let delta_cols = group_output
-        .iter()
-        .enumerate()
-        .map(|(index, _)| quote_ident(&format!("__pgt_group_{index}")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let source_keys: Vec<String> = group_by.iter().map(Expr::to_sql).collect();
-    let delta_keys: Vec<String> = (0..group_output.len())
-        .map(|index| format!("__pgt_d2.{}", quote_ident(&format!("__pgt_group_{index}"))))
-        .collect();
-    let condition = hashable_group_match(&source_keys, &delta_keys);
-    let delta_filter = delta_filter
-        .map(|filter| format!(" AND ({filter})"))
-        .unwrap_or_default();
-    format!(
-        "EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_cols}) WHERE {condition}{delta_filter})"
-    )
+    let mut source_keys = String::with_capacity(group_by.len() * 16);
+    for (index, expr) in group_by.iter().enumerate() {
+        if index > 0 {
+            source_keys.push_str(", ");
+        }
+        source_keys.push_str(&expr.to_sql());
+    }
+    build_group_filter_from_joined(delta_cte, &source_keys, group_output.len(), delta_filter)
 }
 
 fn special_aggregate_delta_filter(aggregates: &[AggExpr], child: &OpTree) -> Option<String> {
     let filters: Vec<String> = aggregates
         .iter()
-        .filter(|agg| needs_special_value_rescan(agg))
+        .filter(|agg| needs_special_value_rescan(agg, child))
         .map(|agg| {
             let state_guard = if agg.uses_incremental_nonfinite_state(child) {
                 format!(
@@ -189,10 +241,89 @@ fn special_state_delta_exprs(
     (state_for("I"), state_for("D"))
 }
 
-fn needs_special_value_rescan(agg: &AggExpr) -> bool {
-    !agg.is_distinct
-        && (matches!(agg.function, AggFunc::Sum | AggFunc::Avg)
+fn needs_special_value_rescan(agg: &AggExpr, child: &OpTree) -> bool {
+    if agg.is_distinct
+        || !(matches!(agg.function, AggFunc::Sum | AggFunc::Avg)
             || agg.function.needs_sum_of_squares())
+    {
+        return false;
+    }
+
+    let type_oid = if let Some(argument) = agg
+        .analyzed_argument
+        .as_ref()
+        .filter(|argument| argument.type_oid != 0)
+    {
+        Some(argument.type_oid)
+    } else if let Some(Expr::ColumnRef {
+        table_alias,
+        column_name,
+    }) = agg.argument.as_ref()
+    {
+        source_column_type_oid(child, table_alias.as_deref(), column_name)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    !type_oid.is_some_and(|type_oid| matches!(type_oid, 20 | 21 | 23))
+}
+
+/// Resolve a source column only through tree shapes where scan type metadata
+/// remains exact. Unsupported or ambiguous shapes retain the special-value
+/// rescan path.
+fn source_column_type_oid(
+    tree: &OpTree,
+    table_alias: Option<&str>,
+    column_name: &str,
+) -> Result<Option<u32>, ()> {
+    match tree {
+        OpTree::Scan { alias, columns, .. } => {
+            if table_alias.is_some_and(|table| table != alias) {
+                return Ok(None);
+            }
+            Ok(columns
+                .iter()
+                .find(|column| column.name == column_name)
+                .map(|column| column.type_oid))
+        }
+        OpTree::Filter { child, .. } => source_column_type_oid(child, table_alias, column_name),
+        OpTree::SemiJoin { left, .. } | OpTree::AntiJoin { left, .. } => {
+            source_column_type_oid(left, table_alias, column_name)
+        }
+        OpTree::InnerJoin { left, right, .. } if table_alias.is_some() => {
+            let left = source_column_type_oid(left, table_alias, column_name)?;
+            let right = source_column_type_oid(right, table_alias, column_name)?;
+            match (left, right) {
+                (Some(_), Some(_)) => Err(()),
+                (left, right) => Ok(left.or(right)),
+            }
+        }
+        _ => Err(()),
+    }
+}
+
+fn direct_sum_uses_row_count(agg: &AggExpr, scan: &OpTree) -> bool {
+    if !matches!(agg.function, AggFunc::Sum) || agg.is_distinct || agg.filter.is_some() {
+        return false;
+    }
+    let Some(Expr::ColumnRef {
+        table_alias,
+        column_name,
+    }) = agg.argument.as_ref()
+    else {
+        return false;
+    };
+    let OpTree::Scan { alias, columns, .. } = scan else {
+        return false;
+    };
+    if table_alias.as_deref().is_some_and(|table| table != alias) {
+        return false;
+    }
+    columns
+        .iter()
+        .find(|column| column.name == *column_name)
+        .is_some_and(|column| !column.is_nullable)
 }
 
 fn internal_group_columns(group_output: &[String]) -> Vec<String> {
@@ -392,7 +523,7 @@ pub(crate) fn centroid_signed_delta_sql(
     };
     let keys = names
         .iter()
-        .map(|name| format!("d.{}", quote_ident(name)))
+        .map(|name| qualified_column("d", name))
         .collect::<Vec<_>>();
     let row_id = build_hash_expr_for_domain("GROUP_KEY", &keys);
     let sql = format!(
@@ -1124,7 +1255,7 @@ fn build_intermediate_agg_delta(
         // make the DELETE half of a D+I update miss the stored row.
         let group_hash_d: Vec<String> = group_columns
             .iter()
-            .map(|c| format!("d.{}", quote_ident(c)))
+            .map(|c| qualified_column("d", c))
             .collect();
         let group_hash_n: Vec<String> = group_columns
             .iter()
@@ -1225,17 +1356,22 @@ fn build_intermediate_agg_delta(
             format!("{delta_cte} AS d({delta_group_aliases})")
         };
 
-        let old_presence = format!(
-            "\nWHERE {}",
-            crate::aggregate_lifecycle::group_presence_sql(group_columns.is_empty(), old_pgt_count,)
-        );
-        let new_presence = format!(
-            "\nWHERE {}",
-            crate::aggregate_lifecycle::group_presence_sql(
-                group_columns.is_empty(),
-                "n.__pgt_count",
+        let old_presence = if group_columns.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nWHERE {}",
+                crate::aggregate_lifecycle::group_presence_sql(false, old_pgt_count)
             )
-        );
+        };
+        let new_presence = if group_columns.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nWHERE {}",
+                crate::aggregate_lifecycle::group_presence_sql(false, "n.__pgt_count")
+            )
+        };
         let final_sql = format!(
             "\
 -- D events: old state (algebraic: old = new - ins + del)
@@ -1428,7 +1564,7 @@ impl RescanConfig<'_> {
             || agg.function.is_group_rescan()
             || matches!(agg.function, AggFunc::Min | AggFunc::Max)
             || (self.include_special_aggs
-                && needs_special_value_rescan(agg)
+                && needs_special_value_rescan(agg, child)
                 && !agg.uses_incremental_nonfinite_state(child))
     }
 }
@@ -1614,7 +1750,7 @@ fn build_rescan_cte(
                 quote_ident(&format!("__pgt_rescan_special_{}", agg.alias)),
             ));
         }
-        if config.include_special_aggs && needs_special_value_rescan(agg) {
+        if config.include_special_aggs && needs_special_value_rescan(agg, child) {
             selects.push(format!(
                 "{} AS {}",
                 agg_sum_rescan_sql(agg),
@@ -1652,12 +1788,21 @@ fn build_rescan_cte(
         }
     }
 
-    // Build GROUP BY clause
+    // Build GROUP BY clause (and reuse the joined expressions for build_group_filter)
+    let mut group_by_exprs = String::new();
     let group_by_sql = if group_by.is_empty() {
         String::new()
     } else {
-        let gb: Vec<String> = group_by.iter().map(|e| e.to_sql()).collect();
-        format!("\nGROUP BY {}", gb.join(", "))
+        for (index, expr) in group_by.iter().enumerate() {
+            if index > 0 {
+                group_by_exprs.push_str(", ");
+            }
+            group_by_exprs.push_str(&expr.to_sql());
+        }
+        let mut sql = String::with_capacity(10 + group_by_exprs.len());
+        sql.push_str("\nGROUP BY ");
+        sql.push_str(&group_by_exprs);
+        sql
     };
 
     // Try to reconstruct the FROM clause from the child OpTree
@@ -1672,10 +1817,10 @@ fn build_rescan_cte(
                 })
                 .unwrap_or_default()
         } else {
-            build_group_filter(
+            build_group_filter_from_joined(
                 delta_cte,
-                group_by,
-                group_output,
+                &group_by_exprs,
+                group_output.len(),
                 config.special_value_filter,
             )
         };
@@ -2133,10 +2278,9 @@ fn generate_direct_agg_delta(
     let delta_cte = ctx.next_cte_name("agg_delta");
     let mut select_exprs = Vec::new();
 
-    // Group columns: c."region" AS "region"
-    // A44-10: direct CB reference — same value on both I and D rows within a group
+    // Group columns: the direct reference already carries its output name.
     for name in &group_output {
-        select_exprs.push(format!("c.{} AS {}", quote_ident(name), quote_ident(name),));
+        select_exprs.push(qualified_column("c", name));
     }
 
     // __ins_count, __del_count (total row counts per group)
@@ -2167,7 +2311,7 @@ fn generate_direct_agg_delta(
             quote_ident(&format!("__del_{}", agg.alias)),
         ));
 
-        if needs_special_value_rescan(agg) {
+        if needs_special_value_rescan(agg, scan) {
             let argument = case_rewrites
                 .get(&agg.alias)
                 .cloned()
@@ -2197,7 +2341,10 @@ fn generate_direct_agg_delta(
 
         // SUM needs a qualifying non-NULL count so the algebraic merge can
         // restore PostgreSQL's NULL result when the last value disappears.
-        if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
+        if matches!(agg.function, AggFunc::Sum)
+            && !agg.is_distinct
+            && !direct_sum_uses_row_count(agg, scan)
+        {
             let argument = case_rewrites
                 .get(&agg.alias)
                 .cloned()
@@ -2220,7 +2367,7 @@ fn generate_direct_agg_delta(
     } else {
         let refs: Vec<String> = group_output
             .iter()
-            .map(|name| format!("c.{}", quote_ident(name)))
+            .map(|name| qualified_column("c", name))
             .collect();
         format!("\nGROUP BY {}", refs.join(", "))
     };
@@ -2268,7 +2415,7 @@ fn direct_agg_delta_exprs(agg: &AggExpr, _has_value_only: bool) -> (String, Stri
             let col = agg
                 .argument
                 .as_ref()
-                .map(|e| format!("c.{}", quote_ident(&e.output_name())))
+                .map(|e| qualified_column("c", &e.output_name()))
                 .unwrap_or_else(|| "1".to_string());
             (
                 // COUNT checks the datum null flag; IS NOT NULL tests composite fields.
@@ -2282,7 +2429,7 @@ fn direct_agg_delta_exprs(agg: &AggExpr, _has_value_only: bool) -> (String, Stri
             let col = agg
                 .argument
                 .as_ref()
-                .map(|e| format!("c.{}", quote_ident(&e.output_name())))
+                .map(|e| qualified_column("c", &e.output_name()))
                 .unwrap_or_else(|| "0".to_string());
             (
                 format!("SUM(CASE WHEN c.action = 'I' THEN {col} ELSE 0 END)"),
@@ -2304,7 +2451,7 @@ fn direct_agg_argument_expr(agg: &AggExpr) -> String {
     agg.argument
         .as_ref()
         .map(|expr| match expr {
-            Expr::ColumnRef { .. } => format!("c.{}", quote_ident(&expr.output_name())),
+            Expr::ColumnRef { column_name, .. } => qualified_column("c", column_name),
             _ => expr.to_sql(),
         })
         .unwrap_or_else(|| "1".to_string())
@@ -2392,7 +2539,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             delta_selects.push(format!("{ins_expr} AS {}", quote_ident(&alias_i)));
             delta_selects.push(format!("{del_expr} AS {}", quote_ident(&alias_d)));
 
-            if needs_special_value_rescan(agg) {
+            if needs_special_value_rescan(agg, child) {
                 let argument = agg
                     .argument
                     .as_ref()
@@ -2562,7 +2709,9 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     };
     let rescan_config = RescanConfig {
         force_all_aggs: use_having_rescan,
-        include_special_aggs: aggregates.iter().any(needs_special_value_rescan),
+        include_special_aggs: aggregates
+            .iter()
+            .any(|agg| needs_special_value_rescan(agg, child)),
         special_value_filter: special_value_filter.as_deref(),
     };
     let rescan_cte = build_rescan_cte(
@@ -2596,7 +2745,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // Row ID from group-by columns (using output names)
     let group_hash_exprs: Vec<String> = group_columns
         .iter()
-        .map(|c| format!("d.{}", quote_ident(c)))
+        .map(|c| qualified_column("d", c))
         .collect();
     let row_id_expr = if group_hash_exprs.is_empty() {
         "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
@@ -2617,7 +2766,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     // Group columns
     for col in &group_columns {
-        merge_selects.push(format!("d.{}", quote_ident(col)));
+        merge_selects.push(qualified_column("d", col));
     }
 
     // New count = old + inserts - deletes
@@ -2648,7 +2797,9 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         // SUM and AVG use rescan values only when deltas contain special
         // numeric values; ordinary changes keep the algebraic path.
         let agg_has_nonnull_aux = matches!(agg.function, AggFunc::Sum) && !agg.is_distinct;
+        let sum_nonnull_from_row_count = use_p5 && direct_sum_uses_row_count(agg, child);
         let agg_has_rescan = rescan_config.includes(agg, child);
+        let has_special_value_delta = needs_special_value_rescan(agg, child);
         let special_state = if agg.uses_incremental_nonfinite_state(child) {
             let state_col = quote_ident(&format!("__pgt_aux_special_{}", st_col_name(&agg.alias)));
             let inserts = quote_ident(&format!("__ins_special_{}", agg.alias));
@@ -2687,13 +2838,11 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         let algebraic_value = agg_merge_expr_mapped(
             agg,
             agg_has_rescan,
+            has_special_value_delta,
             use_having_rescan,
             agg_has_nonnull_aux,
+            sum_nonnull_from_row_count,
             &st_col_name(&agg.alias),
-            ctx.agg_sum_coalesce_defaults
-                .as_ref()
-                .and_then(|m| m.get(&agg.alias))
-                .map(|s| s.as_str()),
         );
         let new_val_expr = if let Some((_, value, use_state)) = &special_state {
             let value = format!("({value})::numeric");
@@ -2703,6 +2852,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                         &agg.alias,
                         &st_col_name(&agg.alias),
                         use_having_rescan,
+                        sum_nonnull_from_row_count,
                     );
                     crate::aggregate_lifecycle::aggregate_value_sql(true, &new_nonnull, &value)
                 }
@@ -2771,7 +2921,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                     &format!("({value})::numeric"),
                 );
                 format!("CASE WHEN {use_state} THEN {special_value} ELSE {aux_sum_value} END")
-            } else if needs_special_value_rescan(agg) && agg_has_rescan {
+            } else if needs_special_value_rescan(agg, child) && agg_has_rescan {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN COALESCE(r.{}, 0) ELSE {aux_sum_value} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
@@ -2810,7 +2960,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             let algebraic = format!(
                 "COALESCE(st.{aux_sum2}, 0) + COALESCE(d.{ins_sum2}, 0) - COALESCE(d.{del_sum2}, 0)"
             );
-            let value = if agg_has_rescan {
+            let value = if agg_has_rescan && has_special_value_delta {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {algebraic} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
@@ -2842,7 +2992,12 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         // Update the SUM nonnull-count auxiliary column.
         if agg_has_nonnull_aux {
             let st_alias = st_col_name(&agg.alias);
-            let new_nonnull = sum_nonnull_count_expr(&agg.alias, &st_alias, use_having_rescan);
+            let new_nonnull = sum_nonnull_count_expr(
+                &agg.alias,
+                &st_alias,
+                use_having_rescan,
+                sum_nonnull_from_row_count,
+            );
             merge_selects.push(format!(
                 "{new_nonnull} AS {}",
                 quote_ident(&format!("new___pgt_aux_nonnull_{}", agg.alias)),
@@ -2898,20 +3053,20 @@ END AS __pgt_meta_action"#
             } else {
                 st_col_name(column)
             };
-            format!("sub.{}", quote_ident(&storage_name))
+            qualified_column("sub", &storage_name)
         })
         .collect();
     // FULL encoding does not parenthesize composite ROW elements; delta
     // encoding does. The parentheses do not change values or types, but
     // these SQL strings must be compared in FULL's exact canonical form.
-    let expected_full_identity =
-        crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys);
     // An unknown FULL identity (e.g. execution-harness state or legacy
     // targets) must not assume that a GROUP_KEY probe will find the row.
     let can_probe_row_identity = ctx
         .st_full_row_identity_expr
         .as_ref()
-        .is_some_and(|full_expr| full_expr == &expected_full_identity);
+        .is_some_and(|full_expr| {
+            full_expr == &crate::hash::build_row_identity_expr("GROUP_KEY", &stored_group_keys)
+        });
 
     // PostgreSQL 18 cannot use a B-tree/hash join for a composite
     // IS NOT DISTINCT FROM predicate; it scanned the stream table for every
@@ -3580,7 +3735,20 @@ fn initialize_having_group(having_rescan: bool, rescanned: &str, algebraic: &str
     }
 }
 
-fn sum_nonnull_count_expr(alias: &str, st_col: &str, having_rescan: bool) -> String {
+fn sum_nonnull_count_expr(
+    alias: &str,
+    st_col: &str,
+    having_rescan: bool,
+    uses_row_count: bool,
+) -> String {
+    if uses_row_count {
+        return initialize_having_group(
+            having_rescan,
+            "COALESCE(r.\"__pgt_count\", 0)",
+            "COALESCE(st.\"__pgt_count\", 0) + COALESCE(d.\"__ins_count\", 0) - COALESCE(d.\"__del_count\", 0)",
+        );
+    }
+
     let aux = quote_ident(&format!("__pgt_aux_nonnull_{st_col}"));
     let ins = quote_ident(&format!("__ins_nonnull_{alias}"));
     let del = quote_ident(&format!("__del_nonnull_{alias}"));
@@ -3598,10 +3766,11 @@ fn sum_nonnull_count_expr(alias: &str, st_col: &str, having_rescan: bool) -> Str
 fn agg_merge_expr_mapped(
     agg: &AggExpr,
     has_rescan: bool,
+    has_special_value_delta: bool,
     having_rescan: bool,
     has_nonnull_aux: bool,
+    sum_nonnull_from_row_count: bool,
     st_col: &str,
-    _else_default: Option<&str>,
 ) -> String {
     let alias = &agg.alias;
     let qt = quote_ident(st_col);
@@ -3649,7 +3818,7 @@ fn agg_merge_expr_mapped(
                     format!("COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)");
                 let value =
                     initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
-                let value = if has_rescan {
+                let value = if has_rescan && has_special_value_delta {
                     format!(
                         "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
                         quote_ident(&format!("__special_{alias}")),
@@ -3657,7 +3826,12 @@ fn agg_merge_expr_mapped(
                 } else {
                     value
                 };
-                let new_nonnull = sum_nonnull_count_expr(alias, st_col, having_rescan);
+                let new_nonnull = sum_nonnull_count_expr(
+                    alias,
+                    st_col,
+                    having_rescan,
+                    sum_nonnull_from_row_count,
+                );
                 crate::aggregate_lifecycle::aggregate_value_sql(true, &new_nonnull, &value)
             } else if has_rescan {
                 // Rescan CTE available (HAVING context):
@@ -3703,7 +3877,7 @@ fn agg_merge_expr_mapped(
                  / NULLIF(COALESCE(st.{aux_count_col}, 0) + COALESCE(d.{ins_cnt}, 0) - COALESCE(d.{del_cnt}, 0), 0)",
             );
             let value = initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
-            if has_rescan {
+            if has_rescan && has_special_value_delta {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
                     quote_ident(&format!("__special_{alias}")),
@@ -3756,7 +3930,7 @@ fn agg_merge_expr_mapped(
                 var_expr
             };
             let algebraic = format!("CASE WHEN {null_guard} THEN NULL ELSE {body} END");
-            if has_rescan {
+            if has_rescan && has_special_value_delta {
                 format!(
                     "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {algebraic} END",
                     quote_ident(&format!("__special_{alias}")),
@@ -3970,9 +4144,9 @@ fn agg_merge_expr_mapped(
 
 /// Convenience wrapper: uses the aggregate's own alias as the ST column name.
 ///
-/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, false, false, &agg.alias, None)`.
+/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, has_rescan, false, false, false, &agg.alias)`.
 pub fn agg_merge_expr(agg: &AggExpr, has_rescan: bool) -> String {
-    agg_merge_expr_mapped(agg, has_rescan, false, false, &agg.alias, None)
+    agg_merge_expr_mapped(agg, has_rescan, has_rescan, false, false, false, &agg.alias)
 }
 
 #[cfg(test)]
@@ -4178,6 +4352,8 @@ mod tests {
         // Should use direct bypass (P5) since it's Scan → Aggregate with COUNT(*)
         // A44-10 (D+I schema): P5 uses c.action directly, no LATERAL VALUES
         assert_sql_contains(&sql, "changes_1");
+        assert_sql_contains(&sql, "c.\"region\"");
+        assert_sql_not_contains(&sql, "c.\"region\" AS \"region\"");
         assert_sql_contains(&sql, "c.action = 'I'");
         assert_sql_contains(&sql, "c.action = 'D'");
     }
@@ -4417,6 +4593,7 @@ mod tests {
 
         // G-S1: change detection guard should be present
         assert_sql_contains(&sql, "IS DISTINCT FROM");
+        assert!(!sql.contains("__special_total"));
     }
 
     // ── agg_delta_exprs tests ───────────────────────────────────────
@@ -4445,11 +4622,20 @@ mod tests {
         assert!(special_delta.contains("(amount)::text IN ('Infinity', '-Infinity', 'NaN')"));
 
         let mut child = scan(1, "t", "public", "t", &["amount"]);
+        let avg = avg_col("amount", "average");
+        let special_aggs = [sum_col("amount", "total"), avg.clone()];
+        assert!(
+            special_aggs
+                .iter()
+                .all(|agg| !needs_special_value_rescan(agg, &child))
+        );
+        assert!(special_aggregate_delta_filter(&special_aggs, &child).is_none());
+        let mut unknown_arg = sum_col("amount", "unknown");
+        unknown_arg.argument = Some(Expr::Raw("amount * 1.0".into()));
+        assert!(needs_special_value_rescan(&unknown_arg, &child));
         if let OpTree::Scan { columns, .. } = &mut child {
             columns[0].type_oid = 1700;
         }
-        let avg = avg_col("amount", "average");
-        let special_aggs = [sum_col("amount", "total"), avg.clone()];
         let special_filter = special_aggregate_delta_filter(&special_aggs, &child).unwrap();
         assert!(special_filter.contains("__special_total"));
         assert!(special_filter.contains("__special_average"));
@@ -4474,33 +4660,174 @@ mod tests {
         let merge = agg_merge_expr_mapped(
             &sum_col("amount", "total"),
             true,
+            true,
             false,
             true,
+            false,
             "total",
-            None,
         );
         assert!(merge.contains("d.\"__special_total\""));
         assert!(merge.contains("r.\"total\""));
 
-        let avg_merge = agg_merge_expr_mapped(&avg, true, false, false, "average", None);
+        let avg_merge = agg_merge_expr_mapped(&avg, true, true, false, false, false, "average");
         assert!(avg_merge.contains("d.\"__special_average\""));
         assert!(avg_merge.contains("r.\"average\""));
     }
 
     #[test]
+    fn test_join_special_value_rescan_resolves_integer_argument_type() {
+        let make_join = |amount_type_oid| {
+            let mut orders = scan(1, "orders", "public", "o", &["id", "amount"]);
+            if let OpTree::Scan { columns, .. } = &mut orders {
+                columns[1].type_oid = amount_type_oid;
+            }
+            inner_join(
+                binop(
+                    "=",
+                    Expr::ColumnRef {
+                        table_alias: Some("o".into()),
+                        column_name: "id".into(),
+                    },
+                    Expr::ColumnRef {
+                        table_alias: Some("c".into()),
+                        column_name: "id".into(),
+                    },
+                ),
+                orders,
+                scan(2, "customers", "public", "c", &["id"]),
+            )
+        };
+        let mut sum = sum_col("amount", "total");
+        sum.argument = Some(Expr::ColumnRef {
+            table_alias: Some("o".into()),
+            column_name: "amount".into(),
+        });
+
+        assert!(!needs_special_value_rescan(&sum, &make_join(23)));
+        assert!(needs_special_value_rescan(&sum, &make_join(701)));
+
+        sum.analyzed_argument = Some(crate::dvm::parser::AnalyzedAggregateArgument {
+            location: -1,
+            type_oid: 0,
+            typmod: -1,
+            type_schema: String::new(),
+            type_name: String::new(),
+        });
+        assert!(!needs_special_value_rescan(&sum, &make_join(23)));
+        assert!(needs_special_value_rescan(&sum, &make_join(701)));
+
+        let semi_join = OpTree::SemiJoin {
+            condition: binop(
+                "=",
+                Expr::ColumnRef {
+                    table_alias: Some("o".into()),
+                    column_name: "id".into(),
+                },
+                Expr::ColumnRef {
+                    table_alias: Some("li".into()),
+                    column_name: "id".into(),
+                },
+            ),
+            left: Box::new(scan(1, "orders", "public", "o", &["id"])),
+            right: Box::new(scan(2, "lineitem", "public", "li", &["id"])),
+        };
+        let joined_semi = inner_join(
+            binop(
+                "=",
+                Expr::ColumnRef {
+                    table_alias: Some("o".into()),
+                    column_name: "id".into(),
+                },
+                Expr::ColumnRef {
+                    table_alias: Some("l".into()),
+                    column_name: "id".into(),
+                },
+            ),
+            semi_join,
+            scan(3, "lineitem", "public", "l", &["id", "amount"]),
+        );
+        sum.analyzed_argument = None;
+        sum.argument = Some(Expr::ColumnRef {
+            table_alias: Some("l".into()),
+            column_name: "amount".into(),
+        });
+        assert!(!needs_special_value_rescan(&sum, &joined_semi));
+
+        sum.argument = Some(colref("amount"));
+        assert!(needs_special_value_rescan(&sum, &make_join(23)));
+    }
+
+    #[test]
+    fn test_analyzed_expression_type_controls_special_value_rescan() {
+        let make_tree = || {
+            let mut sum = sum_col("amount + 1", "total");
+            sum.argument = Some(Expr::Raw("amount + 1".into()));
+            sum.analyzed_argument = Some(crate::dvm::parser::AnalyzedAggregateArgument {
+                location: 42,
+                type_oid: 0,
+                typmod: -1,
+                type_schema: String::new(),
+                type_name: String::new(),
+            });
+            aggregate(
+                Vec::new(),
+                vec![sum],
+                scan(1, "source", "public", "s", &["amount"]),
+            )
+        };
+        let mut tree = make_tree();
+        let mut found_vector_aggregate = false;
+        crate::dvm::annotate_aggregate_arguments(
+            &mut tree,
+            &std::collections::HashMap::from([(42, 23)]),
+            &std::collections::HashMap::new(),
+            &mut found_vector_aggregate,
+        );
+        let OpTree::Aggregate {
+            aggregates, child, ..
+        } = &tree
+        else {
+            panic!("expected aggregate tree");
+        };
+        assert_eq!(
+            aggregates[0].analyzed_argument.as_ref().unwrap().type_oid,
+            23
+        );
+        assert!(!needs_special_value_rescan(&aggregates[0], child));
+
+        let mut tree = make_tree();
+        crate::dvm::annotate_aggregate_arguments(
+            &mut tree,
+            &std::collections::HashMap::from([(42, 701)]),
+            &std::collections::HashMap::new(),
+            &mut found_vector_aggregate,
+        );
+        let OpTree::Aggregate {
+            aggregates, child, ..
+        } = &tree
+        else {
+            panic!("expected aggregate tree");
+        };
+        assert!(needs_special_value_rescan(&aggregates[0], child));
+    }
+
+    #[test]
     fn test_statistical_special_values_rescan_auxiliaries() {
         let stddev = stddev_pop_col("amount", "stddev");
-        let child = scan(1, "t", "public", "t", &["amount"]);
+        let mut child = scan(1, "t", "public", "t", &["amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[0].type_oid = 1700;
+        }
         let filter = special_aggregate_delta_filter(std::slice::from_ref(&stddev), &child).unwrap();
         assert!(filter.contains("__special_stddev"));
-        assert!(needs_special_value_rescan(&stddev));
+        assert!(needs_special_value_rescan(&stddev, &child));
         assert_eq!(
             agg_sum2_rescan_sql(&stddev),
             "COALESCE(SUM((amount)::numeric * (amount)::numeric), 0)"
         );
         assert_eq!(agg_sum_rescan_sql(&stddev), "COALESCE(SUM(amount), 0)");
 
-        let merge = agg_merge_expr_mapped(&stddev, true, false, false, "stddev", None);
+        let merge = agg_merge_expr_mapped(&stddev, true, true, false, false, false, "stddev");
         assert!(merge.contains("d.\"__special_stddev\""));
         assert!(merge.contains("r.\"stddev\""));
     }
@@ -6257,6 +6584,10 @@ mod tests {
     #[test]
     fn test_diff_aggregate_mixed_with_statistical() {
         let mut ctx = test_ctx_with_st("public", "st");
+        let mut child = scan(1, "t", "public", "t", &["dept", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 1700;
+        }
         let agg = OpTree::Aggregate {
             group_by: vec![colref("dept")],
             aggregates: vec![
@@ -6264,7 +6595,7 @@ mod tests {
                 sum_col("amount", "total"),
                 stddev_pop_col("amount", "sd_pop"),
             ],
-            child: Box::new(scan(1, "t", "public", "t", &["dept", "amount"])),
+            child: Box::new(child),
         };
         let result = diff_aggregate(&mut ctx, &agg);
         assert!(
@@ -6557,7 +6888,10 @@ mod tests {
     #[test]
     fn test_sum_rescan_is_scoped_to_special_deltas() {
         let mut ctx = test_ctx_with_st("public", "st");
-        let child = scan(1, "t", "public", "t", &["region", "amount"]);
+        let mut child = scan(1, "t", "public", "t", &["region", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 99999;
+        }
         let tree = aggregate(
             vec![colref("region")],
             vec![sum_col("amount", "total")],
@@ -6596,9 +6930,12 @@ mod tests {
 
     #[test]
     fn test_combined_algebraic_aggs_scope_special_sum_rescan() {
-        // SUM, COUNT, AVG are algebraic; only special SUM deltas are rescanned.
+        // Unknown SUM inputs retain the conservative special-value rescan.
         let mut ctx = test_ctx_with_st("public", "st");
-        let child = scan(1, "t", "public", "t", &["region", "amount"]);
+        let mut child = scan(1, "t", "public", "t", &["region", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 99999;
+        }
         let tree = aggregate(
             vec![colref("region")],
             vec![
@@ -6722,12 +7059,12 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // No unrestricted rescan; only groups with special-value deltas rescan.
+        // Integer SUM inputs need no special-value rescan.
         assert!(
             !sql.contains("agg_rescan"),
             "SUM above plain scan should not use an unrestricted rescan CTE:\n{sql}"
         );
-        assert_sql_contains(&sql, "agg_special_groups");
+        assert_sql_not_contains(&sql, "agg_special_groups");
 
         assert_sql_contains(&sql, "__ins_nonnull_total");
         assert_sql_contains(&sql, "__del_nonnull_total");
@@ -6743,6 +7080,26 @@ mod tests {
                 .columns
                 .contains(&"__pgt_aux_nonnull_total".to_string())
         );
+    }
+
+    #[test]
+    fn test_having_integer_sum_does_not_reference_special_delta() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        ctx.having_filter = true;
+        let mut child = scan(1, "t", "public", "t", &["region", "amount"]);
+        if let OpTree::Scan { columns, .. } = &mut child {
+            columns[1].type_oid = 23;
+        }
+        let tree = aggregate(
+            vec![colref("region")],
+            vec![sum_col("amount", "total")],
+            child,
+        );
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "agg_rescan");
+        assert_sql_not_contains(&sql, "d.\"__special_total\"");
     }
 
     #[test]
@@ -7123,6 +7480,7 @@ mod tests {
                 "0/10",
                 crate::refresh::FullPolicy::Error,
                 1,
+                false,
                 vec![],
             ),
             || Ok(child_to_from_sql_in_context(&child, &ctx, true)),
@@ -7700,6 +8058,32 @@ mod tests {
     }
 
     #[test]
+    fn test_p5_nonnull_sum_uses_group_row_count() {
+        let child = scan_not_null(1, "t", "public", "t", &["id", "region", "amount"]);
+        let group_by = vec![colref("region")];
+        let aggs = vec![sum_col("amount", "total")];
+        assert!(direct_sum_uses_row_count(&aggs[0], &child));
+
+        let mut ctx = crate::dvm::diff::DiffContext::new_standalone(
+            crate::version::Frontier::default(),
+            crate::version::Frontier::default(),
+        );
+        let (cte_name, _) = generate_direct_agg_delta(&mut ctx, &child, &group_by, &aggs).unwrap();
+        let sql = ctx.cte_sql(&cte_name).expect("CTE should exist");
+        assert!(!sql.contains("__ins_nonnull_total"), "{sql}");
+        assert!(sql.contains("__ins_count"), "{sql}");
+
+        let count = sum_nonnull_count_expr("total", "total", false, true);
+        assert_eq!(
+            count,
+            "COALESCE(st.\"__pgt_count\", 0) + COALESCE(d.\"__ins_count\", 0) - COALESCE(d.\"__del_count\", 0)"
+        );
+        let merge = agg_merge_expr_mapped(&aggs[0], false, false, false, true, true, "total");
+        assert!(merge.contains("d.\"__ins_count\""), "{merge}");
+        assert!(!merge.contains("__ins_nonnull_total"), "{merge}");
+    }
+
+    #[test]
     fn test_a2_p5_no_value_only_without_key_columns() {
         // Without key columns set, the standard P5 path should be used (no 'V').
         let child = scan(1, "t", "public", "t", &["id", "region", "amount"]);
@@ -7949,5 +8333,11 @@ mod tests {
             ),
             hashed
         );
+    }
+
+    #[test]
+    fn test_qualified_column_escapes_identifiers() {
+        assert_eq!(qualified_column("c", "a\"b"), "c.\"a\"\"b\"");
+        assert_eq!(qualified_column("c", "foo(bar)"), "c.\"foo(bar)\"");
     }
 }

@@ -787,7 +787,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_scheduler_jobs (
                       'SERIALIZATION', 'OUT_OF_MEMORY', 'CANCELLED',
                       'PERMANENT', 'UNKNOWN_RETRYABLE')),
     outcome_sqlstate TEXT,
-    worker_slot_generation BIGINT
+    worker_slot_generation BIGINT,
+    member_failure_recorded BOOLEAN NOT NULL DEFAULT false
 );
 
 CREATE INDEX IF NOT EXISTS idx_sched_jobs_status_enqueued
@@ -2307,6 +2308,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, te
 REVOKE EXECUTE ON FUNCTION pgtrickle.get_stream_table_partition_retention(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention(text, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.ann_maintenance_request(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.list_ann_maintenance_requests(bigint, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.cancel_ann_maintenance(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.claim_ann_maintenance(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.finish_ann_maintenance(bigint, boolean, text) FROM PUBLIC;

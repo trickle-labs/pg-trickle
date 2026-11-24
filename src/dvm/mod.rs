@@ -921,43 +921,44 @@ fn generate_delta_query_impl(
         );
     }
 
-    // Every live source access in a deferred delta must use the state at the
-    // NEW LSN, not the current MERGE snapshot. DeltaStage prepares these
-    // relations under a source lock before any refresh SQL is executed.
-    if let Some(pgt_id) = stage_pgt_id {
-        ctx.set_source_bound_tables(
-            source_oids
-                .iter()
-                .map(|oid| {
-                    (
-                        *oid,
-                        format!(
-                            "pg_temp.{}",
-                            diff::quote_ident(
-                                &crate::refresh::delta_stage::DeltaStage::bounded_table_name(
-                                    pgt_id, *oid
+    // A locked graph refresh already holds every source at the shared cut;
+    // other paths need the staged NEW-frontier snapshots.
+    if !crate::refresh::current_graph_sources_locked() {
+        if let Some(pgt_id) = stage_pgt_id {
+            ctx.set_source_bound_tables(
+                source_oids
+                    .iter()
+                    .map(|oid| {
+                        (
+                            *oid,
+                            format!(
+                                "pg_temp.{}",
+                                diff::quote_ident(
+                                    &crate::refresh::delta_stage::DeltaStage::bounded_table_name(
+                                        pgt_id, *oid
+                                    )
                                 )
-                            )
-                        ),
-                    )
-                })
-                .collect(),
-        );
-    } else if let Some(tables) = source_stage_tables {
-        // The centroid path uses per-execution suffixed stage names.
-        // Its bounded snapshot is created using the same nonce.
-        ctx.set_source_bound_tables(
-            tables
-                .iter()
-                .map(|(oid, name)| {
-                    (
-                        *oid,
-                        name.replace("__pgt_cd_", "__pgt_bound_")
-                            .replace("__pgt_cdc_", "__pgt_bound_"),
-                    )
-                })
-                .collect(),
-        );
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+        } else if let Some(tables) = source_stage_tables {
+            // The centroid path uses per-execution suffixed stage names.
+            // Its bounded snapshot is created using the same nonce.
+            ctx.set_source_bound_tables(
+                tables
+                    .iter()
+                    .map(|(oid, name)| {
+                        (
+                            *oid,
+                            name.replace("__pgt_cd_", "__pgt_bound_")
+                                .replace("__pgt_cdc_", "__pgt_bound_"),
+                        )
+                    })
+                    .collect(),
+            );
+        }
     }
 
     // P5/direct-aggregate paths do not invoke diff_scan for every leaf.
@@ -1538,15 +1539,15 @@ fn resolve_buffer_names_for_sources(source_oids: &[u32]) -> HashMap<u32, String>
 
 // ── F4 (v0.37.0): pgVectorMV — reclassify avg/sum on vector columns ─────────
 
-/// F4: Walk the OpTree recursively and reclassify `AggFunc::Avg` / `AggFunc::Sum`
-/// on vector-typed columns to `AggFunc::VectorAvg` / `AggFunc::VectorSum`.
+/// Populate parsed aggregate argument types and reclassify pgvector aggregates.
 ///
 /// pgvector overloads the standard `avg(vector)` and `sum(vector)` aggregates.
 /// For vector-typed argument columns, the DVM must use the group-rescan strategy
 /// (re-aggregating affected groups) instead of the algebraic auxiliary-column
 /// strategy (which generates `COALESCE(st.col, 0) + delta` — invalid for vectors).
-pub(crate) fn reclassify_vector_aggregates(
+pub(crate) fn annotate_aggregate_arguments(
     tree: &mut parser::OpTree,
+    argument_types: &HashMap<i32, u32>,
     vector_cols: &HashMap<i32, parser::AnalyzedAggregateArgument>,
     found: &mut bool,
 ) {
@@ -1555,11 +1556,33 @@ pub(crate) fn reclassify_vector_aggregates(
         OpTree::Aggregate {
             aggregates, child, ..
         } => {
-            reclassify_vector_aggregates(child, vector_cols, found);
+            annotate_aggregate_arguments(child, argument_types, vector_cols, found);
             for agg in aggregates.iter_mut() {
-                let Some(location) = agg.analyzed_argument.as_ref().map(|arg| arg.location) else {
+                let location = agg
+                    .analyzed_argument
+                    .as_ref()
+                    .map(|arg| arg.location)
+                    .or_else(|| {
+                        agg.statistical_support
+                            .as_ref()
+                            .and_then(|support| support.parse_location)
+                    });
+                let Some(location) = location else {
                     continue;
                 };
+                if (matches!(agg.function, AggFunc::Sum | AggFunc::Avg)
+                    || agg.function.needs_sum_of_squares())
+                    && let Some(type_oid) = argument_types.get(&location)
+                    && *type_oid != 0
+                {
+                    agg.analyzed_argument = Some(parser::AnalyzedAggregateArgument {
+                        location,
+                        type_oid: *type_oid,
+                        typmod: -1,
+                        type_schema: String::new(),
+                        type_name: String::new(),
+                    });
+                }
                 let Some(metadata) = vector_cols.get(&location) else {
                     continue;
                 };
@@ -1572,63 +1595,73 @@ pub(crate) fn reclassify_vector_aggregates(
                 };
             }
         }
-        OpTree::Filter { child, .. } => reclassify_vector_aggregates(child, vector_cols, found),
-        OpTree::Project { child, .. } => reclassify_vector_aggregates(child, vector_cols, found),
+        OpTree::Filter { child, .. } => {
+            annotate_aggregate_arguments(child, argument_types, vector_cols, found)
+        }
+        OpTree::Project { child, .. } => {
+            annotate_aggregate_arguments(child, argument_types, vector_cols, found)
+        }
         OpTree::InnerJoin { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols, found);
-            reclassify_vector_aggregates(right, vector_cols, found);
+            annotate_aggregate_arguments(left, argument_types, vector_cols, found);
+            annotate_aggregate_arguments(right, argument_types, vector_cols, found);
         }
         OpTree::LeftJoin { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols, found);
-            reclassify_vector_aggregates(right, vector_cols, found);
+            annotate_aggregate_arguments(left, argument_types, vector_cols, found);
+            annotate_aggregate_arguments(right, argument_types, vector_cols, found);
         }
         OpTree::FullJoin { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols, found);
-            reclassify_vector_aggregates(right, vector_cols, found);
+            annotate_aggregate_arguments(left, argument_types, vector_cols, found);
+            annotate_aggregate_arguments(right, argument_types, vector_cols, found);
         }
         OpTree::SemiJoin { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols, found);
-            reclassify_vector_aggregates(right, vector_cols, found);
+            annotate_aggregate_arguments(left, argument_types, vector_cols, found);
+            annotate_aggregate_arguments(right, argument_types, vector_cols, found);
         }
         OpTree::AntiJoin { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols, found);
-            reclassify_vector_aggregates(right, vector_cols, found);
+            annotate_aggregate_arguments(left, argument_types, vector_cols, found);
+            annotate_aggregate_arguments(right, argument_types, vector_cols, found);
         }
-        OpTree::Window { child, .. } => reclassify_vector_aggregates(child, vector_cols, found),
-        OpTree::Distinct { child, .. } => reclassify_vector_aggregates(child, vector_cols, found),
-        OpTree::Subquery { child, .. } => reclassify_vector_aggregates(child, vector_cols, found),
+        OpTree::Window { child, .. } => {
+            annotate_aggregate_arguments(child, argument_types, vector_cols, found)
+        }
+        OpTree::Distinct { child, .. } => {
+            annotate_aggregate_arguments(child, argument_types, vector_cols, found)
+        }
+        OpTree::Subquery { child, .. } => {
+            annotate_aggregate_arguments(child, argument_types, vector_cols, found)
+        }
         OpTree::LateralFunction { child, .. } => {
-            reclassify_vector_aggregates(child, vector_cols, found)
+            annotate_aggregate_arguments(child, argument_types, vector_cols, found)
         }
         OpTree::LateralSubquery { child, .. } => {
-            reclassify_vector_aggregates(child, vector_cols, found)
+            annotate_aggregate_arguments(child, argument_types, vector_cols, found)
         }
         OpTree::ScalarSubquery { child, .. } => {
-            reclassify_vector_aggregates(child, vector_cols, found)
+            annotate_aggregate_arguments(child, argument_types, vector_cols, found)
         }
         OpTree::UnionAll { children, .. } => {
             for c in children.iter_mut() {
-                reclassify_vector_aggregates(c, vector_cols, found);
+                annotate_aggregate_arguments(c, argument_types, vector_cols, found);
             }
         }
         OpTree::Intersect { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols, found);
-            reclassify_vector_aggregates(right, vector_cols, found);
+            annotate_aggregate_arguments(left, argument_types, vector_cols, found);
+            annotate_aggregate_arguments(right, argument_types, vector_cols, found);
         }
         OpTree::Except { left, right, .. } => {
-            reclassify_vector_aggregates(left, vector_cols, found);
-            reclassify_vector_aggregates(right, vector_cols, found);
+            annotate_aggregate_arguments(left, argument_types, vector_cols, found);
+            annotate_aggregate_arguments(right, argument_types, vector_cols, found);
         }
         OpTree::CteScan { body, .. } => {
             if let Some(b) = body.as_mut() {
-                reclassify_vector_aggregates(b, vector_cols, found);
+                annotate_aggregate_arguments(b, argument_types, vector_cols, found);
             }
         }
         OpTree::RecursiveCte {
             base, recursive, ..
         } => {
-            reclassify_vector_aggregates(base, vector_cols, found);
-            reclassify_vector_aggregates(recursive, vector_cols, found);
+            annotate_aggregate_arguments(base, argument_types, vector_cols, found);
+            annotate_aggregate_arguments(recursive, argument_types, vector_cols, found);
         }
         // Leaf nodes (Scan, RecursiveSelfRef, ConstantSelect, Values, etc.)
         _ => {}

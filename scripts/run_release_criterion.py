@@ -79,16 +79,18 @@ def main() -> int:
             worktree = Path(temp_name) / "baseline"
             run(["git", "worktree", "add", "--detach", str(worktree), BASELINE_TAG], cwd=ROOT)
             try:
+                baseline_env = env.copy()
+                baseline_env["BENCH_PROJECT_DIR"] = str(worktree)
                 run(
                     [
                         "bash",
-                        "scripts/run_benchmarks.sh",
+                        str(ROOT / "scripts/run_benchmarks.sh"),
                         "--",
                         "--save-baseline",
                         BASELINE_VERSION,
                     ],
                     cwd=worktree,
-                    env=env,
+                    env=baseline_env,
                 )
                 source = worktree / "target/criterion"
                 if not source.is_dir():

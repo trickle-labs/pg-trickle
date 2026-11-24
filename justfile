@@ -26,7 +26,7 @@ build-release:
 # Build the Docker Hub image (PostgreSQL 18 with pg_trickle pre-installed)
 [group: "build"]
 build-hub:
-    docker build -t pgtrickle/pg_trickle:0.110.2-pg18 -f Dockerfile.ghcr .
+    docker build -t pgtrickle/pg_trickle:0.109.0-pg18 -f Dockerfile.ghcr .
 
 # Build the Docker Hub image with 'latest' tag
 [group: "build"]
@@ -656,12 +656,14 @@ check-upgrade from to:
 # Only validates scripts from v0.40.0 onward (the supported upgrade window).
 # Pre-v0.40.0 scripts remain in sql/ for PostgreSQL chain compatibility but
 # are not actively re-validated (they are stable historical scripts).
+# Migrations targeting versions newer than Cargo.toml remain for later releases.
 [group: "upgrade"]
 check-upgrade-all:
     #!/usr/bin/env bash
     set -euo pipefail
     SUPPORT_CUTOFF="0.40.0"
     version_ge() { printf '%s\n%s' "$2" "$1" | sort -V -C; }
+    version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
     current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
     pairs=()
     for f in sql/pg_trickle--*--*.sql; do
@@ -669,6 +671,9 @@ check-upgrade-all:
         from=${base#pg_trickle--}
         to=${from#*--}
         from=${from%%--*}
+        if ! version_le "$to" "$current_version"; then
+            continue
+        fi
         if version_ge "$from" "$SUPPORT_CUTOFF"; then
             pairs+=("$from $to")
         fi
@@ -701,12 +706,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.110.2": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.109.0": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.110.2": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.109.0": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture
@@ -718,12 +723,16 @@ test-upgrade-all: build-e2e-image
     #!/usr/bin/env bash
     set -euo pipefail
     current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    version_le() { printf '%s\n%s' "$1" "$2" | sort -V -C; }
     pairs=()
     for f in sql/pg_trickle--*--*.sql; do
         base=$(basename "$f" .sql)
         from=${base#pg_trickle--}
         to=${from#*--}
         from=${from%%--*}
+        if ! version_le "$to" "$current_version"; then
+            continue
+        fi
         pairs+=("$from $to")
     done
     # Verify the chain reaches the current Cargo.toml version
@@ -892,6 +901,7 @@ run:
 # Package the extension for distribution
 [group: "pgrx"]
 package:
+    rm -rf target/release/pg_trickle-pg{{pg}}
     cargo pgrx package --features pg{{pg}}
 
 # ── Release ───────────────────────────────────────────────────────────────

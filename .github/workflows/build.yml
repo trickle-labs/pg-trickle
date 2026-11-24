@@ -114,7 +114,7 @@ jobs:
           - os: ubuntu-latest
             artifact_suffix: linux-amd64
             archive_ext: tar.gz
-          - os: macos-14
+          - os: macos-15
             artifact_suffix: macos-arm64
             archive_ext: tar.gz
           # Windows build available via manual CI workflow
@@ -128,6 +128,7 @@ jobs:
         shell: bash
         run: |
           PG_CONFIG_PATH="$(cargo pgrx info path pg18)/bin/pg_config"
+          rm -rf target/release/pg_trickle-pg18
           cargo pgrx package --pg-config "${PG_CONFIG_PATH}"
 
       - name: Extract version

@@ -16,43 +16,7 @@
 
 mod e2e;
 
-use e2e::E2eDb;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Scheduler Suppression
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Disable the background scheduler for the current test database.
-///
-/// These tests perform manual refreshes in strict topological order. A
-/// concurrent scheduler tick can consume CDC changes out of order, causing
-/// stale data and flaky assertions. We suppress the scheduler by:
-///
-/// 1. Setting `pg_trickle.enabled = off` at the database level so any
-///    new scheduler connection to this DB will see it disabled.
-/// 2. Terminating any scheduler worker backend that already connected.
-///
-/// This is per-database and does not affect other tests' databases.
-async fn disable_scheduler(db: &E2eDb) {
-    // Set database-level GUC so any reconnecting scheduler sees it.
-    db.execute(
-        "DO $$ BEGIN \
-           EXECUTE format('ALTER DATABASE %I SET pg_trickle.enabled = off', current_database()); \
-         END $$",
-    )
-    .await;
-    // Terminate existing scheduler workers connected to this database.
-    db.execute(
-        "SELECT pg_terminate_backend(pid) \
-         FROM pg_stat_activity \
-         WHERE datname = current_database() \
-           AND backend_type = 'pg_trickle scheduler' \
-           AND pid <> pg_backend_pid()",
-    )
-    .await;
-    // Brief pause to let the worker exit.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-}
+use e2e::{E2eDb, disable_scheduler};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Shared Setup Helpers

@@ -23,6 +23,22 @@ use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
 use crate::dvm::parser::{Expr, OpTree};
 use crate::error::PgTrickleError;
 
+fn comma_prefixed_columns(columns: &[String], indentation: &str) -> String {
+    if columns.is_empty() {
+        return String::new();
+    }
+
+    let line_prefix_len = indentation.len() + 2;
+    let capacity = line_prefix_len * columns.len() + columns.iter().map(String::len).sum::<usize>();
+    let mut result = String::with_capacity(capacity);
+    for column in columns {
+        result.push_str(",\n");
+        result.push_str(indentation);
+        result.push_str(column);
+    }
+    result
+}
+
 /// Differentiate a Scan node.
 ///
 /// Reads from the change buffer in a **single pass** and produces a delta
@@ -63,9 +79,6 @@ pub fn diff_scan(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgTri
             ctx, *table_oid, schema, table_name, columns, pk_columns, alias, tables,
         ),
         DeltaSource::ChangeBuffer => {
-            // Register the source for frontier-aligned rewriting of live
-            // FROM/JOIN reads (MIN/MAX rescans, join partners, pre-state).
-            ctx.register_source_scan(*table_oid, schema, table_name);
             diff_scan_change_buffer(ctx, *table_oid, columns, pk_columns, alias)
         }
     }
@@ -512,11 +525,7 @@ SELECT {pk_hash_expr} AS content_hash{payload_identity_select},
        -1 AS delta_sign{col_refs}
 FROM {change_table} c
 WHERE {lsn_filter} AND c.action = 'D'",
-            col_refs = if col_refs_raw.is_empty() {
-                String::new()
-            } else {
-                format!(",\n       {}", col_refs_raw.join(",\n       "))
-            },
+            col_refs = comma_prefixed_columns(&col_refs_raw, "       "),
         );
         ctx.add_cte(decomp_cte.clone(), decomp_sql);
 
@@ -549,16 +558,8 @@ FROM (
     HAVING SUM(delta_sign) < 0
 ) sub
 CROSS JOIN generate_series(1, -sub.net_count) gs",
-            sub_cols = if sub_col_refs.is_empty() {
-                String::new()
-            } else {
-                format!(",\n       {}", sub_col_refs.join(",\n       "))
-            },
-            max_cols = if max_col_refs.is_empty() {
-                String::new()
-            } else {
-                format!(",\n           {}", max_col_refs.join(",\n           "))
-            },
+            sub_cols = comma_prefixed_columns(&sub_col_refs, "       "),
+            max_cols = comma_prefixed_columns(&max_col_refs, "           "),
         );
         ctx.add_cte(cte_name.clone(), sql);
 
@@ -689,14 +690,11 @@ SELECT * FROM {multi_cte}",
         ""
     };
     let key_changed_col_ins = key_changed_col_del; // Same for both branches.
-    let first_delete_guard = crate::cdc_elision::scan_initial_row_present_sql("s.__first_action");
-    let last_insert_guard = crate::cdc_elision::scan_final_row_present_sql("s.__last_action");
-    let delete_candidate_filter =
-        crate::cdc_elision::scan_delete_candidate_sql("s.__first_action", "s.action");
-    let insert_candidate_filter =
-        crate::cdc_elision::scan_insert_candidate_sql("s.__last_action", "s.action");
 
     let sql = if ctx.merge_safe_dedup {
+        let first_delete_guard =
+            crate::cdc_elision::scan_initial_row_present_sql("s.__first_action");
+        let last_insert_guard = crate::cdc_elision::scan_final_row_present_sql("s.__last_action");
         // ── Merge-safe dedup mode ──────────────────────────────────────
         // Emit at most ONE row per PK: DELETE only for true deletes OR
         // when the row ID changed (keyless table UPDATE). INSERT for any
@@ -741,6 +739,10 @@ FROM (
             last_insert_guard = last_insert_guard,
         )
     } else {
+        let delete_candidate_filter =
+            crate::cdc_elision::scan_delete_candidate_sql("s.__first_action", "s.action");
+        let insert_candidate_filter =
+            crate::cdc_elision::scan_insert_candidate_sql("s.__last_action", "s.action");
         // ── Standard mode (D+I pairs for updates) ──────────────────────
         // Required when aggregate/join/union consumes the scan delta.
         is_deduplicated = false;
@@ -982,6 +984,15 @@ pub fn build_hash_expr_for_domain(domain: &str, exprs: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::dvm::operators::test_helpers::*;
+
+    #[test]
+    fn test_scan_comma_prefixed_columns_handles_empty_and_multiple_columns() {
+        assert_eq!(comma_prefixed_columns(&[], "  "), "");
+        assert_eq!(
+            comma_prefixed_columns(&["a".into(), "b".into()], "  "),
+            ",\n  a,\n  b"
+        );
+    }
 
     // ── diff_scan basic ─────────────────────────────────────────────
 

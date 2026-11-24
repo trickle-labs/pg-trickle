@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
-# Install the published package, preserve pending committed changes, then
+# Install the source-version catalog, preserve pending committed changes, then
 # restart with and update to the candidate package inside the same database.
 set -euo pipefail
 
 FROM_VERSION="${1:?previous release version required}"
 TO_VERSION="${2:?candidate release version required}"
 IDENTITY_MIGRATION=false
+VECTOR_UPGRADE=false
+RETENTION_UPGRADE=false
+SYNTHETIC_BASELINE=false
+POSTGRES_IMAGE=postgres:18.6
+if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.109.0" ]]; then
+    VECTOR_UPGRADE=true
+    POSTGRES_IMAGE='pgvector/pgvector:0.8.7-pg18@sha256:c29f30688a9ad961691bdf0ec1650717cc132a5814619d80f80463d6e4c42e47'
+fi
+if [[ ( "$FROM_VERSION" == "0.108.3" || "$FROM_VERSION" == "0.108.4" ) && "$TO_VERSION" == "0.109.0" ]]; then
+    RETENTION_UPGRADE=true
+fi
 if [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.3" || "$TO_VERSION" == "0.109.0" ) ]]; then
     IDENTITY_MIGRATION=true
 fi
@@ -25,21 +36,47 @@ trap cleanup EXIT INT TERM
 
 if [[ -n "${PGS_PREVIOUS_RELEASE_ARCHIVE:-}" ]]; then
     cp "$PGS_PREVIOUS_RELEASE_ARCHIVE" "$WORK_DIR/$ARCHIVE_NAME"
+elif [[ "$FROM_VERSION" == "0.108.4" && "$TO_VERSION" == "0.109.0" ]]; then
+    # v0.108.4 was never published; use its archived install SQL with the
+    # exact candidate library to exercise the direct catalog migration.
+    mkdir -p "$WORK_DIR/previous/lib" "$WORK_DIR/previous/extension"
+    cp -a "$CANDIDATE_DIR/usr/lib/postgresql/18/lib/." "$WORK_DIR/previous/lib/"
+    cp -a "$CANDIDATE_DIR/usr/share/postgresql/18/extension/." "$WORK_DIR/previous/extension/"
+    cp sql/archive/pg_trickle--0.108.4.sql "$WORK_DIR/previous/extension/"
+    sed -i "s/^default_version = .*/default_version = '${FROM_VERSION}'/" \
+        "$WORK_DIR/previous/extension/pg_trickle.control"
+    grep -Fxq "default_version = '${FROM_VERSION}'" \
+        "$WORK_DIR/previous/extension/pg_trickle.control"
+    SYNTHETIC_BASELINE=true
 else
     curl --fail --location --retry 3 \
         "https://github.com/trickle-labs/pg-trickle/releases/download/v${FROM_VERSION}/${ARCHIVE_NAME}" \
         --output "$WORK_DIR/$ARCHIVE_NAME"
 fi
-mkdir "$WORK_DIR/previous"
-tar xzf "$WORK_DIR/$ARCHIVE_NAME" -C "$WORK_DIR/previous" --strip-components=1
+if [[ "$SYNTHETIC_BASELINE" != true ]]; then
+    mkdir "$WORK_DIR/previous"
+    tar xzf "$WORK_DIR/$ARCHIVE_NAME" -C "$WORK_DIR/previous" --strip-components=1
+    echo "Published package SHA-256: $(shasum -a 256 "$WORK_DIR/$ARCHIVE_NAME" | cut -d' ' -f1)"
+else
+    echo "Synthetic v0.108.4 baseline: archived install SQL SHA-256 $(shasum -a 256 sql/archive/pg_trickle--0.108.4.sql | cut -d' ' -f1)"
+fi
+
+EXTRA_PG_ARGS=()
+if [[ "$SYNTHETIC_BASELINE" == true ]]; then
+    # Keep the candidate worker idle while its binary is loaded against the
+    # intentionally older synthetic catalog; this fixture carries CDC backlog
+    # across the upgrade and has no running refresh to quiesce.
+    EXTRA_PG_ARGS=(-c pg_trickle.enabled=off)
+fi
 
 CONTAINER_ID="$(docker create \
-    -e POSTGRES_PASSWORD=postgres postgres:18.6 \
+    -e POSTGRES_PASSWORD=postgres "$POSTGRES_IMAGE" \
     -c shared_preload_libraries=pg_trickle \
     -c track_commit_timestamp=on \
     -c wal_level=logical \
     -c max_replication_slots=10 \
-    -c max_worker_processes=32)"
+    -c max_worker_processes=32 \
+    "${EXTRA_PG_ARGS[@]}")"
 docker cp "$WORK_DIR/previous/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"
 docker cp "$WORK_DIR/previous/extension/." "$CONTAINER_ID:/usr/share/postgresql/18/extension/"
 docker start "$CONTAINER_ID" >/dev/null
@@ -62,15 +99,57 @@ psql() {
 }
 
 psql 'CREATE EXTENSION pg_trickle CASCADE' >/dev/null
-OLD_VERSION="$(psql 'SELECT pgtrickle.version()')"
+if [[ "$SYNTHETIC_BASELINE" == true ]]; then
+    OLD_VERSION="$(psql "SELECT extversion FROM pg_extension WHERE extname='pg_trickle'")"
+else
+    OLD_VERSION="$(psql 'SELECT pgtrickle.version()')"
+fi
 [[ "$OLD_VERSION" == "$FROM_VERSION" ]] || {
-    echo "previous package reports $OLD_VERSION, expected $FROM_VERSION" >&2
+    echo "previous extension reports $OLD_VERSION, expected $FROM_VERSION" >&2
     exit 1
 }
 
+AGGREGATE_UPGRADE=false
+if [[ "$VECTOR_UPGRADE" == true ]]; then
+    psql "CREATE EXTENSION vector; CREATE TABLE public.upgrade_vector_source(id int PRIMARY KEY, embedding vector(3));
+        INSERT INTO public.upgrade_vector_source VALUES (1, '[1,0,0]'), (2, '[0,1,0]');
+        SELECT * FROM pgtrickle.embedding_stream_table('upgrade_vector_st', 'public.upgrade_vector_source', 'embedding', NULL, '24h', 'hnsw', false);
+        INSERT INTO pgtrickle.pgt_distance_subscriptions(stream_table,channel,vector_column,query_vector,op,threshold)
+        VALUES ('public.upgrade_vector_st','upgrade_vector_channel','embedding','[1,0,0]','<->',0.5)" >/dev/null
+    [[ "$(psql "SELECT extversion FROM pg_extension WHERE extname='vector'")" == '0.8.7' ]]
+    VECTOR_BEFORE="$(psql "SELECT s.pgt_id::text || '|' || s.pgt_relid::text || '|' || s.defining_query || '|' ||
+        i.indexrelid::text || '|' || pg_relation_filenode(i.indexrelid)::text || '|' || pg_get_indexdef(i.indexrelid)
+        FROM pgtrickle.pgt_stream_tables s JOIN pg_index i ON i.indrelid=s.pgt_relid
+        JOIN pg_opclass op ON op.oid=i.indclass[0]
+        WHERE s.pgt_name='upgrade_vector_st' AND op.opcname='vector_l2_ops' AND i.indisvalid AND i.indisready")"
+    [[ -n "$VECTOR_BEFORE" ]] || { echo "published helper did not create a valid L2 index" >&2; exit 1; }
+    echo "Published vector baseline: pgvector=0.8.7 image=$POSTGRES_IMAGE index=$VECTOR_BEFORE"
+
+fi
+
+if [[ "$RETENTION_UPGRADE" == true ]]; then
+    # Create the stream under the source-version install SQL so migration
+    # qualification proves existing metadata remains unconfigured by default.
+    psql "CREATE TABLE public.retention_upgrade_source(
+              id int NOT NULL, d date NOT NULL, amount int NOT NULL,
+              PRIMARY KEY(id,d)) PARTITION BY RANGE(d);
+        CREATE TABLE public.retention_upgrade_old PARTITION OF public.retention_upgrade_source
+            FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+        CREATE TABLE public.retention_upgrade_live PARTITION OF public.retention_upgrade_source
+            FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+        INSERT INTO public.retention_upgrade_source VALUES
+            (1,'2025-06-01',10),(2,'2026-06-01',20);
+        SELECT pgtrickle.create_stream_table(
+            name=>'retention_upgrade_st',
+            query=>'SELECT d, SUM(amount) AS total, COUNT(*) AS n
+                    FROM public.retention_upgrade_source GROUP BY d',
+            schedule=>'1h', refresh_mode=>'DIFFERENTIAL')" >/dev/null
+    psql "SELECT pgtrickle.refresh_stream_table('retention_upgrade_st')" >/dev/null
+    psql "SELECT count(*)=2 FROM public.retention_upgrade_st" | grep -qx t
+fi
+
 # Exercise upgrade of actual stream-table storage created by the published
 # v0.108.3 binary (not a freshly created stream under the candidate binary).
-AGGREGATE_UPGRADE=false
 if [[ "$FROM_VERSION" == "0.108.3" && ( "$TO_VERSION" == "0.109.0" || "$TO_VERSION" == "0.110.0" || "$TO_VERSION" == "0.110.1" || "$TO_VERSION" == "0.110.2" ) ]]; then
     AGGREGATE_UPGRADE=true
     psql "CREATE TABLE public.upgrade_agg_orders(
@@ -230,8 +309,10 @@ BATCHES_BEFORE="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(b)::text, '|'
                     WHERE consumer_id = '${CONSUMER_ID}'::uuid)")"
 PAYLOAD_BEFORE="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(p)::text, '|' \
     ORDER BY batch_token, ordinal), '')) FROM ${DELTA_RELATION} p")"
-QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
-[[ "$QUIESCED" == "t" ]] || { echo "upgrade quiesce failed" >&2; exit 1; }
+if [[ "$SYNTHETIC_BASELINE" != true ]]; then
+    QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
+    [[ "$QUIESCED" == "t" ]] || { echo "upgrade quiesce failed" >&2; exit 1; }
+fi
 
 UPGRADE_DIR="$CANDIDATE_DIR/usr/share/postgresql/18/extension"
 # The historical 0.106.1 identity-migration test deliberately pins its
@@ -312,6 +393,26 @@ UPDATED_VERSION="$(psql "SELECT extversion FROM pg_extension WHERE extname = 'pg
     echo "extension update reported $UPDATED_VERSION, expected $TO_VERSION" >&2
     exit 1
 }
+if [[ "$VECTOR_UPGRADE" == true ]]; then
+    VECTOR_AFTER="$(psql "SELECT s.pgt_id::text || '|' || s.pgt_relid::text || '|' || s.defining_query || '|' ||
+        i.indexrelid::text || '|' || pg_relation_filenode(i.indexrelid)::text || '|' || pg_get_indexdef(i.indexrelid)
+        FROM pgtrickle.pgt_stream_tables s JOIN pg_index i ON i.indrelid=s.pgt_relid
+        JOIN pg_opclass op ON op.oid=i.indclass[0]
+        WHERE s.pgt_name='upgrade_vector_st' AND op.opcname='vector_l2_ops' AND i.indisvalid AND i.indisready")"
+    [[ "$VECTOR_AFTER" == "$VECTOR_BEFORE" ]] || { echo "vector stream or L2 index changed across upgrade" >&2; exit 1; }
+    psql "SELECT count(*)=1 AND bool_and(pgt_id IS NULL) FROM pgtrickle.pgt_distance_subscriptions
+        WHERE stream_table='public.upgrade_vector_st' AND channel='upgrade_vector_channel' AND threshold=0.5" | grep -qx t
+    [[ "$(psql 'SHOW pg_trickle.enable_centroid_state')" == off ]]
+    psql "SELECT NOT EXISTS (SELECT 1 FROM pg_class c, LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
+        WHERE c.oid IN ('pgtrickle.pgt_ann_maintenance_requests'::regclass, 'pgtrickle.pgt_centroid_states'::regclass) AND a.grantee=0)
+        AND NOT EXISTS (SELECT 1 FROM pg_proc p, LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+        WHERE p.oid='pgtrickle.claim_ann_maintenance(bigint)'::regprocedure AND a.grantee=0 AND a.privilege_type='EXECUTE')" | grep -qx t
+    psql "SELECT NOT EXISTS ((SELECT id,embedding FROM public.upgrade_vector_st EXCEPT ALL SELECT id,embedding FROM public.upgrade_vector_source)
+        UNION ALL (SELECT id,embedding FROM public.upgrade_vector_source EXCEPT ALL SELECT id,embedding FROM public.upgrade_vector_st))" | grep -qx t
+    psql "SET enable_seqscan=off; EXPLAIN SELECT id FROM public.upgrade_vector_st ORDER BY (embedding::vector(3)) <-> '[1,0,0]'::vector LIMIT 1" | grep -q 'upgrade_vector_st_embedding_idx'
+    echo "Published vector stream, L2 index, inactive legacy subscription and default-off centroid state preserved."
+fi
+
 if [[ "$AGGREGATE_UPGRADE" == true ]]; then
     psql "SELECT
         (SELECT count(*)=2 FROM pgtrickle.pgt_stream_tables
@@ -326,8 +427,50 @@ if [[ "$AGGREGATE_UPGRADE" == true ]]; then
                     'public.upgrade_agg_control_st'])" >/dev/null
 fi
 psql 'SELECT pgtrickle.resume_all()' >/dev/null
+if [[ "$VECTOR_UPGRADE" == true ]]; then
+    psql "UPDATE public.upgrade_vector_source SET embedding='[0,0,1]' WHERE id=1;
+        INSERT INTO public.upgrade_vector_source VALUES (3, '[1,1,0]');
+        DELETE FROM public.upgrade_vector_source WHERE id=2" >/dev/null
+    psql "SET pg_trickle.refresh_strategy='differential';
+        SET pg_trickle.differential_max_change_ratio=0;
+        SELECT pgtrickle.refresh_stream_table('public.upgrade_vector_st')" >/dev/null
+    psql "SELECT NOT EXISTS ((SELECT id,embedding FROM public.upgrade_vector_st EXCEPT ALL SELECT id,embedding FROM public.upgrade_vector_source)
+        UNION ALL (SELECT id,embedding FROM public.upgrade_vector_source EXCEPT ALL SELECT id,embedding FROM public.upgrade_vector_st))" | grep -qx t
+    psql "SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback
+        FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id)
+        WHERE s.pgt_name='upgrade_vector_st' ORDER BY h.refresh_id DESC LIMIT 1" | grep -qx t
+fi
 CAPTURE_STATE="$(psql 'SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton')"
 [[ "$CAPTURE_STATE" == "ACTIVE" ]] || { echo "capture did not resume after update" >&2; exit 1; }
+
+if [[ "$RETENTION_UPGRADE" == true ]]; then
+    psql "SELECT to_regprocedure('pgtrickle.set_stream_table_partition_retention(text,text,text,text)') IS NOT NULL
+        AND to_regprocedure('pgtrickle.get_stream_table_partition_retention(text)') IS NOT NULL
+        AND to_regprocedure('pgtrickle.create_stream_table_with_retention(text,text,text,text,text,text)') IS NOT NULL
+        AND EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger
+                    WHERE evtname='pg_trickle_ddl_start_tracker' AND evtevent='ddl_command_start')" | grep -qx t
+
+    # Existing streams stay unconfigured after upgrade. Then exercise RETAIN
+    # through the migrated API and DDL hook on the same upgraded catalog.
+    # The SUM query is marked needs_reinit because older materializations lack
+    # the differential aggregate state added in v0.109.0.
+    psql "SELECT pgtrickle.refresh_stream_table('retention_upgrade_st')" >/dev/null
+    psql "SELECT pgtrickle.get_stream_table_partition_retention('retention_upgrade_st')->>'enabled'" | grep -qx false
+    psql "SELECT pgtrickle.set_stream_table_partition_retention(
+        'retention_upgrade_st', 'RETAIN', 'd', '2026-01-01')" >/dev/null
+    psql "ALTER TABLE public.retention_upgrade_source
+        DETACH PARTITION public.retention_upgrade_old CONCURRENTLY" >/dev/null
+    psql "SELECT NOT EXISTS (
+        (SELECT d,total,n FROM public.retention_upgrade_st
+         EXCEPT ALL VALUES ('2025-06-01'::date,10::bigint,1::bigint),
+                            ('2026-06-01'::date,20::bigint,1::bigint))
+        UNION ALL
+        (VALUES ('2025-06-01'::date,10::bigint,1::bigint),
+                ('2026-06-01'::date,20::bigint,1::bigint)
+         EXCEPT ALL SELECT d,total,n FROM public.retention_upgrade_st))" | grep -qx t
+    psql "SELECT pgtrickle.get_stream_table_partition_retention('retention_upgrade_st')->'sealed_ranges'
+        = '[{\"lower\":\"2025-01-01\",\"upper\":\"2026-01-01\"}]'::jsonb" | grep -qx t
+fi
 
 if [[ "$AGGREGATE_UPGRADE" == true ]]; then
     # Graph-coordinated refresh exercises the manual FULL target for an

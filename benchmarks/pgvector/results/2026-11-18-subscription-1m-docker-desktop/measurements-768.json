@@ -1,0 +1,123 @@
+{
+  "benchmark": "test_pgvector_subscription_scaling_workload",
+  "date": "2026-11-18",
+  "corpus_rows": 1000000,
+  "dimensions": 768,
+  "analyzed": true,
+  "rounds": 2,
+  "updated_rows_per_round": 1,
+  "distinct_pivots": 10,
+  "software": {
+    "postgres": "PostgreSQL 18.7 (Debian 18.7-1.pgdg12+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit",
+    "pgvector": "0.8.7",
+    "pg_trickle": "0.109.0",
+    "runtime_source_commit": "cfb965df",
+    "benchmark_harness_commit": "9fd80566b8d4c9da320099cd7eec4a2d07092c10",
+    "docker_image_id": "sha256:3fa654fab411194eb6b9102eecac0ceb115030d5199fcb66237e2db1ee4ee3b8"
+  },
+  "environment": {
+    "host": "Apple Silicon, 32 GiB RAM",
+    "docker_desktop": "29.9.2",
+    "container_platform": "linux/amd64",
+    "docker_cpus": 10,
+    "docker_memory_bytes": 8319504384
+  },
+  "instrumentation": {
+    "nested_auto_explain": true,
+    "log_analyze": true,
+    "log_buffers": true,
+    "log_timing": false,
+    "timings_include_instrumentation_overhead": true
+  },
+  "notes": [
+    "The zero-subscription control used delete_insert; subscribed cases used explicit_dml.",
+    "The 1,000-subscription case used 10 distinct pivots; other cases used one pivot.",
+    "Each run asserted differential refresh, changed-row propagation, and expected notifications.",
+    "Membership plan summaries count auto_explain plans whose query text contains before_rows AS; buffer blocks are sums of those plans' root counters, not unique pages or total-workload I/O.",
+    "There was no controlled concurrent load, randomized run order, CPU or WAL collection, percentile estimate, or reliable peak-memory measurement.",
+    "Only analyzed 768-dimensional vectors were measured."
+  ],
+  "runs": [
+    {
+      "trigger_path": "trigger_free",
+      "subscriptions": 0,
+      "merge_strategy": "delete_insert",
+      "estimated_rows": 1000000,
+      "samples": [
+        {"round": 0, "refresh_ms": 263.98075, "commit_ms": 6.299542, "notification_wait_ms": null, "snapshot_kind": "none", "snapshot_rows": null, "affected_identities": null, "stream_sequential_tuples_returned": 0, "stream_index_tuples_fetched": 0, "source_sequential_tuples_returned": 0, "source_index_tuples_fetched": 0},
+        {"round": 1, "refresh_ms": 96.066291, "commit_ms": 2.30475, "notification_wait_ms": null, "snapshot_kind": "none", "snapshot_rows": null, "affected_identities": null, "stream_sequential_tuples_returned": 0, "stream_index_tuples_fetched": 0, "source_sequential_tuples_returned": 0, "source_index_tuples_fetched": 0}
+      ],
+      "membership_predicate_plans": {"count_by_round": [0, 0], "root_shared_hit_blocks_by_round": [0, 0], "root_shared_read_blocks_by_round": [0, 0]},
+      "plan_log": {
+        "path": "plans/768-trigger-free-0-subscriptions.log.gz",
+        "raw_sha256": "1ad075d79b87ede07ff0b99946e9d19ba97fca61243178d7284bba6a56acdc80",
+        "archive_sha256": "935c7803590261b4094af0755de9533982e2d0b0c4d56756d0f7ceddddab647c"
+      }
+    },
+    {
+      "trigger_path": "trigger_free",
+      "subscriptions": 1,
+      "merge_strategy": "explicit_dml",
+      "estimated_rows": 1000000,
+      "samples": [
+        {"round": 0, "refresh_ms": 240.506167, "commit_ms": 6.930125, "notification_wait_ms": 0.138667, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "stream_index_tuples_fetched": 0, "source_sequential_tuples_returned": 0, "source_index_tuples_fetched": 0},
+        {"round": 1, "refresh_ms": 88.880375, "commit_ms": 2.899125, "notification_wait_ms": 0.134375, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "stream_index_tuples_fetched": 0, "source_sequential_tuples_returned": 0, "source_index_tuples_fetched": 0}
+      ],
+      "membership_predicate_plans": {"count_by_round": [1, 1], "root_shared_hit_blocks_by_round": [9, 8], "root_shared_read_blocks_by_round": [0, 0]},
+      "plan_log": {
+        "path": "plans/768-trigger-free-1-subscription.log.gz",
+        "raw_sha256": "4e230ecb132c02cbb3b93a0800069281fb69480a147bcc6f1f0c9eb12a60db59",
+        "archive_sha256": "cb107980b9ea8b5a3e4086096cc622cbaef3ac3ba2b50464d025778b1c7d6d00"
+      }
+    },
+    {
+      "trigger_path": "trigger_free",
+      "subscriptions": 10,
+      "merge_strategy": "explicit_dml",
+      "estimated_rows": 1000000,
+      "samples": [
+        {"round": 0, "refresh_ms": 103.2515, "commit_ms": 3.458875, "notification_wait_ms": 0.705084, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "stream_index_tuples_fetched": 0, "source_sequential_tuples_returned": 0, "source_index_tuples_fetched": 0},
+        {"round": 1, "refresh_ms": 166.249083, "commit_ms": 5.080208, "notification_wait_ms": 0.442542, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "stream_index_tuples_fetched": 0, "source_sequential_tuples_returned": 0, "source_index_tuples_fetched": 0}
+      ],
+      "membership_predicate_plans": {"count_by_round": [1, 1], "root_shared_hit_blocks_by_round": [9, 8], "root_shared_read_blocks_by_round": [0, 0]},
+      "plan_log": {
+        "path": "plans/768-trigger-free-10-subscriptions.log.gz",
+        "raw_sha256": "e27f11b0b73967b6bb1eb72ce2b9273eb9de24e64b8e7a68bc66e215633581a4",
+        "archive_sha256": "a6098c9ccdf9f06af262538cb903b6f260b70024e924dc8991134fcea73e2e52"
+      }
+    },
+    {
+      "trigger_path": "trigger_free",
+      "subscriptions": 100,
+      "merge_strategy": "explicit_dml",
+      "estimated_rows": 1000000,
+      "samples": [
+        {"round": 0, "refresh_ms": 269.052958, "commit_ms": 6.030542, "notification_wait_ms": 4.930416, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "stream_index_tuples_fetched": 0, "source_sequential_tuples_returned": 0, "source_index_tuples_fetched": 0},
+        {"round": 1, "refresh_ms": 167.758833, "commit_ms": 2.761833, "notification_wait_ms": 3.652833, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "stream_index_tuples_fetched": 0, "source_sequential_tuples_returned": 0, "source_index_tuples_fetched": 0}
+      ],
+      "membership_predicate_plans": {"count_by_round": [1, 1], "root_shared_hit_blocks_by_round": [9, 8], "root_shared_read_blocks_by_round": [0, 0]},
+      "plan_log": {
+        "path": "plans/768-trigger-free-100-subscriptions.log.gz",
+        "raw_sha256": "54e665fb0e6b5845994ccb33ec43639cdef3a0e378f749ab871c4a057e526dcf",
+        "archive_sha256": "3108dc0b81921a4d6c1a94b01998f6bedf2d361858e769038a59f4993f94796a"
+      }
+    },
+    {
+      "trigger_path": "trigger_free",
+      "subscriptions": 1000,
+      "distinct_pivots": 10,
+      "merge_strategy": "explicit_dml",
+      "estimated_rows": 1000000,
+      "samples": [
+        {"round": 0, "refresh_ms": 965.948625, "commit_ms": 6.98025, "notification_wait_ms": 8.712208, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "stream_index_tuples_fetched": 0, "source_sequential_tuples_returned": 0, "source_index_tuples_fetched": 0},
+        {"round": 1, "refresh_ms": 950.739209, "commit_ms": 3.768666, "notification_wait_ms": 13.768917, "snapshot_kind": "bounded", "snapshot_rows": 1, "affected_identities": 1, "stream_sequential_tuples_returned": 0, "stream_index_tuples_fetched": 0, "source_sequential_tuples_returned": 0, "source_index_tuples_fetched": 0}
+      ],
+      "membership_predicate_plans": {"count_by_round": [10, 10], "root_shared_hit_blocks_by_round": [90, 80], "root_shared_read_blocks_by_round": [0, 0]},
+      "plan_log": {
+        "path": "plans/768-trigger-free-1000-subscriptions-10-pivots.log.gz",
+        "raw_sha256": "c7ab6233d93bc13f2d333cef8f46f6e0616a03fd0533d5ec20caddf59899922c",
+        "archive_sha256": "48ee7e00fbb1e28e4b35cb4005238d9598aca45e83338f059b226ebdce484563"
+      }
+    }
+  ]
+}

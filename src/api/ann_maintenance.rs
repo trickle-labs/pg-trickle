@@ -290,6 +290,52 @@ fn ann_maintenance_request_impl(request_id: i64) -> Result<pgrx::JsonB, PgTrickl
     .ok_or_else(|| PgTrickleError::NotFound(format!("request {request_id} is unavailable or not authorized")))
 }
 
+/// List authorized maintenance requests in request-ID order without exposing the private queue.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+pub fn list_ann_maintenance_requests(
+    after_request_id: i64,
+    max_results: i32,
+) -> Result<SetOfIterator<'static, pgrx::JsonB>, PgTrickleError> {
+    if after_request_id < 0 || !(1..=1000).contains(&max_results) {
+        return Err(PgTrickleError::InvalidArgument(
+            "ANN request cursor must be nonnegative and page size must be between 1 and 1000"
+                .into(),
+        ));
+    }
+    let caller = super::helpers::outer_user_id();
+    let ids = Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT r.request_id FROM pgtrickle.pgt_ann_maintenance_requests r \
+             JOIN pgtrickle.pgt_stream_tables s ON s.pgt_id = r.pgt_id \
+             JOIN pg_catalog.pg_class root ON root.oid = s.pgt_relid \
+             LEFT JOIN pg_catalog.pg_class leaf ON leaf.oid = r.leaf_relid \
+             WHERE r.request_id > $1 \
+               AND pg_catalog.has_schema_privilege($2, root.relnamespace, 'USAGE') \
+               AND pg_catalog.has_table_privilege($2, root.oid, 'SELECT') \
+               AND CASE WHEN leaf.oid IS NULL THEN pg_catalog.pg_has_role($2, root.relowner, 'USAGE') \
+                        ELSE pg_catalog.has_schema_privilege($2, leaf.relnamespace, 'USAGE') \
+                         AND pg_catalog.has_table_privilege($2, leaf.oid, 'MAINTAIN') END \
+             ORDER BY r.request_id LIMIT $3",
+            None,
+            &[after_request_id.into(), caller.into(), max_results.into()],
+        )?;
+        let mut ids = Vec::new();
+        for row in rows {
+            if let Some(id) = row.get::<i64>(1)? {
+                ids.push(id);
+            }
+        }
+        Ok::<_, pgrx::spi::Error>(ids)
+    })
+    .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
+    let statuses = ids
+        .into_iter()
+        .map(ann_maintenance_request_impl)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SetOfIterator::new(statuses))
+}
+
 /// Cancel queued work or request cancellation of an active claim.
 #[pg_extern(schema = "pgtrickle", security_definer)]
 #[search_path(pgtrickle, pg_catalog, pg_temp)]

@@ -1,0 +1,33 @@
+BENCH_QUICK=1: using sample-size=100, measurement-time=5s, warm-up-time=1s
+Building libpg_stub.dylib ...
+Compiling benchmarks ...
+   Compiling ctutils v0.4.4
+   Compiling digest v0.11.2
+   Compiling hmac v0.13.0
+   Compiling sha2 v0.11.0
+   Compiling md-5 v0.11.0
+   Compiling postgres-protocol v0.6.12
+   Compiling hkdf v0.13.0
+   Compiling postgres-types v0.2.14
+   Compiling tokio-postgres v0.7.18
+   Compiling sqlx-postgres v0.9.0
+   Compiling postgres v0.19.14
+   Compiling pg_trickle v0.108.3 (/private/tmp/pg-trickle-before75-perf)
+   Compiling sqlx-macros-core v0.9.0
+   Compiling sqlx-macros v0.9.0
+   Compiling pgrx-tests v0.18.0
+   Compiling sqlx v0.9.0
+    Finished `bench` profile [optimized] target(s) in 2m 59s
+  Executable benches/diff_operators.rs (/private/tmp/pg-trickle-task-1399/target/release/deps/diff_operators-bf6af7668fdf310e)
+
+Running: diff_operators-bf6af7668fdf310e (with libpg_stub.dylib)
+Gnuplot not found, using plotters backend
+Benchmarking diff_aggregate/count_star_1group
+Benchmarking diff_aggregate/count_star_1group: Warming up for 1.0000 s
+Benchmarking diff_aggregate/count_star_1group: Collecting 100 samples in estimated 5.0148 s (1.0M iterations)
+Benchmarking diff_aggregate/count_star_1group: Analyzing
+diff_aggregate/count_star_1group
+                        time:   [4.9069 µs 4.9115 µs 4.9167 µs]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+

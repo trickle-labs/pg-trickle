@@ -94,13 +94,27 @@ pub fn having_retraction_sql(predicate: &str) -> String {
     }
 }
 
-pub fn group_presence_sql(global: bool, count: &str) -> String {
-    match (group_present(global, false), group_present(global, true)) {
-        (true, true) => "TRUE".to_string(),
-        (false, true) => format!("({count}) > 0"),
-        (true, false) => format!("({count}) <= 0"),
-        (false, false) => "FALSE".to_string(),
+pub struct GroupPresenceSql<'a> {
+    global: bool,
+    count: &'a str,
+}
+
+impl std::fmt::Display for GroupPresenceSql<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (
+            group_present(self.global, false),
+            group_present(self.global, true),
+        ) {
+            (true, true) => formatter.write_str("TRUE"),
+            (false, true) => write!(formatter, "({}) > 0", self.count),
+            (true, false) => write!(formatter, "({}) <= 0", self.count),
+            (false, false) => formatter.write_str("FALSE"),
+        }
     }
+}
+
+pub fn group_presence_sql(global: bool, count: &str) -> GroupPresenceSql<'_> {
+    GroupPresenceSql { global, count }
 }
 
 fn action_code(action: GroupAction) -> &'static str {
@@ -193,8 +207,8 @@ mod tests {
         assert_eq!(group_action(false, false, false), GroupAction::Skip);
         assert_eq!(group_action(true, true, false), GroupAction::Update);
         assert_eq!(group_action(true, false, false), GroupAction::Insert);
-        assert_eq!(group_presence_sql(true, "n"), "TRUE");
-        assert_eq!(group_presence_sql(false, "n"), "(n) > 0");
+        assert_eq!(group_presence_sql(true, "n").to_string(), "TRUE");
+        assert_eq!(group_presence_sql(false, "n").to_string(), "(n) > 0");
         assert_eq!(aggregate_value_sql(false, "n", "0"), "0");
         assert_eq!(
             aggregate_value_sql(true, "n", "v"),

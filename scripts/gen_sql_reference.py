@@ -2,7 +2,8 @@
 """DX-2: SQL_REFERENCE.md Completeness Reconciliation.
 
 Scans every ``#[pg_extern]`` annotation in ``src/`` and compares the
-discovered function names against the headings in ``docs/SQL_REFERENCE.md``.
+discovered function names against ``docs/SQL_REFERENCE.md`` and
+``docs/SQL_API_CATALOG.md``.
 Exits non-zero (and prints a diff) when the reference is out of sync.
 
 Usage
@@ -38,6 +39,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src"
 SQL_REF = REPO_ROOT / "docs" / "SQL_REFERENCE.md"
+SQL_API_CATALOG = REPO_ROOT / "docs" / "SQL_API_CATALOG.md"
 
 # Functions that are intentionally internal and excluded from the reference.
 # Add entries here when a function is annotated #[pg_extern(sql = "")] in
@@ -223,6 +225,14 @@ def discover_doc_names(sql_ref: Path) -> set[str]:
     return {m.group(1) for m in _RE_DOC_HEADING.finditer(text)}
 
 
+def discover_catalog_names(sql_catalog: Path) -> set[str]:
+    """Return the set of function names documented in SQL_API_CATALOG.md."""
+    if not sql_catalog.exists():
+        return set()
+    text = sql_catalog.read_text(encoding="utf-8").replace(r"\_", "_")
+    return set(re.findall(r"pgtrickle\.([a-z_][a-z0-9_]*)", text))
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -265,8 +275,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     doc_names = discover_doc_names(SQL_REF)
+    catalog_names = discover_catalog_names(SQL_API_CATALOG)
 
-    missing = sorted(public_names - doc_names)
+    missing = sorted(public_names - doc_names - catalog_names)
     extra = sorted(doc_names - public_names)
 
     ok = True
@@ -275,13 +286,15 @@ def main(argv: list[str] | None = None) -> int:
         ok = False
         print(
             "ERROR: The following public #[pg_extern] functions are NOT documented"
-            f" in {SQL_REF.relative_to(REPO_ROOT)}:",
+            f" in {SQL_REF.relative_to(REPO_ROOT)} or "
+            f"{SQL_API_CATALOG.relative_to(REPO_ROOT)}:",
             file=sys.stderr,
         )
         for name in missing:
             print(f"  + pgtrickle.{name}", file=sys.stderr)
         print(
-            "\nAdd a '### pgtrickle.<name>' heading to docs/SQL_REFERENCE.md"
+            "\nAdd a '### pgtrickle.<name>' heading to docs/SQL_REFERENCE.md "
+            "or a function entry to docs/SQL_API_CATALOG.md"
             " or mark the function internal with #[pg_extern(sql = \"\")].",
             file=sys.stderr,
         )

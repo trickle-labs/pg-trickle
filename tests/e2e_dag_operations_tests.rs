@@ -14,7 +14,7 @@
 
 mod e2e;
 
-use e2e::E2eDb;
+use e2e::{E2eDb, disable_scheduler};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Shared Setup Helpers
@@ -29,6 +29,8 @@ use e2e::E2eDb;
 ///           → ops_l3 (filter: doubled > 30)
 /// ```
 async fn setup_ops_pipeline(db: &E2eDb) {
+    disable_scheduler(db).await;
+
     db.execute(
         "CREATE TABLE ops_src (
             id  SERIAL PRIMARY KEY,
@@ -412,6 +414,7 @@ async fn test_drop_middle_layer_cascades() {
 #[tokio::test]
 async fn test_suspend_resume_cycle_data_consistency() {
     let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
 
     // Simple 2-layer pipeline for this test
     db.execute(

@@ -13,6 +13,9 @@ pub struct DeltaStage {
     /// remove these source-dependent views after the refresh has used them.
     /// The actual materialized bounded sources are ON COMMIT DROP tables.
     bounded_views: Vec<String>,
+    /// Lock-free inverse temp views require a post-read check for any
+    /// post-bound TRUNCATE that committed before or during DVM execution.
+    bounded_view_guards: Vec<(u32, String, String)>,
     centroid_nonce: Option<u64>,
 }
 
@@ -72,14 +75,17 @@ impl DeltaStage {
         let mut stage = Self {
             names: HashMap::new(),
             bounded_views: Vec::new(),
+            bounded_view_guards: Vec::new(),
             centroid_nonce,
         };
 
-        // Never queue a blocking SHARE lock behind continuously active
-        // writers. For an uncontended source, a conditional SHARE lock permits
-        // the cheap no-future VIEW fast path. Under contention, reconstruct
-        // the bounded source by copying live rows and future CDC in ONE SQL
-        // statement/MVCC snapshot without waiting for source writers.
+        // Never acquire SHARE locks on source tables during differential
+        // refresh: holding SHARE through MERGE blocks concurrent OLTP writes
+        // on the source relation. Instead, when no post-bound CDC rows exist
+        // at staging time, expose a zero-copy inverse TEMP VIEW that reads
+        // live rows and post-bound CDC under each DVM statement's single MVCC
+        // snapshot; when post-bound CDC rows already exist, materialize the
+        // inverse into an ON COMMIT DROP temp table in one MVCC snapshot.
         for dependency in dependencies {
             let source_oid = dependency.source_relid.to_u32();
             let (buffer, prev_lsn, new_lsn) = if dependency.source_type == "STREAM_TABLE" {
@@ -117,29 +123,12 @@ impl DeltaStage {
                 continue;
             };
 
-            let source_locked = if matches!(
-                dependency.source_type.as_str(),
-                "TABLE" | "MATVIEW" | "STREAM_TABLE"
-            ) {
-                try_share_lock_source(dependency.source_relid)?
-            } else {
-                false
-            };
-            stage.stage_source(
-                st,
-                dependency,
-                &buffer,
-                &prev_lsn,
-                &new_lsn,
-                &owner,
-                source_locked,
-            )?;
+            stage.stage_source(st, dependency, &buffer, &prev_lsn, &new_lsn, &owner)?;
         }
 
         Ok(stage)
     }
 
-    #[allow(clippy::too_many_arguments)] // Source stage needs both LSN cuts, owner, and conditional-lock state.
     fn stage_source(
         &mut self,
         st: &StreamTableMeta,
@@ -148,7 +137,6 @@ impl DeltaStage {
         prev_lsn: &str,
         new_lsn: &str,
         owner: &str,
-        source_locked: bool,
     ) -> Result<(), PgTrickleError> {
         let pgt_id = st.pgt_id;
         let source_oid = dependency.source_relid.to_u32();
@@ -265,19 +253,19 @@ impl DeltaStage {
             ))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         }
-        // Stage the logical source at new_lsn as well as the bounded delta.
-        // The contended path reads the live relation and future CDC in ONE
-        // statement, so both sides share exactly one MVCC snapshot.
-        self.stage_bounded_source(
-            st,
-            dependency,
-            &source,
-            new_lsn,
-            owner,
-            &source_table,
-            &hash_columns,
-            source_locked,
-        )?;
+        // The graph executor already holds every source lock across its shared
+        // cut, so the live source is the exact NEW-frontier state.
+        if !crate::refresh::current_graph_sources_locked() {
+            self.stage_bounded_source(
+                st,
+                dependency,
+                &source,
+                new_lsn,
+                owner,
+                &source_table,
+                &hash_columns,
+            )?;
+        }
         self.names.insert(source_oid, qualified_name);
         Ok(())
     }
@@ -296,6 +284,10 @@ impl DeltaStage {
         st: &StreamTableMeta,
         dependencies: &[StDependency],
     ) -> Result<(), PgTrickleError> {
+        if crate::refresh::current_graph_sources_locked() {
+            return Ok(());
+        }
+        self.bounded_view_guards.clear();
         let owner = quote_ident(&crate::refresh::stream_owner_name(st)?);
         for dependency in dependencies {
             let oid = dependency.source_relid.to_u32();
@@ -358,15 +350,36 @@ impl DeltaStage {
         Ok(())
     }
 
-    /// Build a source snapshot at the NEW logical frontier. If no post-bound
-    /// changes are visible, a temporary view avoids copying a large relation.
-    /// When a conditional SHARE lock succeeds, the view is stable until
-    /// MERGE ends. Under contention we materialize the complete relation
-    /// against a single MVCC snapshot, without blocking source writers.
+    /// Verify that no post-bound TRUNCATE invalidated any lock-free inverse
+    /// temp view during DVM execution, then drop the session-local views.
+    pub(crate) fn verify_and_cleanup_bounded_views(&self) -> Result<(), PgTrickleError> {
+        for (source_oid, buffer, new_lsn) in &self.bounded_view_guards {
+            let probe_sql = format!(
+                "SELECT EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action = 'T')"
+            );
+            // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- buffer is catalog-derived and quoted; the frontier LSN is a parameter.
+            let future_truncate =
+                Spi::get_one_with_args::<bool>(&probe_sql, &[new_lsn.as_str().into()])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if future_truncate != Some(false) {
+                return Err(PgTrickleError::UnsupportedOperator(format!(
+                    "post-bound TRUNCATE for source OID {source_oid} requires FULL refresh"
+                )));
+            }
+        }
+        self.cleanup_bounded_views()
+    }
+
+    /// Build a source snapshot at the NEW logical frontier without holding a
+    /// SHARE lock on the source relation.
     ///
-    /// With post-bound changes, materialize a snapshot that reverses them.
-    /// For keyed tables the earliest event per identity gives the old row;
-    /// for keyless tables signed multiplicities preserve duplicate rows.
+    /// When no post-bound changes are visible at staging time, expose a
+    /// zero-copy temporary inverse VIEW over the live source and post-bound
+    /// CDC so each DVM statement sees the exact as-of state under its own
+    /// single MVCC snapshot without blocking concurrent writers.
+    ///
+    /// When post-bound changes already exist, materialize the inverse into an
+    /// ON COMMIT DROP temporary table in a single MVCC snapshot.
     #[allow(clippy::too_many_arguments)]
     fn stage_bounded_source(
         &mut self,
@@ -377,13 +390,12 @@ impl DeltaStage {
         owner: &str,
         source_table: &str,
         hash_columns: &[String],
-        source_locked: bool,
     ) -> Result<(), PgTrickleError> {
         let source_oid = dependency.source_relid.to_u32();
         let name = self.bounded_name(st.pgt_id, source_oid);
         let target = format!("pg_temp.{}", quote_ident(&name));
         // The bound originates from frontier metadata. Validate it before
-        // interpolating into a nested CREATE TABLE AS SELECT statement.
+        // interpolating into a nested CREATE VIEW / CREATE TABLE statement.
         crate::lsn::Lsn::parse(new_lsn).map_err(|error| {
             PgTrickleError::InvalidArgument(format!("invalid bounded source frontier LSN: {error}"))
         })?;
@@ -411,263 +423,239 @@ impl DeltaStage {
         }
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-        // When the nonblocking SHARE lock succeeds, the source cannot change
-        // during this refresh. The window CTAS above has already switched SPI
-        // to writable execution, so the probe below uses a fresh READ
-        // COMMITTED snapshot. We do not need to copy the entire post-frontier
-        // CDC buffer into another temporary table just to decide whether a
-        // stable source view is safe. One query probes both event categories.
-        //
-        // When the source is contended, it is NOT safe to probe now and
-        // choose a view: another source transaction might commit before the
-        // next SPI statement. Always materialize the inverse in a single
-        // snapshot of source and post-frontier CDC in that case.
-        let has_future = if source_locked {
-            // buffer is a catalog-derived, quoted qualified identifier;
-            // the frontier is a bound $1::pg_lsn parameter, not SQL text.
-            let probe_sql = format!(
-                "SELECT EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action = 'T'), \
-                 EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action IN ('I', 'D'))"
-            );
-            let (future_truncate, future_changes) =
-                Spi::get_two_with_args::<bool, bool>(&probe_sql, &[new_lsn.into()])
-                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            if future_truncate != Some(false) {
-                return Err(PgTrickleError::UnsupportedOperator(format!(
-                    "post-bound TRUNCATE or unknown CDC status for source OID {source_oid} requires FULL refresh"
-                )));
-            }
-            future_changes.ok_or_else(|| {
-                PgTrickleError::InternalError(format!(
-                    "post-bound CDC probe was NULL for source OID {source_oid}"
-                ))
-            })?
+        // Probe whether post-bound CDC rows already exist without locking the
+        // source. Even if a writer commits after this probe, the inverse VIEW
+        // below reads live source + post-bound CDC in one MVCC snapshot.
+        let probe_sql = format!(
+            "SELECT EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action = 'T'), \
+             EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action IN ('I', 'D'))"
+        );
+        let (future_truncate, future_changes) =
+            Spi::get_two_with_args::<bool, bool>(&probe_sql, &[new_lsn.into()])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if future_truncate != Some(false) {
+            return Err(PgTrickleError::UnsupportedOperator(format!(
+                "post-bound TRUNCATE or unknown CDC status for source OID {source_oid} requires FULL refresh"
+            )));
+        }
+        let has_future = future_changes.ok_or_else(|| {
+            PgTrickleError::InternalError(format!(
+                "post-bound CDC probe was NULL for source OID {source_oid}"
+            ))
+        })?;
+
+        let pk_columns = crate::cdc::resolve_pk_columns(dependency.source_relid)?;
+        let is_st = dependency.source_type == "STREAM_TABLE";
+        let keyless = !is_st && pk_columns.is_empty();
+
+        // Use the real column order, but only columns captured in CDC.
+        // The change buffer can track a superset of this ST's columns;
+        // absent source columns are never referenced by the DVM plan.
+        let columns = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT attname::text FROM pg_catalog.pg_attribute \
+                     WHERE attrelid = $1 AND attnum > 0 AND NOT attisdropped \
+                     ORDER BY attnum",
+                    None,
+                    &[dependency.source_relid.into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            rows.into_iter()
+                .map(|row| {
+                    row.get::<String>(1)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .ok_or_else(|| {
+                            PgTrickleError::InternalError(
+                                "source column name unexpectedly NULL".into(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        let captured: HashSet<String> = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT a.attname::text FROM pg_catalog.pg_attribute a \
+                     WHERE a.attrelid = pg_catalog.to_regclass($1) \
+                       AND a.attnum > 0 AND NOT a.attisdropped",
+                    None,
+                    &[buffer.into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            rows.into_iter()
+                .map(|row| {
+                    row.get::<String>(1)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .ok_or_else(|| {
+                            PgTrickleError::InternalError(
+                                "buffer column name unexpectedly NULL".into(),
+                            )
+                        })
+                })
+                .collect::<Result<HashSet<_>, _>>()
+        })?;
+        let mut cols = columns
+            .into_iter()
+            .filter(|col| captured.contains(&crate::cdc::cb_col_name(col)))
+            .collect::<Vec<_>>();
+        if is_st && !cols.iter().any(|col| col == "__pgt_row_id") {
+            cols.push("__pgt_row_id".to_string());
+        }
+        if cols.is_empty() {
+            return Err(PgTrickleError::UnsupportedOperator(format!(
+                "cannot reconstruct source OID {source_oid} without captured columns"
+            )));
+        }
+        let live_cols = cols
+            .iter()
+            .map(|c| format!("s.{}", quote_ident(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let first_cols = cols
+            .iter()
+            .map(|c| format!("f.{}", quote_ident(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let future_cols = cols
+            .iter()
+            .filter(|c| *c != "__pgt_row_id")
+            .map(|c| {
+                format!(
+                    "c.{} AS {}",
+                    quote_ident(&crate::cdc::cb_col_name(c)),
+                    quote_ident(c)
+                )
+            })
+            .collect::<Vec<_>>();
+        let future_cols = if future_cols.is_empty() {
+            String::new()
         } else {
-            true
+            format!(", {}", future_cols.join(", "))
+        };
+        let projected = cols
+            .iter()
+            .filter(|c| *c != "__pgt_row_id")
+            .map(|c| format!("f.{}", quote_ident(c)))
+            .collect::<Vec<_>>();
+        let selected = if projected.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", projected.join(", "))
+        };
+        let first = format!(
+            "SELECT DISTINCT ON (f.__pgt_event_identity) f.__pgt_event_identity AS __pgt_row_id, f.__pgt_event_action AS __pgt_future_action{selected} FROM __pgt_future f \
+             ORDER BY f.__pgt_event_identity, f.__pgt_event_sequence"
+        );
+        // Each statement reading this query evaluates both the live source and
+        // post-bound CDC under one PostgreSQL MVCC snapshot, without holding a
+        // SHARE lock on the source relation.
+        let common = format!(
+            "WITH __pgt_future AS MATERIALIZED (\
+               SELECT c.__pgt_row_id AS __pgt_event_identity, c.action AS __pgt_event_action, c.change_id AS __pgt_event_sequence{future_cols} \
+               FROM {buffer} c \
+               WHERE c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')\
+             ), __pgt_first AS ({first})"
+        );
+        let select = if keyless {
+            let identity = crate::refresh::codegen::build_content_hash_expr_for_domain(
+                "s.",
+                hash_columns,
+                "KEYLESS_ROW",
+            );
+            format!(
+                "{common}, __pgt_net AS (\
+                   SELECT __pgt_event_identity AS __pgt_row_id, \
+                     SUM(CASE WHEN __pgt_event_action = 'I' THEN 1 ELSE -1 END)::bigint AS net \
+                   FROM __pgt_future GROUP BY __pgt_event_identity\
+                 ), __pgt_live AS (\
+                   SELECT {live_cols}, {identity} AS __pgt_bound_identity, \
+                     ROW_NUMBER() OVER (PARTITION BY {identity}) AS __pgt_bound_rn \
+                   FROM {source_table} s\
+                 ) \
+                 SELECT {cols} FROM __pgt_live l \
+                 LEFT JOIN __pgt_net n ON n.__pgt_row_id = l.__pgt_bound_identity \
+                 WHERE l.__pgt_bound_rn > GREATEST(n.net, 0) \
+                 UNION ALL SELECT {first_cols} FROM __pgt_first f \
+                 JOIN __pgt_net n ON n.__pgt_row_id = f.__pgt_row_id \
+                 CROSS JOIN LATERAL generate_series(1::bigint, GREATEST(-n.net, 0)) g",
+                cols = cols
+                    .iter()
+                    .map(|c| format!("l.{}", quote_ident(c)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        } else {
+            let identity = if is_st {
+                "s.__pgt_row_id".to_string()
+            } else {
+                crate::refresh::codegen::build_content_hash_expr_for_domain(
+                    "s.",
+                    hash_columns,
+                    "SCAN_KEY",
+                )
+            };
+            format!(
+                "{common} \
+                 SELECT {live_cols} FROM {source_table} s \
+                 WHERE NOT EXISTS (SELECT 1 FROM __pgt_first f \
+                   WHERE f.__pgt_row_id = {identity}) \
+                 UNION ALL SELECT {first_cols} FROM __pgt_first f \
+                 WHERE f.__pgt_future_action = 'D'"
+            )
         };
 
         if !has_future {
-            // The source lock makes the live source identical to its bounded
-            // state until the transaction ends. No full-table copy needed.
-            // nosemgrep: rust.spi.run.dynamic-format -- both names are
-            // catalog-derived, explicitly quoted identifiers.
-            // nosemgrep: rust.spi.run.dynamic-format -- source and target identifiers quoted.
-            Spi::run(&format!(
-                "CREATE TEMP VIEW {target} AS SELECT * FROM {source_table}"
-            ))
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            // Zero-copy lock-free inverse view. If concurrent writers commit
+            // before or during MERGE, the view reverses those post-bound rows
+            // inside MERGE's own MVCC snapshot. Post-bound TRUNCATE is checked
+            // by verify_and_cleanup_bounded_views() before commit.
+            let create_bound_view_sql = format!("CREATE TEMP VIEW {target} AS {select}");
+            // nosemgrep: rust.spi.run.dynamic-format -- target, source, and columns are catalog-derived quoted identifiers and new_lsn is validated.
+            Spi::run(&create_bound_view_sql)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             self.bounded_views.push(target.clone());
+            self.bounded_view_guards
+                .push((source_oid, buffer.to_string(), new_lsn.to_string()));
         } else {
-            let pk_columns = crate::cdc::resolve_pk_columns(dependency.source_relid)?;
-            let is_st = dependency.source_type == "STREAM_TABLE";
-            let keyless = !is_st && pk_columns.is_empty();
-
-            // Use the real column order, but only columns captured in CDC.
-            // The change buffer can track a superset of this ST's columns;
-            // absent source columns are never referenced by the DVM plan.
-            let columns = Spi::connect(|client| {
-                let rows = client
-                    .select(
-                        "SELECT attname::text FROM pg_catalog.pg_attribute \
-                         WHERE attrelid = $1 AND attnum > 0 AND NOT attisdropped \
-                         ORDER BY attnum",
-                        None,
-                        &[dependency.source_relid.into()],
-                    )
-                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-                rows.into_iter()
-                    .map(|row| {
-                        row.get::<String>(1)
-                            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                            .ok_or_else(|| {
-                                PgTrickleError::InternalError(
-                                    "source column name unexpectedly NULL".into(),
-                                )
-                            })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })?;
-            let captured: HashSet<String> = Spi::connect(|client| {
-                let rows = client
-                    .select(
-                        "SELECT a.attname::text FROM pg_catalog.pg_attribute a \
-                         WHERE a.attrelid = pg_catalog.to_regclass($1) \
-                           AND a.attnum > 0 AND NOT a.attisdropped",
-                        None,
-                        &[buffer.into()],
-                    )
-                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-                rows.into_iter()
-                    .map(|row| {
-                        row.get::<String>(1)
-                            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                            .ok_or_else(|| {
-                                PgTrickleError::InternalError(
-                                    "buffer column name unexpectedly NULL".into(),
-                                )
-                            })
-                    })
-                    .collect::<Result<HashSet<_>, _>>()
-            })?;
-            let mut cols = columns
-                .into_iter()
-                .filter(|col| captured.contains(&crate::cdc::cb_col_name(col)))
-                .collect::<Vec<_>>();
-            if is_st && !cols.iter().any(|col| col == "__pgt_row_id") {
-                cols.push("__pgt_row_id".to_string());
-            }
-            if cols.is_empty() {
-                return Err(PgTrickleError::UnsupportedOperator(format!(
-                    "cannot reconstruct source OID {source_oid} without captured columns"
-                )));
-            }
-            let live_cols = cols
-                .iter()
-                .map(|c| format!("s.{}", quote_ident(c)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let first_cols = cols
-                .iter()
-                .map(|c| format!("f.{}", quote_ident(c)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let future_cols = cols
-                .iter()
-                .filter(|c| *c != "__pgt_row_id")
-                .map(|c| {
-                    format!(
-                        "c.{} AS {}",
-                        quote_ident(&crate::cdc::cb_col_name(c)),
-                        quote_ident(c)
-                    )
-                })
-                .collect::<Vec<_>>();
-            let future_cols = if future_cols.is_empty() {
-                String::new()
-            } else {
-                format!(", {}", future_cols.join(", "))
-            };
-            let projected = cols
-                .iter()
-                .filter(|c| *c != "__pgt_row_id")
-                .map(|c| format!("f.{}", quote_ident(c)))
-                .collect::<Vec<_>>();
-            let selected = if projected.is_empty() {
-                String::new()
-            } else {
-                format!(", {}", projected.join(", "))
-            };
-            let first = format!(
-                "SELECT DISTINCT ON (f.__pgt_event_identity) f.__pgt_event_identity AS __pgt_row_id, f.__pgt_event_action AS __pgt_future_action{selected} FROM __pgt_future f \
-                 ORDER BY f.__pgt_event_identity, f.__pgt_event_sequence"
-            );
-            // The source lock protects direct CDC reads; without the lock,
-            // this CDC scan and live-source scan occur in the same CTAS
-            // statement and therefore share one PostgreSQL MVCC snapshot.
-            let common = format!(
-                "WITH __pgt_future AS MATERIALIZED (\
-                   SELECT c.__pgt_row_id AS __pgt_event_identity, c.action AS __pgt_event_action, c.change_id AS __pgt_event_sequence{future_cols} \
-                   FROM {buffer} c \
-                   WHERE c.lsn > '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')\
-                 ), __pgt_first AS ({first})"
-            );
-            let select = if keyless {
-                let identity = crate::refresh::codegen::build_content_hash_expr_for_domain(
-                    "s.",
-                    hash_columns,
-                    "KEYLESS_ROW",
-                );
-                format!(
-                    "{common}, __pgt_net AS (\
-                       SELECT __pgt_event_identity AS __pgt_row_id, \
-                         SUM(CASE WHEN __pgt_event_action = 'I' THEN 1 ELSE -1 END)::bigint AS net \
-                       FROM __pgt_future GROUP BY __pgt_event_identity\
-                     ), __pgt_live AS (\
-                       SELECT {live_cols}, {identity} AS __pgt_bound_identity, \
-                         ROW_NUMBER() OVER (PARTITION BY {identity}) AS __pgt_bound_rn \
-                       FROM {source_table} s\
-                     ) \
-                     SELECT {cols} FROM __pgt_live l \
-                     LEFT JOIN __pgt_net n ON n.__pgt_row_id = l.__pgt_bound_identity \
-                     WHERE l.__pgt_bound_rn > GREATEST(n.net, 0) \
-                     UNION ALL SELECT {first_cols} FROM __pgt_first f \
-                     JOIN __pgt_net n ON n.__pgt_row_id = f.__pgt_row_id \
-                     CROSS JOIN LATERAL generate_series(1::bigint, GREATEST(-n.net, 0)) g",
-                    cols = cols
-                        .iter()
-                        .map(|c| format!("l.{}", quote_ident(c)))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                )
-            } else {
-                let identity = if is_st {
-                    "s.__pgt_row_id".to_string()
-                } else {
-                    crate::refresh::codegen::build_content_hash_expr_for_domain(
-                        "s.",
-                        hash_columns,
-                        "SCAN_KEY",
-                    )
-                };
-                format!(
-                    "{common} \
-                     SELECT {live_cols} FROM {source_table} s \
-                     WHERE NOT EXISTS (SELECT 1 FROM __pgt_first f \
-                       WHERE f.__pgt_row_id = {identity}) \
-                     UNION ALL SELECT {first_cols} FROM __pgt_first f \
-                     WHERE f.__pgt_future_action = 'D'"
-                )
-            };
-
             // PostgreSQL's statement snapshot is shared by the live source
             // and CDC scans in the same CTAS, even while writers commit.
-            // A future TRUNCATE has no D-images. For a contended source
-            // materialize a sentinel row *in the same snapshot* so it can
-            // be detected reliably; a separate preflight query could miss it.
+            // A future TRUNCATE has no D-images; materialize a sentinel row
+            // *in the same snapshot* so it can be detected reliably.
             let guard = quote_ident(&format!(
                 "__pgt_future_truncate_guard_{}_{}",
                 st.pgt_id, source_oid
             ));
-            let select = if source_locked {
-                select
-            } else {
-                let null_cols = cols
-                    .iter()
-                    .map(|col| format!("NULL AS {}", quote_ident(col)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "SELECT b.*, FALSE AS {guard} FROM ({select}) b \
-                     UNION ALL SELECT {null_cols}, TRUE AS {guard} \
-                     WHERE EXISTS (SELECT 1 FROM {buffer} t \
-                       WHERE t.lsn > '{new_lsn}'::pg_lsn AND t.action = 'T')"
-                )
-            };
-            // The SQL contains only catalog-derived qualified relations,
-            // quote_ident-projected columns, a validated pg_lsn literal, and
-            // the extension-generated inverse query. DDL identifiers cannot
-            // be bound as SPI parameters. Keep the reviewed SQL in a named
-            // value for diagnostics and a single execution.
-            let create_bound_sql = format!("CREATE TEMP TABLE {target} ON COMMIT DROP AS {select}");
+            let null_cols = cols
+                .iter()
+                .map(|col| format!("NULL AS {}", quote_ident(col)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let guarded_select = format!(
+                "SELECT b.*, FALSE AS {guard} FROM ({select}) b \
+                 UNION ALL SELECT {null_cols}, TRUE AS {guard} \
+                 WHERE EXISTS (SELECT 1 FROM {buffer} t \
+                   WHERE t.lsn > '{new_lsn}'::pg_lsn AND t.action = 'T')"
+            );
+            let create_bound_sql =
+                format!("CREATE TEMP TABLE {target} ON COMMIT DROP AS {guarded_select}");
             Spi::run(&create_bound_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            if !source_locked {
-                // Only rows from the CTAS snapshot affect this guard.
-                // nosemgrep: rust.spi.query.dynamic-format
-                let future_truncate = Spi::get_one::<bool>(&format!(
-                    "SELECT EXISTS (SELECT 1 FROM {target} WHERE {guard})"
-                )) // nosemgrep: rust.spi.query.dynamic-format
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .unwrap_or(false);
-                if future_truncate {
-                    return Err(PgTrickleError::UnsupportedOperator(format!(
-                        "post-bound TRUNCATE for source OID {source_oid} requires FULL refresh"
-                    )));
-                }
-                // Remove the internal marker before the DVM uses this table.
-                // nosemgrep: rust.spi.run.dynamic-format
-                Spi::run(&format!("ALTER TABLE {target} DROP COLUMN {guard}")) // nosemgrep: rust.spi.run.dynamic-format
-                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            // Only rows from the CTAS snapshot affect this guard.
+            // nosemgrep: rust.spi.query.dynamic-format
+            let future_truncate = Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS (SELECT 1 FROM {target} WHERE {guard})"
+            )) // nosemgrep: rust.spi.query.dynamic-format
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(false);
+            if future_truncate {
+                return Err(PgTrickleError::UnsupportedOperator(format!(
+                    "post-bound TRUNCATE for source OID {source_oid} requires FULL refresh"
+                )));
             }
+            // Remove the internal marker before the DVM uses this table.
+            // nosemgrep: rust.spi.run.dynamic-format
+            Spi::run(&format!("ALTER TABLE {target} DROP COLUMN {guard}")) // nosemgrep: rust.spi.run.dynamic-format
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         }
         // nosemgrep: rust.spi.run.dynamic-format -- temp relation is
         // numeric-ID-scoped and the owner is identifier-quoted.
@@ -675,72 +663,6 @@ impl DeltaStage {
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Ok(())
     }
-}
-
-// Standalone Rust unit-test executables do not load PostgreSQL's dynamic
-// backend symbols. Keep the real conditional lock in extension builds; E2E
-// tests against a PostgreSQL server exercise the actual locking branch.
-#[cfg(test)]
-fn conditional_source_share_lock(_oid: pg_sys::Oid) -> bool {
-    false
-}
-
-#[cfg(not(test))]
-fn conditional_source_share_lock(oid: pg_sys::Oid) -> bool {
-    // SAFETY: The relation OID was verified in pg_class by this backend and
-    // this API is called on the PostgreSQL backend thread. It fails without
-    // waiting when another transaction holds a conflicting lock.
-    unsafe { pg_sys::ConditionalLockRelationOid(oid, pg_sys::ShareLock as i32) }
-}
-
-/// Try to fence a source and all partition descendants without ever waiting
-/// behind a continuously active writer. A failed attempt is not an error:
-/// callers must instead materialize an as-of source from a single MVCC
-/// snapshot of the live relation and its post-frontier CDC.
-fn try_share_lock_source(source_oid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
-    let relations = Spi::connect(|client| {
-        let rows = client
-            .select(
-                "WITH RECURSIVE rels(oid) AS (
-                    SELECT $1::oid
-                    UNION ALL
-                    SELECT i.inhrelid FROM pg_catalog.pg_inherits i
-                    JOIN rels r ON r.oid = i.inhparent
-                 )
-                 SELECT r.oid::text, c.relkind::text FROM rels r
-                 JOIN pg_catalog.pg_class c ON c.oid = r.oid
-                 ORDER BY r.oid",
-                None,
-                &[source_oid.into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        let mut oids = Vec::new();
-        for row in rows {
-            let oid = row
-                .get::<String>(1)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .ok_or_else(|| PgTrickleError::InternalError("source OID was NULL".into()))?
-                .parse::<u32>()
-                .map_err(|e| PgTrickleError::SpiError(format!("invalid source OID: {e}")))?;
-            let relkind = row
-                .get::<String>(2)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .ok_or_else(|| PgTrickleError::InternalError("source relkind was NULL".into()))?;
-            if relkind != "f" {
-                oids.push(pg_sys::Oid::from(oid));
-            }
-        }
-        Ok::<_, PgTrickleError>(oids)
-    })?;
-    if relations.is_empty() {
-        return Ok(false);
-    }
-    for oid in relations {
-        if !conditional_source_share_lock(oid) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 fn frontier_lsn(frontier: &Frontier, key: &str) -> String {

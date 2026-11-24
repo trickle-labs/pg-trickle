@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running tests/e2e_pgvector_revision_tests.rs (/private/tmp/pg-trickle-task-1399/target/debug/deps/e2e_pgvector_revision_tests-7ac7530d67ba7c77)
+
+running 1 test
+100 committed visibility changes and tenant reads during refresh: 6.958s
+test test_live_rag_paced_writes_and_tenant_reads_during_refresh ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 9.75s
+

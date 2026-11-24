@@ -3099,7 +3099,7 @@ pub fn execute_differential_refresh_with_tuning(
             // so we must record it here before returning.
             crate::shmem::record_diff_refresh(crate::dvm::is_delta_deduplicated(st.pgt_id));
 
-            delta_stage.cleanup_bounded_views()?;
+            delta_stage.verify_and_cleanup_bounded_views()?;
             return Ok((rows_inserted, 0));
         }
     }
@@ -3157,15 +3157,12 @@ pub fn execute_differential_refresh_with_tuning(
         crate::config::MergeStrategy::Merge => false,
         crate::config::MergeStrategy::Auto => {
             // Heuristic: use DELETE+INSERT when delta is a small fraction
-            // of the target table. Estimate target rows from pg_class.
+            // of the target table. If statistics are missing, prefer MERGE
+            // over counting the stream table during refresh.
             let threshold = crate::config::pg_trickle_merge_strategy_threshold();
             if total_change_count > 0 && threshold > 0.0 {
                 let target_rows: i64 = Spi::get_one::<i64>(&format!(
-                    "SELECT CASE WHEN reltuples >= 1 THEN reltuples::bigint \
-                            ELSE (SELECT COUNT(*) FROM \"{}\".\"{}\" ) END \
-                     FROM pg_class WHERE oid = {}::oid",
-                    schema.replace('"', "\"\""),
-                    name.replace('"', "\"\""),
+                    "SELECT reltuples::bigint FROM pg_class WHERE oid = {}::oid",
                     st.pgt_relid.to_u32(),
                 ))
                 .unwrap_or(Some(0))
@@ -3588,20 +3585,24 @@ pub fn execute_differential_refresh_with_tuning(
         let accumulator = format!("pg_temp.{accumulator_basename}");
         let raw_delta = format!("pg_temp.{delta_table_basename}");
         let target = format!("{schema}.{name}");
-        // The MT-8 fast path has its own MIN/MAX rescan SQL, outside the
-        // regular DVM source-rewrite machinery. Pass the same bounded
-        // source that the delta stage froze at this refresh's NEW LSN.
-        let bounded_source = format!(
-            "pg_temp.{}",
-            crate::refresh::delta_stage::DeltaStage::bounded_table_name(st.pgt_id, plan.source_oid)
-        );
+        // Graph sources are locked at the shared cut, so their live relation
+        // already has the same contents as the bounded stage.
+        let bounded_source = (!crate::refresh::current_graph_sources_locked()).then(|| {
+            format!(
+                "pg_temp.{}",
+                crate::refresh::delta_stage::DeltaStage::bounded_table_name(
+                    st.pgt_id,
+                    plan.source_oid,
+                )
+            )
+        });
         let finalize = crate::refresh::vectorized_agg::algebraic_finalize_sql(
             &plan,
             &target,
             &accumulator,
             &raw_delta,
             insert_only_minmax,
-            Some(&bounded_source),
+            bounded_source.as_deref(),
         )?;
         Some((plan, accumulator, raw_delta, finalize, insert_only_minmax))
     } else {
@@ -4370,11 +4371,7 @@ pub fn execute_differential_refresh_with_tuning(
     if crate::config::pg_trickle_adaptive_merge_strategy() {
         let threshold = crate::config::pg_trickle_merge_strategy_threshold();
         let target_rows: i64 = Spi::get_one::<i64>(&format!(
-            "SELECT CASE WHEN reltuples >= 1 THEN reltuples::bigint \
-                    ELSE (SELECT COUNT(*) FROM \"{}\".\"{}\" ) END \
-             FROM pg_class WHERE oid = {}::oid",
-            schema.replace('"', "\"\""),
-            name.replace('"', "\"\""),
+            "SELECT reltuples::bigint FROM pg_class WHERE oid = {}::oid",
             st.pgt_relid.to_u32(),
         ))
         .unwrap_or(Some(0))
@@ -4723,10 +4720,10 @@ pub fn execute_differential_refresh_with_tuning(
         }
     }
 
-    // CREATE TEMP VIEW has no ON COMMIT DROP. Clean the fast-path views
-    // after the final DVM read so they cannot pin source table DDL across
-    // transactions or pooled backend reuse.
-    delta_stage.cleanup_bounded_views()?;
+    // CREATE TEMP VIEW has no ON COMMIT DROP. Verify no post-bound TRUNCATE
+    // invalidated the lock-free inverse views, then clean them up after the
+    // final DVM read so they cannot pin source table DDL across transactions.
+    delta_stage.verify_and_cleanup_bounded_views()?;
     Ok((effective_count, 0))
 }
 

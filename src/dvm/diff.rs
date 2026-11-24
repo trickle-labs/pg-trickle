@@ -598,20 +598,28 @@ impl OptimizationContext {
 
     fn next_cte_name(&mut self, prefix: &str) -> String {
         self.cte_counter += 1;
+        let digits = self.cte_counter.checked_ilog10().unwrap_or(0) as usize + 1;
+        let max_prefix = 63usize.saturating_sub("__pgt_cte_".len() + digits + 1);
+        if prefix.len() <= max_prefix
+            && prefix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return format!("__pgt_cte_{prefix}_{}", self.cte_counter);
+        }
         let suffix = format!("_{}", self.cte_counter);
-        let max_prefix = 63usize.saturating_sub("__pgt_cte_".len() + suffix.len());
-        let safe_prefix: String = prefix
-            .chars()
-            .take(max_prefix)
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        format!("__pgt_cte_{safe_prefix}{suffix}")
+        let mut name =
+            String::with_capacity("__pgt_cte_".len() + prefix.len().min(max_prefix) + suffix.len());
+        name.push_str("__pgt_cte_");
+        name.extend(prefix.chars().take(max_prefix).map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        }));
+        name.push_str(&suffix);
+        name
     }
 
     fn add_cte(&mut self, name: String, sql: String, is_recursive: bool, is_materialized: bool) {
@@ -790,6 +798,10 @@ impl DiffContext {
         self.cdc.fenced_endpoint_sources.contains(&oid)
     }
 
+    pub(crate) fn source_endpoint_is_bounded(&self, oid: u32) -> bool {
+        self.cdc.source_bound_tables.contains_key(&oid)
+    }
+
     pub(crate) fn set_fenced_endpoint_sources(&mut self, sources: HashSet<u32>) {
         self.cdc.fenced_endpoint_sources = sources;
     }
@@ -840,16 +852,6 @@ impl DiffContext {
     /// The staging phase must create them before any DIFFERENTIAL MERGE.
     pub(crate) fn set_source_bound_tables(&mut self, tables: HashMap<u32, String>) {
         self.cdc.source_bound_tables = tables;
-    }
-
-    /// Record the exact qualified source spelling for a Scan leaf. Rewriting
-    /// only recorded leaf relations avoids replacing similarly named tables
-    /// in expressions or source SQL from an unrelated scope.
-    pub(crate) fn register_source_scan(&mut self, oid: u32, schema: &str, table: &str) {
-        self.cache.source_scan_relations.insert(
-            oid,
-            format!("{}.{}", quote_ident(schema), quote_ident(table)),
-        );
     }
 
     /// Register every parsed source, including leaves optimized away by P5
@@ -1103,7 +1105,13 @@ impl DiffContext {
         let result = self.diff_node_inner(op);
         self.optimization.exit_diff();
         let result = result?;
-        if result.schema.names() != result.columns {
+        if !result
+            .schema
+            .0
+            .iter()
+            .map(|column| &column.name)
+            .eq(result.columns.iter())
+        {
             return Err(PgTrickleError::TypeMismatch(format!(
                 "{} at root declared columns {:?}, schema {:?}",
                 operator_name(op),
@@ -1462,19 +1470,30 @@ fn rewrite_bounded_source_reads(sql: &str, source: &str, bounded: &str) -> Strin
 
 /// Helper: quote a SQL identifier.
 pub fn quote_ident(name: &str) -> String {
+    if !name.contains('"') {
+        let mut out = String::with_capacity(name.len() + 2);
+        out.push('"');
+        out.push_str(name);
+        out.push('"');
+        return out;
+    }
     let mut out =
         String::with_capacity(name.len() + 2 + name.bytes().filter(|&byte| byte == b'"').count());
     push_quoted_ident(&mut out, name);
     out
 }
 
-fn push_quoted_ident(out: &mut String, name: &str) {
+pub(crate) fn push_quoted_ident(out: &mut String, name: &str) {
     out.push('"');
-    for (index, part) in name.split('"').enumerate() {
-        if index > 0 {
-            out.push_str("\"\"");
+    if name.contains('"') {
+        for (index, part) in name.split('"').enumerate() {
+            if index > 0 {
+                out.push_str("\"\"");
+            }
+            out.push_str(part);
         }
-        out.push_str(part);
+    } else {
+        out.push_str(name);
     }
     out.push('"');
 }
@@ -1685,6 +1704,21 @@ mod tests {
             assert!(name.len() <= 63);
             assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
         }
+    }
+
+    #[test]
+    fn test_next_cte_name_preserves_encoding_and_counter_width() {
+        let mut ctx = test_ctx();
+        assert_eq!(ctx.next_cte_name("safe_foo"), "__pgt_cte_safe_foo_1");
+        assert_eq!(ctx.next_cte_name("é.x"), "__pgt_cte___x_2");
+        for _ in 3..10 {
+            ctx.next_cte_name("x");
+        }
+        assert_eq!(ctx.next_cte_name("safe"), "__pgt_cte_safe_10");
+        assert_eq!(
+            ctx.next_cte_name(&"x".repeat(100)),
+            format!("__pgt_cte_{}_11", "x".repeat(50))
+        );
     }
 
     // ── add_cte() + build_with_query() ──────────────────────────────

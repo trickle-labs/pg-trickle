@@ -13,6 +13,20 @@ TEST_ONLY_FUNCTION = "e2e_catch_security_context_error"
 
 
 class ApiDocFilterTests(unittest.TestCase):
+    def test_catalog_covers_api_omitted_from_versioned_reference(self) -> None:
+        function = "would_replace_stream_table_storage"
+
+        self.assertNotIn(
+            function,
+            gen_sql_reference.discover_doc_names(gen_sql_reference.SQL_REF),
+        )
+        self.assertIn(
+            function,
+            gen_sql_reference.discover_catalog_names(
+                gen_sql_reference.SQL_API_CATALOG
+            ),
+        )
+
     def test_asan_probe_is_not_cataloged_or_counted_as_public_api(self) -> None:
         source_functions = gen_catalogs.extract_sql_functions(gen_catalogs.SRC_DIR)
         self.assertNotIn(TEST_ONLY_FUNCTION, {f["fn_name"] for f in source_functions})

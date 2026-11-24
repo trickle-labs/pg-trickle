@@ -16,7 +16,6 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.create\_stream\_table\_cost\_optimized](#pgtricklecreate_stream_table_cost_optimized)
     - [pgtrickle.create\_stream\_table\_if\_not\_exists](#pgtricklecreate_stream_table_if_not_exists)
     - [pgtrickle.create\_or\_replace\_stream\_table](#pgtricklecreate_or_replace_stream_table)
-    - [pgtrickle.would\_replace\_stream\_table\_storage](#pgtricklewould_replace_stream_table_storage)
     - [pgtrickle.bulk\_create](#pgtricklebulk_create)
     - [pgtrickle.alter\_stream\_table](#pgtricklealter_stream_table)
     - [pgtrickle.explain\_alter](#pgtrickleexplain_alter)
@@ -1138,44 +1137,8 @@ SELECT pgtrickle.create_or_replace_stream_table(
 - Mirrors PostgreSQL's `CREATE OR REPLACE` convention (`CREATE OR REPLACE VIEW`, `CREATE OR REPLACE FUNCTION`).
 - Never drops the stream table — even for incompatible schema changes, the ALTER QUERY path rebuilds storage in place while preserving the catalog entry (`pgt_id`).
 - For migration scripts that should **not** modify an existing definition, use [`create_stream_table_if_not_exists`](#pgtricklecreate_stream_table_if_not_exists) instead.
-- With an attached downstream publication, use [`would_replace_stream_table_storage`](#pgtricklewould_replace_stream_table_storage) to determine whether a declarative deployment must detach and re-attach it first.
 
 ---
-
-### pgtrickle.would_replace_stream_table_storage
-
-Read-only preflight for a `create_or_replace_stream_table` definition. Returns
-`true` when the proposed defining query would enter the protected shadow-storage
-replacement path, which is prohibited while a downstream publication is attached.
-Returns `false` if the stream table does not exist (creation, not replacement),
-the defining query is identical, or the changes are whitespace-only.
-Configuration-only changes do not replace storage.
-
-```sql
-pgtrickle.would_replace_stream_table_storage(name text, query text) → boolean
-```
-
-The check uses the same caller search path, rewrite, TopK base-query comparison,
-and whitespace normalization as `create_or_replace_stream_table`. Changed
-queries are validated without mutating catalog, storage, refresh state, or
-publication bindings; invalid queries raise an error instead of returning
-`true`. The caller must own an existing stream table and have permission to
-execute the preflight function.
-
-A `true` result predicts the storage path, not that the eventual ALTER will
-succeed: other lifecycle restrictions or concurrent DDL may still block it.
-
-```sql
-SELECT pgtrickle.would_replace_stream_table_storage(
-    'public.totals',
-    'SELECT grp, sum(value) AS total, count(*) AS n, max(value) AS peak
-     FROM event GROUP BY grp'
-);
--- true if totals exists with a different defining query
-```
-
-See [Downstream Publications](PUBLICATIONS.md#declarative-deployments-with-publications)
-for a deployment guard that only re-attaches the publication when needed.
 
 ---
 
@@ -4550,6 +4513,22 @@ is a point-in-time observation and does not prevent later DDL. An unchanged
 epoch does not rule out an in-flight refresh. Execution is revoked from
 `PUBLIC`; an administrator must grant it explicitly.
 
+### pgtrickle.list_ann_maintenance_requests
+
+```sql
+pgtrickle.list_ann_maintenance_requests(after_request_id bigint, max_results integer) → setof jsonb
+```
+
+Lists up to 1,000 requests after the nonnegative ID cursor in ascending ID
+order. Each result has the same fields and authorization checks as
+`ann_maintenance_request`; callers see only requests for streams they may
+inspect and maintain. For a removed leaf, only the stream owner may inspect
+its stale request. A concurrent privilege or catalog change can make a page
+fail, so retry the listing rather than assuming it was complete. Results are
+observations, not claims: workers must revalidate and claim each request.
+Execution is revoked from `PUBLIC` and must be granted explicitly. The
+function does not require SELECT on the private request catalog.
+
 ### pgtrickle.claim_ann_maintenance
 
 ```sql
@@ -4641,7 +4620,9 @@ move commands between backends and is incompatible with session-bound claims.
 Do not use psql's `--single-transaction` option or wrap the script in a
 transaction; concurrent reindex must run at the top level.
 The worker handles one request and exits; a supervisor must choose requests
-and retries. Reference workers admit at most four concurrent executions per
+and retries. The repository's [supervisor and runbook](ANN_MAINTENANCE.md)
+provide an unattended reference using bounded, authorized queue discovery.
+Reference workers admit at most four concurrent executions per
 database using session advisory locks; a worker that cannot obtain a slot
 exits without claiming its request. Custom clients are not subject to this
 limit. Run the script as a one-shot psql process so unexpected errors release
