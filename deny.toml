@@ -39,21 +39,6 @@ ignore = [
   # Unmaintained advisory for a test-only transitive dependency; no patched
   # release is available. Vulnerability advisories remain enabled.
   "RUSTSEC-2026-0440",
-  # Owner: pg_trickle maintainers
-  # Added: 2026-11-15
-  # Review-By: 2026-12-15
-  # Upstream: https://github.com/transact-rs/sqlx
-  # Remove-When: SQLx supports libsqlite3-sys >= 0.39, or pg_trickle no
-  # longer depends on the SQLx facade and its optional SQLite driver.
-  # RUSTSEC-2026-0459 applies to libsqlite3-sys < 0.39, including the
-  # version Cargo resolves for SQLx 0.9's *optional* SQLite backend.
-  # pg_trickle uses SQLx only in its test harness with the Postgres backend.
-  # The project does not open SQLite databases; Cargo.lock also records
-  # optional SQLx backend packages. Verify the resolved feature graph when
-  # reviewing this exception, and remove it as soon as feasible.
-  # Keep this exception time-boxed, rather than hand-pruning Cargo.lock
-  # (which Cargo regenerates during the S1 release build).
-  "RUSTSEC-2026-0459",
 ]
 
 [bans]

@@ -54,7 +54,7 @@ jobs:
           # SEC-001: Advisory ignores are centralized in deny.toml.
           # This list must stay in sync with the [advisories] ignore list in deny.toml.
           # See deny.toml for the rationale comment on each advisory.
-          ignore: RUSTSEC-2021-0127,RUSTSEC-2026-0459
+          ignore: RUSTSEC-2021-0127
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
@@ -87,6 +87,6 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Match the annotated, reviewed exceptions in deny.toml: serde_cbor
-          # unmaintained and SQLx's unselected optional SQLite backend.
-          ignore: RUSTSEC-2021-0127,RUSTSEC-2026-0459
+          # Keep the reviewed serde_cbor maintenance exception in deny.toml.
+          # SQLite must remain inactive and no longer needs an audit exception.
+          ignore: RUSTSEC-2021-0127
