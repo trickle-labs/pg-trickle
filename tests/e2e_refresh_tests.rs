@@ -272,8 +272,11 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
         "UPDATE pgtrickle.pgt_refresh_summary
             SET stats_reset_at = now() - interval '10 minutes'
           WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
-                          WHERE pgt_name = 'rf_cost_st');
-         INSERT INTO pgtrickle.pgt_refresh_history
+                          WHERE pgt_name = 'rf_cost_st')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_refresh_history
             (pgt_id, data_timestamp, start_time, end_time, action, status,
              rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback,
              refresh_reason_detail)
@@ -287,8 +290,11 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
                     'contract_generation', contract_generation
                 )::text
            FROM pgtrickle.pgt_stream_tables CROSS JOIN generate_series(1, 5)
-          WHERE pgt_name = 'rf_cost_st';
-         INSERT INTO pgtrickle.pgt_refresh_history
+          WHERE pgt_name = 'rf_cost_st'",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_refresh_history
             (pgt_id, data_timestamp, start_time, end_time, action, status,
              rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback)
          SELECT pgt_id, now(), now() - interval '1 minute',
