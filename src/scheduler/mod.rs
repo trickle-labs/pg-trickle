@@ -1774,8 +1774,9 @@ fn count_pending_changes(
                 frontier.get_lsn(dep.source_relid.to_u32()),
             ),
             "STREAM_TABLE" => {
-                let id = StreamTableMeta::pgt_id_for_relid(dep.source_relid)
-                    .ok_or_else(|| PgTrickleError::InternalError("missing upstream stream".into()))?;
+                let id = StreamTableMeta::pgt_id_for_relid(dep.source_relid).ok_or_else(|| {
+                    PgTrickleError::InternalError("missing upstream stream".into())
+                })?;
                 (
                     crate::sql_builder::qualified(&schema, &format!("changes_pgt_{id}")),
                     frontier.get_st_lsn(id),
@@ -1856,7 +1857,8 @@ fn evaluate_fuse(st: &StreamTableMeta) -> bool {
         Err(e) => {
             pgrx::warning!(
                 "pg_trickle: fuse backlog inspection failed for {}.{}: {e}",
-                st.pgt_schema, st.pgt_name,
+                st.pgt_schema,
+                st.pgt_name,
             );
             // The ordinary refresh path validates CDC independently.
             // Do not claim a zero-count or a threshold breach on failure.
@@ -1871,7 +1873,11 @@ fn evaluate_fuse(st: &StreamTableMeta) -> bool {
                   ELSE 0 END
           WHERE pgt_id = $1 AND fuse_state = 'armed'
           RETURNING fuse_over_ceiling_cycles",
-        &[st.pgt_id.into(), (pending > effective_ceiling).into(), sensitivity.into()],
+        &[
+            st.pgt_id.into(),
+            (pending > effective_ceiling).into(),
+            sensitivity.into(),
+        ],
     ) {
         Ok(Some(count)) => count,
         Ok(None) => return false,
