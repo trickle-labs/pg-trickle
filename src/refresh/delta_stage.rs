@@ -183,7 +183,7 @@ impl DeltaStage {
             Spi::run(&access_sql) // nosemgrep: rust.spi.run.dynamic-format -- source is catalog-qualified; owner permissions are enforced.
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             let active = Spi::get_one_with_args::<bool>(
-                "SELECT pg_catalog.row_security_active($1::oid)",
+                "SELECT pg_catalog.row_security_active($1::regclass)",
                 &[dependency.source_relid.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
