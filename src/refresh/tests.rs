@@ -3015,3 +3015,15 @@ fn test_t1l_in_subquery_not_detected_by_correlated_detector() {
         "T-1l: IN (SELECT ...) pattern must NOT be flagged by correlated detector"
     );
 }
+
+#[test]
+fn test_keyless_image_delete_matches_payload_and_partition_tuple() {
+    let columns = vec!["n".to_string(), "f".to_string()];
+    let sql = build_keyless_image_delete_template("\"public\".\"s\"", 5, &columns);
+    assert!(sql.contains("ROW(st2.\"n\", st2.\"f\") OPERATOR(pg_catalog.*=) ROW(d.\"n\", d.\"f\")"));
+    assert!(sql.contains("LIMIT d.__pgt_del_image_count"));
+    assert!(sql.contains("st.tableoid = chosen.tableoid AND st.ctid = chosen.ctid"));
+    assert!(uses_signed_multiset_apply(true, false, &columns));
+    assert!(!uses_signed_multiset_apply(true, true, &columns));
+    assert!(!uses_signed_multiset_apply(true, false, &["__pgt_count".to_string()]));
+}

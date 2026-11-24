@@ -1440,22 +1440,38 @@ pub(crate) fn capture_diff_to_table(
                 crate::refresh::retention_partition_key(pgt_id).as_deref(),
             )
         );
-        let mut total = 0;
-        for (action, left, right) in [('D', &before, &after), ('I', &after, &before)] {
-            let sql = format!(
-                "INSERT INTO {target_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
-                 SELECT {lsn_expr}, '{action}', __pgt_row_id, NULL::xid, {source_commit_at}, {flat_col_list} \
-                 FROM ({left} EXCEPT ALL {right}) difference"
-            );
-            total += Spi::connect_mut(|c| {
-                Ok::<i64, PgTrickleError>(
-                    c.update(&sql, None, &[])
-                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                        .len() as i64,
-                )
-            })?;
-        }
-        return Ok(total);
+        // EXCEPT ALL applies SQL equality and can cancel observably different
+        // representations. Rank complete images and expand their signed counts.
+        let vacant = |prefix: &str| {
+            let mut name = prefix.to_string();
+            while user_cols.contains(&name) {
+                name.push('_');
+            }
+            name
+        };
+        let sign = vacant("__pgt_capture_sign");
+        let rank = vacant("__pgt_capture_rank");
+        let weight = vacant("__pgt_capture_weight");
+        let occurrence = vacant("__pgt_capture_occurrence");
+        let sql = format!(
+            "INSERT INTO {target_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+             SELECT {lsn_expr}, CASE WHEN {weight} > 0 THEN 'I' ELSE 'D' END, \
+                    __pgt_row_id, NULL::xid, {source_commit_at}, {flat_col_list} \
+             FROM (SELECT ranked.*, SUM({sign}) OVER (PARTITION BY {rank}) AS {weight}, \
+                          ROW_NUMBER() OVER (PARTITION BY {rank}) AS {occurrence} \
+                   FROM (SELECT images.*, dense_rank() OVER (ORDER BY ROW({columns}) USING OPERATOR(pg_catalog.*<)) AS {rank} \
+                         FROM (SELECT {columns}, -1 AS {sign} FROM ({before}) old_image \
+                               UNION ALL SELECT {columns}, 1 AS {sign} FROM ({after}) new_image) images) ranked) weighted \
+             CROSS JOIN LATERAL generate_series(1, ABS(weighted.{weight})) expanded \
+             WHERE {occurrence} = 1 AND {weight} <> 0"
+        );
+        return Spi::connect_mut(|c| {
+            Ok::<i64, PgTrickleError>(
+                c.update(&sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .len() as i64,
+            )
+        });
     }
 
     let mut total: i64 = 0;
@@ -2360,6 +2376,57 @@ pub(crate) fn build_merge_sql(
     )
 }
 
+/// A non-deduplicated keyless delta is a signed bag of complete row
+/// images. Equal logical identities can have different observable payloads.
+/// Count deletions by image, and select physical occurrences only from the
+/// matching image. tableoid disambiguates ctids in partitioned storage.
+pub(crate) fn build_keyless_image_delete_template(
+    quoted_table: &str,
+    pgt_id: i64,
+    user_cols: &[String],
+) -> String {
+    let d_cols = format_prefixed_col_list("d", user_cols);
+    let st_cols = format_prefixed_col_list("st2", user_cols);
+    let all_cols = format_col_list(user_cols);
+    // Keep internal rank names separate from any user-selected column name.
+    let vacant = |prefix: &str| {
+        let mut name = prefix.to_string();
+        while user_cols.contains(&name) {
+            name.push('_');
+        }
+        name
+    };
+    let rank = vacant("__pgt_del_image_rank");
+    let count = vacant("__pgt_del_image_count");
+    let occurrence = vacant("__pgt_del_image_occurrence");
+    format!(
+        "DELETE FROM {quoted_table} AS st USING (\
+           SELECT matched.tableoid, matched.ctid FROM (\
+             SELECT ranked.*, COUNT(*) OVER (PARTITION BY __pgt_row_id, {rank}) AS {count}, \
+                    ROW_NUMBER() OVER (PARTITION BY __pgt_row_id, {rank}) AS {occurrence} \
+             FROM (SELECT __pgt_row_id, {all_cols}, \
+                    dense_rank() OVER (PARTITION BY __pgt_row_id ORDER BY ROW({all_cols}) USING OPERATOR(pg_catalog.*<)) AS {rank} \
+                   FROM __pgt_delta_{pgt_id} WHERE __pgt_action = 'D') ranked\
+           ) d CROSS JOIN LATERAL (\
+             SELECT st2.tableoid, st2.ctid FROM {quoted_table} st2 \
+             WHERE {identity_match} AND ROW({st_cols}) OPERATOR(pg_catalog.*=) ROW({d_cols}) \
+             ORDER BY st2.tableoid, st2.ctid LIMIT d.{count}\
+           ) matched WHERE d.{occurrence} = 1\
+         ) chosen WHERE st.tableoid = chosen.tableoid AND st.ctid = chosen.ctid",
+        identity_match = build_row_id_match("st2.__pgt_row_id", "d.__pgt_row_id"),
+    )
+}
+
+pub(crate) fn uses_signed_multiset_apply(
+    has_keyless_source: bool,
+    is_deduplicated: bool,
+    user_cols: &[String],
+) -> bool {
+    has_keyless_source
+        && !is_deduplicated
+        && !user_cols.iter().any(|column| column == "__pgt_count")
+}
+
 /// Build the trigger-path DELETE template.
 ///
 /// For keyless sources, uses counted DELETE via ROW_NUMBER to avoid
@@ -2546,10 +2613,7 @@ pub(crate) fn build_trigger_insert_for_storage(
     // Non-deduplicated keyless deltas represent a multiset: equal row_ids
     // may be separate occurrences, so neither DISTINCT ON nor NOT EXISTS
     // can be used to discard them.
-    if has_keyless_source
-        && !is_deduplicated
-        && !user_cols.iter().any(|column| column == "__pgt_count")
-    {
+    if uses_signed_multiset_apply(has_keyless_source, is_deduplicated, user_cols) {
         return build_trigger_insert_sql(quoted_table, pgt_id, user_cols, true);
     }
 
@@ -2760,16 +2824,24 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // __pgt_row_id values are expected. The UPDATE step is a no-op
     // because the scan-level net counting decomposes updates into
     // separate D + I rows.
-    let trigger_delete_template =
-        build_trigger_delete_sql(&quoted_table, st.pgt_id, st.has_keyless_source);
+    let signed_multiset = uses_signed_multiset_apply(
+        st.has_keyless_source,
+        delta_result.is_deduplicated,
+        user_cols,
+    );
+    let trigger_delete_template = if signed_multiset {
+        build_keyless_image_delete_template(&quoted_table, st.pgt_id, user_cols)
+    } else {
+        build_trigger_delete_sql(&quoted_table, st.pgt_id, st.has_keyless_source)
+    };
 
-    // EC-06: For keyless sources, the scan-level delta decomposes UPDATEs
-    // into D+I pairs (different content hashes), so the UPDATE template
-    // naturally matches 0 rows. For aggregate queries on keyless sources,
-    // the aggregate delta produces 'I' actions for changed groups that
-    // need real UPDATEs. Using the normal UPDATE template handles both
-    // cases correctly.
-    let trigger_update_template = build_trigger_update_sql(&quoted_table, st.pgt_id, user_cols);
+    // Bag deltas express replacements as D + I. An I event must not mutate
+    // other occurrences with the same identity. Grouped/deduplicated deltas
+    // still use their ordinary UPDATE path.
+    let mut trigger_update_template = build_trigger_update_sql(&quoted_table, st.pgt_id, user_cols);
+    if signed_multiset {
+        trigger_update_template.push_str(" AND FALSE");
+    }
 
     let trigger_insert_template = build_trigger_insert_for_storage(
         &quoted_table,

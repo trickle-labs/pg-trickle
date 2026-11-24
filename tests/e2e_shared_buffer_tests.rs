@@ -3253,3 +3253,35 @@ async fn test_wide_stream_updates_do_not_elide_null_empty_or_delimiter_changes()
         }
     }
 }
+
+#[tokio::test]
+async fn test_keyless_stream_duplicate_images_preserve_numeric_scale() {
+    let db = E2eDb::new().await.with_extension().await;
+    e2e::disable_scheduler(&db).await;
+    db.execute("CREATE TABLE keyless_image_src (n numeric)").await;
+    db.execute("INSERT INTO keyless_image_src VALUES (1.0), (1.00), (1.00)").await;
+    db.create_st("keyless_image_up", "SELECT n FROM keyless_image_src", "1h", "DIFFERENTIAL").await;
+    let query = "SELECT scale(n) AS observed_scale, count(*) AS n FROM keyless_image_up GROUP BY scale(n)";
+    db.create_st("keyless_image_down", query, "1h", "DIFFERENTIAL").await;
+    for sql in [
+        "DELETE FROM keyless_image_src WHERE scale(n) = 1",
+        "INSERT INTO keyless_image_src VALUES (1.000)",
+        "UPDATE keyless_image_src SET n = 1.0000 WHERE scale(n) = 2",
+    ] {
+        db.execute(sql).await;
+        for name in ["keyless_image_up", "keyless_image_down"] {
+            db.try_execute_with_config(
+                &["SET pg_trickle.refresh_strategy = 'differential'"],
+                &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+            ).await.expect("apply exact signed bag");
+            let differential: bool = db.query_scalar(&format!(
+                "SELECT action='DIFFERENTIAL' AND NOT was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='{name}' AND h.status='COMPLETED' ORDER BY refresh_id DESC LIMIT 1"
+            )).await;
+            assert!(differential);
+        }
+        let upstream: Vec<i32> = sqlx::query_scalar("SELECT scale(n) FROM keyless_image_up ORDER BY 1").fetch_all(&db.pool).await.unwrap();
+        let source: Vec<i32> = sqlx::query_scalar("SELECT scale(n) FROM keyless_image_src ORDER BY 1").fetch_all(&db.pool).await.unwrap();
+        assert_eq!(upstream, source, "identity equality must not delete the wrong physical image");
+        db.assert_st_matches_query("keyless_image_down", query).await;
+    }
+}
