@@ -904,11 +904,7 @@ impl MaterializedApplyPlanner {
 /// Never force an index based on missing target statistics. The actual
 /// materialized row count, not the (potentially amplified) input count,
 /// determines whether target probes are selective.
-fn prefer_indexed_materialized_apply(
-    delta_rows: usize,
-    target_rows: f64,
-    threshold: f64,
-) -> bool {
+fn prefer_indexed_materialized_apply(delta_rows: usize, target_rows: f64, threshold: f64) -> bool {
     delta_rows > 0
         && target_rows.is_finite()
         && target_rows > 0.0
@@ -2049,7 +2045,11 @@ pub fn execute_differential_refresh_with_tuning(
     // When strategy = 'auto' and the ratio check didn't trigger, query
     // historical refresh timings and use the cost model to predict
     // whether DIFFERENTIAL or FULL is cheaper for the *current* delta.
-    if fallback_reason.is_none() && !skip_ratio_check && total_change_count > 0 {
+    if fallback_reason.is_none()
+        && !skip_ratio_check
+        && !input_delta_rows_may_be_incomplete
+        && total_change_count > 0
+    {
         let complexity = classify_query_complexity(&effective_defining_query);
         if let Some(hist) = query_refresh_history_stats(st.pgt_id, total_change_count)
             && cost_model_prefers_full(
