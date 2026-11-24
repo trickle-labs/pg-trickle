@@ -1395,11 +1395,19 @@ async fn test_v108_partial_output_capture_requires_invalidation() {
     let root = "public.v108_partial_capture_stream";
     db.execute("INSERT INTO v108_partial_capture_source VALUES (2,'second'),(3,'third')")
         .await;
-    let mut tx = db.pool.begin().await.expect("begin controlled graph refresh");
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin controlled graph refresh");
     sqlx::query("SET LOCAL pg_trickle.test_chaos_for_table = 'v108_partial_capture_stream'")
-        .execute(&mut *tx).await.unwrap();
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     sqlx::query("SET LOCAL pg_trickle.test_chaos_phase = 'control_partial_output_capture'")
-        .execute(&mut *tx).await.unwrap();
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     refresh_graph_without_full(&mut *tx, root, &graph).await;
     tx.commit().await.unwrap();
 
@@ -1409,9 +1417,13 @@ async fn test_v108_partial_output_capture_requires_invalidation() {
     assert_eq!(batch.mode, "FULL_INVALIDATION");
     assert_eq!(batch.row_count, 0);
     let payload_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT count(*) FROM {} WHERE batch_token=$1", consumer.delta_relation
+        "SELECT count(*) FROM {} WHERE batch_token=$1",
+        consumer.delta_relation
     )))
-    .bind(batch.batch_token).fetch_one(&db.pool).await.unwrap();
+    .bind(batch.batch_token)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
     assert_eq!(payload_count, 0, "incomplete payload must not be exposed");
 
     // A fresh real baseline followed by another change must return to EXACT.
@@ -1422,7 +1434,8 @@ async fn test_v108_partial_output_capture_requires_invalidation() {
         "ACTIVE"
     );
     tx.commit().await.unwrap();
-    db.execute("INSERT INTO v108_partial_capture_source VALUES (4,'complete')").await;
+    db.execute("INSERT INTO v108_partial_capture_source VALUES (4,'complete')")
+        .await;
     refresh_graph_without_full(&db.pool, root, &graph).await;
     let recovered = reference_clients::pending_batch(&db.pool, &consumer.consumer_id).await;
     assert_eq!(recovered.mode, "EXACT");

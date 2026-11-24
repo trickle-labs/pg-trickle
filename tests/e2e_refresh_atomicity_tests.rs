@@ -2670,14 +2670,25 @@ async fn test_refresh_downstream_capture_failure_rolls_back_and_retries() {
         .await
         .unwrap();
     drop(conn);
-    assert_committed_checkpoint(&db, up_id, "capture_up", "capture_up_checkpoint", &before_up)
-        .await;
     assert_committed_checkpoint(
-        &db, down_id, "capture_down", "capture_down_checkpoint", &before_down,
+        &db,
+        up_id,
+        "capture_up",
+        "capture_up_checkpoint",
+        &before_up,
+    )
+    .await;
+    assert_committed_checkpoint(
+        &db,
+        down_id,
+        "capture_down",
+        "capture_down_checkpoint",
+        &before_down,
     )
     .await;
     assert_eq!(
-        db.query_scalar::<i64>(&format!("SELECT count(*) FROM {buffer}")).await,
+        db.query_scalar::<i64>(&format!("SELECT count(*) FROM {buffer}"))
+            .await,
         before_buffer
     );
     db.refresh_st("capture_up").await;
@@ -2694,7 +2705,8 @@ async fn test_scheduler_downstream_capture_failure_preserves_checkpoint() {
     configure_scheduler(&db).await;
     db.execute("CREATE TABLE sched_capture_src (id INT PRIMARY KEY, value INT NOT NULL)")
         .await;
-    db.execute("INSERT INTO sched_capture_src VALUES (1, 10)").await;
+    db.execute("INSERT INTO sched_capture_src VALUES (1, 10)")
+        .await;
     let up = "sched_capture_up";
     let down = "sched_capture_down";
     let up_query = "SELECT id, value FROM sched_capture_src";
@@ -2713,16 +2725,15 @@ async fn test_scheduler_downstream_capture_failure_preserves_checkpoint() {
         .await;
     let before_down = progress(&db, down_id).await;
 
-    db.execute("INSERT INTO sched_capture_src VALUES (2, 20)").await;
+    db.execute("INSERT INTO sched_capture_src VALUES (2, 20)")
+        .await;
     let phase = "before_downstream_capture";
     set_chaos(&db, up, phase).await;
     let (mut blocker, blocker_pid) = hold_barrier(&db, up_id, phase).await;
     make_scheduler_due(&db, &[up]).await;
     db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['sched_capture_up'])")
         .await;
-    let witness = wait_for_barrier(
-        &db, up_id, phase, blocker_pid, Duration::from_secs(90),
-    );
+    let witness = wait_for_barrier(&db, up_id, phase, blocker_pid, Duration::from_secs(90));
     tokio::pin!(witness);
     // Keep due across a possible no-data tick with an old watermark.
     let observed = loop {
@@ -2746,22 +2757,25 @@ async fn test_scheduler_downstream_capture_failure_preserves_checkpoint() {
     };
     assert!(observed.blockers.contains(&blocker_pid));
     let before_up = progress(&db, up_id).await;
-    assert_committed_checkpoint(&db, up_id, up, "sched_capture_up_checkpoint", &before_up)
-        .await;
+    assert_committed_checkpoint(&db, up_id, up, "sched_capture_up_checkpoint", &before_up).await;
     release_barrier(&mut blocker, up_id, phase).await;
     let (failed_id, action, message) = wait_for_scheduler_failure(&db, up_id).await;
     assert_eq!(action, "DIFFERENTIAL", "{message}");
     assert!(message.contains("before_downstream_capture"), "{message}");
     clear_chaos(&db).await;
     wait_for_scheduler_status(&db, up, "SUSPENDED").await;
-    assert_committed_checkpoint(&db, up_id, up, "sched_capture_up_checkpoint", &before_up)
-        .await;
+    assert_committed_checkpoint(&db, up_id, up, "sched_capture_up_checkpoint", &before_up).await;
     assert_committed_checkpoint(
-        &db, down_id, down, "sched_capture_down_checkpoint", &before_down,
+        &db,
+        down_id,
+        down,
+        "sched_capture_down_checkpoint",
+        &before_down,
     )
     .await;
     assert_eq!(
-        db.query_scalar::<i64>(&format!("SELECT count(*) FROM {buffer}")).await,
+        db.query_scalar::<i64>(&format!("SELECT count(*) FROM {buffer}"))
+            .await,
         before_buffer
     );
 

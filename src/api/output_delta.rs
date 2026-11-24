@@ -575,7 +575,10 @@ pub(crate) fn invalidate_after_snapshot_restore(pgt_id: i64) -> Result<(), PgTri
 }
 
 fn capture_before_table(pgt_id: i64) -> String {
-    format!("pg_temp.{}", quoted_ident(&format!("__pgt_output_before_{pgt_id}")))
+    format!(
+        "pg_temp.{}",
+        quoted_ident(&format!("__pgt_output_before_{pgt_id}"))
+    )
 }
 
 /// Keep an independent typed checkpoint for external consumers. The common
@@ -614,15 +617,18 @@ fn capture_matches_effective_output(
         .collect::<Vec<_>>()
         .join(", ");
     let buffer_cols = std::iter::once("b.__pgt_row_id".to_string())
-        .chain(columns.iter().map(|(name, _)| {
-            format!("b.{}", quoted_ident(&crate::cdc::cb_col_name(name)))
-        }))
+        .chain(
+            columns
+                .iter()
+                .map(|(name, _)| format!("b.{}", quoted_ident(&crate::cdc::cb_col_name(name)))),
+        )
         .collect::<Vec<_>>()
         .join(", ");
     let exists = spi(Spi::get_one_with_args::<bool>(
         "SELECT pg_catalog.to_regclass($1) IS NOT NULL",
         &[before.as_str().into()],
-    ))?.unwrap_or(false);
+    ))?
+    .unwrap_or(false);
     if !exists {
         return Ok(false);
     }
@@ -656,8 +662,12 @@ pub(crate) fn begin_capture(pgt_id: i64) -> Result<(), PgTrickleError> {
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
     .unwrap_or(0);
-    let meta = StreamTableMeta::get_by_id(pgt_id)?
-        .ok_or_else(|| delta_error("PGT_EXT_CONSUMER_BLOCKED", "stream table metadata is missing"))?;
+    let meta = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
+        delta_error(
+            "PGT_EXT_CONSUMER_BLOCKED",
+            "stream table metadata is missing",
+        )
+    })?;
     snapshot_capture_before(&meta)?;
     CAPTURE_STARTS.with(|starts| starts.borrow_mut().insert(pgt_id, (max_id, false)));
     Ok(())
@@ -736,7 +746,8 @@ pub(crate) fn finalize(
         start = spi(Spi::get_one_with_args::<i64>(
             &format!("SELECT min(change_id) FROM {source} WHERE change_id > $1"),
             &[start.into()],
-        ))?.unwrap_or(start);
+        ))?
+        .unwrap_or(start);
     }
     let (changed_rows, unsupported_rows) = if capture_complete && captured_start.is_some() {
         // nosemgrep: rust.spi.get_one_with_args.dynamic-format — source is assembled from a quoted schema and OID-derived relation name.
