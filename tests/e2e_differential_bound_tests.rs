@@ -260,11 +260,10 @@ async fn test_rls_bypass_preserves_insert_deleted_after_bound() {
     let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_rls_st").await;
     db.execute("DELETE FROM bound_rls_src WHERE id = 2").await;
     finish_bounded_refresh(&mut blocker, id, refresh).await;
-    let bounded: (i64, i64) =
-        sqlx::query_as("SELECT total, n FROM bound_rls_st WHERE g = 1")
-            .fetch_one(&db.pool)
-            .await
-            .expect("read owner-visible bounded aggregate");
+    let bounded: (i64, i64) = sqlx::query_as("SELECT total, n FROM bound_rls_st WHERE g = 1")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read owner-visible bounded aggregate");
     assert_eq!(bounded, (30, 2));
     refresh_normally(&db, "bound_rls_st").await;
     db.assert_st_matches_query("bound_rls_st", query).await;
