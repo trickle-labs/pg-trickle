@@ -1,83 +1,95 @@
 #!/usr/bin/env python3
-"""check_deny_expiry.py — DEP-001: Fail if any RUSTSEC ignore is past its review date.
+"""Validate review deadlines and export the shared RustSec advisory ignore list.
 
-Parses deny.toml and finds all `# Review-By: YYYY-MM-DD` comment lines.
-Exits with code 1 if any review date is in the past, prompting a human to
-re-evaluate whether the advisory ignore is still appropriate.
-
-Usage:
-    python3 scripts/check_deny_expiry.py
+Each advisory in deny.toml must have one preceding Review-By comment.
+Run without arguments to check expiry, or with --audit-ignores to emit only
+comma-separated IDs for rustsec/audit-check (after validating all deadlines).
 """
+import argparse
 import re
 import sys
+import tomllib
 from datetime import date
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DENY_TOML = REPO_ROOT / "deny.toml"
-
 _REVIEW_BY_RE = re.compile(r"#\s*Review-By:\s*(\d{4}-\d{2}-\d{2})")
-# Also capture the advisory ID that precedes the review line
-_ADVISORY_RE = re.compile(r'"(RUSTSEC-\d{4}-\d{4})"')
+_ADVISORY_RE = re.compile(r'"(RUSTSEC-\d{4}-\d{4,})"\s*,?')
 
 
-def main() -> int:
-    if not DENY_TOML.exists():
-        print(f"ERROR: {DENY_TOML} not found", file=sys.stderr)
-        return 2
+def review_dates(text: str) -> dict[str, date]:
+    ignores = tomllib.loads(text)["advisories"]["ignore"]
+    if not isinstance(ignores, list) or any(not isinstance(i, str) for i in ignores):
+        raise ValueError("advisory ignores must be a list of RustSec IDs")
+    if len(set(ignores)) != len(ignores):
+        raise ValueError("duplicate advisory ignore")
+    if not ignores:
+        return {}
 
-    today = date.today()
-    text = DENY_TOML.read_text(encoding="utf-8")
-    lines = text.splitlines()
-
-    expired: list[tuple[str, str, date]] = []
-    ok: list[tuple[str, str, date]] = []
-
-    # Walk forward from each Review-By line to find the associated advisory ID
-    for i, line in enumerate(lines):
-        m = _REVIEW_BY_RE.search(line)
-        if not m:
+    result: dict[str, date] = {}
+    in_advisories = False
+    in_ignores = False
+    pending: date | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not in_ignores and line.startswith("["):
+            in_advisories = line == "[advisories]"
             continue
-        review_date = date.fromisoformat(m.group(1))
-        # Search forward (up to 10 lines) for the RUSTSEC ID, then try backward
-        advisory_id = "UNKNOWN"
-        for j in range(i + 1, min(i + 10, len(lines))):
-            am = _ADVISORY_RE.search(lines[j])
-            if am:
-                advisory_id = am.group(1)
-                break
-        if advisory_id == "UNKNOWN":
-            for j in range(i - 1, max(i - 10, -1), -1):
-                am = _ADVISORY_RE.search(lines[j])
-                if am:
-                    advisory_id = am.group(1)
-                    break
+        if not in_advisories:
+            continue
+        if not in_ignores:
+            in_ignores = re.fullmatch(r"ignore\s*=\s*\[", line) is not None
+            continue
+        if line == "]":
+            break
+        if line.startswith("#"):
+            if re.match(r"#\s*Review-By:", line):
+                match = _REVIEW_BY_RE.fullmatch(line)
+                if match is None or pending is not None:
+                    raise ValueError("invalid or duplicate Review-By comment")
+                pending = date.fromisoformat(match.group(1))
+        elif line:
+            match = _ADVISORY_RE.fullmatch(line)
+            if match is None:
+                raise ValueError(f"invalid advisory ignore entry: {line}")
+            advisory = match.group(1)
+            if pending is None:
+                raise ValueError(f"{advisory} has no Review-By date")
+            result[advisory] = pending
+            pending = None
+    if pending is not None or list(result) != ignores:
+        raise ValueError("Review-By comments must match every advisory ignore in order")
+    return result
 
-        if review_date < today:
-            expired.append((advisory_id, line.strip(), review_date))
-        else:
-            ok.append((advisory_id, line.strip(), review_date))
 
-    if ok:
-        print(f"OK: {len(ok)} advisory ignore(s) within review window:")
-        for adv, _, rd in ok:
-            print(f"  {adv}  (review by {rd})")
-
+def validated_ignores(text: str, today: date) -> dict[str, date]:
+    dates = review_dates(text)
+    expired = [f"{adv} ({rd})" for adv, rd in dates.items() if rd < today]
     if expired:
-        print(
-            f"\nERROR: {len(expired)} advisory ignore(s) past their review date:",
-            file=sys.stderr,
-        )
-        for adv, line_txt, rd in expired:
-            print(f"  {adv}  — review date was {rd}", file=sys.stderr)
-        print(
-            "\nAction required: review each expired ignore in deny.toml and either:\n"
-            "  (a) update the Review-By date if the ignore is still appropriate, or\n"
-            "  (b) remove the ignore if the upstream dep has been updated.",
-            file=sys.stderr,
-        )
+        raise ValueError("expired advisory ignores: " + ", ".join(expired))
+    return dates
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--audit-ignores", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        dates = validated_ignores(DENY_TOML.read_text(encoding="utf-8"), date.today())
+    except OSError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    except (ValueError, KeyError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
+    if args.audit_ignores:
+        print(",".join(dates))
+    else:
+        print(f"OK: {len(dates)} advisory ignore(s) within review window:")
+        for adv, rd in dates.items():
+            print(f"  {adv}  (review by {rd})")
     return 0
 
 
