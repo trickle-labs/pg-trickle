@@ -96,7 +96,6 @@ pub struct CacheContext {
     cte_registry: CteRegistry,
     cte_delta_cache: HashMap<usize, DiffResult>,
     scan_pushed_predicate: Option<Expr>,
-    st_bypass_tables: HashMap<i64, String>,
     scan_delta_ctes: HashMap<(u32, String), String>,
     scan_delta_ctes_by_oid: HashMap<u32, String>,
     /// Qualified base relations used by Scan nodes in generated live reads.
@@ -507,21 +506,15 @@ fn snapshot_cache_key(op: &crate::dvm::parser::OpTree) -> (String, String) {
 }
 
 impl CdcContext {
-    fn change_table_for_source(
-        &self,
-        source_oid: u32,
-        st_bypass_tables: &HashMap<i64, String>,
-    ) -> String {
+    fn change_table_for_source(&self, source_oid: u32) -> String {
         if let Some(stage) = self.source_stage_tables.get(&source_oid) {
             return stage.clone();
         }
         if let Some(pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
-            return st_bypass_tables.get(pgt_id).cloned().unwrap_or_else(|| {
-                format!(
-                    "{}.changes_pgt_{pgt_id}",
-                    quote_ident(&self.change_buffer_schema)
-                )
-            });
+            return format!(
+                "{}.changes_pgt_{pgt_id}",
+                quote_ident(&self.change_buffer_schema)
+            );
         }
         let buffer = self
             .source_buffer_names
@@ -690,7 +683,6 @@ impl DiffContext {
                 cte_registry: CteRegistry::default(),
                 cte_delta_cache: HashMap::new(),
                 scan_pushed_predicate: None,
-                st_bypass_tables: HashMap::new(),
                 scan_delta_ctes: HashMap::new(),
                 scan_delta_ctes_by_oid: HashMap::new(),
                 source_scan_relations: HashMap::new(),
@@ -908,14 +900,6 @@ impl DiffContext {
         std::mem::replace(&mut self.cache.scan_pushed_predicate, predicate)
     }
 
-    pub(crate) fn set_st_bypass_tables(&mut self, tables: HashMap<i64, String>) {
-        self.cache.st_bypass_tables = tables;
-    }
-
-    pub(crate) fn st_bypass_tables(&self) -> &HashMap<i64, String> {
-        &self.cache.st_bypass_tables
-    }
-
     pub(crate) fn scan_delta_ctes(&self) -> &HashMap<(u32, String), String> {
         &self.cache.scan_delta_ctes
     }
@@ -1004,8 +988,7 @@ impl DiffContext {
 
     /// Resolve the relation a delta scan may read for one source.
     pub fn change_table_for_source(&self, source_oid: u32) -> String {
-        self.cdc
-            .change_table_for_source(source_oid, &self.cache.st_bypass_tables)
+        self.cdc.change_table_for_source(source_oid)
     }
 
     /// Get the previous LSN for a source table. In placeholder mode,

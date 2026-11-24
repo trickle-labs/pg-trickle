@@ -71,7 +71,6 @@ impl DeltaStage {
         let owner = crate::refresh::stream_owner_name(st)?;
         let owner = quote_ident(&owner);
         let change_schema = crate::config::pg_trickle_change_buffer_schema();
-        let bypass_tables = crate::refresh::get_st_bypass_tables();
         let mut stage = Self {
             names: HashMap::new(),
             bounded_views: Vec::new(),
@@ -97,13 +96,11 @@ impl DeltaStage {
                         reason: "upstream stream table metadata is missing".to_string(),
                     })?;
                 let key = format!("pgt_{upstream_pgt_id}");
+                // The persistent buffer is the authoritative history for
+                // both (prev, new] and post-bound inverse reconstruction.
+                // A current-refresh-only delta cannot substitute for it.
                 (
-                    bypass_tables
-                        .get(&upstream_pgt_id)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            format!("{change_schema}.changes_pgt_{upstream_pgt_id}")
-                        }),
+                    format!("{change_schema}.changes_pgt_{upstream_pgt_id}"),
                     frontier_lsn(prev_frontier, &key),
                     frontier_lsn(new_frontier, &key),
                 )

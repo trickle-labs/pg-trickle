@@ -1140,24 +1140,22 @@ fn try_fused_chain_refresh(
     Ok(fused_pgt_ids)
 }
 
-/// DAG-4: Execute a fused chain of stream tables in a single worker.
+/// Execute a fused chain of stream tables in a single worker.
 ///
-/// Members are refreshed sequentially in topological order.  For each
-/// intermediate member (all except the last), the delta is written to a
-/// temp bypass table instead of the persistent `changes_pgt_` buffer.
-/// The next member in the chain reads from the bypass table via the
-/// `ST_BYPASS_TABLES` thread-local mapping.
+/// Members not handled by the optional CTE-fused executor are refreshed
+/// sequentially in topological order, within the same READ COMMITTED
+/// transaction. All members publish and consume persistent ST change buffers.
 ///
-/// The last member writes to the persistent buffer as normal so that
-/// any external consumers (outside the chain) see the delta.
+/// #1488: An intermediate member's current delta is not a complete CDC
+/// history for its downstream consumer. In particular, its output LSN can
+/// be above this tick's immutable watermark while older, eligible deltas
+/// remain in the persistent buffer. Substituting a temp table containing
+/// only that member's latest delta can advance a downstream frontier past
+/// unread changes. Use the persistent history for both the delta window
+/// and any bounded-source reconstruction.
 ///
-/// A41-5 — Isolation invariant:
-/// All members of a fused chain execute within a single `READ COMMITTED`
-/// transaction.  Intermediate bypass tables are `ON COMMIT DROP` temp
-/// tables, so they are automatically cleaned up on transaction boundary.
-/// Because all members share one transaction, the chain is atomic: either
-/// the entire chain commits or, on error, the entire chain rolls back.
-/// External consumers do not see partial chain results.
+/// A41-5: All members share one transaction, so the chain commits atomically
+/// and external consumers do not observe partial chain results.
 fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
     log!(
         "pg_trickle refresh worker: fused chain — {} members, job {}",
@@ -1170,9 +1168,6 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
 
     // BOOT-4: Build gated-source set once for the whole group.
     let gated_oids = load_gated_source_oids();
-
-    // Ensure bypass tables are clean at the start.
-    crate::refresh::clear_all_st_bypass();
 
     // PERF-2 (v0.63.0): Attempt fused differential refresh for eligible nodes.
     // Nodes that are successfully fused are skipped in the sequential loop below.
@@ -1189,10 +1184,9 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
     };
     let fused_set: std::collections::HashSet<i64> = fused_pgt_ids.into_iter().collect();
 
-    let member_count = job.member_pgt_ids.len();
     let mut refreshed_count: usize = fused_set.len();
 
-    for (idx, &pgt_id) in job.member_pgt_ids.iter().enumerate() {
+    for &pgt_id in &job.member_pgt_ids {
         // PERF-2: Skip nodes already handled by the fused path.
         if fused_set.contains(&pgt_id) {
             continue;
@@ -1269,56 +1263,13 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
             continue;
         }
 
-        let is_last = idx == member_count - 1;
         let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
         let action = determine_scheduled_refresh_action(&st, has_changes);
-
-        // DAG-4: For intermediate members, set a flag so the refresh path
-        // uses bypass capture instead of the persistent buffer.
-        // The flag is set via the thread-local ST_BYPASS_TABLES before
-        // execute_scheduled_refresh runs. For the last member, normal
-        // persistent buffer is used so external downstreams see the delta.
-        //
-        // Note: The actual bypass capture happens inside
-        // execute_differential_refresh based on has_downstream_st_consumers().
-        // The bypass tables from earlier members are already in the
-        // thread-local map, so downstream members in this chain read from
-        // them automatically.
 
         let result = execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None);
         match result {
             RefreshOutcome::Success => {
                 refreshed_count += 1;
-
-                // DAG-4: For non-last members with downstream ST consumers,
-                // create the bypass temp table so the next member can read
-                // from it instead of the persistent buffer.
-                // Only for DIFFERENTIAL refreshes — NoData/Full/Reinitialize
-                // do not materialize __pgt_delta_{pgt_id}.
-                if !is_last
-                    && action == RefreshAction::Differential
-                    && refresh::has_downstream_st_consumers(pgt_id)
-                {
-                    let user_cols_typed = refresh::get_st_user_columns_typed(&st);
-                    match crate::refresh::capture_delta_to_bypass_table(&st, &user_cols_typed) {
-                        Ok(n) => {
-                            pgrx::debug1!(
-                                "[pg_trickle] DAG-4: bypass captured {} rows for pgt_id={}",
-                                n,
-                                pgt_id,
-                            );
-                        }
-                        Err(e) => {
-                            // Bypass failed — the downstream will fall back to the
-                            // persistent buffer which was also written.
-                            pgrx::debug1!(
-                                "[pg_trickle] DAG-4: bypass capture failed for pgt_id={}: {}",
-                                pgt_id,
-                                e,
-                            );
-                        }
-                    }
-                }
             }
             RefreshOutcome::RetryableFailure
             | RefreshOutcome::PermanentFailure
@@ -1329,15 +1280,10 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
                     st.pgt_name,
                     job.job_id,
                 );
-                // Clean up bypass tables before returning.
-                crate::refresh::clear_all_st_bypass();
                 return result;
             }
         }
     }
-
-    // Clean up bypass tables.
-    crate::refresh::clear_all_st_bypass();
 
     log!(
         "pg_trickle refresh worker: fused chain completed ({} members refreshed, job {})",

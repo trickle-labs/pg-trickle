@@ -1120,21 +1120,6 @@ fn test_build_content_hash_expr_empty_cols_fallback() {
     );
 }
 
-#[test]
-fn test_bypass_capture_uses_content_hash() {
-    let sql = build_bypass_capture_sql(
-        42,
-        &[
-            ("id".to_string(), "integer".to_string()),
-            ("name".to_string(), "text".to_string()),
-        ],
-        "pg_temp.__pgt_bypass_42",
-        None,
-    );
-    // The bypass forwards the already-encoded complete identity.
-    assert!(sql.contains("d.__pgt_row_id"));
-}
-
 // ── Phase 6 (TESTING_GAPS_2): determine_refresh_action unit tests ────────
 
 #[test]
@@ -2026,111 +2011,6 @@ fn test_topk_metadata_negative_offset() {
     let result = validate_topk_metadata_fields(10, "score DESC", Some(-3));
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("negative"));
-}
-
-// ── DAG-4: Bypass capture SQL tests ─────────────────────────────────
-
-#[test]
-fn test_build_bypass_capture_sql_basic() {
-    let sql = build_bypass_capture_sql(
-        42,
-        &[
-            ("id".to_string(), "integer".to_string()),
-            ("name".to_string(), "text".to_string()),
-        ],
-        "pg_temp.__pgt_bypass_42",
-        None,
-    );
-    assert!(sql.contains("CREATE TEMP TABLE IF NOT EXISTS pg_temp.__pgt_bypass_42"));
-    assert!(sql.contains("ON COMMIT DROP"));
-    // A44-10: flat D+I schema — no new_/old_ prefix
-    assert!(sql.contains("\"id\""));
-    assert!(sql.contains("\"name\""));
-    assert!(!sql.contains("\"new_id\""));
-    assert!(!sql.contains("\"new_name\""));
-    assert!(sql.contains("FROM __pgt_delta_42 d"));
-    assert!(sql.contains("d.__pgt_action IN ('I', 'D')"));
-}
-
-#[test]
-fn test_build_bypass_capture_sql_quoted_columns() {
-    let sql = build_bypass_capture_sql(
-        7,
-        &[("col\"name".to_string(), "text".to_string())],
-        "pg_temp.__pgt_bypass_7",
-        None,
-    );
-    // A44-10: flat D+I schema — column with quote should be properly escaped.
-    assert!(sql.contains(r#""col""name""#));
-    assert!(!sql.contains(r#""new_col""name""#));
-    assert!(sql.contains(r#"d."col""name""#));
-}
-
-#[test]
-fn test_build_bypass_capture_sql_column_defs() {
-    let sql = build_bypass_capture_sql(
-        1,
-        &[
-            ("a".to_string(), "bigint".to_string()),
-            ("b".to_string(), "text".to_string()),
-        ],
-        "pg_temp.__pgt_bypass_1",
-        None,
-    );
-    // Verify the column definitions in CREATE TEMP TABLE.
-    // A44-10: flat D+I schema — no new_/old_ prefix
-    assert!(sql.contains("lsn pg_lsn"));
-    assert!(sql.contains("action \"char\""));
-    assert!(sql.contains("__pgt_row_id bytea NOT NULL"));
-    assert!(sql.contains("\"a\" bigint"));
-    assert!(sql.contains("\"b\" text"));
-    assert!(!sql.contains("\"new_a\""));
-    assert!(!sql.contains("\"new_b\""));
-}
-
-#[test]
-fn test_build_bypass_capture_sql_lsn_override() {
-    let sql = build_bypass_capture_sql(
-        42,
-        &[("id".to_string(), "integer".to_string())],
-        "pg_temp.__pgt_bypass_42",
-        Some("0/1A2B3C"),
-    );
-    // Should use the literal LSN, not pg_current_wal_lsn()
-    assert!(sql.contains("'0/1A2B3C'::pg_lsn"));
-    assert!(!sql.contains("pg_current_wal_lsn()"));
-}
-
-#[test]
-fn test_build_bypass_capture_sql_no_lsn_override() {
-    let sql = build_bypass_capture_sql(
-        42,
-        &[("id".to_string(), "integer".to_string())],
-        "pg_temp.__pgt_bypass_42",
-        None,
-    );
-    // Should use pg_current_wal_lsn() by default
-    assert!(sql.contains("pg_current_wal_insert_lsn()"));
-}
-
-#[test]
-fn test_st_bypass_thread_local_set_get_clear() {
-    clear_all_st_bypass();
-    assert!(get_st_bypass_tables().is_empty());
-
-    set_st_bypass(10, "pg_temp.__pgt_bypass_10".to_string());
-    set_st_bypass(20, "pg_temp.__pgt_bypass_20".to_string());
-
-    let tables = get_st_bypass_tables();
-    assert_eq!(tables.len(), 2);
-    assert_eq!(tables[&10], "pg_temp.__pgt_bypass_10");
-    assert_eq!(tables[&20], "pg_temp.__pgt_bypass_20");
-
-    clear_st_bypass(10);
-    assert_eq!(get_st_bypass_tables().len(), 1);
-
-    clear_all_st_bypass();
-    assert!(get_st_bypass_tables().is_empty());
 }
 
 // ── build_is_distinct_clause ─────────────────────────────────────────────
