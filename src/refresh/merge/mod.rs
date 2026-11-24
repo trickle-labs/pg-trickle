@@ -110,7 +110,7 @@ pub(crate) fn execute_full_refresh_target(
     Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-    let needs_diff_capture = has_downstream_st_consumers(st.pgt_id);
+    let needs_diff_capture = has_downstream_st_consumers_checked(st.pgt_id)?;
     let prepared_user_cols = if needs_diff_capture {
         get_st_user_columns(st)
     } else {
@@ -1574,7 +1574,7 @@ pub fn execute_differential_refresh_with_tuning(
         && !st.has_keyless_source
         && !cached_non_monotonic
         && cached_is_deduplicated
-        && !has_downstream_st_consumers(st.pgt_id)
+        && !has_downstream_st_consumers_checked(st.pgt_id)?
     {
         let has_non_insert = catalog_source_oids.iter().any(|oid| {
             let prev_lsn = prev_frontier.get_lsn(*oid);
@@ -2983,7 +2983,7 @@ pub fn execute_differential_refresh_with_tuning(
     // Partitioned storage may lack a parent-level unique row-id constraint.
     if is_append_only
         && st.st_partition_key.is_none()
-        && !has_downstream_st_consumers(st.pgt_id)
+        && !has_downstream_st_consumers_checked(st.pgt_id)?
         && !bounded_distance_snapshot
     {
         let non_monotonic = has_non_monotonic_cte(&resolved.merge_sql);
@@ -3122,7 +3122,7 @@ pub fn execute_differential_refresh_with_tuning(
     // ST-ST-2: Force explicit DML when this ST has downstream ST consumers.
     // The explicit DML path materializes the delta into __pgt_delta_{pgt_id},
     // which we then capture into the ST's change buffer for downstream use.
-    let needs_downstream_capture = has_downstream_st_consumers(st.pgt_id);
+    let needs_downstream_capture = has_downstream_st_consumers_checked(st.pgt_id)?;
     let use_explicit_dml =
         use_explicit_dml || needs_downstream_capture || bounded_distance_snapshot;
 

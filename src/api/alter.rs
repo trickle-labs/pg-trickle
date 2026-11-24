@@ -864,7 +864,7 @@ fn atomic_swap_shadow_table(
     if had_change_buffer {
         cdc::drop_st_change_buffer_table(pgt_id, &change_schema)?;
     }
-    if cdc::count_downstream_st_consumers(pgt_id) > 0 {
+    if cdc::count_downstream_st_consumers(pgt_id)? > 0 {
         cdc::ensure_st_change_buffer(pgt_id, new_relid, &change_schema)?;
     }
     let backup = format!(
@@ -917,7 +917,7 @@ fn drop_st_change_buffer_if_unused(source_relid: pg_sys::Oid) -> Result<(), PgTr
     let Some(upstream_pgt_id) = StreamTableMeta::pgt_id_for_relid(source_relid) else {
         return Ok(());
     };
-    if cdc::count_downstream_st_consumers(upstream_pgt_id) == 0 {
+    if cdc::count_downstream_st_consumers(upstream_pgt_id)? == 0 {
         let change_schema = config::pg_trickle_change_buffer_schema();
         if cdc::has_st_change_buffer(upstream_pgt_id, &change_schema) {
             cdc::drop_st_change_buffer_table(upstream_pgt_id, &change_schema)?;

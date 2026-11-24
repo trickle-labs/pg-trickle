@@ -739,7 +739,7 @@ fn execute_manual_full_refresh_target(
     refresh::poll_foreign_table_sources_for_st(st)?;
     let safe_bound = refresh_safe_bound()?;
 
-    let needs_diff_capture = refresh::has_downstream_st_consumers(st.pgt_id);
+    let needs_diff_capture = refresh::has_downstream_st_consumers_checked(st.pgt_id)?;
     let prepared_user_cols = if needs_diff_capture {
         refresh::get_st_user_columns(st)
     } else {

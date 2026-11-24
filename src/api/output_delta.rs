@@ -576,7 +576,7 @@ pub(crate) fn invalidate_after_snapshot_restore(pgt_id: i64) -> Result<(), PgTri
 
 /// Start the output capture window immediately before a refresh executor runs.
 pub(crate) fn begin_capture(pgt_id: i64) -> Result<(), PgTrickleError> {
-    if !has_consumer(pgt_id) {
+    if !has_consumer(pgt_id)? {
         return Ok(());
     }
     super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
@@ -599,13 +599,15 @@ pub(crate) fn record_empty_apply(pgt_id: i64) {
     });
 }
 
-pub(crate) fn has_consumer(pgt_id: i64) -> bool {
+pub(crate) fn has_consumer(pgt_id: i64) -> Result<bool, PgTrickleError> {
     Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_output_delta_consumers WHERE pgt_id = $1 AND state <> 'DROPPED')",
         &[pgt_id.into()],
     )
-    .unwrap_or(Some(false))
-    .unwrap_or(false)
+    .map_err(|e| PgTrickleError::SpiError(format!("output-delta consumer discovery: {e}")))?
+    .ok_or_else(|| {
+        PgTrickleError::InternalError("output-delta consumer discovery returned NULL".into())
+    })
 }
 
 /// Create one shared batch in the common refresh finalizer.
@@ -615,7 +617,7 @@ pub(crate) fn finalize(
     rows_changed: i64,
     capture_complete: bool,
 ) -> Result<(), PgTrickleError> {
-    if !has_consumer(meta.pgt_id) {
+    if !has_consumer(meta.pgt_id)? {
         return Ok(());
     }
     super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
