@@ -4467,7 +4467,9 @@ mod tests {
                 }
             }
             let eu = ExecutionUnitDag::build_from_st_dag(&dag, all_differential);
-            let order = eu.topological_order().expect("contraction must remain acyclic");
+            let order = eu
+                .topological_order()
+                .expect("contraction must remain acyclic");
             for (bit, &(up, down)) in edges.iter().enumerate() {
                 if mask & (1 << bit) == 0 {
                     continue;
@@ -4483,7 +4485,8 @@ mod tests {
                     );
                 } else {
                     assert!(
-                        eu.get_downstream_units(upstream.id).contains(&downstream.id)
+                        eu.get_downstream_units(upstream.id)
+                            .contains(&downstream.id)
                             && eu.get_upstream_units(downstream.id).contains(&upstream.id),
                         "lost external edge {up}->{down} in graph {mask}"
                     );
