@@ -2454,6 +2454,73 @@ pub fn query_partition_descendant_oids(
     Ok(Vec::new())
 }
 
+/// Level-triggered partition-DDL recovery compares durable membership and
+/// bounds to the current recursive tree before processing a differential delta.
+/// Only actual partitioned roots participate: plain TABLE dependencies are
+/// common in scheduled refreshes and have no partition ancestry to reconcile.
+/// The saved catalog tracks range metadata as well as child OIDs. A missed
+/// hook must force a protected rebuild (or fail closed with sealed RETAIN).
+#[cfg(not(test))]
+pub(crate) fn partition_snapshot_changed(pgt_id: i64) -> Result<bool, PgTrickleError> {
+    let changed = Spi::get_one_with_args::<bool>(
+        r#"WITH RECURSIVE descendants(root_oid, relid, parent_oid) AS (
+             SELECT dep.source_relid, inh.inhrelid, inh.inhparent
+               FROM pgtrickle.pgt_dependencies dep
+               JOIN pg_catalog.pg_partitioned_table p ON p.partrelid = dep.source_relid
+               JOIN pg_catalog.pg_inherits inh ON inh.inhparent = dep.source_relid
+              WHERE dep.pgt_id = $1 AND dep.source_type = 'TABLE'
+             UNION ALL
+             SELECT d.root_oid, inh.inhrelid, inh.inhparent
+               FROM descendants d
+               JOIN pg_catalog.pg_inherits inh ON inh.inhparent = d.relid
+           ), current_children AS (
+             SELECT d.root_oid,
+                    pg_catalog.jsonb_agg(DISTINCT d.relid::bigint
+                                         ORDER BY d.relid::bigint) AS oids,
+                    pg_catalog.jsonb_object_agg(d.relid::text,
+                      pg_catalog.jsonb_build_object(
+                        'parent_oid', d.parent_oid::bigint,
+                        'bound_node', c.relpartbound::text,
+                        'relkind', c.relkind::text)) AS metadata
+               FROM descendants d
+               JOIN pg_catalog.pg_class c ON c.oid = d.relid
+              GROUP BY d.root_oid
+           )
+           SELECT EXISTS (
+             SELECT 1 FROM pgtrickle.pgt_dependencies dep
+             LEFT JOIN current_children children ON children.root_oid = dep.source_relid
+             WHERE dep.pgt_id = $1 AND dep.source_type = 'TABLE'
+               AND EXISTS (
+                 SELECT 1 FROM pg_catalog.pg_partitioned_table p
+                  WHERE p.partrelid = dep.source_relid
+               )
+               AND (
+                 (dep.column_snapshot ? 'partition_descendant_oids'
+                  AND dep.column_snapshot->'partition_descendant_oids'
+                      IS DISTINCT FROM COALESCE(children.oids, '[]'::jsonb))
+                 OR
+                 (dep.column_snapshot ? 'partition_descendants'
+                  AND COALESCE(
+                    (SELECT pg_catalog.jsonb_object_agg(
+                              entry->>'oid', entry - 'oid' - 'range')
+                       FROM pg_catalog.jsonb_array_elements(
+                         dep.column_snapshot->'partition_descendants') entry),
+                     '{}'::jsonb)
+                      IS DISTINCT FROM COALESCE(children.metadata, '{}'::jsonb))
+               )
+           )"#,
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::InternalError("cannot inspect partition ancestry".into()))?;
+    Ok(changed)
+}
+
+#[cfg(test)]
+pub(crate) fn partition_snapshot_changed(_pgt_id: i64) -> Result<bool, PgTrickleError> {
+    Ok(false)
+}
+
 /// Get the stored column snapshot for a dependency pair.
 ///
 /// Returns `None` if no snapshot is stored.
@@ -2495,11 +2562,13 @@ pub fn store_column_snapshot_for_pgt_id(
     let (snapshot, fingerprint) = build_column_snapshot(source_oid)?;
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_dependencies \
-         SET column_snapshot = CASE \
+         SET column_snapshot = (CASE \
                WHEN column_snapshot ? 'partition_retention' \
                THEN pg_catalog.jsonb_set($1, '{partition_retention}', \
                                         column_snapshot->'partition_retention', true) \
-               ELSE $1 END, \
+               ELSE $1 END) \
+               || CASE WHEN column_snapshot->>'partition_auto_disabled' = 'true' \
+                  THEN pg_catalog.jsonb_build_object('partition_auto_disabled', true) ELSE '{}'::jsonb END, \
              schema_fingerprint = $2 \
          WHERE pgt_id = $3 AND source_relid = $4",
         &[

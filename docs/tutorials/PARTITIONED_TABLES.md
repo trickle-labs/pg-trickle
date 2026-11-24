@@ -81,11 +81,24 @@ SELECT * FROM regional_sales ORDER BY region;
 
 ## Retention policies
 
-Retention is disabled by default. An eligible stream can opt into `TRIM` or
-`RETAIN` with an explicit cutoff. A partition is expired only when its entire
-half-open range `[lower, upper)` is at or below the cutoff. Advancing the
-cutoff does not remove a partition; it makes a subsequent `DETACH`, concurrent
-`DETACH`, or direct `DROP TABLE` eligible for retention processing.
+Explicit retention policies are disabled by default. A newly initialized or
+protectedly reinitialized partition-aligned managed DIFFERENTIAL stream can automatically delete groups
+when their source partition is removed, without configuring `TRIM` or a cutoff.
+The initial FULL baseline must establish complete partition CDC, truncate guards
+and a suitable output index under source locks. Streams that do not meet these
+requirements use the protected full-reinitialization fallback instead. This
+fast path is internal: `get_stream_table_partition_retention` reports
+`enabled: false` and `automatic_delete_with_source: true` when it is armed.
+A caller may still explicitly configure `TRIM` or `RETAIN`, optionally
+with a cutoff. Setting the policy to `OFF` disables automatic delete-with-source,
+including across subsequent protected rebuilds. When a cutoff is provided, a partition is
+eligible only when its entire half-open range `[lower, upper)` is below the
+cutoff. Advancing the cutoff does not remove a partition; it makes a subsequent
+`DETACH`, concurrent `DETACH`, or direct `DROP TABLE` eligible for retention
+processing. Omitting the cutoff opts into **source-driven removal**: the
+partition's disappearance is the signal, and any removable, aligned partition
+can be trimmed or sealed regardless of its timestamp. Existing policies with
+explicit cutoffs retain their cutoff checks for compatibility.
 
 This example uses the **same** `occurred` column for partitioning and hourly
 grouping. It does not infer any relationship between two timestamps. Run it in
@@ -187,31 +200,33 @@ The contract is intentionally narrow:
   non-null `date`, `timestamp`, or `timestamptz` partition column, the default
   btree operator class, finite bounds, and no default partition. Descendants
   must be durable local tables.
+- The defining query must admit **partition-separable** grouping: the
+  supported single-source grouped aggregate has a uniquely projected partition
+  key (or a bucket of that very key aligned to source partition boundaries).
+  Other grouping expressions may involve other source columns, including
+  hourly buckets of an event timestamp different from the date partition key;
+  they cannot combine output groups across partitions. Constant or calculated
+  SELECT items do not change this proof. Query operators with cross-partition
+  dependencies, such as joins, window functions, global limits and unrelated
+  subqueries, are still rejected by the retention proof.
+- Other grouping expressions, projections and PostgreSQL built-in aggregates
+  must be supported by ordinary DIFFERENTIAL maintenance, including its
+  immutability and typed row-identity requirements. Floating-point `SUM` is
+  rejected because rounding depends on change batching. Grouping columns
+  using nondeterministic collations are rejected. The defining search path must
+  leave `pg_catalog` ahead of other schemas, and the stream owner must not be
+  subject to source row-level security. The output partition identity remains
+  a direct projected group column so that the retention delete can use a typed
+  half-open range predicate.
+- Hourly `timestamp` partition-key buckets use
+  `pg_catalog.date_trunc('hour', key)`; `timestamptz` partition-key buckets
+  must use `pg_catalog.date_trunc('hour', key, 'UTC')`. Partition bounds must
+  align with the bucket boundaries. A bucket of an *unrelated* timestamp
+  column is allowed only as an **additional** group key when the partition
+  key itself is also projected.
 - An optional source-level `WHERE` filter is allowed; `HAVING` and
   predicates that mix groups across partitions are not. An ALTER of this
   filter must not require newly uncaptured source columns.
-- The defining query is a single-source grouped aggregate with `COUNT(*)`,
-  `COUNT(column)` and/or `SUM(column)`, using PostgreSQL's built-in aggregates
-  without DISTINCT or aggregate filters. `SUM` accepts built-in integer and
-  numeric columns. Floating-point `SUM` is rejected because rounding depends
-  on how changes are batched; `COUNT` of a floating-point column is supported.
-  Other grouping keys must be source
-  columns supported by the stream table's typed row identity and must use
-  deterministic collations; for example, array-valued grouping keys and
-  nondeterministic text collations are rejected. Aggregate arguments cannot be
-  arbitrary expressions. The
-  defining search path must leave `pg_catalog` ahead of other schemas, and the
-  stream owner must not be subject to source row-level security. Its output
-  includes either
-  the exact partition key or an hourly bucket of that same key. Hourly
-  `timestamp` buckets use `pg_catalog.date_trunc('hour', key)`; `timestamptz`
-  buckets must use `pg_catalog.date_trunc('hour', key, 'UTC')`. Partition
-  bounds must align with bucket boundaries. Joins and other query shapes are
-  rejected at configuration time. The SELECT list may only project grouped
-  source columns and aggregate outputs as plain column references (aliases are
-  allowed); literal constants and computed select-list items are not eligible.
-  An hourly grouping expression over a different timestamp column is not a
-  substitute for the partition key and is not an additional allowed group key.
 - The source workload may append rows, but grouped output rows are updated;
   this feature does not require the stream's append-only output fast path.
 - Retention cuts require the configured stream to be active and initialized
@@ -259,8 +274,11 @@ complete raw history and build a replacement stream with deterministic
 grouping and exact aggregate inputs. If RETAIN has sealed history, do not
 discard the old stream until the replacement has been checked.
 
-The retention cutoff is parsed as the source column type. Include a timezone
-offset for `timestamptz` cutoffs to avoid dependence on the session timezone.
+The optional retention cutoff is parsed as the source column type. Include a
+timezone offset for `timestamptz` cutoffs to avoid dependence on the session
+timezone. A missing cutoff is represented as `null` by
+`get_stream_table_partition_retention`; the internal typed sentinel is not a
+time boundary and is never used as an expiry gate.
 For an existing initialized managed differential stream, use
 `pgtrickle.set_stream_table_partition_retention(name, policy, column, cutoff)`;
 the API validates the existing source, query, storage and partition layout.

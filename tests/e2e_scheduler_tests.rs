@@ -805,7 +805,9 @@ async fn test_scheduler_reinitialize_partitioned_multistatement_writer_exact() {
 
     // Pause/resume can preserve CDC and legitimately avoid a rebuild. Detach an
     // empty source partition while the scheduler is paused to explicitly require
-    // a protected REINITIALIZE without changing the live source data.
+    // a protected REINITIALIZE without changing the live source data. This also
+    // exercises a protected FULL baseline while a multi-statement source writer
+    // holds the lock.
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['issue1455_hourly'])")
         .await;
     db.execute("SELECT pgtrickle.pause_stream_table('issue1455_hourly')")

@@ -1,4 +1,4 @@
-//! Conservative query-side candidates for partition-local aggregate groups.
+//! Query-side proofs of partition-local aggregate groups.
 //!
 //! A candidate is not sufficient to authorize retention: callers must also
 //! validate the partition key, every bound, and the retention lifecycle.
@@ -126,6 +126,14 @@ fn retention_pruning_key(partition_spec: Option<&str>, group_column: &str) -> Op
 pub struct RetentionState {
     pub version: u8,
     pub mode: RetentionMode,
+    /// Internal, automatically maintained delete-with-source optimization.
+    /// It has no user-configured TRIM policy; explicit policies set this false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub automatic: bool,
+    /// A source-driven retention cut needs no time horizon. Previously
+    /// configured policies retain their original explicit cutoff semantics.
+    #[serde(default, skip_serializing_if = "is_false", alias = "trim_unbounded")]
+    pub cutoff_unbounded: bool,
     pub candidate: RetentionGroupCandidate,
     pub cutoff: RetentionBound,
     pub query_hash: i64,
@@ -142,6 +150,10 @@ pub enum RetentionStateError {
     Overlap,
     CutoffRegression,
     TrimCannotSeal,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn bound_value(bound: RetentionBound) -> i64 {
@@ -192,7 +204,7 @@ impl RetentionState {
         for range in &self.sealed {
             let expired = range_is_expired(&self.candidate, range.lower, range.upper, self.cutoff)
                 .map_err(RetentionStateError::InvalidRange)?;
-            if !expired {
+            if !self.cutoff_unbounded && !expired {
                 return Err(RetentionStateError::NotExpired);
             }
             if previous_upper.is_some_and(|upper| upper > bound_value(range.lower)) {
@@ -207,14 +219,16 @@ impl RetentionState {
             {
                 return Err(RetentionStateError::InvalidState);
             }
-            if !range_is_expired(
+            // An unbounded cut is source-driven: an explicit time horizon
+            // is not required, but finite and aligned bounds still are.
+            let expired = range_is_expired(
                 &self.candidate,
                 pending.range.lower,
                 pending.range.upper,
                 self.cutoff,
             )
-            .map_err(RetentionStateError::InvalidRange)?
-            {
+            .map_err(RetentionStateError::InvalidRange)?;
+            if !self.cutoff_unbounded && !expired {
                 return Err(RetentionStateError::NotExpired);
             }
             if self.sealed.iter().any(|old| {
@@ -233,9 +247,9 @@ impl RetentionState {
         if self.mode != RetentionMode::Retain {
             return Err(RetentionStateError::TrimCannotSeal);
         }
-        if !range_is_expired(&self.candidate, range.lower, range.upper, self.cutoff)
-            .map_err(RetentionStateError::InvalidRange)?
-        {
+        let expired = range_is_expired(&self.candidate, range.lower, range.upper, self.cutoff)
+            .map_err(RetentionStateError::InvalidRange)?;
+        if !self.cutoff_unbounded && !expired {
             return Err(RetentionStateError::NotExpired);
         }
         if self.sealed.contains(&range) {
@@ -584,6 +598,65 @@ fn retention_policies_for_source(
     })
 }
 
+/// A broken automatic capture must take the ordinary FULL-rebuild fallback,
+/// never block user partition DDL or silently skip unknown direct-child writes.
+/// Explicit TRIM / RETAIN have stronger user promises and remain fail-closed.
+#[cfg(not(test))]
+fn automatic_cut_available(
+    pgt_id: i64,
+    source_oid: pg_sys::Oid,
+    state: &RetentionState,
+) -> Result<bool, crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    if !state.automatic {
+        return Ok(true);
+    }
+    let st = crate::catalog::StreamTableMeta::get_by_id(pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {pgt_id}")))?;
+    let aligned = st.status == crate::dag::StStatus::Active
+        && !st.needs_reinit
+        && state.candidate.source_oid == source_oid.to_u32()
+        && state.query_hash == crate::catalog::compute_defining_query_hash(&st.defining_query);
+    let ready = if aligned {
+        let capture = ensure_retention_capture(pgt_id);
+        let storage = validate_retention_storage(
+            &st,
+            source_oid,
+            &state.candidate,
+            RetentionMode::Trim,
+            false,
+        );
+        match (capture, storage) {
+            (Ok(()), Ok(())) => true,
+            (Err(PgTrickleError::InvalidArgument(_)), _)
+            | (_, Err(PgTrickleError::InvalidArgument(_))) => false,
+            (Err(error), _) | (_, Err(error)) => return Err(error),
+        }
+    } else {
+        false
+    };
+    if !ready {
+        let changed = Spi::get_one_with_args::<i64>(
+            "UPDATE pgtrickle.pgt_dependencies
+                SET column_snapshot = column_snapshot - 'partition_retention'
+              WHERE pgt_id = $1 AND source_relid = $2
+                AND column_snapshot->'partition_retention'->>'automatic' = 'true'
+              RETURNING pgt_id",
+            &[pgt_id.into(), source_oid.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if changed != Some(pgt_id) {
+            return Err(PgTrickleError::InvalidArgument(
+                "automatic partition capture changed before its safe fallback".into(),
+            ));
+        }
+        // The DDL completion hook will mark the stream for reinitialization.
+        // Remaining no-op guards are harmless until its CDC is rebuilt.
+    }
+    Ok(ready)
+}
+
 /// Persist a protected cut before PostgreSQL commits the first detach phase.
 #[cfg(not(test))]
 pub(crate) fn prepare_concurrent_retention_detaches(
@@ -606,6 +679,9 @@ pub(crate) fn prepare_concurrent_retention_detaches(
             prepared.push(pgt_id);
             continue;
         }
+        if !automatic_cut_available(pgt_id, source_oid, &state)? {
+            continue;
+        }
         let partition = match resolve_retention_partition(
             source_oid,
             target_oid,
@@ -619,7 +695,7 @@ pub(crate) fn prepare_concurrent_retention_detaches(
             }
             Err(error) => return Err(error),
         };
-        if partition.is_none_or(|partition| !partition.expired) {
+        if partition.is_none_or(|partition| !state.cutoff_unbounded && !partition.expired) {
             if state.mode == RetentionMode::Trim {
                 continue;
             }
@@ -830,6 +906,9 @@ pub(crate) fn prepare_automatic_detaches(
         if prepared_detach_exists(pgt_id, source_oid.to_u32(), target_oid.to_u32()) {
             continue;
         }
+        if !automatic_cut_available(pgt_id, source_oid, &state)? {
+            continue;
+        }
         let partition = match resolve_retention_partition(
             source_oid,
             target_oid,
@@ -843,7 +922,7 @@ pub(crate) fn prepare_automatic_detaches(
             }
             Err(error) => return Err(error),
         };
-        if partition.is_none_or(|partition| !partition.expired) {
+        if partition.is_none_or(|partition| !state.cutoff_unbounded && !partition.expired) {
             if state.mode == RetentionMode::Trim {
                 continue;
             }
@@ -1531,7 +1610,7 @@ pub fn prepare_retention_cut(
                     "retention target is not an aligned source partition".into(),
                 )
             })?;
-    if !partition.expired {
+    if !state.cutoff_unbounded && !partition.expired {
         return Err(PgTrickleError::InvalidArgument(
             "partition is not wholly below the retention cutoff".into(),
         ));
@@ -2453,13 +2532,12 @@ pub(crate) fn validate_builtin_aggregates(
     for oid in analyzed.values() {
         let builtin = Spi::get_one_with_args::<bool>(
             "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-             WHERE p.oid = $1 AND n.nspname = 'pg_catalog' AND p.prokind = 'a' AND p.proname IN ('sum','count'))",
+             WHERE p.oid = $1 AND n.nspname = 'pg_catalog' AND p.prokind = 'a')",
             &[(*oid).into()],
         ).map_err(|e| PgTrickleError::SpiError(e.to_string()))?.unwrap_or(false);
         if !builtin {
             return Err(PgTrickleError::InvalidArgument(
-                "partition retention supports only PostgreSQL built-in SUM and COUNT aggregates"
-                    .into(),
+                "partition retention requires PostgreSQL built-in aggregate identities".into(),
             ));
         }
     }
@@ -2581,104 +2659,40 @@ pub fn query_group_candidate(
     if has_floating_sum(tree) {
         return Err(RetentionQueryError::FloatingPointSum);
     }
+    let missing_projected_key = || {
+        RetentionQueryError::MissingProjectedGroupKey(format!(
+            "the GROUP BY and select list must project the partition key \"{key}\" or an approved hourly bucket of that same key as a plain column"
+        ))
+    };
     let column = columns
         .iter()
         .find(|column| column.name == key && !column.is_nullable)
         .filter(|column| matches!(column.type_oid, DATE_OID | TIMESTAMP_OID | TIMESTAMPTZ_OID))
         .filter(|_| *table_oid == source_oid)
         .ok_or_else(|| {
-            RetentionQueryError::InvalidSourceKey(format!(
-                "source column \"{key}\" must belong to the single source table and be a non-null date, timestamp, or timestamptz partition key"
-            ))
+            // The parser may prune an unreferenced key from the scan. Report
+            // the missing GROUP BY/SELECT proof instead of an invalid source key.
+            if *table_oid == source_oid && !columns.iter().any(|column| column.name == key) {
+                missing_projected_key()
+            } else {
+                RetentionQueryError::InvalidSourceKey(format!(
+                    "source column \"{key}\" must belong to the single source table and be a non-null date, timestamp, or timestamptz partition key"
+                ))
+            }
         })?;
 
-    for group in group_by {
-        match group {
-            Expr::ColumnRef {
-                table_alias,
-                column_name,
-            } => {
-                if !table_alias.as_deref().is_none_or(|name| name == alias)
-                    || !columns.iter().any(|column| column.name == *column_name)
-                {
-                    return Err(RetentionQueryError::UnsupportedShape(format!(
-                        "grouping key \"{}\" is not a plain column of source \"{alias}\"; other grouping keys must be source columns",
-                        group.to_sql()
-                    )));
-                }
-            }
-            _ if bucket(group, alias, key, column.type_oid).is_none() => {
-                return Err(RetentionQueryError::UnsupportedShape(format!(
-                    "grouping key \"{}\" is neither the partition key \"{key}\" nor an hourly bucket of it; other grouping keys must be plain source columns",
-                    group.to_sql()
-                )));
-            }
-            _ => {}
-        }
-    }
-    if let Some((expressions, aliases)) = projection {
-        for (expression, output) in expressions.iter().zip(aliases) {
-            if !matches!(expression, Expr::ColumnRef { .. }) {
-                return Err(RetentionQueryError::UnsupportedShape(format!(
-                    "select-list item \"{} AS {output}\" is not a plain column reference; retention projections must reference grouped columns or aggregate outputs directly",
-                    expression.to_sql()
-                )));
-            }
-        }
-    }
+    // Group locality follows from ONE projected group key that identifies the
+    // source partition. Additional group expressions and SELECT projections
+    // cannot merge groups across partitions. The normal DIFFERENTIAL validator
+    // checks expression volatility, type compatibility and row identities.
+    // Keep the partition-identifying projection itself strict below: deleting
+    // by an arbitrary projection would not be a valid range predicate.
 
     if aggregates.is_empty() {
         return Err(RetentionQueryError::UnsupportedAggregate(
-            "query has no aggregates; retention requires COUNT(*) / COUNT(column) or SUM(numeric source column)".into(),
+            "query has no aggregates; retention requires a grouped aggregate".into(),
         ));
     }
-    if let Some(aggregate) = aggregates.iter().find(|aggregate| {
-        !matches!(
-            aggregate.function,
-            AggFunc::CountStar | AggFunc::Count | AggFunc::Sum
-        ) || aggregate.is_distinct
-            || aggregate.filter.is_some()
-            || aggregate.second_arg.is_some()
-            || aggregate.order_within_group.is_some()
-            || match aggregate.function {
-                AggFunc::CountStar => aggregate.argument.is_some(),
-                AggFunc::Count | AggFunc::Sum => match aggregate.argument.as_ref() {
-                    Some(Expr::ColumnRef {
-                        table_alias,
-                        column_name,
-                    }) if table_alias.as_deref().is_none_or(|name| name == alias) => columns
-                        .iter()
-                        .find(|column| column.name == *column_name)
-                        .is_none_or(|column| {
-                            aggregate.function == AggFunc::Sum
-                                && !matches!(column.type_oid, 20 | 21 | 23 | 1700)
-                        }),
-                    _ => true,
-                },
-                _ => true,
-            }
-    }) {
-        let arg = aggregate
-            .argument
-            .as_ref()
-            .map(Expr::to_sql)
-            .unwrap_or_else(|| "*".into());
-        let argument = if aggregate.is_distinct {
-            format!("DISTINCT {arg}")
-        } else {
-            arg
-        };
-        let signature = if aggregate.function == AggFunc::CountStar {
-            "COUNT(*)".to_string()
-        } else {
-            format!("{:?}({argument})", aggregate.function)
-        };
-        return Err(RetentionQueryError::UnsupportedAggregate(format!(
-            "aggregate \"{signature} AS {}\" is not supported; retention allows only COUNT(*), COUNT(column), and SUM(numeric source column) without DISTINCT, FILTER, ORDER BY, or extra arguments",
-            aggregate.alias
-        )));
-    }
-
     for group in group_by {
         let Some(candidate) = bucket(group, alias, key, column.type_oid) else {
             continue;
@@ -2738,9 +2752,7 @@ pub fn query_group_candidate(
             source_column: key.to_string(),
         });
     }
-    Err(RetentionQueryError::MissingProjectedGroupKey(format!(
-        "the GROUP BY and select list must project the partition key \"{key}\" or an approved hourly bucket of that same key as a plain column"
-    )))
+    Err(missing_projected_key())
 }
 
 #[cfg(all(feature = "e2e-unsafe-test-hooks", not(test)))]
@@ -2994,7 +3006,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape(_))
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
         ));
         let unqualified = Expr::FuncCall {
             func_name: "date_trunc".into(),
@@ -3006,7 +3018,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape(_))
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
         ));
         assert!(matches!(
             query_group_candidate(
@@ -3019,7 +3031,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape(_))
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
         ));
         assert!(matches!(
             query_group_candidate(
@@ -3048,7 +3060,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape(_))
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
         ));
         assert!(matches!(
             query_group_candidate(
@@ -3056,7 +3068,7 @@ mod tests {
                 42,
                 "occurred"
             ),
-            Err(RetentionQueryError::UnsupportedShape(_))
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
         ));
     }
 
@@ -3136,7 +3148,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_aggregates_and_query_shapes() {
+    fn aggregate_choice_does_not_change_locality_but_other_operators_do() {
+        let mut distinct = query(col("occurred"), col("occurred"), DATE_OID, false);
+        let OpTree::Project { child, .. } = &mut distinct else {
+            unreachable!()
+        };
+        let OpTree::Aggregate { aggregates, .. } = child.as_mut() else {
+            unreachable!()
+        };
+        aggregates[0].is_distinct = true;
+        // DISTINCT does not affect which source partition owns a group.
+        // Aggregate support is validated separately by ordinary DVM checks.
+        assert!(query_group_candidate(&distinct, 42, "occurred").is_ok());
+
         let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
         let OpTree::Project { child, .. } = &mut tree else {
             unreachable!()
@@ -3144,18 +3168,19 @@ mod tests {
         let OpTree::Aggregate { aggregates, .. } = child.as_mut() else {
             unreachable!()
         };
-        aggregates[0].is_distinct = true;
-        assert!(matches!(
-            query_group_candidate(&tree, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedAggregate(_))
-        ));
+        // The aggregate's evaluation remains the normal DVM's responsibility.
+        aggregates[0].function = AggFunc::Max;
+        aggregates[0].argument = Some(col("occurred"));
+        assert!(query_group_candidate(&tree, 42, "occurred").is_ok());
 
-        let tree = OpTree::Filter {
+        // A top-level operator can modify groups outside the removed partition,
+        // so this proof deliberately does not admit arbitrary operator trees.
+        let filtered_result = OpTree::Filter {
             predicate: Expr::Literal("true".into()),
-            child: Box::new(query(col("occurred"), col("occurred"), DATE_OID, false)),
+            child: Box::new(tree),
         };
         assert!(matches!(
-            query_group_candidate(&tree, 42, "occurred"),
+            query_group_candidate(&filtered_result, 42, "occurred"),
             Err(RetentionQueryError::UnsupportedShape(_))
         ));
 
@@ -3183,99 +3208,61 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unproven_group_and_aggregate_expressions() {
-        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
-        let OpTree::Project { child, .. } = &mut tree else {
-            unreachable!()
-        };
-        let OpTree::Aggregate { aggregates, .. } = child.as_mut() else {
-            unreachable!()
-        };
-        aggregates[0].function = AggFunc::Sum;
-        aggregates[0].argument = Some(Expr::Literal("random()".into()));
-        assert!(matches!(
-            query_group_candidate(&tree, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedAggregate(_))
-        ));
-        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
-        let OpTree::Project { child, .. } = &mut tree else {
-            unreachable!()
-        };
-        let OpTree::Aggregate { group_by, .. } = child.as_mut() else {
-            unreachable!()
-        };
-        group_by.push(Expr::FuncCall {
-            func_name: "random".into(),
-            args: vec![],
-        });
-        assert!(matches!(
-            query_group_candidate(&tree, 42, "occurred"),
-            Err(RetentionQueryError::UnsupportedShape(_))
-        ));
-    }
-
-    #[test]
-    fn eligibility_errors_name_the_offending_projection_group_and_aggregate() {
-        let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
-        let OpTree::Project {
-            expressions,
-            aliases,
-            ..
-        } = &mut tree
-        else {
-            unreachable!()
-        };
-        expressions.push(Expr::Literal("'x'::text".into()));
-        aliases.push("tag".into());
-        let message = query_group_candidate(&tree, 42, "occurred")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            message.contains("select-list item \"'x'::text AS tag\""),
-            "{message}"
-        );
-        assert!(message.contains("plain column reference"), "{message}");
-
+    fn locality_ignores_other_group_expressions_and_aggregate_arguments() {
         let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
         let OpTree::Project { child, .. } = &mut tree else {
             unreachable!()
         };
         let OpTree::Aggregate {
-            group_by, child, ..
+            group_by,
+            aggregates,
+            ..
         } = child.as_mut()
         else {
             unreachable!()
         };
         group_by.push(hour("other", None));
-        let OpTree::Scan { columns, .. } = child.as_mut() else {
-            unreachable!()
-        };
-        columns.push(Column {
-            name: "other".into(),
-            type_oid: TIMESTAMP_OID,
-            is_nullable: false,
-        });
-        let message = query_group_candidate(&tree, 42, "occurred")
-            .unwrap_err()
-            .to_string();
-        assert!(message.contains("grouping key"), "{message}");
-        assert!(message.contains("other"), "{message}");
-        assert!(message.contains("partition key \"occurred\""), "{message}");
-        assert!(message.contains("hourly bucket of it"), "{message}");
+        aggregates[0].function = AggFunc::Avg;
+        aggregates[0].argument = Some(col("value"));
+        let candidate = query_group_candidate(&tree, 42, "occurred")
+            .expect("a projected partition key makes other groups partition-local");
+        assert_eq!(candidate.output_column, "bucket");
 
+        // Absence of the partition-determining key is still not proof of locality.
+        let only_other_group = query(hour("other", None), hour("other", None), DATE_OID, false);
+        assert!(matches!(
+            query_group_candidate(&only_other_group, 42, "occurred"),
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
+        ));
+    }
+
+    #[test]
+    fn accepts_constant_projection_with_an_unmodified_partition_key() {
         let mut tree = query(col("occurred"), col("occurred"), DATE_OID, false);
-        let OpTree::Project { child, .. } = &mut tree else {
+        {
+            let OpTree::Project {
+                expressions,
+                aliases,
+                ..
+            } = &mut tree
+            else {
+                unreachable!()
+            };
+            expressions.push(Expr::Literal("'x'::text".into()));
+            aliases.push("tag".into());
+        }
+        assert!(query_group_candidate(&tree, 42, "occurred").is_ok());
+
+        // The WHERE predicate in the range DELETE must be on a projected
+        // partition identity, not a computed replacement.
+        let OpTree::Project { expressions, .. } = &mut tree else {
             unreachable!()
         };
-        let OpTree::Aggregate { aggregates, .. } = child.as_mut() else {
-            unreachable!()
-        };
-        aggregates[0].is_distinct = true;
-        let message = query_group_candidate(&tree, 42, "occurred")
-            .unwrap_err()
-            .to_string();
-        assert!(message.contains("COUNT(*) AS n"), "{message}");
-        assert!(message.contains("without DISTINCT"), "{message}");
+        expressions[0] = Expr::Literal("'2025-01-01'::date".into());
+        assert!(matches!(
+            query_group_candidate(&tree, 42, "occurred"),
+            Err(RetentionQueryError::MissingProjectedGroupKey(_))
+        ));
     }
 
     #[test]
@@ -3299,6 +3286,25 @@ mod tests {
         .to_string();
         assert!(message.contains("source column \"occurred\""), "{message}");
         assert!(message.contains("non-null"), "{message}");
+
+        // The parser can omit unused source columns from its scan. Missing
+        // projected keys should still produce the actionable locality hint.
+        let mut pruned = query(col("other"), col("other"), DATE_OID, false);
+        let OpTree::Project { child, .. } = &mut pruned else {
+            unreachable!()
+        };
+        let OpTree::Aggregate { child, .. } = child.as_mut() else {
+            unreachable!()
+        };
+        let OpTree::Scan { columns, .. } = child.as_mut() else {
+            unreachable!()
+        };
+        columns[0].name = "other".into();
+        let message = query_group_candidate(&pruned, 42, "occurred")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("GROUP BY and select list"), "{message}");
+        assert!(message.contains("partition key \"occurred\""), "{message}");
 
         let tree = OpTree::Filter {
             predicate: Expr::Literal("true".into()),
@@ -3405,6 +3411,8 @@ mod tests {
         RetentionState {
             version: 1,
             mode,
+            automatic: false,
+            cutoff_unbounded: false,
             candidate: RetentionGroupCandidate {
                 output_column: "d".into(),
                 bucket: RetentionBucket::Exact,
