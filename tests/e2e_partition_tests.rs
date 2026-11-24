@@ -9843,7 +9843,6 @@ async fn test_scale2_multi_db_worker_pool_hot_tier_refreshes_within_sla() {
         .await;
 }
 
-
 /// A NULL partition key is a real value in the default partition, not
 /// evidence that a delta is empty. Also cover moving a stable row identity
 /// between distinct partitions when the normalized delta has only a new image.
@@ -9857,18 +9856,25 @@ async fn test_partitioned_stream_nullable_and_moving_keys_remain_exact() {
     for (suffix, partition_by, bound) in [
         ("range", "k", "FOR VALUES FROM (1) TO (10)"),
         ("list", "LIST:k", "FOR VALUES IN (1)"),
-        ("composite", "k, bucket", "FOR VALUES FROM (1, 0) TO (10, 100)"),
+        (
+            "composite",
+            "k, bucket",
+            "FOR VALUES FROM (1, 0) TO (10, 100)",
+        ),
     ] {
         let source = format!("nullpart_src_{suffix}");
         let stream = format!("nullpart_st_{suffix}");
         db.execute(&format!(
             "CREATE TABLE {source} (id int PRIMARY KEY, k int, bucket int, v int)"
-        )).await;
+        ))
+        .await;
         let query = format!("SELECT id, k, bucket, v FROM {source}");
         db.create_st_partitioned(&stream, &query, "1h", "DIFFERENTIAL", partition_by)
             .await;
-        db.execute(&format!("CREATE TABLE {stream}_named PARTITION OF {stream} {bound}"))
-            .await;
+        db.execute(&format!(
+            "CREATE TABLE {stream}_named PARTITION OF {stream} {bound}"
+        ))
+        .await;
         for mutation in [
             format!("INSERT INTO {source} VALUES (1,NULL,1,10),(2,1,1,20),(3,NULL,NULL,30)"),
             format!("UPDATE {source} SET v = v + 1 WHERE id = 1"),
@@ -9883,14 +9889,18 @@ async fn test_partitioned_stream_nullable_and_moving_keys_remain_exact() {
                     "SET pg_trickle.merge_strategy = 'merge'",
                 ],
                 &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
-            ).await.expect("real differential partitioned refresh");
+            )
+            .await
+            .expect("real differential partitioned refresh");
             db.assert_st_matches_query(&stream, &query).await;
-            let action: String = db.query_scalar(&format!(
-                "SELECT h.action FROM pgtrickle.pgt_refresh_history h
+            let action: String = db
+                .query_scalar(&format!(
+                    "SELECT h.action FROM pgtrickle.pgt_refresh_history h
                  JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
                  WHERE st.pgt_name = '{stream}' AND h.initiated_by = 'MANUAL'
                  ORDER BY h.refresh_id DESC LIMIT 1"
-            )).await;
+                ))
+                .await;
             assert_eq!(action, "DIFFERENTIAL", "{suffix}: {mutation}");
         }
     }
