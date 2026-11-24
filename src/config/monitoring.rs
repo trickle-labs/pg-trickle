@@ -28,12 +28,9 @@ pub static PGS_METRICS_BIND_ADDRESS: GucSetting<Option<std::ffi::CString>> =
 /// Default: 90 days.
 pub static PGS_HISTORY_RETENTION_DAYS: GucSetting<i32> = GucSetting::<i32>::new(90);
 
-/// MON-2: Self-monitoring auto-apply mode.
+/// MON-2: Legacy self-monitoring mode.
 ///
-/// Controls when self-monitoring insights are automatically applied:
-/// - `"off"` (default): Never auto-apply.
-/// - `"threshold_only"`: Only apply threshold-based rules automatically.
-/// - `"full"`: Apply all monitoring-based optimizations automatically.
+/// Non-off values enable anomaly notifications, not automatic cost threshold changes.
 pub static PGS_SELF_MONITORING_AUTO_APPLY: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"off"));
 
@@ -193,9 +190,8 @@ pub fn register_monitoring_gucs() {
     GucRegistry::define_string_guc(
         c"pg_trickle.self_monitoring_auto_apply",
         c"MON-2: Self-monitoring auto-apply mode: off, threshold_only, or full.",
-        c"'off' (default) never auto-applies monitoring insights. \
-           'threshold_only' applies threshold-based rules automatically. \
-           'full' applies all monitoring-based optimizations automatically.",
+        c"'off' (default) disables periodic monitoring notifications. \
+           'threshold_only' and 'full' retain anomaly notifications only.",
         &PGS_SELF_MONITORING_AUTO_APPLY,
         GucContext::Suset,
         GucFlags::default(),
