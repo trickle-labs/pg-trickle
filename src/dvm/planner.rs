@@ -7,7 +7,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
 pub const WINDOW_COST_MODEL_VERSION: u16 = 1;
 const PLANNING_BUDGET: Duration = Duration::from_millis(10);
 const MINIMUM_IMPROVEMENT: f64 = 0.05;

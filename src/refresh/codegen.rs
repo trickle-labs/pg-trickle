@@ -1089,55 +1089,16 @@ pub(crate) fn capture_delta_to_st_buffer(
         .collect::<Vec<_>>()
         .join(", ");
 
-    // UX-7: When diff_output_format = 'merged', recombine DELETE+INSERT
-    // pairs with the same __pgt_row_id back into a single 'U' row for
-    // backward compatibility with consumers expecting UPDATE operations.
-    let sql = if crate::config::pg_trickle_diff_output_format()
-        == crate::config::DiffOutputFormat::Merged
-    {
-        format!(
-            "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
-             SELECT {lsn_expr}, \
-                    CASE WHEN ins.__pgt_row_id IS NOT NULL \
-                              AND del.__pgt_row_id IS NOT NULL \
-                         THEN 'U' ELSE COALESCE(ins.__pgt_action, del.__pgt_action) \
-                    END, \
-                    COALESCE(ins.__pgt_row_id, del.__pgt_row_id), NULL::xid, {source_commit_at}, \
-                    {coal_cols} \
-             FROM (SELECT * FROM __pgt_delta_{pgt_id} WHERE __pgt_action = 'I') ins \
-             FULL OUTER JOIN \
-                  (SELECT * FROM __pgt_delta_{pgt_id} WHERE __pgt_action = 'D') del \
-             ON {row_match}",
-            change_schema = change_schema,
-            pgt_id = pgt_id,
-            source_commit_at = source_commit_at,
-            flat_col_list = flat_col_list,
-            row_match = build_row_id_match("ins.__pgt_row_id", "del.__pgt_row_id"),
-            coal_cols = user_cols
-                .iter()
-                .map(|c| {
-                    let escaped = c.replace('"', "\"\"");
-                    format!("COALESCE(ins.\"{escaped}\", del.\"{escaped}\")")
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
-        )
-    } else {
-        format!(
-            "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
-             SELECT {lsn_expr}, d.__pgt_action, d.__pgt_row_id, \
-                    NULL::xid, {source_commit_at}, {d_col_list} \
-             FROM __pgt_delta_{pgt_id} d \
-             WHERE d.__pgt_action IN ('I', 'D')",
-            change_schema = change_schema,
-            pgt_id = pgt_id,
-            source_commit_at = source_commit_at,
-            flat_col_list = flat_col_list,
-            d_col_list = d_col_list,
-        )
-    };
+    // Internal CDC is always a signed D/I history, regardless of legacy
+    // display-format settings. A merged U event cannot carry the old image.
+    let sql = format!(
+        "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
+         (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+         SELECT {lsn_expr}, d.__pgt_action, d.__pgt_row_id, \
+                NULL::xid, {source_commit_at}, {d_col_list} \
+         FROM __pgt_delta_{pgt_id} d \
+         WHERE d.__pgt_action IN ('I', 'D')"
+    );
 
     let count = Spi::connect_mut(|client| {
         let result = client
@@ -1412,7 +1373,7 @@ pub(crate) fn capture_diff_to_table(
             if let Some(sender) = vector_senders.get(c) {
                 format!("{sender}(pre.{qc}) IS DISTINCT FROM {sender}(post.{qc})")
             } else {
-                format!("pre.{qc} IS DISTINCT FROM post.{qc}")
+                observable_change_sql(&format!("pre.{qc}"), &format!("post.{qc}"))
             }
         })
         .collect::<Vec<_>>()
@@ -2051,59 +2012,29 @@ pub fn flush_local_template_cache() {
     crate::dvm::flush_all_delta_caches();
 }
 
-/// Wide-table MERGE hash threshold (F41: G4.6).
-///
-/// When a table has more than this many user columns, the MERGE's
-/// `WHEN MATCHED` IS DISTINCT FROM guard uses a hash comparison instead
-/// of per-column checks, reducing SQL text length and planner overhead.
-pub(crate) const WIDE_TABLE_HASH_THRESHOLD: usize = 50;
+/// Compare complete value representations, not SQL equality or a text hash.
+/// PostgreSQL's record-image operators compare binary datum images, including
+/// NULL framing, without invoking a type's user-defined equality or send
+/// function. If the DVM widens an expression's type, conservatively apply it
+/// instead of comparing unlike record field types or discarding a change.
+pub(crate) fn observable_change_sql(old: &str, new: &str) -> String {
+    format!(
+        "(CASE WHEN pg_catalog.pg_typeof({old}) = pg_catalog.pg_typeof({new}) \
+         THEN ROW({old}) OPERATOR(pg_catalog.*<>) ROW({new}) ELSE TRUE END)"
+    )
+}
 
-/// Build the IS DISTINCT FROM clause for the MERGE `WHEN MATCHED` guard.
-///
-/// For tables with ≤ [`WIDE_TABLE_HASH_THRESHOLD`] columns, generates
-/// per-column text comparisons joined with `OR`.
-///
-/// The text cast avoids PostgreSQL's requirement that the underlying type
-/// implement `=` for `IS DISTINCT FROM` to work. This matters for `json`
-/// aggregate outputs, which intentionally do not have a native equality
-/// operator.
-///
-/// For wider tables (F41), generates a single xxh64 hash comparison using
-/// `pgtrickle.pg_trickle_hash()`:
-/// ```sql
-/// pgtrickle.pg_trickle_hash(concat_ws('\x1E', VARIADIC ARRAY[COALESCE(st."c1"::text,''), ...]))
-/// IS DISTINCT FROM
-/// pgtrickle.pg_trickle_hash(concat_ws('\x1E', VARIADIC ARRAY[COALESCE(d."c1"::text,''), ...]))
-/// ```
+/// Never use lossy hash equality to suppress a storage update, irrespective
+/// of output width.
 pub(crate) fn build_is_distinct_clause(user_cols: &[String]) -> String {
-    if user_cols.len() <= WIDE_TABLE_HASH_THRESHOLD {
-        user_cols
-            .iter()
-            .map(|c| {
-                let qc = format!("\"{}\"", c.replace('"', "\"\""));
-                format!("st.{qc}::text IS DISTINCT FROM d.{qc}::text")
-            })
-            .collect::<Vec<_>>()
-            .join(" OR ")
-    } else {
-        // Hash-based comparison for wide tables using xxh64 (faster than md5).
-        // Uses pgtrickle.pg_trickle_hash() which is IMMUTABLE + PARALLEL SAFE.
-        let hash_expr = |prefix: &str| -> String {
-            let parts: Vec<String> = user_cols
-                .iter()
-                .map(|c| {
-                    let qc = format!("\"{}\"", c.replace('"', "\"\""));
-                    format!("COALESCE({prefix}.{qc}::text, '')")
-                })
-                .collect();
-            format!(
-                "pgtrickle.pg_trickle_hash(concat_ws({sep}, VARIADIC ARRAY[{cols}]))",
-                sep = "'\\x1E'",
-                cols = parts.join(", ")
-            )
-        };
-        format!("{} IS DISTINCT FROM {}", hash_expr("st"), hash_expr("d"))
-    }
+    user_cols
+        .iter()
+        .map(|c| {
+            let qc = crate::sql_builder::ident(c);
+            observable_change_sql(&format!("st.{qc}"), &format!("d.{qc}"))
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 /// B3-2: Build a USING clause with weight aggregation for cross-source
@@ -2148,33 +2079,36 @@ pub(crate) fn build_weight_agg_using(delta_sql: &str, user_col_list: &str) -> St
 /// versa), the DELETE step searches *storage* (which may not contain H) while
 /// the INSERT step adds a row unconditionally — creating a phantom row.
 ///
-/// This wrapper groups delta rows by `(__pgt_row_id, user_cols)`, computes the
-/// net action (INSERT if positive, DELETE if negative, filtered if zero), and
-/// expands back to the correct row count via `generate_series`.
-///
-/// Unlike [`build_weight_agg_using`] (keyed), this does **not** use
-/// `DISTINCT ON (__pgt_row_id)` because keyless tables intentionally allow
-/// multiple rows with the same `__pgt_row_id` but different column values.
+/// Normalize signed images rather than grouping payloads by SQL equality.
+/// The identity remains unchanged; the independent image rank distinguishes
+/// representations such as numeric 1.0/1.00, even when their logical key agrees.
 pub(crate) fn build_keyless_weight_agg(delta_sql: &str, user_col_list: &str) -> String {
-    // `__pgt_count` is already the logical multiplicity state for aggregate
-    // and DISTINCT rows; expanding it would create duplicate physical rows.
+    let vacant = |prefix: &str| {
+        let mut name = prefix.to_string();
+        let mut suffix = 0usize;
+        while user_col_list.contains(&name) {
+            name = format!("{prefix}_{suffix}");
+            suffix += 1;
+        }
+        name
+    };
+    let image = vacant("__pgt_image");
+    let weight = vacant("__pgt_weight");
+    let occurrence = vacant("__pgt_occurrence");
     let expansion = if user_col_list.contains("\"__pgt_count\"") {
-        ""
+        String::new()
     } else {
-        ", LATERAL generate_series(1, __w.__pgt_cnt) __gs"
+        format!(", LATERAL generate_series(1, ABS(__w.{weight})) __gs")
     };
     format!(
-        "(SELECT \"__pgt_row_id\", \"__pgt_action\", {user_col_list} \
-         FROM (\
-             SELECT __pgt_row_id, \
-                    CASE WHEN SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) > 0 \
-                         THEN 'I' ELSE 'D' END AS __pgt_action, \
-                    {user_col_list}, \
-                    ABS(SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END)) AS __pgt_cnt \
-             FROM ({delta_sql}) __raw \
-             GROUP BY __pgt_row_id, {user_col_list} \
-             HAVING SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) <> 0\
-         ) __w{expansion})"
+        "(SELECT __pgt_row_id, CASE WHEN {weight} > 0 THEN 'I' ELSE 'D' END AS __pgt_action, {user_col_list} \
+         FROM (SELECT __images.*, SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) \
+                  OVER (PARTITION BY __pgt_row_id, {image}) AS {weight}, \
+                  ROW_NUMBER() OVER (PARTITION BY __pgt_row_id, {image}) AS {occurrence} \
+               FROM (SELECT __raw.*, dense_rank() OVER (PARTITION BY __pgt_row_id \
+                     ORDER BY ROW({user_col_list}) USING OPERATOR(pg_catalog.*<)) AS {image} \
+                     FROM ({delta_sql}) __raw) __images) __w{expansion} \
+         WHERE {occurrence} = 1 AND {weight} <> 0)"
     )
 }
 
