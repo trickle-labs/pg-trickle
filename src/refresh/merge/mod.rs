@@ -2112,7 +2112,7 @@ fn execute_differential_refresh_inner(
                 crate::sql_builder::ident(&change_schema),
                 crate::sql_builder::ident(&format!("changes_pgt_{upstream_pgt_id}")),
             );
-            // nosemgrep: rust.spi.query.dynamic-format — buffer identifiers are quoted; LSNs are bound parameters.
+            // nosemgrep: rust.spi.get_one_with_args.dynamic-format — buffer identifiers are quoted; LSNs are bound parameters.
             let count = Spi::get_one_with_args::<i64>(
                 &format!(
                     "SELECT count(*)::bigint FROM {buffer}
@@ -4124,6 +4124,7 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
                     .update(
                         &format!("INSERT INTO {delta_table} {delta_select}"),
@@ -4233,6 +4234,7 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
                     .update(
                         &format!("INSERT INTO {delta_table} {delta_select}"),
@@ -4300,6 +4302,7 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
                     .update(
                         &format!("INSERT INTO {delta_table} {delta_select}"),
@@ -4463,6 +4466,7 @@ fn execute_differential_refresh_inner(
         } else if use_materialized_merge {
             // nosemgrep: rust.spi.connect_mut.dynamic-format — generated temp table and validated delta SQL.
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
                     .update(
                         &format!("INSERT INTO {delta_table} {delta_select}"),

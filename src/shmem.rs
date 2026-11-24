@@ -2496,13 +2496,18 @@ impl CostModelCache {
     }
 }
 
+/// The database key is shared by all three cost-cache operations.
+fn cost_model_database_oid() -> u32 {
+    // SAFETY: MyDatabaseId is initialized in a connected PostgreSQL backend.
+    unsafe { pg_sys::MyDatabaseId }.to_u32()
+}
+
 /// PERF-3: Write timing data only to the owning database and stream.
 pub fn update_cost_model(pgt_id: i64, last_full_ms: Option<f64>, last_diff_ms: Option<f64>) {
     if !is_shmem_available() {
         return;
     }
-    // SAFETY: MyDatabaseId is valid in a connected PostgreSQL backend.
-    let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
+    let database_oid = cost_model_database_oid();
     COST_MODEL_STATE.exclusive().update(
         database_oid,
         pgt_id,
@@ -2517,8 +2522,7 @@ pub fn read_cost_model(pgt_id: i64) -> Option<(f64, f64)> {
     if !is_shmem_available() {
         return None;
     }
-    // SAFETY: MyDatabaseId is valid in a connected PostgreSQL backend.
-    let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
+    let database_oid = cost_model_database_oid();
     COST_MODEL_STATE
         .share()
         .read(database_oid, pgt_id, effective_cost_cache_capacity())
@@ -2529,8 +2533,7 @@ pub fn invalidate_cost_model(pgt_id: Option<i64>) {
     if !is_shmem_available() {
         return;
     }
-    // SAFETY: MyDatabaseId is valid in a connected PostgreSQL backend.
-    let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
+    let database_oid = cost_model_database_oid();
     COST_MODEL_STATE
         .exclusive()
         .invalidate(database_oid, pgt_id);
