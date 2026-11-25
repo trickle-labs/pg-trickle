@@ -22,6 +22,12 @@ async fn refresh_with_optional_barrier(pool: &PgPool, st: &'static str, barrier:
         .execute(&mut *connection)
         .await
         .expect("force differential strategy");
+    if st == "bound_poll_st" {
+        sqlx::query("SET pg_trickle.matview_polling = on")
+            .execute(&mut *connection)
+            .await
+            .expect("enable materialized-view polling in refresh session");
+    }
     if barrier {
         sqlx::query("SET pg_trickle.test_chaos_phase = 'input_boundary'")
             .execute(&mut *connection)
@@ -558,8 +564,15 @@ async fn polling_rescan_uses_the_captured_matview_image() {
     db.execute("CREATE UNIQUE INDEX bound_poll_mv_id ON bound_poll_mv(id)")
         .await;
     let query = "SELECT max(v) AS ex, count(*) AS n FROM bound_poll_mv";
-    db.create_st("bound_poll_st", query, "1h", "DIFFERENTIAL")
-        .await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.matview_polling = on"],
+        &format!(
+            "SELECT pgtrickle.create_stream_table('bound_poll_st', $${query}$$, \
+             '1h', 'DIFFERENTIAL')"
+        ),
+    )
+    .await
+    .expect("create stream table with materialized-view polling enabled");
     db.execute("DELETE FROM bound_poll_src WHERE id = 3").await;
     db.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY bound_poll_mv")
         .await;
