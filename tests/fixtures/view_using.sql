@@ -101,18 +101,28 @@ SELECT pgtrickle.create_stream_table('using_repro.rolled_back',
     'SELECT * FROM using_repro.candidate', '1h', 'DIFFERENTIAL');
 ROLLBACK;
 DO $rollback$
+DECLARE
+    differential_count bigint;
+    history jsonb;
 BEGIN
     IF to_regclass('using_repro.rolled_back') IS NOT NULL
        OR EXISTS (SELECT 1 FROM pgtrickle.pgt_stream_tables
                   WHERE pgt_schema = 'using_repro' AND pgt_name = 'rolled_back') THEN
         RAISE EXCEPTION 'rolled-back USING creation left storage or metadata';
     END IF;
-    IF (SELECT count(*) FROM pgtrickle.pgt_refresh_history
-        WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
-                        WHERE pgt_schema = 'using_repro' AND pgt_name = 'result')
-          AND action = 'DIFFERENTIAL' AND status = 'COMPLETED'
-          AND NOT was_full_fallback) <> 3 THEN
-        RAISE EXCEPTION 'USING refreshes fell back or rollback retained refresh history';
+    SELECT count(*) FILTER (WHERE action = 'DIFFERENTIAL' AND status = 'COMPLETED'
+                              AND NOT was_full_fallback),
+           jsonb_agg(jsonb_build_object(
+               'action', action, 'status', status, 'was_full_fallback', was_full_fallback,
+               'reason', refresh_reason, 'detail', refresh_reason_detail
+           ) ORDER BY refresh_id)
+      INTO differential_count, history
+      FROM pgtrickle.pgt_refresh_history
+     WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                     WHERE pgt_schema = 'using_repro' AND pgt_name = 'result');
+    IF differential_count <> 3 THEN
+        RAISE EXCEPTION 'USING refreshes fell back or rollback retained refresh history: expected 3, got %, history=%',
+            differential_count, history;
     END IF;
 END
 $rollback$;
