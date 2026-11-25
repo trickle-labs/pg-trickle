@@ -2249,69 +2249,86 @@ fn generate_direct_agg_delta(
     // For non-CASE aggregates, use direct c.{col} references.
     let has_value_only = false; // V-row optimization dropped in D+I schema.
 
-    // ── Build SELECT expressions ──────────────────────────────────────
+    // ── Build SELECT expressions directly into one buffer ─────────────
     let delta_cte = ctx.next_cte_name("agg_delta");
-    let mut select_exprs = Vec::new();
+    let mut delta_sql =
+        String::with_capacity(512 + group_output.len() * 24 + aggregates.len() * 192);
+    delta_sql.push_str("SELECT ");
+
+    let push_qualified = |buf: &mut String, name: &str| {
+        buf.push_str("c.");
+        push_quoted_ident(buf, name);
+    };
+    let push_prefixed_ident = |buf: &mut String, prefix: &str, alias: &str| {
+        if !alias.contains('"') {
+            buf.push('"');
+            buf.push_str(prefix);
+            buf.push_str(alias);
+            buf.push('"');
+        } else {
+            push_quoted_ident(buf, &format!("{prefix}{alias}"));
+        }
+    };
 
     // Group columns: the direct reference already carries its output name.
     for name in &group_output {
-        select_exprs.push(qualified_column("c", name));
+        push_qualified(&mut delta_sql, name);
+        delta_sql.push_str(",\n       ");
     }
 
     // __ins_count, __del_count (total row counts per group)
-    select_exprs
-        .push("SUM(CASE WHEN c.action = 'I' THEN 1 ELSE 0 END)::bigint AS __ins_count".to_string());
-    select_exprs
-        .push("SUM(CASE WHEN c.action = 'D' THEN 1 ELSE 0 END)::bigint AS __del_count".to_string());
+    delta_sql.push_str(
+        "SUM(CASE WHEN c.action = 'I' THEN 1 ELSE 0 END)::bigint AS __ins_count,\n       ",
+    );
+    delta_sql.push_str("SUM(CASE WHEN c.action = 'D' THEN 1 ELSE 0 END)::bigint AS __del_count");
 
     // Per-aggregate delta expressions
     for agg in aggregates {
-        // A44-2: If this aggregate has a rewritten CASE expression, use it
-        // directly with I/D action filtering instead of the generic helper.
         let (ins_expr, del_expr) = if let Some(rewritten) = case_rewrites.get(&agg.alias) {
-            // DI-2 UPDATE split for SUM(CASE ...): the rewritten CASE references
-            // c."col" CB column aliases (after A44-10 update of rewrite_case_for_lateral).
             let ins = format!("SUM(CASE WHEN c.action = 'I' THEN ({rewritten}) ELSE 0 END)");
             let del = format!("SUM(CASE WHEN c.action = 'D' THEN ({rewritten}) ELSE 0 END)");
             (ins, del)
         } else {
             direct_agg_delta_exprs(agg, has_value_only)
         };
-        select_exprs.push(format!(
-            "{ins_expr} AS {}",
-            quote_ident(&format!("__ins_{}", agg.alias)),
-        ));
-        select_exprs.push(format!(
-            "{del_expr} AS {}",
-            quote_ident(&format!("__del_{}", agg.alias)),
-        ));
+        delta_sql.push_str(",\n       ");
+        delta_sql.push_str(&ins_expr);
+        delta_sql.push_str(" AS ");
+        push_prefixed_ident(&mut delta_sql, "__ins_", &agg.alias);
 
-        if needs_special_value_rescan(agg, scan) {
+        delta_sql.push_str(",\n       ");
+        delta_sql.push_str(&del_expr);
+        delta_sql.push_str(" AS ");
+        push_prefixed_ident(&mut delta_sql, "__del_", &agg.alias);
+
+        let needs_special = needs_special_value_rescan(agg, scan);
+        let uses_nonfinite = agg.uses_incremental_nonfinite_state(scan);
+        if needs_special {
             let argument = case_rewrites
                 .get(&agg.alias)
                 .cloned()
                 .unwrap_or_else(|| direct_agg_argument_expr(agg));
-            select_exprs.push(format!(
-                "{} AS {}",
-                special_value_delta_expr("c.action", &argument, None),
-                quote_ident(&format!("__special_{}", agg.alias)),
-            ));
+            delta_sql.push_str(",\n       ");
+            delta_sql.push_str(&special_value_delta_expr("c.action", &argument, None));
+            delta_sql.push_str(" AS ");
+            push_prefixed_ident(&mut delta_sql, "__special_", &agg.alias);
         }
 
-        if agg.uses_incremental_nonfinite_state(scan) {
+        if uses_nonfinite {
             let argument = case_rewrites
                 .get(&agg.alias)
                 .cloned()
                 .unwrap_or_else(|| direct_agg_argument_expr(agg));
             let (inserts, deletes) = special_state_delta_exprs("c.action", &argument, None);
-            select_exprs.push(format!(
-                "{inserts} AS {}",
-                quote_ident(&format!("__ins_special_{}", agg.alias)),
-            ));
-            select_exprs.push(format!(
-                "{deletes} AS {}",
-                quote_ident(&format!("__del_special_{}", agg.alias)),
-            ));
+            delta_sql.push_str(",\n       ");
+            delta_sql.push_str(&inserts);
+            delta_sql.push_str(" AS ");
+            push_prefixed_ident(&mut delta_sql, "__ins_special_", &agg.alias);
+
+            delta_sql.push_str(",\n       ");
+            delta_sql.push_str(&deletes);
+            delta_sql.push_str(" AS ");
+            push_prefixed_ident(&mut delta_sql, "__del_special_", &agg.alias);
         }
 
         // SUM needs a qualifying non-NULL count so the algebraic merge can
@@ -2324,45 +2341,35 @@ fn generate_direct_agg_delta(
                 .get(&agg.alias)
                 .cloned()
                 .unwrap_or_else(|| direct_agg_argument_expr(agg));
-            let (ins_nonnull, del_nonnull) = direct_nonnull_delta_exprs(&argument);
-            select_exprs.push(format!(
-                "{ins_nonnull} AS {}",
-                quote_ident(&format!("__ins_nonnull_{}", agg.alias)),
-            ));
-            select_exprs.push(format!(
-                "{del_nonnull} AS {}",
-                quote_ident(&format!("__del_nonnull_{}", agg.alias)),
-            ));
+            delta_sql.push_str(",\n       SUM(CASE WHEN c.action = 'I' AND (");
+            delta_sql.push_str(&argument);
+            delta_sql.push_str(") IS NOT NULL THEN 1 ELSE 0 END)::bigint AS ");
+            push_prefixed_ident(&mut delta_sql, "__ins_nonnull_", &agg.alias);
+
+            delta_sql.push_str(",\n       SUM(CASE WHEN c.action = 'D' AND (");
+            delta_sql.push_str(&argument);
+            delta_sql.push_str(") IS NOT NULL THEN 1 ELSE 0 END)::bigint AS ");
+            push_prefixed_ident(&mut delta_sql, "__del_nonnull_", &agg.alias);
         }
     }
 
-    // GROUP BY — use c."col" directly (A44-10: no v.grp_* aliases needed)
-    let group_by_clause = if group_output.is_empty() {
-        String::new()
-    } else {
-        let refs: Vec<String> = group_output
-            .iter()
-            .map(|name| qualified_column("c", name))
-            .collect();
-        format!("\nGROUP BY {}", refs.join(", "))
-    };
+    delta_sql.push_str("\nFROM ");
+    delta_sql.push_str(&change_table);
+    delta_sql.push_str(" c\nWHERE c.lsn > '");
+    delta_sql.push_str(&prev_lsn);
+    delta_sql.push_str("'::pg_lsn AND c.lsn <= '");
+    delta_sql.push_str(&new_lsn);
+    delta_sql.push_str("'::pg_lsn\n  AND c.action IN ('I', 'D')");
 
-    // A44-10 (D+I schema): Simple WHERE — all CB rows are already I or D.
-    // No LATERAL VALUES needed. UNION ALL approach is replaced by direct
-    // c.action filtering in the SELECT expressions.
-    let where_clause = format!(
-        "WHERE c.lsn > '{prev_lsn}'::pg_lsn AND c.lsn <= '{new_lsn}'::pg_lsn\n  \
-         AND c.action IN ('I', 'D')"
-    );
-
-    let delta_sql = format!(
-        "\
-SELECT {selects}
-FROM {change_table} c
-{where_clause}{group_by}",
-        selects = select_exprs.join(",\n       "),
-        group_by = group_by_clause,
-    );
+    if !group_output.is_empty() {
+        delta_sql.push_str("\nGROUP BY ");
+        for (i, name) in group_output.iter().enumerate() {
+            if i > 0 {
+                delta_sql.push_str(", ");
+            }
+            push_qualified(&mut delta_sql, name);
+        }
+    }
 
     ctx.add_cte(delta_cte.clone(), delta_sql);
 
