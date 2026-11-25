@@ -12,7 +12,9 @@ use pgrx::prelude::*;
 use std::sync::Arc;
 
 // ── Functions moved to merge sub-modules (A16 split) — import for unit tests ─
-use crate::refresh::merge::columns::{extract_keyword_int, parse_hash_bound_spec, pg_quote_literal};
+use crate::refresh::merge::columns::{
+    extract_keyword_int, parse_hash_bound_spec, pg_quote_literal,
+};
 use crate::refresh::merge::delete::should_warn_amplification;
 
 #[test]
