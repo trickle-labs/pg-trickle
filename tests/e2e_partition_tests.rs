@@ -9925,9 +9925,10 @@ async fn test_retention_catchup_uses_set_oriented_delta_generation() {
         .split("Query Text: ")
         .skip(1)
         .filter(|plan| {
-            let is_delta_insert = plan.lines().next().is_some_and(|sql| {
-                sql.contains("INSERT INTO") && sql.contains("__pgt_delta_")
-            });
+            let is_delta_insert = plan
+                .lines()
+                .next()
+                .is_some_and(|sql| sql.contains("INSERT INTO") && sql.contains("__pgt_delta_"));
             is_delta_insert
                 && plan
                     .lines()
