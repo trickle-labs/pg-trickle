@@ -51,7 +51,7 @@ async fn test_instrumented_pg18_boot_and_assertions_enabled() {
     );
     let version: String = db.query_scalar("SELECT version()").await;
     assert!(
-        version.contains("PostgreSQL 18.6"),
+        version.contains("PostgreSQL 18.7"),
         "unexpected server version: {version}"
     );
     eprintln!("instrumented PostgreSQL version: {version}");
