@@ -21,8 +21,14 @@ async fn test_view_inline_using_preserves_results_privileges_and_rollback() {
         .query_scalar("SELECT oid::bigint FROM pg_database WHERE datname = current_database()")
         .await;
     let fixture = include_str!("fixtures/view_using.sql")
-        .replace("view_using_owner", &format!("view_using_owner_{database_oid}"))
-        .replace("view_using_worker", &format!("view_using_worker_{database_oid}"));
+        .replace(
+            "view_using_owner",
+            &format!("view_using_owner_{database_oid}"),
+        )
+        .replace(
+            "view_using_worker",
+            &format!("view_using_worker_{database_oid}"),
+        );
     sqlx::raw_sql(sqlx::AssertSqlSafe(fixture))
         .execute(&db.pool)
         .await
