@@ -93,13 +93,33 @@ async fn test_immediate_repair_and_reinitialize_restore_ivm_without_cdc() {
         "IMMEDIATE",
     )
     .await;
-    db.create_st(
-        "imm_repair_st",
-        "SELECT id, v * 2 AS doubled FROM imm_repair_upstream",
-        "1m",
-        "IMMEDIATE",
-    )
-    .await;
+    // Fixture creation can race the upstream scheduler's catalog lock.
+    // Each attempt is a standalone statement; retry only the explicit
+    // upstream metadata contention error, not other creation failures.
+    let create_sql = "SELECT pgtrickle.create_stream_table(
+        'imm_repair_st',
+        $$SELECT id, v * 2 AS doubled FROM imm_repair_upstream$$,
+        '1m',
+        'IMMEDIATE'
+    )";
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match db.try_execute(create_sql).await {
+            Ok(()) => break,
+            Err(sqlx::Error::Database(e))
+                if e.code().as_deref() == Some("55P03")
+                    && e.message()
+                        .starts_with("lock timeout: upstream stream-table metadata") =>
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out acquiring upstream metadata for fixture creation: {e}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("fixture creation failed: {e:?}"),
+        }
+    }
     let pgt_id: i64 = db
         .query_scalar(
             "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'imm_repair_st'",
