@@ -309,15 +309,33 @@ async fn test_error_in_leaf_does_not_affect_upstream() {
     .await;
 
     // B (L2): project on A — always works
-    db.execute(
-        "SELECT pgtrickle.create_stream_table(
-            'err_leaf_b',
-            $$SELECT grp, total * 2 AS doubled FROM err_leaf_a$$,
-            'calculated',
-            'DIFFERENTIAL'
-        )",
-    )
-    .await;
+    // Fixture creation can race the upstream scheduler's catalog lock.
+    // Each attempt is a standalone statement; retry only the explicit
+    // upstream metadata contention error, not other creation failures.
+    let create_sql = "SELECT pgtrickle.create_stream_table(
+        'err_leaf_b',
+        $$SELECT grp, total * 2 AS doubled FROM err_leaf_a$$,
+        'calculated',
+        'DIFFERENTIAL'
+    )";
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match db.try_execute(create_sql).await {
+            Ok(()) => break,
+            Err(sqlx::Error::Database(e))
+                if e.code().as_deref() == Some("55P03")
+                    && e.message()
+                        .starts_with("lock timeout: upstream stream-table metadata") =>
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out acquiring upstream metadata for fixture creation: {e}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("fixture creation failed: {e:?}"),
+        }
+    }
 
     // C (L3): division on source — will fail on bad data
     // Note: C reads from err_leaf_src directly (not from B), so it's a
