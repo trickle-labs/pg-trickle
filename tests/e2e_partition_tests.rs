@@ -9254,7 +9254,8 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
             Ok(_) => break tx,
             Err(sqlx::Error::Database(e))
                 if e.code().as_deref() == Some("55P03")
-                    && e.message().starts_with("lock timeout: upstream stream-table metadata") =>
+                    && e.message()
+                        .starts_with("lock timeout: upstream stream-table metadata") =>
             {
                 tx.rollback()
                     .await
