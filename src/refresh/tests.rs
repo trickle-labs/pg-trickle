@@ -3021,7 +3021,9 @@ fn test_keyless_image_delete_matches_payload_and_partition_tuple() {
     let columns = vec!["n".to_string(), "f".to_string()];
     let sql = build_keyless_image_delete_template("\"public\".\"s\"", 5, &columns);
     assert!(
-        sql.contains("pg_catalog.record_image_eq(ROW(st2.\"n\", st2.\"f\"), ROW(d.\"n\", d.\"f\"))")
+        sql.contains(
+            "pg_catalog.record_image_eq(ROW(st2.\"n\", st2.\"f\"), ROW(d.\"n\", d.\"f\"))"
+        )
     );
     assert!(sql.contains("LIMIT d.__pgt_del_image_count"));
     assert!(sql.contains("st.tableoid = chosen.tableoid AND st.ctid = chosen.ctid"));
