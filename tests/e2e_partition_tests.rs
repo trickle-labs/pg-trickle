@@ -9859,8 +9859,11 @@ async fn test_retention_catchup_uses_set_oriented_delta_generation() {
         "INSERT INTO catch1498_src SELECT n,'2025-06-01',n/2,1 FROM generate_series(1,100) n",
     )
     .await;
-    let query =
-        "SELECT d, grp, SUM(amount) AS total, COUNT(*) AS n FROM catch1498_src GROUP BY d,grp";
+    // A WHERE filter deliberately prevents the P5 direct aggregate bypass:
+    // this test must exercise the per-key CDC statistics join, not a
+    // join-free direct aggregate over the change buffer.
+    let query = "SELECT d, grp, SUM(amount) AS total, COUNT(*) AS n \
+                 FROM catch1498_src WHERE amount > 0 GROUP BY d,grp";
     db.create_st("catch1498_st", query, "1h", "DIFFERENTIAL")
         .await;
     let policy: serde_json::Value = db
@@ -9920,22 +9923,31 @@ async fn test_retention_catchup_uses_set_oriented_delta_generation() {
     );
     let generation: Vec<_> = logs
         .split("Query Text: ")
+        .skip(1)
         .filter(|plan| {
-            plan.lines().next().is_some_and(|sql| {
-                sql.contains("INSERT INTO")
-                    && sql.contains("__pgt_delta_")
-                    && sql.contains("__pgt_cte_pk_stats_")
-            })
+            let is_delta_insert = plan.lines().next().is_some_and(|sql| {
+                sql.contains("INSERT INTO") && sql.contains("__pgt_delta_")
+            });
+            is_delta_insert
+                && plan
+                    .lines()
+                    .take_while(|line| !line.contains("(cost="))
+                    .any(|sql| sql.contains("__pgt_cte_pk_stats_"))
         })
         .collect();
     assert!(
         !generation.is_empty(),
         "must witness actual CDC delta materialization"
     );
+    let has_set_join = generation.iter().any(|plan| {
+        plan.lines().any(|line| {
+            line.contains("(cost=")
+                && line.contains("loops=")
+                && (line.contains("Hash Join") || line.contains("Merge Join"))
+        })
+    });
     assert!(
-        generation
-            .iter()
-            .any(|plan| plan.contains("Hash Join") || plan.contains("Merge Join")),
+        has_set_join,
         "CDC generation must permit set-oriented joins"
     );
 }
