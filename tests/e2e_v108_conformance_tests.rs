@@ -1426,9 +1426,23 @@ async fn test_v108_partial_output_capture_requires_invalidation() {
     .unwrap();
     assert_eq!(payload_count, 0, "incomplete payload must not be exposed");
 
-    // A fresh real baseline followed by another change must return to EXACT.
+    // FULL_INVALIDATION cannot be acknowledged as an exact applied delta.
+    let error = sqlx::query_scalar::<_, String>(
+        "SELECT pgtrickle.ack_output_delta($1::uuid, $2, 'APPLIED')",
+    )
+    .bind(&consumer.consumer_id)
+    .bind(batch.batch_token)
+    .fetch_one(&db.pool)
+    .await
+    .expect_err("APPLIED must reject a partial capture invalidation");
+    assert!(error.to_string().contains("RESYNCHRONIZED"));
+
+    // Explicitly request a fresh baseline using the public consumer protocol.
+    let requested = reference_clients::request_resnapshot(&db.pool, &consumer.consumer_id).await;
+    assert_eq!(requested.state, "RESNAPSHOT_REQUIRED");
     let mut tx = db.pool.begin().await.unwrap();
-    let (token, _) = reference_clients::begin_resnapshot(&mut *tx, &consumer.consumer_id).await;
+    let (token, head) = reference_clients::begin_resnapshot(&mut *tx, &consumer.consumer_id).await;
+    assert_eq!(head, batch.batch_token);
     assert_eq!(
         reference_clients::ack_resnapshot(&mut *tx, &consumer.consumer_id, &token).await,
         "ACTIVE"
