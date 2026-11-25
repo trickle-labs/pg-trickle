@@ -1331,7 +1331,10 @@ fn test_build_trigger_update_sql_basic() {
     assert!(sql.contains("SET \"val\" = d.\"val\""));
     assert!(sql.contains("FROM __pgt_delta_7 AS d"));
     assert!(sql.contains("d.__pgt_action = 'I'"));
-    assert!(sql.contains("IS DISTINCT FROM"));
+    assert!(sql.contains(r#"pg_catalog.pg_typeof(st."val") = pg_catalog.pg_typeof(d."val")"#));
+    assert!(sql.contains(r#"pg_catalog.record_image_ne(ROW(st."val"), ROW(d."val"))"#));
+    assert!(sql.contains("ELSE TRUE END"));
+    assert!(!sql.contains("IS DISTINCT FROM"));
 }
 
 #[test]
