@@ -5,7 +5,7 @@
 # Contains everything needed to compile the extension EXCEPT the source:
 #   - PostgreSQL 18 + pg_config + headers
 #   - Rust stable toolchain
-#   - cargo-pgrx 0.18.0 (pre-compiled, ~3-4 min to build from source)
+#   - cargo-pgrx 0.20.1 (pre-compiled, ~3-4 min to build from source)
 #   - pgrx initialized for PG 18
 #
 # This image only needs to be rebuilt when one of the above changes (i.e.
@@ -48,7 +48,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # ever recompiled when the version number changes.
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    cargo install --locked cargo-pgrx --version 0.18.0
+    cargo install --locked cargo-pgrx --version 0.20.1
 
 # Initialize pgrx for PG 18 using the system pg_config.
 # This writes per-version metadata into /root/.pgrx/.

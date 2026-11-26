@@ -9,6 +9,6 @@ ENV PATH=/usr/local/cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain 1.98.0 --profile minimal
 RUN --mount=type=cache,id=s1-arm64-registry,sharing=locked,target=/usr/local/cargo/registry \
-    cargo install --locked cargo-pgrx --version 0.18.0 \
+    cargo install --locked cargo-pgrx --version 0.20.1 \
     && cargo pgrx init --pg18 /usr/bin/pg_config
 RUN (uname -a; rustc -Vv; cargo pgrx --version; pg_config; dpkg-query -W) > /sdk-manifest.txt

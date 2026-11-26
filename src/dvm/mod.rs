@@ -1670,7 +1670,7 @@ pub(crate) fn annotate_aggregate_arguments(
 
 /// Return dimensions only for aggregates directly exposed by the output tree.
 /// Nested expressions and aliases need lineage proof before narrowing a type.
-#[cfg(feature = "pg18")]
+#[cfg(any(feature = "pg18", feature = "pg19"))]
 pub(crate) fn extract_vector_agg_output_dims(tree: &parser::OpTree) -> Vec<(String, i32, String)> {
     use parser::{AggFunc, OpTree};
     let mut current = tree;
@@ -1703,7 +1703,7 @@ pub(crate) fn extract_vector_agg_output_dims(tree: &parser::OpTree) -> Vec<(Stri
         .collect()
 }
 
-#[cfg(not(feature = "pg18"))]
+#[cfg(not(any(feature = "pg18", feature = "pg19")))]
 pub(crate) fn extract_vector_agg_output_dims(_tree: &parser::OpTree) -> Vec<(String, i32, String)> {
     Vec::new()
 }

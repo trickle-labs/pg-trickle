@@ -3747,7 +3747,7 @@ fn drain(timeout_s: default!(i32, 60)) -> bool {
         if std::time::Instant::now() >= deadline {
             return false;
         }
-        pgrx::check_for_interrupts!();
+        pgrx::check_for_interrupts();
         unsafe {
             // SAFETY: pg_usleep is PostgreSQL's bounded backend sleep helper.
             pgrx::pg_sys::pg_usleep(100_000);

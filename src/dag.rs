@@ -176,7 +176,7 @@ impl ConsistencyGroup {
     }
 }
 
-#[cfg(feature = "pg18")]
+#[cfg(any(feature = "pg18", feature = "pg19"))]
 use pgrx::prelude::*;
 
 // ── Strongly Connected Components ──────────────────────────────────────────
@@ -345,7 +345,7 @@ impl StDag {
     ///
     /// Loads all stream tables and their dependencies, constructs the graph,
     /// and resolves CALCULATED schedules.
-    #[cfg(feature = "pg18")]
+    #[cfg(any(feature = "pg18", feature = "pg19"))]
     pub fn build_from_catalog(fallback_schedule_secs: i32) -> Result<Self, PgTrickleError> {
         let mut dag = StDag::new();
 
@@ -1395,7 +1395,7 @@ impl StDag {
     ///
     /// Returns `Ok(())` on success. The caller should fall back to a full
     /// `build_from_catalog` if this returns `Err`.
-    #[cfg(feature = "pg18")]
+    #[cfg(any(feature = "pg18", feature = "pg19"))]
     pub fn rebuild_incremental(
         &mut self,
         affected_ids: &[i64],

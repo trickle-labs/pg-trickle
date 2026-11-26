@@ -27,13 +27,14 @@ path = "./src/bin/pg_trickle_dump.rs"
 [features]
 default = ["pg18"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg19 = ["pgrx/pg19", "pgrx-tests/pg19"]
 pg_test = []
 light-e2e = []
 # SQL probes used only by the dedicated assertion/ASan E2E image.
 e2e-unsafe-test-hooks = []
 
 [dependencies]
-pgrx = "=0.18.0"
+pgrx = "=0.20.1"
 vstd = { git = "https://github.com/verus-lang/verus", rev = "2e59154" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -51,7 +52,7 @@ lru = "0.19"
 
 
 [dev-dependencies]
-pgrx-tests = "=0.18.0"
+pgrx-tests = "=0.20.1"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }

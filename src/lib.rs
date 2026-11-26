@@ -53,7 +53,7 @@ pub(crate) mod diagnostics;
 pub mod dvm;
 pub mod dvm_trace;
 pub mod error;
-#[cfg(feature = "pg18")]
+#[cfg(any(feature = "pg18", feature = "pg19"))]
 #[allow(dead_code)]
 mod explain_hook;
 pub mod fuzz_pub;
@@ -114,7 +114,7 @@ pub extern "C-unwind" fn _PG_init() {
     let in_shared_preload = unsafe { pg_sys::process_shared_preload_libraries_in_progress };
     // PGC_POSTMASTER variables can only be created during shared preload.
     config::register_gucs(in_shared_preload);
-    #[cfg(feature = "pg18")]
+    #[cfg(any(feature = "pg18", feature = "pg19"))]
     explain_hook::register();
 
     if in_shared_preload {

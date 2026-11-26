@@ -45,7 +45,7 @@ RUN rustup component add llvm-tools-preview
 # Install cargo-pgrx (layer-cached; only re-runs if the version changes).
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    cargo install --locked cargo-pgrx --version 0.18.0
+    cargo install --locked cargo-pgrx --version 0.20.1
 
 # Initialize pgrx for PG 18 using the system pg_config (layer-cached)
 RUN cargo pgrx init --pg18 /usr/bin/pg_config

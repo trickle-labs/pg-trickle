@@ -898,7 +898,7 @@ fn rewrite_cte_bodies_for_distinct_on(query: &str) -> Result<String, PgTrickleEr
         if !is_node_type!(node_ptr, T_CommonTableExpr) {
             return false;
         }
-        // SAFETY: pgrx::is_a confirmed T_CommonTableExpr.
+        // SAFETY: PgNode::is_a_ptr confirmed T_CommonTableExpr.
         let cte = pg_deref!(node_ptr as *const pg_sys::CommonTableExpr);
         if cte.ctequery.is_null()
             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
@@ -906,7 +906,7 @@ fn rewrite_cte_bodies_for_distinct_on(query: &str) -> Result<String, PgTrickleEr
         {
             return false;
         }
-        // SAFETY: pgrx::is_a confirmed T_SelectStmt.
+        // SAFETY: PgNode::is_a_ptr confirmed T_SelectStmt.
         let body = pg_deref!(cte.ctequery as *const pg_sys::SelectStmt);
         if body.distinctClause.is_null() {
             return false;
@@ -926,7 +926,7 @@ fn rewrite_cte_bodies_for_distinct_on(query: &str) -> Result<String, PgTrickleEr
         if !is_node_type!(node_ptr, T_CommonTableExpr) {
             continue;
         }
-        // SAFETY: pgrx::is_a confirmed T_CommonTableExpr.
+        // SAFETY: PgNode::is_a_ptr confirmed T_CommonTableExpr.
         let cte = pg_deref!(node_ptr as *const pg_sys::CommonTableExpr);
         let cte_name = pg_cstr_to_str(cte.ctename).unwrap_or("cte").to_string();
         let quoted_name = format!("\"{}\"", cte_name.replace('"', "\"\""));
