@@ -167,7 +167,9 @@ def run_case(
         environment["PGVECTOR_SUB_PLAN_LOG"] = str(plan_path)
     measurement_path = Path(environment["PGS_RELEASE_MEASUREMENT_JSON"]).resolve()
     stem = f"subscription-scale-{dimensions}-{rows}-{subscriptions}-{statistics}-{mutation_shape}"
+    log_path = measurement_path.with_name(f"{stem}.log")
     stats_path = measurement_path.with_name(f"{stem}-docker-stats.jsonl")
+    log_path.unlink(missing_ok=True)
     stats_path.unlink(missing_ok=True)
     sampler = DockerStatsSampler(stats_path)
     sampler.start()
@@ -183,12 +185,11 @@ def run_case(
         )
     finally:
         sampler.stop()
-    sys.stdout.write(completed.stdout)
-    sys.stdout.flush()
+    log_path.write_text(completed.stdout, encoding="utf-8")
     if completed.returncode != 0:
         raise RuntimeError(
             f"subscription case {rows}/{statistics}/{subscriptions}/{mutation_shape} "
-            f"failed with exit {completed.returncode}"
+            f"failed with exit {completed.returncode}; see {log_path}:\n{completed.stdout[-4000:]}"
         )
     if sampler.samples == 0:
         raise RuntimeError(f"subscription case produced no Docker CPU/memory samples: {stats_path}")
