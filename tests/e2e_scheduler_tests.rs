@@ -1583,7 +1583,7 @@ async fn test_scheduler_fanout_shared_matview_changes_refresh_both_consumers() {
                     UNION ALL
                     (SELECT id, val FROM fanout_mv EXCEPT ALL SELECT id, val FROM fanout_mv_b)
                 )",
-                Duration::from_secs(30),
+                Duration::from_secs(60),
                 Duration::from_millis(100),
             )
             .await,

@@ -1000,12 +1000,6 @@ async fn test_pgvector_filtered_ann_workload() {
                  ORDER BY embedding::vector({dim}) <=> $2::text::vector LIMIT 10"
             );
             if id == 1 {
-                settings = sqlx::query_as(
-                    "SELECT current_setting('hnsw.ef_search'), current_setting('ivfflat.probes')",
-                )
-                .fetch_one(&mut *tx)
-                .await
-                .expect("ANN settings");
                 let explain = format!("EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON) {query_sql}");
                 recorded_plan = sqlx::query_scalar(sqlx::AssertSqlSafe(explain))
                     .bind(tenant)
@@ -1013,6 +1007,12 @@ async fn test_pgvector_filtered_ann_workload() {
                     .fetch_one(&mut *tx)
                     .await
                     .expect("ANN plan");
+                settings = sqlx::query_as(
+                    "SELECT current_setting('hnsw.ef_search'), current_setting('ivfflat.probes')",
+                )
+                .fetch_one(&mut *tx)
+                .await
+                .expect("ANN settings");
                 assert!(
                     has_index(&recorded_plan, "vector_bench_ann"),
                     "ANN index not used: {recorded_plan}"
