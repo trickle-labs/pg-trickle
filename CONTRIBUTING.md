@@ -15,7 +15,7 @@ request.**
 > **Quick navigation:**
 > - **Reporting a bug, requesting a feature, or asking a question?** Read
 >   [Ways to contribute](#ways-to-contribute) through
->   [Community expectations](#community-expectations).
+>   [Licensing](#licensing).
 > - **Invited to open a pull request (or working as a maintainer)?** Jump to
 >   [Before opening an invited pull request](#before-opening-an-invited-pull-request).
 
@@ -23,12 +23,12 @@ request.**
 
 | Type | Where to start |
 |------|----------------|
-| Bug report | [Open a bug report](../../issues/new?template=bug_report.md) with a minimal SQL reproduction |
-| Feature request or improvement | [Open a feature request](../../issues/new?template=feature_request.md) describing the problem and use case |
-| Question or early idea | [Start a discussion](../../discussions) |
-| Documentation fix or gap | Use the [bug report template](../../issues/new?template=bug_report.md) for inaccuracies, typos, or broken links, or the [feature request template](../../issues/new?template=feature_request.md) for missing guides |
+| Bug report | [Open a bug report](https://github.com/trickle-labs/pg-trickle/issues/new?template=bug_report.md) with a minimal SQL reproduction |
+| Feature request or improvement | [Open a feature request](https://github.com/trickle-labs/pg-trickle/issues/new?template=feature_request.md) describing the problem and use case |
+| Question or early idea | [Start a discussion](https://github.com/trickle-labs/pg-trickle/discussions) |
+| Documentation fix or gap | Use the [bug report template](https://github.com/trickle-labs/pg-trickle/issues/new?template=bug_report.md) for inaccuracies, typos, or broken links, or the [feature request template](https://github.com/trickle-labs/pg-trickle/issues/new?template=feature_request.md) for missing guides |
 | Code or performance change | Open an issue first and wait for a maintainer invitation before opening a PR |
-| Security vulnerability | Report privately via [Security → Report a vulnerability](../../security) (see [SECURITY.md](SECURITY.md)) |
+| Security vulnerability | Report privately via [Security → Report a vulnerability](https://github.com/trickle-labs/pg-trickle/security/advisories/new) (see [SECURITY.md](SECURITY.md)) |
 
 ## Why we work this way
 
@@ -57,36 +57,37 @@ valuable contributions are:
 
 ## Reporting a bug
 
-Please search [existing issues](../../issues) and [discussions](../../discussions)
-before opening a new one, as the problem may already have been reported or
-discussed.
+Search [existing issues](https://github.com/trickle-labs/pg-trickle/issues) and
+[discussions](https://github.com/trickle-labs/pg-trickle/discussions) before
+opening a new one, as the problem may already have been reported or discussed.
 
-Use the [bug report template](../../issues/new?template=bug_report.md) and
-include whichever of the following are relevant:
+Use the [bug report template](https://github.com/trickle-labs/pg-trickle/issues/new?template=bug_report.md)
+and include whichever of the following are relevant:
 
 - a clear description of what happened and what you expected instead;
 - a minimal SQL reproduction (schema, defining query, DML sequence, and refresh
   steps);
 - the `pg_trickle` version and PostgreSQL version;
 - your OS / platform and deployment setup (bare metal, Docker, CNPG, etc.);
-- the CDC mode (`trigger`, `auto`, or `wal`) and refresh mode (`DIFFERENTIAL`,
-  `FULL`, or `IMMEDIATE`);
+- the CDC mode (`trigger`, `auto`, or `wal`) and refresh mode (`AUTO`,
+  `DIFFERENTIAL`, `FULL`, or `IMMEDIATE`);
 - relevant GUC settings, PostgreSQL logs, stack traces, or error messages; and
 - any concurrent activity or schema changes involved.
 
 Minimal SQL reproductions are especially valuable. If the clearest way to
 demonstrate a bug is a small SQL script showing a mismatch between a stream
 table and a fresh execution of its defining query, paste it directly in the
-issue. There is no need to open a pull request just to prove a bug exists, and
-you do not need to know the root cause before reporting a bug.
+issue. You do not need to open a pull request or know the root cause before
+reporting a bug.
 
 ## Suggesting an improvement
 
 Before opening a proposal, check [ROADMAP.md](ROADMAP.md),
-[existing issues](../../issues), and [discussions](../../discussions) to see if
+[existing issues](https://github.com/trickle-labs/pg-trickle/issues), and
+[discussions](https://github.com/trickle-labs/pg-trickle/discussions) to see if
 the topic is already planned or under discussion.
 
-Use the [feature request template](../../issues/new?template=feature_request.md)
+Use the [feature request template](https://github.com/trickle-labs/pg-trickle/issues/new?template=feature_request.md)
 and start from the problem or use case rather than a specific implementation.
 It helps to describe:
 
@@ -142,7 +143,7 @@ path makes expectations clear for everyone.
 For small documentation problems—such as a typo, outdated GUC name, or broken
 link—reporting the file, location, and suggested correction in an issue is
 already a complete contribution. A maintainer may fix it directly; there is no
-need to prepare a pull request just to make the contribution count.
+need to open a pull request just to make the contribution count.
 
 For larger documentation changes, open an issue describing what is unclear,
 incorrect, or missing so we can agree on what the documentation should say
@@ -173,25 +174,21 @@ disproportionate triage work may also be closed.
 
 ## Questions and early ideas
 
-Use [GitHub Discussions](../../discussions) for general questions, usage help,
-early-stage ideas, and architecture or design exploration that is not yet
-concrete enough for an actionable issue.
-
+Use [GitHub Discussions](https://github.com/trickle-labs/pg-trickle/discussions)
+for general questions, usage help, early-stage ideas, and architecture or
+design exploration that is not yet concrete enough for an actionable issue.
 Once a discussion narrows down to a concrete bug or a well-defined proposal,
-move it into an issue. Keeping exploratory threads in Discussions keeps the
-issue tracker clear and useful for everyone.
+move it into an issue.
 
 ## Security vulnerabilities
 
 **Please do not report security vulnerabilities in public issues, discussions,
 or pull requests.**
 
-Use GitHub's private vulnerability reporting instead: go to the
-[Security tab](../../security) and select **Report a vulnerability**. See
-[SECURITY.md](SECURITY.md) for scope, response targets, and what to include.
-
-Keeping reports private gives maintainers time to investigate and prepare a fix
-before details become public.
+Use GitHub's private vulnerability reporting instead: go to
+[Security → Report a vulnerability](https://github.com/trickle-labs/pg-trickle/security/advisories/new).
+See [SECURITY.md](SECURITY.md) for scope, response targets, and what to
+include.
 
 ## Maintainer decisions
 
@@ -240,6 +237,16 @@ context searchable and useful to other users and future contributors.
 - If outside implementation would be helpful, **we will invite you to open a
   pull request**.
 
+## Licensing
+
+By submitting a contribution to `pg_trickle`, you agree to license that
+contribution under the [Apache License 2.0](LICENSE), unless a separate
+contributor agreement explicitly applies.
+
+This applies to code, tests, SQL reproductions, documentation, examples, and
+other material submitted for inclusion in the project. Please only submit
+material that you have the right to contribute under those terms.
+
 ---
 
 ## Before opening an invited pull request
@@ -265,15 +272,21 @@ Before writing code, read:
    before continuing.
 3. Follow [AGENTS.md](AGENTS.md) and add or update tests covering both success
    and failure paths (see [AGENTS.md § Testing](AGENTS.md#testing)).
-4. Update documentation and `CHANGELOG.md` for any user-visible change (see
-   [Documentation requirements](#documentation-requirements)).
-5. Run the exact repository validation commands locally:
-   - `just fmt` (verify no formatting diff remains);
-   - `just lint` (formatting check, clippy with warnings as errors, security
-     checks, `docs-lint`, and contract checks) — or `just lint-ci` for the full
-     set of CI lint and sync checks; and
-   - the relevant test tiers (`just test-unit`, `just test-integration`,
-     `just test-dvm`, `just test-light-e2e`, or `just test-e2e`).
+4. Update documentation and [CHANGELOG.md](CHANGELOG.md) for any user-visible
+   change (see [Documentation requirements](#documentation-requirements)).
+5. Run the repository validation commands locally:
+   - Formatting: `just fmt` (verify no formatting diff remains).
+   - Core lint suite: `just lint` (format check, `clippy` with warnings as
+     errors, `SECURITY DEFINER` and privilege-boundary checks, `docs-lint`,
+     SQL-builder check, fuzz inventory check, and monitoring contract) — or
+     `just lint-ci` to also run version-sync, stale-version, and capability
+     manifest checks.
+   - Targeted CI guards when applicable: `just check-docs-drift` (after GUC or
+     SQL API changes), `just check-upgrade-all` (after catalog or SQL surface
+     changes), `just unsafe-inventory` (after `unsafe` changes), and
+     `just security` (after dependency changes).
+   - Relevant test tiers: `just test-unit`, `just test-integration`,
+     `just test-dvm`, `just test-light-e2e`, or `just test-e2e`.
 6. Open a PR against `main`, reference the issue (`Fixes #<number>`), explain
    any non-obvious design choices or differences from the issue discussion, and
    complete the PR template checklist.
@@ -297,20 +310,25 @@ cargo install --locked cargo-nextest
 cargo pgrx init --pg18 "$(pg_config --bindir)/pg_config"
 
 # Build
-cargo build
+just build
 
 # Format + lint (required before every PR; includes docs-lint)
 just fmt
 just lint
 
 # Run tests
-just test-unit          # fast, no DB
+just test-unit          # fast, no DB (automatically preloads pg_stub)
 just test-integration   # Testcontainers
 just test-dvm           # generated DVM SQL against Testcontainers PostgreSQL
-just test-light-e2e     # installed extension in stock postgres
+just test-light-e2e     # packaged extension mounted in stock postgres
 just test-e2e           # full E2E (builds Docker image)
 just test-pgbouncer     # PgBouncer transaction-pool compatibility tests
 ```
+
+Always use `just test-unit` rather than bare `cargo test --lib`: the wrapper
+automatically builds and preloads `scripts/pg_stub.c` so pure-Rust unit tests
+run cleanly without a PostgreSQL process (especially important on macOS 26+ and
+strict-linking Linux toolchains; see [INSTALL.md § Troubleshooting](INSTALL.md#troubleshooting)).
 
 For differential correctness, prefer multi-cycle mutation tests that compare
 the stream table with a fresh query result. Concurrency tests need a barrier or
@@ -322,8 +340,9 @@ Full setup instructions (including macOS troubleshooting) are in
 
 ### Devcontainer / containerized development
 
-If you are developing in a devcontainer, use the default non-root `vscode` user
-and run the normal commands from the workspace root:
+If you are developing in the VS Code devcontainer (`.devcontainer/devcontainer.json`),
+use the default non-root `vscode` user and run the normal `just` commands from
+the workspace root:
 
 ```bash
 just fmt
@@ -331,68 +350,63 @@ just lint
 just test-unit
 ```
 
-`just test-unit` uses `scripts/run_unit_tests.sh`, which selects a writable and
-cache-friendly target directory in this order:
+`scripts/run_unit_tests.sh` automatically falls back to a writable target
+directory if `target/` is not writable on a bind mount. If you still see
+permission errors in containerized runs, verify you are not overriding the
+container user/UID expected by your workspace mount.
 
-1. `target/` (preferred)
-2. `.cargo-target/` (project-local fallback)
-3. `$HOME/.cache/pg_trickle-target`
-4. `${TMPDIR:-/tmp}/pg_trickle-target` (last resort)
-
-This avoids permission failures on bind mounts and preserves incremental builds
-when source or test files change.
-
-If you see permission errors in containerized runs, verify you are not forcing a
-different container user/UID than expected by your workspace mount.
-
-#### Run E2E tests in devcontainer
-
-E2E tests use Testcontainers and require Docker access from inside the
-devcontainer (provided by the Docker-in-Docker feature in
-`.devcontainer/devcontainer.json`).
-
-Run from the workspace root inside the devcontainer:
+E2E tests require Docker access from inside the devcontainer (provided by the
+Docker-in-Docker feature in `.devcontainer/devcontainer.json`):
 
 ```bash
 just build-e2e-image
 just test-e2e
 ```
 
-Notes:
-
-- The E2E harness starts containers via `testcontainers` (`tests/e2e/mod.rs`).
-- The default E2E image is `pg_trickle_e2e:latest` (built by
-  `tests/build_e2e_image.sh`).
-- A plain `docker run` of the dev image is not equivalent to a full VS Code
-  devcontainer session with features/lifecycle hooks enabled.
+A plain `docker run` of the dev image is not equivalent to a full devcontainer
+session with features and lifecycle hooks enabled.
 
 ### Coding conventions (summary)
 
-- No `unwrap()` or `panic!()` in non-test code
-- All `unsafe` blocks require a `// SAFETY:` comment
-- Errors go through `PgTrickleError` in `src/error.rs`
-- New SQL functions use `#[pg_extern(schema = "pgtrickle")]`
-- Tests use Testcontainers — never a local PostgreSQL instance
+- No `unwrap()` or `panic!()` in non-test code.
+- All `unsafe` blocks require a `// SAFETY:` comment. Adding a justified
+  `unsafe` block also requires updating `.unsafe-baseline` via
+  `scripts/unsafe_inventory.sh --update > .unsafe-baseline` (enforced by CI).
+- Errors go through `PgTrickleError` in `src/error.rs` with relevant context.
+- New SQL functions use `#[pg_extern(schema = "pgtrickle")]`, and catalog or
+  SQL surface changes must be reflected in the corresponding upgrade migration
+  script (`sql/pg_trickle--<from>--<to>.sql`, checked by `just check-upgrade-all`).
+- Integration and E2E tests use Testcontainers — never a local PostgreSQL
+  instance.
 
 Full details are in [AGENTS.md](AGENTS.md).
 
 ### Documentation requirements
 
 **Every new feature ships with documentation.** This is a hard requirement, not
-a nice-to-have.
+a nice-to-have. See [docs/DOCS_OWNERSHIP.md](docs/DOCS_OWNERSHIP.md) for the
+canonical source of each documentation surface.
 
 - New SQL functions → entry in [docs/SQL_REFERENCE.md](docs/SQL_REFERENCE.md)
   and regenerate [docs/SQL_API_CATALOG.md](docs/SQL_API_CATALOG.md) via
   `just gen-catalogs`.
 - New GUC variable → entry in [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
   plus a `///` doc comment on `PGS_*`, then run `just gen-catalogs` to update
-  [docs/GUC_CATALOG.md](docs/GUC_CATALOG.md) (verified by
-  `just check-docs-drift`).
+  [docs/GUC_CATALOG.md](docs/GUC_CATALOG.md).
 - New user-facing capability → at minimum a paragraph in the relevant chapter
   and an entry under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md); for
   headline features, add a dedicated page.
 - New page → add it to [docs/SUMMARY.md](docs/SUMMARY.md) in the correct
   chapter.
+
+Before opening or updating a PR with doc, GUC, or SQL API changes, run the
+documentation drift guards:
+
+```bash
+just check-docs-drift               # verify GUC_CATALOG.md and SQL_API_CATALOG.md
+python3 scripts/check_docs_truth.py # verify GUC and SQL function references in docs/
+python3 check_links.py              # check internal Markdown links in docs/
+```
 
 PRs that introduce a `#[pg_extern]` function or a new GUC without documentation
 will be asked to add it before merge.
@@ -401,7 +415,7 @@ will be asked to add it before merge.
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):
 
-```
+```text
 fix: correct pgoutput action parsing for tables named INSERT_LOG
 feat: add CUBE explosion guard (max 64 UNION ALL branches)
 docs: document JOIN key change limitation in SQL_REFERENCE
@@ -410,96 +424,52 @@ test: add E2E test for keyless table duplicate-row behaviour
 
 ## CI coverage on PRs
 
-Every PR runs static/release contracts, script unit tests, upgrade completeness,
-and the checked LSN proof. The contracts also classify changed files using
-[.github/ci-paths.yml](.github/ci-paths.yml). Expensive CI jobs wait for the
-contracts to pass and run only when the relevant inputs changed:
+Every PR runs static and release contracts, script unit tests, upgrade
+completeness, and the pinned formal-verification proof suites. The contracts
+also classify changed files using [.github/ci-paths.yml](.github/ci-paths.yml)
+so expensive jobs wait for contracts to pass and run only when relevant inputs
+changed:
 
-| Changed inputs | Selected work beyond the contracts and proof |
-|----------------|---------------------------------------------|
+| Changed inputs | Selected work beyond the contracts and proofs |
+|----------------|-----------------------------------------------|
 | Rust, extension SQL, build inputs, test fixtures/harness | Unit/catalog/DVM component tests; ready PRs add packaged and bounded full E2E |
 | Documentation, release-contract data, ordinary maintenance scripts | Documentation checks and script tests; no extension rebuild |
-| Benchmark sources or inputs | Benchmark tracking on main; measurements also remain nightly/manual |
+| Benchmark sources or inputs | Benchmark tracking on `main`; measurements also remain nightly/manual |
 | Shipping Dockerfile or PostgreSQL defaults | Shipping-image qualification |
-| Monitoring configuration | Collector contract |
-| dbt getting-started project or adapter | Getting-started example on main; full dbt integration remains scheduled/manual |
+| Monitoring configuration | OpenTelemetry Collector contract |
+| dbt getting-started project or adapter | Getting-started example on `main`; full dbt integration remains scheduled/manual |
 | Demo/CNPG examples | Static checks; CNPG deployment verification remains scheduled/manual |
 
 Build inputs include `build.rs`, `.cargo/**`, `pg_trickle.control`, Cargo
 manifests, and the scripts used by compiled tests. Unclassified paths retain
-runtime coverage. A mixed PR selects the union of the relevant checks. The
-standalone lint, benchmark-tracking, and coverage workflows also filter their
-inputs, so a documentation-only merge does not rebuild Rust targets.
+runtime coverage, and mixed PRs select the union of matching checks. Standalone
+workflows—lint, docs drift, unsafe inventory, Semgrep, `cargo-deny`,
+`cargo audit`, secret scanning, stability soak regressions, and fuzz corpus
+replay—use their own path filters so documentation-only changes do not rebuild
+Rust targets.
 
 Draft PRs defer packaging, light/full E2E, shipping-image qualification,
 Windows compilation, and fuzz corpus replay. Marking a draft **ready for
 review** starts those jobs; converting it back to a draft cancels the previous
 run and returns to the smaller set of checks.
 
-Ready runtime PRs run the curated light-E2E suite in three shards against stock
+Ready runtime PRs run the three-shard light-E2E suite against stock
 `postgres:18.6` plus the bounded full-harness suite defined in
-[.github/ci-suites.json](.github/ci-suites.json) (without automatic test
-retries—investigate failures before rerunning). Permanent regressions,
-transaction visibility, multiplicity, recovery, permissions, workers, and
-full-only cases remain pre-merge checks, and refresh/CDC/scheduler changes
-select extra failure-recovery repetitions while unsafe-boundary changes run
-instrumented qualification. DVM component tests run in the integration job
+[.github/ci-suites.json](.github/ci-suites.json) with automatic test retries
+disabled—investigate failures before rerunning. Refresh, CDC, and scheduler
+changes add extra failure-recovery repetitions, and unsafe-boundary changes run
+AddressSanitizer qualification. DVM component tests run in the integration job
 using the `pg_stub`/Testcontainers runner.
 
-See [docs/CI_COVERAGE.md](docs/CI_COVERAGE.md) for what each test layer proves,
-deferred suites, failure ownership, and how `PR correctness` aggregates checks.
+Heavier suites—full E2E inventory, TPC-H, upgrade E2E, Criterion/pgbench/DAG/E2E
+benchmarks, dbt integration, CNPG smoke, soak/multi-DB stability, extended
+fuzzing, SQLancer, and macOS/Windows unit tests—run on scheduled and manual
+workflows. For the full test-layer matrix, deferred-suite schedule, failure
+ownership, and `PR correctness` aggregation rules, see
+[docs/CI_COVERAGE.md](docs/CI_COVERAGE.md) and
+[.github/workflows/](.github/workflows/).
 
-Criterion regression comparisons and the pgbench overhead gate run nightly and
-remain available manually. Nightly Criterion runs compare the candidate against
-the last successful scheduled CI revision on the same runner, recording the
-compared commits in the job summary. TPC-H, dbt, CNPG, and the macOS/Windows
-unit jobs also run on scheduled and manual workflows.
-
-### Workflow trigger matrix
-
-PR and push entries below are subject to the input selection described above.
-Scheduled and manual runs execute the full workflow regardless of changed
-paths. For exact job definitions, see [.github/workflows/](.github/workflows/).
-
-| Workflow / Job | PR | Push to main | Scheduled | Manual dispatch |
-|----------------|----|--------------|-----------|-----------------|
-| Unit tests (Linux) | ✅ | ✅ | Daily | ✅ |
-| Unit tests (macOS + Windows) | ❌ | ❌ | Daily | ✅ |
-| Catalog + DVM component tests | ✅ | ✅ | Daily | ✅ |
-| Light E2E (3 shards) | Ready only | ✅ | Daily | ✅ |
-| Bounded full E2E | Ready runtime PRs | ❌ | Full inventory (Daily) | Full inventory |
-| PR correctness aggregate | ✅ | ❌ | ❌ | ❌ |
-| TPC-H | ❌ | ❌ | Daily | ✅ |
-| Upgrade completeness check | ✅ | ✅ | Daily | ✅ |
-| Upgrade E2E | ❌ | ❌ | Daily | ✅ |
-| Benchmarks | ❌ | ✅ | Daily | ✅ |
-| Benchmark regression gate | ❌ | ❌ | Daily | Opt-in |
-| pgbench overhead gate | ❌ | ❌ | Daily | ✅ |
-| Shipping image upgrade | Ready only | Shipping inputs | Daily | ✅ |
-| DAG bench (calc / throughput) | ❌ | ❌ | Daily | ✅ |
-| DAG bench (parallel workers) | ❌ | ❌ | Daily | ✅ |
-| E2E bench (refresh / latency / CDC / TPC-H) | ❌ | ❌ | Weekly (Wed) | ✅ |
-| dbt getting-started example | ❌ | Runtime / dbt | Daily | ✅ |
-| dbt integration | ❌ | ❌ | Daily | ✅ |
-| CNPG smoke test | ❌ | ❌ | Daily | ✅ |
-| Stability / soak tests (`stability-tests.yml`) | Soak harness¹ | ❌ | Daily | ✅ |
-| Multi-database (`stability-tests.yml`) | ❌ | ❌ | Daily | ✅ |
-| Lint (`fmt` + `clippy` + SQL/fuzz checks) | ✅ | ✅ | ❌ | ❌ |
-| Unsafe block inventory | ✅ | ✅ | Weekly (Mon) | ✅ |
-| Docs drift + `docs-lint` (GUC & SQL catalogs) | ✅ | ✅ | Weekly (Mon) | ✅ |
-| `cargo-deny` (dependency policy) | Dep files² | ✅ | Weekly (Mon) | ✅ |
-| `cargo audit` (security) | ✅ | ✅ | Weekly (Mon) | ✅ |
-| Semgrep static analysis | ✅ | ✅ | Weekly (Mon) | ✅ |
-| Secret scanning (gitleaks) | ✅ | ✅ | Weekly (Mon) | ✅ |
-| Fuzz corpus replay (`fuzz-smoke.yml`) | Ready only³ | ❌ | Daily | ✅ |
-| Windows compile check | Ready only | ❌ | ❌ | ❌ |
-
-¹ Runs soak correctness regressions on PRs touching `tests/e2e_soak_tests.rs`
-or `.github/workflows/stability-tests.yml`.
-² Runs on PRs touching `Cargo.toml`, `Cargo.lock`, `deny.toml`, or the
-dependency-policy workflow/scripts; otherwise skipped and non-blocking.
-³ Runs on ready PRs touching `fuzz/**`, `src/**/*.rs`, or
-`.github/workflows/fuzz-smoke.yml`.
+### Triggering full CI and running checks locally
 
 To trigger the **full CI matrix** on your PR branch (recommended for DVM
 engine, refresh, or CDC changes):
@@ -509,19 +479,18 @@ gh workflow run ci.yml --ref <your-branch>
 ```
 
 Manual dispatch also runs the heavy tests on a draft branch. To opt in to the
-Criterion comparison against an exact base ref or commit:
+Criterion comparison against an exact base ref or commit (defaults to `main`
+when `benchmark_base` is omitted):
 
 ```bash
 gh workflow run ci.yml --ref <your-branch> \
   -f run_benchmark_regression=true -f benchmark_base=<base-ref-or-sha>
 ```
 
-Omitting `benchmark_base` on manual runs compares against `main`.
-
 To run tests locally before pushing:
 
 ```bash
-just test-all          # unit + integration + e2e + pgrx (excludes test-dvm)
+just test-all          # unit + integration + e2e + pgrx (excludes test-dvm and ignored TPC-H)
 
 # PR-equivalent fast path:
 just test-unit
@@ -540,35 +509,18 @@ just test-tpch         # full rebuild + TPC-H suite
 just test-tpch-fast    # reduced cycles, skips image rebuild
 ```
 
-See [AGENTS.md § Testing](AGENTS.md#testing) for local test recipes and
-[docs/CI_COVERAGE.md](docs/CI_COVERAGE.md) for the CI coverage map.
-
 ## Fuzz testing
 
 `pg_trickle` uses `cargo-fuzz` (libFuzzer) with a nightly Rust toolchain
 (`rustup install nightly` and `cargo install cargo-fuzz`) to exercise core
-parser, decoder, and pipeline logic. Fuzz targets live in `fuzz/fuzz_targets/`.
-
-### Available targets
-
-| Target | What it exercises |
-|--------|-------------------|
-| `api_guard_fuzz` | Pure-Rust API validation & pre-parser rewrite guards |
-| `cron_fuzz` | Cron expression parser |
-| `guc_fuzz` | GUC string→enum coercion |
-| `cdc_trigger_fuzz` | CDC trigger payload decoding |
-| `error_classifier_fuzz` | WAL/SQLSTATE error classifier |
-| `dag_fuzz` | DAG/merge SQL and snapshot column-list generation |
-| `sql_builder_fuzz` | SQL builder + typed parser facade |
-| `merge_sql_fuzz` | Merge SQL codegen with random change streams |
-| `row_id_fuzz` | Row identity tracking with random operator trees |
-| `snapshot_fingerprint_fuzz` | DVM snapshot fingerprint classifier stability |
-| `wal_decoder_fuzz` | `test_decoding` WAL parser & schema-mismatch detection |
-
-### Running fuzz targets
+parser, decoder, SQL builder, DAG, merge, and CDC logic. Fuzz targets are
+defined in `fuzz/Cargo.toml` under `fuzz/fuzz_targets/`.
 
 ```bash
-# Run each target for 60 s (requires nightly toolchain):
+# List all available fuzz targets:
+python3 scripts/fuzz_targets.py
+
+# Run every target for 60 s (requires nightly toolchain):
 just fuzz-all
 
 # Run for a custom duration (seconds):
@@ -578,13 +530,14 @@ just fuzz-all 120
 cargo +nightly fuzz run merge_sql_fuzz -- -max_total_time=60
 ```
 
-Corpus directories are created under `fuzz/corpus/<target_name>/` when running
-`cargo fuzz`. Committed proptest regression cases are stored in
-`proptest-regressions/`.
+Corpus directories are stored under `fuzz/corpus/<target_name>/`, and committed
+`proptest` regression cases live in `proptest-regressions/`.
 
-## Updating base image digests
+## Maintainer tasks
 
-> **Maintainer task:** External contributors normally do not need to run this.
+> External contributors normally do not need to run the tasks in this section.
+
+### Updating base image digests
 
 Docker base images are pinned to exact SHA256 manifest-list digests in
 `Dockerfile.demo`, `Dockerfile.ghcr`, `tests/Dockerfile.e2e`, and
@@ -606,14 +559,6 @@ and `linux/arm64` builds pull the matching architecture automatically), patches
 the Dockerfiles in-place, and prints the commit command. Include the
 digest-update commit in the release PR.
 
-## Licensing
-
-By submitting a contribution to `pg_trickle`, you agree to license that
-contribution under the [Apache License 2.0](LICENSE), unless a separate
-contributor agreement explicitly applies.
-
-This applies to code, tests, documentation, examples, and other material
-submitted for inclusion in the project. Please only submit material that you
-have the right to contribute under those terms.
+---
 
 Thanks again for taking the time to help improve `pg_trickle`.
