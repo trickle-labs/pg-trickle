@@ -873,17 +873,11 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_capped_deep_join_hints_are_scoped_to_refresh() {
+    fn test_deep_join_hints_are_scoped_to_refresh() {
         Spi::run("SET LOCAL pg_trickle.planner_aggressive = on").unwrap();
         Spi::run("SET LOCAL pg_trickle.merge_join_strategy = 'auto'").unwrap();
         Spi::run("SET LOCAL work_mem = '16MB'").unwrap();
         Spi::run("SET LOCAL temp_file_limit = '64MB'").unwrap();
-        let tuning = crate::catalog::RefreshRuntimeTuning {
-            merge_work_mem_mb: 512,
-            delta_work_mem_mb: 0,
-            delta_work_mem_cap_mb: 256,
-            lock_backoff_exponent: 0,
-        };
         let settings = || {
             (
                 Spi::get_one::<String>("SELECT current_setting('work_mem')")
@@ -894,20 +888,35 @@ mod tests {
                     .unwrap(),
             )
         };
-        with_refresh_guc_scope(|| {
-            // Deep-join hints do not consult the target relation.
-            assert!(!crate::refresh::apply_planner_hints(
-                1,
-                pg_sys::Oid::from(0u32),
-                5,
-                &tuning,
-                true,
-            ));
-            assert_eq!(settings(), ("256MB".into(), "64MB".into()));
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(settings(), ("16MB".into(), "64MB".into()));
+        for (cap, expected_work_mem, expected_temp_limit) in [
+            (0, "512MB", "-1"),
+            (1024, "512MB", "-1"),
+            (256, "256MB", "64MB"),
+        ] {
+            let tuning = crate::catalog::RefreshRuntimeTuning {
+                merge_work_mem_mb: 512,
+                delta_work_mem_mb: 0,
+                delta_work_mem_cap_mb: cap,
+                lock_backoff_exponent: 0,
+            };
+            with_refresh_guc_scope(|| {
+                // Deep-join hints do not consult the target relation.
+                assert!(!crate::refresh::apply_planner_hints(
+                    1,
+                    pg_sys::Oid::from(0u32),
+                    5,
+                    &tuning,
+                    true,
+                ));
+                assert_eq!(
+                    settings(),
+                    (expected_work_mem.into(), expected_temp_limit.into())
+                );
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(settings(), ("16MB".into(), "64MB".into()));
+        }
     }
 
     #[pg_test]
