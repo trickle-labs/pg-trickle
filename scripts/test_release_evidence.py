@@ -18,6 +18,7 @@ from scripts.release_evidence import (
     validate_case_evidence,
     validate_case_log,
     validate_installation,
+    validate_pgvector_measurement,
 )
 from scripts.stage_release_assets import stage_release_assets
 from scripts.run_release_suite import attempt_records, machine_case_attempts
@@ -27,6 +28,27 @@ CASE = "e2e_example_tests::test_required_case"
 
 
 class ReleaseEvidenceTests(unittest.TestCase):
+    def test_pgvector_raw_measurements_require_complete_status(self) -> None:
+        contract = {"postgresql_major": 18}
+        for suite_id in ("live-rag-100k", "centroid-cost-matrix", "subscription-scale-100k"):
+            suite_results = [{"suite_id": suite_id, "postgresql_version": "18.7"}]
+            measurement = {"status": "complete", "cases": [{}], "postgresql_version": "18.7"}
+            with self.subTest(suite=suite_id):
+                validate_pgvector_measurement(suite_id, measurement, suite_results, contract)
+            for status in ("passed", "running", "failed", None):
+                with self.subTest(suite=suite_id, status=status):
+                    with self.assertRaisesRegex(ValueError, "did not complete"):
+                        validate_pgvector_measurement(
+                            suite_id, {**measurement, "status": status}, suite_results, contract
+                        )
+            for changes, message in (
+                ({"cases": []}, "zero cases"),
+                ({"postgresql_version": "18.6"}, "differs from its suite record"),
+            ):
+                with self.subTest(suite=suite_id, changes=changes):
+                    with self.assertRaisesRegex(ValueError, message):
+                        validate_pgvector_measurement(suite_id, {**measurement, **changes}, suite_results, contract)
+
     def test_failed_command_attempt_cannot_be_reported_as_passed(self) -> None:
         cases = [[{"id": CASE, "status": "passed"}]]
         self.assertEqual(attempt_records([], 1, {})[0]["status"], "failed")

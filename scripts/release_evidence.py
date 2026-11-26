@@ -23,6 +23,24 @@ else:
 RESULT_STATES = {"passed", "failed", "skipped", "unavailable", "stale", "historical"}
 
 
+def validate_pgvector_measurement(suite_id: str, measurement: dict, suite_results: list[dict], contract: dict) -> None:
+    matching_suite = next(
+        (result for result in suite_results if result.get("suite_id") == suite_id),
+        None,
+    )
+    if matching_suite is None:
+        raise ValueError(f"{suite_id} measurement has no matching suite result")
+    # The runners use "complete" for raw measurements; the suite verdict uses "passed".
+    if measurement.get("status") != "complete":
+        raise ValueError(f"{suite_id} measurement did not complete")
+    if not isinstance(measurement.get("cases"), list) or not measurement["cases"]:
+        raise ValueError(f"{suite_id} measurement recorded zero cases")
+    if measurement.get("postgresql_version") != matching_suite.get("postgresql_version"):
+        raise ValueError(f"{suite_id} measurement PostgreSQL version differs from its suite record")
+    if not str(measurement.get("postgresql_version", "")).startswith(f"{contract['postgresql_major']}."):
+        raise ValueError(f"{suite_id} measurement used an unsupported PostgreSQL major version")
+
+
 def canonical_digest(value: object) -> str:
     encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -679,20 +697,7 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
             })
             continue
         if suite_id in {"live-rag-100k", "centroid-cost-matrix", "subscription-scale-100k"} and measurement.get("kind") is None:
-            matching_suite = next(
-                (result for result in suite_results if result.get("suite_id") == suite_id),
-                None,
-            )
-            if matching_suite is None:
-                raise ValueError(f"{suite_id} measurement has no matching suite result")
-            if measurement.get("status") != "passed":
-                raise ValueError(f"{suite_id} measurement did not pass")
-            if not isinstance(measurement.get("cases"), list) or not measurement["cases"]:
-                raise ValueError(f"{suite_id} measurement recorded zero cases")
-            if measurement.get("postgresql_version") != matching_suite.get("postgresql_version"):
-                raise ValueError(f"{suite_id} measurement PostgreSQL version differs from its suite record")
-            if not str(measurement.get("postgresql_version", "")).startswith(f"{contract['postgresql_major']}."):
-                raise ValueError(f"{suite_id} measurement used an unsupported PostgreSQL major version")
+            validate_pgvector_measurement(suite_id, measurement, suite_results, contract)
             continue
         if measurement.get("kind") != "database-workloads":
             raise ValueError("measurement suite has an unknown measurement kind")
