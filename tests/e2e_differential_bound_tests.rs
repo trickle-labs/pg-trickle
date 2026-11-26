@@ -312,6 +312,10 @@ async fn join_counts_future_partner_only_in_next_window() {
                  FROM bound_a a JOIN bound_b b ON a.k = b.k GROUP BY a.g";
     db.create_st("bound_join_st", query, "1h", "DIFFERENTIAL")
         .await;
+    // Only the manual refresh may choose the first window in this test.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.bound_join_st'])")
+        .await;
 
     db.execute("INSERT INTO bound_a VALUES (100, 100, 0)").await;
     let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_join_st").await;
