@@ -628,29 +628,42 @@ impl OptimizationContext {
             return format!("SELECT * FROM {final_cte}");
         }
 
-        let with_keyword = if self.ctes.iter().any(|(_, _, is_rec, _)| *is_rec) {
-            "WITH RECURSIVE"
+        let is_recursive = self.ctes.iter().any(|(_, _, is_rec, _)| *is_rec);
+        let with_keyword = if is_recursive {
+            "WITH RECURSIVE "
         } else {
-            "WITH"
+            "WITH "
         };
-        let cte_defs = self
-            .ctes
-            .iter()
-            .map(|(name, sql, _, is_mat)| {
-                if *is_mat {
-                    format!("{name} AS MATERIALIZED (\n{sql}\n)")
-                } else if self.not_materialized_ctes.contains(name.as_str()) {
-                    format!("{name} AS NOT MATERIALIZED (\n{sql}\n)")
-                } else {
-                    format!("{name} AS (\n{sql}\n)")
-                }
-            })
-            .collect::<Vec<_>>();
-
-        format!(
-            "{with_keyword} {}\nSELECT * FROM {final_cte}",
-            cte_defs.join(",\n"),
-        )
+        let capacity = with_keyword.len()
+            + self
+                .ctes
+                .iter()
+                .map(|(name, sql, _, _)| name.len() + sql.len() + 28)
+                .sum::<usize>()
+            + "\nSELECT * FROM ".len()
+            + final_cte.len();
+        let mut out = String::with_capacity(capacity);
+        out.push_str(with_keyword);
+        for (i, (name, sql, _, is_mat)) in self.ctes.iter().enumerate() {
+            if i > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str(name);
+            if *is_mat {
+                out.push_str(" AS MATERIALIZED (\n");
+            } else if !self.not_materialized_ctes.is_empty()
+                && self.not_materialized_ctes.contains(name.as_str())
+            {
+                out.push_str(" AS NOT MATERIALIZED (\n");
+            } else {
+                out.push_str(" AS (\n");
+            }
+            out.push_str(sql);
+            out.push_str("\n)");
+        }
+        out.push_str("\nSELECT * FROM ");
+        out.push_str(final_cte);
+        out
     }
 }
 

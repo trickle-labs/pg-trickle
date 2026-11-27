@@ -1048,6 +1048,12 @@ pub fn finalize_success(
 
     let history_action =
         effective_action_for_mode(execution.requested_action, execution.effective_mode);
+    if history_action == RefreshAction::Reinitialize {
+        // Both executors have established a protected FULL baseline, and
+        // the catalog now reflects the populated storage and its frontier.
+        // Arm here, before releasing the source locks or publishing success.
+        crate::api::arm_automatic_trim_after_full_snapshot(st.pgt_id)?;
+    }
     let window_reason =
         if execution.full_reason.is_none() && history_action == RefreshAction::Differential {
             crate::window_state::ensure_plan(st)?

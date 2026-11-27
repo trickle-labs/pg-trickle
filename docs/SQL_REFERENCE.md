@@ -1602,13 +1602,14 @@ SELECT pgtrickle.set_stream_table_refresh_policy('order_totals', 'DIFFERENTIAL')
 
 ```sql
 pgtrickle.create_stream_table_with_retention(
-    name TEXT, query TEXT, policy TEXT, source_column TEXT, cutoff TEXT,
+    name TEXT, query TEXT, policy TEXT, source_column TEXT, cutoff TEXT DEFAULT NULL,
     schedule TEXT DEFAULT 'calculated'
 ) RETURNS void
 ```
 
 Create an initialized, managed differential stream and configure its retention
-policy atomically. If policy validation fails, the creation rolls back. For
+policy atomically. Omit the cutoff (or pass NULL) for source-driven removal.
+If policy validation fails, the creation rolls back. For
 additional creation options, call `create_stream_table` and then configure
 retention in the same transaction.
 

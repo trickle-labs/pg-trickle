@@ -167,89 +167,38 @@ impl DeltaStage {
             &[prev_lsn.into(), new_lsn.into()],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        let rls_enabled = Spi::get_one_with_args::<bool>(
-            "SELECT relrowsecurity FROM pg_catalog.pg_class WHERE oid = $1",
-            &[dependency.source_relid.into()],
-        )
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-        .unwrap_or(false);
-        let privileges = if rls_enabled {
-            "SELECT, DELETE"
-        } else {
-            "SELECT"
-        };
-        // nosemgrep: rust.spi.run.dynamic-format — privileges is fixed; qualified_name and owner are quoted identifiers.
-        Spi::run(&format!(
-            "GRANT {privileges} ON TABLE {qualified_name} TO {owner}"
-        ))
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
         let (source_table, hash_columns) =
             crate::refresh::source_visibility_key(dependency.source_relid)?;
-        let identity_domain = if crate::cdc::resolve_pk_columns(dependency.source_relid)?.is_empty()
-        {
-            "KEYLESS_ROW"
-        } else {
-            "SCAN_KEY"
-        };
-        let visible_hash = crate::refresh::codegen::build_content_hash_expr_for_domain(
-            "s.",
-            &hash_columns,
-            identity_domain,
-        );
-        let filter_sql = format!(
-            "DELETE FROM {qualified_name} c \
-             WHERE c.action <> 'D' AND NOT EXISTS (\
-               SELECT 1 FROM {source_table} s \
-               WHERE pgtrickle.row_probe_v1({visible_hash}) = pgtrickle.row_probe_v1(c.__pgt_row_id) \
-                 AND {visible_hash} = c.__pgt_row_id\
-             )"
-        );
-        if rls_enabled {
-            // Reduce each key to its net change before checking the current
-            // owner-visible source row. Without this, an insert followed by a
-            // delete in one refresh window loses only its insert image and
-            // leaves an unmatched delete. This is the same first/last
-            // compaction used by persistent CDC buffers.
-            // nosemgrep: rust.spi.run.dynamic-format — qualified_name is a quoted internal identifier.
-            Spi::run(&format!(
-                "DELETE FROM {qualified_name} WHERE change_id IN (\
-                   SELECT change_id FROM (\
-                     SELECT change_id, \
-                            ROW_NUMBER() OVER (PARTITION BY __pgt_row_id ORDER BY change_id) AS rn_asc, \
-                            ROW_NUMBER() OVER (PARTITION BY __pgt_row_id ORDER BY change_id DESC) AS rn_desc, \
-                            FIRST_VALUE(action) OVER (\
-                              PARTITION BY __pgt_row_id ORDER BY change_id\
-                            ) AS first_act, \
-                            LAST_VALUE(action) OVER (\
-                              PARTITION BY __pgt_row_id ORDER BY change_id \
-                              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\
-                            ) AS last_act \
-                     FROM {qualified_name} WHERE action IN ('I', 'D')\
-                   ) __pgt_ranked \
-                   WHERE (first_act = 'I' AND last_act = 'D') \
-                      OR (rn_asc > 1 AND rn_desc > 1)\
-                 )"
-            ))
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        }
-
         let access_sql = format!("SELECT 1 FROM {source_table} LIMIT 0");
+        // Admission and ordinary refresh already reject RLS-constrained
+        // differential maintenance. Recheck under the actual execution role
+        // before exposing any privileged CDC images. A bypassing owner sees
+        // the complete history: filtering against today's source would lose
+        // a valid insert deleted after the immutable input cut, and first/last
+        // compaction could also discard duplicate occurrences.
         crate::refresh::with_stream_owner(st, || {
-            Spi::run(&access_sql) // nosemgrep: rust.spi.run.dynamic-format — source_table is built by pg_catalog.format('%I.%I').
+            Spi::run(&access_sql) // nosemgrep: rust.spi.run.dynamic-format -- source is catalog-qualified; owner permissions are enforced.
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            if rls_enabled {
-                Spi::run(&filter_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let active = Spi::get_one_with_args::<bool>(
+                "SELECT pg_catalog.row_security_active($1::regclass)",
+                &[dependency.source_relid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| {
+                PgTrickleError::InternalError("row security status unexpectedly NULL".into())
+            })?;
+            if active {
+                return Err(PgTrickleError::UnsupportedOperator(format!(
+                    "cannot stage historical CDC for source OID {source_oid} with active row-level security"
+                )));
             }
             Ok(())
         })?;
-        if rls_enabled {
-            // nosemgrep: rust.spi.run.dynamic-format — qualified_name and owner are quoted identifiers.
-            Spi::run(&format!(
-                "REVOKE DELETE ON TABLE {qualified_name} FROM {owner}"
-            ))
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        }
+        // nosemgrep: rust.spi.run.dynamic-format -- qualified_name and owner are quoted identifiers.
+        Spi::run(&format!(
+            "GRANT SELECT ON TABLE {qualified_name} TO {owner}"
+        ))
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         // The graph executor already holds every source lock across its shared
         // cut, so the live source is the exact NEW-frontier state.
         if !crate::refresh::current_graph_sources_locked() {
