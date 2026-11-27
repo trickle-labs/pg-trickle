@@ -1879,7 +1879,12 @@ fn execute_differential_refresh_inner(
     // Cost heuristics must not select a rebuild when historical rows are gone.
     let unreconstructible_history =
         crate::dvm::retention::has_unreconstructible_history(st.pgt_id)?;
+    // Strict graph refreshes must not select elective FULL fallbacks.
+    // Mandatory correctness/resource guards and explicit overrides still apply.
+    let strict_full_policy =
+        crate::refresh::current_full_policy() == crate::refresh::FullPolicy::Error;
     let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential
+        || strict_full_policy
         || crate::refresh::is_retention_catchup()
         || unreconstructible_history;
     // Only additive UNION ALL scans can safely use one combined denominator.
@@ -1922,7 +1927,9 @@ fn execute_differential_refresh_inner(
         let new_lsn = new_frontier.get_lsn(*oid);
         let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
 
-        let max_ratio_lit = if max_ratio > 0.0 {
+        // A strict graph refresh cannot act on an elective ratio breach.
+        // Count its entire CDC window for the differential planner and guards.
+        let max_ratio_lit = if !strict_full_policy && max_ratio > 0.0 {
             format!("{max_ratio}")
         } else {
             "0".to_string()
