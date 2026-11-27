@@ -1630,17 +1630,34 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             _ => None,
                         })
                         .collect(),
-                    None => group
-                        .members
-                        .iter()
-                        .filter_map(|member| match member {
-                            NodeId::StreamTable(id) => load_st_by_id(*id).and_then(|st| {
-                                let due = check_schedule(&st, dag_ref) || st.needs_reinit;
-                                due.then(|| (*id, has_table_source_changes(&st)))
-                            }),
-                            _ => None,
-                        })
-                        .collect(),
+                    None => {
+                        let mut snapshots = HashMap::new();
+                        let mut poll_failed = false;
+                        for member in &group.members {
+                            let NodeId::StreamTable(id) = member else {
+                                continue;
+                            };
+                            let Some(st) = load_st_by_id(*id) else {
+                                continue;
+                            };
+                            if check_schedule(&st, dag_ref) || st.needs_reinit {
+                                match has_table_source_changes(&st) {
+                                    Ok(changes) => {
+                                        snapshots.insert(*id, changes);
+                                    }
+                                    Err(error) => {
+                                        warning!("pg_trickle: deferring group: {error}");
+                                        poll_failed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if poll_failed {
+                            continue;
+                        }
+                        snapshots
+                    }
                 };
 
                 if group.is_singleton() {
@@ -1935,7 +1952,15 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     }
 
                     let (has_changes, _has_stream_table_changes) =
-                        upstream_change_state(&st, initial_table_changes.get(&pgt_id).copied());
+                        match upstream_change_state(&st, initial_table_changes.get(&pgt_id).copied())
+                        {
+                            Ok(state) => state,
+                            Err(error) => {
+                                warning!("pg_trickle: atomic group source check failed: {error}");
+                                group_ok = false;
+                                break;
+                            }
+                        };
                     let action = determine_scheduled_refresh_action(&st, has_changes);
                     if !crate::shmem::begin_inline_refreshes_for_database(database_oid, &[pgt_id]) {
                         group_ok = false;
