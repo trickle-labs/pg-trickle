@@ -206,44 +206,12 @@ fn clear_cleanup_status(source_oid: u32) {
     );
 }
 
-// ── DAG-4: ST bypass tables for fused-chain execution ───────────────
-
 thread_local! {
-    /// Maps upstream `pgt_id` → temp bypass table name.
-    ///
-    /// When a fused-chain worker refreshes an upstream member, instead of
-    /// writing delta rows to the persistent `changes_pgt_{id}` buffer, it
-    /// creates a TEMP TABLE with the same schema and stores the mapping
-    /// here.  Downstream members in the same chain read from the temp
-    /// table via this mapping.
-    static ST_BYPASS_TABLES: RefCell<HashMap<i64, String>> =
-        RefCell::new(HashMap::new());
-
     /// DI-2: Source table OIDs whose per-leaf delta fraction exceeds
     /// `max_delta_fraction`. These leaves fall back from NOT EXISTS
     /// (index-based) to EXCEPT ALL (hash-based) in snapshot construction.
     static FALLBACK_LEAF_OIDS: RefCell<std::collections::HashSet<u32>> =
         RefCell::new(std::collections::HashSet::new());
-}
-
-/// Register a bypass temp table for the given upstream pgt_id.
-pub fn set_st_bypass(pgt_id: i64, temp_table: String) {
-    ST_BYPASS_TABLES.with(|m| m.borrow_mut().insert(pgt_id, temp_table));
-}
-
-/// Remove the bypass mapping for a pgt_id.
-pub fn clear_st_bypass(pgt_id: i64) {
-    ST_BYPASS_TABLES.with(|m| m.borrow_mut().remove(&pgt_id));
-}
-
-/// Clear all bypass mappings.
-pub fn clear_all_st_bypass() {
-    ST_BYPASS_TABLES.with(|m| m.borrow_mut().clear());
-}
-
-/// Return the current bypass table mappings.
-pub fn get_st_bypass_tables() -> HashMap<i64, String> {
-    ST_BYPASS_TABLES.with(|m| m.borrow().clone())
 }
 
 /// DI-2: Set the per-leaf fallback OIDs for the current refresh cycle.
@@ -1159,133 +1127,6 @@ pub(crate) fn capture_delta_to_st_buffer(
     Ok(count)
 }
 
-/// DAG-4: Capture delta to a temp bypass table instead of the persistent
-/// `changes_pgt_{id}` buffer.
-///
-/// Creates `pg_temp.__pgt_bypass_{pgt_id}` (ON COMMIT DROP) with the same
-/// schema as the persistent buffer, inserts I/D rows from the delta temp
-/// table, and registers the bypass mapping so that downstream refresh
-/// reads from this temp table instead.
-///
-/// Returns the number of captured rows.
-pub fn capture_delta_to_bypass_table(
-    st: &StreamTableMeta,
-    user_cols_typed: &[(String, String)],
-) -> Result<i64, PgTrickleError> {
-    let pgt_id = st.pgt_id;
-
-    // The delta temp table is only created during a true DIFFERENTIAL
-    // refresh.  If `execute_scheduled_refresh` internally fell back to
-    // FULL (e.g. no previous frontier), the table won't exist and we
-    // must skip the capture to avoid a "relation does not exist" ERROR.
-    // pgt_id is a plain i64, not user-supplied input.
-    let delta_exists_sql = format!("SELECT to_regclass('__pgt_delta_{}') IS NOT NULL", pgt_id);
-    let delta_exists: bool = Spi::get_one::<bool>(&delta_exists_sql)
-        .unwrap_or(Some(false))
-        .unwrap_or(false);
-
-    if !delta_exists {
-        pgrx::debug1!(
-            "[pg_trickle] DAG-4: no delta table for pgt_id={}, skipping bypass capture",
-            pgt_id,
-        );
-        return Ok(0);
-    }
-
-    let bypass_table = format!("pg_temp.__pgt_bypass_{}", pgt_id);
-
-    // DAG-4/ST-ST-10: If a pre-snapshot table exists (created by the
-    // capture_incremental_diff_to_st_buffer path in explicit_dml), use a
-    // pre/post comparison to produce correct D+I pairs for value-changes.
-    // The weight-aggregated __pgt_delta_ collapses D+I with the same
-    // __pgt_row_id into a single I, which omits the D for old column values.
-    // Downstream STs with WHERE filters on changed columns would miss the
-    // deletion and retain stale rows.
-    // pgt_id is a plain i64, not user-supplied input.
-    let pre_snap_sql = format!("SELECT to_regclass('__pgt_pre_{}') IS NOT NULL", pgt_id);
-    let pre_snapshot_exists: bool = Spi::get_one::<bool>(&pre_snap_sql)
-        .unwrap_or(Some(false))
-        .unwrap_or(false);
-
-    // DAG-4/ST-ST-10: Read the MAX(lsn) from the persistent change buffer
-    // so that bypass table rows use an LSN that falls within the downstream
-    // ST's frontier range.  Between capture_incremental_diff_to_st_buffer
-    // (which writes to the persistent buffer inside execute_differential_refresh)
-    // and this bypass capture (called after execute_scheduled_refresh stores
-    // frontier and other catalog metadata), WAL-generating catalog DMLs advance
-    // pg_current_wal_lsn().  Using the stale higher LSN would cause the
-    // downstream scan's `lsn <= new_lsn` filter to exclude bypass rows,
-    // silently dropping the entire delta.
-    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
-    let buffer_lsn: Option<String> = if crate::cdc::has_st_change_buffer(pgt_id, &change_schema) {
-        Spi::get_one::<String>(&format!(
-            "SELECT MAX(lsn)::text FROM \"{change_schema}\".changes_pgt_{pgt_id}",
-        ))
-        .unwrap_or(None)
-    } else {
-        None
-    };
-
-    let count = if pre_snapshot_exists {
-        let user_cols: Vec<String> = user_cols_typed.iter().map(|(n, _)| n.clone()).collect();
-        // A44-10: Bypass tables use flat D+I schema (no new_/old_ prefix).
-        let col_defs: String = std::iter::once("lsn pg_lsn".to_string())
-            .chain(std::iter::once("action \"char\"".to_string()))
-            .chain(std::iter::once("__pgt_row_id bytea NOT NULL".to_string()))
-            .chain(std::iter::once("source_xid xid".to_string()))
-            .chain(std::iter::once("source_commit_at timestamptz".to_string()))
-            .chain(
-                user_cols_typed
-                    .iter()
-                    .map(|(name, typ)| format!("\"{}\" {}", name.replace('"', "\"\""), typ)),
-            )
-            .collect::<Vec<_>>()
-            .join(", ");
-        let create_sql =
-            format!("CREATE TEMP TABLE IF NOT EXISTS {bypass_table} ({col_defs}) ON COMMIT DROP",);
-        Spi::run(&create_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        capture_diff_to_table(
-            st,
-            &user_cols,
-            &bypass_table,
-            pgt_id,
-            buffer_lsn.as_deref(),
-            true,
-            false,
-        )?
-    } else {
-        let source_commit_at =
-            crate::catalog::RefreshRecord::source_commit_at_sql_for_refresh(pgt_id)?;
-        let sql = build_bypass_capture_sql(
-            pgt_id,
-            user_cols_typed,
-            &bypass_table,
-            buffer_lsn.as_deref(),
-        );
-        let sql = sql.replace("NULL::timestamptz", &source_commit_at);
-        Spi::connect_mut(|client| {
-            let result = client
-                .update(&sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            Ok::<i64, PgTrickleError>(result.len() as i64)
-        })?
-    };
-
-    set_st_bypass(pgt_id, bypass_table.clone());
-
-    if count > 0 {
-        pgrx::debug1!(
-            "[pg_trickle] DAG-4: captured {} delta rows to bypass table {} for {}.{}",
-            count,
-            bypass_table,
-            st.pgt_schema,
-            st.pgt_name,
-        );
-    }
-
-    Ok(count)
-}
-
 /// Select only identities present in the retention delta before probing storage.
 pub(crate) fn retention_scoped_rows_sql(
     table: &str,
@@ -1329,8 +1170,7 @@ pub(crate) fn retention_scoped_rows_sql(
 
 /// Shared pre/post diff logic for capturing D+I pairs into a target table.
 ///
-/// Used by both `capture_delta_to_bypass_table` (FusedChain path) and
-/// `capture_incremental_diff_to_st_buffer` (persistent buffer path).
+/// Used by persistent ST change-buffer capture paths.
 ///
 /// `target_table` must already exist with the appropriate schema
 /// (`lsn, action, __pgt_row_id, col1, col2, ...` — flat D+I schema, A44-10).
@@ -1338,9 +1178,8 @@ pub(crate) fn retention_scoped_rows_sql(
 /// current state of the ST backing table.
 ///
 /// `lsn_override`: when present, the given LSN is used instead of
-/// `pg_current_wal_lsn()`. Bypass capture needs it because catalog writes can
-/// advance the current LSN past the downstream frontier; Graph V1 needs it so
-/// later members can consume deltas produced earlier in the same graph pass.
+/// `pg_current_wal_insert_lsn()`. Graph V1 needs the override so later
+/// members can consume deltas produced earlier in the same graph pass.
 /// `retention_pre_scoped` requires a pre-snapshot containing only delta identities.
 pub(crate) fn capture_diff_to_table(
     st: &StreamTableMeta,
@@ -1457,8 +1296,7 @@ pub(crate) fn capture_diff_to_table(
     };
     let source_commit_at = crate::catalog::RefreshRecord::source_commit_at_sql_for_refresh(pgt_id)?;
 
-    // DAG-4: When an LSN override is provided (bypass tables), use the
-    // literal value so the rows fall within the downstream frontier range.
+    // Preserve the explicit shared graph bound when supplied.
     let lsn_expr = change_capture_lsn_expr(lsn_override);
 
     if retention_pre_scoped {
@@ -1537,54 +1375,6 @@ pub(crate) fn capture_diff_to_table(
     })?;
 
     Ok(total)
-}
-
-/// Build the SQL for creating a bypass temp table and inserting delta rows.
-///
-/// Pure-logic helper for unit testing.
-pub fn build_bypass_capture_sql(
-    pgt_id: i64,
-    user_cols_typed: &[(String, String)],
-    bypass_table: &str,
-    lsn_override: Option<&str>,
-) -> String {
-    // A44-10: Bypass tables use flat D+I schema (no new_/old_ prefix).
-    let col_defs: String = std::iter::once("lsn pg_lsn".to_string())
-        .chain(std::iter::once("action \"char\"".to_string()))
-        .chain(std::iter::once("__pgt_row_id bytea NOT NULL".to_string()))
-        .chain(std::iter::once("source_xid xid".to_string()))
-        .chain(std::iter::once("source_commit_at timestamptz".to_string()))
-        .chain(
-            user_cols_typed
-                .iter()
-                .map(|(name, typ)| format!("\"{}\" {}", name.replace('"', "\"\""), typ)),
-        )
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let flat_col_list: String = user_cols_typed
-        .iter()
-        .map(|(name, _)| format!("\"{}\"", name.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let d_col_list: String = user_cols_typed
-        .iter()
-        .map(|(name, _)| format!("d.\"{}\"", name.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    // DAG-4: Use the persistent buffer's LSN when available so the bypass
-    // rows fall within the downstream scan's frontier range.
-    let lsn_expr = change_capture_lsn_expr(lsn_override);
-
-    format!(
-        "CREATE TEMP TABLE IF NOT EXISTS {bypass_table} ({col_defs}) ON COMMIT DROP;\n\
-         INSERT INTO {bypass_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
-         SELECT {lsn_expr}, d.__pgt_action, d.__pgt_row_id, NULL::xid, NULL::timestamptz, {d_col_list} \
-         FROM __pgt_delta_{pgt_id} d \
-         WHERE d.__pgt_action IN ('I', 'D')"
-    )
 }
 
 /// Capture the effective delta from a DIFFERENTIAL refresh into the ST's
@@ -1680,13 +1470,6 @@ pub fn get_st_user_columns(st: &StreamTableMeta) -> Vec<String> {
         .into_iter()
         .map(|(name, _)| name)
         .collect()
-}
-
-/// Return user column (name, type) pairs for a stream table.
-///
-/// Used by bypass-table creation so column types match the original ST.
-pub fn get_st_user_columns_typed(st: &StreamTableMeta) -> Vec<(String, String)> {
-    crate::cdc::resolve_st_output_columns(st.pgt_relid).unwrap_or_default()
 }
 
 /// Check whether this ST has downstream ST consumers that need delta capture.
@@ -1975,40 +1758,6 @@ fn enforce_template_cache_byte_cap(
             break;
         }
     }
-}
-
-/// PERF-2 (v0.63.0): Retrieve the delta SQL template and source OIDs from the
-/// MERGE template cache for fused refresh eligibility checks.
-///
-/// Returns `Some((delta_sql_template, source_oids, user_cols_needed, is_deduplicated))`
-/// when a valid, non-stale cache entry exists for `pgt_id`.
-/// Returns `None` when the cache is cold or the entry is stale (hash mismatch).
-pub(crate) fn get_fused_refresh_template(
-    pgt_id: i64,
-    defining_query_hash: u64,
-) -> Option<(String, Vec<u32>, bool)> {
-    let cached = MERGE_TEMPLATE_CACHE.with(|cache| {
-        cache
-            .borrow()
-            .peek(&pgt_id)
-            .filter(|entry| {
-                entry.defining_query_hash == defining_query_hash
-                    && entry.planning_version == crate::dvm::planner::FORMAT_VERSION
-            })
-            .cloned()
-    });
-    cached
-        .filter(|entry| {
-            entry.statistics_epoch
-                == crate::dvm::planner::statistics_epoch_for_sources(&entry.source_oids)
-        })
-        .map(|entry| {
-            (
-                entry.delta_sql_template.as_ref().to_owned(),
-                entry.source_oids,
-                entry.is_deduplicated,
-            )
-        })
 }
 
 pub fn invalidate_merge_cache(pgt_id: i64) {

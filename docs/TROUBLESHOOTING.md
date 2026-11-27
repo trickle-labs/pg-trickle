@@ -36,6 +36,7 @@ pg_trickle in production.
   - [15. Stale Data After High-Concurrency Writes (Sequence Cache Inversion)](#15-stale-data-after-high-concurrency-writes-sequence-cache-inversion)
   - [16. Semantic Admission or Identity-Version Failure](#16-semantic-admission-or-identity-version-failure)
   - [17. Permission Denied on Internal Catalog During Refresh](#17-permission-denied-on-internal-catalog-during-refresh)
+  - [18. Silent Divergence in Parallel Stream-Table Chains](#18-silent-divergence-in-parallel-stream-table-chains)
 
 ---
 
@@ -787,6 +788,86 @@ refreshes succeed and that its contents match the defining query. The owner
 needs privileges for the defining query, not direct access to internal catalogs
 or `pgtrickle_changes` buffers. Review any workaround grants before removing
 them, including grants inherited through other roles or default privileges.
+
+---
+
+### 18. Silent Divergence in Parallel Stream-Table Chains
+
+**Symptoms:** In affected versions (reported on v0.108.3, issue
+[#1488](https://github.com/trickle-labs/pg-trickle/issues/1488)), an upstream
+stream table contains the expected rows but a downstream stream table is
+missing changes even after the pipeline has caught up. Refresh history may show
+only `COMPLETED` entries. The old fused-worker CDC bypass could skip older
+eligible deltas while advancing the downstream frontier.
+
+**Containment and recovery:**
+
+1. Until an upgrade containing the fix is installed, disable parallel refresh
+   at server level (as an administrator):
+
+   ```sql
+   ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = 'off';
+   SELECT pg_reload_conf();
+   ```
+
+   Allow existing worker jobs to drain before relying on the new setting.
+   This can reduce throughput. Disabling the separate CTE-fusion setting
+   alone is not a workaround for this issue.
+
+2. Upgrade using the [upgrade guide](UPGRADING.md). The fix retains fused
+   worker grouping but reads persistent change buffers for complete, bounded
+   CDC history. It prevents new omissions in that path; it cannot infer or
+   repair previously skipped events.
+
+3. Audit every potentially affected downstream stream table, including
+   descendants. If divergence is confirmed, use the supported rebuild API
+   starting with the earliest divergent upstream, then each affected
+   descendant in dependency order:
+
+   ```sql
+   SELECT pgtrickle.reinitialize_stream_table('public.my_downstream');
+   ```
+
+   Wait for each protected rebuild to complete before proceeding to its
+   dependents. Plan for rebuild locking, disk and runtime costs. Do not reset
+   frontiers or edit internal change buffers by hand. Resume normal processing
+   and verify the graph again after recovery.
+
+**Schedulable exact consistency check:**
+
+Run this example in a maintenance/verification window after quiescing
+source writes and draining pending refreshes through the entire chain.
+Execute under the stream owner (with the defining query's expected search
+path and visibility), select only user-visible columns, and substitute the
+actual defining query and table name. Both sides of the check use the same
+statement snapshot. Ordinary refresh lag, ongoing writes, time-dependent
+queries, or retention policies that intentionally preserve sealed history
+can cause a live-query comparison to differ without corruption; arrange
+an appropriate consistent cut and use a retention-aware oracle where needed.
+
+```sql
+WITH actual AS MATERIALIZED (
+    SELECT k, total, n FROM public.my_downstream
+), expected AS MATERIALIZED (
+    SELECT k, SUM(v) AS total, COUNT(*) AS n
+    FROM public.my_upstream
+    GROUP BY k
+), missing AS (
+    SELECT * FROM expected EXCEPT ALL SELECT * FROM actual
+), extra AS (
+    SELECT * FROM actual EXCEPT ALL SELECT * FROM expected
+)
+SELECT (SELECT COUNT(*) FROM missing) AS missing_rows,
+       (SELECT COUNT(*) FROM extra) AS extra_rows;
+```
+
+Schedule this read-only SQL with an existing SQL job runner in the verification
+window and alert if either count is nonzero. The symmetric `EXCEPT ALL` checks
+preserve multiplicities and detect same-count substitutions that a simple
+row-count check misses. A comparison with a divergent upstream may still pass
+for its child; verify the upstream against its own defining query as well.
+A full comparison can be expensive on large tables; apply suitable statement
+timeouts and run it outside latency-sensitive workloads.
 
 ---
 

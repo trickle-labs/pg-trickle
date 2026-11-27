@@ -32,7 +32,9 @@ use std::cell::RefCell;
 pub(crate) mod centroid_cost;
 pub(crate) mod codegen;
 pub(crate) mod delta_stage;
-pub(crate) mod fused;
+// Retain the historical SQL composer only as a test fixture, not an executor.
+#[cfg(test)]
+mod fused;
 pub(crate) mod merge;
 pub(crate) mod orchestrator;
 pub(crate) mod phd1;
@@ -51,18 +53,15 @@ pub(crate) mod vectorized_agg;
 // Precedence: explicit `pub use` overrides the `pub(crate) use *` glob for
 // the same name, giving those items public (not just crate) visibility.
 pub(crate) use codegen::*;
-pub(crate) use fused::{NodeSpec, fuse_diff_batch};
 pub(crate) use orchestrator::*;
 
 // ── External public API surface ─────────────────────────────────────────
 // Only items that are actually imported via the `crate::refresh::*` path
 // (rather than the full `crate::refresh::codegen::*` path) need to appear here.
 pub use codegen::{
-    capture_delta_to_bypass_table, clear_all_st_bypass, clear_fallback_leaf_oids,
-    flush_local_template_cache, flush_pending_cleanups_for_oids, get_fallback_leaf_oids,
-    get_st_bypass_tables, get_st_user_columns, get_st_user_columns_typed,
-    has_downstream_st_consumers, invalidate_merge_cache, prewarm_merge_cache,
-    set_fallback_leaf_oids,
+    clear_fallback_leaf_oids, flush_local_template_cache, flush_pending_cleanups_for_oids,
+    get_fallback_leaf_oids, get_st_user_columns, has_downstream_st_consumers,
+    invalidate_merge_cache, prewarm_merge_cache, set_fallback_leaf_oids,
 };
 pub(crate) use merge::compute_amplification_ratio;
 pub use merge::{

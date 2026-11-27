@@ -57,7 +57,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.dvm_decision_trace` | `bool` | `false` | When enabled, the DVM logs JSON events containing operator paths, output schemas, snapshot plans, and generated delta CTEs. |
 | `pg_trickle.enable_centroid_state` | `bool` | `false` | Enable experimental algebraic maintenance for supported vector averages. |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
-| `pg_trickle.enable_fused_refresh` | `bool` | `false` | Disable if a specific DAG shape causes unexpected planner behaviour. |
+| `pg_trickle.enable_fused_refresh` | `bool` | `false` | Deprecated compatibility setting; CTE-fused execution is disabled for correctness. |
 | `pg_trickle.enable_output_delta_qualification` | `bool` | `false` | Enable the constrained Delta V1 recovery qualification API. |
 | `pg_trickle.enable_trace_propagation` | `bool` | `false` | When `true`, trace context is propagated through refresh cycles for distributed tracing with OpenTelemetry. |
 | `pg_trickle.enable_vector_agg` | `bool` | `false` | F4 (v0.37.0): Enable pgVectorMV — incremental vector aggregate operators. |
@@ -71,7 +71,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.frontier_holdback_probe_cache_ms` | `int4` | `250` | Set to 0 to disable caching and probe on every scheduler tick. |
 | `pg_trickle.frontier_holdback_warn_seconds` | `int4` | `60` | #536: Emit a WARNING when the frontier holdback has been active for longer than this many seconds. |
 | `pg_trickle.fuse_default_ceiling` | `int4` | `0` | Set to 0 to disable the global default ceiling (per-ST ceiling only). |
-| `pg_trickle.fused_refresh_max_delta_rows` | `int4` | `500000` | Default: 500 000. |
+| `pg_trickle.fused_refresh_max_delta_rows` | `int4` | `500000` | Deprecated compatibility setting; the retired CTE-fusion executor ignores this limit. |
 | `pg_trickle.history_prune_interval_seconds` | `int4` | `60` | Default: 60 seconds. |
 | `pg_trickle.history_retention_days` | `int4` | `90` | Default: 90 days. |
 | `pg_trickle.invalidation_ring_capacity` | `int4` | `1024` | Default: 1024. |
