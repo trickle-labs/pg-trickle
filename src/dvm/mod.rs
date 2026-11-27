@@ -966,9 +966,6 @@ fn generate_delta_query_impl(
     // endpoint, rescan or join snapshot reads the bounded relation.
     ctx.register_all_source_scans(&source_oids)?;
 
-    // DAG-4: Apply any active bypass table mappings from fused-chain execution.
-    ctx.set_st_bypass_tables(crate::refresh::get_st_bypass_tables());
-
     // DI-2: Per-leaf conditional fallback — leaves whose delta fraction
     // exceeds max_delta_fraction use EXCEPT ALL instead of NOT EXISTS.
     ctx.set_fallback_leaf_oids(crate::refresh::get_fallback_leaf_oids());
@@ -1053,21 +1050,6 @@ pub fn generate_delta_query_cached(
         && !prev_frontier.is_empty()
         && !new_frontier.is_empty()
     {
-        return generate_delta_query_staged(
-            pgt_id,
-            defining_query,
-            prev_frontier,
-            new_frontier,
-            pgt_schema,
-            pgt_name,
-            stream_owner,
-        );
-    }
-
-    // DAG-4: When bypass tables are active, the cached SQL template
-    // has the wrong table names.  Fall back to the uncached path.
-    let bypass_tables = crate::refresh::get_st_bypass_tables();
-    if !bypass_tables.is_empty() {
         return generate_delta_query_staged(
             pgt_id,
             defining_query,

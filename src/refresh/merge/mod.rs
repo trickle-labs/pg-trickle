@@ -2384,8 +2384,7 @@ pub fn execute_differential_refresh_with_tuning(
         || incremental_window_state.is_some()
         || graph_same_pass
         || crate::config::pg_trickle_dvm_decision_trace()
-        || !get_fallback_leaf_oids().is_empty()
-        || !crate::refresh::get_st_bypass_tables().is_empty();
+        || !get_fallback_leaf_oids().is_empty();
     // Non-recursive CTEs (WITH … AS (…)) are fully supported by the DVM
     // engine: parse_defining_query_full() builds CteScan nodes and the
     // diff engine processes them via diff_cte_scan().  There is no need for

@@ -892,8 +892,13 @@ fn child_to_from_sql_in_context(
             // The LATERAL builder adds the source alias itself. Its fallback
             // must therefore be an unaliased snapshot, not child_to_from_sql's
             // already-aliased `(SELECT ...) AS alias` form.
-            let child_snapshot = current_bypass_scan_from_sql(lateral_child, ctx)
-                .unwrap_or_else(|| build_snapshot_sql(lateral_child));
+            let child_snapshot = match lateral_child.as_ref() {
+                OpTree::Scan { table_oid, .. } => ctx
+                    .bounded_source_table(*table_oid)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| build_snapshot_sql(lateral_child)),
+                _ => build_snapshot_sql(lateral_child),
+            };
             Some(
                 crate::dvm::operators::join_common::build_lateral_function_from_clause(
                     func_sql,
@@ -910,41 +915,6 @@ fn child_to_from_sql_in_context(
         }
         _ => child_to_from_sql(child, ctx.cte_registry(), project_scan_columns),
     }
-}
-
-fn current_bypass_scan_from_sql(child: &OpTree, ctx: &DiffContext) -> Option<String> {
-    let OpTree::Scan {
-        schema,
-        table_name,
-        table_oid,
-        alias,
-        columns,
-        ..
-    } = child
-    else {
-        return None;
-    };
-    // Strict graph members run after their upstream storage merge, so their
-    // physical stream-table relation is already current.  Only fused-chain
-    // execution exposes a pre-merge bypass relation that needs the staged
-    // D/I reconstruction here.
-    let pgt_id = ctx.st_source_pgt_ids().get(table_oid)?;
-    if !ctx.st_bypass_tables().contains_key(pgt_id) {
-        return None;
-    }
-    let delta_cte = ctx.scan_delta_cte_for_source(*table_oid, alias)?;
-    let column_list = columns
-        .iter()
-        .map(|column| quote_ident(&column.name))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "(SELECT {column_list} FROM {}.{} \
-         EXCEPT ALL SELECT {column_list} FROM {delta_cte} WHERE __pgt_action = 'D' \
-         UNION ALL SELECT {column_list} FROM {delta_cte} WHERE __pgt_action = 'I')",
-        quote_ident(schema),
-        quote_ident(table_name),
-    ))
 }
 
 fn child_from_has_outer_where(child: &OpTree) -> bool {
@@ -7415,7 +7385,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lateral_aggregate_current_snapshot_applies_same_pass_stage_delta() {
+    fn test_lateral_aggregate_current_snapshot_uses_bounded_source() {
         let scan = scan_with_pk(
             10,
             "normalized_name",
@@ -7443,37 +7413,16 @@ mod tests {
             },
         );
         let mut ctx = test_ctx();
-        ctx.set_st_source_pgt_ids(std::collections::HashMap::from([(10, 42)]));
-        ctx.set_source_stage_tables(std::collections::HashMap::from([(
+        ctx.set_source_bound_tables(std::collections::HashMap::from([(
             10,
-            "pg_temp.__pgt_cdc_99_10".into(),
+            "pg_temp.__pgt_bound_99_10".into(),
         )]));
-        ctx.set_st_bypass_tables(std::collections::HashMap::from([(
-            42,
-            "pg_temp.__pgt_cdc_99_10".into(),
-        )]));
-        ctx.scan_delta_ctes_mut().insert(
-            (10, "normalized_name".into()),
-            "__pgt_cte_scan_normalized".into(),
-        );
 
-        let sql = crate::refresh::with_refresh_context(
-            crate::refresh::RefreshContext::graph_result(
-                "0/10",
-                crate::refresh::FullPolicy::Error,
-                1,
-                false,
-                vec![],
-            ),
-            || Ok(child_to_from_sql_in_context(&child, &ctx, true)),
-        )
-        .expect("same-pass LATERAL aggregate snapshot should be reconstructible")
-        .expect("same-pass LATERAL aggregate snapshot should be present");
+        let sql = child_to_from_sql_in_context(&child, &ctx, true)
+            .expect("LATERAL aggregate snapshot should be present");
 
-        assert!(sql.contains("EXCEPT ALL"), "{sql}");
-        assert!(sql.contains("WHERE __pgt_action = 'D'"), "{sql}");
-        assert!(sql.contains("UNION ALL"), "{sql}");
-        assert!(sql.contains("WHERE __pgt_action = 'I'"), "{sql}");
+        assert!(sql.contains("pg_temp.__pgt_bound_99_10"), "{sql}");
+        assert!(!sql.contains("EXCEPT ALL"), "{sql}");
         assert!(sql.contains("CROSS JOIN LATERAL"), "{sql}");
     }
 
