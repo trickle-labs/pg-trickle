@@ -100,7 +100,9 @@ fn retention_catchup(
     let partition_key =
         retention_pruning_key(st.st_partition_key.as_deref(), &candidate.output_column)
             .map(|key| (st.pgt_id, key));
-    with_retention_index_scans(|| {
+    with_retention_guc_scope(|| {
+        // Delta generation joins unindexed temporary CDC/statistics rows.
+        // Do not install the storage probe-only planner policy here.
         crate::refresh::with_refresh_context(
             crate::refresh::RefreshContext::retention(safe_bound, partition_key),
             || {
@@ -2079,37 +2081,44 @@ fn with_retention_guc_scope<T>(
     }
 }
 
+/// Apply the indexed storage-probe policy only after delta materialization.
+/// The caller owns a GUC checkpoint (owner execution or retention scope).
+pub(crate) fn set_retention_apply_planner() -> Result<(), crate::error::PgTrickleError> {
+    use crate::error::PgTrickleError;
+    use pgrx::prelude::*;
+    Spi::run("SET LOCAL enable_partition_pruning = on")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run("SET LOCAL enable_indexscan = on")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run("SET LOCAL enable_bitmapscan = on")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run("SET LOCAL enable_tidscan = on")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run("SET LOCAL enable_seqscan = off")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run("SET LOCAL enable_nestloop = on")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run("SET LOCAL enable_hashjoin = off")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run("SET LOCAL enable_mergejoin = off")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    // shortcut: nested-loop parameterized lookups bound retention DML to affected keys.
+    Spi::run("SET LOCAL random_page_cost = 1")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run("SET LOCAL cpu_index_tuple_cost = 0.005")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run("SET LOCAL cpu_operator_cost = 0.0025")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run("SET LOCAL jit = off").map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Ok(())
+}
+
 #[cfg(not(test))]
 fn with_retention_index_scans<T>(
     operation: impl FnOnce() -> Result<T, crate::error::PgTrickleError>,
 ) -> Result<T, crate::error::PgTrickleError> {
-    use crate::error::PgTrickleError;
-    use pgrx::prelude::*;
     with_retention_guc_scope(|| {
-        Spi::run("SET LOCAL enable_partition_pruning = on")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Spi::run("SET LOCAL enable_indexscan = on")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Spi::run("SET LOCAL enable_bitmapscan = on")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Spi::run("SET LOCAL enable_tidscan = on")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Spi::run("SET LOCAL enable_seqscan = off")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Spi::run("SET LOCAL enable_nestloop = on")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Spi::run("SET LOCAL enable_hashjoin = off")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Spi::run("SET LOCAL enable_mergejoin = off")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        // shortcut: nested-loop parameterized lookups bound retention DML to affected keys.
-        Spi::run("SET LOCAL random_page_cost = 1")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Spi::run("SET LOCAL cpu_index_tuple_cost = 0.005")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Spi::run("SET LOCAL cpu_operator_cost = 0.0025")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Spi::run("SET LOCAL jit = off").map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        set_retention_apply_planner()?;
         operation()
     })
 }

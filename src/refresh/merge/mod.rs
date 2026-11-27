@@ -2891,6 +2891,17 @@ pub fn execute_differential_refresh_with_tuning(
     // SET LOCAL hints that are automatically reset at transaction end.
     // Deep joins (5+ tables) get aggressive hints to avoid pathological
     // plans that spill excessive temp files.
+    if crate::refresh::is_retention_catchup() {
+        for sql in [
+            "SET LOCAL enable_hashjoin = on",
+            "SET LOCAL enable_mergejoin = on",
+            "SET LOCAL enable_seqscan = on",
+            "SET LOCAL enable_nestloop = on",
+            "SET LOCAL jit = off",
+        ] {
+            Spi::run(sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+    }
     let work_mem_cap_exceeded = apply_planner_hints(
         total_change_count,
         st.pgt_relid,
@@ -3132,8 +3143,10 @@ pub fn execute_differential_refresh_with_tuning(
     // The explicit DML path materializes the delta into __pgt_delta_{pgt_id},
     // which we then capture into the ST's change buffer for downstream use.
     let needs_downstream_capture = has_downstream_st_consumers(st.pgt_id);
-    let use_explicit_dml =
-        use_explicit_dml || needs_downstream_capture || bounded_distance_snapshot;
+    let use_explicit_dml = use_explicit_dml
+        || needs_downstream_capture
+        || bounded_distance_snapshot
+        || crate::refresh::is_retention_catchup();
 
     // When user_triggers = 'off' but there ARE user triggers on the ST,
     // suppress them during the MERGE to prevent spurious firing.
@@ -3999,7 +4012,9 @@ pub fn execute_differential_refresh_with_tuning(
             if bounded_distance_snapshot {
                 crate::api::prepare_distance_delta_snapshot(st, &delta_table);
             }
-            if graph_same_pass && crate::config::pg_trickle_analyze_before_delta() {
+            if (graph_same_pass || crate::refresh::is_retention_catchup())
+                && crate::config::pg_trickle_analyze_before_delta()
+            {
                 let analyze_sql = format!("ANALYZE {delta_table}");
                 Spi::run(&analyze_sql).map_err(|e| {
                     PgTrickleError::SpiError(format!(
@@ -4008,6 +4023,9 @@ pub fn execute_differential_refresh_with_tuning(
                 })?;
             }
             let t_mat = t_mat_start.elapsed();
+            if crate::refresh::is_retention_catchup() {
+                crate::dvm::retention::set_retention_apply_planner()?;
+            }
             // ST-ST-10: When this ST has downstream ST consumers, snapshot
             // the affected rows BEFORE applying DML.  The weight-aggregation
             // wrapper collapses D+I pairs for the same __pgt_row_id into a
