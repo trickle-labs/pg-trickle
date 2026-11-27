@@ -46,7 +46,11 @@ SELECT
     max(h.start_time)                                            AS last_refresh_at
 FROM pgtrickle.pgt_refresh_history h
 JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = h.pgt_id
+JOIN pgtrickle.pgt_refresh_summary rs ON rs.pgt_id = h.pgt_id
 WHERE h.status = 'COMPLETED'
+  AND h.start_time >= rs.stats_reset_at
+  AND h.plan_identity = st.defining_query_hash
+  AND h.contract_generation = st.contract_generation
   AND h.start_time > now() - interval '1 hour'
 GROUP BY h.pgt_id, st.pgt_schema, st.pgt_name";
 
@@ -101,39 +105,9 @@ SELECT
     eff.pgt_schema,
     eff.pgt_name,
     st.auto_threshold AS current_threshold,
-    CASE
-        WHEN eff.avg_diff_ms IS NOT NULL AND eff.avg_full_ms IS NOT NULL
-             AND eff.avg_full_ms > 0
-        THEN LEAST(0.80, GREATEST(0.01,
-            CASE WHEN eff.avg_diff_ms / eff.avg_full_ms <= 0.30 THEN
-                LEAST(st.auto_threshold * 1.20, 0.80)
-            WHEN eff.avg_diff_ms / eff.avg_full_ms >= 0.80 THEN
-                GREATEST(st.auto_threshold * 0.70, 0.01)
-            ELSE st.auto_threshold
-            END
-        ))
-        ELSE st.auto_threshold
-    END AS recommended_threshold,
-    CASE
-        WHEN eff.total_refreshes >= 20 AND eff.diff_count >= 5
-             AND eff.full_count >= 2 THEN 'HIGH'
-        WHEN eff.total_refreshes >= 10 THEN 'MEDIUM'
-        ELSE 'LOW'
-    END AS confidence,
-    CASE
-        WHEN eff.avg_diff_ms IS NOT NULL AND eff.avg_full_ms IS NOT NULL
-             AND eff.avg_full_ms > 0
-        THEN CASE
-            WHEN eff.avg_diff_ms / eff.avg_full_ms <= 0.30
-                THEN 'DIFF is ' || round((1.0 - eff.avg_diff_ms / eff.avg_full_ms)::numeric * 100)
-                     || '% faster — raise threshold to allow more DIFF'
-            WHEN eff.avg_diff_ms / eff.avg_full_ms >= 0.80
-                THEN 'DIFF is only ' || round((1.0 - eff.avg_diff_ms / eff.avg_full_ms)::numeric * 100)
-                     || '% faster — lower threshold to prefer FULL sooner'
-            ELSE 'Current threshold is well-calibrated'
-        END
-        ELSE 'Insufficient data — need both DIFF and FULL observations'
-    END AS reason,
+    st.auto_threshold AS recommended_threshold,
+    'LOW'::text AS confidence,
+    'Historical averages are observational; use comparable refresh cost evidence'::text AS reason,
     eff.avg_diff_ms,
     eff.avg_full_ms,
     eff.diff_count,
@@ -810,12 +784,14 @@ mod tests {
         assert!(dot.contains("#4A90D9"));
     }
 
-    /// CORR-1: Verify the threshold clamping SQL expression
-    /// produces values within [0.01, 0.80] for edge cases.
     #[test]
-    fn test_threshold_advice_query_contains_clamp() {
-        assert!(DF_THRESHOLD_ADVICE_QUERY.contains("LEAST(0.80"));
-        assert!(DF_THRESHOLD_ADVICE_QUERY.contains("GREATEST(0.01"));
+    fn test_threshold_advice_does_not_recommend_threshold_changes() {
+        assert!(DF_THRESHOLD_ADVICE_QUERY.contains("st.auto_threshold AS recommended_threshold"));
+        assert!(DF_THRESHOLD_ADVICE_QUERY.contains("'LOW'::text AS confidence"));
+        assert!(DF_EFFICIENCY_ROLLING_QUERY.contains("h.start_time >= rs.stats_reset_at"));
+        assert!(
+            DF_EFFICIENCY_ROLLING_QUERY.contains("h.contract_generation = st.contract_generation")
+        );
     }
 
     /// CORR-3: Verify the NULLIF guard against divide-by-zero.

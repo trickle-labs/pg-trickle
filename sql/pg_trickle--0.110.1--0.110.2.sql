@@ -76,3 +76,7 @@ SET search_path TO pgtrickle, pg_catalog, pg_temp
 AS 'MODULE_PATHNAME', 'would_replace_stream_table_storage_wrapper';
 
 REVOKE EXECUTE ON FUNCTION pgtrickle.would_replace_stream_table_storage(text, text) FROM PUBLIC;
+
+-- Old refresh records cannot establish current contract provenance.
+ALTER TABLE pgtrickle.pgt_refresh_history
+    ADD COLUMN IF NOT EXISTS contract_generation BIGINT;

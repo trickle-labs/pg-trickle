@@ -299,10 +299,12 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
     db.execute(
         "INSERT INTO pgtrickle.pgt_refresh_history
             (pgt_id, data_timestamp, start_time, end_time, action, status,
-             rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback)
+             rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback,
+             plan_identity, contract_generation)
          SELECT pgt_id, now(), now() - interval '1 minute',
                 now() - interval '1 minute' + interval '100 milliseconds',
-                'FULL', 'COMPLETED', 2, 2, 'FULL', false
+                'FULL', 'COMPLETED', 2, 2, 'FULL', false,
+                defining_query_hash, contract_generation
            FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_cost_st'",
     )
     .await;

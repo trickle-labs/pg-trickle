@@ -434,7 +434,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_history (
     visibility_xid  XID,
     visible_at      TIMESTAMPTZ,
     commit_to_visible_ms DOUBLE PRECISION,
-    plan_identity   BIGINT
+    plan_identity   BIGINT,
+    contract_generation BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS idx_hist_pgt_ts ON pgtrickle.pgt_refresh_history (pgt_id, data_timestamp);

@@ -361,3 +361,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, te
 GRANT EXECUTE ON FUNCTION pgtrickle.set_stream_table_partition_retention(text, text, text, text) TO pgtrickle_admin;
 GRANT EXECUTE ON FUNCTION pgtrickle.get_stream_table_partition_retention(text) TO pgtrickle_admin;
 GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table_with_retention(text, text, text, text, text, text) TO pgtrickle_admin;
+
+-- Old refresh records cannot establish current contract provenance.
+ALTER TABLE pgtrickle.pgt_refresh_history
+    ADD COLUMN IF NOT EXISTS contract_generation BIGINT;
