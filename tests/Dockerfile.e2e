@@ -83,7 +83,7 @@ RUN echo "=== Package artifacts ===" && \
 # ── Stage 2: Runtime image with extension installed ─────────────────────────
 # OPS-10-03: Pinned to exact SHA256 digest for reproducibility.
 # Run scripts/update_base_image_digests.sh to refresh quarterly.
-FROM postgres:18.7-bookworm@sha256:ece55f7868da684e400f82f1030a050718adbdd65c23aa500c486f6e2950dc0f AS runtime-base
+FROM postgres:18.7-bookworm@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1 AS runtime-base
 
 ARG DVM_MUTATION_RUNTIME_SOURCE_SHA
 LABEL com.pgtrickle.dvm-mutation.runtime-source-sha=${DVM_MUTATION_RUNTIME_SOURCE_SHA}
