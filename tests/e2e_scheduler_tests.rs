@@ -2231,6 +2231,28 @@ async fn assert_fused_chain_consumes_complete_cdc_windows(
     let buffer = format!("pgtrickle_changes.changes_pgt_{up_id}");
     let members = format!("ARRAY[{up_id}, {down_id}]::bigint[]");
 
+    // Use an independent scheduler job to witness that the database-wide
+    // safe watermark has reached the committed fixture writes. A tick may
+    // legitimately retain an older watermark while active transactions drain.
+    db.execute("CREATE TABLE fused_probe_src (id INT PRIMARY KEY, v INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO fused_probe_src VALUES (1, 0)")
+        .await;
+    db.create_st(
+        "fused_probe",
+        "SELECT id, v FROM fused_probe_src",
+        "1s",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['fused_probe'])")
+        .await;
+    let probe_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fused_probe'",
+        )
+        .await;
+
     // Two independent upstream refreshes while the consumer is paused:
     // INSERT, DELETE, and two changes to the same logical row.
     db.execute("INSERT INTO fused_a VALUES (1001, 1, 7), (1002, 2, 8)")
@@ -2279,6 +2301,37 @@ async fn assert_fused_chain_consumes_complete_cdc_windows(
             db.execute("UPDATE fused_b SET v = 99 WHERE id = 11").await;
         }
 
+        // Capture a WAL position after the fixture writes committed, then
+        // keep the chain paused until a real independent job has observed a
+        // safe cut at or beyond it. Do not disable the writer holdback.
+        let required_cut: String = db
+            .query_scalar("SELECT pg_current_wal_insert_lsn()::text")
+            .await;
+        db.execute("UPDATE fused_probe_src SET v = v + 1 WHERE id = 1")
+            .await;
+        let before_probe: i64 = db
+            .query_scalar("SELECT COALESCE(MAX(job_id), 0) FROM pgtrickle.pgt_scheduler_jobs")
+            .await;
+        db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['fused_probe'])")
+            .await;
+        let probe_ready = format!(
+            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_scheduler_jobs \
+             WHERE job_id > {before_probe} AND member_pgt_ids = ARRAY[{probe_id}]::bigint[] \
+               AND status = 'SUCCEEDED' AND tick_watermark_lsn >= '{required_cut}'::pg_lsn)"
+        );
+        assert!(
+            db.wait_for_condition(
+                "scheduler safe watermark covers fixture writes",
+                &probe_ready,
+                Duration::from_secs(60),
+                Duration::from_millis(100),
+            )
+            .await,
+            "tick {tick}: scheduler did not reach required cut {required_cut}"
+        );
+        db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['fused_probe'])")
+            .await;
+
         let before_job: i64 = db
             .query_scalar("SELECT COALESCE(MAX(job_id), 0) FROM pgtrickle.pgt_scheduler_jobs")
             .await;
@@ -2323,7 +2376,7 @@ async fn assert_fused_chain_consumes_complete_cdc_windows(
                 "SELECT '{eligible_lsn}'::pg_lsn <= '{watermark}'::pg_lsn"
             ))
             .await,
-            "tick {tick}: the earlier backlog must be inside the worker's window"
+            "tick {tick}: the earlier backlog ({eligible_lsn}) must be inside the worker's window ({watermark}); probe cut {required_cut}"
         );
 
         // The old implementation either omitted the eligible backlog or
