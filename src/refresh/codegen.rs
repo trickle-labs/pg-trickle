@@ -404,7 +404,8 @@ pub(crate) fn drain_pending_cleanups() {
                 }
                 _ => {}
             }
-            continue;
+            // DEFAULT and partially consumed partitions still contain rows
+            // eligible for bounded cleanup. Preserve the sentinel below.
         }
 
         // NS-3: record a failed cleanup attempt; warn after 3 consecutive failures.
@@ -620,7 +621,8 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
                 }
                 _ => {}
             }
-            continue;
+            // DEFAULT and partially consumed partitions still contain rows
+            // eligible for bounded cleanup. Preserve the sentinel below.
         }
 
         let delete_sql = format!(

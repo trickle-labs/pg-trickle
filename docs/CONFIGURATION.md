@@ -1442,14 +1442,15 @@ WHERE property IN ('template_cache', 'template_cache_stats');
 
 ### pg_trickle.buffer_partitioning
 
-Controls whether change buffer tables use `PARTITION BY RANGE (lsn)` for
-O(1) cleanup via partition detach instead of O(n) DELETE.
+Controls whether newly created change buffers use `PARTITION BY RANGE (lsn)`.
+Fully consumed range partitions can be detached, and remaining consumed rows
+(including DEFAULT) are deleted at the minimum protected consumer frontier.
 
 | Value | Behaviour |
 |-------|----------|
-| `'off'` | **(Default)** Unpartitioned heap tables. Cleanup uses DELETE or TRUNCATE. Lowest DDL overhead per cycle. |
-| `'on'` | Always create partitioned change buffers. Old partitions are detached and dropped after consumption — O(1) cleanup regardless of buffer size. Best for high-throughput sources where buffers routinely exceed `compact_threshold`. |
-| `'auto'` | Start with unpartitioned buffers. If a buffer accumulates more rows than `compact_threshold` within a single refresh cycle, automatically promote it to RANGE(lsn) partitioned mode. Once promoted, the buffer stays partitioned. Combines low overhead for quiet sources with O(1) cleanup for hot ones. |
+| `'off'` | **(Default)** Unpartitioned heap tables. Cleanup uses bounded DELETE. Lowest DDL overhead per cycle. |
+| `'on'` | Always create partitioned change buffers. Fully consumed ranges can be detached; remaining consumed rows are deleted. |
+| `'auto'` | Choose partitioned storage at buffer creation for sources with effective refresh schedules of at least 30 seconds. Existing capture relations are not replaced. |
 
 **Default:** `'off'`
 **Context:** `SUSET` (superuser session-level)
@@ -1458,17 +1459,18 @@ O(1) cleanup via partition detach instead of O(n) DELETE.
 -- Always partition change buffers
 SET pg_trickle.buffer_partitioning = 'on';
 
--- Auto-promote based on throughput
+-- Choose layout at buffer creation
 SET pg_trickle.buffer_partitioning = 'auto';
 
 -- Disable partitioning (default)
 SET pg_trickle.buffer_partitioning = 'off';
 ```
 
-> **Interaction with `compact_threshold`:** In `'auto'` mode, the
-> `compact_threshold` value serves double duty — it triggers both compaction
-> and the auto-promotion decision. Lowering `compact_threshold` makes
-> auto-promotion more sensitive.
+Runtime auto-promotion is retired: replacing a live capture relation risks
+losing its sequence ordering, exact column definitions and durability.
+`compact_threshold` controls compaction only. Existing installations that
+previously auto-promoted buffers should qualify their capture layout and
+reinitialize from complete source history if event ordering may have been lost.
 
 ---
 
@@ -2971,7 +2973,7 @@ documents these cross-dependencies to help avoid misconfiguration.
 | `cdc_mode` | `cdc_trigger_mode` | `cdc_trigger_mode` (`'statement'` / `'row'`) applies while a source uses trigger capture. |
 | `cdc_mode` | `wal_transition_timeout` | WAL transition timeouts return a source to trigger capture. |
 | `cleanup_use_truncate` | `compact_threshold` | `cleanup_use_truncate` is a compatibility setting with no effect. Bounded DELETE cleans consumed rows. `compact_threshold` controls compaction of pending changes when row identity and consumer count permit it. |
-| `buffer_partitioning` | `compact_threshold` | In `'auto'` mode, `compact_threshold` serves as the promotion trigger: if a buffer exceeds this many rows in a single refresh cycle, it is promoted to RANGE(lsn) partitioned mode. Lowering `compact_threshold` makes auto-promotion more sensitive. |
+| `buffer_partitioning` | `compact_threshold` | Buffer layout is selected at creation; `compact_threshold` controls compaction only. |
 | `allow_circular` | `max_fixpoint_iterations` | `max_fixpoint_iterations` is only evaluated when `allow_circular = true`. It caps the number of convergence iterations for circular dependency chains. |
 | `ivm_topk_max_limit` | TopK queries | Queries with `LIMIT > ivm_topk_max_limit` fall back to FULL refresh instead of the optimized TopK path. Raise this if you have legitimate large TopK queries. |
 | `ivm_recursive_max_depth` | Recursive CTEs | Recursive expansion beyond `ivm_recursive_max_depth` iterations is terminated with a warning and falls back to FULL refresh. Set to 0 to disable the guard (not recommended). |

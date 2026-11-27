@@ -96,9 +96,6 @@ pub(crate) mod buffer;
 /// Compaction result type (QUAL-3).
 pub(crate) mod compact;
 
-/// Buffer auto-promotion decision logic (QUAL-3).
-pub(crate) mod partition;
-
 // Re-export all public items from submodules to preserve the existing API.
 pub use polling::{
     poll_foreign_table_changes, poll_matview_changes, setup_foreign_table_polling,
@@ -1948,6 +1945,18 @@ pub fn detach_consumed_partitions(
                 .unwrap_or(false);
 
         if is_consumed {
+            // Keep the crash-recovery sentinel even if an administrator
+            // placed it in an explicit low-LSN partition rather than DEFAULT.
+            let child = crate::sql_builder::qualified(change_schema, part_name);
+            // nosemgrep: rust.spi.query.dynamic-format — child uses qualified() to quote both identifiers; action is a fixed literal.
+            let has_sentinel = Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS (SELECT 1 FROM {child} WHERE action = 'S')"
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(true);
+            if has_sentinel {
+                continue;
+            }
             // CONCURRENTLY is not available inside a transaction, so use
             // plain DETACH + DROP.
             let detach_sql = format!(
@@ -3208,245 +3217,6 @@ pub fn consume_slot_changes(
     Ok(count.unwrap_or(0))
 }
 
-// ── PERF-2: Auto Buffer Partitioning ────────────────────────────────────
-
-/// Pure decision logic for auto-promotion — testable without a PostgreSQL
-/// backend.  All GUC values are passed as parameters.
-///
-/// Returns `true` when:
-/// 1. `mode` is `"auto"`
-/// 2. The buffer is not already partitioned
-/// 3. `pending_count > threshold` and `threshold > 0`
-// QUAL-3: should_promote_inner moved to src/cdc/partition.rs.
-use partition::should_promote_inner;
-
-/// Should an unpartitioned buffer be promoted to RANGE(lsn) partitioned mode?
-///
-/// Reads GUC values and delegates to the pure [`should_promote_inner`].
-pub fn should_promote_to_partitioned(pending_count: i64, already_partitioned: bool) -> bool {
-    let mode = crate::config::pg_trickle_buffer_partitioning();
-    let threshold = crate::config::pg_trickle_compact_threshold();
-    should_promote_inner(pending_count, already_partitioned, &mode, threshold)
-}
-
-/// Convert an existing unpartitioned change buffer to RANGE(lsn) partitioned
-/// mode at runtime.
-///
-/// Strategy:
-/// 1. Rename the existing heap table to a temporary name
-/// 2. Create a new partitioned table with the same schema
-/// 3. Create a default partition to accept incoming rows immediately
-/// 4. Migrate existing rows via INSERT … SELECT
-/// 5. Recreate the covering index
-/// 6. Drop the old table
-///
-/// This runs inside the current transaction and acquires an ACCESS EXCLUSIVE
-/// lock on the buffer table during the rename — which is safe because it
-/// runs between refresh cycles when no concurrent readers exist.
-pub fn convert_buffer_to_partitioned(
-    change_schema: &str,
-    source_oid: u32,
-) -> Result<i64, PgTrickleError> {
-    let table_name = buffer_base_name_for_oid(pg_sys::Oid::from(source_oid));
-    let migrated_name = format!("{table_name}_pre_part");
-
-    // Step 1: Rename the existing unpartitioned table.
-    let rename_sql = format!(
-        "ALTER TABLE \"{schema}\".\"{table}\" RENAME TO \"{migrated}\"",
-        schema = change_schema,
-        table = table_name,
-        migrated = migrated_name,
-    );
-    Spi::run(&rename_sql).map_err(|e| {
-        PgTrickleError::SpiError(format!(
-            "PERF-2: Failed to rename buffer for partitioning: {e}"
-        ))
-    })?;
-
-    // Step 2: Read the column definitions from the renamed table so we can
-    // recreate the partitioned table with identical schema.
-    let col_defs: Vec<(String, String, i32)> = Spi::connect(|client| {
-        let sql = format!(
-            "SELECT column_name::text, data_type::text, ordinal_position::int \
-             FROM information_schema.columns \
-             WHERE table_schema = '{schema}' AND table_name = '{migrated}' \
-             ORDER BY ordinal_position",
-            schema = change_schema,
-            migrated = migrated_name,
-        );
-        let result = client
-            .select(&sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        let mut cols = Vec::new();
-        for row in result {
-            let name: String = row.get(1).unwrap_or(None).unwrap_or_default();
-            let dtype: String = row.get(2).unwrap_or(None).unwrap_or_default();
-            let pos: i32 = row.get(3).unwrap_or(None).unwrap_or(0);
-            cols.push((name, dtype, pos));
-        }
-        Ok::<_, PgTrickleError>(cols)
-    })?;
-
-    // Build CREATE TABLE statement replicating all columns.
-    let col_sql: String = col_defs
-        .iter()
-        .map(|(name, dtype, _)| {
-            let qname = name.replace('"', "\"\"");
-            // Map information_schema types back to SQL types.
-            let sql_type = match dtype.as_str() {
-                "bigint" => "BIGINT",
-                "pg_lsn" => "PG_LSN",
-                "character" => "CHAR(1)",
-                "bit varying" => "VARBIT",
-                _ => dtype.as_str(),
-            };
-            // change_id uses BIGSERIAL for auto-increment.
-            if name == "change_id" {
-                return format!("\"{qname}\" BIGSERIAL");
-            }
-            // lsn is NOT NULL.
-            if name == "lsn" {
-                return format!("\"{qname}\" {sql_type} NOT NULL");
-            }
-            // action is NOT NULL.
-            if name == "action" {
-                return format!("\"{qname}\" {sql_type} NOT NULL");
-            }
-            if name == "__pgt_row_id" {
-                return format!("\"{qname}\" BYTEA NOT NULL");
-            }
-            format!("\"{qname}\" {sql_type}")
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let create_sql = format!(
-        "CREATE TABLE \"{schema}\".\"{table}\" ({col_sql}) PARTITION BY RANGE (lsn)",
-        schema = change_schema,
-        table = table_name,
-    );
-    Spi::run(&create_sql).map_err(|e| {
-        PgTrickleError::SpiError(format!("PERF-2: Failed to create partitioned buffer: {e}"))
-    })?;
-
-    // Disable RLS on the new partitioned table.
-    Spi::run(&format!(
-        "ALTER TABLE \"{schema}\".\"{table}\" DISABLE ROW LEVEL SECURITY",
-        schema = change_schema,
-        table = table_name,
-    ))
-    .map_err(|e| PgTrickleError::SpiError(format!("PERF-2: Failed to disable RLS: {e}")))?;
-
-    // Step 3: Create default partition.
-    let default_sql = format!(
-        "CREATE TABLE \"{schema}\".\"{table}_default\" \
-         PARTITION OF \"{schema}\".\"{table}\" DEFAULT",
-        schema = change_schema,
-        table = table_name,
-    );
-    Spi::run(&default_sql).map_err(|e| {
-        PgTrickleError::SpiError(format!("PERF-2: Failed to create default partition: {e}"))
-    })?;
-
-    // Step 4: Migrate existing rows.
-    let migrate_sql = format!(
-        "INSERT INTO \"{schema}\".\"{table}\" SELECT * FROM \"{schema}\".\"{migrated}\"",
-        schema = change_schema,
-        table = table_name,
-        migrated = migrated_name,
-    );
-    Spi::run(&migrate_sql).map_err(|e| {
-        PgTrickleError::SpiError(format!(
-            "PERF-2: Failed to migrate rows to partitioned buffer: {e}"
-        ))
-    })?;
-
-    // Count migrated rows for logging.
-    let migrated_count = Spi::get_one::<i64>(&format!(
-        "SELECT count(*)::bigint FROM \"{schema}\".\"{table}\"",
-        schema = change_schema,
-        table = table_name,
-    ))
-    .unwrap_or(Some(0))
-    .unwrap_or(0);
-
-    // Step 5: Recreate the covering index.
-    let idx_sql = format!(
-        "CREATE INDEX IF NOT EXISTS \"idx_{table}_lsn_pk_cid\" \
-         ON \"{schema}\".\"{table}\" (lsn, pgtrickle.row_probe_v1(__pgt_row_id), change_id) INCLUDE (action)",
-        schema = change_schema,
-        table = table_name,
-    );
-    Spi::run(&idx_sql).map_err(|e| {
-        PgTrickleError::SpiError(format!(
-            "PERF-2: Failed to create index on partitioned buffer: {e}"
-        ))
-    })?;
-
-    // Step 6: Drop the old table.
-    let drop_sql = format!(
-        "DROP TABLE IF EXISTS \"{schema}\".\"{migrated}\"",
-        schema = change_schema,
-        migrated = migrated_name,
-    );
-    Spi::run(&drop_sql).map_err(|e| {
-        PgTrickleError::SpiError(format!("PERF-2: Failed to drop old buffer table: {e}"))
-    })?;
-
-    pgrx::log!(
-        "pg_trickle PERF-2: promoted {} to RANGE(lsn) partitioned mode ({} rows migrated)",
-        table_name,
-        migrated_count,
-    );
-
-    Ok(migrated_count)
-}
-
-/// PERF-2: Check if a buffer should be auto-promoted and do the conversion.
-///
-/// Called after compaction in `execute_differential_refresh()`. If the
-/// buffer accumulated more rows than `compact_threshold` in a single
-/// refresh cycle AND `buffer_partitioning = 'auto'`, converts the buffer
-/// to RANGE(lsn) partitioned mode for O(1) cleanup.
-///
-/// Returns `Ok(true)` if the buffer was promoted, `Ok(false)` otherwise.
-pub fn maybe_auto_promote_buffer(
-    change_schema: &str,
-    source_oid: u32,
-    pending_count: i64,
-) -> Result<bool, PgTrickleError> {
-    let already_partitioned = is_buffer_partitioned(change_schema, source_oid);
-    if !should_promote_to_partitioned(pending_count, already_partitioned) {
-        return Ok(false);
-    }
-
-    convert_buffer_to_partitioned(change_schema, source_oid)?;
-    Ok(true)
-}
-
-/// Count the number of pending change rows in a buffer between two LSN boundaries.
-///
-/// Used by the auto-promote heuristic to measure buffer fill rate within
-/// a single refresh cycle.
-pub fn count_pending_changes(
-    change_schema: &str,
-    source_oid: u32,
-    prev_lsn: &str,
-    new_lsn: &str,
-) -> i64 {
-    // CITUS-4: Use stable buffer name (v0.32.0+).
-    let buf_name = buffer_base_name_for_oid(pg_sys::Oid::from(source_oid));
-    Spi::get_one::<i64>(&format!(
-        "SELECT count(*)::bigint FROM \"{schema}\".{buf} \
-         WHERE action IN ('I', 'D') \
-           AND lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn",
-        schema = change_schema,
-        buf = buf_name,
-    ))
-    .unwrap_or(Some(0))
-    .unwrap_or(0)
-}
-
 /// PRED-2: Estimate total pending change buffer rows across all sources for a stream table.
 ///
 /// This uses `pg_class.reltuples` for a fast estimate (no sequential scan).
@@ -4698,62 +4468,6 @@ mod tests {
         let k1 = compact_st_advisory_lock_key(1);
         let k2 = compact_st_advisory_lock_key(2);
         assert_ne!(k1, k2, "Different pgt_ids must produce different keys");
-    }
-
-    // ── PERF-2: should_promote_inner tests ─────────────────────────
-
-    #[test]
-    fn test_promote_already_partitioned_returns_false() {
-        assert!(!should_promote_inner(999_999, true, "auto", 100_000));
-    }
-
-    #[test]
-    fn test_promote_below_threshold_returns_false() {
-        assert!(!should_promote_inner(50_000, false, "auto", 100_000));
-    }
-
-    #[test]
-    fn test_promote_at_threshold_returns_false() {
-        // Exactly at threshold — not above.
-        assert!(!should_promote_inner(100_000, false, "auto", 100_000));
-    }
-
-    #[test]
-    fn test_promote_above_threshold_auto_mode() {
-        assert!(should_promote_inner(100_001, false, "auto", 100_000));
-    }
-
-    #[test]
-    fn test_promote_above_threshold_off_mode() {
-        // Mode = "off" — never promote.
-        assert!(!should_promote_inner(100_001, false, "off", 100_000));
-    }
-
-    #[test]
-    fn test_promote_above_threshold_on_mode() {
-        // Mode = "on" — buffers created pre-partitioned, never runtime promote.
-        assert!(!should_promote_inner(100_001, false, "on", 100_000));
-    }
-
-    #[test]
-    fn test_promote_zero_pending_returns_false() {
-        assert!(!should_promote_inner(0, false, "auto", 100_000));
-    }
-
-    #[test]
-    fn test_promote_negative_pending_returns_false() {
-        assert!(!should_promote_inner(-1, false, "auto", 100_000));
-    }
-
-    #[test]
-    fn test_promote_zero_threshold_returns_false() {
-        // Threshold disabled (0) — never promote.
-        assert!(!should_promote_inner(999_999, false, "auto", 0));
-    }
-
-    #[test]
-    fn test_promote_negative_threshold_returns_false() {
-        assert!(!should_promote_inner(999_999, false, "auto", -1));
     }
 
     // ── #536: classify_holdback unit tests ─────────────────────────
