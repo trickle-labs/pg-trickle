@@ -130,14 +130,49 @@ async fn test_view_inline_diff_basic() {
     let count = db.count("public.vi_st_basic").await;
     assert_eq!(count, 3, "Should have 3 rows from view");
 
-    // INSERT into the base table (not the view) → verify CDC captures it
+    // Keep the manual witness independent of scheduled refreshes. A completed
+    // refresh can also defer a committed insert under writer holdback.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.vi_st_basic'])")
+        .await;
+    let baseline: i64 = db
+        .query_scalar(
+            "SELECT COALESCE(MAX(h.refresh_id), 0) FROM pgtrickle.pgt_refresh_history h
+             JOIN pgtrickle.pgt_stream_tables t USING (pgt_id)
+             WHERE t.pgt_relid = 'public.vi_st_basic'::regclass",
+        )
+        .await;
+
+    // INSERT into the base table (not the view) → verify CDC captures it.
     db.execute("INSERT INTO vi_base VALUES (4, 'd')").await;
-    db.refresh_st("vi_st_basic").await;
+    db.refresh_st_until_converged("vi_st_basic").await;
 
     let count_after = db.count("public.vi_st_basic").await;
     assert_eq!(
         count_after, 4,
         "Differential refresh should pick up insert on base table"
+    );
+    db.assert_st_matches_query("vi_st_basic", "SELECT id, val FROM vi_simple")
+        .await;
+
+    // A FULL rebuild must not make a broken view-inlining delta test pass.
+    let differential_only: bool = sqlx::query_scalar(
+        "SELECT COALESCE(bool_or(h.action = 'DIFFERENTIAL'
+                    AND h.initiated_by = 'MANUAL' AND NOT h.was_full_fallback), false)
+                AND NOT COALESCE(bool_or(h.action IN ('FULL', 'REINITIALIZE')
+                    OR h.was_full_fallback), false)
+         FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables t USING (pgt_id)
+         WHERE t.pgt_relid = 'public.vi_st_basic'::regclass
+           AND h.status = 'COMPLETED' AND h.refresh_id > $1",
+    )
+    .bind(baseline)
+    .fetch_one(&db.pool)
+    .await
+    .expect("inspect completed view-inlining refresh history");
+    assert!(
+        differential_only,
+        "view insert must converge through DIFFERENTIAL"
     );
 }
 
