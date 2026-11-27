@@ -59,6 +59,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("functions_used", "ARRAY"),
         ("fuse_ceiling", "bigint"),
         ("fuse_mode", "text"),
+        ("fuse_over_ceiling_cycles", "integer"),
         ("fuse_sensitivity", "integer"),
         ("fuse_state", "text"),
         ("has_keyless_source", "boolean"),

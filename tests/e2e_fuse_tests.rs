@@ -517,3 +517,94 @@ async fn test_fuse_global_ceiling_guc() {
     let blown = wait_for_fuse_blown(&db, "st_fuse_global", Duration::from_secs(30)).await;
     assert!(blown, "fuse should blow from global ceiling");
 }
+
+#[tokio::test]
+async fn test_fuse_ignores_history_retained_for_slow_sibling() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    setup_fast_scheduler(&db).await;
+    db.execute("CREATE TABLE fuse1486_src(id int PRIMARY KEY, v int)")
+        .await;
+    db.execute("INSERT INTO fuse1486_src VALUES (1,1)").await;
+    let query = "SELECT id,v FROM fuse1486_src";
+    db.create_st("fuse1486_fast", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st("fuse1486_slow", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.fuse1486_slow'])")
+        .await;
+    db.execute("INSERT INTO fuse1486_src SELECT n,n FROM generate_series(2,100) n")
+        .await;
+    db.refresh_st_until_converged("fuse1486_fast").await;
+    db.assert_st_matches_query("fuse1486_fast", query).await;
+    assert_eq!(db.count("fuse1486_slow").await, 1);
+    let buffer = db
+        .change_buffer_table(i64::from(db.table_oid("fuse1486_src").await))
+        .await;
+    assert!(
+        db.query_scalar::<i64>(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await
+            > 10
+    );
+    db.execute("SELECT pgtrickle.alter_stream_table('fuse1486_fast', schedule => '1s', fuse => 'on', fuse_ceiling => 10)").await;
+    db.execute("INSERT INTO fuse1486_src VALUES (101,101)")
+        .await;
+    assert!(
+        db.wait_for_condition(
+            "fast consumer refreshes despite sibling backlog",
+            "SELECT EXISTS (SELECT 1 FROM fuse1486_fast WHERE id=101)",
+            Duration::from_secs(60),
+            Duration::from_millis(100),
+        )
+        .await
+    );
+    assert_eq!(
+        db.query_scalar::<String>(
+            "SELECT fuse_state FROM pgtrickle.pgt_stream_tables WHERE pgt_name='fuse1486_fast'",
+        )
+        .await,
+        "armed"
+    );
+    db.assert_st_matches_query("fuse1486_fast", query).await;
+}
+
+#[tokio::test]
+async fn test_fuse_sensitivity_requires_more_than_one_observation() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    setup_fast_scheduler(&db).await;
+    db.execute("CREATE TABLE streak1486_src(id int PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO streak1486_src VALUES (1)").await;
+    db.create_st(
+        "streak1486_st",
+        "SELECT id FROM streak1486_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.alter_stream_table('streak1486_st', schedule => '1s', fuse => 'on', fuse_ceiling => 10, fuse_sensitivity => 100)").await;
+    db.execute("INSERT INTO streak1486_src SELECT n FROM generate_series(2,100) n")
+        .await;
+    assert!(
+        db.wait_for_condition(
+            "first over-ceiling batch remains armed and is applied",
+            "SELECT EXISTS (SELECT 1 FROM streak1486_st WHERE id=100)",
+            Duration::from_secs(60),
+            Duration::from_millis(100),
+        )
+        .await
+    );
+    assert_eq!(
+        db.query_scalar::<String>(
+            "SELECT fuse_state FROM pgtrickle.pgt_stream_tables WHERE pgt_name='streak1486_st'",
+        )
+        .await,
+        "armed"
+    );
+    db.execute("SELECT pgtrickle.alter_stream_table('streak1486_st', fuse_sensitivity => 1)")
+        .await;
+    db.execute("INSERT INTO streak1486_src SELECT n FROM generate_series(101,200) n")
+        .await;
+    assert!(wait_for_fuse_blown(&db, "streak1486_st", Duration::from_secs(60)).await);
+}

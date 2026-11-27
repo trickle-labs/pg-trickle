@@ -1425,7 +1425,7 @@ impl StreamTableMeta {
     ) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_stream_tables \
-             SET fuse_mode = $1, fuse_ceiling = $2, fuse_sensitivity = $3, updated_at = now() \
+             SET fuse_mode = $1, fuse_ceiling = $2, fuse_sensitivity = $3, fuse_over_ceiling_cycles = 0, updated_at = now() \
              WHERE pgt_id = $4",
             &[
                 fuse_mode.into(),
@@ -1453,7 +1453,7 @@ impl StreamTableMeta {
     pub fn reset_fuse(pgt_id: i64) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_stream_tables \
-             SET fuse_state = 'armed', blown_at = NULL, blow_reason = NULL, \
+             SET fuse_state = 'armed', blown_at = NULL, blow_reason = NULL, fuse_over_ceiling_cycles = 0, \
              status = 'ACTIVE', consecutive_errors = 0, updated_at = now() \
              WHERE pgt_id = $1",
             &[pgt_id.into()],

@@ -76,3 +76,8 @@ SET search_path TO pgtrickle, pg_catalog, pg_temp
 AS 'MODULE_PATHNAME', 'would_replace_stream_table_storage_wrapper';
 
 REVOKE EXECUTE ON FUNCTION pgtrickle.would_replace_stream_table_storage(text, text) FROM PUBLIC;
+
+-- Consumer fuse observation state is durable across scheduler workers.
+ALTER TABLE pgtrickle.pgt_stream_tables
+    ADD COLUMN IF NOT EXISTS fuse_over_ceiling_cycles INT NOT NULL DEFAULT 0
+        CHECK (fuse_over_ceiling_cycles >= 0);
