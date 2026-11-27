@@ -2,40 +2,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-pub(crate) fn execute_incremental_truncate_delete(
-    st: &StreamTableMeta,
-) -> Result<(i64, i64), PgTrickleError> {
-    crate::dvm::retention::ensure_history_reconstructible(st.pgt_id)?;
-    // Suppress the CDC trigger on the ST itself during the operation.
-    Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-    let schema = &st.pgt_schema;
-    let name = &st.pgt_name;
-    let quoted_table = format!(
-        "\"{}\".\"{}\"",
-        schema.replace('"', "\"\""),
-        name.replace('"', "\"\"")
-    );
-
-    let rows_deleted = Spi::connect_mut(|client| {
-        // nosemgrep: rust.spi.connect_mut.dynamic-format — quoted_table is built from double-quote-escaped relation identifiers.
-        let result = client
-            .update(&format!("DELETE FROM {quoted_table}"), None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Ok::<i64, PgTrickleError>(result.len() as i64)
-    })?;
-
-    pgrx::notice!(
-        "[pg_trickle] Incremental TRUNCATE: deleted {} row(s) from {}.{} \
-         (pure TRUNCATE window — skipping full query re-execution)",
-        rows_deleted,
-        schema,
-        name,
-    );
-    Ok((0, rows_deleted))
-}
-
 // ── A1-2: Partition key range extraction ────────────────────────────────────
 
 /// Safely quote a SQL string literal (standard SQL single-quote escaping).
