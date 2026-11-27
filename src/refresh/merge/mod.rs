@@ -2403,7 +2403,7 @@ pub fn execute_differential_refresh_with_tuning(
                 map.peek(&st.pgt_id)
                     .filter(|entry| {
                         entry.defining_query_hash == query_hash
-                            && entry.planning_version == crate::dvm::planner::FORMAT_VERSION
+                            && entry.planning_version == crate::dvm::planner::TEMPLATE_FORMAT_VERSION
                     })
                     .cloned()
             })
@@ -2670,7 +2670,7 @@ pub fn execute_differential_refresh_with_tuning(
                         statistics_epoch: crate::dvm::planner::statistics_epoch_for_sources(
                             &source_oids,
                         ),
-                        planning_version: crate::dvm::planner::FORMAT_VERSION,
+                        planning_version: crate::dvm::planner::TEMPLATE_FORMAT_VERSION,
                         // PERF-3: convert to Arc<str> for O(1) cache-hit clones.
                         merge_sql_template: merge_template.clone().into(),
                         source_oids: source_oids.clone(),

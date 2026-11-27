@@ -216,8 +216,8 @@ async fn test_explain_delta_plan_is_read_only() {
         .query_scalar("SELECT count(*) FROM pgtrickle.pgt_template_cache")
         .await;
 
-    // Format 2 invalidates cached SQL using the old lossy value comparisons.
-    assert_eq!(format_version, 2);
+    // The public diagnostic format remains stable across SQL cache changes.
+    assert_eq!(format_version, 1);
     assert!(!epoch.is_empty());
     assert!(has_chosen);
     assert_eq!(before, after, "planning diagnostics must not mutate caches");

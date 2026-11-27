@@ -7,7 +7,11 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-pub const FORMAT_VERSION: u16 = 2;
+// Public diagnostic/Graph V1 format; changing it invalidates consumer bindings.
+pub const FORMAT_VERSION: u16 = 1;
+// Private persisted SQL template format. Old templates must be regenerated
+// after an executor/codegen change even when the public contract is unchanged.
+pub const TEMPLATE_FORMAT_VERSION: u16 = 2;
 pub const WINDOW_COST_MODEL_VERSION: u16 = 1;
 const PLANNING_BUDGET: Duration = Duration::from_millis(10);
 const MINIMUM_IMPROVEMENT: f64 = 0.05;

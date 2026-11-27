@@ -34,7 +34,7 @@ pub(crate) struct CachedMergeTemplate {
     pub(crate) defining_query_hash: u64,
     /// Source-statistics epoch that selected this physical template.
     pub(crate) statistics_epoch: String,
-    /// Planner format version used to build this template.
+    /// Private SQL template format version used to build this template.
     pub(crate) planning_version: u16,
     /// MERGE SQL template with `__PGS_PREV_LSN_{oid}__` / `__PGS_NEW_LSN_{oid}__`
     /// placeholder tokens. Resolved to concrete LSN values before each execution.
@@ -1970,7 +1970,7 @@ pub(crate) fn get_fused_refresh_template(
             .peek(&pgt_id)
             .filter(|entry| {
                 entry.defining_query_hash == defining_query_hash
-                    && entry.planning_version == crate::dvm::planner::FORMAT_VERSION
+                    && entry.planning_version == crate::dvm::planner::TEMPLATE_FORMAT_VERSION
             })
             .cloned()
     });
@@ -2862,7 +2862,7 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     let new_entry = CachedMergeTemplate {
         defining_query_hash: query_hash,
         statistics_epoch: crate::dvm::planner::statistics_epoch_for_sources(source_oids),
-        planning_version: crate::dvm::planner::FORMAT_VERSION,
+        planning_version: crate::dvm::planner::TEMPLATE_FORMAT_VERSION,
         // PERF-3: convert to Arc<str> so cache-hit clones are O(1).
         merge_sql_template: merge_template.into(),
         parameterized_merge_sql: parameterized_merge_sql.into(),

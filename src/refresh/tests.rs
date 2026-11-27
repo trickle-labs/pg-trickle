@@ -696,7 +696,7 @@ fn test_merge_template_cache_insert_and_retrieve() {
             CachedMergeTemplate {
                 defining_query_hash: 12345,
                 statistics_epoch: "test".into(),
-                planning_version: crate::dvm::planner::FORMAT_VERSION,
+                planning_version: crate::dvm::planner::TEMPLATE_FORMAT_VERSION,
                 merge_sql_template: "MERGE INTO t ...".into(),
                 source_oids: vec![100, 200],
                 cleanup_sql_template: "DELETE FROM ...".into(),
@@ -730,7 +730,7 @@ fn test_invalidate_merge_cache_removes_entry() {
             CachedMergeTemplate {
                 defining_query_hash: 0,
                 statistics_epoch: "test".into(),
-                planning_version: crate::dvm::planner::FORMAT_VERSION,
+                planning_version: crate::dvm::planner::TEMPLATE_FORMAT_VERSION,
                 merge_sql_template: Arc::from(""),
                 source_oids: vec![],
                 cleanup_sql_template: Arc::from(""),
