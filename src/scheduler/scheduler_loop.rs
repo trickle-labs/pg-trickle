@@ -1951,16 +1951,17 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         continue;
                     }
 
-                    let (has_changes, _has_stream_table_changes) =
-                        match upstream_change_state(&st, initial_table_changes.get(&pgt_id).copied())
-                        {
-                            Ok(state) => state,
-                            Err(error) => {
-                                warning!("pg_trickle: atomic group source check failed: {error}");
-                                group_ok = false;
-                                break;
-                            }
-                        };
+                    let (has_changes, _has_stream_table_changes) = match upstream_change_state(
+                        &st,
+                        initial_table_changes.get(&pgt_id).copied(),
+                    ) {
+                        Ok(state) => state,
+                        Err(error) => {
+                            warning!("pg_trickle: atomic group source check failed: {error}");
+                            group_ok = false;
+                            break;
+                        }
+                    };
                     let action = determine_scheduled_refresh_action(&st, has_changes);
                     if !crate::shmem::begin_inline_refreshes_for_database(database_oid, &[pgt_id]) {
                         group_ok = false;

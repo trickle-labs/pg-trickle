@@ -1618,7 +1618,9 @@ async fn assert_snapshot_poll_failure_isolated(fanout: &str) {
                      ) r",
                 )
                 .await;
-            eprintln!("snapshot polling failure (fanout={fanout}): streams={streams}; history={history}");
+            eprintln!(
+                "snapshot polling failure (fanout={fanout}): streams={streams}; history={history}"
+            );
         }
         assert!(
             converged,
