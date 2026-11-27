@@ -4383,7 +4383,7 @@ async fn test_centroid_cost_based_full_fallback_rebinds_state() {
         "CREATE TABLE centroid_cost_src (id int PRIMARY KEY, grp int, v vector(2))",
         "INSERT INTO centroid_cost_src SELECT id, id % 2, '[1,2]'::vector FROM generate_series(1, 100) id",
         "ANALYZE centroid_cost_src",
-        "SELECT pgtrickle.create_stream_table('centroid_cost_st', $SELECT grp, avg(v) AS centroid FROM centroid_cost_src GROUP BY grp$, '1h', 'AUTO')",
+        "SELECT pgtrickle.create_stream_table('centroid_cost_st', $$SELECT grp, avg(v) AS centroid FROM centroid_cost_src GROUP BY grp$$, '1h', 'AUTO')",
         "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_cost_st'::regclass",
         "SELECT pgtrickle.refresh_stream_table('centroid_cost_st')",
         // Seed fresh, complete evidence for the actual two-image UPDATE.
