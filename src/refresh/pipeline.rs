@@ -116,22 +116,18 @@ fn relation_name(pgt_id: i64, backend_pid: i32) -> String {
     format!("__pgt_pipeline_{pgt_id}_{backend_pid}")
 }
 
-fn replace_merge_source(merge_sql: &str, relation: &str) -> Result<String, PgTrickleError> {
-    let using_start = merge_sql.find("USING ").ok_or_else(|| {
-        PgTrickleError::InternalError("pipeline MERGE has no USING clause".to_string())
-    })? + "USING ".len();
-    let source_end = merge_sql[using_start..]
-        .find(" AS d ON ")
-        .map(|offset| using_start + offset)
-        .ok_or_else(|| {
-            PgTrickleError::InternalError("pipeline MERGE has no delta alias".to_string())
-        })?;
-    Ok(format!(
-        "{}{}{}",
-        &merge_sql[..using_start],
-        relation,
-        &merge_sql[source_end..]
-    ))
+/// Replace the exact known generated source rather than matching a nested
+/// AS d ON token that can occur inside the delta subquery.
+pub(crate) fn replace_merge_source(
+    merge_sql: &str,
+    delta_sql: &str,
+    relation: &str,
+) -> Result<String, PgTrickleError> {
+    let source = format!("USING {delta_sql} AS d ON ");
+    let (prefix, suffix) = merge_sql.split_once(&source).ok_or_else(|| {
+        PgTrickleError::InternalError("MERGE does not contain its expected delta source".into())
+    })?;
+    Ok(format!("{prefix}USING {relation} AS d ON {suffix}"))
 }
 
 #[cfg(not(test))]
@@ -277,15 +273,16 @@ pub fn execute_merge_pipeline(
     merge_sql: &str,
     batch_size: usize,
     byte_limit: u64,
+    prepare_apply: impl Fn(&str, usize) -> Result<(), PgTrickleError>,
 ) -> Result<(usize, PipelineStats), PgTrickleError> {
     let backend_pid = Spi::get_one::<i32>("SELECT pg_backend_pid()")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
         .ok_or_else(|| PgTrickleError::InternalError("backend PID is NULL".to_string()))?;
     let relation = relation_name(pgt_id, backend_pid);
-    let quoted_relation = format!("\"{relation}\"");
+    let quoted_relation = format!("pg_temp.\"{relation}\"");
     let relation_oid = Spi::get_one_with_args::<pg_sys::Oid>(
         "SELECT $1::regclass::oid",
-        &[relation.as_str().into()],
+        &[quoted_relation.as_str().into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
     .ok_or_else(|| {
@@ -300,6 +297,7 @@ pub fn execute_merge_pipeline(
     ))
     .map_err(|e| PgTrickleError::SpiError(format!("pipeline cursor open: {e}")))?;
 
+    let batch_sql = replace_merge_source(merge_sql, delta_sql, &quoted_relation)?;
     let mut stats = PipelineStats::default();
     let mut applied = 0usize;
     let result = (|| {
@@ -330,12 +328,17 @@ pub fn execute_merge_pipeline(
             .unwrap_or(0)
             .max(0) as u64;
             stats.add_batch(fetched, staged_bytes, byte_limit)?;
-            let batch_sql = replace_merge_source(merge_sql, &quoted_relation)?;
-            let changed = Spi::connect_mut(|client| {
-                let result = client
-                    .update(&batch_sql, None, &[])
-                    .map_err(|e| PgTrickleError::SpiError(format!("pipeline batch apply: {e}")))?;
-                Ok::<usize, PgTrickleError>(result.len())
+            // The cursor has already planned delta generation. Each target
+            // apply needs statistics and its own planner scope. Restore the
+            // generation settings before fetching the next batch.
+            let changed = crate::api::security_context::with_refresh_guc_scope(|| {
+                prepare_apply(&quoted_relation, fetched)?;
+                Spi::connect_mut(|client| {
+                    let result = client
+                        .update(&batch_sql, None, &[])
+                        .map_err(|e| PgTrickleError::SpiError(format!("pipeline batch apply: {e}")))?;
+                    Ok::<usize, PgTrickleError>(result.len())
+                })
             })?;
             applied = applied.checked_add(changed).ok_or_else(|| {
                 PgTrickleError::InternalError("pipeline apply counter overflow".to_string())
@@ -356,6 +359,7 @@ pub fn execute_merge_pipeline(
     _merge_sql: &str,
     _batch_size: usize,
     _byte_limit: u64,
+    _prepare_apply: impl Fn(&str, usize) -> Result<(), PgTrickleError>,
 ) -> Result<(usize, PipelineStats), PgTrickleError> {
     Err(PgTrickleError::InternalError(
         "pipeline execution requires a PostgreSQL backend".to_string(),
@@ -401,8 +405,20 @@ mod tests {
     fn merge_source_replacement_keeps_the_merge_shell() {
         let sql = "MERGE INTO st AS st USING (SELECT * FROM delta) AS d ON st.id = d.id";
         assert_eq!(
-            replace_merge_source(sql, "\"__pgt_pipeline_1_2\"").expect("valid merge"),
+            replace_merge_source(sql, "(SELECT * FROM delta)", "\"__pgt_pipeline_1_2\"")
+                .expect("valid merge"),
             "MERGE INTO st AS st USING \"__pgt_pipeline_1_2\" AS d ON st.id = d.id"
         );
     }
+    #[test]
+    fn merge_source_replacement_does_not_split_nested_join() {
+        let delta = "(SELECT a.id FROM a JOIN b AS d ON a.id = d.id)";
+        let sql = format!("MERGE INTO st AS st USING {delta} AS d ON st.id = d.id");
+        assert_eq!(
+            replace_merge_source(&sql, delta, "pg_temp.batch").expect("known source"),
+            "MERGE INTO st AS st USING pg_temp.batch AS d ON st.id = d.id"
+        );
+        assert!(replace_merge_source(&sql, "(SELECT 1)", "pg_temp.batch").is_err());
+    }
+
 }

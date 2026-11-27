@@ -11,9 +11,9 @@ pub(crate) fn capture_delta_explain(schema: &str, name: &str, delta_sql: &str) {
         return;
     }
 
-    // Build EXPLAIN query wrapping the delta SQL.
+    // Estimated plan under the actual generation settings; no duplicate execution.
     let explain_sql = format!(
-        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ({delta_sql}) __pgt_explain_d"
+        "EXPLAIN (FORMAT JSON) SELECT * FROM ({delta_sql}) __pgt_explain_d"
     );
 
     let plan_json = Spi::connect(|client| {
@@ -22,7 +22,7 @@ pub(crate) fn capture_delta_explain(schema: &str, name: &str, delta_sql: &str) {
             .map_err(|e| format!("SPI error in explain: {e}"))?;
         let mut lines = Vec::new();
         for row in result {
-            let line: Option<pgrx::JsonB> = row.get(1).unwrap_or(None);
+            let line: Option<pgrx::Json> = row.get(1).unwrap_or(None);
             if let Some(j) = line {
                 lines.push(j.0.to_string());
             }

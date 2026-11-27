@@ -821,6 +821,9 @@ fn distinct_aggregate_max_values(
 struct MaterializedApplyPlanner {
     enable_nestloop: bool,
     enable_seqscan: bool,
+    work_mem: String,
+    join_collapse_limit: String,
+    from_collapse_limit: String,
 }
 
 impl MaterializedApplyPlanner {
@@ -829,7 +832,10 @@ impl MaterializedApplyPlanner {
             let row = client
                 .select(
                     "SELECT current_setting('enable_nestloop') = 'on',
-                            current_setting('enable_seqscan') = 'on'",
+                            current_setting('enable_seqscan') = 'on',
+                            current_setting('work_mem'),
+                            current_setting('join_collapse_limit'),
+                            current_setting('from_collapse_limit')",
                     None,
                     &[],
                 )
@@ -844,6 +850,22 @@ impl MaterializedApplyPlanner {
                     .get::<bool>(2)
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                     .unwrap_or(true),
+                work_mem: row
+                    .get::<String>(3)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| PgTrickleError::InternalError("missing work_mem".into()))?,
+                join_collapse_limit: row
+                    .get::<String>(4)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError("missing join_collapse_limit".into())
+                    })?,
+                from_collapse_limit: row
+                    .get::<String>(5)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError("missing from_collapse_limit".into())
+                    })?,
             })
         })
     }
@@ -867,8 +889,22 @@ impl MaterializedApplyPlanner {
             return Ok(());
         }
 
-        // The owner execution context restores these SET LOCAL changes on
-        // exit. Do not override explicit caller-level disables.
+        // Restore generation-specific memory and join-search preferences.
+        // set_config accepts the captured exact textual GUC values, and the
+        // enclosing owner/batch scope restores the settings on exit.
+        Spi::run_with_args(
+            "SELECT pg_catalog.set_config('work_mem', $1, true),
+                    pg_catalog.set_config('join_collapse_limit', $2, true),
+                    pg_catalog.set_config('from_collapse_limit', $3, true)",
+            &[
+                self.work_mem.as_str().into(),
+                self.join_collapse_limit.as_str().into(),
+                self.from_collapse_limit.as_str().into(),
+            ],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        // Do not override explicit caller-level disables.
         Spi::run(if self.enable_nestloop {
             "SET LOCAL enable_nestloop = on"
         } else {
@@ -2903,17 +2939,6 @@ fn execute_differential_refresh_inner(
 
     let t1 = Instant::now();
 
-    // PROF-DLT / PGS_PROFILE_DELTA: When the env var is set, capture
-    // EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) for the delta query and write
-    // the result to /tmp/delta_plans/<schema>_<name>.json.  This env var is
-    // intended for E2E test diagnostics and local profiling runs.
-    if std::env::var("PGS_PROFILE_DELTA").as_deref() == Ok("1") {
-        with_stream_owner(st, || {
-            capture_delta_explain(schema, name, &resolved.resolved_delta_sql);
-            Ok(())
-        })?;
-    }
-
     // ── Diagnostic: detect OID mismatch between catalog and delta ────
     // If the delta template references source OIDs that are not in the
     // catalog deps, the MERGE will fail referencing nonexistent change
@@ -3116,6 +3141,16 @@ fn execute_differential_refresh_inner(
     // Before executing expensive MERGE, run a capped COUNT on the delta
     // subquery. If the output exceeds the budget, fall back to FULL
     // refresh to prevent OOM or excessive temp-file spills.
+    // Capture the estimated delta plan only after statistics and generation
+    // hints are installed. EXPLAIN without ANALYZE does not execute a second
+    // delta or pollute the recorded refresh duration with extra query work.
+    if std::env::var("PGS_PROFILE_DELTA").as_deref() == Ok("1") {
+        with_stream_owner(st, || {
+            capture_delta_explain(schema, name, &resolved.resolved_delta_sql);
+            Ok(())
+        })?;
+    }
+
     let max_estimate = crate::config::pg_trickle_max_delta_estimate_rows();
     let delta_estimate = if max_estimate > 0 {
         with_stream_owner(st, || {
@@ -3754,7 +3789,26 @@ fn execute_differential_refresh_inner(
         && st.st_partition_key.is_none()
         && !has_pgt_placeholders;
 
-    let materializes_delta = uses_intersect_private_state
+    // Direct MERGE also needs separate generation/apply when automatic
+    // generation hints discourage nested loops. Preserve the cheap direct
+    // path for tiny deltas and the special partition/distributed paths.
+    let use_materialized_merge = !uses_intersect_private_state
+        && !use_delete_insert
+        && !use_agg_fast_path
+        && !use_explicit_dml
+        && !use_vector_agg
+        && !use_pipeline
+        && !use_prepared
+        && !is_distributed_st
+        && !has_recursive_cte
+        && st.st_partition_key.is_none()
+        && crate::config::pg_trickle_merge_join_strategy() == crate::config::MergeJoinStrategy::Auto
+        && ((crate::config::pg_trickle_merge_planner_hints()
+            && total_change_count >= PLANNER_HINT_NESTLOOP_THRESHOLD)
+            || !crate::config::pg_trickle_delta_enable_nestloop());
+
+    let materializes_delta = use_materialized_merge
+        || uses_intersect_private_state
         || use_delete_insert
         || use_agg_fast_path
         || use_explicit_dml
@@ -3939,8 +3993,11 @@ fn execute_differential_refresh_inner(
                 apply_page_sql: &apply,
                 page_byte_limit: crate::config::pg_trickle_memory_budget().delta_pipeline_bytes,
             };
-            let stats =
-                crate::refresh::vectorized_agg::execute_vectorized_aggregate(plan, &execution)?;
+            let stats = crate::refresh::vectorized_agg::execute_vectorized_aggregate(
+                plan,
+                &execution,
+                |relation, rows| apply_planner.prepare(st, relation, rows),
+            )?;
             pgrx::debug1!(
                 "[pg_trickle] MT-8 vector aggregate {}.{} pages={} rows={} groups={} bytes={}",
                 schema,
@@ -3999,6 +4056,16 @@ fn execute_differential_refresh_inner(
                 schema.replace('"', "\"\""),
                 name.replace('"', "\"\""),
             );
+            // The private state has produced a complete public delta.
+            // Count and analyze it before the separate target MERGE.
+            // nosemgrep: rust.spi.query.dynamic-format — generated temp relation name.
+            let delta_rows = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {delta_table}"))
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("missing INTERSECT delta count".into()))?;
+            let delta_rows = usize::try_from(delta_rows).map_err(|_| {
+                PgTrickleError::InternalError("invalid INTERSECT delta count".into())
+            })?;
+            apply_planner.prepare(st, &delta_table, delta_rows)?;
             let public_delta =
                 format!("(SELECT * FROM {delta_table} WHERE __pgt_action IN ('I', 'D'))");
             let merge_sql = build_merge_sql(
@@ -4021,6 +4088,7 @@ fn execute_differential_refresh_inner(
                 &resolved.merge_sql,
                 crate::config::pg_trickle_pipeline_batch_size(),
                 crate::config::pg_trickle_memory_budget().delta_pipeline_bytes,
+                |relation, rows| apply_planner.prepare(st, relation, rows),
             )?;
             pgrx::debug1!(
                 "[pg_trickle] v0.87 pipeline {}.{} reason={} batches={} rows={} bytes={}",
@@ -4390,6 +4458,27 @@ fn execute_differential_refresh_inner(
                     "explicit_dml"
                 },
             )
+        } else if use_materialized_merge {
+            // nosemgrep: rust.spi.connect_mut.dynamic-format — generated temp table and validated delta SQL.
+            let delta_rows = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&format!("INSERT INTO {delta_table} {delta_select}"), None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            apply_planner.prepare(st, &delta_table, delta_rows)?;
+            let merge_sql = crate::refresh::pipeline::replace_merge_source(
+                &resolved.merge_sql,
+                &resolved.trigger_using_sql,
+                &delta_table,
+            )?;
+            let count = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&merge_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(format!("[MATERIALIZED-MERGE] {e}")))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            (count, "merge")
         } else if use_prepared {
             // ── D-2: MERGE via prepared statement ────────────────────────
             // After ~5 executions PostgreSQL switches from custom to generic
