@@ -30,8 +30,8 @@ async fn test_manual_refresh_records_initiated_by_manual() {
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.erg_st'])")
         .await;
 
-    // Manual refresh
-    db.refresh_st("erg_st").await;
+    // Wait for a completed manual refresh, not a busy-scheduler NOTICE.
+    db.refresh_st_with_retry("erg_st").await;
 
     // Check that the history contains a MANUAL entry
     let initiated_by: String = db

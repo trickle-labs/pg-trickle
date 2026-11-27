@@ -542,6 +542,7 @@ pub struct VectorAggregateExecution<'a> {
 pub fn execute_vectorized_aggregate(
     plan: &VectorAggregatePlan,
     execution: &VectorAggregateExecution<'_>,
+    prepare_apply: impl Fn(&str, usize) -> Result<(), PgTrickleError>,
 ) -> Result<VectorAggregateStats, PgTrickleError> {
     let fetch_rows = page_row_limit(plan, execution.page_byte_limit);
     let query = source_query(plan)?;
@@ -597,8 +598,13 @@ pub fn execute_vectorized_aggregate(
             flush_groups(plan, execution.accumulator_relation, &mut accumulated)?,
         )?;
         let apply_started = Instant::now();
-        Spi::run(execution.finalize_page_sql)
-            .map_err(|error| PgTrickleError::SpiError(format!("vector finalize: {error}")))?;
+        let delta_rows = Spi::connect_mut(|client| {
+            client
+                .update(execution.finalize_page_sql, None, &[])
+                .map(|result| result.len())
+                .map_err(|error| PgTrickleError::SpiError(format!("vector finalize: {error}")))
+        })?;
+        prepare_apply(execution.delta_relation, delta_rows)?;
         for sql in execution.apply_page_sql {
             let applied = Spi::connect_mut(|client| {
                 client
@@ -1009,6 +1015,7 @@ fn vector_type_sql(value_type: VectorType) -> &'static str {
 pub fn execute_vectorized_aggregate(
     _plan: &VectorAggregatePlan,
     _execution: &VectorAggregateExecution<'_>,
+    _prepare_apply: impl Fn(&str, usize) -> Result<(), PgTrickleError>,
 ) -> Result<VectorAggregateStats, PgTrickleError> {
     Err(PgTrickleError::InternalError(
         "vector execution requires a PostgreSQL backend".to_string(),

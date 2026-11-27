@@ -1167,7 +1167,8 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 // P-3 (v0.78.0): Batch-refresh the cost-model summary table.
                 // Replaces N per-ST history subqueries with a single grouped
                 // upsert. Runs once per auto-apply interval (same cadence as
-                // SLA tier adjustment — ~10 s by default).
+                // SLA tier adjustment — 10 minutes). Monitoring only; the refresh
+                // decision reads fresh size-comparable history.
                 BackgroundWorker::transaction(AssertUnwindSafe(|| {
                     batch_update_cost_model_summary();
                 }));

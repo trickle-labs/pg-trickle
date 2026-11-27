@@ -3418,34 +3418,8 @@ fn refresh_single_st(
             base_action = RefreshAction::Full;
         }
 
-        // PRED-2: Predictive cost model — pre-emptive FULL switch.
-        // If the predicted DIFFERENTIAL cost exceeds the FULL cost by the
-        // configured ratio, switch to FULL preemptively.
-        //
-        // PERF-3: Try the shmem cost-model cache first to avoid an extra SPI
-        // call.  Fall back to `st.last_full_ms` (loaded from catalog at tick
-        // start) if the shmem slot is empty.
-        let last_full_cost = crate::shmem::read_cost_model(st.pgt_id)
-            .map(|(full_ms, _)| full_ms)
-            .or(st.last_full_ms);
-        if base_action == RefreshAction::Differential
-            && let Some(last_full) = last_full_cost
-        {
-            // Estimate delta_rows from change buffers.
-            let delta_rows = crate::cdc::estimate_pending_changes(st.pgt_id).unwrap_or(0);
-            if delta_rows > 0
-                && crate::api::publication::should_preempt_to_full(st.pgt_id, delta_rows, last_full)
-            {
-                log!(
-                    "pg_trickle: PRED-2 pre-emptive FULL switch for {}.{} \
-                     (predicted diff cost exceeds {}× full cost)",
-                    st.pgt_schema,
-                    st.pgt_name,
-                    config::pg_trickle_prediction_ratio(),
-                );
-                base_action = RefreshAction::Full;
-            }
-        }
+        // Elective FULL selection happens only inside the differential
+        // executor, after the actual CDC window and current policy are known.
 
         // Check periodic drift reset
         if base_action == RefreshAction::Differential {

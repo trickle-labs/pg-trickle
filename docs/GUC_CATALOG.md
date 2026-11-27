@@ -41,7 +41,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.compact_threshold` | `int4` | `100000` | Set to 0 to disable compaction. |
 | `pg_trickle.connection_pooler_mode` | `text` | `"off"` | Overrides the per-ST `pooler_compatibility_mode` for all stream tables. |
 | `pg_trickle.cost_cache_capacity` | `int4` | `256` | Default: 256. |
-| `pg_trickle.cost_model_safety_margin` | `float8` | `0.8` | Default 0.8 — DIFFERENTIAL is chosen unless it's estimated to cost more than 80% of FULL. |
+| `pg_trickle.cost_model_safety_margin` | `float8` | `0.8` | Elective FULL requires DIFF duration to exceed FULL duration times the maximum of 1.0, prediction_ratio, and cost_model_safety_margin. |
 | `pg_trickle.deep_join_l0_scan_threshold` | `int4` | `4` | Default: 4 (matches the previously hardcoded `DEEP_JOIN_L0_SCAN_THRESHOLD`). |
 | `pg_trickle.default_schedule_seconds` | `int4` | `1` | Default: 1 s. |
 | `pg_trickle.delta_amplification_threshold` | `float8` | `100.0` | Set to 0.0 to disable amplification detection. |
@@ -118,9 +118,9 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.per_database_worker_quota` | `int4` | `0` | Set to 0 (default) to disable per-database quotas — all databases share `max_dynamic_refresh_workers` on a first-come-first-served basis, bounded per coordinator by `max_concurrent_refreshes`. |
 | `pg_trickle.pipeline_batch_size` | `int4` | `4096` | Maximum logical rows in one differential pipeline apply batch. |
 | `pg_trickle.planner_aggressive` | `bool` | `true` | Replaces the old `merge_planner_hints` and `merge_work_mem_mb` GUCs (both still accepted but emit deprecation warnings). |
-| `pg_trickle.prediction_min_samples` | `int4` | `5` | When fewer than this many data points exist, the predictor falls back to the existing fixed-threshold logic. |
-| `pg_trickle.prediction_ratio` | `float8` | `1.5` | When `predicted_diff_ms > last_full_ms × prediction_ratio`, the scheduler overrides the strategy to FULL refresh. |
-| `pg_trickle.prediction_window` | `int4` | `60` | The forecaster fits `duration_ms ~ delta_rows` over this many minutes of `pgt_refresh_history` data per stream table. |
+| `pg_trickle.prediction_min_samples` | `int4` | `5` | PRED-3: Minimum comparable history samples (zero disables cost fallback). |
+| `pg_trickle.prediction_ratio` | `float8` | `1.5` | PRED-2: Minimum measured DIFF/FULL duration ratio for elective FULL. |
+| `pg_trickle.prediction_window` | `int4` | `60` | PRED-1: Age limit in minutes for comparable differential observations. |
 | `pg_trickle.publication_lag_warn_bytes` | `int4` | `0` | Set to 0 to disable subscriber lag tracking (default). |
 | `pg_trickle.refresh_strategy` | `text` | `"auto"` | This GUC is a cluster-wide override. |
 | `pg_trickle.reindex_drift_threshold` | `float8` | `0.20` | Default: 0.20. |

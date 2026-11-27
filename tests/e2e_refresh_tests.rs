@@ -57,8 +57,11 @@ async fn test_refresh_cost_evidence_marks_unaccounted_stream_changes() {
     db.refresh_st_until_converged("rf_cost_chain_child").await;
     let detail: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'rf_cost_chain_child'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
     let evidence: serde_json::Value = serde_json::from_str(&detail).expect("parse cost evidence");
-    assert_eq!(evidence["input_delta_rows"], 0);
+    // The single upstream insert is counted in the durable CDC window, but
+    // upstream-derived evidence is still incomplete for cost-model learning.
+    assert_eq!(evidence["input_delta_rows"], 1);
     assert_eq!(evidence["input_delta_rows_may_be_incomplete"], true);
+    assert_eq!(evidence["output_rows_changed"], 1);
     db.assert_st_matches_query("rf_cost_chain_child", "SELECT id FROM rf_cost_chain_src")
         .await;
 }
@@ -258,7 +261,7 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
         "rf_cost_st",
         "SELECT id, val FROM rf_cost_src",
         "1h",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
     // Keep the cost-model assertion deterministic when the scheduler is active.
@@ -269,14 +272,38 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
     let buffer = db.change_buffer_table(source_oid).await;
 
     db.execute(
-        "INSERT INTO pgtrickle.pgt_cost_model_summary
-            (pgt_id, avg_full_ms, avg_diff_ms, sample_count)
-         SELECT pgt_id, 0.1, 100.0, 3
-           FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_cost_st'
-         ON CONFLICT (pgt_id) DO UPDATE
-             SET avg_full_ms = EXCLUDED.avg_full_ms,
-                 avg_diff_ms = EXCLUDED.avg_diff_ms,
-                 sample_count = EXCLUDED.sample_count",
+        "UPDATE pgtrickle.pgt_refresh_summary
+            SET stats_reset_at = now() - interval '10 minutes'
+          WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                          WHERE pgt_name = 'rf_cost_st')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_refresh_history
+            (pgt_id, data_timestamp, start_time, end_time, action, status,
+             rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback,
+             refresh_reason_detail)
+         SELECT pgt_id, now(), now() - interval '2 minutes',
+                now() - interval '119 seconds', 'DIFFERENTIAL', 'COMPLETED',
+                1, 1, 'explicit_dml', false,
+                jsonb_build_object(
+                    'schema_version', 1, 'input_delta_rows', 1,
+                    'input_delta_rows_may_be_incomplete', false,
+                    'plan_identity', defining_query_hash,
+                    'contract_generation', contract_generation
+                )::text
+           FROM pgtrickle.pgt_stream_tables CROSS JOIN generate_series(1, 5)
+          WHERE pgt_name = 'rf_cost_st'",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_refresh_history
+            (pgt_id, data_timestamp, start_time, end_time, action, status,
+             rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback)
+         SELECT pgt_id, now(), now() - interval '1 minute',
+                now() - interval '1 minute' + interval '100 milliseconds',
+                'FULL', 'COMPLETED', 2, 2, 'FULL', false
+           FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_cost_st'",
     )
     .await;
     db.execute("INSERT INTO rf_cost_src VALUES (3, 'c')").await;
@@ -1477,4 +1504,51 @@ async fn test_fused_refresh_scheduler_audit_trail() {
         "Inserting a row with initiated_by = 'SCHEDULER_FUSED' must succeed \
          (COR-001: CHECK constraint should include SCHEDULER_FUSED)"
     );
+}
+
+#[tokio::test]
+async fn test_explicit_differential_policy_avoids_elective_full() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE rf_policy_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO rf_policy_src SELECT n, n FROM generate_series(1, 1000) n")
+        .await;
+    db.create_st(
+        "rf_policy_st",
+        "SELECT id, val FROM rf_policy_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_policy_st'])")
+        .await;
+    db.execute("ANALYZE rf_policy_src").await;
+    db.execute("UPDATE rf_policy_src SET val = val + 1 WHERE id <= 500")
+        .await;
+    let mut tx = db.pool.begin().await.expect("transaction");
+    for setting in [
+        "SET LOCAL pg_trickle.refresh_strategy = 'auto'",
+        "SET LOCAL pg_trickle.differential_max_change_ratio = 0.01",
+    ] {
+        sqlx::query(setting).execute(&mut *tx).await.unwrap();
+    }
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('rf_policy_st')")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let (action, fallback): (String, bool) = sqlx::query_as(
+        "SELECT h.action, h.was_full_fallback FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables s USING (pgt_id)
+         WHERE s.pgt_name = 'rf_policy_st' AND h.initiated_by = 'MANUAL' AND h.status = 'COMPLETED'
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(action, "DIFFERENTIAL");
+    assert!(!fallback);
+    tx.commit().await.unwrap();
+    db.assert_st_matches_query("rf_policy_st", "SELECT id, val FROM rf_policy_src")
+        .await;
 }

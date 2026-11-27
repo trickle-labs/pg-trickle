@@ -2381,10 +2381,8 @@ pub fn increment_dag_cycles_detected() {
 ///
 /// This is the compile-time maximum. The runtime effective capacity is
 /// controlled by `pg_trickle.cost_cache_capacity` GUC (default 256).
-/// Slots are addressed by `(pgt_id as usize) % effective_capacity`.
-/// Collisions are tolerated — a wrong slot is treated as a miss and
-/// triggers an SPI fallback. 256 slots give < 0.4% expected collision
-/// rate for workloads with ≤ 1 000 stream tables.
+/// The key includes the database OID because stream IDs are database-local.
+/// Collisions are cache misses, never a source of another stream's timings.
 const COST_CACHE_CAPACITY: usize = 256;
 
 /// A44-4 (v0.43.0): Returns the effective cost-cache capacity from the GUC.
@@ -2403,6 +2401,8 @@ fn effective_cost_cache_capacity() -> usize {
 /// Default` work without needing a `f64` field.
 #[derive(Copy, Clone, Default)]
 pub struct CostModelEntry {
+    /// Database that owns the stream ID, or zero for an empty entry.
+    pub database_oid: u32,
     /// `pgt_id` of the stream table that owns this slot, or 0 if empty.
     pub pgt_id: i64,
     /// Last observed FULL refresh duration (ms) as IEEE 754 bits.
@@ -2438,48 +2438,105 @@ unsafe impl PGRXSharedMemory for CostModelCache {}
 pub static COST_MODEL_STATE: PgLwLock<CostModelCache> =
     unsafe { PgLwLock::new(c"pg_trickle_cost_model") };
 
-/// PERF-3: Write cost-model timing data for a stream table to shmem.
-///
-/// Called by the scheduler after each refresh completes. Parallel workers
-/// can then read the timing from shmem instead of issuing an SPI query.
-///
-/// `last_full_ms` and/or `last_diff_ms` can be `None` to leave the
-/// corresponding slot value unchanged.
+impl CostModelCache {
+    fn slot(database_oid: u32, pgt_id: i64, capacity: usize) -> usize {
+        (pgt_id as usize).wrapping_add(database_oid as usize) % capacity
+    }
+
+    fn update(
+        &mut self,
+        database_oid: u32,
+        pgt_id: i64,
+        capacity: usize,
+        last_full_ms: Option<f64>,
+        last_diff_ms: Option<f64>,
+    ) {
+        if database_oid == 0 || pgt_id <= 0 {
+            return;
+        }
+        let entry = &mut self.entries[Self::slot(database_oid, pgt_id, capacity)];
+        if entry.database_oid != database_oid || entry.pgt_id != pgt_id {
+            *entry = CostModelEntry {
+                database_oid,
+                pgt_id,
+                ..CostModelEntry::default()
+            };
+        }
+        if let Some(ms) = last_full_ms.filter(|ms| ms.is_finite() && *ms > 0.0) {
+            entry.last_full_ms_bits = ms.to_bits();
+        }
+        if let Some(ms) = last_diff_ms.filter(|ms| ms.is_finite() && *ms > 0.0) {
+            entry.last_diff_ms_bits = ms.to_bits();
+        }
+    }
+
+    fn read(&self, database_oid: u32, pgt_id: i64, capacity: usize) -> Option<(f64, f64)> {
+        let entry = &self.entries[Self::slot(database_oid, pgt_id, capacity)];
+        if database_oid == 0
+            || pgt_id <= 0
+            || entry.database_oid != database_oid
+            || entry.pgt_id != pgt_id
+        {
+            return None;
+        }
+        Some((
+            f64::from_bits(entry.last_full_ms_bits),
+            f64::from_bits(entry.last_diff_ms_bits),
+        ))
+    }
+
+    fn invalidate(&mut self, database_oid: u32, pgt_id: Option<i64>) {
+        // Scan every slot: a different backend may have used another
+        // effective capacity, and invalidation must clear every matching key.
+        for entry in &mut self.entries {
+            if entry.database_oid == database_oid && pgt_id.is_none_or(|id| entry.pgt_id == id) {
+                *entry = CostModelEntry::default();
+            }
+        }
+    }
+}
+
+/// The database key is shared by all three cost-cache operations.
+fn cost_model_database_oid() -> u32 {
+    // SAFETY: MyDatabaseId is initialized in a connected PostgreSQL backend.
+    unsafe { pg_sys::MyDatabaseId }.to_u32()
+}
+
+/// PERF-3: Write timing data only to the owning database and stream.
 pub fn update_cost_model(pgt_id: i64, last_full_ms: Option<f64>, last_diff_ms: Option<f64>) {
     if !is_shmem_available() {
         return;
     }
-    let slot = (pgt_id as usize).wrapping_rem(effective_cost_cache_capacity());
-    let mut cache = COST_MODEL_STATE.exclusive();
-    let entry = &mut cache.entries[slot];
-    // If the slot is taken by a different pgt_id, overwrite it.
-    entry.pgt_id = pgt_id;
-    if let Some(ms) = last_full_ms {
-        entry.last_full_ms_bits = ms.to_bits();
-    }
-    if let Some(ms) = last_diff_ms {
-        entry.last_diff_ms_bits = ms.to_bits();
-    }
+    let database_oid = cost_model_database_oid();
+    COST_MODEL_STATE.exclusive().update(
+        database_oid,
+        pgt_id,
+        effective_cost_cache_capacity(),
+        last_full_ms,
+        last_diff_ms,
+    );
 }
 
-/// PERF-3: Read cost-model timing data for a stream table from shmem.
-///
-/// Returns `Some((last_full_ms, last_diff_ms))` on a cache hit, or `None`
-/// on a miss (slot empty, slot occupied by a different pgt_id, or
-/// shmem unavailable). Callers should fall back to SPI on `None`.
+/// A missing timing field is zero; callers must fall back to durable evidence.
 pub fn read_cost_model(pgt_id: i64) -> Option<(f64, f64)> {
     if !is_shmem_available() {
         return None;
     }
-    let slot = (pgt_id as usize).wrapping_rem(effective_cost_cache_capacity());
-    let cache = COST_MODEL_STATE.share();
-    let entry = &cache.entries[slot];
-    if entry.pgt_id != pgt_id || entry.pgt_id == 0 {
-        return None;
+    let database_oid = cost_model_database_oid();
+    COST_MODEL_STATE
+        .share()
+        .read(database_oid, pgt_id, effective_cost_cache_capacity())
+}
+
+/// Invalidate one stream, or every stream in the current database.
+pub fn invalidate_cost_model(pgt_id: Option<i64>) {
+    if !is_shmem_available() {
+        return;
     }
-    let full_ms = f64::from_bits(entry.last_full_ms_bits);
-    let diff_ms = f64::from_bits(entry.last_diff_ms_bits);
-    Some((full_ms, diff_ms))
+    let database_oid = cost_model_database_oid();
+    COST_MODEL_STATE
+        .exclusive()
+        .invalidate(database_oid, pgt_id);
 }
 
 /// Flag indicating whether shared memory was initialized via _PG_init.
@@ -2492,6 +2549,37 @@ mod tests {
         merge_inline_pgt_id, push_invalidation,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn test_cost_cache_collision_clears_both_previous_timings() {
+        let mut cache = super::CostModelCache::default();
+        cache.update(10, 1, 256, Some(10.0), Some(5.0));
+        cache.update(10, 257, 256, None, Some(200.0));
+        assert_eq!(cache.read(10, 1, 256), None);
+        assert_eq!(cache.read(10, 257, 256), Some((0.0, 200.0)));
+        cache.update(10, 257, 256, Some(500.0), None);
+        assert_eq!(cache.read(10, 257, 256), Some((500.0, 200.0)));
+    }
+
+    #[test]
+    fn test_cost_cache_database_isolation_and_reset() {
+        let mut cache = super::CostModelCache::default();
+        cache.update(10, 1, 256, Some(100.0), None);
+        cache.update(11, 1, 256, Some(900.0), None);
+        cache.update(10, 3, 16, None, Some(50.0));
+        assert_eq!(cache.read(10, 1, 256), Some((100.0, 0.0)));
+        assert_eq!(cache.read(11, 1, 256), Some((900.0, 0.0)));
+        cache.invalidate(10, Some(1));
+        assert_eq!(cache.read(10, 1, 256), None);
+        assert_eq!(cache.read(10, 3, 16), Some((0.0, 50.0)));
+        cache.invalidate(10, None);
+        assert_eq!(cache.read(10, 3, 16), None);
+        assert_eq!(cache.read(11, 1, 256), Some((900.0, 0.0)));
+        // Same slot and local ID in different databases must not inherit costs.
+        cache.update(267, 1, 256, None, Some(20.0));
+        assert_eq!(cache.read(11, 1, 256), None);
+        assert_eq!(cache.read(267, 1, 256), Some((0.0, 20.0)));
+    }
 
     #[test]
     fn test_increment_epoch_advances_counter() {

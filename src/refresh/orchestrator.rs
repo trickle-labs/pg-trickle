@@ -5,7 +5,6 @@
 // SCAL-3 (v0.30.0): Removed dead #[allow(unused_imports)] shims; imports are now
 // concrete and will warn if unused, catching future stale imports early.
 
-use super::QueryComplexityClass;
 use crate::catalog::StreamTableMeta;
 use crate::dag::RefreshMode;
 use crate::error::PgTrickleError;
@@ -140,284 +139,120 @@ pub fn validate_topk_metadata(
 /// TopK tables. The caller decides whether to invoke it (DIFFERENTIAL mode
 /// checks change buffers first and skips if no changes exist).
 pub(crate) struct RefreshHistoryStats {
-    /// Average milliseconds per delta row across recent DIFFERENTIAL refreshes.
-    pub(crate) avg_ms_per_delta: f64,
-    /// Average FULL refresh time in milliseconds.
-    pub(crate) avg_full_ms: f64,
+    /// Median complete differential duration among size-comparable inputs.
+    pub(crate) diff_ms: f64,
+    /// Median completed FULL duration in milliseconds.
+    pub(crate) full_ms: f64,
 }
 
-/// B-4: Query recent refresh history stats for a stream table.
-///
-/// Returns `None` when insufficient history exists (fewer than 3
-/// completed DIFFERENTIAL refreshes or no completed FULL refresh).
-pub(crate) fn query_refresh_history_stats(pgt_id: i64) -> Option<RefreshHistoryStats> {
-    // P-3 (v0.78.0): Try the pre-computed summary table first.  It is
-    // populated by batch_update_cost_model_summary() once per scheduler tick,
-    // eliminating N per-ST subquery scans on pgt_refresh_history.
-    // Fall back to the legacy live query if the summary table doesn't exist
-    // yet (pre-migration) or has no entry for this ST.
-    let summary: Option<(f64, f64, i32)> = Spi::connect(|client| {
-        Ok::<_, pgrx::spi::SpiError>((|| {
+/// B-4: Read fresh, size-comparable cost evidence. The periodic summary is
+/// useful for monitoring but is not a valid prediction for every delta size.
+/// Use the median duration of the last ten completed comparable refreshes
+/// (within a factor of two of the current input size). This includes fixed
+/// overhead without multiplying it by an unrelated delta size, and rejects
+/// isolated slow plans. In the absence of comparable evidence, keep the
+/// ordinary ratio heuristic. Never resurrect pre-reset history.
+pub(crate) fn query_refresh_history_stats(
+    pgt_id: i64,
+    current_delta_rows: i64,
+) -> Option<RefreshHistoryStats> {
+    let min_samples = crate::config::pg_trickle_prediction_min_samples();
+    if current_delta_rows <= 0 || min_samples <= 0 {
+        return None;
+    }
+    let min_samples = min_samples.max(3);
+    let window_minutes = crate::config::pg_trickle_prediction_window();
+    let lower = (current_delta_rows / 2).max(1);
+    let upper = current_delta_rows.saturating_mul(2);
+    let stats: Option<(f64, f64)> = Spi::connect(|client| {
+        let result = (|| {
             let row = client
                 .select(
-                    "SELECT avg_full_ms, avg_diff_ms, sample_count \
-                     FROM pgtrickle.pgt_cost_model_summary \
-                     WHERE pgt_id = $1",
+                    "WITH recent_diff_history AS MATERIALIZED (
+                        SELECT h.refresh_id,
+                               EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0 AS ms,
+                               CASE WHEN pg_catalog.pg_input_is_valid(h.refresh_reason_detail, 'jsonb')
+                                    THEN h.refresh_reason_detail::jsonb END AS evidence
+                        FROM pgtrickle.pgt_refresh_history h
+                        JOIN pgtrickle.pgt_refresh_summary s USING (pgt_id)
+                        WHERE h.pgt_id = $1 AND h.start_time >= s.stats_reset_at
+                          AND h.action = 'DIFFERENTIAL' AND h.status = 'COMPLETED'
+                          AND h.merge_strategy_used IS DISTINCT FROM 'FULL'
+                          AND h.merge_strategy_used IS DISTINCT FROM 'TOP_K'
+                          AND NOT h.was_full_fallback AND h.end_time > h.start_time
+                          AND h.start_time >= now() - make_interval(mins => $5)
+                        ORDER BY h.refresh_id DESC LIMIT GREATEST(50, $4 * 5)
+                    ), recent_diff AS (
+                        SELECT ms FROM recent_diff_history
+                        CROSS JOIN pgtrickle.pgt_stream_tables st
+                        WHERE st.pgt_id = $1
+                          AND evidence->'plan_identity' = to_jsonb(st.defining_query_hash)
+                          AND evidence->'contract_generation' = to_jsonb(st.contract_generation)
+                          AND evidence->'schema_version' = '1'::jsonb
+                          AND evidence->'input_delta_rows_may_be_incomplete' = 'false'::jsonb
+                          AND (CASE WHEN jsonb_typeof(evidence->'input_delta_rows') = 'number'
+                                    THEN (evidence->>'input_delta_rows')::numeric END) BETWEEN $2 AND $3
+                        ORDER BY refresh_id DESC LIMIT GREATEST(10, $4)
+                    ), recent_full AS (
+                        SELECT EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0 AS ms
+                        FROM pgtrickle.pgt_refresh_history h
+                        JOIN pgtrickle.pgt_refresh_summary s USING (pgt_id)
+                        WHERE h.pgt_id = $1 AND h.start_time >= s.stats_reset_at
+                          AND h.status = 'COMPLETED' AND h.end_time > h.start_time
+                          AND (h.action = 'FULL' OR h.merge_strategy_used = 'FULL')
+                          AND h.rows_inserted > 0
+                        ORDER BY h.refresh_id DESC LIMIT 5
+                    )
+                    SELECT (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY ms::float8)
+                            FROM recent_diff HAVING COUNT(*) >= $4),
+                           (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY ms::float8)
+                            FROM recent_full)",
                     None,
-                    &[pgt_id.into()],
+                    &[
+                        pgt_id.into(),
+                        lower.into(),
+                        upper.into(),
+                        min_samples.into(),
+                        window_minutes.into(),
+                    ],
                 )
                 .ok()?
                 .first();
-            let avg_full_ms: f64 = row.get::<f64>(1).ok()??;
-            let avg_diff_ms: f64 = row.get::<f64>(2).ok()??;
-            let sample_count: i32 = row.get::<i32>(3).ok()??;
-            if avg_full_ms > 0.0 && avg_diff_ms > 0.0 && sample_count >= 3 {
-                Some((avg_full_ms, avg_diff_ms, sample_count))
-            } else {
-                None
-            }
-        })())
-    })
-    .unwrap_or(None);
-
-    if let Some((avg_full_ms, avg_diff_ms, _)) = summary {
-        return Some(RefreshHistoryStats {
-            avg_ms_per_delta: avg_diff_ms,
-            avg_full_ms,
-        });
-    }
-
-    // Legacy path: live subquery on pgt_refresh_history.
-    let stats: Option<(f64, f64)> = Spi::connect(|client| {
-        let sql = format!(
-            "SELECT incr.avg_ms_per_delta, full_r.avg_full_ms \
-             FROM ( \
-               SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0 \
-                          / GREATEST(delta_row_count, 1)) AS avg_ms_per_delta, \
-                      COUNT(*)::int AS cnt \
-               FROM ( \
-                 SELECT end_time, start_time, delta_row_count \
-                 FROM pgtrickle.pgt_refresh_history \
-                 WHERE pgt_id = {pgt_id} \
-                   AND action = 'DIFFERENTIAL' \
-                   AND merge_strategy_used IS DISTINCT FROM 'FULL' \
-                   AND merge_strategy_used IS DISTINCT FROM 'TOP_K' \
-                   AND NOT was_full_fallback \
-                   AND status = 'COMPLETED' \
-                   AND delta_row_count > 0 \
-                   AND end_time IS NOT NULL \
-                 ORDER BY refresh_id DESC LIMIT 10 \
-               ) __pgt_incr \
-             ) incr, ( \
-               SELECT COALESCE( \
-                        AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0), \
-                        (SELECT last_full_ms FROM pgtrickle.pgt_stream_tables \
-                          WHERE pgt_id = {pgt_id}) \
-                      ) AS avg_full_ms \
-               FROM ( \
-                 SELECT end_time, start_time \
-                 FROM pgtrickle.pgt_refresh_history \
-                 WHERE pgt_id = {pgt_id} \
-                   AND (action = 'FULL' OR merge_strategy_used = 'FULL') \
-                   AND status = 'COMPLETED' \
-                   AND rows_inserted > 0 \
-                   AND end_time IS NOT NULL \
-                 ORDER BY refresh_id DESC LIMIT 5 \
-               ) __pgt_full \
-             ) full_r \
-             WHERE incr.cnt >= 3 \
-               AND full_r.avg_full_ms IS NOT NULL \
-               AND full_r.avg_full_ms > 0 \
-               AND incr.avg_ms_per_delta IS NOT NULL \
-               AND incr.avg_ms_per_delta > 0",
-        );
-
-        let result: Option<(f64, f64)> = (|| {
-            let row = client.select(&sql, None, &[]).ok()?.first();
-            let avg_ms_per_delta: f64 = row.get::<f64>(1).ok()??;
-            let avg_full_ms: f64 = row.get::<f64>(2).ok()??;
-            Some((avg_ms_per_delta, avg_full_ms))
+            Some((row.get::<f64>(1).ok()??, row.get::<f64>(2).ok()??))
         })();
         Ok::<_, pgrx::spi::SpiError>(result)
     })
     .unwrap_or(None);
 
-    let (avg_ms_per_delta, avg_full_ms) = stats?;
-    Some(RefreshHistoryStats {
-        avg_ms_per_delta,
-        avg_full_ms,
-    })
-}
-
-/// D-3 / B-4: Estimate a cost-based fallback threshold from refresh history.
-///
-/// Queries the last N DIFFERENTIAL and FULL refreshes for a stream table
-/// and computes the crossover delta ratio where incremental cost equals
-/// full cost.  The `complexity` class adjusts the per-delta-row cost
-/// via a multiplicative factor (joins and aggregates are more expensive
-/// per delta row than plain scans).
-///
-/// Returns `None` if insufficient history is available (fewer
-/// than 3 DIFFERENTIAL or no FULL refresh recorded).
-///
-/// The model:
-///   incr_cost(delta_ratio) ≈ avg_incr_cost_per_delta_row × complexity_factor × delta_ratio × table_size
-///   full_cost              ≈ avg_full_ms
-///   crossover_ratio        = avg_full_ms / (avg_cost_per_delta_row × complexity_factor × table_size)
-///
-/// Clamped to [0.01, 0.80].
-pub(crate) fn estimate_cost_based_threshold(
-    pgt_id: i64,
-    complexity: QueryComplexityClass,
-) -> Option<f64> {
-    // Query recent completed DIFFERENTIAL refreshes with non-zero delta.
-    let stats: Option<(f64, f64, f64)> = Spi::connect(|client| {
-        // avg_ms_per_delta: average milliseconds per delta row
-        // avg_full_ms:      average FULL refresh time
-        //
-        // We use a lateral subquery to get both INCR and FULL stats.
-        let sql = format!(
-            "SELECT incr.avg_ms_per_delta, full_r.avg_full_ms, \
-                    GREATEST(incr.avg_delta, 1)::double precision AS avg_delta \
-             FROM ( \
-               SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0 \
-                          / GREATEST(delta_row_count, 1)) AS avg_ms_per_delta, \
-                      AVG(delta_row_count)::double precision AS avg_delta, \
-                      COUNT(*)::int AS cnt \
-               FROM ( \
-                 SELECT end_time, start_time, delta_row_count \
-                 FROM pgtrickle.pgt_refresh_history \
-                 WHERE pgt_id = {pgt_id} \
-                   AND action = 'DIFFERENTIAL' \
-                   AND merge_strategy_used IS DISTINCT FROM 'FULL' \
-                   AND merge_strategy_used IS DISTINCT FROM 'TOP_K' \
-                   AND NOT was_full_fallback \
-                   AND status = 'COMPLETED' \
-                   AND delta_row_count > 0 \
-                   AND end_time IS NOT NULL \
-                 ORDER BY refresh_id DESC LIMIT 10 \
-               ) __pgt_incr \
-             ) incr, ( \
-               SELECT COALESCE( \
-                        AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0), \
-                        (SELECT last_full_ms FROM pgtrickle.pgt_stream_tables \
-                          WHERE pgt_id = {pgt_id}) \
-                      ) AS avg_full_ms \
-               FROM ( \
-                 SELECT end_time, start_time \
-                 FROM pgtrickle.pgt_refresh_history \
-                 WHERE pgt_id = {pgt_id} \
-                   AND (action = 'FULL' OR merge_strategy_used = 'FULL') \
-                   AND status = 'COMPLETED' \
-                   AND rows_inserted > 0 \
-                   AND end_time IS NOT NULL \
-                 ORDER BY refresh_id DESC LIMIT 5 \
-               ) __pgt_full \
-             ) full_r \
-             WHERE incr.cnt >= 3 \
-               AND full_r.avg_full_ms IS NOT NULL \
-               AND full_r.avg_full_ms > 0 \
-               AND incr.avg_ms_per_delta IS NOT NULL \
-               AND incr.avg_ms_per_delta > 0",
-        );
-
-        let result: Option<(f64, f64, f64)> = (|| {
-            let row = client.select(&sql, None, &[]).ok()?.first();
-            let avg_ms_per_delta: f64 = row.get::<f64>(1).ok()??;
-            let avg_full_ms: f64 = row.get::<f64>(2).ok()??;
-            let avg_delta: f64 = row.get::<f64>(3).ok()??;
-            Some((avg_ms_per_delta, avg_full_ms, avg_delta))
-        })();
-        Ok::<_, pgrx::spi::SpiError>(result)
-    })
-    .unwrap_or(None);
-
-    let (avg_ms_per_delta, avg_full_ms, avg_delta) = stats?;
-
-    // crossover_delta = avg_full_ms / (avg_ms_per_delta × complexity_factor)
-    // The complexity factor scales the per-delta-row cost: join_agg queries
-    // have 4× the cost per delta row compared to a plain scan, so their
-    // crossover point is lower (smaller change ratio triggers FULL).
-    let factor = complexity.diff_cost_factor();
-    let crossover_delta = avg_full_ms / (avg_ms_per_delta * factor);
-    if avg_delta <= 0.0 {
+    let (diff_ms, avg_full_ms) = stats?;
+    if !diff_ms.is_finite() || !avg_full_ms.is_finite() || diff_ms <= 0.0 || avg_full_ms <= 0.0 {
         return None;
     }
-
-    // If crossover is much higher than typical delta, current threshold is fine;
-    // if crossover is near or below typical delta, we should lower the threshold.
-    // Scale the global default (0.15) by how far the crossover is from the average.
-    let global_ratio = crate::config::pg_trickle_differential_max_change_ratio();
-    let scaling: f64 = crossover_delta / avg_delta;
-    let suggested: f64 = (global_ratio * scaling).clamp(0.01, 0.80);
-
-    Some(suggested)
+    Some(RefreshHistoryStats {
+        diff_ms,
+        full_ms: avg_full_ms,
+    })
 }
 
-/// B-4: Pre-refresh predictive cost comparison.
-///
-/// **Before** executing a refresh, estimate the DIFFERENTIAL and FULL costs
-/// from historical data and the current delta size.  Returns `true` if the
-/// cost model recommends FULL refresh.
-///
-/// When insufficient history exists (cold start), returns `None` to let the
-/// caller fall through to the fixed-threshold heuristic.
-///
-/// Pure decision logic — called from the refresh decision path.
-pub(crate) fn cost_model_prefers_full(
-    avg_ms_per_delta: f64,
-    avg_full_ms: f64,
-    current_delta_rows: i64,
-    complexity: QueryComplexityClass,
-    safety_margin: f64,
-) -> bool {
-    let factor = complexity.diff_cost_factor();
-    let estimated_diff = avg_ms_per_delta * factor * current_delta_rows as f64;
-    let estimated_full = avg_full_ms * safety_margin;
-    estimated_diff >= estimated_full
+/// Require a measured differential cost to exceed FULL by an availability
+/// margin. Historical durations already include the query's complexity.
+pub(crate) fn cost_model_prefers_full(diff_ms: f64, full_ms: f64, margin: f64) -> bool {
+    diff_ms.is_finite()
+        && full_ms.is_finite()
+        && margin.is_finite()
+        && diff_ms > 0.0
+        && full_ms > 0.0
+        && diff_ms / full_ms > margin.max(1.0)
 }
 
-/// Compute a new adaptive fallback threshold based on observed performance.
-///
-/// Compares the DIFFERENTIAL refresh time against the last known FULL refresh
-/// time and adjusts the threshold accordingly:
-///
-/// - If INCR time >= 90% of FULL → lower threshold by 20% (more aggressive fallback)
-/// - If INCR time >= 70% of FULL → lower threshold by 10%
-/// - If INCR time <= 30% of FULL → raise threshold by 10% (allow more INCR)
-/// - Otherwise → keep the current threshold
-///
-/// The threshold is clamped to [0.01, 0.80] to prevent extreme values.
-///
-/// This is a pure function — no database access.
-pub(crate) fn compute_adaptive_threshold(current: f64, incr_ms: f64, full_ms: f64) -> f64 {
-    let ratio = incr_ms / full_ms;
-    let adjusted = if ratio >= 0.90 {
-        // INCR is nearly as slow as FULL — lower threshold aggressively
-        current * 0.80
-    } else if ratio >= 0.70 {
-        // INCR is getting expensive — lower threshold moderately
-        current * 0.90
-    } else if ratio <= 0.30 {
-        // INCR is much faster — raise threshold to allow more INCR
-        (current * 1.10).min(0.80)
-    } else {
-        // INCR is reasonably faster — keep threshold
-        current
-    };
-
-    adjusted.clamp(0.01, 0.80)
+/// Update the completed stream's monitoring averages in the refresh transaction.
+/// The periodic scheduler pass only backfills missing rows and refreshes
+/// percentiles: it must not overwrite fresher per-stream averages.
+pub(crate) fn update_cost_model_summary_for_st(pgt_id: i64) -> Result<(), PgTrickleError> {
+    update_cost_model_summary(Some(pgt_id))
 }
 
-/// P-3 (v0.78.0): Batch-update the cost-model summary table.
-///
-/// Runs a single aggregating INSERT ... ON CONFLICT DO UPDATE that
-/// replaces N per-ST history subqueries with one grouped query.
-/// Called once per scheduler tick instead of once per stream table.
-///
-/// The summary table `pgtrickle.pgt_cost_model_summary` must already
-/// exist (created by the v0.77.0→0.78.0 migration).
-pub(crate) fn batch_update_cost_model_summary() {
+fn update_cost_model_summary(pgt_id: Option<i64>) -> Result<(), PgTrickleError> {
     let sql = "
         INSERT INTO pgtrickle.pgt_cost_model_summary
             (pgt_id, avg_full_ms, avg_diff_ms, sample_count, updated_at)
@@ -464,14 +299,24 @@ pub(crate) fn batch_update_cost_model_summary() {
                 LIMIT 10
             ) recent_diff
         ) diff_samples ON true
+        WHERE s.pgt_id = $1::bigint
+           OR ($1::bigint IS NULL AND NOT EXISTS (
+               SELECT 1 FROM pgtrickle.pgt_cost_model_summary c WHERE c.pgt_id = s.pgt_id
+           ))
         ON CONFLICT (pgt_id) DO UPDATE
             SET avg_full_ms   = EXCLUDED.avg_full_ms,
                 avg_diff_ms   = EXCLUDED.avg_diff_ms,
                 sample_count  = EXCLUDED.sample_count,
                 updated_at    = EXCLUDED.updated_at
+            WHERE $1::bigint IS NOT NULL
     ";
-    if let Err(e) = pgrx::Spi::run(sql) {
-        pgrx::warning!("[pg_trickle] P-3: failed to batch-update pgt_cost_model_summary: {e}");
+    Spi::run_with_args(sql, &[pgt_id.into()]).map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+/// Backfill missing monitoring rows and refresh historical percentiles.
+pub(crate) fn batch_update_cost_model_summary() {
+    if let Err(e) = update_cost_model_summary(None) {
+        pgrx::warning!("[pg_trickle] P-3: failed to backfill pgt_cost_model_summary: {e}");
     }
     let percentile_sql = "
         UPDATE pgtrickle.pgt_cost_model_summary c
@@ -659,11 +504,113 @@ mod tests {
         )
         .expect("seed differential-only history");
 
-        batch_update_cost_model_summary();
+        update_cost_model_summary_for_st(pgt_id).expect("update completed stream summary");
         let (avg_full_ms, avg_diff_ms, sample_count) = read_cost_summary(pgt_id);
         assert!((avg_full_ms - 321.0).abs() < 0.01, "{avg_full_ms}");
         assert!((avg_diff_ms - 2.0).abs() < 0.01, "{avg_diff_ms}");
         assert_eq!(sample_count, 3);
+    }
+
+    #[pg_test]
+    fn test_cost_prediction_is_fresh_size_aware_and_reset_aware() {
+        Spi::run("CREATE TABLE public.cost_prediction_src (id INT PRIMARY KEY)")
+            .expect("create source");
+        Spi::run(
+            "SELECT pgtrickle.create_stream_table(
+                'public.cost_prediction_st',
+                'SELECT id FROM public.cost_prediction_src',
+                schedule => '1h',
+                refresh_mode => 'DIFFERENTIAL'
+            )",
+        )
+        .expect("create stream table");
+        Spi::run("SET LOCAL pg_trickle.prediction_min_samples = 3").expect("sample floor");
+        let pgt_id = Spi::get_one::<i64>(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+              WHERE pgt_schema = 'public' AND pgt_name = 'cost_prediction_st'",
+        )
+        .expect("read pgt_id")
+        .expect("stream exists");
+        for sql in [
+            "DELETE FROM pgtrickle.pgt_refresh_history WHERE pgt_id = $1",
+            "UPDATE pgtrickle.pgt_refresh_summary
+                SET stats_reset_at = now() - interval '1 hour'
+              WHERE pgt_id = $1",
+            "INSERT INTO pgtrickle.pgt_refresh_history
+                (pgt_id, data_timestamp, start_time, end_time, action, status,
+                 rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback)
+             VALUES
+               ($1, now(), now() - interval '2 minutes', now() - interval '1 minute',
+                'FULL', 'COMPLETED', 25000000, 1, 'FULL', false),
+               ($1, now(), now() - interval '2 minutes', now() - interval '119 seconds',
+                'DIFFERENTIAL', 'COMPLETED', 1, 1, 'explicit_dml', false),
+               ($1, now(), now() - interval '2 minutes', now() - interval '119 seconds',
+                'DIFFERENTIAL', 'COMPLETED', 50000, 50000, 'explicit_dml', false),
+               ($1, now(), now() - interval '2 minutes', now() - interval '61 seconds',
+                'DIFFERENTIAL', 'COMPLETED', 1, 1, 'explicit_dml', false)",
+            "UPDATE pgtrickle.pgt_refresh_history
+                SET refresh_reason_detail = jsonb_build_object(
+                    'schema_version', 1, 'input_delta_rows', 1000,
+                    'input_delta_rows_may_be_incomplete', false,
+                    'plan_identity', st.defining_query_hash,
+                    'contract_generation', st.contract_generation)::text
+               FROM pgtrickle.pgt_stream_tables st
+              WHERE pgtrickle.pgt_refresh_history.pgt_id = $1
+                AND st.pgt_id = $1 AND action = 'DIFFERENTIAL'",
+            "INSERT INTO pgtrickle.pgt_refresh_history
+                (pgt_id, data_timestamp, start_time, end_time, action, status,
+                 rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback,
+                 refresh_reason_detail)
+             VALUES
+               ($1, now(), now() - interval '2 minutes', now(),
+                'DIFFERENTIAL', 'COMPLETED', 1000, 1000, 'explicit_dml', false,
+                jsonb_build_object('schema_version', 1, 'input_delta_rows', 1000,
+                    'input_delta_rows_may_be_incomplete', true)::text),
+               ($1, now(), now() - interval '2 minutes', now(),
+                'DIFFERENTIAL', 'COMPLETED', 1000, 1000, 'explicit_dml', false,
+                'legacy diagnostic, not JSON')",
+        ] {
+            Spi::run_with_args(sql, &[pgt_id.into()]).expect("seed cost history");
+        }
+
+        let stats = query_refresh_history_stats(pgt_id, 1_000).expect("comparable samples");
+        assert!((stats.diff_ms - 1_000.0).abs() < 0.01);
+        assert!((stats.full_ms - 60_000.0).abs() < 0.01);
+        assert!(query_refresh_history_stats(pgt_id, 50_000).is_none());
+        Spi::run("SET LOCAL pg_trickle.prediction_min_samples = 0").expect("disable predictor");
+        assert!(query_refresh_history_stats(pgt_id, 1_000).is_none());
+        Spi::run("SET LOCAL pg_trickle.prediction_min_samples = 3").expect("enable predictor");
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_refresh_history
+                SET refresh_reason_detail =
+                    jsonb_set(refresh_reason_detail::jsonb, '{contract_generation}', '-1'::jsonb)::text
+              WHERE pgt_id = $1 AND action = 'DIFFERENTIAL'
+                AND pg_input_is_valid(refresh_reason_detail, 'jsonb')",
+            &[pgt_id.into()],
+        )
+        .expect("invalidate the sampled contract");
+        assert!(query_refresh_history_stats(pgt_id, 1_000).is_none());
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_refresh_history h
+                SET refresh_reason_detail = jsonb_set(
+                    h.refresh_reason_detail::jsonb, '{contract_generation}',
+                    to_jsonb(st.contract_generation))::text
+               FROM pgtrickle.pgt_stream_tables st
+              WHERE h.pgt_id = $1 AND st.pgt_id = $1 AND h.action = 'DIFFERENTIAL'
+                AND pg_input_is_valid(h.refresh_reason_detail, 'jsonb')",
+            &[pgt_id.into()],
+        )
+        .expect("restore comparable contract");
+        assert!(query_refresh_history_stats(pgt_id, 1_000).is_some());
+
+        batch_update_cost_model_summary();
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_refresh_summary SET stats_reset_at = now()
+               WHERE pgt_id = $1",
+            &[pgt_id.into()],
+        )
+        .expect("reset cost history");
+        assert!(query_refresh_history_stats(pgt_id, 1_000).is_none());
     }
 
     fn read_cost_summary(pgt_id: i64) -> (f64, f64, i32) {
@@ -696,75 +643,20 @@ mod tests {
 mod unit_tests {
     use super::*;
 
-    // ── compute_adaptive_threshold tests (TEST-1) ────────────────────────────
-
     #[test]
-    fn test_adaptive_threshold_incr_slower_than_90pct_lowers_aggressively() {
-        // INCR ~= FULL → lower threshold by 20%
-        let result = compute_adaptive_threshold(0.50, 950.0, 1000.0);
-        assert!((result - 0.40).abs() < 1e-9, "expected 0.40, got {result}");
+    fn test_cost_model_requires_an_availability_margin() {
+        assert!(!cost_model_prefers_full(80.0, 100.0, 0.8));
+        assert!(!cost_model_prefers_full(110.0, 100.0, 1.5));
+        assert!(!cost_model_prefers_full(150.0, 100.0, 1.5));
+        assert!(cost_model_prefers_full(151.0, 100.0, 1.5));
     }
 
     #[test]
-    fn test_adaptive_threshold_incr_between_70_and_90pct_lowers_moderately() {
-        // ratio = 0.80 → lower by 10%
-        let result = compute_adaptive_threshold(0.50, 800.0, 1000.0);
-        assert!((result - 0.45).abs() < 1e-9, "expected 0.45, got {result}");
-    }
-
-    #[test]
-    fn test_adaptive_threshold_incr_faster_than_30pct_raises_threshold() {
-        // ratio = 0.20 → raise by 10%
-        let result = compute_adaptive_threshold(0.50, 200.0, 1000.0);
-        assert!((result - 0.55).abs() < 1e-9, "expected 0.55, got {result}");
-    }
-
-    #[test]
-    fn test_adaptive_threshold_middle_range_unchanged() {
-        // ratio = 0.50 → no change
-        let result = compute_adaptive_threshold(0.50, 500.0, 1000.0);
-        assert!((result - 0.50).abs() < 1e-9, "expected 0.50, got {result}");
-    }
-
-    #[test]
-    fn test_adaptive_threshold_clamps_to_minimum_0_01() {
-        // Extreme INCR slowness → repeated 20% reductions → clamps at 0.01
-        let result = compute_adaptive_threshold(0.01, 999.0, 1000.0);
-        assert!(result >= 0.01, "must not go below 0.01: {result}");
-    }
-
-    #[test]
-    fn test_adaptive_threshold_clamps_to_maximum_0_80() {
-        // Very fast INCR + already near max → clamps at 0.80
-        let result = compute_adaptive_threshold(0.79, 10.0, 1000.0);
-        assert!(result <= 0.80, "must not exceed 0.80: {result}");
-    }
-
-    // ── cost_model_prefers_full tests (TEST-1) ───────────────────────────────
-
-    #[test]
-    fn test_cost_model_prefers_full_when_diff_expensive() {
-        // avg_ms_per_delta=1.0, delta_rows=1000 → diff_est=1000 ms
-        // full=500ms*1.2 margin=600ms → 1000 >= 600 → prefer FULL
-        assert!(cost_model_prefers_full(
-            1.0,
-            500.0,
-            1000,
-            QueryComplexityClass::Scan,
-            1.2
-        ));
-    }
-
-    #[test]
-    fn test_cost_model_prefers_diff_when_delta_small() {
-        // avg_ms_per_delta=0.1, delta_rows=10 → diff_est=1 ms
-        // full=500ms → 1 < 500 → prefer DIFF
-        assert!(!cost_model_prefers_full(
-            0.1,
-            500.0,
-            10,
-            QueryComplexityClass::Scan,
-            1.0
-        ));
+    fn test_cost_model_rejects_invalid_evidence() {
+        for invalid in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
+            assert!(!cost_model_prefers_full(invalid, 100.0, 1.5));
+            assert!(!cost_model_prefers_full(100.0, invalid, 1.5));
+        }
+        assert!(!cost_model_prefers_full(200.0, 100.0, f64::NAN));
     }
 }

@@ -1144,6 +1144,13 @@ pub fn finalize_success(
         RefreshRecord::set_cost_evidence(refresh_id, evidence)?;
     }
 
+    if matches!(
+        history_action,
+        RefreshAction::Differential | RefreshAction::Full | RefreshAction::Reinitialize
+    ) {
+        orchestrator::update_cost_model_summary_for_st(st.pgt_id)?;
+    }
+
     if !execution.effective_mode.is_empty() {
         StreamTableMeta::update_effective_refresh_mode(st.pgt_id, execution.effective_mode)?;
     }
@@ -1234,42 +1241,6 @@ use std::cell::Cell;
 
 // ── B-4: Query complexity classification ────────────────────────────────
 
-/// Complexity class for a stream table's defining query.
-///
-/// Used by the cost model to apply per-class cost coefficients.  Higher
-/// complexity classes have steeper differential cost curves (more joins /
-/// aggregates → more work per delta row).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum QueryComplexityClass {
-    /// Simple scan: `SELECT cols FROM single_table`
-    Scan,
-    /// Scan with filter: `SELECT cols FROM single_table WHERE ...`
-    Filter,
-    /// Aggregate: `SELECT ... GROUP BY ...` (no joins)
-    Aggregate,
-    /// Join(s) without aggregation
-    Join,
-    /// Join(s) with GROUP BY aggregation (most expensive differential path)
-    JoinAggregate,
-}
-
-impl QueryComplexityClass {
-    /// Default differential cost scaling factor per class.
-    ///
-    /// The factor represents the per-delta-row cost multiplier relative to
-    /// a plain scan.  Joins and aggregates make each delta row more
-    /// expensive to process incrementally.
-    pub(crate) fn diff_cost_factor(self) -> f64 {
-        match self {
-            Self::Scan => 1.0,
-            Self::Filter => 1.1,
-            Self::Aggregate => 1.5,
-            Self::Join => 2.5,
-            Self::JoinAggregate => 4.0,
-        }
-    }
-}
-
 /// Classify a defining query's complexity from its SQL text using the OpTree
 /// parser for accurate scan-count analysis.
 ///
@@ -1293,36 +1264,6 @@ pub(crate) fn classify_query_complexity_optree(defining_query: &str) -> &'static
                 "Filter"
             } else {
                 "Scan"
-            }
-        }
-    }
-}
-
-/// Classify a defining query's complexity from its SQL text.
-///
-/// Uses lightweight keyword analysis (no parsing or SPI).  This is
-/// intentionally conservative: false positives (over-classifying) are
-/// preferable to false negatives because a higher class merely biases
-/// the cost model toward FULL at lower change rates, which is always safe.
-pub(crate) fn classify_query_complexity(defining_query: &str) -> QueryComplexityClass {
-    let upper = defining_query.to_ascii_uppercase();
-    let has_join = upper.contains(" JOIN ")
-        || upper.contains(" INNER JOIN ")
-        || upper.contains(" LEFT JOIN ")
-        || upper.contains(" RIGHT JOIN ")
-        || upper.contains(" FULL JOIN ")
-        || upper.contains(" CROSS JOIN ");
-    let has_group_by = upper.contains("GROUP BY");
-
-    match (has_join, has_group_by) {
-        (true, true) => QueryComplexityClass::JoinAggregate,
-        (true, false) => QueryComplexityClass::Join,
-        (false, true) => QueryComplexityClass::Aggregate,
-        (false, false) => {
-            if upper.contains(" WHERE ") {
-                QueryComplexityClass::Filter
-            } else {
-                QueryComplexityClass::Scan
             }
         }
     }
