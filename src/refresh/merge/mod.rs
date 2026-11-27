@@ -4259,10 +4259,15 @@ pub fn execute_differential_refresh_with_tuning(
         // A successful frontier must never acknowledge storage changes that
         // were not published. Roll back the refresh instead of attempting a
         // best-effort repair after publication has already failed.
-        capture_result.map_err(|e| PgTrickleError::RefreshFinalizationFailed {
-            pgt_id: st.pgt_id,
-            stage: "downstream CDC capture".to_string(),
-            reason: e.to_string(),
+        capture_result.map_err(|e| match e {
+            // Preserve the scheduler's dedicated atomicity-failure path.
+            // Real publication failures still fail closed as finalization errors.
+            PgTrickleError::TestAtomicityFailpoint(_) => e,
+            _ => PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "downstream CDC capture".to_string(),
+                reason: e.to_string(),
+            },
         })?;
     }
 
