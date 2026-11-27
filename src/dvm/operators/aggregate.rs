@@ -204,25 +204,24 @@ fn build_group_filter(
 }
 
 fn special_aggregate_delta_filter(aggregates: &[AggExpr], child: &OpTree) -> Option<String> {
-    let filters: Vec<String> = aggregates
-        .iter()
-        .filter(|agg| needs_special_value_rescan(agg, child))
-        .map(|agg| {
-            let state_guard = if agg.uses_incremental_nonfinite_state(child) {
-                format!(
-                    " AND pg_catalog.jsonb_typeof(__pgt_d2.{}) IS DISTINCT FROM 'object'",
-                    quote_ident(&format!("__ins_special_{}", agg.alias))
-                )
-            } else {
-                String::new()
-            };
-            format!(
-                "COALESCE(__pgt_d2.{}, 0) > 0{state_guard}",
-                quote_ident(&format!("__special_{}", agg.alias)),
-            )
-        })
-        .collect();
-    (!filters.is_empty()).then(|| filters.join(" OR "))
+    let mut filter = String::new();
+    for agg in aggregates {
+        if !needs_special_value_rescan(agg, child) {
+            continue;
+        }
+        if !filter.is_empty() {
+            filter.push_str(" OR ");
+        }
+        filter.push_str("COALESCE(__pgt_d2.");
+        filter.push_str(&quote_ident(&format!("__special_{}", agg.alias)));
+        filter.push_str(", 0) > 0");
+        if agg.uses_incremental_nonfinite_state(child) {
+            filter.push_str(" AND pg_catalog.jsonb_typeof(__pgt_d2.");
+            filter.push_str(&quote_ident(&format!("__ins_special_{}", agg.alias)));
+            filter.push_str(") IS DISTINCT FROM 'object'");
+        }
+    }
+    (!filter.is_empty()).then_some(filter)
 }
 
 fn special_state_delta_exprs(
@@ -241,6 +240,23 @@ fn special_state_delta_exprs(
     (state_for("I"), state_for("D"))
 }
 
+fn expr_is_exact_integer(expr: &Expr, child: &OpTree) -> bool {
+    match expr {
+        Expr::ColumnRef {
+            table_alias,
+            column_name,
+        } => source_column_type_oid(child, table_alias.as_deref(), column_name)
+            .ok()
+            .flatten()
+            .is_some_and(|type_oid| matches!(type_oid, 20 | 21 | 23)),
+        Expr::Literal(raw) => raw.trim().parse::<i64>().is_ok(),
+        Expr::BinaryOp { op, left, right } if matches!(op.as_str(), "+" | "-" | "*") => {
+            expr_is_exact_integer(left, child) && expr_is_exact_integer(right, child)
+        }
+        _ => false,
+    }
+}
+
 fn needs_special_value_rescan(agg: &AggExpr, child: &OpTree) -> bool {
     if agg.is_distinct
         || !(matches!(agg.function, AggFunc::Sum | AggFunc::Avg)
@@ -249,24 +265,17 @@ fn needs_special_value_rescan(agg: &AggExpr, child: &OpTree) -> bool {
         return false;
     }
 
-    let type_oid = if let Some(argument) = agg
+    if let Some(argument) = agg
         .analyzed_argument
         .as_ref()
         .filter(|argument| argument.type_oid != 0)
     {
-        Some(argument.type_oid)
-    } else if let Some(Expr::ColumnRef {
-        table_alias,
-        column_name,
-    }) = agg.argument.as_ref()
-    {
-        source_column_type_oid(child, table_alias.as_deref(), column_name)
-            .ok()
-            .flatten()
-    } else {
-        None
-    };
-    !type_oid.is_some_and(|type_oid| matches!(type_oid, 20 | 21 | 23))
+        return !matches!(argument.type_oid, 20 | 21 | 23);
+    }
+
+    !agg.argument
+        .as_ref()
+        .is_some_and(|expr| expr_is_exact_integer(expr, child))
 }
 
 /// Resolve a source column only through tree shapes where scan type metadata
@@ -1583,13 +1592,13 @@ fn build_rescan_cte(
     // When `force_all_aggs` is true (HAVING context), include ALL aggregates
     // so that the merge CTE can use the correct full aggregate value for
     // groups that were absent from the ST (below the HAVING threshold).
+    if !aggregates.iter().any(|agg| config.includes(agg, child)) {
+        return None;
+    }
     let rescan_aggs: Vec<&AggExpr> = aggregates
         .iter()
         .filter(|agg| config.includes(agg, child))
         .collect();
-    if rescan_aggs.is_empty() {
-        return None;
-    }
 
     let source_from = child_to_from_sql_in_context(child, ctx, false);
 
@@ -2189,69 +2198,35 @@ fn generate_direct_agg_delta(
     // Collect group-by column names
     let group_output: Vec<String> = group_by.iter().map(|e| e.output_name()).collect();
 
-    // A44-2 (v0.43.0): Gather CDC columns for DI-2 CASE-expression rewrite.
-    let cdc_cols_for_case = ctx
-        .source_cdc_columns()
-        .get(table_oid)
-        .cloned()
-        .unwrap_or_default();
-
-    // Collect unique aggregate argument column names.
-    // A44-2: For SUM(CASE ...) aggregates, extract the column names referenced
-    // inside the CASE expression and include them individually in arg_cols, then
-    // record the rewritten CASE for use in the SELECT expressions.
-    let mut arg_cols: Vec<String> = Vec::new();
-    // Maps aggregate alias -> rewritten CASE expression using v.val_{col} refs.
+    // Maps aggregate alias -> rewritten CASE expression using c."col" refs.
     let mut case_rewrites: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    // Track whether any aggregate has a CASE argument (was used by V-row optimization,
-    // now only kept for case_rewrites population).
-    let mut _has_case_aggregate = false;
-
-    for agg in aggregates {
-        if let Some(arg) = &agg.argument {
-            match arg {
-                Expr::ColumnRef { .. } => {
-                    let name = arg.output_name();
-                    if !arg_cols.contains(&name) {
-                        arg_cols.push(name);
-                    }
-                }
-                Expr::Raw(case_sql)
-                    if matches!(agg.function, AggFunc::Sum) && expr_contains_case(arg) =>
-                {
-                    // A44-2: DI-2 UPDATE split for SUM(CASE ...).
-                    // Extract column refs from the CASE expression and
-                    // rewrite it to use LATERAL VALUES aliases.
-                    let case_cols = extract_case_columns(case_sql, &cdc_cols_for_case);
-                    if !case_cols.is_empty() {
-                        for col in &case_cols {
-                            if !arg_cols.contains(*col) {
-                                arg_cols.push((*col).clone());
-                            }
-                        }
-                        let rewritten = rewrite_case_for_lateral(case_sql, &case_cols);
-                        case_rewrites.insert(agg.alias.clone(), rewritten);
-                        _has_case_aggregate = true;
-                    } else {
-                        // is_direct_agg_eligible guards this path: if it returned
-                        // true, CDC columns were verified to be non-empty.  If we
-                        // somehow reach here with no columns extracted, it is an
-                        // internal invariant violation.
-                        return Err(PgTrickleError::InternalError(format!(
-                            "A44-2: generate_direct_agg_delta reached with CASE aggregate \
-                             '{}' but no CASE columns could be extracted — CDC column \
-                             metadata missing. This should have been caught by \
-                             is_direct_agg_eligible.",
-                            agg.alias
-                        )));
-                    }
-                }
-                _ => {
-                    let name = arg.output_name();
-                    if !arg_cols.contains(&name) {
-                        arg_cols.push(name);
-                    }
+    let has_raw_sum = aggregates.iter().any(|agg| {
+        matches!(agg.function, AggFunc::Sum) && matches!(&agg.argument, Some(Expr::Raw(_)))
+    });
+    if has_raw_sum {
+        let cdc_cols_for_case = ctx
+            .source_cdc_columns()
+            .get(table_oid)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        for agg in aggregates {
+            if let Some(arg @ Expr::Raw(case_sql)) = &agg.argument
+                && matches!(agg.function, AggFunc::Sum)
+                && expr_contains_case(arg)
+            {
+                let case_cols = extract_case_columns(case_sql, cdc_cols_for_case);
+                if !case_cols.is_empty() {
+                    let rewritten = rewrite_case_for_lateral(case_sql, &case_cols);
+                    case_rewrites.insert(agg.alias.clone(), rewritten);
+                } else {
+                    return Err(PgTrickleError::InternalError(format!(
+                        "A44-2: generate_direct_agg_delta reached with CASE aggregate \
+                         '{}' but no CASE columns could be extracted — CDC column \
+                         metadata missing. This should have been caught by \
+                         is_direct_agg_eligible.",
+                        agg.alias
+                    )));
                 }
             }
         }
@@ -2274,69 +2249,86 @@ fn generate_direct_agg_delta(
     // For non-CASE aggregates, use direct c.{col} references.
     let has_value_only = false; // V-row optimization dropped in D+I schema.
 
-    // ── Build SELECT expressions ──────────────────────────────────────
+    // ── Build SELECT expressions directly into one buffer ─────────────
     let delta_cte = ctx.next_cte_name("agg_delta");
-    let mut select_exprs = Vec::new();
+    let mut delta_sql =
+        String::with_capacity(512 + group_output.len() * 24 + aggregates.len() * 192);
+    delta_sql.push_str("SELECT ");
+
+    let push_qualified = |buf: &mut String, name: &str| {
+        buf.push_str("c.");
+        push_quoted_ident(buf, name);
+    };
+    let push_prefixed_ident = |buf: &mut String, prefix: &str, alias: &str| {
+        if !alias.contains('"') {
+            buf.push('"');
+            buf.push_str(prefix);
+            buf.push_str(alias);
+            buf.push('"');
+        } else {
+            push_quoted_ident(buf, &format!("{prefix}{alias}"));
+        }
+    };
 
     // Group columns: the direct reference already carries its output name.
     for name in &group_output {
-        select_exprs.push(qualified_column("c", name));
+        push_qualified(&mut delta_sql, name);
+        delta_sql.push_str(",\n       ");
     }
 
     // __ins_count, __del_count (total row counts per group)
-    select_exprs
-        .push("SUM(CASE WHEN c.action = 'I' THEN 1 ELSE 0 END)::bigint AS __ins_count".to_string());
-    select_exprs
-        .push("SUM(CASE WHEN c.action = 'D' THEN 1 ELSE 0 END)::bigint AS __del_count".to_string());
+    delta_sql.push_str(
+        "SUM(CASE WHEN c.action = 'I' THEN 1 ELSE 0 END)::bigint AS __ins_count,\n       ",
+    );
+    delta_sql.push_str("SUM(CASE WHEN c.action = 'D' THEN 1 ELSE 0 END)::bigint AS __del_count");
 
     // Per-aggregate delta expressions
     for agg in aggregates {
-        // A44-2: If this aggregate has a rewritten CASE expression, use it
-        // directly with I/D action filtering instead of the generic helper.
         let (ins_expr, del_expr) = if let Some(rewritten) = case_rewrites.get(&agg.alias) {
-            // DI-2 UPDATE split for SUM(CASE ...): the rewritten CASE references
-            // c."col" CB column aliases (after A44-10 update of rewrite_case_for_lateral).
             let ins = format!("SUM(CASE WHEN c.action = 'I' THEN ({rewritten}) ELSE 0 END)");
             let del = format!("SUM(CASE WHEN c.action = 'D' THEN ({rewritten}) ELSE 0 END)");
             (ins, del)
         } else {
             direct_agg_delta_exprs(agg, has_value_only)
         };
-        select_exprs.push(format!(
-            "{ins_expr} AS {}",
-            quote_ident(&format!("__ins_{}", agg.alias)),
-        ));
-        select_exprs.push(format!(
-            "{del_expr} AS {}",
-            quote_ident(&format!("__del_{}", agg.alias)),
-        ));
+        delta_sql.push_str(",\n       ");
+        delta_sql.push_str(&ins_expr);
+        delta_sql.push_str(" AS ");
+        push_prefixed_ident(&mut delta_sql, "__ins_", &agg.alias);
 
-        if needs_special_value_rescan(agg, scan) {
+        delta_sql.push_str(",\n       ");
+        delta_sql.push_str(&del_expr);
+        delta_sql.push_str(" AS ");
+        push_prefixed_ident(&mut delta_sql, "__del_", &agg.alias);
+
+        let needs_special = needs_special_value_rescan(agg, scan);
+        let uses_nonfinite = agg.uses_incremental_nonfinite_state(scan);
+        if needs_special {
             let argument = case_rewrites
                 .get(&agg.alias)
                 .cloned()
                 .unwrap_or_else(|| direct_agg_argument_expr(agg));
-            select_exprs.push(format!(
-                "{} AS {}",
-                special_value_delta_expr("c.action", &argument, None),
-                quote_ident(&format!("__special_{}", agg.alias)),
-            ));
+            delta_sql.push_str(",\n       ");
+            delta_sql.push_str(&special_value_delta_expr("c.action", &argument, None));
+            delta_sql.push_str(" AS ");
+            push_prefixed_ident(&mut delta_sql, "__special_", &agg.alias);
         }
 
-        if agg.uses_incremental_nonfinite_state(scan) {
+        if uses_nonfinite {
             let argument = case_rewrites
                 .get(&agg.alias)
                 .cloned()
                 .unwrap_or_else(|| direct_agg_argument_expr(agg));
             let (inserts, deletes) = special_state_delta_exprs("c.action", &argument, None);
-            select_exprs.push(format!(
-                "{inserts} AS {}",
-                quote_ident(&format!("__ins_special_{}", agg.alias)),
-            ));
-            select_exprs.push(format!(
-                "{deletes} AS {}",
-                quote_ident(&format!("__del_special_{}", agg.alias)),
-            ));
+            delta_sql.push_str(",\n       ");
+            delta_sql.push_str(&inserts);
+            delta_sql.push_str(" AS ");
+            push_prefixed_ident(&mut delta_sql, "__ins_special_", &agg.alias);
+
+            delta_sql.push_str(",\n       ");
+            delta_sql.push_str(&deletes);
+            delta_sql.push_str(" AS ");
+            push_prefixed_ident(&mut delta_sql, "__del_special_", &agg.alias);
         }
 
         // SUM needs a qualifying non-NULL count so the algebraic merge can
@@ -2349,45 +2341,35 @@ fn generate_direct_agg_delta(
                 .get(&agg.alias)
                 .cloned()
                 .unwrap_or_else(|| direct_agg_argument_expr(agg));
-            let (ins_nonnull, del_nonnull) = direct_nonnull_delta_exprs(&argument);
-            select_exprs.push(format!(
-                "{ins_nonnull} AS {}",
-                quote_ident(&format!("__ins_nonnull_{}", agg.alias)),
-            ));
-            select_exprs.push(format!(
-                "{del_nonnull} AS {}",
-                quote_ident(&format!("__del_nonnull_{}", agg.alias)),
-            ));
+            delta_sql.push_str(",\n       SUM(CASE WHEN c.action = 'I' AND (");
+            delta_sql.push_str(&argument);
+            delta_sql.push_str(") IS NOT NULL THEN 1 ELSE 0 END)::bigint AS ");
+            push_prefixed_ident(&mut delta_sql, "__ins_nonnull_", &agg.alias);
+
+            delta_sql.push_str(",\n       SUM(CASE WHEN c.action = 'D' AND (");
+            delta_sql.push_str(&argument);
+            delta_sql.push_str(") IS NOT NULL THEN 1 ELSE 0 END)::bigint AS ");
+            push_prefixed_ident(&mut delta_sql, "__del_nonnull_", &agg.alias);
         }
     }
 
-    // GROUP BY — use c."col" directly (A44-10: no v.grp_* aliases needed)
-    let group_by_clause = if group_output.is_empty() {
-        String::new()
-    } else {
-        let refs: Vec<String> = group_output
-            .iter()
-            .map(|name| qualified_column("c", name))
-            .collect();
-        format!("\nGROUP BY {}", refs.join(", "))
-    };
+    delta_sql.push_str("\nFROM ");
+    delta_sql.push_str(&change_table);
+    delta_sql.push_str(" c\nWHERE c.lsn > '");
+    delta_sql.push_str(&prev_lsn);
+    delta_sql.push_str("'::pg_lsn AND c.lsn <= '");
+    delta_sql.push_str(&new_lsn);
+    delta_sql.push_str("'::pg_lsn\n  AND c.action IN ('I', 'D')");
 
-    // A44-10 (D+I schema): Simple WHERE — all CB rows are already I or D.
-    // No LATERAL VALUES needed. UNION ALL approach is replaced by direct
-    // c.action filtering in the SELECT expressions.
-    let where_clause = format!(
-        "WHERE c.lsn > '{prev_lsn}'::pg_lsn AND c.lsn <= '{new_lsn}'::pg_lsn\n  \
-         AND c.action IN ('I', 'D')"
-    );
-
-    let delta_sql = format!(
-        "\
-SELECT {selects}
-FROM {change_table} c
-{where_clause}{group_by}",
-        selects = select_exprs.join(",\n       "),
-        group_by = group_by_clause,
-    );
+    if !group_output.is_empty() {
+        delta_sql.push_str("\nGROUP BY ");
+        for (i, name) in group_output.iter().enumerate() {
+            if i > 0 {
+                delta_sql.push_str(", ");
+            }
+            push_qualified(&mut delta_sql, name);
+        }
+    }
 
     ctx.add_cte(delta_cte.clone(), delta_sql);
 

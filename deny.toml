@@ -22,38 +22,38 @@ allow = [
 version = 2
 yanked = "warn"
 ignore = [
+  # Shared with cargo-audit via scripts/check_deny_expiry.py. These reviewed
+  # exceptions cover maintenance warnings; other advisories remain enabled.
+  # Lockfile-only/dev entries may be unmatched in cargo-deny's selected graph.
   # Owner: geir-gronmo
   # Added: 2026-05-22
   # Review-By: 2027-05-23
-  # Upstream: https://github.com/pyfisch/cbor/issues/172
-  # Remove-When: transitive dep chain updated to use ciborium
-  # serde_cbor is pulled in transitively (dev path). Not a security vulnerability,
-  # only unmaintained. Use of ciborium is the upstream recommendation but we
-  # have no direct control over this dep.
+  # Tracking: https://github.com/trickle-labs/pg-trickle/issues/257
+  # Upstream: https://github.com/pgcentralfoundation/pgrx/issues/524
+  # Remove-When: pgrx removes/replaces serde_cbor
+  # Normal transitive dependency of pgrx, not dev-only. This is a maintenance
+  # advisory, not a disclosed vulnerability. A serializer migration is upstream
+  # work and may affect persisted custom PostgreSQL type representations.
   "RUSTSEC-2021-0127",
   # Owner: geir-gronmo
   # Added: 2026-11-08
   # Review-By: 2026-12-08
+  # Tracking: https://github.com/trickle-labs/pg-trickle/issues/1407
   # Upstream: https://github.com/testcontainers/testcontainers-rs
   # Remove-When: testcontainers replaces astral-tokio-tar
   # Unmaintained advisory for a test-only transitive dependency; no patched
   # release is available. Vulnerability advisories remain enabled.
   "RUSTSEC-2026-0440",
   # Owner: pg_trickle maintainers
-  # Added: 2026-11-15
-  # Review-By: 2026-12-15
-  # Upstream: https://github.com/transact-rs/sqlx
-  # Remove-When: SQLx supports libsqlite3-sys >= 0.39, or pg_trickle no
-  # longer depends on the SQLx facade and its optional SQLite driver.
-  # RUSTSEC-2026-0459 applies to libsqlite3-sys < 0.39, including the
-  # version Cargo resolves for SQLx 0.9's *optional* SQLite backend.
-  # pg_trickle uses SQLx only in its test harness with the Postgres backend.
-  # The project does not open SQLite databases; Cargo.lock also records
-  # optional SQLx backend packages. Verify the resolved feature graph when
-  # reviewing this exception, and remove it as soon as feasible.
-  # Keep this exception time-boxed, rather than hand-pruning Cargo.lock
-  # (which Cargo regenerates during the S1 release build).
-  "RUSTSEC-2026-0459",
+  # Added: 2026-11-24
+  # Review-By: 2026-12-24
+  # Tracking: https://github.com/trickle-labs/pg-trickle/issues/1480
+  # Upstream: https://github.com/jonasbb/serde_with
+  # Remove-When: chrono disappears from Cargo.lock
+  # Optional serde_with dependency via testcontainers. The security workflow
+  # must prove chrono is absent from the active all-target, all-feature graph
+  # before using this maintenance-only exception. Production uses jiff.
+  "RUSTSEC-2026-0543",
 ]
 
 [bans]

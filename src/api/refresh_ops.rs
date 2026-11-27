@@ -488,11 +488,6 @@ pub(crate) fn execute_manual_refresh(
         );
         Spi::run(&sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-        // The FULL refresh held source locks while materializing a new CDC
-        // baseline. Re-arm eligible legacy streams only after clearing the
-        // reinitialization flag; an explicit OFF remains a durable opt-out.
-        super::arm_automatic_trim_after_full_snapshot(st.pgt_id)?;
-
         // Rewriting can refresh another stream and overwrite the backend-local mode.
         refresh::set_effective_mode("FULL");
         Ok(full_result)
