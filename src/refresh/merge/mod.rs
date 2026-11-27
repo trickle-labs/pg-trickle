@@ -918,10 +918,18 @@ mod materialized_apply_tests {
 
     #[test]
     fn test_materialized_apply_prefers_index_for_sparse_large_target() {
-        assert!(prefer_indexed_materialized_apply(20_000, 25_000_000.0, 0.001));
+        assert!(prefer_indexed_materialized_apply(
+            20_000,
+            25_000_000.0,
+            0.001
+        ));
         assert!(!prefer_indexed_materialized_apply(20_000, 100_000.0, 0.001));
         assert!(!prefer_indexed_materialized_apply(20_000, -1.0, 0.001));
-        assert!(!prefer_indexed_materialized_apply(20_000, 25_000_000.0, 0.0));
+        assert!(!prefer_indexed_materialized_apply(
+            20_000,
+            25_000_000.0,
+            0.0
+        ));
         assert!(!prefer_indexed_materialized_apply(0, 25_000_000.0, 0.001));
     }
 }
@@ -1871,7 +1879,12 @@ fn execute_differential_refresh_inner(
     // Cost heuristics must not select a rebuild when historical rows are gone.
     let unreconstructible_history =
         crate::dvm::retention::has_unreconstructible_history(st.pgt_id)?;
+    // Strict graph refreshes must not select elective FULL fallbacks.
+    // Mandatory correctness/resource guards and explicit overrides still apply.
+    let strict_full_policy =
+        crate::refresh::current_full_policy() == crate::refresh::FullPolicy::Error;
     let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential
+        || strict_full_policy
         || crate::refresh::is_retention_catchup()
         || unreconstructible_history;
     // Only additive UNION ALL scans can safely use one combined denominator.
@@ -4038,8 +4051,13 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
-                    .update(&format!("INSERT INTO {delta_table} {delta_select}"), None, &[])
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
@@ -4143,8 +4161,13 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
-                    .update(&format!("INSERT INTO {delta_table} {delta_select}"), None, &[])
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
@@ -4206,8 +4229,13 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
-                    .update(&format!("INSERT INTO {delta_table} {delta_select}"), None, &[])
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
