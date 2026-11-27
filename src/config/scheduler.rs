@@ -179,22 +179,13 @@ pub static PGS_PARALLEL_REFRESH_MODE: GucSetting<Option<std::ffi::CString>> =
 /// Recommended range: 2–8 for workloads with many short refreshes.
 pub static PGS_WORKER_POOL_SIZE: GucSetting<i32> = GucSetting::<i32>::new(0);
 
-/// PRED-1: Prediction window in minutes for the linear regression forecaster.
-///
-/// The forecaster fits `duration_ms ~ delta_rows` over this many minutes of
-/// `pgt_refresh_history` data per stream table.
+/// PRED-1: Age limit in minutes for comparable differential observations.
 pub static PGS_PREDICTION_WINDOW: GucSetting<i32> = GucSetting::<i32>::new(60);
 
-/// PRED-2: Prediction ratio threshold for pre-emptive FULL switch.
-///
-/// When `predicted_diff_ms > last_full_ms × prediction_ratio`, the
-/// scheduler overrides the strategy to FULL refresh.
+/// PRED-2: Minimum measured DIFF/FULL duration ratio for elective FULL.
 pub static PGS_PREDICTION_RATIO: GucSetting<f64> = GucSetting::<f64>::new(1.5);
 
-/// PRED-3: Minimum number of history samples before the predictor is active.
-///
-/// When fewer than this many data points exist, the predictor falls back to
-/// the existing fixed-threshold logic.
+/// PRED-3: Minimum comparable history samples (zero disables cost fallback).
 pub static PGS_PREDICTION_MIN_SAMPLES: GucSetting<i32> = GucSetting::<i32>::new(5);
 
 /// SCAL-1 (v0.31.0): Number of consecutive refresh cycles a change buffer
@@ -226,15 +217,7 @@ pub static PGS_BACKPRESSURE_CONSECUTIVE_LIMIT: GucSetting<i32> = GucSetting::<i3
 pub static PGS_REFRESH_STRATEGY: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"auto"));
 
-/// B-4: Cost-model safety margin for the FULL vs. DIFFERENTIAL decision.
-///
-/// When `refresh_strategy = 'auto'`, the cost model compares the estimated
-/// DIFFERENTIAL cost against `estimated_full_cost × safety_margin`.
-/// A value below 1.0 biases toward DIFFERENTIAL (which has lower lock
-/// contention), while a value above 1.0 biases toward FULL.
-///
-/// Default 0.8 — DIFFERENTIAL is chosen unless it's estimated to cost
-/// more than 80% of FULL.
+/// Elective FULL requires DIFF duration to exceed FULL duration times the maximum of 1.0, prediction_ratio, and cost_model_safety_margin.
 pub static PGS_COST_MODEL_SAFETY_MARGIN: GucSetting<f64> = GucSetting::<f64>::new(0.8);
 
 /// B-4: Refresh strategy enum.
@@ -684,10 +667,9 @@ pub fn register_scheduler_gucs() {
     GucRegistry::define_float_guc(
         c"pg_trickle.cost_model_safety_margin",
         c"Safety margin for the cost-model FULL vs DIFFERENTIAL decision.",
-        c"When refresh_strategy = 'auto', DIFFERENTIAL is chosen unless its \
-           estimated cost exceeds estimated_full_cost × this margin. Values \
-           below 1.0 bias toward DIFFERENTIAL (lower lock contention). \
-           Default 0.8.",
+        c"Elective FULL requires comparable DIFF duration to exceed FULL duration \
+           times the maximum of 1.0, prediction_ratio and this margin. \
+           Higher values favor DIFFERENTIAL. Default 0.8.",
         &PGS_COST_MODEL_SAFETY_MARGIN,
         0.1, // min
         2.0, // max
@@ -910,9 +892,9 @@ pub fn register_scheduler_gucs() {
     // PRED-1: Prediction window in minutes.
     GucRegistry::define_int_guc(
         c"pg_trickle.prediction_window",
-        c"Prediction window in minutes for the linear regression forecaster.",
-        c"The forecaster fits duration_ms ~ delta_rows over this many minutes of \
-           pgt_refresh_history data per stream table.",
+        c"Age limit in minutes for comparable differential observations.",
+        c"Only completed, size-comparable differential samples inside this window \
+           can drive the elective FULL decision.",
         &PGS_PREDICTION_WINDOW,
         5,    // min (5 minutes)
         1440, // max (24 hours)
@@ -923,9 +905,9 @@ pub fn register_scheduler_gucs() {
     // PRED-2: Prediction ratio threshold.
     GucRegistry::define_float_guc(
         c"pg_trickle.prediction_ratio",
-        c"Prediction ratio threshold for pre-emptive FULL switch.",
-        c"When predicted_diff_ms > last_full_ms × prediction_ratio, the scheduler \
-           overrides the strategy to FULL refresh. Default 1.5.",
+        c"Minimum measured DIFF/FULL duration ratio for elective FULL.",
+        c"The differential executor compares comparable committed history. \
+           FULL requires a measured advantage beyond this ratio. Default 1.5.",
         &PGS_PREDICTION_RATIO,
         1.0,  // min
         10.0, // max
@@ -937,8 +919,8 @@ pub fn register_scheduler_gucs() {
     GucRegistry::define_int_guc(
         c"pg_trickle.prediction_min_samples",
         c"Minimum samples before the predictive cost model activates (0 = disabled).",
-        c"When fewer than this many data points exist for a stream table, the \
-           predictor falls back to the existing fixed-threshold logic.",
+        c"At least three comparable samples are required when enabled. Zero disables \
+           the predictive cost fallback; configured ratio and safety limits remain.",
         &PGS_PREDICTION_MIN_SAMPLES,
         0,    // min (0 = disabled)
         1000, // max

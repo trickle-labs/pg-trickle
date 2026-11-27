@@ -2126,28 +2126,20 @@ fn execute_differential_refresh_inner(
         && !input_delta_rows_may_be_incomplete
         && total_change_count > 0
     {
-        let complexity = classify_query_complexity(&effective_defining_query);
+        let margin = crate::config::pg_trickle_prediction_ratio()
+            .max(crate::config::pg_trickle_cost_model_safety_margin());
         if let Some(hist) = query_refresh_history_stats(st.pgt_id, total_change_count)
-            && cost_model_prefers_full(
-                hist.avg_ms_per_delta,
-                hist.avg_full_ms,
-                total_change_count,
-                complexity,
-                crate::config::pg_trickle_cost_model_safety_margin(),
-            )
+            && cost_model_prefers_full(hist.diff_ms, hist.full_ms, margin)
         {
-            let estimated_diff =
-                hist.avg_ms_per_delta * complexity.diff_cost_factor() * total_change_count as f64;
-            let estimated_full =
-                hist.avg_full_ms * crate::config::pg_trickle_cost_model_safety_margin();
+            let estimated_diff = hist.diff_ms;
+            let estimated_full = hist.full_ms * margin.max(1.0);
             pgrx::debug1!(
                 "[pg_trickle] B-4 cost model: FULL preferred for {}.{} \
-                 (est_diff={:.1}ms > est_full×margin={:.1}ms, class={:?}, Δ={})",
+                 (est_diff={:.1}ms > est_full×margin={:.1}ms, Δ={})",
                 st.pgt_schema,
                 st.pgt_name,
                 estimated_diff,
                 estimated_full,
-                complexity,
                 total_change_count,
             );
             fallback_reason = Some(crate::refresh::FullRefreshReason::new(
@@ -3287,6 +3279,31 @@ fn execute_differential_refresh_inner(
 
             // G12-ERM-1: Record the effective mode for this execution path.
             set_effective_mode("APPEND_ONLY");
+            let mut cost_evidence = crate::refresh::build_differential_cost_evidence(
+                total_change_count,
+                rows_inserted,
+            );
+            if let Some(fields) = cost_evidence.as_object_mut() {
+                fields.insert(
+                    "input_delta_rows_may_be_incomplete".into(),
+                    serde_json::json!(input_delta_rows_may_be_incomplete),
+                );
+                fields.insert("plan_identity".into(), serde_json::json!(st.defining_query_hash));
+                fields.insert(
+                    "contract_generation".into(),
+                    serde_json::json!(st.contract_generation),
+                );
+                fields.insert("merge_strategy".into(), serde_json::json!("append_only"));
+                fields.insert(
+                    "source_rows_estimate".into(),
+                    serde_json::json!(_total_table_size.max(0)),
+                );
+            }
+            crate::refresh::set_last_cost_evidence(
+                serde_json::to_string(&cost_evidence).map_err(|e| {
+                    PgTrickleError::InternalError(format!("serialize cost evidence: {e}"))
+                })?,
+            );
             crate::refresh::set_last_ann_churn_operations(
                 (!user_triggers_active).then_some(rows_inserted),
             );
@@ -4621,12 +4638,7 @@ fn execute_differential_refresh_inner(
         }
     }
 
-    // ── Session 7: Adaptive threshold auto-tuning ───────────────────
-    // Compare INCR total time against the last known FULL time. If INCR
-    // is approaching or exceeding FULL, lower the threshold so future
-    // refreshes at this change rate fall back to FULL sooner. If INCR
-    // is significantly faster, raise the threshold to allow more
-    // differential refreshes.
+    // Report observed duration without training a competing global threshold.
     let incr_total_ms = (t_decision.as_secs_f64() + t3.duration_since(t0).as_secs_f64()) * 1000.0;
 
     // ── UX-1: DIFF-slower-than-FULL per-query log warning ───────────
@@ -4647,44 +4659,8 @@ fn execute_differential_refresh_inner(
         );
     }
 
-    if let Some(last_full) = st.last_full_ms
-        && last_full > 0.0
-    {
-        let current_threshold = st.auto_threshold.unwrap_or(global_ratio);
-        let ratio_threshold =
-            compute_adaptive_threshold(current_threshold, incr_total_ms, last_full);
-
-        // ── D-3 / B-4: Cost-based threshold from historical data ────
-        // Blend the ratio-based threshold with a cost-model estimate
-        // derived from recent refresh history.  The cost model computes
-        // the crossover delta ratio where INCR cost equals FULL cost,
-        // adjusted for query complexity class.
-        let complexity = classify_query_complexity(&effective_defining_query);
-        let new_threshold = match estimate_cost_based_threshold(st.pgt_id, complexity) {
-            Some(cost_threshold) => {
-                // Weighted blend: 60% ratio-based, 40% cost-based.
-                let blended = ratio_threshold * 0.6 + cost_threshold * 0.4;
-                blended.clamp(0.01, 0.80)
-            }
-            None => ratio_threshold,
-        };
-
-        if (new_threshold - current_threshold).abs() > 0.001 {
-            pgrx::debug1!(
-                "[pg_trickle] Adaptive threshold: INCR={:.1}ms vs FULL={:.1}ms (ratio={:.2}), threshold {:.3} → {:.3}",
-                incr_total_ms,
-                last_full,
-                incr_total_ms / last_full,
-                current_threshold,
-                new_threshold,
-            );
-        }
-        if let Err(e) =
-            StreamTableMeta::update_adaptive_threshold(st.pgt_id, Some(new_threshold), None)
-        {
-            pgrx::debug1!("[pg_trickle] Failed to update adaptive threshold: {}", e);
-        }
-    }
+    // Do not train a second, global ratio threshold from one observed
+    // runtime. The size-aware history decision is the cost authority.
 
     if materializes_delta && merge_count == 0 && phantom_cleanup_count == 0 {
         crate::api::output_delta::record_empty_apply(st.pgt_id);

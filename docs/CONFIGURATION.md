@@ -583,13 +583,13 @@ Maximum change-to-table ratio before DIFFERENTIAL refresh falls back to FULL ref
 When the number of pending change buffer rows exceeds this fraction of the source table's estimated row count, the refresh engine switches from DIFFERENTIAL (which uses JSONB parsing and window functions) to FULL refresh. At high change rates FULL refresh is cheaper because it avoids the per-row JSONB overhead.
 
 **Special Values:**
-- **`0.0`**: Disable adaptive fallback — always use DIFFERENTIAL.
-- **`1.0`**: Always fall back to FULL (effectively forces FULL mode).
+- **`0.0`**: Disable the configured ratio fallback; predictive and safety fallbacks may still apply.
+- **`1.0`**: The ratio guard permits deltas up to the estimated source size.
 
 **Tuning Guidance:**
 - **OLTP with low change rates** (< 5%): Default `0.15` is appropriate.
 - **Batch-load workloads** (bulk inserts): Lower to `0.05`–`0.10` so large batches trigger FULL refresh sooner.
-- **Latency-sensitive** (want deterministic refresh time): Set to `0.0` to always use DIFFERENTIAL.
+- **Latency-sensitive**: Set `refresh_strategy = 'differential'` to avoid elective cost and ratio fallback. Correctness/resource fallbacks may still require FULL.
 
 ```sql
 -- Lower threshold for batch-heavy workloads
@@ -623,7 +623,7 @@ Controls the FULL vs. DIFFERENTIAL decision for all stream tables whose `refresh
 
 **Tuning Guidance:**
 - **Most workloads**: Leave at `'auto'` — the adaptive heuristic learns from refresh history.
-- **Known-low-churn workloads**: Set to `'differential'` to eliminate the per-source capped-count query overhead.
+- **Known-low-churn workloads**: Set to `'differential'` to avoid elective FULL decisions; the actual CDC window is still counted.
 - **Debugging delta issues**: Temporarily set to `'full'` to compare behavior.
 
 ```sql
@@ -651,29 +651,18 @@ Safety margin for the predictive cost model that decides FULL vs. DIFFERENTIAL.
 | Context | `SUSET` |
 | Restart Required | No |
 
-When `refresh_strategy = 'auto'`, the cost model estimates DIFFERENTIAL and FULL costs from recent refresh history. DIFFERENTIAL is chosen when:
+When `refresh_strategy = 'auto'`, elective FULL requires:
 
 ```
-estimated_diff_cost < estimated_full_cost × safety_margin
+median_comparable_diff_ms > median_full_ms × max(1.0, prediction_ratio, cost_model_safety_margin)
 ```
 
-A value below 1.0 biases toward DIFFERENTIAL (which has lower lock contention and is generally preferred). A value above 1.0 biases toward FULL.
-
-The cost model also classifies each stream table's query complexity (scan, filter, aggregate, join, or join+aggregate) and uses per-class coefficients learned from historical data.
-
-**Tuning Guidance:**
-- **`0.8`** (default): Prefer DIFFERENTIAL unless it's nearly as expensive as FULL.
-- **`0.5`**: Strongly prefer DIFFERENTIAL — only fall back when it's clearly more expensive.
-- **`1.0`**: Neutral — pick whichever is estimated to be cheaper.
-- **`1.2`**: Slightly prefer FULL — useful when FULL is very fast and DIFFERENTIAL lock contention is a concern.
-
-```sql
--- Strongly prefer DIFFERENTIAL
-SET pg_trickle.cost_model_safety_margin = 0.5;
-
--- Neutral (pick the estimated cheapest)
-SET pg_trickle.cost_model_safety_margin = 1.0;
-```
+The model uses committed, size-comparable input evidence for the same defining
+query and contract generation. It does not multiply measured durations by
+query-complexity factors. Higher margins favor nonblocking DIFFERENTIAL.
+`prediction_min_samples = 0` disables the cost-based fallback; other configured
+ratio and resource guards remain. The independent scheduler regression
+forecaster is retired.
 
 ---
 
