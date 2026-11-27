@@ -2403,7 +2403,8 @@ pub fn execute_differential_refresh_with_tuning(
                 map.peek(&st.pgt_id)
                     .filter(|entry| {
                         entry.defining_query_hash == query_hash
-                            && entry.planning_version == crate::dvm::planner::TEMPLATE_FORMAT_VERSION
+                            && entry.planning_version
+                                == crate::dvm::planner::TEMPLATE_FORMAT_VERSION
                     })
                     .cloned()
             })
