@@ -3174,3 +3174,63 @@ async fn test_perf2_auto_mode_promotes_on_high_throughput() {
     let cnt_after: i64 = db.query_scalar("SELECT cnt FROM perf2_promo_cnt").await;
     assert_eq!(cnt_after, 102, "post-promotion differential refresh");
 }
+
+/// The slow sibling intentionally retains a large physical CDC buffer.
+/// A small eligible window for the fast consumer must not force FULL.
+#[tokio::test]
+async fn test_max_delta_fraction_uses_consumer_window_not_shared_buffer() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE frac1486_src (id int PRIMARY KEY, v int)")
+        .await;
+    db.execute("INSERT INTO frac1486_src SELECT n,n FROM generate_series(1,10000) n")
+        .await;
+    db.execute("ANALYZE frac1486_src").await;
+    let query = "SELECT id,v FROM frac1486_src";
+    db.create_st("frac1486_fast", query, "1h", "AUTO").await;
+    db.create_st("frac1486_slow", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("SELECT pgtrickle.alter_stream_table('frac1486_fast', max_delta_fraction => 0.01)")
+        .await;
+    db.execute("ANALYZE frac1486_fast").await;
+    // Build a physical backlog above the old 100-row limit, using only
+    // small eligible windows. The slow stream never consumes them.
+    for n in 0..5 {
+        db.execute(&format!(
+            "UPDATE frac1486_src SET v=v+1 WHERE id > {} AND id <= {}",
+            n * 30,
+            (n + 1) * 30
+        ))
+        .await;
+        db.try_execute_with_config(
+            &["SET pg_trickle.refresh_strategy = 'auto'"],
+            "SELECT pgtrickle.refresh_stream_table('frac1486_fast')",
+        )
+        .await
+        .expect("fast stream consumes its own small window");
+        db.assert_st_matches_query("frac1486_fast", query).await;
+        let action: String = db
+            .query_scalar(
+                "SELECT h.action FROM pgtrickle.pgt_refresh_history h
+              JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+              WHERE st.pgt_name='frac1486_fast' AND h.initiated_by='MANUAL'
+              ORDER BY h.refresh_id DESC LIMIT 1",
+            )
+            .await;
+        assert_eq!(action, "DIFFERENTIAL");
+    }
+    let buffer = db
+        .change_buffer_table(i64::from(db.table_oid("frac1486_src").await))
+        .await;
+    assert!(
+        db.query_scalar::<i64>(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await
+            > 100
+    );
+    db.refresh_st_until_converged("frac1486_slow").await;
+    db.assert_st_matches_query("frac1486_slow", query).await;
+}
