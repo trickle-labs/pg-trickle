@@ -525,20 +525,30 @@ fn live_sources_at_refresh_cut(
     if crate::refresh::current_graph_sources_locked() {
         return Ok(true);
     }
-    if dependencies.iter().any(|dep| {
-        dep.source_type != "STREAM_TABLE"
-            && (dep.source_type != "TABLE" || dep.cdc_mode != crate::catalog::CdcMode::Trigger)
-    }) {
+    // Plain views are dependency/DDL metadata, not independent CDC
+    // producers. Their expanded relation leaves are registered separately.
+    // Fence and check every physical producer, not the view's nonexistent
+    // frontier or change buffer.
+    let producers = dependencies
+        .iter()
+        .filter(|dep| dep.source_type != "VIEW")
+        .collect::<Vec<_>>();
+    if producers.is_empty()
+        || producers.iter().any(|dep| {
+            dep.source_type != "STREAM_TABLE"
+                && (dep.source_type != "TABLE" || dep.cdc_mode != crate::catalog::CdcMode::Trigger)
+        })
+    {
         return Ok(false);
     }
     crate::cdc::lock_stream_table_source_catalogs(st.pgt_id, dependencies)?;
-    let oids = dependencies
+    let oids = producers
         .iter()
         .map(|dep| dep.source_relid)
         .collect::<Vec<_>>();
     crate::cdc::lock_source_relations(&oids)?;
     let schema = crate::config::pg_trickle_change_buffer_schema();
-    for dep in dependencies {
+    for dep in producers {
         let (buffer, key) = if dep.source_type == "STREAM_TABLE" {
             let id = StreamTableMeta::pgt_id_for_relid(dep.source_relid).ok_or_else(|| {
                 PgTrickleError::InternalError("missing upstream stream table".into())
@@ -558,7 +568,7 @@ fn live_sources_at_refresh_cut(
         };
         // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- quoted catalog-controlled CDC buffer.
         let at_cut = Spi::get_one_with_args::<bool>(
-            &format!("SELECT NOT EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action IN ('I','D','T'))"),
+            &format!("SELECT NOT EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action IN ('I','D','T','U'))"),
             &[position.lsn.as_str().into()],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;

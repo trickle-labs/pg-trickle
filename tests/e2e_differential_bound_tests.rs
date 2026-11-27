@@ -625,3 +625,46 @@ async fn phantom_reconciliation_does_not_publish_rows_past_its_cut() {
     refresh_normally(&db, "bound_recon_st").await;
     db.assert_st_matches_query("bound_recon_st", query).await;
 }
+
+/// A plain view has no CDC buffer/frontier of its own. Its physical join
+/// sources must be fenced without rejecting the ordinary differential path.
+#[tokio::test]
+async fn phantom_reconciliation_accepts_view_over_synchronous_sources() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE bound_view_left(k int, v int)")
+        .await;
+    db.execute("CREATE TABLE bound_view_right(k int, v int)")
+        .await;
+    db.execute("INSERT INTO bound_view_left VALUES (1, 10), (1, 10)")
+        .await;
+    db.execute("INSERT INTO bound_view_right VALUES (1, 20)")
+        .await;
+    db.execute(
+        "CREATE VIEW bound_join_view AS SELECT l.k, l.v AS lv, r.v AS rv \
+         FROM bound_view_left l JOIN bound_view_right r ON l.k = r.k",
+    )
+    .await;
+    let query = "SELECT * FROM bound_join_view";
+    db.create_st("bound_view_join_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    let view_and_leaves: bool = db
+        .query_scalar(
+            "SELECT count(*) FILTER (WHERE d.source_type = 'VIEW') = 1 \
+                 AND count(*) FILTER (WHERE d.source_type = 'TABLE' \
+                     AND d.cdc_mode = 'TRIGGER') = 2 \
+             FROM pgtrickle.pgt_dependencies d \
+             JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) \
+             WHERE s.pgt_name = 'bound_view_join_st'",
+        )
+        .await;
+    assert!(
+        view_and_leaves,
+        "fixture must register a view and both physical sources"
+    );
+    db.execute("INSERT INTO bound_view_left VALUES (1, 11)")
+        .await;
+    refresh_normally(&db, "bound_view_join_st").await;
+    db.assert_st_matches_query("bound_view_join_st", query)
+        .await;
+    assert_no_full_fallback(&db, "bound_view_join_st").await;
+}
