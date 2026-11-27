@@ -510,8 +510,9 @@ async fn mutate_refresh_and_compare(fixture: &Fixture, mutation: &str) {
     let settings: (String, String) = sqlx::query_as(settings_sql)
         .fetch_one(&mut *tx)
         .await
-        .expect("read capped deep-join settings");
-    assert_eq!(settings, ("256MB".into(), "64MB".into()));
+        .expect("read caller settings after differential refresh");
+    // The cap applies inside delta generation, not to subsequent caller SQL.
+    assert_eq!(settings, ("16MB".into(), "64MB".into()));
     tx.commit().await.expect("commit compiler-v9 mutation");
     let settings_after: (String, String) = sqlx::query_as(settings_sql)
         .fetch_one(&mut *connection)
