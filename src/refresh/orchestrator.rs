@@ -314,8 +314,7 @@ fn update_cost_model_summary(pgt_id: Option<i64>) -> Result<(), PgTrickleError> 
                 updated_at    = EXCLUDED.updated_at
             WHERE $1::bigint IS NOT NULL
     ";
-    Spi::run_with_args(sql, &[pgt_id.into()])
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    Spi::run_with_args(sql, &[pgt_id.into()]).map_err(|e| PgTrickleError::SpiError(e.to_string()))
 }
 
 /// Backfill missing monitoring rows and refresh historical percentiles.

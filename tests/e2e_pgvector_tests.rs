@@ -2607,8 +2607,8 @@ async fn test_centroid_opt_in_applies_and_falls_back_after_corruption() {
     }
     let bounded: String = sqlx::query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_live_st'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
         .fetch_one(&mut *conn).await.expect("read exact cost evidence above the ratio threshold");
-    let bounded: serde_json::Value =
-        serde_json::from_str(&bounded).expect("parse exact cost evidence above the ratio threshold");
+    let bounded: serde_json::Value = serde_json::from_str(&bounded)
+        .expect("parse exact cost evidence above the ratio threshold");
     assert_eq!(bounded["input_delta_rows_may_be_incomplete"], false);
     assert_eq!(bounded["input_delta_rows"], 2);
     assert_eq!(bounded["merge_strategy"], "centroid_algebraic");
@@ -4383,10 +4383,15 @@ async fn test_centroid_cost_based_full_fallback_rebinds_state() {
         "CREATE TABLE centroid_cost_src (id int PRIMARY KEY, grp int, v vector(2))",
         "INSERT INTO centroid_cost_src SELECT id, id % 2, '[1,2]'::vector FROM generate_series(1, 100) id",
         "ANALYZE centroid_cost_src",
-        "SELECT pgtrickle.create_stream_table('centroid_cost_st', $$SELECT grp, avg(v) AS centroid FROM centroid_cost_src GROUP BY grp$$, '1h', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.create_stream_table('centroid_cost_st', $$SELECT grp, avg(v) AS centroid FROM centroid_cost_src GROUP BY grp$$, '1h', 'AUTO')",
         "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_cost_st'::regclass",
         "SELECT pgtrickle.refresh_stream_table('centroid_cost_st')",
-        "INSERT INTO pgtrickle.pgt_cost_model_summary (pgt_id, avg_full_ms, avg_diff_ms, sample_count) SELECT pgt_id, 0.1, 100.0, 3 FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_cost_st'::regclass ON CONFLICT (pgt_id) DO UPDATE SET avg_full_ms = EXCLUDED.avg_full_ms, avg_diff_ms = EXCLUDED.avg_diff_ms, sample_count = EXCLUDED.sample_count",
+        // Seed fresh, complete evidence for the actual two-image UPDATE.
+        // The monitoring summary is no longer an input to cost prediction.
+        "UPDATE pgtrickle.pgt_refresh_summary SET stats_reset_at = now() - interval '10 minutes' WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_cost_st'::regclass)",
+        "SET pg_trickle.prediction_min_samples = 3",
+        "INSERT INTO pgtrickle.pgt_refresh_history (pgt_id, data_timestamp, start_time, end_time, action, status, rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback, refresh_reason_detail) SELECT pgt_id, now(), now() - interval '2 minutes', now() - interval '119 seconds', 'DIFFERENTIAL', 'COMPLETED', 1, 2, 'centroid_algebraic', false, jsonb_build_object('schema_version', 1, 'input_delta_rows', 2, 'input_delta_rows_may_be_incomplete', false, 'plan_identity', defining_query_hash, 'contract_generation', contract_generation)::text FROM pgtrickle.pgt_stream_tables CROSS JOIN generate_series(1, 5) WHERE pgt_relid = 'centroid_cost_st'::regclass",
+        "INSERT INTO pgtrickle.pgt_refresh_history (pgt_id, data_timestamp, start_time, end_time, action, status, rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback) SELECT pgt_id, now(), now() - interval '1 minute', now() - interval '1 minute' + interval '100 milliseconds', 'FULL', 'COMPLETED', 2, 2, 'FULL', false FROM pgtrickle.pgt_stream_tables CROSS JOIN generate_series(1, 3) WHERE pgt_relid = 'centroid_cost_st'::regclass",
         "SET pg_trickle.refresh_strategy = 'auto'",
         "SET pg_trickle.differential_max_change_ratio = 0.8",
         "UPDATE centroid_cost_src SET v = '[5,6]' WHERE id = 1",

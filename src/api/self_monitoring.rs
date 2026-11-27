@@ -789,7 +789,9 @@ mod tests {
         assert!(DF_THRESHOLD_ADVICE_QUERY.contains("st.auto_threshold AS recommended_threshold"));
         assert!(DF_THRESHOLD_ADVICE_QUERY.contains("'LOW'::text AS confidence"));
         assert!(DF_EFFICIENCY_ROLLING_QUERY.contains("h.start_time >= rs.stats_reset_at"));
-        assert!(DF_EFFICIENCY_ROLLING_QUERY.contains("h.contract_generation = st.contract_generation"));
+        assert!(
+            DF_EFFICIENCY_ROLLING_QUERY.contains("h.contract_generation = st.contract_generation")
+        );
     }
 
     /// CORR-3: Verify the NULLIF guard against divide-by-zero.

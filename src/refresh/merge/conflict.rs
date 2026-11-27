@@ -12,9 +12,7 @@ pub(crate) fn capture_delta_explain(schema: &str, name: &str, delta_sql: &str) {
     }
 
     // Estimated plan under the actual generation settings; no duplicate execution.
-    let explain_sql = format!(
-        "EXPLAIN (FORMAT JSON) SELECT * FROM ({delta_sql}) __pgt_explain_d"
-    );
+    let explain_sql = format!("EXPLAIN (FORMAT JSON) SELECT * FROM ({delta_sql}) __pgt_explain_d");
 
     let plan_json = Spi::connect(|client| {
         let result = client

@@ -57,8 +57,11 @@ async fn test_refresh_cost_evidence_marks_unaccounted_stream_changes() {
     db.refresh_st_until_converged("rf_cost_chain_child").await;
     let detail: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'rf_cost_chain_child'::regclass AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
     let evidence: serde_json::Value = serde_json::from_str(&detail).expect("parse cost evidence");
-    assert_eq!(evidence["input_delta_rows"], 0);
+    // The single upstream insert is counted in the durable CDC window, but
+    // upstream-derived evidence is still incomplete for cost-model learning.
+    assert_eq!(evidence["input_delta_rows"], 1);
     assert_eq!(evidence["input_delta_rows_may_be_incomplete"], true);
+    assert_eq!(evidence["output_rows_changed"], 1);
     db.assert_st_matches_query("rf_cost_chain_child", "SELECT id FROM rf_cost_chain_src")
         .await;
 }

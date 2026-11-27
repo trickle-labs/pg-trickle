@@ -954,10 +954,18 @@ mod materialized_apply_tests {
 
     #[test]
     fn test_materialized_apply_prefers_index_for_sparse_large_target() {
-        assert!(prefer_indexed_materialized_apply(20_000, 25_000_000.0, 0.001));
+        assert!(prefer_indexed_materialized_apply(
+            20_000,
+            25_000_000.0,
+            0.001
+        ));
         assert!(!prefer_indexed_materialized_apply(20_000, 100_000.0, 0.001));
         assert!(!prefer_indexed_materialized_apply(20_000, -1.0, 0.001));
-        assert!(!prefer_indexed_materialized_apply(20_000, 25_000_000.0, 0.0));
+        assert!(!prefer_indexed_materialized_apply(
+            20_000,
+            25_000_000.0,
+            0.0
+        ));
         assert!(!prefer_indexed_materialized_apply(0, 25_000_000.0, 0.001));
     }
 }
@@ -2104,7 +2112,7 @@ fn execute_differential_refresh_inner(
                 crate::sql_builder::ident(&change_schema),
                 crate::sql_builder::ident(&format!("changes_pgt_{upstream_pgt_id}")),
             );
-            // nosemgrep: rust.spi.query.dynamic-format — buffer identifiers are quoted; LSNs are bound parameters.
+            // nosemgrep: rust.spi.get_one_with_args.dynamic-format — buffer identifiers are quoted; LSNs are bound parameters.
             let count = Spi::get_one_with_args::<i64>(
                 &format!(
                     "SELECT count(*)::bigint FROM {buffer}
@@ -3309,16 +3317,17 @@ fn execute_differential_refresh_inner(
 
             // G12-ERM-1: Record the effective mode for this execution path.
             set_effective_mode("APPEND_ONLY");
-            let mut cost_evidence = crate::refresh::build_differential_cost_evidence(
-                total_change_count,
-                rows_inserted,
-            );
+            let mut cost_evidence =
+                crate::refresh::build_differential_cost_evidence(total_change_count, rows_inserted);
             if let Some(fields) = cost_evidence.as_object_mut() {
                 fields.insert(
                     "input_delta_rows_may_be_incomplete".into(),
                     serde_json::json!(input_delta_rows_may_be_incomplete),
                 );
-                fields.insert("plan_identity".into(), serde_json::json!(st.defining_query_hash));
+                fields.insert(
+                    "plan_identity".into(),
+                    serde_json::json!(st.defining_query_hash),
+                );
                 fields.insert(
                     "contract_generation".into(),
                     serde_json::json!(st.contract_generation),
@@ -3329,11 +3338,9 @@ fn execute_differential_refresh_inner(
                     serde_json::json!(_total_table_size.max(0)),
                 );
             }
-            crate::refresh::set_last_cost_evidence(
-                serde_json::to_string(&cost_evidence).map_err(|e| {
-                    PgTrickleError::InternalError(format!("serialize cost evidence: {e}"))
-                })?,
-            );
+            crate::refresh::set_last_cost_evidence(serde_json::to_string(&cost_evidence).map_err(
+                |e| PgTrickleError::InternalError(format!("serialize cost evidence: {e}")),
+            )?);
             crate::refresh::set_last_ann_churn_operations(
                 (!user_triggers_active).then_some(rows_inserted),
             );
@@ -3797,7 +3804,8 @@ fn execute_differential_refresh_inner(
         && !is_distributed_st
         && !has_recursive_cte
         && st.st_partition_key.is_none()
-        && crate::config::pg_trickle_merge_join_strategy() == crate::config::MergeJoinStrategy::Auto
+        && crate::config::pg_trickle_merge_join_strategy()
+            == crate::config::MergeJoinStrategy::Auto
         && ((crate::config::pg_trickle_merge_planner_hints()
             && total_change_count >= PLANNER_HINT_NESTLOOP_THRESHOLD)
             || !crate::config::pg_trickle_delta_enable_nestloop());
@@ -4056,7 +4064,9 @@ fn execute_differential_refresh_inner(
             // nosemgrep: rust.spi.query.dynamic-format — generated temp relation name.
             let delta_rows = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {delta_table}"))
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .ok_or_else(|| PgTrickleError::InternalError("missing INTERSECT delta count".into()))?;
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("missing INTERSECT delta count".into())
+                })?;
             let delta_rows = usize::try_from(delta_rows).map_err(|_| {
                 PgTrickleError::InternalError("invalid INTERSECT delta count".into())
             })?;
@@ -4114,8 +4124,13 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
-                    .update(&format!("INSERT INTO {delta_table} {delta_select}"), None, &[])
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
@@ -4219,8 +4234,13 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
-                    .update(&format!("INSERT INTO {delta_table} {delta_select}"), None, &[])
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
@@ -4282,8 +4302,13 @@ fn execute_differential_refresh_inner(
             let t_mat_start = Instant::now();
 
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
-                    .update(&format!("INSERT INTO {delta_table} {delta_select}"), None, &[])
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
@@ -4441,8 +4466,13 @@ fn execute_differential_refresh_inner(
         } else if use_materialized_merge {
             // nosemgrep: rust.spi.connect_mut.dynamic-format — generated temp table and validated delta SQL.
             let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
                 let result = client
-                    .update(&format!("INSERT INTO {delta_table} {delta_select}"), None, &[])
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<usize, PgTrickleError>(result.len())
             })?;
