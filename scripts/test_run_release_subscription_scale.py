@@ -63,6 +63,45 @@ def report(
 
 
 class SubscriptionScaleTests(unittest.TestCase):
+    def test_selected_case_execution_requires_one_success(self):
+        selected = {"type": "test", "name": scale.SELECTED_TEST}
+        started = dict(selected, event="started")
+        passed = dict(selected, event="ok")
+        ignored = {"type": "test", "event": "ignored", "name": "unrelated"}
+        summary = {"type": "suite", "event": "ok", "passed": 1, "failed": 0, "ignored": 38}
+
+        def output(*events):
+            return "\n".join(json.dumps(event) for event in events)
+
+        scale.validate_case_execution(output(started, ignored, passed, summary))
+        for events in (
+            (ignored, summary),
+            (started, dict(selected, event="ignored"), summary),
+            (started, dict(selected, event="failed"), summary),
+            (started, passed, passed, summary),
+            (started, passed),
+            (started, passed, dict(summary, passed=0)),
+            (started, passed, dict(summary, failed=1)),
+            (started, passed, dict(summary, event="failed")),
+        ):
+            with self.subTest(events=events), self.assertRaises(ValueError):
+                scale.validate_case_execution(output(*events))
+
+    def test_matrix_evidence_paths_are_unique(self):
+        stems = [
+            scale.case_evidence_stem(dimensions, rows, count, statistics, force_explicit, "single_update")
+            for dimensions, row_counts, statistics_values, force_explicit, counts in scale.CASE_GROUPS
+            for rows in row_counts
+            for statistics in statistics_values
+            for count in counts
+        ]
+        stems.extend(
+            scale.case_evidence_stem(384, 100_000, 10, "analyzed", False, shape)
+            for shape in scale.EXTRA_MUTATION_SHAPES
+        )
+        self.assertEqual(len(stems), 42)
+        self.assertEqual(len(set(stems)), len(stems))
+
     def test_parse_case_accepts_the_requested_measurement(self):
         data = report(100_000, 10, True)
         output = scale.REPORT_MARKER + json.dumps(data)

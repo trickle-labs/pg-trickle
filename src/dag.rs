@@ -1619,7 +1619,7 @@ pub struct ExecutionUnitDag {
 /// A unit A can chain to B when:
 /// 1. A is a Singleton
 /// 2. A has exactly one downstream unit (B)
-/// 3. B is a Singleton
+/// 3. B is a Singleton and A is its only upstream execution unit
 /// 4. Both A and B use CALCULATED (Differential) refresh mode
 ///
 /// Returns maximal chains (length ≥ 2) in topological order.
@@ -1667,6 +1667,14 @@ where
                 break; // Must have exactly one downstream
             }
             let next_id = downstream[0];
+            // Contract only a genuine linear edge. Otherwise an incoming
+            // edge to an interior member would disappear when fuse_chain
+            // rewires the head's predecessors, or contraction could create
+            // a cycle through an external path.
+            let predecessors = eu_dag.get_upstream_units(next_id);
+            if predecessors.as_slice() != [current] {
+                break;
+            }
             if visited.contains(&next_id) {
                 break;
             }
@@ -1950,8 +1958,8 @@ impl ExecutionUnitDag {
 
         // Step 5 (DAG-4): Detect and fuse single-consumer CALCULATED chains.
         // A chain A → B (→ C …) is fusable when each upstream unit is a
-        // Singleton with exactly one downstream, and both upstream and
-        // downstream are CALCULATED (deferred) refresh mode.
+        // Singleton with exactly one downstream, each successor has exactly
+        // one predecessor, and all members are in DIFFERENTIAL mode.
         let chains = find_fusable_chains(&eu_dag, &resolve_mode);
         for chain in chains {
             eu_dag.fuse_chain(&chain);
@@ -4422,6 +4430,74 @@ mod tests {
         let unit = eu.units().next().unwrap();
         assert_eq!(unit.kind, ExecutionUnitKind::FusedChain);
         assert_eq!(unit.member_pgt_ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_fused_chain_preserves_fan_in_predecessors() {
+        let mut dag = StDag::new();
+        for id in 1..=4 {
+            dag.add_st_node(make_st_node(id, &format!("public.st{id}")));
+        }
+        for (up, down) in [(1, 3), (2, 3), (3, 4)] {
+            dag.add_edge(NodeId::StreamTable(up), NodeId::StreamTable(down));
+        }
+        let eu = ExecutionUnitDag::build_from_st_dag(&dag, all_differential);
+        let a = eu.unit_for_pgt(1).unwrap().id;
+        let x = eu.unit_for_pgt(2).unwrap().id;
+        let b = eu.unit_for_pgt(3).unwrap().id;
+        assert_ne!(a, b);
+        assert_ne!(x, b);
+        assert!(eu.get_upstream_units(b).contains(&a));
+        assert!(eu.get_upstream_units(b).contains(&x));
+        assert!(eu.get_downstream_units(a).contains(&b));
+        assert!(eu.get_downstream_units(x).contains(&b));
+    }
+
+    #[test]
+    fn test_fused_chain_contraction_preserves_all_ordered_dag_edges() {
+        let edges = [(1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)];
+        for mask in 0u32..(1 << edges.len()) {
+            let mut dag = StDag::new();
+            for id in 1..=4 {
+                dag.add_st_node(make_st_node(id, &format!("public.st{id}")));
+            }
+            for (bit, &(up, down)) in edges.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    dag.add_edge(NodeId::StreamTable(up), NodeId::StreamTable(down));
+                }
+            }
+            let eu = ExecutionUnitDag::build_from_st_dag(&dag, all_differential);
+            let order = eu
+                .topological_order()
+                .expect("contraction must remain acyclic");
+            for (bit, &(up, down)) in edges.iter().enumerate() {
+                if mask & (1 << bit) == 0 {
+                    continue;
+                }
+                let upstream = eu.unit_for_pgt(up).unwrap();
+                let downstream = eu.unit_for_pgt(down).unwrap();
+                if upstream.id == downstream.id {
+                    let members = &upstream.member_pgt_ids;
+                    assert!(
+                        members.iter().position(|id| *id == up)
+                            < members.iter().position(|id| *id == down),
+                        "reordered internal edge {up}->{down} in graph {mask}"
+                    );
+                } else {
+                    assert!(
+                        eu.get_downstream_units(upstream.id)
+                            .contains(&downstream.id)
+                            && eu.get_upstream_units(downstream.id).contains(&upstream.id),
+                        "lost external edge {up}->{down} in graph {mask}"
+                    );
+                    assert!(
+                        order.iter().position(|id| *id == upstream.id)
+                            < order.iter().position(|id| *id == downstream.id),
+                        "reordered external edge {up}->{down} in graph {mask}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
