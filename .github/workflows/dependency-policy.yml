@@ -12,6 +12,8 @@ on:
       - 'Cargo.lock'
       - 'deny.toml'
       - '.github/workflows/dependency-policy.yml'
+      - 'scripts/check_deny_expiry.py'
+      - 'scripts/test_check_deny_expiry.py'
   pull_request:
     branches: [main]
     paths:
@@ -19,6 +21,8 @@ on:
       - 'Cargo.lock'
       - 'deny.toml'
       - '.github/workflows/dependency-policy.yml'
+      - 'scripts/check_deny_expiry.py'
+      - 'scripts/test_check_deny_expiry.py'
   schedule:
     - cron: '30 9 * * 1'
   workflow_dispatch:
@@ -59,6 +63,9 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+
+      - name: Test advisory policy parser
+        run: python3 -m unittest discover -s scripts -p 'test_check_deny_expiry.py'
 
       - name: Check advisory ignore expiry dates (DEP-001)
         run: python3 scripts/check_deny_expiry.py

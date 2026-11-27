@@ -17,12 +17,16 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/security.yml"
+      - "deny.toml"
+      - "scripts/check_deny_expiry.py"
   pull_request:
     branches: [main]
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/security.yml"
+      - "deny.toml"
+      - "scripts/check_deny_expiry.py"
   schedule:
     # Weekly on Monday at 08:00 UTC — catches newly published advisories
     - cron: "0 8 * * 1"
@@ -40,21 +44,31 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Reject active SQLite dependency
+      - name: Reject active SQLite or Chrono dependencies
         shell: bash
         run: |
           set -o pipefail
           cargo tree --locked --workspace --all-features --target all --edges normal,build,dev --prefix none --format '{p}' |
-            awk '/^libsqlite3-sys v/ { found = 1 } END { exit found }'
+            awk '/^(libsqlite3-sys|chrono) v/ { print "Unexpected active dependency: " $0; found = 1 } END { exit found }'
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Validate and export reviewed advisory exceptions
+        id: advisory-policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          ignores="$(python3 scripts/check_deny_expiry.py --audit-ignores)"
+          printf 'ignore=%s\n' "$ignores" >> "$GITHUB_OUTPUT"
 
       - name: Run cargo audit
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # SEC-001: Advisory ignores are centralized in deny.toml.
-          # This list must stay in sync with the [advisories] ignore list in deny.toml.
-          # See deny.toml for the rationale comment on each advisory.
-          ignore: RUSTSEC-2021-0127,RUSTSEC-2026-0459
+          # SEC-001: Read the same time-limited advisory exceptions as cargo-deny.
+          ignore: ${{ steps.advisory-policy.outputs.ignore }}
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
@@ -76,17 +90,28 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Reject active SQLite dependency
+      - name: Reject active SQLite or Chrono dependencies
         shell: bash
         run: |
           set -o pipefail
           cargo tree --locked --workspace --all-features --target all --edges normal,build,dev --prefix none --format '{p}' |
-            awk '/^libsqlite3-sys v/ { found = 1 } END { exit found }'
+            awk '/^(libsqlite3-sys|chrono) v/ { print "Unexpected active dependency: " $0; found = 1 } END { exit found }'
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Validate and export reviewed advisory exceptions
+        id: advisory-policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          ignores="$(python3 scripts/check_deny_expiry.py --audit-ignores)"
+          printf 'ignore=%s\n' "$ignores" >> "$GITHUB_OUTPUT"
 
       - name: Run cargo audit
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Match the annotated, reviewed exceptions in deny.toml: serde_cbor
-          # unmaintained and SQLx's unselected optional SQLite backend.
-          ignore: RUSTSEC-2021-0127,RUSTSEC-2026-0459
+          # SEC-001: Read the same time-limited advisory exceptions as cargo-deny.
+          ignore: ${{ steps.advisory-policy.outputs.ignore }}

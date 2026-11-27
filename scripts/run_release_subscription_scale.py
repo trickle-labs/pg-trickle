@@ -53,6 +53,45 @@ TEST_COMMAND = [
 ]
 
 
+SELECTED_TEST = "pg_trickle::e2e_bench_tests$pgvector_workload::test_pgvector_subscription_scaling_workload"
+
+
+def validate_case_execution(output: str) -> None:
+    """Require one successful selected test, ignoring unrelated discovery events."""
+    events = []
+    summaries = []
+    for line in output.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "test" and event.get("name") == SELECTED_TEST:
+            events.append(event.get("event"))
+        if event.get("type") == "suite" and event.get("event") != "started":
+            summaries.append(event)
+    if events != ["started", "ok"] or len(summaries) != 1:
+        raise ValueError("subscription benchmark did not execute its selected test exactly once")
+    summary = summaries[0]
+    if summary.get("event") != "ok" or summary.get("passed") != 1 or summary.get("failed") != 0:
+        raise ValueError("subscription benchmark did not report one successful test")
+
+
+def case_evidence_stem(
+    dimensions: int,
+    rows: int,
+    subscriptions: int,
+    statistics: str,
+    force_explicit: bool,
+    mutation_shape: str,
+) -> str:
+    mode = "explicit" if force_explicit else "trigger-free"
+    return f"subscription-scale-{dimensions}-{rows}-{subscriptions}-{statistics}-{mode}-{mutation_shape}"
+
+
 def parse_case(
     output: str,
     rows: int,
@@ -150,6 +189,7 @@ def run_case(
     environment = os.environ.copy()
     environment.update(
         {
+            "PGT_RELEASE_MACHINE_FORMAT": "1",
             "PGVECTOR_EXPECTED_VERSION": "0.8.7",
             "PGVECTOR_SUB_ROWS": str(rows),
             "PGVECTOR_SUB_COUNTS": str(subscriptions),
@@ -166,8 +206,10 @@ def run_case(
     if plan_path is not None:
         environment["PGVECTOR_SUB_PLAN_LOG"] = str(plan_path)
     measurement_path = Path(environment["PGS_RELEASE_MEASUREMENT_JSON"]).resolve()
-    stem = f"subscription-scale-{dimensions}-{rows}-{subscriptions}-{statistics}-{mutation_shape}"
+    stem = case_evidence_stem(dimensions, rows, subscriptions, statistics, force_explicit, mutation_shape)
+    log_path = measurement_path.with_name(f"{stem}.log")
     stats_path = measurement_path.with_name(f"{stem}-docker-stats.jsonl")
+    log_path.unlink(missing_ok=True)
     stats_path.unlink(missing_ok=True)
     sampler = DockerStatsSampler(stats_path)
     sampler.start()
@@ -183,13 +225,13 @@ def run_case(
         )
     finally:
         sampler.stop()
-    sys.stdout.write(completed.stdout)
-    sys.stdout.flush()
+    log_path.write_text(completed.stdout, encoding="utf-8")
     if completed.returncode != 0:
         raise RuntimeError(
             f"subscription case {rows}/{statistics}/{subscriptions}/{mutation_shape} "
-            f"failed with exit {completed.returncode}"
+            f"failed with exit {completed.returncode}; see {log_path}:\n{completed.stdout[-4000:]}"
         )
+    validate_case_execution(completed.stdout)
     if sampler.samples == 0:
         raise RuntimeError(f"subscription case produced no Docker CPU/memory samples: {stats_path}")
     report = parse_case(
@@ -205,6 +247,7 @@ def run_case(
     )
     report["resource_samples"] = sampler.samples
     report["resource_file"] = stats_path.relative_to(ROOT).as_posix()
+    report["log_file"] = log_path.relative_to(ROOT).as_posix()
     return report
 
 
@@ -380,7 +423,7 @@ def main() -> int:
                             )
                             case["plan_log"] = plan_relative
                         result["cases"].append(case)
-                        result["raw_evidence_files"].append(report["resource_file"])
+                        result["raw_evidence_files"].extend([report["resource_file"], report["log_file"]])
                         write_measurement(measurement_path, result)
         for mutation_shape in EXTRA_MUTATION_SHAPES:
             dimensions, rows, subscriptions, statistics = 384, 100_000, 10, "analyzed"
@@ -412,7 +455,7 @@ def main() -> int:
                     "report": report,
                 }
             )
-            result["raw_evidence_files"].append(report["resource_file"])
+            result["raw_evidence_files"].extend([report["resource_file"], report["log_file"]])
             write_measurement(measurement_path, result)
         validate_trigger_free_strategies(result["cases"])
         match = re.match(r"^PostgreSQL (18(?:\.\d+){1,2})", postgres_version or "")

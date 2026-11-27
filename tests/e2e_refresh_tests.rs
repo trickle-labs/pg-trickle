@@ -233,13 +233,18 @@ async fn test_refresh_mixed_dml() {
     )
     .await;
 
+    // Do not let a scheduler refresh race the manual mixed-DML window.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.rf_mix_st'])")
+        .await;
+
     // Mixed DML
     db.execute("INSERT INTO rf_mix VALUES (4, 'd')").await;
     db.execute("UPDATE rf_mix SET val = 'a_updated' WHERE id = 1")
         .await;
     db.execute("DELETE FROM rf_mix WHERE id = 2").await;
 
-    db.refresh_st("rf_mix_st").await;
+    db.refresh_st_with_retry("rf_mix_st").await;
 
     // Final state should match defining query
     db.assert_st_matches_query("public.rf_mix_st", "SELECT id, val FROM rf_mix")

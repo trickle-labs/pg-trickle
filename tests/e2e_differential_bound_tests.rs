@@ -237,6 +237,39 @@ async fn min_excludes_future_insert_and_converges() {
     extremum_case(true).await;
 }
 
+/// An admitted BYPASSRLS owner must receive the eligible insert even when
+/// the row no longer exists in the live table at CDC staging time.
+#[tokio::test]
+async fn test_rls_bypass_preserves_insert_deleted_after_bound() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE bound_rls_src(id int PRIMARY KEY, g int, v int)")
+        .await;
+    db.execute("INSERT INTO bound_rls_src VALUES (1, 1, 10)")
+        .await;
+    db.execute("ALTER TABLE bound_rls_src ENABLE ROW LEVEL SECURITY")
+        .await;
+    db.execute("ALTER TABLE bound_rls_src FORCE ROW LEVEL SECURITY")
+        .await;
+    db.execute("CREATE POLICY deny_all ON bound_rls_src USING (false)")
+        .await;
+    let query = "SELECT g, sum(v) AS total, count(*) AS n FROM bound_rls_src GROUP BY g";
+    db.create_st("bound_rls_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("INSERT INTO bound_rls_src VALUES (2, 1, 20)")
+        .await;
+    let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_rls_st").await;
+    db.execute("DELETE FROM bound_rls_src WHERE id = 2").await;
+    finish_bounded_refresh(&mut blocker, id, refresh).await;
+    let bounded: (i64, i64) = sqlx::query_as("SELECT total, n FROM bound_rls_st WHERE g = 1")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read owner-visible bounded aggregate");
+    assert_eq!(bounded, (30, 2));
+    refresh_normally(&db, "bound_rls_st").await;
+    db.assert_st_matches_query("bound_rls_st", query).await;
+    assert_no_full_fallback(&db, "bound_rls_st").await;
+}
+
 #[tokio::test]
 async fn max_restores_future_deleted_row_in_current_window() {
     let db = E2eDb::new().await.with_extension().await;
