@@ -604,6 +604,40 @@ async fn test_bound_deferred_primary_key_replacement_preserves_old_image() {
     assert_no_full_fallback(&db, "bound_deferred_st").await;
 }
 
+/// Use the installed synchronous publisher for the racing producer. A second
+/// manual refresh can wait on catalog/refresh locks held by the paused reader;
+/// that tests refresh coordination rather than historical bag reconstruction.
+/// Bound the SQL transaction itself so a broken interleaving never hangs CI.
+async fn publish_future_bag_write(db: &E2eDb, sql: &str) -> Result<(), sqlx::Error> {
+    let mut writer = db.pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '10s'")
+        .execute(&mut *writer)
+        .await?;
+    sqlx::query("SET LOCAL statement_timeout = '20s'")
+        .execute(&mut *writer)
+        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
+        .execute(&mut *writer)
+        .await?;
+    writer.commit().await
+}
+
+async fn bag_capture_cut(db: &E2eDb, upstream: &'static str) -> (String, String) {
+    let upstream_id = pgt_id(db, upstream).await;
+    let buffer = format!("pgtrickle_changes.changes_pgt_{upstream_id}");
+    let cut: String = db
+        .query_scalar(&format!("SELECT MAX(lsn)::text FROM {buffer}"))
+        .await;
+    assert!(
+        db.query_scalar::<bool>(&format!(
+            "SELECT EXISTS (SELECT 1 FROM {buffer} WHERE action = 'D' AND v = 30)"
+        ))
+        .await,
+        "the synchronous publisher must capture the eligible deletion"
+    );
+    (buffer, cut)
+}
+
 /// At the selected downstream cut two equal maxima remain. Publishing one
 /// more occurrence after the cut must not remove the earlier copies.
 #[tokio::test]
@@ -614,8 +648,10 @@ async fn test_bound_duplicate_stream_table_occurrences_preserve_extrema() {
         .await;
     let up_query = "SELECT g, v FROM bound_bag_src";
     let down_query = "SELECT g, max(v) AS ex, count(*) AS n FROM bound_bag_up GROUP BY g";
-    db.create_st("bound_bag_up", up_query, "1h", "DIFFERENTIAL")
-        .await;
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table('bound_bag_up', '{up_query}', NULL, 'IMMEDIATE')"
+    ))
+    .await;
     db.create_st("bound_bag_down", down_query, "1h", "DIFFERENTIAL")
         .await;
     assert!(
@@ -625,12 +661,28 @@ async fn test_bound_duplicate_stream_table_occurrences_preserve_extrema() {
         .await,
         "fixture must have duplicate stored identities"
     );
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['bound_bag_down'])")
+        .await;
     db.execute("DELETE FROM bound_bag_src WHERE v = 30").await;
-    refresh_normally(&db, "bound_bag_up").await;
+    db.assert_st_matches_query("bound_bag_up", up_query).await;
+    let (buffer, cut) = bag_capture_cut(&db, "bound_bag_up").await;
     let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_bag_down").await;
-    db.execute("INSERT INTO bound_bag_src VALUES (1, 20)").await;
-    refresh_normally(&db, "bound_bag_up").await;
+    let publication =
+        publish_future_bag_write(&db, "INSERT INTO bound_bag_src VALUES (1, 20)").await;
+    if let Err(error) = publication {
+        release_boundary(&mut blocker, id).await;
+        panic!("future duplicate insert did not commit during the bounded refresh: {error}");
+    }
+    assert_eq!(
+        db.query_scalar::<i64>(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action = 'I' AND v = 20 AND lsn > '{cut}'::pg_lsn"
+        ))
+        .await,
+        1,
+        "one real future insert must be present in persistent CDC"
+    );
     finish_bounded_refresh(&mut blocker, id, refresh).await;
+    db.assert_st_matches_query("bound_bag_up", up_query).await;
     let bounded: (i32, i64) = sqlx::query_as("SELECT ex, n FROM bound_bag_down WHERE g = 1")
         .fetch_one(&db.pool)
         .await
@@ -655,21 +707,39 @@ async fn test_bound_duplicate_stream_table_deletes_restore_every_occurrence() {
     .await;
     let up_query = "SELECT g, v FROM bound_bag_delete_src";
     let down_query = "SELECT g, max(v) AS ex, count(*) AS n FROM bound_bag_delete_up GROUP BY g";
-    db.create_st("bound_bag_delete_up", up_query, "1h", "DIFFERENTIAL")
-        .await;
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table('bound_bag_delete_up', '{up_query}', NULL, 'IMMEDIATE')"
+    ))
+    .await;
     db.create_st("bound_bag_delete_down", down_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['bound_bag_delete_down'])")
         .await;
     db.execute("DELETE FROM bound_bag_delete_src WHERE v = 30")
         .await;
-    refresh_normally(&db, "bound_bag_delete_up").await;
+    db.assert_st_matches_query("bound_bag_delete_up", up_query)
+        .await;
+    let (buffer, cut) = bag_capture_cut(&db, "bound_bag_delete_up").await;
     let (mut blocker, id, refresh) = start_bounded_refresh(&db, "bound_bag_delete_down").await;
-    db.execute(
+    let publication = publish_future_bag_write(
+        &db,
         "DELETE FROM bound_bag_delete_src WHERE ctid IN (
             SELECT ctid FROM bound_bag_delete_src WHERE v = 20 LIMIT 2
         )",
     )
     .await;
-    refresh_normally(&db, "bound_bag_delete_up").await;
+    if let Err(error) = publication {
+        release_boundary(&mut blocker, id).await;
+        panic!("future duplicate deletes did not commit during the bounded refresh: {error}");
+    }
+    assert_eq!(
+        db.query_scalar::<i64>(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action = 'D' AND v = 20 AND lsn > '{cut}'::pg_lsn"
+        ))
+        .await,
+        2,
+        "both future delete images must be present in persistent CDC"
+    );
     assert_eq!(
         db.query_scalar::<i64>("SELECT count(*) FROM bound_bag_delete_up WHERE v = 20")
             .await,
@@ -678,6 +748,8 @@ async fn test_bound_duplicate_stream_table_deletes_restore_every_occurrence() {
     // The barrier helper also inspects the materialized historical stage:
     // all three copies must be restored there even though live has one.
     finish_bounded_refresh(&mut blocker, id, refresh).await;
+    db.assert_st_matches_query("bound_bag_delete_up", up_query)
+        .await;
     let bounded: (i32, i64) = sqlx::query_as("SELECT ex, n FROM bound_bag_delete_down WHERE g = 1")
         .fetch_one(&db.pool)
         .await
