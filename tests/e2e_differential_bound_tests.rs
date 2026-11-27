@@ -545,3 +545,66 @@ async fn test_issue_1453_staged_cdc_analyzed_in_ordinary_refresh() {
     db.assert_st_matches_query("analyze1453_hourly", query)
         .await;
 }
+
+/// A writer on an unrelated tracked source must not freeze this stream's
+/// manual cut. Keep that transaction open across the refresh.
+#[tokio::test]
+async fn test_manual_writer_fence_ignores_unrelated_capture_relation() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE fence1486_a (id int PRIMARY KEY, v int)")
+        .await;
+    db.execute("CREATE TABLE fence1486_b (id int PRIMARY KEY, v int)")
+        .await;
+    db.execute("INSERT INTO fence1486_a VALUES (1,1)").await;
+    db.execute("INSERT INTO fence1486_b VALUES (1,1)").await;
+    let query = "SELECT id,v FROM fence1486_a";
+    db.create_st("fence1486_st_a", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st(
+        "fence1486_st_b",
+        "SELECT id,v FROM fence1486_b",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute(
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.fence1486_st_a','public.fence1486_st_b'])",
+    )
+    .await;
+    db.execute("UPDATE fence1486_a SET v=2 WHERE id=1").await;
+    let mut writer = db.pool.begin().await.expect("unrelated writer transaction");
+    sqlx::query("INSERT INTO fence1486_b VALUES (2,2)")
+        .execute(&mut *writer)
+        .await
+        .expect("hold captured source and buffer locks");
+    let has_xid: bool = sqlx::query_scalar("SELECT pg_current_xact_id_if_assigned() IS NOT NULL")
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+    assert!(has_xid);
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy = 'differential'"],
+        "SELECT pgtrickle.refresh_stream_table('fence1486_st_a')",
+    )
+    .await
+    .expect("unrelated writer does not block manual refresh");
+    db.assert_st_matches_query("fence1486_st_a", query).await;
+    let value: i32 = db
+        .query_scalar("SELECT v FROM fence1486_st_a WHERE id=1")
+        .await;
+    assert_eq!(value, 2);
+    let action: String = db
+        .query_scalar(
+            "SELECT h.action FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables t USING(pgt_id)
+         WHERE t.pgt_name='fence1486_st_a' AND h.initiated_by='MANUAL'
+         ORDER BY h.refresh_id DESC LIMIT 1",
+        )
+        .await;
+    assert_eq!(action, "DIFFERENTIAL");
+    writer.commit().await.unwrap();
+    db.refresh_st_until_converged("fence1486_st_b").await;
+    db.assert_st_matches_query("fence1486_st_b", "SELECT id,v FROM fence1486_b")
+        .await;
+}

@@ -1232,29 +1232,57 @@ fn execute_manual_differential_refresh(
     } else if endpoint_fenced {
         cdc::get_current_wal_lsn()?
     } else {
-        // Capture before inspecting locks: any older invisible CDC still has a writer lock.
-        let candidate = cdc::get_current_wal_lsn()?;
+        // A writer can stamp the same insertion LSN after the sample,
+        // especially with unlogged relations. Exclude the equal endpoint.
+        // Any older invisible CDC must still hold a relevant writer lock.
+        let candidate =
+            Spi::get_one::<String>("SELECT (pg_current_wal_insert_lsn() - 1::numeric)::text")
+                .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                    context: format!("manual refresh of {schema}.{table_name}"),
+                    reason: format!("sample strict WAL bound: {e}"),
+                })?
+                .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
+                    context: format!("manual refresh of {schema}.{table_name}"),
+                    reason: "missing WAL bound".into(),
+                })?;
         let has_writer = Spi::get_one_with_args::<bool>(
-            "WITH RECURSIVE sources(oid) AS (
-                 SELECT source_relid FROM pgtrickle.pgt_dependencies WHERE pgt_id = $1
+            "WITH RECURSIVE deps AS MATERIALIZED (
+                 SELECT source_type, source_relid
+                   FROM pgtrickle.pgt_dependencies WHERE pgt_id = $1
+             ), roots(oid) AS (
+                 SELECT source_relid FROM deps
+                  WHERE source_type IN ('TABLE','FOREIGN_TABLE','MATVIEW','STREAM_TABLE')
                  UNION
-                 SELECT i.inhrelid FROM pg_inherits i JOIN sources s ON i.inhparent = s.oid
+                 SELECT c.oid FROM deps d
+                 LEFT JOIN pgtrickle.pgt_stream_tables upstream
+                   ON d.source_type = 'STREAM_TABLE' AND upstream.pgt_relid = d.source_relid
+                 JOIN pgtrickle.pgt_change_buffers cb
+                   ON (cb.source_kind = 'BASE'
+                       AND d.source_type IN ('TABLE','FOREIGN_TABLE','MATVIEW')
+                       AND cb.source_id = d.source_relid::bigint)
+                   OR (cb.source_kind = 'STREAM_TABLE'
+                       AND d.source_type = 'STREAM_TABLE'
+                       AND cb.source_id = upstream.pgt_id)
+                 JOIN pg_catalog.pg_namespace n ON n.nspname = $2
+                 JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid
+                    AND c.relname = cb.buffer_key AND c.relkind IN ('r','p')
+             ), sources(oid) AS (
+                 SELECT oid FROM roots
+                 UNION
+                 SELECT i.inhrelid FROM pg_catalog.pg_inherits i
+                 JOIN sources s ON i.inhparent = s.oid
              )
              SELECT CASE WHEN current_setting('transaction_isolation')
                               IN ('repeatable read', 'serializable') THEN NULL
              ELSE EXISTS (
-                 SELECT 1 FROM pg_locks l
-                 JOIN pg_class c ON c.oid = l.relation
-                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 SELECT 1 FROM pg_catalog.pg_locks l
                  WHERE l.locktype = 'relation' AND l.granted
-                   AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                   AND l.database = (SELECT oid FROM pg_catalog.pg_database
+                                     WHERE datname = current_database())
                    AND l.pid IS DISTINCT FROM pg_backend_pid()
                    AND l.mode IN ('RowExclusiveLock', 'ShareRowExclusiveLock',
                                   'ExclusiveLock', 'AccessExclusiveLock')
-                   -- Ignore index locks held by autovacuum; only source/buffer tables
-                   -- can prove an uncommitted CDC writer is still active.
-                   AND (l.relation IN (SELECT oid FROM sources)
-                        OR (n.nspname = $2 AND c.relkind IN ('r', 'p')))
+                   AND l.relation IN (SELECT oid FROM sources)
              ) END",
             &[
                 st.pgt_id.into(),
@@ -1272,7 +1300,8 @@ fn execute_manual_differential_refresh(
             reason: "manual differential writer-lock proof requires READ COMMITTED isolation"
                 .to_string(),
         })?;
-        // shortcut: hold all manual sources until writers drain; add per-source fences if busy sources starve.
+        // Keep one common cut for this stream's complete dependency set.
+        // Unrelated capture relations cannot justify holding this stream.
         if has_writer {
             "0/0".to_string()
         } else {
