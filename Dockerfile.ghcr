@@ -56,7 +56,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Install cargo-pgrx (version must match Cargo.toml)
-RUN cargo install --locked cargo-pgrx --version 0.18.0
+RUN cargo install --locked cargo-pgrx --version 0.20.1
 
 # Initialise pgrx for PostgreSQL 18 using the system pg_config
 RUN cargo pgrx init --pg18 /usr/bin/pg_config

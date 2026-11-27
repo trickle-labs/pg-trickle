@@ -348,6 +348,8 @@ fn create_replication_slot_internal(slot_name: &str) -> Result<String, PgTrickle
             true, // db_specific
             pg_sys::ReplicationSlotPersistency::RS_EPHEMERAL,
             false, // two_phase
+            #[cfg(feature = "pg19")]
+            false, // repack
             false, // failover
             false, // synced
         );
@@ -389,6 +391,8 @@ fn create_replication_slot_internal(slot_name: &str) -> Result<String, PgTrickle
             c_plugin.as_ptr(),
             std::ptr::null_mut(), // output_plugin_options (NIL)
             false,                // need_full_snapshot
+            #[cfg(feature = "pg19")]
+            false, // for_repack
             pg_sys::InvalidXLogRecPtr as u64,
             &mut xl_routine,
             None, // prepare_write

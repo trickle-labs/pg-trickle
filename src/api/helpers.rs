@@ -1356,7 +1356,10 @@ fn record_function_call(
             // SAFETY: args comes from a valid analyzed FuncExpr or WindowFunc
             // and its nodes remain valid for the collector's duration.
             unsafe {
-                if pgrx::is_a(arg, pg_sys::NodeTag::T_NamedArgExpr) {
+                if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+                    arg,
+                    pg_sys::NodeTag::T_NamedArgExpr,
+                ) {
                     (*(arg as *const pg_sys::NamedArgExpr)).argnumber
                 } else {
                     index as i32
@@ -1387,19 +1390,31 @@ unsafe extern "C-unwind" fn collect_volatility_nodes(
         // QTW_EXAMINE_RTES_BEFORE passes RangeTblEntry nodes to the callback
         // before the query walker handles their subqueries. They are not
         // expression nodes and must not reach expression_tree_walker.
-        if pgrx::is_a(node, pg_sys::NodeTag::T_RangeTblEntry) {
+        if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+            node,
+            pg_sys::NodeTag::T_RangeTblEntry,
+        ) {
             return false;
         }
 
         let collector = &mut *(context as *mut VolatilityCollector);
-        if collector.reject_sublinks && pgrx::is_a(node, pg_sys::NodeTag::T_SubLink) {
+        if collector.reject_sublinks
+            && <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+                node,
+                pg_sys::NodeTag::T_SubLink,
+            )
+        {
             collector.worst = 'v';
         }
-        if pgrx::is_a(node, pg_sys::NodeTag::T_FuncExpr) {
+        if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_FuncExpr)
+        {
             let function = &*(node as *const pg_sys::FuncExpr);
             let args = pgrx::PgList::<pg_sys::Node>::from_pg(function.args);
             record_function_call(function.funcid, &args, collector);
-        } else if pgrx::is_a(node, pg_sys::NodeTag::T_WindowFunc) {
+        } else if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+            node,
+            pg_sys::NodeTag::T_WindowFunc,
+        ) {
             let window = &*(node as *const pg_sys::WindowFunc);
             if !window.winagg {
                 let args = pgrx::PgList::<pg_sys::Node>::from_pg(window.args);
@@ -1407,7 +1422,10 @@ unsafe extern "C-unwind" fn collect_volatility_nodes(
             }
         }
 
-        if pgrx::is_a(node, pg_sys::NodeTag::T_CoerceViaIO) {
+        if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+            node,
+            pg_sys::NodeTag::T_CoerceViaIO,
+        ) {
             let cast = &*(node as *const pg_sys::CoerceViaIO);
             if !cast.arg.is_null() {
                 let source_type = pg_sys::exprType(cast.arg as *const pg_sys::Node);
@@ -1424,7 +1442,10 @@ unsafe extern "C-unwind" fn collect_volatility_nodes(
                 pg_sys::getTypeInputInfo(cast.resulttype, &mut input, &mut io_param);
                 collector.enum_io_function_oids.push(input);
             }
-        } else if pgrx::is_a(node, pg_sys::NodeTag::T_JsonConstructorExpr) {
+        } else if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+            node,
+            pg_sys::NodeTag::T_JsonConstructorExpr,
+        ) {
             let constructor = &*(node as *const pg_sys::JsonConstructorExpr);
             if constructor.returning.is_null() || (*constructor.returning).format.is_null() {
                 collector.worst = 'v';
@@ -1444,9 +1465,15 @@ unsafe extern "C-unwind" fn collect_volatility_nodes(
                     }
                 }
             }
-        } else if pgrx::is_a(node, pg_sys::NodeTag::T_JsonExpr) {
+        } else if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+            node,
+            pg_sys::NodeTag::T_JsonExpr,
+        ) {
             let json = &*(node as *const pg_sys::JsonExpr);
-            if !pgrx::is_a(json.path_spec, pg_sys::NodeTag::T_Const) {
+            if !<pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+                json.path_spec,
+                pg_sys::NodeTag::T_Const,
+            ) {
                 collector.worst = max_analyzed_volatility(collector.worst, 's');
             } else {
                 let path = &*(json.path_spec as *const pg_sys::Const);
@@ -1467,21 +1494,28 @@ unsafe extern "C-unwind" fn collect_volatility_nodes(
                     }
                 }
             }
-        } else if pgrx::is_a(node, pg_sys::NodeTag::T_SQLValueFunction) {
+        } else if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+            node,
+            pg_sys::NodeTag::T_SQLValueFunction,
+        ) {
             collector.worst = max_analyzed_volatility(collector.worst, 's');
-        } else if pgrx::is_a(node, pg_sys::NodeTag::T_NextValueExpr) {
+        } else if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+            node,
+            pg_sys::NodeTag::T_NextValueExpr,
+        ) {
             collector.worst = 'v';
         }
 
         // Aggregate implementation volatility is intentionally excluded.
         // PostgreSQL handles every other function-containing node, including
         // both sides of CoerceViaIO and every RowCompareExpr operator.
-        if !pgrx::is_a(node, pg_sys::NodeTag::T_Aggref) {
+        if !<pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_Aggref)
+        {
             pg_sys::check_functions_in_node(node, Some(collect_function_oid), context);
         }
 
         // expression_tree_walker does not recurse into nested Query nodes.
-        if pgrx::is_a(node, pg_sys::NodeTag::T_Query) {
+        if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_Query) {
             pg_sys::query_tree_walker_impl(
                 node as *mut pg_sys::Query,
                 Some(collect_volatility_nodes),
@@ -2044,7 +2078,12 @@ unsafe extern "C-unwind" fn relation_oid_walker(
     }
 
     // RTE_RELATION → record the OID
-    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_RangeTblEntry) } {
+    if unsafe {
+        <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+            node,
+            pg_sys::NodeTag::T_RangeTblEntry,
+        )
+    } {
         // SAFETY: node tag verified as T_RangeTblEntry.
         let rte = unsafe { &*(node as *const pg_sys::RangeTblEntry) };
         if rte.rtekind == pg_sys::RTEKind::RTE_RELATION {
@@ -2062,7 +2101,9 @@ unsafe extern "C-unwind" fn relation_oid_walker(
 
     // T_Query → use query_tree_walker to handle rtable + expressions
     // (expression_tree_walker does NOT recurse into Query nodes)
-    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_Query) } {
+    if unsafe {
+        <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_Query)
+    } {
         // SAFETY: node tag verified as T_Query.
         return unsafe {
             pg_sys::query_tree_walker_impl(

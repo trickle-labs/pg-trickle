@@ -81,12 +81,12 @@ fn pg_list<T>(raw: *mut pg_sys::List) -> pgrx::PgList<T> {
 macro_rules! cast_node {
     ($node:expr, $tag:ident, $ty:ty) => {{
         let __n = $node;
-        // SAFETY: `pgrx::is_a` reads the node's tag field, which is valid
+        // SAFETY: `PgNode::is_a_ptr` reads the node's tag field, which is valid
         // for any non-null `Node*` allocated by the PostgreSQL parser.
         // The pointer cast is sound because `is_a` verified the concrete
         // type matches `$tag`.
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !__n.is_null() && unsafe { pgrx::is_a(__n, pg_sys::NodeTag::$tag) } {
+        if !__n.is_null() && unsafe { <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(__n, pg_sys::NodeTag::$tag) } {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
             Some(unsafe { &*(__n as *const $ty) })
         } else {
@@ -235,14 +235,17 @@ fn parse_first_select(_sql: &str) -> Result<Option<*const pg_sys::SelectStmt>, P
 /// Check whether a `*mut pg_sys::Node` has a specific `NodeTag` without downcasting.
 ///
 /// Returns `true` if the pointer is non-null and the node's tag matches.
-/// This is the safe counterpart for standalone `pgrx::is_a()` checks that
+/// This is the safe counterpart for standalone `<pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr()` checks that
 /// are not followed by a pointer cast (those should use `cast_node!` instead).
 macro_rules! is_node_type {
     ($node:expr, $tag:ident) => {{
         let __n = $node;
-        // SAFETY: `pgrx::is_a` reads the node tag field, which is valid
+        // SAFETY: `PgNode::is_a_ptr` reads the node tag field, which is valid
         // for any non-null `Node*` allocated by the PostgreSQL parser.
-        !__n.is_null() && unsafe { pgrx::is_a(__n, pg_sys::NodeTag::$tag) }
+        !__n.is_null()
+            && unsafe {
+                <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(__n, pg_sys::NodeTag::$tag)
+            }
     }};
 }
 

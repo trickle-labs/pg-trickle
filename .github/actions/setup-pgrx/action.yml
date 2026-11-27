@@ -1,6 +1,6 @@
 name: Setup pgrx build environment
 description: >
-  Install Rust toolchain, cargo-pgrx 0.18.0, and PostgreSQL 18 build support.
+  Install Rust toolchain, cargo-pgrx 0.20.1, and PostgreSQL 18 build support.
   Works on Linux, macOS, and Windows runners with either system-managed or
   pgrx-managed PostgreSQL.
 
@@ -89,7 +89,7 @@ runs:
           ~/.cargo/bin/cargo-pgrx.exe
           ~/.cargo/.crates2.json
           ~/.cargo/.crates.toml
-        key: v3-cargo-pgrx-bin-0.18.0-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS || 'unknown' }}
+        key: v3-cargo-pgrx-bin-0.20.1-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS || 'unknown' }}
         # Aggressive fallback to avoid 20-25 min recompilation on runner image updates.
         # GitHub GHA runner images update periodically (e.g. ubuntu-20.04 → ubuntu-24.04),
         # which changes env.ImageOS and breaks the exact cache key.
@@ -100,7 +100,7 @@ runs:
         # 2. Same OS+arch, any version of cargo-pgrx (fallback if pgrx upgrades)
         # 3. Same OS only (broadest fallback, works for amd64→arm64 in theory but less ideal)
         restore-keys: |
-          v3-cargo-pgrx-bin-0.18.0-${{ runner.os }}-${{ runner.arch }}-
+          v3-cargo-pgrx-bin-0.20.1-${{ runner.os }}-${{ runner.arch }}-
           v3-cargo-pgrx-bin-${{ runner.os }}-${{ runner.arch }}-
           v3-cargo-pgrx-bin-${{ runner.os }}-
 
@@ -110,7 +110,7 @@ runs:
       uses: actions/cache@v5
       with:
         path: ~/.pgrx
-        key: pgrx-home-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS || 'unknown' }}-pg${{ inputs.pg-version }}-${{ inputs.pg-install-mode }}-pgrx0.18.0
+        key: pgrx-home-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS || 'unknown' }}-pg${{ inputs.pg-version }}-${{ inputs.pg-install-mode }}-pgrx0.20.1
         # Fallback to any runner image version (survives ubuntu-latest image updates)
         restore-keys: |
           pgrx-home-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS || 'unknown' }}-pg${{ inputs.pg-version }}-${{ inputs.pg-install-mode }}-
@@ -182,7 +182,7 @@ runs:
           exit 0
         fi
 
-        cargo install --locked cargo-pgrx --version 0.18.0
+        cargo install --locked cargo-pgrx --version 0.20.1
         cargo pgrx --version
 
     # ── pgrx init ─────────────────────────────────────────────────────────

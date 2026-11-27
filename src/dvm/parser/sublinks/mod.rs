@@ -1492,7 +1492,10 @@ unsafe extern "C-unwind" fn analyzed_lateral_walker(
     // and analyzed nodes supplied to query_tree_walker_impl below.
     unsafe {
         let context = &mut *(context as *mut AnalyzedLateralContext);
-        if pgrx::is_a(node, pg_sys::NodeTag::T_RangeTblEntry) {
+        if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+            node,
+            pg_sys::NodeTag::T_RangeTblEntry,
+        ) {
             let rte = &*(node as *const pg_sys::RangeTblEntry);
             if rte.rtekind == pg_sys::RTEKind::RTE_FUNCTION {
                 for table_function in
@@ -1502,7 +1505,10 @@ unsafe extern "C-unwind" fn analyzed_lateral_walker(
                         continue;
                     }
                     let expression = (*table_function).funcexpr;
-                    if !pgrx::is_a(expression, pg_sys::NodeTag::T_FuncExpr) {
+                    if !<pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(
+                        expression,
+                        pg_sys::NodeTag::T_FuncExpr,
+                    ) {
                         context.error = Some(PgTrickleError::UnsupportedOperator(
                             "LATERAL table expression is not a resolved function call".into(),
                         ));
@@ -1544,7 +1550,7 @@ unsafe extern "C-unwind" fn analyzed_lateral_walker(
             }
             return false;
         }
-        if pgrx::is_a(node, pg_sys::NodeTag::T_Query) {
+        if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_Query) {
             pg_sys::query_tree_walker_impl(
                 node as *mut pg_sys::Query,
                 Some(analyzed_lateral_walker),
@@ -1649,7 +1655,9 @@ unsafe extern "C-unwind" fn analyzed_window_walker(
     // remains live for the whole PostgreSQL tree walk.
     let ctx = unsafe { &mut *(context as *mut AnalyzedWindowCollectorCtx) };
     // SAFETY: node is non-null and PostgreSQL owns it for the duration of the walk.
-    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_Query) } {
+    if unsafe {
+        <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_Query)
+    } {
         let previous = ctx.current_query;
         ctx.current_query = node as *mut pg_sys::Query;
         // SAFETY: node tag is T_Query and the callback/context stay live.
@@ -1665,7 +1673,9 @@ unsafe extern "C-unwind" fn analyzed_window_walker(
         return stopped;
     }
     // SAFETY: node is non-null and PostgreSQL owns it for the duration of the walk.
-    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_WindowFunc) } {
+    if unsafe {
+        <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_WindowFunc)
+    } {
         if !ctx.current_query.is_null() {
             // SAFETY: node and current_query tags were established above.
             let function = unsafe { &*(node as *const pg_sys::WindowFunc) };
@@ -1680,7 +1690,9 @@ unsafe extern "C-unwind" fn analyzed_window_walker(
         return false;
     }
     // SAFETY: node is non-null and PostgreSQL owns it for the duration of the walk.
-    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_Aggref) } {
+    if unsafe {
+        <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_Aggref)
+    } {
         // SAFETY: node tag is T_Aggref and aggregates points to the caller's map.
         let aggregate = unsafe { &*(node as *const pg_sys::Aggref) };
         if aggregate.location >= 0 {
@@ -1942,7 +1954,7 @@ unsafe extern "C-unwind" fn aggregate_argument_walker(
     }
     // SAFETY: node tags are checked before casting; context points to the live collector.
     unsafe {
-        if pgrx::is_a(node, pg_sys::NodeTag::T_Aggref) {
+        if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_Aggref) {
             let agg = &*(node as *const pg_sys::Aggref);
             let args = pgrx::PgList::<pg_sys::TargetEntry>::from_pg(agg.args);
             if agg.location >= 0
@@ -1963,7 +1975,7 @@ unsafe extern "C-unwind" fn aggregate_argument_walker(
             }
             return false;
         }
-        if pgrx::is_a(node, pg_sys::NodeTag::T_Query) {
+        if <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_Query) {
             return pg_sys::query_tree_walker_impl(
                 node as *mut pg_sys::Query,
                 Some(aggregate_argument_walker),
@@ -2088,7 +2100,9 @@ unsafe extern "C-unwind" fn analyzed_agg_walker(
         return false;
     }
 
-    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_Aggref) } {
+    if unsafe {
+        <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_Aggref)
+    } {
         // SAFETY: node tag verified as T_Aggref.
         let aggref = unsafe { &*(node as *const pg_sys::Aggref) };
         if aggref.location >= 0 {
@@ -2102,7 +2116,9 @@ unsafe extern "C-unwind" fn analyzed_agg_walker(
         return false;
     }
 
-    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_Query) } {
+    if unsafe {
+        <pgrx::pg_sys::Node as pgrx::pg_sys::PgNode>::is_a_ptr(node, pg_sys::NodeTag::T_Query)
+    } {
         // SAFETY: node tag verified as T_Query.
         return unsafe {
             pg_sys::query_tree_walker_impl(
