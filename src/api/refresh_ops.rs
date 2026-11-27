@@ -398,6 +398,19 @@ pub(crate) fn execute_manual_refresh(
     };
     let action = requested_action.as_str();
 
+    // Acquire the ordinary destination DML lock before choosing a manual
+    // differential cut or fencing any live source. Otherwise a refresh
+    // waiting behind destination DDL can hold SHARE locks on its producers,
+    // blocking writers that must finish before the destination is released.
+    // The destination is already protected by the refresh/lifecycle lock.
+    // Graph execution has its own established lock ordering and fixed cut.
+    if requested_action == RefreshAction::Differential && refresh::current_safe_bound().is_none() {
+        let target = crate::sql_builder::qualified(schema, table_name);
+        // nosemgrep: rust.spi.run.dynamic-format -- catalog-derived, quoted destination identifiers.
+        Spi::run(&format!("LOCK TABLE ONLY {target} IN ROW EXCLUSIVE MODE"))
+            .map_err(|e| PgTrickleError::LockTimeout(format!("could not lock target {target}: {e}")))?;
+    }
+
     // ERG-D: Record refresh start in pgt_refresh_history.
     let now = Spi::get_one::<TimestampWithTimeZone>("SELECT now()")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
