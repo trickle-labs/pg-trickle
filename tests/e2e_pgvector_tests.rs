@@ -3954,6 +3954,10 @@ async fn test_centroid_auto_samples_cold_rescan_history() {
         "UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_relid = 'centroid_sample_st'::regclass",
         "SELECT pgtrickle.refresh_stream_table('centroid_sample_st')",
         "ANALYZE centroid_sample_st",
+        // Exclude the bootstrap FULL timing from the independent whole-table
+        // cost predictor. This test exercises the centroid strategy selector,
+        // not the earlier elective FULL decision. Keep real differential samples.
+        "SELECT pgtrickle.stat_reset(pgt_id) FROM pgtrickle.pgt_stream_tables WHERE pgt_relid = 'centroid_sample_st'::regclass",
     ] {
         sqlx::query(statement)
             .execute(&mut *conn)
@@ -3970,6 +3974,32 @@ async fn test_centroid_auto_samples_cold_rescan_history() {
             .await
             .expect("refresh algebraic sample");
     }
+    // Verify the actual observations satisfy the centroid selector's
+    // comparability contract; a skipped refresh must not seed a cold sample.
+    let (algebraic, full): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE h.action = 'DIFFERENTIAL'
+                   AND h.merge_strategy_used = 'centroid_algebraic'
+                   AND NOT h.was_full_fallback AND h.end_time > h.start_time
+                   AND h.refresh_reason_detail::jsonb->'schema_version' = '1'::jsonb
+                   AND h.refresh_reason_detail::jsonb->'input_delta_rows' = '4'::jsonb
+                   AND h.refresh_reason_detail::jsonb->'input_delta_rows_may_be_incomplete' = 'false'::jsonb
+                   AND h.refresh_reason_detail::jsonb->'source_rows_estimate' = '1000'::jsonb
+                   AND h.refresh_reason_detail::jsonb->'plan_identity' = to_jsonb(t.defining_query_hash)
+                   AND h.refresh_reason_detail::jsonb->'contract_generation' = to_jsonb(t.contract_generation)
+                   AND (h.refresh_reason_detail::jsonb->>'output_rows_changed')::bigint > 0
+                   AND NOT (h.refresh_reason_detail::jsonb ? 'centroid_fallback')),
+                count(*) FILTER (WHERE h.action = 'FULL' OR h.merge_strategy_used = 'FULL')
+         FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables t USING (pgt_id)
+         JOIN pgtrickle.pgt_refresh_summary s USING (pgt_id)
+         WHERE t.pgt_relid = 'centroid_sample_st'::regclass
+           AND h.status = 'COMPLETED' AND h.start_time >= s.stats_reset_at",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("verify cold centroid sampling history");
+    assert_eq!((algebraic, full), (3, 0));
+
     for statement in [
         "SET pg_trickle.refresh_strategy = 'auto'",
         "UPDATE centroid_sample_src SET v = v + '[1,1]'::vector WHERE id IN (1, 2)",
@@ -3986,6 +4016,23 @@ async fn test_centroid_auto_samples_cold_rescan_history() {
          FROM pgtrickle.pgt_stream_tables t JOIN pgtrickle.pgt_centroid_states c USING (pgt_id) \
          WHERE t.pgt_relid = 'centroid_sample_st'::regclass",
     ).fetch_one(&mut *conn).await.expect("inspect transactional sample");
+    if !sampled_in_transaction {
+        let history: String = sqlx::query_scalar(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(r)), '[]'::jsonb)::text
+             FROM (
+                 SELECT h.action, h.merge_strategy_used, h.was_full_fallback,
+                        h.refresh_reason, h.refresh_reason_detail
+                 FROM pgtrickle.pgt_refresh_history h
+                 JOIN pgtrickle.pgt_stream_tables t USING (pgt_id)
+                 WHERE t.pgt_relid = 'centroid_sample_st'::regclass
+                 ORDER BY h.refresh_id DESC LIMIT 5
+             ) r",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("inspect failed cold centroid sample");
+        eprintln!("cold centroid sampling history: {history}");
+    }
     assert!(sampled_in_transaction);
     sqlx::query("ROLLBACK")
         .execute(&mut *conn)
