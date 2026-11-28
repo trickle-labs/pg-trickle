@@ -2470,9 +2470,9 @@ transaction commits (or rolls back).
 
 | Value | Behaviour |
 |-------|-----------|
-| `'xmin'` | (Default) Probes `pg_stat_activity` + `pg_prepared_xacts` once per tick; caps the frontier to exclude rows from uncommitted transactions. |
-| `'none'` | No holdback — maximum performance but can skip rows from long-lived transactions. Not recommended for production. |
-| `'lsn:<N>'` | Hold back by exactly N bytes. Debugging use only. |
+| `'xmin'` | (Default) Probes assigned transaction IDs and prepared transactions after sampling the WAL candidate; caps the frontier to exclude rows from uncommitted writers. Snapshot-only readers do not hold it back. |
+| `'none'` | Compatibility setting: no additional margin. The mandatory writer-visibility probe remains active; this setting cannot bypass it. |
+| `'lsn:<N>'` | Additional cap of N bytes behind the candidate, without bypassing the mandatory writer-visibility probe. Debugging use only. |
 
 ### pg_trickle.frontier_holdback_warn_seconds
 
@@ -3128,7 +3128,7 @@ pg_trickle.prediction_min_samples = 5           # minimum samples before model a
 pg_trickle.log_delta_sql = false                # log delta SQL at DEBUG1 (diagnostic only)
 pg_trickle.delta_work_mem = 0                   # work_mem MB for delta execution (0 = inherit)
 pg_trickle.delta_enable_nestloop = true         # allow nested-loop joins in delta SQL
-pg_trickle.analyze_before_delta = true          # ANALYZE staged CDC, ordinary buffers and graph deltas
+pg_trickle.analyze_before_delta = true          # ANALYZE staged CDC, ordinary buffers and materialized deltas
 pg_trickle.max_change_buffer_alert_rows = 0     # change buffer overflow alert threshold (0 = off)
 pg_trickle.diff_output_format = 'split'         # 'split' (DI-2 pairs) | 'merged' (compat)
 

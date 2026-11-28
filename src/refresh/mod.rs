@@ -1150,6 +1150,13 @@ pub fn finalize_success(
         RefreshRecord::set_cost_evidence(refresh_id, evidence)?;
     }
 
+    if matches!(
+        history_action,
+        RefreshAction::Differential | RefreshAction::Full | RefreshAction::Reinitialize
+    ) {
+        orchestrator::update_cost_model_summary_for_st(st.pgt_id)?;
+    }
+
     if !execution.effective_mode.is_empty() {
         StreamTableMeta::update_effective_refresh_mode(st.pgt_id, execution.effective_mode)?;
     }

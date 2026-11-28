@@ -240,12 +240,14 @@ Without holdback, a transaction that inserts into a tracked table and commits *a
 
 **Fix — one mandatory safe-frontier probe:**
 Before computing the tick watermark, the scheduler samples
-`pg_current_wal_insert_lsn()` (the LSN coordinate used by trigger CDC) and
-**then**, in a separate ordered SPI operation, probes `backend_xid`,
-`backend_xmin`, and prepared transactions. The order matters: a writer that
-begins after the candidate sample cannot emit a captured change at or below
-that sample. A single materialized CTE would not guarantee that the activity
-scan actually executes second. Writer fences hold the frontier until every
+a strict bound below `pg_current_wal_insert_lsn()` (the coordinate used by
+trigger CDC), then clears cached activity statistics and samples live
+`backend_xid` values before inspecting prepared transactions. The strict
+bound excludes events that share the current insertion position. Every
+transaction that has inserted a CDC row has an assigned top-level XID;
+`backend_xmin` is a visibility horizon and need not identify a writer.
+Snapshot-only readers therefore do not hold back the frontier. The order
+also covers a live transaction moving into prepared state between scans. Writer fences hold the frontier until every
 potentially invisible buffer write has a proven bound. Permission or
 malformed-result failures hold dispatch closed; no holdback mode can bypass
 this proof.

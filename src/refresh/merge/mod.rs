@@ -814,7 +814,138 @@ fn distinct_aggregate_max_values(
         })
 }
 
+/// Planner settings for the materialized-delta apply phase. Restore the
+/// caller's join preferences instead of carrying delta-generation heuristics
+/// into indexed target probes. Explicit join overrides and retention plans
+/// retain their requested strategy.
+struct MaterializedApplyPlanner {
+    enable_nestloop: bool,
+    enable_seqscan: bool,
+}
+
+impl MaterializedApplyPlanner {
+    fn capture() -> Result<Self, PgTrickleError> {
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT current_setting('enable_nestloop') = 'on',
+                            current_setting('enable_seqscan') = 'on'",
+                    None,
+                    &[],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .first();
+            Ok(Self {
+                enable_nestloop: row
+                    .get::<bool>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(true),
+                enable_seqscan: row
+                    .get::<bool>(2)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(true),
+            })
+        })
+    }
+
+    fn prepare(
+        &self,
+        st: &StreamTableMeta,
+        delta_table: &str,
+        delta_rows: usize,
+    ) -> Result<(), PgTrickleError> {
+        if crate::config::pg_trickle_analyze_before_delta() {
+            // nosemgrep: rust.spi.run.dynamic-format — delta_table is generated from the stream ID.
+            Spi::run(&format!("ANALYZE {delta_table}"))
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+
+        if crate::refresh::is_retention_catchup()
+            || crate::config::pg_trickle_merge_join_strategy()
+                != crate::config::MergeJoinStrategy::Auto
+        {
+            return Ok(());
+        }
+
+        // The owner execution context restores these SET LOCAL changes on
+        // exit. Do not override explicit caller-level disables.
+        Spi::run(if self.enable_nestloop {
+            "SET LOCAL enable_nestloop = on"
+        } else {
+            "SET LOCAL enable_nestloop = off"
+        })
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        let mut enable_seqscan = self.enable_seqscan;
+        if crate::config::pg_trickle_merge_planner_hints() && self.enable_nestloop {
+            let target_rows = Spi::get_one_with_args::<f64>(
+                "SELECT reltuples::float8 FROM pg_catalog.pg_class WHERE oid = $1",
+                &[st.pgt_relid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(0.0);
+            if prefer_indexed_materialized_apply(
+                delta_rows,
+                target_rows,
+                crate::config::pg_trickle_merge_seqscan_threshold(),
+            ) {
+                enable_seqscan = false;
+            }
+        }
+        Spi::run(if enable_seqscan {
+            "SET LOCAL enable_seqscan = on"
+        } else {
+            "SET LOCAL enable_seqscan = off"
+        })
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    }
+}
+
+/// Never force an index based on missing target statistics. The actual
+/// materialized row count, not the (potentially amplified) input count,
+/// determines whether target probes are selective.
+fn prefer_indexed_materialized_apply(delta_rows: usize, target_rows: f64, threshold: f64) -> bool {
+    delta_rows > 0
+        && target_rows.is_finite()
+        && target_rows > 0.0
+        && threshold > 0.0
+        && (delta_rows as f64) / target_rows < threshold
+}
+
+#[cfg(test)]
+mod materialized_apply_tests {
+    use super::prefer_indexed_materialized_apply;
+
+    #[test]
+    fn test_materialized_apply_prefers_index_for_sparse_large_target() {
+        assert!(prefer_indexed_materialized_apply(
+            20_000,
+            25_000_000.0,
+            0.001
+        ));
+        assert!(!prefer_indexed_materialized_apply(20_000, 100_000.0, 0.001));
+        assert!(!prefer_indexed_materialized_apply(20_000, -1.0, 0.001));
+        assert!(!prefer_indexed_materialized_apply(
+            20_000,
+            25_000_000.0,
+            0.0
+        ));
+        assert!(!prefer_indexed_materialized_apply(0, 25_000_000.0, 0.001));
+    }
+}
+
 pub fn execute_differential_refresh_with_tuning(
+    st: &StreamTableMeta,
+    prev_frontier: &Frontier,
+    new_frontier: &Frontier,
+    tuning: &crate::catalog::RefreshRuntimeTuning,
+) -> Result<(i64, i64), PgTrickleError> {
+    crate::api::security_context::with_refresh_guc_scope(|| {
+        execute_differential_refresh_inner(st, prev_frontier, new_frontier, tuning)
+    })
+}
+
+fn execute_differential_refresh_inner(
     st: &StreamTableMeta,
     prev_frontier: &Frontier,
     new_frontier: &Frontier,
@@ -1748,7 +1879,12 @@ pub fn execute_differential_refresh_with_tuning(
     // Cost heuristics must not select a rebuild when historical rows are gone.
     let unreconstructible_history =
         crate::dvm::retention::has_unreconstructible_history(st.pgt_id)?;
+    // Strict graph refreshes must not select elective FULL fallbacks.
+    // Mandatory correctness/resource guards and explicit overrides still apply.
+    let strict_full_policy =
+        crate::refresh::current_full_policy() == crate::refresh::FullPolicy::Error;
     let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential
+        || strict_full_policy
         || crate::refresh::is_retention_catchup()
         || unreconstructible_history;
     // Only additive UNION ALL scans can safely use one combined denominator.
@@ -1791,7 +1927,9 @@ pub fn execute_differential_refresh_with_tuning(
         let new_lsn = new_frontier.get_lsn(*oid);
         let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
 
-        let max_ratio_lit = if max_ratio > 0.0 {
+        // A strict graph refresh cannot act on an elective ratio breach.
+        // Count its entire CDC window for the differential planner and guards.
+        let max_ratio_lit = if !strict_full_policy && max_ratio > 0.0 {
             format!("{max_ratio}")
         } else {
             "0".to_string()
@@ -1933,9 +2071,13 @@ pub fn execute_differential_refresh_with_tuning(
     // When strategy = 'auto' and the ratio check didn't trigger, query
     // historical refresh timings and use the cost model to predict
     // whether DIFFERENTIAL or FULL is cheaper for the *current* delta.
-    if fallback_reason.is_none() && !skip_ratio_check && total_change_count > 0 {
+    if fallback_reason.is_none()
+        && !skip_ratio_check
+        && !input_delta_rows_may_be_incomplete
+        && total_change_count > 0
+    {
         let complexity = classify_query_complexity(&effective_defining_query);
-        if let Some(hist) = query_refresh_history_stats(st.pgt_id)
+        if let Some(hist) = query_refresh_history_stats(st.pgt_id, total_change_count)
             && cost_model_prefers_full(
                 hist.avg_ms_per_delta,
                 hist.avg_full_ms,
@@ -2862,6 +3004,11 @@ pub fn execute_differential_refresh_with_tuning(
             alert_threshold,
         );
     }
+
+    // Materialized delta generation and target application have different
+    // access patterns. Save the caller's join/scan preferences before
+    // enabling generation-specific hints.
+    let apply_planner = MaterializedApplyPlanner::capture()?;
 
     // ── P5-1 / P5-2: Delta-specific planner hints from GUCs ────────
     {
@@ -3836,8 +3983,18 @@ pub fn execute_differential_refresh_with_tuning(
             // temp table, then applied as two targeted statements.
             let t_mat_start = Instant::now();
 
-            Spi::run(&format!("INSERT INTO {delta_table} {delta_select}")) // nosemgrep: rust.spi.run.dynamic-format — table is numeric-ID-derived and delta_select is generated by the DVM engine.
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
+                let result = client
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            apply_planner.prepare(st, &delta_table, delta_rows)?;
             let t_mat = t_mat_start.elapsed();
 
             // Step 1: DELETE rows touched by the delta.
@@ -3936,8 +4093,18 @@ pub fn execute_differential_refresh_with_tuning(
             // (DELETE+UPDATE+INSERT) to avoid the MERGE hash-join cost.
             let t_mat_start = Instant::now();
 
-            Spi::run(&format!("INSERT INTO {delta_table} {delta_select}")) // nosemgrep: rust.spi.run.dynamic-format — table is numeric-ID-derived and delta_select is generated by the DVM engine.
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
+                let result = client
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            apply_planner.prepare(st, &delta_table, delta_rows)?;
             let t_mat = t_mat_start.elapsed();
 
             // Step 1: DELETE rows marked for removal
@@ -3994,18 +4161,20 @@ pub fn execute_differential_refresh_with_tuning(
             // This avoids evaluating the delta query three times.
             let t_mat_start = Instant::now();
 
-            Spi::run(&format!("INSERT INTO {delta_table} {delta_select}")) // nosemgrep: rust.spi.run.dynamic-format — table is numeric-ID-derived and delta_select is generated by the DVM engine.
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let delta_rows = Spi::connect_mut(|client| {
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — delta_table is a quoted extension temp name; delta_select is the owner-validated DVM plan.
+                let result = client
+                    .update(
+                        &format!("INSERT INTO {delta_table} {delta_select}"),
+                        None,
+                        &[],
+                    )
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            apply_planner.prepare(st, &delta_table, delta_rows)?;
             if bounded_distance_snapshot {
                 crate::api::prepare_distance_delta_snapshot(st, &delta_table);
-            }
-            if graph_same_pass && crate::config::pg_trickle_analyze_before_delta() {
-                let analyze_sql = format!("ANALYZE {delta_table}");
-                Spi::run(&analyze_sql).map_err(|e| {
-                    PgTrickleError::SpiError(format!(
-                        "graph delta statistics for {schema}.{name}: {e}"
-                    ))
-                })?;
             }
             let t_mat = t_mat_start.elapsed();
             // ST-ST-10: When this ST has downstream ST consumers, snapshot

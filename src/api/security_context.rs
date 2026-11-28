@@ -315,6 +315,21 @@ pub(crate) fn with_stream_owner_context<T>(
     }
 }
 
+/// Run a refresh in its own GUC scope, without changing the active role.
+pub(crate) fn with_refresh_guc_scope<T>(
+    f: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    // SAFETY: This uses the same GUC checkpoint/rollback pair as the
+    // owner-context helper. The finally hook restores the settings on both
+    // successful and exceptional exits, including PostgreSQL ERROR.
+    unsafe {
+        let level = pg_sys::NewGUCNestLevel();
+        pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(f))
+            .finally(move || pg_sys::AtEOXact_GUC(false, level))
+            .execute()
+    }
+}
+
 /// Run `f` as the captured caller, under the caller's captured
 /// `search_path` and with row security enabled. Restore all identity and GUC
 /// state on success, PostgreSQL ERROR, or Rust unwind.
@@ -827,6 +842,34 @@ mod tests {
         );
 
         Spi::run("DROP ROLE lsec_probe_owner_guc").unwrap();
+    }
+
+    #[pg_test]
+    fn test_refresh_guc_scope_restores_on_success_and_error() {
+        Spi::run("SET LOCAL enable_nestloop = on").unwrap();
+        with_refresh_guc_scope(|| {
+            Spi::run("SET LOCAL enable_nestloop = off")
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })
+        .unwrap();
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('enable_nestloop')")
+                .unwrap()
+                .unwrap(),
+            "on"
+        );
+        let result = with_refresh_guc_scope(|| {
+            Spi::run("SET LOCAL enable_nestloop = off")
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Err::<(), _>(PgTrickleError::InternalError("expected failure".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('enable_nestloop')")
+                .unwrap()
+                .unwrap(),
+            "on"
+        );
     }
 
     #[pg_test]

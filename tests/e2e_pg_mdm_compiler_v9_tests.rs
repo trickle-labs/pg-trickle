@@ -510,8 +510,9 @@ async fn mutate_refresh_and_compare(fixture: &Fixture, mutation: &str) {
     let settings: (String, String) = sqlx::query_as(settings_sql)
         .fetch_one(&mut *tx)
         .await
-        .expect("read capped deep-join settings");
-    assert_eq!(settings, ("256MB".into(), "64MB".into()));
+        .expect("read caller settings after differential refresh");
+    // The cap applies inside delta generation, not to subsequent caller SQL.
+    assert_eq!(settings, ("16MB".into(), "64MB".into()));
     tx.commit().await.expect("commit compiler-v9 mutation");
     let settings_after: (String, String) = sqlx::query_as(settings_sql)
         .fetch_one(&mut *connection)
@@ -760,11 +761,7 @@ async fn test_pg_mdm_compiler_v9_bootstrap_and_mutations_match_full_without_fall
     assert_eq!(graph_fingerprint(&fixture).await, before_retry);
     mutate_refresh_and_compare(&fixture, retry_sql).await;
 
-    for (cap, expected_work_mem, expected_temp_limit) in [
-        (0, "512MB", "-1"),
-        (1024, "512MB", "-1"),
-        (256, "256MB", "64MB"),
-    ] {
+    for cap in [0, 1024, 256] {
         let before = graph_fingerprint(&fixture).await;
         let mut tx = fixture.db.pool.begin().await.expect("begin resource probe");
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
@@ -788,11 +785,10 @@ async fn test_pg_mdm_compiler_v9_bootstrap_and_mutations_match_full_without_fall
         )
         .fetch_one(&mut *tx)
         .await
-        .expect("read deep-join resource settings");
-        assert_eq!(
-            settings,
-            (expected_work_mem.into(), expected_temp_limit.into())
-        );
+        .expect("read caller settings after resource probe");
+        // Planner hints are scoped to refresh, even when the memory cap is
+        // disabled or does not clamp the requested memory.
+        assert_eq!(settings, ("16MB".into(), "64MB".into()));
         tx.rollback().await.expect("roll back resource probe");
         assert_eq!(graph_fingerprint(&fixture).await, before);
     }
