@@ -654,17 +654,9 @@ fn run_immediate_phantom_cleanup(
     // Mark downstream ST consumers for reinit when phantom rows were
     // removed, mirroring the DIFFERENTIAL refresh behaviour so chained
     // stream tables stay consistent with the cleaned-up upstream state.
-    if phantom_cleanup_count > 0
-        && let Ok(downstream_ids) =
-            crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
-    {
-        for ds_id in &downstream_ids {
-            if let Err(e) = crate::catalog::StreamTableMeta::mark_for_reinitialize(*ds_id) {
-                pgrx::warning!(
-                    "[pg_trickle] EC-01b: failed to mark downstream ST {ds_id} for reinit \
-                     after IMMEDIATE phantom cleanup: {e}"
-                );
-            }
+    if phantom_cleanup_count > 0 {
+        for ds_id in crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)? {
+            crate::catalog::StreamTableMeta::mark_for_reinitialize(ds_id)?;
         }
     }
 
@@ -683,7 +675,7 @@ fn apply_ivm_owner_delta(
         st.pgt_schema.replace('"', "\"\""),
         st.pgt_name.replace('"', "\"\""),
     );
-    let capture_columns = if crate::refresh::has_downstream_st_consumers(st.pgt_id) {
+    let capture_columns = if crate::refresh::has_downstream_st_consumers_checked(st.pgt_id)? {
         crate::refresh::get_st_user_columns(st)
     } else {
         Vec::new()
@@ -1052,7 +1044,7 @@ fn apply_topk_micro_refresh(st: &crate::catalog::StreamTableMeta) -> Result<(), 
     let columns = crate::refresh::with_stream_owner(st, || {
         crate::dvm::get_defining_query_columns(&st.defining_query)
     })?;
-    let capture_columns = if crate::refresh::has_downstream_st_consumers(st.pgt_id) {
+    let capture_columns = if crate::refresh::has_downstream_st_consumers_checked(st.pgt_id)? {
         crate::refresh::get_st_user_columns(st)
     } else {
         Vec::new()
@@ -1364,7 +1356,7 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
         st.pgt_name.replace('"', "\"\""),
     );
 
-    let needs_diff_capture = crate::refresh::has_downstream_st_consumers(st.pgt_id);
+    let needs_diff_capture = crate::refresh::has_downstream_st_consumers_checked(st.pgt_id)?;
     let user_cols = if needs_diff_capture {
         crate::refresh::get_st_user_columns(&st)
     } else {

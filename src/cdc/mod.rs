@@ -1470,7 +1470,7 @@ pub fn ensure_st_change_buffer(
 }
 
 /// Count consumers that require a stream-table change buffer.
-pub fn count_downstream_st_consumers(pgt_id: i64) -> i64 {
+pub fn count_downstream_st_consumers(pgt_id: i64) -> Result<i64, PgTrickleError> {
     // IMMEDIATE dependants consume changes through IVM triggers, not this
     // buffer. Output-delta consumers still require the same durable capture.
     let sql = format!(
@@ -1484,8 +1484,12 @@ pub fn count_downstream_st_consumers(pgt_id: i64) -> i64 {
                AND downstream.refresh_mode <> 'IMMEDIATE'\
            )"
     );
-    let graph_consumers = Spi::get_one::<i64>(&sql).unwrap_or(Some(0)).unwrap_or(0);
-    graph_consumers + i64::from(crate::api::output_delta::has_consumer(pgt_id))
+    let graph_consumers = Spi::get_one::<i64>(&sql)
+        .map_err(|e| PgTrickleError::SpiError(format!("downstream consumer discovery: {e}")))?
+        .ok_or_else(|| {
+            PgTrickleError::InternalError("downstream consumer count returned NULL".into())
+        })?;
+    Ok(graph_consumers + i64::from(crate::api::output_delta::has_consumer(pgt_id)?))
 }
 
 // QUAL-3: CompactionResult moved to src/cdc/compact.rs.

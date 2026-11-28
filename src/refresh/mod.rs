@@ -941,7 +941,12 @@ pub(crate) fn test_atomicity_barrier(
         return None;
     }
     // A no-data refresh has no applied state whose finalization can fail.
-    if observed_rows == 0 && matches!(phase, "after_apply" | "during_finalize") {
+    if observed_rows == 0
+        && matches!(
+            phase,
+            "after_apply" | "during_finalize" | "before_downstream_capture"
+        )
+    {
         return None;
     }
 
@@ -951,6 +956,7 @@ pub(crate) fn test_atomicity_barrier(
         "during_finalize" => 3,
         "snapshot_after_metadata" => 4,
         "before_upstream_lock" => 5,
+        "before_downstream_capture" => 6,
         _ => return None,
     };
     let Ok(lock_id) = i32::try_from(st.pgt_id) else {
@@ -976,7 +982,12 @@ pub(crate) fn test_atomicity_barrier(
     ) {
         pgrx::error!("PGT_TEST_BARRIER_FAILED phase={} error={}", phase, error);
     }
-    if !control_at_finalize && matches!(phase, "after_apply" | "during_finalize") {
+    if !control_at_finalize
+        && matches!(
+            phase,
+            "after_apply" | "during_finalize" | "before_downstream_capture"
+        )
+    {
         let backend_pid = Spi::get_one::<i32>("SELECT pg_backend_pid()")
             .ok()
             .flatten()

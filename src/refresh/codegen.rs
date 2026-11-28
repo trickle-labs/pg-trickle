@@ -1691,7 +1691,21 @@ pub fn get_st_user_columns_typed(st: &StreamTableMeta) -> Vec<(String, String)> 
 
 /// Check whether this ST has downstream ST consumers that need delta capture.
 pub fn has_downstream_st_consumers(pgt_id: i64) -> bool {
-    crate::cdc::count_downstream_st_consumers(pgt_id) > 0
+    // Compatibility for the legacy worker-local bypass, pending #1489.
+    // On an unknown count do not claim there are no consumers. Every actual
+    // storage/capture path uses the checked function below.
+    match has_downstream_st_consumers_checked(pgt_id) {
+        Ok(found) => found,
+        Err(e) => {
+            pgrx::warning!("could not determine downstream consumers for ST {pgt_id}: {e}");
+            true
+        }
+    }
+}
+
+/// A failed catalog read is not proof that no output needs publication.
+pub(crate) fn has_downstream_st_consumers_checked(pgt_id: i64) -> Result<bool, PgTrickleError> {
+    Ok(crate::cdc::count_downstream_st_consumers(pgt_id)? > 0)
 }
 
 /// Resolve LSN placeholders in a SQL template with actual frontier values.

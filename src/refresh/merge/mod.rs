@@ -110,7 +110,7 @@ pub(crate) fn execute_full_refresh_target(
     Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-    let needs_diff_capture = has_downstream_st_consumers(st.pgt_id);
+    let needs_diff_capture = has_downstream_st_consumers_checked(st.pgt_id)?;
     let prepared_user_cols = if needs_diff_capture {
         get_st_user_columns(st)
     } else {
@@ -1392,19 +1392,10 @@ pub fn execute_differential_refresh_with_tuning(
                     name,
                     reconciled,
                 );
-                if has_downstream_st_consumers(st.pgt_id)
-                    && let Ok(downstream_ids) =
-                        crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
+                for downstream_id in
+                    crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)?
                 {
-                    for downstream_id in downstream_ids {
-                        if let Err(e) = StreamTableMeta::mark_for_reinitialize(downstream_id) {
-                            pgrx::warning!(
-                                "[pg_trickle] EC01-2: failed to mark downstream ST {} for reinitialization after no-data phantom cleanup: {}",
-                                downstream_id,
-                                e,
-                            );
-                        }
-                    }
+                    StreamTableMeta::mark_for_reinitialize(downstream_id)?;
                 }
                 return Ok((0, reconciled));
             }
@@ -1583,7 +1574,7 @@ pub fn execute_differential_refresh_with_tuning(
         && !st.has_keyless_source
         && !cached_non_monotonic
         && cached_is_deduplicated
-        && !has_downstream_st_consumers(st.pgt_id)
+        && !has_downstream_st_consumers_checked(st.pgt_id)?
     {
         let has_non_insert = catalog_source_oids.iter().any(|oid| {
             let prev_lsn = prev_frontier.get_lsn(*oid);
@@ -2992,7 +2983,7 @@ pub fn execute_differential_refresh_with_tuning(
     // Partitioned storage may lack a parent-level unique row-id constraint.
     if is_append_only
         && st.st_partition_key.is_none()
-        && !has_downstream_st_consumers(st.pgt_id)
+        && !has_downstream_st_consumers_checked(st.pgt_id)?
         && !bounded_distance_snapshot
     {
         let non_monotonic = has_non_monotonic_cte(&resolved.merge_sql);
@@ -3131,7 +3122,7 @@ pub fn execute_differential_refresh_with_tuning(
     // ST-ST-2: Force explicit DML when this ST has downstream ST consumers.
     // The explicit DML path materializes the delta into __pgt_delta_{pgt_id},
     // which we then capture into the ST's change buffer for downstream use.
-    let needs_downstream_capture = has_downstream_st_consumers(st.pgt_id);
+    let needs_downstream_capture = has_downstream_st_consumers_checked(st.pgt_id)?;
     let use_explicit_dml =
         use_explicit_dml || needs_downstream_capture || bounded_distance_snapshot;
 
@@ -4238,23 +4229,13 @@ pub fn execute_differential_refresh_with_tuning(
     };
     crate::refresh::set_merge_strategy(strategy_label);
 
-    if phantom_cleanup_count > 0
-        && has_downstream_st_consumers(st.pgt_id)
-        && let Ok(downstream_ids) =
-            crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
-    {
+    if phantom_cleanup_count > 0 {
         // The repair can touch identities outside the original delta. The
         // bounded ST buffer cannot describe those rows, so downstream STs
         // must rebuild from a consistent snapshot instead of consuming a
         // falsely exact partial delta.
-        for downstream_id in &downstream_ids {
-            if let Err(e) = StreamTableMeta::mark_for_reinitialize(*downstream_id) {
-                pgrx::warning!(
-                    "[pg_trickle] EC01-2: failed to mark downstream ST {} for reinitialization after phantom cleanup: {}",
-                    downstream_id,
-                    e,
-                );
-            }
+        for downstream_id in crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)? {
+            StreamTableMeta::mark_for_reinitialize(downstream_id)?;
         }
     }
 
@@ -4264,27 +4245,30 @@ pub fn execute_differential_refresh_with_tuning(
     // the reconciliation pass.  The post-cleanup snapshot is the committed
     // stream-table state downstream consumers must observe.
     if let Some(diff_capture_cols) = downstream_capture {
-        let capture_result = if diff_capture_cols.is_empty() {
+        let capture_result = if let Some(message) = crate::refresh::test_atomicity_barrier(
+            st,
+            "before_downstream_capture",
+            merge_count as i64,
+        ) {
+            Err(PgTrickleError::TestAtomicityFailpoint(message))
+        } else if diff_capture_cols.is_empty() {
             capture_delta_to_st_buffer(st, &get_st_user_columns(st))
         } else {
             capture_incremental_diff_to_st_buffer(st, &diff_capture_cols)
         };
-        if let Err(e) = capture_result {
-            pgrx::warning!(
-                "[pg_trickle] ST-ST: downstream delta capture failed for {}.{}: {} — \
-                 marking downstream stream tables for reinitialization",
-                schema,
-                name,
-                e,
-            );
-            if let Ok(downstream_ids) =
-                crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
-            {
-                for downstream_id in downstream_ids {
-                    StreamTableMeta::mark_for_reinitialize(downstream_id)?;
-                }
-            }
-        }
+        // A successful frontier must never acknowledge storage changes that
+        // were not published. Roll back the refresh instead of attempting a
+        // best-effort repair after publication has already failed.
+        capture_result.map_err(|e| match e {
+            // Preserve the scheduler's dedicated atomicity-failure path.
+            // Real publication failures still fail closed as finalization errors.
+            PgTrickleError::TestAtomicityFailpoint(_) => e,
+            _ => PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "downstream CDC capture".to_string(),
+                reason: e.to_string(),
+            },
+        })?;
     }
 
     // Restore user-trigger modes if application triggers were suppressed.

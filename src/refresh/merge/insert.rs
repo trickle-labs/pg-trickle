@@ -59,7 +59,7 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))
     })?;
 
-    let downstream_cols = if has_downstream_st_consumers(st.pgt_id) {
+    let downstream_cols = if has_downstream_st_consumers_checked(st.pgt_id)? {
         let cols = get_st_user_columns(st);
         if cols.is_empty() {
             return Err(PgTrickleError::RefreshFinalizationFailed {
