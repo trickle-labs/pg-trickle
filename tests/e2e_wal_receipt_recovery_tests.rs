@@ -298,6 +298,10 @@ async fn create_identity_sentinel(db: &E2eDb, table: &str, value: &str) {
 }
 
 async fn setup_wal_fixture(case_name: &str) -> Fixture {
+    setup_wal_fixture_with_aggregate(case_name, false).await
+}
+
+async fn setup_wal_fixture_with_aggregate(case_name: &str, aggregate: bool) -> Fixture {
     let stem = case_name.replace('-', "_");
     let db = E2eDb::new_dedicated().await.with_extension().await;
     // Avoid autovacuum contending with the short-lived receipt lock witnesses.
@@ -327,11 +331,16 @@ async fn setup_wal_fixture(case_name: &str) -> Fixture {
     create_identity_sentinel(&db, &sentinel_table, &sentinel).await;
     commit_row(&db, &source, &journal, 1, "baseline").await;
 
+    let (projection, schedule) = if aggregate {
+        ("max(value) AS ex, count(*) AS n", "1h")
+    } else {
+        ("id, value", "1s")
+    };
     db.execute(&format!(
         "SELECT pgtrickle.create_stream_table(\
             name => '{stream}',\
-            query => $$SELECT id, value FROM public.{source}$$,\
-            schedule => '1s',\
+            query => $SELECT {projection} FROM public.{source}$,\
+            schedule => '{schedule}',\
             refresh_mode => 'DIFFERENTIAL',\
             cdc_mode => 'wal'\
         )"
@@ -352,8 +361,11 @@ async fn setup_wal_fixture(case_name: &str) -> Fixture {
         .await,
         "initial WAL receipts did not settle"
     );
-    db.assert_st_matches_query(&stream, &format!("SELECT id, value FROM public.{journal}"))
-        .await;
+    db.assert_st_matches_query(
+        &stream,
+        &format!("SELECT {projection} FROM public.{journal}"),
+    )
+    .await;
 
     let oid = i64::from(db.table_oid(&source).await);
     let stable_name: String = db
@@ -4216,20 +4228,36 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
 
 #[tokio::test]
 async fn wal_aggregate_with_undecoded_source_change_uses_protected_baseline() {
-    let fixture = setup_wal_fixture("boundlag").await;
+    // Register the aggregate before transitioning the source to WAL.
+    // Creating another consumer after cutover deliberately reconciles the
+    // source back to trigger capture; a write in that interval cannot have
+    // the WAL receipt this test requires.
+    let fixture = setup_wal_fixture_with_aggregate("boundlag", true).await;
     let db = &fixture.db;
     let query = format!(
         "SELECT max(value) AS ex, count(*) AS n FROM public.{}",
         fixture.source
     );
     db.execute(&format!(
-        "SELECT pgtrickle.create_stream_table(name => 'wal_boundlag_agg', query => $$ {query} $$, schedule => '1h', refresh_mode => 'DIFFERENTIAL', cdc_mode => 'wal')"
-    )).await;
-    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.wal_boundlag_agg'])")
-        .await;
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.{}'])",
+        fixture.stream
+    ))
+    .await;
+    wait_for_cdc_mode(db, &fixture.source, "WAL").await;
     commit_row(db, &fixture.source, &fixture.journal, 2, "decoded_batch").await;
     wait_for_receipt(&db.pool, fixture.oid, "ACKNOWLEDGED", "decoded_batch").await;
     disable_wal_scheduler(&fixture).await;
+    let decoded_lsn = matching_receipt_lsn(db, fixture.oid, "ACKNOWLEDGED", "decoded_batch").await;
+    assert!(
+        db.query_scalar::<bool>(&format!(
+            "SELECT NOT needs_reinit AND \
+             (frontier #>> ARRAY['sources', '{}', 'lsn'])::pg_lsn < '{decoded_lsn}'::pg_lsn \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{}'",
+            fixture.oid, fixture.stream
+        ))
+        .await,
+        "the decoded batch must remain unconsumed at an initialized differential frontier"
+    );
     commit_row(
         db,
         &fixture.source,
@@ -4251,18 +4279,18 @@ async fn wal_aggregate_with_undecoded_source_change_uses_protected_baseline() {
     );
     db.try_execute_with_config(
         &["SET pg_trickle.refresh_strategy = 'differential'"],
-        "SELECT pgtrickle.refresh_stream_table('wal_boundlag_agg')",
+        "SELECT pgtrickle.refresh_stream_table('wal_boundlag_stream')",
     )
     .await
     .expect("protected FULL may advance to the actual live cut");
     let fallback: bool = db.query_scalar(
-        "SELECT was_full_fallback FROM pgtrickle.pgt_refresh_history WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'wal_boundlag_agg') AND status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1",
+        "SELECT was_full_fallback FROM pgtrickle.pgt_refresh_history WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'wal_boundlag_stream') AND status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1",
     ).await;
     assert!(
         fallback,
         "unproven WAL endpoint must not use inverse live reconstruction"
     );
-    db.assert_st_matches_query("wal_boundlag_agg", &query).await;
+    db.assert_st_matches_query("wal_boundlag_stream", &query).await;
     db.alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
         .await;
     wait_for_receipt(
@@ -4274,9 +4302,9 @@ async fn wal_aggregate_with_undecoded_source_change_uses_protected_baseline() {
     .await;
     db.try_execute_with_config(
         &["SET pg_trickle.refresh_strategy = 'differential'"],
-        "SELECT pgtrickle.refresh_stream_table('wal_boundlag_agg')",
+        "SELECT pgtrickle.refresh_stream_table('wal_boundlag_stream')",
     )
     .await
     .expect("catch-up must not replay the protected baseline");
-    db.assert_st_matches_query("wal_boundlag_agg", &query).await;
+    db.assert_st_matches_query("wal_boundlag_stream", &query).await;
 }
