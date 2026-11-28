@@ -304,8 +304,23 @@ for failures, expected_calls in ((2, 3), (5, 5)):
     assert sleep_mock.call_count == expected_calls - 1
     assert result is (healthy if failures == 2 else silent_exit)
 
+vanished_config = subprocess.CompletedProcess(
+    [], 1, "1024 /data\n",
+    "du: cannot access '/var/lib/postgresql/18/docker/postgresql.auto.conf.tmp': No such file or directory\n")
+mixed_vanished = subprocess.CompletedProcess(
+    [], 1, "1024 /data\n", vanished_config.stderr + vanished.stderr)
+for failed in (vanished_config, mixed_vanished):
+    for failures, expected_calls in ((2, 3), (5, 5)):
+        with patch.object(bounded.subprocess, "run", side_effect=[failed] * failures + [healthy]) as run_mock, \
+             patch.object(bounded.time, "sleep") as sleep_mock:
+            result = bounded.disk_metrics([])
+        assert run_mock.call_count == expected_calls
+        assert sleep_mock.call_count == expected_calls - 1
+        assert result is (healthy if failures == 2 else failed)
+
 for message in ("permission denied", "du: cannot access '/data/global/pg_control': No such file or directory",
-                vanished.stderr + "permission denied"):
+                vanished.stderr + "permission denied", vanished_config.stderr + "permission denied",
+                "du: cannot access '/data/postgresql.auto.conf': No such file or directory"):
     with patch.object(bounded.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", message)) as run_mock:
         assert bounded.disk_metrics([]).returncode == 1
         assert run_mock.call_count == 1

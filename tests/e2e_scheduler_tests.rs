@@ -1515,6 +1515,15 @@ async fn wait_for_n_refreshes(
 /// change visibility, even when their buffers were initially empty.
 #[tokio::test]
 async fn test_scheduler_fanout_shared_matview_changes_refresh_both_consumers() {
+    assert_snapshot_poll_failure_isolated("on").await;
+}
+
+#[tokio::test]
+async fn test_scheduler_nonfanout_snapshot_poll_failure_isolated() {
+    assert_snapshot_poll_failure_isolated("off").await;
+}
+
+async fn assert_snapshot_poll_failure_isolated(fanout: &str) {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
     configure_fast_scheduler(&db).await;
     db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
@@ -1522,7 +1531,7 @@ async fn test_scheduler_fanout_shared_matview_changes_refresh_both_consumers() {
     // This test asserts scheduled refreshes, so host load must not defer them.
     db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
         .await;
-    db.alter_system_set_and_wait("pg_trickle.enable_change_buffer_fanout", "on", "on")
+    db.alter_system_set_and_wait("pg_trickle.enable_change_buffer_fanout", fanout, fanout)
         .await;
     db.execute("CREATE TABLE fanout_mv_src (id INT PRIMARY KEY, val INT)")
         .await;
@@ -1573,8 +1582,8 @@ async fn test_scheduler_fanout_shared_matview_changes_refresh_both_consumers() {
     ] {
         db.execute(mutation).await;
         db.execute("REFRESH MATERIALIZED VIEW fanout_mv").await;
-        assert!(
-            db.wait_for_condition(
+        let converged = db
+            .wait_for_condition(
                 "both fanout consumers match the materialized view",
                 "SELECT NOT EXISTS (
                     (SELECT id, val FROM fanout_mv_a EXCEPT ALL SELECT id, val FROM fanout_mv)
@@ -1588,8 +1597,34 @@ async fn test_scheduler_fanout_shared_matview_changes_refresh_both_consumers() {
                 Duration::from_secs(60),
                 Duration::from_millis(100),
             )
-            .await,
-            "fanout polling must refresh both consumers after {mutation}"
+            .await;
+        if !converged {
+            let streams: String = db
+                .query_scalar(
+                    "SELECT COALESCE(jsonb_agg(to_jsonb(t)), '[]'::jsonb)::text
+                     FROM pgtrickle.pgt_stream_tables t
+                     WHERE t.pgt_name IN ('fanout_mv_a', 'fanout_mv_b', 'fanout_ft_st')",
+                )
+                .await;
+            let history: String = db
+                .query_scalar(
+                    "SELECT COALESCE(jsonb_agg(to_jsonb(r)), '[]'::jsonb)::text
+                     FROM (
+                         SELECT t.pgt_name, h.*
+                         FROM pgtrickle.pgt_refresh_history h
+                         JOIN pgtrickle.pgt_stream_tables t USING (pgt_id)
+                         WHERE t.pgt_name IN ('fanout_mv_a', 'fanout_mv_b', 'fanout_ft_st')
+                         ORDER BY h.refresh_id DESC LIMIT 20
+                     ) r",
+                )
+                .await;
+            eprintln!(
+                "snapshot polling failure (fanout={fanout}): streams={streams}; history={history}"
+            );
+        }
+        assert!(
+            converged,
+            "snapshot polling must refresh both consumers after {mutation} (fanout={fanout})"
         );
     }
     // The failed source remains retryable and catches up after recovery.
@@ -2191,8 +2226,15 @@ async fn test_scheduled_reinitialize_arms_automatic_partition_retention() {
         .await;
     assert_ne!(policy["automatic_delete_with_source"], true);
 
+    // Dropping DEFAULT can itself queue reinitialization. Drain the
+    // scheduler before both setup operations so it cannot acquire the
+    // refresh locks while the fixture is requesting the same rebuild.
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.arm1499_st'])")
+        .await;
     db.execute("DROP TABLE arm1499_default").await;
     db.execute("SELECT pgtrickle.reinitialize_stream_table('arm1499_st')")
+        .await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['public.arm1499_st'])")
         .await;
     assert!(
         db.wait_for_condition(

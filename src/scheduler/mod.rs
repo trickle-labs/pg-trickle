@@ -277,7 +277,10 @@ fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
 
     // #536: Use holdback-aware watermark for dynamic workers.
     let tick_watermark = job.tick_watermark_lsn.clone();
-    let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+    let Ok(has_table_changes) = has_table_source_changes(&st) else {
+        return RefreshOutcome::RetryableFailure;
+    };
+    let has_changes = has_table_changes || has_stream_table_source_changes(&st);
     let action = determine_scheduled_refresh_action(&st, has_changes);
 
     execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None)
@@ -390,7 +393,11 @@ fn execute_worker_atomic_group(job: &SchedulerJob, is_repeatable_read: bool) -> 
             continue;
         }
 
-        let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+        let Ok(has_table_changes) = has_table_source_changes(&st) else {
+            subtxn.rollback();
+            return RefreshOutcome::RetryableFailure;
+        };
+        let has_changes = has_table_changes || has_stream_table_source_changes(&st);
         let action = determine_scheduled_refresh_action(&st, has_changes);
 
         let result = execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None);
@@ -485,7 +492,10 @@ fn execute_worker_immediate_closure(job: &SchedulerJob) -> RefreshOutcome {
 
     // #536: Use holdback-aware watermark for dynamic workers.
     let tick_watermark = job.tick_watermark_lsn.clone();
-    let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+    let Ok(has_table_changes) = has_table_source_changes(&st) else {
+        return RefreshOutcome::RetryableFailure;
+    };
+    let has_changes = has_table_changes || has_stream_table_source_changes(&st);
     let action = determine_scheduled_refresh_action(&st, has_changes);
 
     execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None)
@@ -846,7 +856,7 @@ fn try_fused_chain_refresh(
             })?;
 
         // Determine refresh action.
-        let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+        let has_changes = has_table_source_changes(&st)? || has_stream_table_source_changes(&st);
         let action = determine_scheduled_refresh_action(&st, has_changes);
         if action != RefreshAction::Differential {
             continue;
@@ -1270,7 +1280,11 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
         }
 
         let is_last = idx == member_count - 1;
-        let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+        let Ok(has_table_changes) = has_table_source_changes(&st) else {
+            crate::refresh::clear_all_st_bypass();
+            return RefreshOutcome::RetryableFailure;
+        };
+        let has_changes = has_table_changes || has_stream_table_source_changes(&st);
         let action = determine_scheduled_refresh_action(&st, has_changes);
 
         // DAG-4: For intermediate members, set a flag so the refresh path
@@ -2684,7 +2698,8 @@ fn check_upstream_changes(st: &StreamTableMeta) -> bool {
     if !st.is_populated {
         return true;
     }
-    has_table_source_changes(st) || has_stream_table_source_changes(st)
+    has_table_source_changes(st)
+        .is_ok_and(|has_changes| has_changes || has_stream_table_source_changes(st))
 }
 
 /// Resolve upstream change state for a scheduler decision.
@@ -2697,17 +2712,20 @@ fn check_upstream_changes(st: &StreamTableMeta) -> bool {
 fn upstream_change_state(
     st: &StreamTableMeta,
     table_change_snapshot: Option<bool>,
-) -> (bool, bool) {
+) -> Result<(bool, bool), PgTrickleError> {
+    let has_table_changes = match table_change_snapshot {
+        Some(has_changes) => has_changes,
+        None => has_table_source_changes(st)?,
+    };
     if !st.is_populated {
-        return (true, false);
+        return Ok((true, false));
     }
 
-    let has_table_changes = table_change_snapshot.unwrap_or_else(|| has_table_source_changes(st));
     let has_stream_table_changes = has_stream_table_source_changes(st);
-    (
+    Ok((
         has_table_changes || has_stream_table_changes,
         has_stream_table_changes,
-    )
+    ))
 }
 
 /// SCAL-2: Batch change detection across multiple stream tables in one SPI call.
@@ -2788,7 +2806,7 @@ pub(crate) fn batched_has_source_changes(
                 }
             }
         }
-        if source_oids.is_empty() {
+        if failed_sts.contains(&st.pgt_id) || source_oids.is_empty() {
             continue;
         }
 
@@ -2832,49 +2850,18 @@ pub(crate) fn batched_has_source_changes(
     Ok((ids, failed_sts))
 }
 
-/// Returns `true` if any TABLE or FOREIGN_TABLE upstream source has rows in
-/// its CDC change buffer that have not yet been consumed by a refresh.
-///
-/// PERF-6: Uses a single batched EXISTS query instead of one SPI round-trip
-/// per source table.
-fn has_table_source_changes(st: &StreamTableMeta) -> bool {
-    if st.refresh_mode.is_immediate() {
-        return false;
+/// Check TABLE, FOREIGN_TABLE and MATVIEW inputs using the same isolated
+/// polling path as the fanout batch. A failed poll is not evidence of no
+/// changes: callers must defer the affected refresh (or roll back its group).
+fn has_table_source_changes(st: &StreamTableMeta) -> Result<bool, PgTrickleError> {
+    let (changes, failed) = batched_has_source_changes(std::slice::from_ref(st))?;
+    if failed.contains(&st.pgt_id) {
+        return Err(PgTrickleError::SpiError(format!(
+            "snapshot source polling failed for {}.{}",
+            st.pgt_schema, st.pgt_name
+        )));
     }
-    if let Err(e) = refresh::poll_foreign_table_sources_for_st(st) {
-        log!(
-            "pg_trickle: failed to poll foreign table sources for {}.{} while checking upstream changes: {}",
-            st.pgt_schema,
-            st.pgt_name,
-            e,
-        );
-    }
-
-    let change_schema = config::pg_trickle_change_buffer_schema();
-    let source_oids = get_source_oids_for_st(st.pgt_id);
-
-    if source_oids.is_empty() {
-        return false;
-    }
-
-    // PERF-6: Build a single UNION ALL EXISTS query for all sources.
-    // Note: LIMIT 1 is omitted from individual branches because
-    // `SELECT ... LIMIT 1 UNION ALL SELECT ...` is a syntax error in
-    // PostgreSQL (LIMIT binds at the top level, not per-branch).
-    // EXISTS already short-circuits on the first row found.
-    // v0.32.0+: buffer table uses stable hash name; fall back to OID if untracked.
-    let union_arms: Vec<String> = source_oids
-        .iter()
-        .map(|oid| {
-            let buf = crate::cdc::buffer_qualified_name_for_oid(&change_schema, *oid);
-            format!("SELECT 1 FROM {buf} WHERE action <> 'S'")
-        })
-        .collect();
-    let batched_sql = format!("SELECT EXISTS({})", union_arms.join(" UNION ALL "));
-
-    Spi::get_one::<bool>(&batched_sql) // nosemgrep: rust.spi.query.dynamic-format
-        .unwrap_or(Some(false))
-        .unwrap_or(false)
+    Ok(changes.contains(&st.pgt_id))
 }
 
 /// Returns `true` if any STREAM_TABLE upstream has buffered changes beyond
@@ -3401,7 +3388,14 @@ fn refresh_single_st(
     let distributed_lock_key = drive_distributed_cdc(pgt_id);
 
     let (has_changes, _has_stream_table_changes) =
-        upstream_change_state(&st, table_change_snapshot);
+        match upstream_change_state(&st, table_change_snapshot) {
+            Ok(state) => state,
+            Err(error) => {
+                warning!("pg_trickle: deferring refresh of pgt_id={pgt_id}: {error}");
+                release_distributed_refresh_lock(distributed_lock_key.as_deref());
+                return;
+            }
+        };
 
     let action = {
         let mut base_action = determine_scheduled_refresh_action(&st, has_changes);
@@ -3427,6 +3421,7 @@ fn refresh_single_st(
         // start) if the shmem slot is empty.
         let last_full_cost = crate::shmem::read_cost_model(st.pgt_id)
             .map(|(full_ms, _)| full_ms)
+            .filter(|ms| ms.is_finite() && *ms > 0.0)
             .or(st.last_full_ms);
         if base_action == RefreshAction::Differential
             && let Some(last_full) = last_full_cost
@@ -3689,8 +3684,12 @@ fn refresh_single_st(
         }
     }
 
-    // COORD-12 (v0.34.0): Release the distributed lock if we acquired one.
-    if let Some(ref lock_key) = distributed_lock_key {
+    release_distributed_refresh_lock(distributed_lock_key.as_deref());
+}
+
+/// COORD-12 (v0.34.0): Release the distributed lock if we acquired one.
+fn release_distributed_refresh_lock(distributed_lock_key: Option<&str>) {
+    if let Some(lock_key) = distributed_lock_key {
         let holder = format!("scheduler_{}", unsafe { pg_sys::MyProcPid });
         if let Err(e) = crate::citus::release_st_lock(lock_key, &holder) {
             pgrx::debug1!(
