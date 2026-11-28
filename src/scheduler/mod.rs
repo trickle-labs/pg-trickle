@@ -4510,6 +4510,12 @@ fn execute_scheduled_refresh(
                 if let crate::error::PgTrickleError::TestAtomicityFailpoint(message) = &e {
                     return RefreshOutcome::AtomicityTestFailure(message.clone());
                 }
+                if matches!(
+                    &e,
+                    crate::error::PgTrickleError::RefreshFinalizationFailed { .. }
+                ) {
+                    pgrx::error!("{}", e);
+                }
                 log!(
                     "pg_trickle: finalization failed for pgt_id={}: {}",
                     st.pgt_id,
@@ -4585,6 +4591,20 @@ fn execute_scheduled_refresh(
             RefreshOutcome::Success
         }
         Err(e) => {
+            // Executor faults can occur after applying target DML. Route the
+            // deliberate fault through the same rollback boundary used by
+            // the after-apply and during-finalize atomicity witnesses.
+            if let crate::error::PgTrickleError::TestAtomicityFailpoint(message) = &e {
+                return RefreshOutcome::AtomicityTestFailure(message.clone());
+            }
+            // A failed publication/finalization must abort the transaction,
+            // not commit the applied rows along with an ERROR catalog state.
+            if matches!(
+                &e,
+                crate::error::PgTrickleError::RefreshFinalizationFailed { .. }
+            ) {
+                pgrx::error!("{}", e);
+            }
             let failure = match &e {
                 crate::error::PgTrickleError::SpiErrorCode(code, message) => {
                     crate::error::classify_refresh_failure(
