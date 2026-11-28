@@ -4709,7 +4709,7 @@ SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c AS 'MODULE_PATHNAME', 'get_stream_table_partition_retention_wrapper';
 
 CREATE FUNCTION pgtrickle."create_stream_table_with_retention"(
-    "name" text, "query" text, "policy" text, "source_column" text, "cutoff" text,
+    "name" text, "query" text, "policy" text, "source_column" text, "cutoff" text DEFAULT NULL,
     "schedule" text DEFAULT 'calculated'
 ) RETURNS void SECURITY DEFINER
 SET search_path TO pgtrickle, pg_catalog, pg_temp

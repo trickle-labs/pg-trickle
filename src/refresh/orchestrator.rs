@@ -548,10 +548,6 @@ pub fn execute_reinitialize_refresh(st: &StreamTableMeta) -> Result<(i64, i64), 
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-    // The protected FULL source lock also establishes a safe baseline for
-    // legacy streams. An explicit OFF survives this reinitialization.
-    crate::api::arm_automatic_trim_after_full_snapshot(st.pgt_id)?;
-
     Ok(result)
 }
 
