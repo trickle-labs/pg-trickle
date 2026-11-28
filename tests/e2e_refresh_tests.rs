@@ -37,14 +37,50 @@ async fn test_refresh_cost_evidence_reports_empty_filtered_output() {
 #[tokio::test]
 async fn test_refresh_cost_evidence_marks_unaccounted_stream_changes() {
     let db = E2eDb::new().await.with_extension().await;
-    db.execute_seq(&[
+    // Keep the session-local refresh strategy and fixture statements on one
+    // connection, including retries of the standalone child creation statement.
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("cost evidence fixture session");
+    for sql in [
         "SET pg_trickle.refresh_strategy = 'differential'",
         "CREATE TABLE rf_cost_chain_src (id INT PRIMARY KEY)",
         "INSERT INTO rf_cost_chain_src VALUES (1)",
         "SELECT pgtrickle.create_stream_table('rf_cost_chain_parent', 'SELECT id FROM rf_cost_chain_src', '1h', 'DIFFERENTIAL')",
-        "SELECT pgtrickle.create_stream_table('rf_cost_chain_child', 'SELECT id FROM rf_cost_chain_parent', '1h', 'DIFFERENTIAL')",
-        "INSERT INTO rf_cost_chain_src VALUES (2)",
-    ]).await;
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
+            .execute(&mut *conn)
+            .await
+            .expect("prepare cost evidence fixture");
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match sqlx::query("SELECT pgtrickle.create_stream_table('rf_cost_chain_child', 'SELECT id FROM rf_cost_chain_parent', '1h', 'DIFFERENTIAL')")
+            .execute(&mut *conn)
+            .await
+        {
+            Ok(_) => break,
+            Err(sqlx::Error::Database(e))
+                if e.code().as_deref() == Some("55P03")
+                    && e.message()
+                        .starts_with("lock timeout: upstream stream-table metadata") =>
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out acquiring upstream metadata for fixture creation: {e}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("fixture creation failed: {e:?}"),
+        }
+    }
+    sqlx::query("INSERT INTO rf_cost_chain_src VALUES (2)")
+        .execute(&mut *conn)
+        .await
+        .expect("insert cost evidence source row");
+    drop(conn);
     // Keep the scheduler from racing the manual parent/child refresh sequence.
     // FULL baseline protection now locks upstream stream-table metadata, so a
     // concurrent scheduler refresh can legitimately return LockTimeout here.

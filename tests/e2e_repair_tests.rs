@@ -230,6 +230,9 @@ async fn test_immediate_repair_preserves_shared_deferred_cdc() {
 #[tokio::test]
 async fn test_ivm_documented_cascade_recovery_restores_results() {
     let db = E2eDb::new().await.with_extension().await;
+    // This test drives repair and IVM synchronously; a scheduler tick can
+    // lock upstream metadata while a child is establishing its baseline.
+    e2e::disable_scheduler(&db).await;
     db.execute("CREATE TABLE documented_repair_src (id INT PRIMARY KEY, val INT)")
         .await;
     db.execute("INSERT INTO documented_repair_src VALUES (1, 10)")
