@@ -545,3 +545,74 @@ async fn test_issue_1453_staged_cdc_analyzed_in_ordinary_refresh() {
     db.assert_st_matches_query("analyze1453_hourly", query)
         .await;
 }
+
+
+/// The ratio threshold is deliberately below 100 events; it must not
+/// truncate the cardinality used by a forced differential refresh.
+#[tokio::test]
+async fn test_issue_1486_forced_diff_counts_the_complete_window() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE cardinality1486_src (id int PRIMARY KEY, v int)")
+        .await;
+    db.execute(
+        "INSERT INTO cardinality1486_src SELECT g, g FROM generate_series(1, 1000) g",
+    )
+    .await;
+    db.execute("ANALYZE cardinality1486_src").await;
+    let query = "SELECT id, v FROM cardinality1486_src";
+    db.create_st("cardinality1486_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.cardinality1486_st'])")
+        .await;
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables SET auto_threshold = 0.01
+          WHERE pgt_name = 'cardinality1486_st'",
+    )
+    .await;
+    // Use UPDATE, not the append-only fast path, to produce cost evidence.
+    db.execute("UPDATE cardinality1486_src SET v = -v WHERE id <= 500")
+        .await;
+
+    let mut tx = db.pool.begin().await.expect("begin inspectable refresh");
+    sqlx::query("SET LOCAL pg_trickle.refresh_strategy = 'differential'")
+        .execute(&mut *tx)
+        .await
+        .expect("force differential");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('cardinality1486_st')")
+        .execute(&mut *tx)
+        .await
+        .expect("apply complete CDC window");
+
+    let stage: String = sqlx::query_scalar(
+        "SELECT relname::text FROM pg_catalog.pg_class
+          WHERE relnamespace = pg_my_temp_schema() AND relname LIKE '__pgt_cdc_%'",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("staged input relation");
+    let input_rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*)::bigint FROM pg_temp.\"{stage}\""
+    )))
+    .fetch_one(&mut *tx)
+    .await
+    .expect("count actual staged input");
+    let (action, recorded_input, incomplete): (String, i64, bool) = sqlx::query_as(
+        "SELECT h.action::text,
+                (h.refresh_reason_detail::jsonb->>'input_delta_rows')::bigint,
+                (h.refresh_reason_detail::jsonb->>'input_delta_rows_may_be_incomplete')::bool
+         FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables t USING (pgt_id)
+         WHERE t.pgt_name = 'cardinality1486_st'
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("inspect real refresh evidence");
+    assert_eq!(action, "DIFFERENTIAL");
+    assert!(input_rows >= 500, "test must exceed the 11-row ratio cap");
+    assert_eq!(recorded_input, input_rows);
+    assert!(!incomplete);
+    tx.commit().await.expect("commit refresh");
+    db.assert_st_matches_query("cardinality1486_st", query).await;
+}
