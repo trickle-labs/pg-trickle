@@ -598,8 +598,9 @@ async fn test_three_layer_cascade_insert_propagates() {
     )
     .await;
 
-    // Layer 2: category_flags (reads from ST layer 1)
-    db.execute(
+    // Chained fixture creation can race a scheduler refresh holding the upstream
+    // catalog row. Retry only that explicit lock contention, not DML or assertions.
+    for sql in [
         "SELECT pgtrickle.create_stream_table(
             'category_flags',
             $$SELECT category, total,
@@ -608,19 +609,32 @@ async fn test_three_layer_cascade_insert_propagates() {
             'calculated',
             'DIFFERENTIAL'
         )",
-    )
-    .await;
-
-    // Layer 3: big_categories (reads from ST layer 2)
-    db.execute(
         "SELECT pgtrickle.create_stream_table(
             'big_categories',
             $$SELECT category, total FROM category_flags WHERE is_big = true$$,
             'calculated',
             'DIFFERENTIAL'
         )",
-    )
-    .await;
+    ] {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match db.try_execute(sql).await {
+                Ok(()) => break,
+                Err(sqlx::Error::Database(e))
+                    if e.code().as_deref() == Some("55P03")
+                        && e.message()
+                            .starts_with("lock timeout: upstream stream-table metadata") =>
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out acquiring upstream metadata for fixture creation: {e}"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(e) => panic!("fixture creation failed: {e:?}"),
+            }
+        }
+    }
 
     // Initial state: A total=30 (>25, big), B total=30 (>25, big)
     assert_eq!(
