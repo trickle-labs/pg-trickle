@@ -39,7 +39,11 @@ async fn test_refresh_cost_evidence_marks_unaccounted_stream_changes() {
     let db = E2eDb::new().await.with_extension().await;
     // Keep the session-local refresh strategy and fixture statements on one
     // connection, including retries of the standalone child creation statement.
-    let mut conn = db.pool.acquire().await.expect("cost evidence fixture session");
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("cost evidence fixture session");
     for sql in [
         "SET pg_trickle.refresh_strategy = 'differential'",
         "CREATE TABLE rf_cost_chain_src (id INT PRIMARY KEY)",
