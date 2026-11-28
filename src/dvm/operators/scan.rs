@@ -492,6 +492,19 @@ fn diff_scan_change_buffer(
         } else {
             String::new()
         };
+        // Canonical identities are logical keys, not exact image equality.
+        // Rank payloads using PostgreSQL record-image comparison before
+        // net-counting, including for keyless base sources.
+        let mut image_rank = "__pgt_payload_rank".to_string();
+        while col_names.contains(&image_rank) {
+            image_rank.push('_');
+        }
+        let image_rank = quote_ident(&image_rank);
+        let payload_columns = col_names
+            .iter()
+            .map(|column| quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
         let payload_identity_group = if is_st_source {
             ", payload_identity"
         } else {
@@ -529,6 +542,13 @@ WHERE {lsn_filter} AND c.action = 'D'",
         );
         ctx.add_cte(decomp_cte.clone(), decomp_sql);
 
+        // Compute ranks inside both branches rather than comparing payloads
+        // by SQL equality. Keep the original row identity for downstream DVM.
+        let ranked = format!(
+            "(SELECT *, dense_rank() OVER (PARTITION BY content_hash{payload_identity_group} \
+             ORDER BY ROW({payload_columns}) USING OPERATOR(pg_catalog.*<)) AS {image_rank} \
+             FROM {decomp_cte})"
+        );
         // Final CTE: aggregate net counts and expand with generate_series.
         let cte_name = ctx.next_cte_name(&format!("scan_{alias}"));
         let sql = format!(
@@ -539,8 +559,8 @@ SELECT {output_identity} AS __pgt_row_id,
 FROM (
     SELECT content_hash{payload_identity_group}{max_cols},
            SUM(delta_sign)::INT AS net_count
-    FROM {decomp_cte}
-    GROUP BY content_hash{payload_identity_group}
+    FROM {ranked} AS __pgt_ranked
+    GROUP BY content_hash{payload_identity_group}, {image_rank}
     HAVING SUM(delta_sign) > 0
 ) sub
 CROSS JOIN generate_series(1, sub.net_count) gs
@@ -553,8 +573,8 @@ SELECT {output_identity} AS __pgt_row_id,
 FROM (
     SELECT content_hash{payload_identity_group}{max_cols},
            SUM(delta_sign)::INT AS net_count
-    FROM {decomp_cte}
-    GROUP BY content_hash{payload_identity_group}
+    FROM {ranked} AS __pgt_ranked
+    GROUP BY content_hash{payload_identity_group}, {image_rank}
     HAVING SUM(delta_sign) < 0
 ) sub
 CROSS JOIN generate_series(1, -sub.net_count) gs",

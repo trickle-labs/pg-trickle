@@ -696,7 +696,7 @@ fn test_merge_template_cache_insert_and_retrieve() {
             CachedMergeTemplate {
                 defining_query_hash: 12345,
                 statistics_epoch: "test".into(),
-                planning_version: crate::dvm::planner::FORMAT_VERSION,
+                planning_version: crate::dvm::planner::TEMPLATE_FORMAT_VERSION,
                 merge_sql_template: "MERGE INTO t ...".into(),
                 source_oids: vec![100, 200],
                 cleanup_sql_template: "DELETE FROM ...".into(),
@@ -730,7 +730,7 @@ fn test_invalidate_merge_cache_removes_entry() {
             CachedMergeTemplate {
                 defining_query_hash: 0,
                 statistics_epoch: "test".into(),
-                planning_version: crate::dvm::planner::FORMAT_VERSION,
+                planning_version: crate::dvm::planner::TEMPLATE_FORMAT_VERSION,
                 merge_sql_template: Arc::from(""),
                 source_oids: vec![],
                 cleanup_sql_template: Arc::from(""),
@@ -1188,43 +1188,18 @@ fn test_determine_refresh_action_immediate_falls_back_to_full() {
     assert_eq!(determine_refresh_action(&st, true), RefreshAction::Full);
 }
 
-// ── Phase 6: build_is_distinct_clause boundary tests ────────────────────
-//
-// The threshold between column-list and hash-based comparison is
-// WIDE_TABLE_HASH_THRESHOLD (50).  Test straddling that boundary.
+// ── Exact update guards, including former wide-table threshold ──────────
 
 #[test]
-fn test_build_is_distinct_clause_exactly_at_threshold_uses_columns() {
-    let cols: Vec<String> = (1..=WIDE_TABLE_HASH_THRESHOLD)
-        .map(|i| format!("col{i}"))
-        .collect();
-    let sql = build_is_distinct_clause(&cols);
-    // At the threshold: use per-column IS DISTINCT FROM
-    assert!(
-        sql.contains("IS DISTINCT FROM"),
-        "Threshold should use per-column comparison"
-    );
-    assert!(
-        !sql.contains("pg_trickle_hash"),
-        "Threshold should NOT use hash comparison"
-    );
-}
-
-#[test]
-fn test_build_is_distinct_clause_one_over_threshold_uses_hash() {
-    let cols: Vec<String> = (1..=(WIDE_TABLE_HASH_THRESHOLD + 1))
-        .map(|i| format!("col{i}"))
-        .collect();
-    let sql = build_is_distinct_clause(&cols);
-    assert!(
-        sql.contains("pg_trickle_hash"),
-        "One over threshold should use hash comparison"
-    );
-    // Per-column path uses `::text IS DISTINCT FROM`; hash path does not.
-    assert!(
-        !sql.contains("::text IS DISTINCT FROM"),
-        "Wide table should NOT use per-column comparison; got: {sql}"
-    );
+fn test_build_is_distinct_clause_retains_every_column_at_any_width() {
+    for width in [1, 50, 51, 100, 188] {
+        let cols: Vec<String> = (0..width).map(|i| format!("col{i}")).collect();
+        let sql = build_is_distinct_clause(&cols);
+        assert_eq!(sql.matches("pg_catalog.record_image_ne(").count(), width);
+        assert!(!sql.contains("pg_trickle_hash"));
+        assert!(!sql.contains("COALESCE"));
+        assert!(sql.contains(&format!("st.\"col{}\"", width - 1)));
+    }
 }
 
 #[test]
@@ -1301,8 +1276,8 @@ fn test_build_merge_sql_column_quoting() {
 fn test_build_merge_sql_is_distinct_from_guard() {
     let cols = vec!["a".to_string(), "b".to_string()];
     let sql = build_merge_sql("\"public\".\"t\"", "(delta)", &cols, false);
-    assert!(sql.contains("IS DISTINCT FROM"));
-    assert!(sql.contains("st.\"a\"::text IS DISTINCT FROM d.\"a\"::text"));
+    assert!(sql.contains("pg_catalog.record_image_ne("));
+    assert!(sql.contains("pg_catalog.record_image_ne(ROW(st.\"a\"), ROW(d.\"a\"))"));
 }
 
 // ── TG2-MERGE: format helpers ───────────────────────────────────
@@ -1356,7 +1331,10 @@ fn test_build_trigger_update_sql_basic() {
     assert!(sql.contains("SET \"val\" = d.\"val\""));
     assert!(sql.contains("FROM __pgt_delta_7 AS d"));
     assert!(sql.contains("d.__pgt_action = 'I'"));
-    assert!(sql.contains("IS DISTINCT FROM"));
+    assert!(sql.contains(r#"pg_catalog.pg_typeof(st."val") = pg_catalog.pg_typeof(d."val")"#));
+    assert!(sql.contains(r#"pg_catalog.record_image_ne(ROW(st."val"), ROW(d."val"))"#));
+    assert!(sql.contains("ELSE TRUE END"));
+    assert!(!sql.contains("IS DISTINCT FROM"));
 }
 
 #[test]
@@ -1368,7 +1346,7 @@ fn test_retention_dml_probes_affected_rows() {
     );
     assert_eq!(
         build_retention_trigger_update_sql("\"public\".\"t\"", 7, &cols, None),
-        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"public\".\"t\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid AND d.__pgt_action = 'I' AND (st.\"val\"::text IS DISTINCT FROM d.\"val\"::text)"
+        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d CROSS JOIN LATERAL (SELECT st2.tableoid, st2.ctid FROM \"public\".\"t\" st2 WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st2.__pgt_row_id = d.__pgt_row_id OFFSET 0) matched WHERE st.tableoid = matched.tableoid AND st.ctid = matched.ctid AND d.__pgt_action = 'I' AND ((CASE WHEN pg_catalog.pg_typeof(st.\"val\") = pg_catalog.pg_typeof(d.\"val\") THEN pg_catalog.record_image_ne(ROW(st.\"val\"), ROW(d.\"val\")) ELSE TRUE END))"
     );
     assert_eq!(
         build_retention_trigger_insert_sql("\"public\".\"t\"", 7, &cols, None),
@@ -1385,7 +1363,7 @@ fn test_retention_dml_prunes_by_proven_partition_key() {
     );
     assert_eq!(
         build_retention_trigger_update_sql("\"public\".\"t\"", 7, &cols, Some("d")),
-        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\" AND d.__pgt_action = 'I' AND (st.\"val\"::text IS DISTINCT FROM d.\"val\"::text)"
+        "UPDATE \"public\".\"t\" AS st SET \"val\" = d.\"val\" FROM __pgt_delta_7 AS d WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) AND st.__pgt_row_id = d.__pgt_row_id AND st.\"d\" OPERATOR(pg_catalog.=) d.\"d\" AND d.__pgt_action = 'I' AND ((CASE WHEN pg_catalog.pg_typeof(st.\"val\") = pg_catalog.pg_typeof(d.\"val\") THEN pg_catalog.record_image_ne(ROW(st.\"val\"), ROW(d.\"val\")) ELSE TRUE END))"
     );
     assert_eq!(
         build_retention_trigger_insert_sql("\"public\".\"t\"", 7, &cols, Some("d")),
@@ -2137,68 +2115,23 @@ fn test_st_bypass_thread_local_set_get_clear() {
 
 #[test]
 fn test_build_is_distinct_clause_single_col() {
-    let cols = vec!["price".to_string()];
-    let clause = build_is_distinct_clause(&cols);
-    assert_eq!(
-        clause,
-        r#"st."price"::text IS DISTINCT FROM d."price"::text"#
-    );
+    let clause = build_is_distinct_clause(&["price".to_string()]);
+    assert!(clause.contains(r#"pg_catalog.record_image_ne(ROW(st."price"), ROW(d."price"))"#));
+    assert!(clause.contains("ELSE TRUE"));
 }
 
 #[test]
 fn test_build_is_distinct_clause_multi_col() {
-    let cols = vec!["a".to_string(), "b".to_string()];
-    let clause = build_is_distinct_clause(&cols);
-    assert_eq!(
-        clause,
-        r#"st."a"::text IS DISTINCT FROM d."a"::text OR st."b"::text IS DISTINCT FROM d."b"::text"#
-    );
+    let clause = build_is_distinct_clause(&["a".to_string(), "b".to_string()]);
+    assert_eq!(clause.matches("pg_catalog.record_image_ne(").count(), 2);
+    assert!(clause.contains(" OR "));
 }
 
 #[test]
 fn test_build_is_distinct_clause_col_with_double_quote() {
-    let cols = vec!["col\"name".to_string()];
-    let clause = build_is_distinct_clause(&cols);
-    // Inner double-quote must be escaped as ""
+    let clause = build_is_distinct_clause(&["col\"name".to_string()]);
     assert!(clause.contains(r#""col""name""#));
-    assert!(clause.contains("IS DISTINCT FROM"));
-}
-
-#[test]
-fn test_build_is_distinct_clause_at_threshold() {
-    // Exactly 50 columns — still per-column path
-    let cols: Vec<String> = (0..50).map(|i| format!("col{i}")).collect();
-    let clause = build_is_distinct_clause(&cols);
-    // Per-column path produces OR-joined expressions
-    assert!(clause.contains("IS DISTINCT FROM"));
-    assert!(!clause.contains("pgtrickle.pg_trickle_hash"));
-    let parts: Vec<&str> = clause.split(" OR ").collect();
-    assert_eq!(parts.len(), 50);
-}
-
-#[test]
-fn test_build_is_distinct_clause_wide_table_hash_path() {
-    // 51 columns — crosses into hash-based comparison
-    let cols: Vec<String> = (0..51).map(|i| format!("col{i}")).collect();
-    let clause = build_is_distinct_clause(&cols);
-    assert!(clause.contains("pgtrickle.pg_trickle_hash"));
-    assert!(clause.contains("IS DISTINCT FROM"));
-    // Should reference both st. and d. prefixes
-    assert!(clause.contains("st.\"col0\""));
-    assert!(clause.contains("d.\"col0\""));
-    // Should use the record separator
-    assert!(clause.contains(r"'\x1E'"));
-    // No OR — single hash expression
-    assert!(!clause.contains(" OR "));
-}
-
-#[test]
-fn test_build_is_distinct_clause_over_function_argument_limit() {
-    let cols: Vec<String> = (0..188).map(|i| format!("col{i}")).collect();
-    let clause = build_is_distinct_clause(&cols);
-    assert_eq!(clause.matches("VARIADIC ARRAY[").count(), 2);
-    assert!(clause.contains("COALESCE(st.\"col187\"::text, '')"));
-    assert!(clause.contains("COALESCE(d.\"col187\"::text, '')"));
+    assert!(clause.contains("pg_catalog.record_image_ne("));
 }
 
 #[test]
@@ -2391,11 +2324,11 @@ fn test_build_keyless_weight_agg_structure() {
     assert!(sql.contains("__pgt_row_id"));
     assert!(sql.contains("__pgt_action"));
     assert!(sql.contains("SUM"));
-    assert!(sql.contains("HAVING"));
-    assert!(sql.contains("GROUP BY"));
+    assert!(sql.contains("ROW_NUMBER()"));
+    assert!(sql.contains("PARTITION BY"));
     // Must use generate_series for count expansion
     assert!(sql.contains("generate_series"));
-    assert!(sql.contains("__pgt_cnt"));
+    assert!(sql.contains("__pgt_weight"));
     // Must NOT use DISTINCT ON (keyless allows duplicate row_ids)
     assert!(!sql.contains("DISTINCT ON"));
 }
@@ -2407,7 +2340,7 @@ fn test_build_keyless_weight_agg_cancel_logic() {
     assert!(sql.contains("'D'"));
     // Net-weight sign decides the action
     assert!(sql.contains("> 0"));
-    // HAVING filters out net-zero groups (I/D cancellation)
+    // The weight predicate filters out net-zero groups (I/D cancellation)
     assert!(sql.contains("<> 0"));
     // ABS for the count expansion
     assert!(sql.contains("ABS"));
@@ -3084,4 +3017,24 @@ fn test_t1l_in_subquery_not_detected_by_correlated_detector() {
         !classify_correlated_aggregate_subquery_in_where(q),
         "T-1l: IN (SELECT ...) pattern must NOT be flagged by correlated detector"
     );
+}
+
+#[test]
+fn test_keyless_image_delete_matches_payload_and_partition_tuple() {
+    let columns = vec!["n".to_string(), "f".to_string()];
+    let sql = build_keyless_image_delete_template("\"public\".\"s\"", 5, &columns);
+    assert!(
+        sql.contains(
+            "pg_catalog.record_image_eq(ROW(st2.\"n\", st2.\"f\"), ROW(d.\"n\", d.\"f\"))"
+        )
+    );
+    assert!(sql.contains("LIMIT d.__pgt_del_image_count"));
+    assert!(sql.contains("st.tableoid = chosen.tableoid AND st.ctid = chosen.ctid"));
+    assert!(uses_signed_multiset_apply(true, false, &columns));
+    assert!(!uses_signed_multiset_apply(true, true, &columns));
+    assert!(!uses_signed_multiset_apply(
+        true,
+        false,
+        &["__pgt_count".to_string()]
+    ));
 }

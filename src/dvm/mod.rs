@@ -127,7 +127,7 @@ struct CachedDeltaTemplate {
     defining_query_hash: u64,
     /// Source-statistics epoch that selected this physical template.
     statistics_epoch: String,
-    /// Planner format version used to build this template.
+    /// Private SQL template format version used to build this template.
     planning_version: u16,
     /// Delta SQL with `__PGS_PREV_LSN_{oid}__` / `__PGS_NEW_LSN_{oid}__`
     /// placeholder tokens instead of literal LSN values.
@@ -1127,7 +1127,7 @@ pub fn generate_delta_query_cached(
     let cached = candidate
         .filter(|entry| {
             entry.defining_query_hash == query_hash
-                && entry.planning_version == planner::FORMAT_VERSION
+                && entry.planning_version == planner::TEMPLATE_FORMAT_VERSION
         })
         .filter(|entry| {
             entry.statistics_epoch == planner::statistics_epoch_for_sources(&entry.source_oids)
@@ -1323,7 +1323,7 @@ pub fn generate_delta_query_cached(
         Ok(CachedDeltaTemplate {
             defining_query_hash: query_hash,
             statistics_epoch: planner::statistics_epoch_for_sources(&source_oids),
-            planning_version: planner::FORMAT_VERSION,
+            planning_version: planner::TEMPLATE_FORMAT_VERSION,
             delta_sql_template: template_sql,
             output_columns,
             source_oids,
@@ -3024,7 +3024,7 @@ mod tests {
         let entry = CachedDeltaTemplate {
             defining_query_hash: 12345,
             statistics_epoch: "test".into(),
-            planning_version: planner::FORMAT_VERSION,
+            planning_version: planner::TEMPLATE_FORMAT_VERSION,
             delta_sql_template: "WITH cte AS (SELECT 1) SELECT * FROM cte".to_string(),
             output_columns: vec!["id".to_string()],
             source_oids: vec![42],
@@ -3052,7 +3052,7 @@ mod tests {
         let entry = CachedDeltaTemplate {
             defining_query_hash: 0,
             statistics_epoch: "test".into(),
-            planning_version: planner::FORMAT_VERSION,
+            planning_version: planner::TEMPLATE_FORMAT_VERSION,
             delta_sql_template: "SELECT 1".to_string(),
             output_columns: vec![],
             source_oids: vec![],
@@ -3082,7 +3082,7 @@ mod tests {
         let entry = CachedDeltaTemplate {
             defining_query_hash: 0,
             statistics_epoch: "test".into(),
-            planning_version: planner::FORMAT_VERSION,
+            planning_version: planner::TEMPLATE_FORMAT_VERSION,
             delta_sql_template: "SELECT 1".to_string(),
             output_columns: vec![],
             source_oids: vec![],

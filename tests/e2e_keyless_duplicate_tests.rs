@@ -139,17 +139,20 @@ async fn test_keyless_unique_content() {
     db.create_st("kl_uniq_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("kl_uniq_st", q).await;
 
+    // A completed manual window may retain its frontier while a writer is
+    // active. Check exact convergence rather than assuming the first window
+    // has consumed every committed change.
     db.execute("INSERT INTO kl_uniq VALUES (4, 'd')").await;
-    db.refresh_st("kl_uniq_st").await;
+    db.refresh_st_until_converged("kl_uniq_st").await;
     db.assert_st_matches_query("kl_uniq_st", q).await;
 
     db.execute("DELETE FROM kl_uniq WHERE val = 2").await;
-    db.refresh_st("kl_uniq_st").await;
+    db.refresh_st_until_converged("kl_uniq_st").await;
     db.assert_st_matches_query("kl_uniq_st", q).await;
 
     db.execute("UPDATE kl_uniq SET label = 'updated' WHERE val = 1")
         .await;
-    db.refresh_st("kl_uniq_st").await;
+    db.refresh_st_until_converged("kl_uniq_st").await;
     db.assert_st_matches_query("kl_uniq_st", q).await;
 }
 

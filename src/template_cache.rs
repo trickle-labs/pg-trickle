@@ -90,7 +90,7 @@ pub fn lookup(pgt_id: i64, defining_query_hash: u64) -> Option<CachedTemplate> {
     });
 
     cached.filter(|template| {
-        template.planning_version == crate::dvm::planner::FORMAT_VERSION
+        template.planning_version == crate::dvm::planner::TEMPLATE_FORMAT_VERSION
             && template.statistics_epoch
                 == crate::dvm::planner::statistics_epoch_for_sources(&template.source_oids)
     })

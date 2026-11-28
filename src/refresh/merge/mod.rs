@@ -2403,7 +2403,8 @@ pub fn execute_differential_refresh_with_tuning(
                 map.peek(&st.pgt_id)
                     .filter(|entry| {
                         entry.defining_query_hash == query_hash
-                            && entry.planning_version == crate::dvm::planner::FORMAT_VERSION
+                            && entry.planning_version
+                                == crate::dvm::planner::TEMPLATE_FORMAT_VERSION
                     })
                     .cloned()
             })
@@ -2611,7 +2612,10 @@ pub fn execute_differential_refresh_with_tuning(
                 crate::api::helpers::parse_partition_key_columns(partition_by) == [key.to_string()]
             })
         });
-        let trigger_delete_template = if scoped_retention {
+        let signed_multiset = uses_signed_multiset_apply(use_keyless, is_dedup, &user_cols);
+        let trigger_delete_template = if signed_multiset {
+            build_keyless_image_delete_template(&quoted_table, st.pgt_id, &user_cols)
+        } else if scoped_retention {
             build_retention_trigger_delete_sql(&quoted_table, st.pgt_id, retention_output_key)
         } else {
             build_trigger_delete_sql(&quoted_table, st.pgt_id, use_keyless)
@@ -2619,7 +2623,7 @@ pub fn execute_differential_refresh_with_tuning(
 
         // EC-06: Use normal UPDATE template for keyless sources — see
         // prewarm_merge_cache comment for full rationale.
-        let trigger_update_template = if scoped_retention {
+        let mut trigger_update_template = if scoped_retention {
             build_retention_trigger_update_sql(
                 &quoted_table,
                 st.pgt_id,
@@ -2629,6 +2633,10 @@ pub fn execute_differential_refresh_with_tuning(
         } else {
             build_trigger_update_sql(&quoted_table, st.pgt_id, &user_cols)
         };
+
+        if signed_multiset {
+            trigger_update_template.push_str(" AND FALSE");
+        }
 
         let trigger_insert_template = if scoped_retention
             && ((use_keyless && (is_dedup || user_cols.iter().any(|c| c == "__pgt_count")))
@@ -2663,7 +2671,7 @@ pub fn execute_differential_refresh_with_tuning(
                         statistics_epoch: crate::dvm::planner::statistics_epoch_for_sources(
                             &source_oids,
                         ),
-                        planning_version: crate::dvm::planner::FORMAT_VERSION,
+                        planning_version: crate::dvm::planner::TEMPLATE_FORMAT_VERSION,
                         // PERF-3: convert to Arc<str> for O(1) cache-hit clones.
                         merge_sql_template: merge_template.clone().into(),
                         source_oids: source_oids.clone(),

@@ -147,7 +147,12 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     } else {
         col_list
             .iter()
-            .map(|c| format!("{quoted_table}.{c}::text IS DISTINCT FROM __pgt_topk_src.{c}::text"))
+            .map(|c| {
+                observable_change_sql(
+                    &format!("{quoted_table}.{c}"),
+                    &format!("__pgt_topk_src.{c}"),
+                )
+            })
             .collect::<Vec<_>>()
             .join(" OR ")
     };

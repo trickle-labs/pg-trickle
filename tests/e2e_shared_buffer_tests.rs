@@ -3174,3 +3174,177 @@ async fn test_perf2_auto_mode_promotes_on_high_throughput() {
     let cnt_after: i64 = db.query_scalar("SELECT cnt FROM perf2_promo_cnt").await;
     assert_eq!(cnt_after, 102, "post-promotion differential refresh");
 }
+
+/// Preserve the observed numeric scale and floating-point representation
+/// through persistent stream-to-stream CDC, not just base CDC.
+#[tokio::test]
+async fn test_stream_cdc_preserves_observable_numeric_and_float_images() {
+    let db = E2eDb::new().await.with_extension().await;
+    e2e::disable_scheduler(&db).await;
+    db.execute("CREATE TABLE image_chain_src (id int PRIMARY KEY, n numeric, f float8)")
+        .await;
+    db.execute("INSERT INTO image_chain_src VALUES (1, 1.0, 0.0)")
+        .await;
+    let up_query = "SELECT id, n, f FROM image_chain_src";
+    let down_query =
+        "SELECT id, scale(n) AS n_scale, pg_catalog.float8send(f) AS f_image FROM image_chain_up";
+    db.create_st("image_chain_up", up_query, "1h", "DIFFERENTIAL")
+        .await;
+    db.create_st("image_chain_down", down_query, "1h", "DIFFERENTIAL")
+        .await;
+    let up_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name='image_chain_up'",
+        )
+        .await;
+    let buffer = format!("pgtrickle_changes.changes_pgt_{up_id}");
+    for (n, f) in [
+        ("1.00", "'-0'::float8"),
+        ("1.0", "'0'::float8"),
+        ("NULL", "NULL"),
+    ] {
+        let before: i64 = db
+            .query_scalar(&format!("SELECT COALESCE(max(change_id),0) FROM {buffer}"))
+            .await;
+        db.execute(&format!(
+            "UPDATE image_chain_src SET n={n}, f={f} WHERE id=1"
+        ))
+        .await;
+        for name in ["image_chain_up", "image_chain_down"] {
+            db.try_execute_with_config(
+                &["SET pg_trickle.refresh_strategy='differential'"],
+                &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+            )
+            .await
+            .expect("refresh must apply without full replacement");
+            let action: (String, bool) = sqlx::query_as(
+                "SELECT action, was_full_fallback FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name=$1 AND h.status='COMPLETED' ORDER BY refresh_id DESC LIMIT 1",
+            )
+            .bind(name)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(action, ("DIFFERENTIAL".to_string(), false));
+            if name == "image_chain_up" {
+                assert_eq!(db.query_scalar::<i64>(&format!(
+                    "SELECT count(*) FROM {buffer} WHERE change_id>{before} AND action IN ('I','D')"
+                )).await, 2, "both complete images must be published");
+            }
+        }
+        let exact: bool = db.query_scalar(
+            "SELECT pg_catalog.record_send(ROW(u.n,u.f)) = pg_catalog.record_send(ROW(s.n,s.f)) \
+             FROM image_chain_up u JOIN image_chain_src s USING(id)"
+        ).await;
+        assert!(exact, "upstream must retain exact representations");
+        db.assert_st_matches_query("image_chain_down", down_query)
+            .await;
+    }
+}
+
+/// The former >50-column hash collapsed NULL and empty text before hashing.
+#[tokio::test]
+async fn test_wide_stream_updates_do_not_elide_null_empty_or_delimiter_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    e2e::disable_scheduler(&db).await;
+    for width in [50, 51, 100] {
+        let source = format!("wide_image_src_{width}");
+        let stream = format!("wide_image_st_{width}");
+        let cols = (1..width)
+            .map(|i| format!("c{i} text"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id int PRIMARY KEY, {cols})"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source}(id,c1,c2) VALUES (1,NULL,'')"
+        ))
+        .await;
+        let query = format!("SELECT * FROM {source}");
+        db.create_st(&stream, &query, "1h", "DIFFERENTIAL").await;
+        for update in [
+            "c1 = ''",
+            "c1 = NULL",
+            "c1 = E'a\\\\x1Eb', c2 = 'c'",
+            "c1 = 'a', c2 = E'b\\\\x1Ec'",
+        ] {
+            db.execute(&format!("UPDATE {source} SET {update} WHERE id=1"))
+                .await;
+            db.try_execute_with_config(
+                &["SET pg_trickle.refresh_strategy='differential'"],
+                &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
+            )
+            .await
+            .expect("wide differential apply");
+            db.assert_st_matches_query(&stream, &query).await;
+            let differential: bool = db.query_scalar(&format!(
+                "SELECT action='DIFFERENTIAL' AND NOT was_full_fallback \
+                 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) \
+                 WHERE s.pgt_name='{stream}' AND h.status='COMPLETED' ORDER BY refresh_id DESC LIMIT 1"
+            )).await;
+            assert!(
+                differential,
+                "width {width} must really exercise differential apply"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_keyless_stream_duplicate_images_preserve_numeric_scale() {
+    let db = E2eDb::new().await.with_extension().await;
+    e2e::disable_scheduler(&db).await;
+    db.execute("CREATE TABLE keyless_image_src (n numeric)")
+        .await;
+    db.execute("INSERT INTO keyless_image_src VALUES (1.0), (1.00), (1.00)")
+        .await;
+    db.create_st(
+        "keyless_image_up",
+        "SELECT n FROM keyless_image_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let query =
+        "SELECT scale(n) AS observed_scale, count(*) AS n FROM keyless_image_up GROUP BY scale(n)";
+    db.create_st("keyless_image_down", query, "1h", "DIFFERENTIAL")
+        .await;
+    for sql in [
+        "DELETE FROM keyless_image_src WHERE scale(n) = 1",
+        "INSERT INTO keyless_image_src VALUES (1.000)",
+        "UPDATE keyless_image_src SET n = 1.0000 WHERE scale(n) = 2",
+    ] {
+        db.execute(sql).await;
+        for name in ["keyless_image_up", "keyless_image_down"] {
+            db.try_execute_with_config(
+                &["SET pg_trickle.refresh_strategy = 'differential'"],
+                &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+            )
+            .await
+            .expect("apply exact signed bag");
+            let differential: bool = db.query_scalar(&format!(
+                "SELECT action='DIFFERENTIAL' AND NOT was_full_fallback FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='{name}' AND h.status='COMPLETED' ORDER BY refresh_id DESC LIMIT 1"
+            )).await;
+            assert!(differential);
+        }
+        let upstream: Vec<i32> =
+            sqlx::query_scalar("SELECT scale(n) FROM keyless_image_up ORDER BY 1")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        let source: Vec<i32> =
+            sqlx::query_scalar("SELECT scale(n) FROM keyless_image_src ORDER BY 1")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            upstream, source,
+            "identity equality must not delete the wrong physical image"
+        );
+        db.assert_st_matches_query("keyless_image_down", query)
+            .await;
+    }
+}

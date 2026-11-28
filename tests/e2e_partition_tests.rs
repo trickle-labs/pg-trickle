@@ -9236,16 +9236,39 @@ async fn test_alter_st_partition_key_serializes_concurrent_downstream_registrati
 
     // Complete downstream creation, but deliberately keep its transaction
     // uncommitted while the repartition request begins.
-    let mut create_tx = db.pool.begin().await.expect("begin dependent creation");
-    sqlx::query(
-        "SELECT pgtrickle.create_stream_table(
-            'guard_race_down',
-            'SELECT id FROM guard_race_up',
-            '1m', 'DIFFERENTIAL')",
-    )
-    .execute(&mut *create_tx)
-    .await
-    .expect("create downstream stream table inside transaction");
+    // The upstream scheduler can hold its catalog row before this fixture
+    // starts the CREATE/ALTER race. Retry only that fail-fast metadata error,
+    // in a fresh transaction; keep the successful CREATE uncommitted.
+    let create_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut create_tx = loop {
+        let mut tx = db.pool.begin().await.expect("begin dependent creation");
+        match sqlx::query(
+            "SELECT pgtrickle.create_stream_table(
+                'guard_race_down',
+                'SELECT id FROM guard_race_up',
+                '1m', 'DIFFERENTIAL')",
+        )
+        .execute(&mut *tx)
+        .await
+        {
+            Ok(_) => break tx,
+            Err(sqlx::Error::Database(e))
+                if e.code().as_deref() == Some("55P03")
+                    && e.message()
+                        .starts_with("lock timeout: upstream stream-table metadata") =>
+            {
+                tx.rollback()
+                    .await
+                    .expect("rollback failed dependent creation");
+                assert!(
+                    std::time::Instant::now() < create_deadline,
+                    "timed out acquiring upstream metadata for dependent creation"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("create downstream stream table inside transaction: {e:?}"),
+        }
+    };
     let creator_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *create_tx)
         .await

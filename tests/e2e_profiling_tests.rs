@@ -216,6 +216,7 @@ async fn test_explain_delta_plan_is_read_only() {
         .query_scalar("SELECT count(*) FROM pgtrickle.pgt_template_cache")
         .await;
 
+    // The public diagnostic format remains stable across SQL cache changes.
     assert_eq!(format_version, 1);
     assert!(!epoch.is_empty());
     assert!(has_chosen);
