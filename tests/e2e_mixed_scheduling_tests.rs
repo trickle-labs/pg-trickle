@@ -111,12 +111,12 @@ async fn configure_scheduler(db: &E2eDb, mode: ScheduleMode) {
 
 /// Refresh a stream table according to the scheduling mode.
 ///
-/// - **Manual**: calls `refresh_st()` directly.
+/// - **Manual**: retries transient lock contention until a manual refresh completes.
 /// - **Serial/Parallel**: waits for exact contents, including an already-completed refresh.
 async fn refresh_for_mode(db: &E2eDb, st_name: &str, query: &str, mode: ScheduleMode) {
     match mode {
         ScheduleMode::Manual => {
-            db.refresh_st(st_name).await;
+            db.refresh_st_with_retry(st_name).await;
         }
         ScheduleMode::Serial | ScheduleMode::Parallel => {
             // Use original fixture SQL: catalog deparsing can omit NUMERIC typmods.

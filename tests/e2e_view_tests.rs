@@ -15,7 +15,21 @@ use e2e::E2eDb;
 #[tokio::test]
 async fn test_view_inline_using_preserves_results_privileges_and_rollback() {
     let db = E2eDb::new().await.with_extension().await;
-    sqlx::raw_sql(include_str!("fixtures/view_using.sql"))
+    // Roles are cluster-wide, even when each attempt uses a fresh database.
+    // A failed attempt can commit its roles before reaching the final assertion.
+    let database_oid: i64 = db
+        .query_scalar("SELECT oid::bigint FROM pg_database WHERE datname = current_database()")
+        .await;
+    let fixture = include_str!("fixtures/view_using.sql")
+        .replace(
+            "view_using_owner",
+            &format!("view_using_owner_{database_oid}"),
+        )
+        .replace(
+            "view_using_worker",
+            &format!("view_using_worker_{database_oid}"),
+        );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(fixture))
         .execute(&db.pool)
         .await
         .expect("nested USING regression");

@@ -125,26 +125,42 @@ async fn create_department_tree(db: &E2eDb) {
         .await;
 }
 
+/// Create a chained guide fixture, retrying only explicit upstream catalog contention.
+async fn create_chained_fixture(db: &E2eDb, name: &str, query: &str, schedule: &str) {
+    let sql = format!(
+        "SELECT pgtrickle.create_stream_table('{name}', $${query}$$, \
+         '{schedule}', 'DIFFERENTIAL')"
+    );
+    // Each attempt is a standalone statement; retain all creation and data assertions.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match db.try_execute(&sql).await {
+            Ok(()) => break,
+            Err(sqlx::Error::Database(e))
+                if e.code().as_deref() == Some("55P03")
+                    && e.message()
+                        .starts_with("lock timeout: upstream stream-table metadata") =>
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out acquiring upstream metadata for fixture creation: {e}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("fixture creation failed: {e:?}"),
+        }
+    }
+}
+
 /// Create `department_stats` — LEFT JOIN + agg, NULL schedule, DIFFERENTIAL (Step 3).
 async fn create_department_stats(db: &E2eDb) {
-    // NULL schedule = CALCULATED mode (inherit from downstream).
-    // The helper only accepts &str, so use execute() directly.
-    db.execute(&format!(
-        "SELECT pgtrickle.create_stream_table(
-            'department_stats',
-            $${}$$,
-            'calculated',
-            'DIFFERENTIAL'
-        )",
-        Q_STATS
-    ))
-    .await;
+    // CALCULATED mode inherits the schedule from downstream.
+    create_chained_fixture(db, "department_stats", Q_STATS, "calculated").await;
 }
 
 /// Create `department_report` — ordinal GROUP BY 1, '1m', DIFFERENTIAL (Step 3).
 async fn create_department_report(db: &E2eDb) {
-    db.create_st("department_report", Q_REPORT, "1m", "DIFFERENTIAL")
-        .await;
+    create_chained_fixture(db, "department_report", Q_REPORT, "1m").await;
     // Keep combined and sequential mutation windows under the guide's manual control.
     #[cfg(not(feature = "light-e2e"))]
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['department_tree', 'department_stats', 'department_report'])")

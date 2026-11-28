@@ -514,6 +514,99 @@ pub fn execute_differential_refresh(
     execute_differential_refresh_with_tuning(st, prev_frontier, new_frontier, &st.runtime_tuning())
 }
 
+/// A live reconciliation is safe only when every source's current image is
+/// exactly its selected cut. Lock producers before checking the durable CDC
+/// buffers, then retain those locks through apply and reconciliation.
+fn live_sources_at_refresh_cut(
+    st: &StreamTableMeta,
+    dependencies: &[StDependency],
+    frontier: &Frontier,
+) -> Result<bool, PgTrickleError> {
+    if crate::refresh::current_graph_sources_locked() {
+        return Ok(true);
+    }
+    // Plain views are dependency/DDL metadata, not independent CDC
+    // producers. Their expanded relation leaves are registered separately.
+    // Fence and check every physical producer, not the view's nonexistent
+    // frontier or change buffer.
+    let producers = dependencies
+        .iter()
+        .filter(|dep| dep.source_type != "VIEW")
+        .collect::<Vec<_>>();
+    if producers.is_empty()
+        || producers.iter().any(|dep| {
+            dep.source_type != "STREAM_TABLE"
+                && (dep.source_type != "TABLE" || dep.cdc_mode != crate::catalog::CdcMode::Trigger)
+        })
+    {
+        return Ok(false);
+    }
+    crate::cdc::lock_stream_table_source_catalogs(st.pgt_id, dependencies)?;
+    let oids = producers
+        .iter()
+        .map(|dep| dep.source_relid)
+        .collect::<Vec<_>>();
+    crate::cdc::lock_source_relations(&oids)?;
+    let schema = crate::config::pg_trickle_change_buffer_schema();
+    for dep in producers {
+        let (buffer, key) = if dep.source_type == "STREAM_TABLE" {
+            let id = StreamTableMeta::pgt_id_for_relid(dep.source_relid).ok_or_else(|| {
+                PgTrickleError::InternalError("missing upstream stream table".into())
+            })?;
+            (
+                crate::sql_builder::qualified(&schema, &format!("changes_pgt_{id}")),
+                format!("pgt_{id}"),
+            )
+        } else {
+            (
+                crate::cdc::buffer_qualified_name_for_oid(&schema, dep.source_relid),
+                dep.source_relid.to_u32().to_string(),
+            )
+        };
+        let Some(position) = frontier.sources.get(&key) else {
+            return Ok(false);
+        };
+        // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- quoted catalog-controlled CDC buffer.
+        let at_cut = Spi::get_one_with_args::<bool>(
+            &format!("SELECT NOT EXISTS (SELECT 1 FROM {buffer} WHERE lsn > $1::pg_lsn AND action IN ('I','D','T','U'))"),
+            &[position.lsn.as_str().into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if at_cut != Some(true) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// A protected FULL rebuild is the conservative alternative to an unprovable
+/// historical source read. Do not attempt it for remote sources, whose live
+/// contents cannot be fenced by local relation locks.
+fn source_boundary_fallback(
+    st: &StreamTableMeta,
+    dependencies: &[StDependency],
+    reason: &str,
+) -> Result<(i64, i64), PgTrickleError> {
+    if dependencies
+        .iter()
+        .any(|dep| dep.source_type == "FOREIGN_TABLE")
+    {
+        return Err(PgTrickleError::SafeFrontierUnavailable {
+            context: format!("{}.{}", st.pgt_schema, st.pgt_name),
+            reason: reason.to_string(),
+        });
+    }
+    crate::refresh::ensure_full_policy(st, reason)?;
+    StreamTableMeta::set_refresh_reason(
+        st.pgt_id,
+        &crate::refresh::FullRefreshReason::new(
+            crate::refresh::FullRefreshReasonCode::ForceFullRefresh,
+            reason,
+        ),
+    )?;
+    execute_full_refresh(st)
+}
+
 fn validate_differential_refresh_inputs(
     st: &StreamTableMeta,
     prev_frontier: &Frontier,
@@ -725,7 +818,20 @@ fn parse_and_enforce_distinct_aggregate_bounds(
                     check.source_oid
                 ))
             })?;
-        let observed = with_stream_owner(st, || distinct_aggregate_max_values(&check, buffer))?;
+        let source = if crate::refresh::current_graph_sources_locked() {
+            None
+        } else {
+            Some(crate::sql_builder::qualified(
+                "pg_temp",
+                &crate::refresh::delta_stage::DeltaStage::bounded_table_name(
+                    st.pgt_id,
+                    check.source_oid,
+                ),
+            ))
+        };
+        let observed = with_stream_owner(st, || {
+            distinct_aggregate_max_values(&check, buffer, source.as_deref())
+        })?;
         if observed > max_values {
             return Err(PgTrickleError::QueryTooComplex(format!(
                 "DISTINCT_AGG_BOUNDED_STATE_FULL_FALLBACK: {}.{} {}(DISTINCT) '{}' has {observed} distinct non-NULL value(s) in an affected group, exceeding pg_trickle.distinct_agg_max_values_per_group={max_values}; falling back to FULL refresh",
@@ -740,14 +846,13 @@ fn parse_and_enforce_distinct_aggregate_bounds(
 fn distinct_aggregate_max_values(
     check: &DistinctAggBoundCheck,
     buffer: &str,
+    bounded_source: Option<&str>,
 ) -> Result<i64, PgTrickleError> {
     let q = crate::api::quote_identifier;
-    let source = format!(
-        "{}.{} AS {}",
-        q(&check.source_schema),
-        q(&check.source_table),
-        q(&check.source_alias),
-    );
+    let relation = bounded_source
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}.{}", q(&check.source_schema), q(&check.source_table)));
+    let source = format!("{} AS {}", relation, q(&check.source_alias));
     let changed_predicate = "c.action IN ('I', 'D')";
     let affected = if check.group_keys.is_empty() {
         format!("SELECT 1 WHERE EXISTS (SELECT 1 FROM {buffer} c WHERE {changed_predicate})")
@@ -1364,7 +1469,7 @@ pub fn execute_differential_refresh_with_tuning(
     let has_user_triggers = crate::cdc::has_user_triggers(st.pgt_relid)?;
 
     if !any_changes && !any_st_changes {
-        if crate::refresh::current_graph_refresh_id().is_some()
+        if crate::refresh::current_graph_sources_locked()
             && st.st_partition_key.is_none()
             && dvm::query_has_join(&effective_defining_query).unwrap_or(true)
             && !dvm::query_has_recursive_cte(&effective_defining_query).unwrap_or(false)
@@ -1437,6 +1542,32 @@ pub fn execute_differential_refresh_with_tuning(
             st.pgt_name
         );
         return execute_full_refresh(st);
+    }
+
+    // A WAL decoder may not have emitted all changes already visible in the
+    // source. Inverse reconstruction from the live image plus decoded CDC
+    // therefore cannot prove an old endpoint. Only row-local plans that read
+    // their complete captured images (no CTEs or hidden sublinks) may use
+    // that cut. Other plans establish a new protected FULL baseline.
+    if dependencies
+        .iter()
+        .any(|dep| dep.source_type == "TABLE" && dep.cdc_mode != crate::catalog::CdcMode::Trigger)
+    {
+        let row_local = with_stream_owner(st, || {
+            let parsed = dvm::parse_defining_query_full(&effective_defining_query)?;
+            Ok(dvm::is_rowwise_scan_tree(&parsed.tree)
+                && parsed.cte_registry.entries.is_empty()
+                && crate::api::defining_query_is_immutable_without_sublinks(
+                    &effective_defining_query,
+                )?)
+        })?;
+        if !row_local {
+            return source_boundary_fallback(
+                st,
+                &dependencies,
+                "asynchronous CDC cannot prove the historical source endpoint",
+            );
+        }
     }
 
     let (parsed_query, early_stage) = parse_and_enforce_distinct_aggregate_bounds(
@@ -2303,11 +2434,20 @@ pub fn execute_differential_refresh_with_tuning(
         }
     }
 
+    // A source-ahead centroid candidate cannot be repaired by reading live
+    // rows under the old cut. Retry when the complete window is available.
+    if centroid_fallback == Some("SOURCE_AHEAD_OF_FRONTIER") {
+        return Err(PgTrickleError::SafeFrontierUnavailable {
+            context: format!("{schema}.{name}"),
+            reason: "SOURCE_AHEAD_OF_FRONTIER: centroid requires a complete source endpoint".into(),
+        });
+    }
+
     let t_decision = t_decision_start.elapsed();
     // CDC staging precedes t0, so it was absent from the existing per-node
     // timing report even though it can issue several SQL statements per source.
     let staging_start = Instant::now();
-    let mut delta_stage = match early_stage {
+    let delta_stage = match early_stage {
         Some(stage) => stage,
         None => crate::refresh::delta_stage::DeltaStage::prepare(
             st,
@@ -2316,15 +2456,6 @@ pub fn execute_differential_refresh_with_tuning(
             new_frontier,
         )?,
     };
-    // A centroid SOURCE_AHEAD fallback is a current-source group rescan,
-    // not a bounded delta evaluation. If the CDC cut splits one UPDATE's
-    // D/I images, reversing only the later D image would resurrect an old
-    // vector value and make the fallback incorrect. Keep the existing
-    // live-rescan contract for this exceptional, unbound centroid path;
-    // ordinary DVM plans continue to use frontier-aligned source stages.
-    if centroid_fallback == Some("SOURCE_AHEAD_OF_FRONTIER") {
-        delta_stage.use_live_sources_for_centroid_rescan(st, &dependencies)?;
-    }
     let t_staging = staging_start.elapsed();
     let t0 = Instant::now();
 
@@ -2973,6 +3104,25 @@ pub fn execute_differential_refresh_with_tuning(
         return result;
     }
 
+    // Reconciliation evaluates the original defining query. Before any
+    // target DML, prove its live reads are at the selected source boundary.
+    // If a writer advanced a source, recompute under a new protected cut
+    // rather than overwrite a correctly bounded result with future rows.
+    if query_has_join
+        && !has_recursive_cte
+        && !resolved.is_deduplicated
+        && st.st_partition_key.is_none()
+        && !user_triggers_active
+        && !live_sources_at_refresh_cut(st, &dependencies, new_frontier)?
+    {
+        delta_stage.cleanup_bounded_views()?;
+        return source_boundary_fallback(
+            st,
+            &dependencies,
+            "phantom reconciliation requires a protected source endpoint",
+        );
+    }
+
     // ── A-3a: Append-only INSERT fast path ───────────────────────────
     // When the stream table is marked append-only (and hasn't been
     // reverted by the heuristic check above), skip MERGE entirely and
@@ -3359,10 +3509,11 @@ pub fn execute_differential_refresh_with_tuning(
         }
     };
     let use_vector_agg = vector_plan.is_some();
-    let reconciled_baseline =
-        graph_same_pass && query_has_join && super::phd1::has_reconciled_baseline(st.pgt_id)?;
+    let reconciled_baseline = crate::refresh::current_graph_sources_locked()
+        && query_has_join
+        && super::phd1::has_reconciled_baseline(st.pgt_id)?;
     let exact_pointwise_scans = super::phd1::exact_rowwise_join_scan_count(&parsed_query.tree);
-    let exact_pointwise = graph_same_pass
+    let exact_pointwise = crate::refresh::current_graph_sources_locked()
         && (query_has_join || !resolved.is_deduplicated)
         && use_explicit_dml
         && !user_triggers_active
@@ -3389,7 +3540,7 @@ pub fn execute_differential_refresh_with_tuning(
     let exact_rowwise_join = reconciled_baseline && exact_pointwise;
     // Reuse the mandatory comparison instead of paying for a large join delta too.
     // Upstream stream tables are fixed by this graph pass's shared safe boundary.
-    let reconciliation_delta = if graph_same_pass
+    let reconciliation_delta = if crate::refresh::current_graph_sources_locked()
         && query_has_join
         && (resolved.is_deduplicated || reconciled_baseline)
         && use_explicit_dml

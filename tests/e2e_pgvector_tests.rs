@@ -4581,6 +4581,11 @@ async fn test_centroid_source_ahead_fallback_is_reported() {
     db.execute("UPDATE centroid_ahead_live_src SET v = '[3,4]' WHERE id = 1")
         .await;
     let buffer: String = db.query_scalar("SELECT format('%I.%I', 'pgtrickle_changes', 'changes_' || COALESCE(source_stable_name, source_relid::text)) FROM pgtrickle.pgt_change_tracking WHERE source_relid = 'centroid_ahead_live_src'::regclass::oid").await;
+    let original_lsn: String = db
+        .query_scalar(&format!(
+            "SELECT lsn::text FROM {buffer} WHERE action = 'D'"
+        ))
+        .await;
     let moved: i64 = db.query_scalar(&format!("WITH moved AS (UPDATE {buffer} SET lsn = 'FF/FFFFFFFF'::pg_lsn WHERE action = 'D' RETURNING 1) SELECT count(*)::bigint FROM moved")).await;
     assert_eq!(
         moved, 1,
@@ -4592,25 +4597,43 @@ async fn test_centroid_source_ahead_fallback_is_reported() {
         "the injected ahead row must not itself unbind state"
     );
     let before: String = db.query_scalar("SELECT format('state=%s stream_generation=%s frontier=%s', row_to_json(c), t.contract_generation, t.frontier) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
-    db.execute_seq(&[
+    let settings = [
         "SET pg_trickle.enable_vector_agg = on",
         "SET pg_trickle.enable_centroid_state = on",
         "SET pg_trickle.refresh_strategy = 'differential'",
-        "SELECT pgtrickle.refresh_stream_table('centroid_ahead_live_st')",
-    ])
-    .await;
-    let safe_and_reported: bool = db.query_scalar("SELECT c.baseline_frontier IS NULL AND h.merge_strategy_used <> 'centroid_algebraic' AND h.refresh_reason_detail::jsonb->'centroid_fallback'->>'reason' = 'SOURCE_AHEAD_OF_FRONTIER' AND s.centroid::text = '[3,4]' FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_ahead_live_st s WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
-    let detail: String = db.query_scalar("SELECT format('baseline=%s strategy=%s detail=%s centroid=%s', coalesce(c.baseline_frontier::text, 'null'), h.merge_strategy_used, coalesce(h.refresh_reason_detail, 'null'), s.centroid::text) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) JOIN LATERAL (SELECT * FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h ON true CROSS JOIN centroid_ahead_live_st s WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
-    let history: String = db.query_scalar("SELECT COALESCE(string_agg(format('id=%s by=%s status=%s detail=%s', h.refresh_id, h.initiated_by, h.status, h.refresh_reason_detail), E'\\n' ORDER BY h.refresh_id), '') FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
-    let after: String = db.query_scalar("SELECT format('state=%s stream_generation=%s frontier=%s', row_to_json(c), t.contract_generation, t.frontier) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
+    ];
+    let error = db
+        .try_execute_with_config(
+            &settings,
+            "SELECT pgtrickle.refresh_stream_table('centroid_ahead_live_st')",
+        )
+        .await
+        .expect_err("an incomplete centroid cut must be rejected");
     assert!(
-        safe_and_reported,
-        "source-ahead fallback must remain correct, unbound, and observable: {detail}\nbefore: {before}\nafter: {after}\n{history}"
+        error.to_string().contains("SOURCE_AHEAD_OF_FRONTIER"),
+        "{error}"
     );
-    let evidence: String = db.query_scalar("SELECT h.refresh_reason_detail FROM pgtrickle.pgt_stream_tables t CROSS JOIN LATERAL (SELECT refresh_reason_detail FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = t.pgt_id AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) h WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
-    let evidence: serde_json::Value =
-        serde_json::from_str(&evidence).expect("parse fallback evidence");
-    assert!(evidence["input_delta_rows_may_be_incomplete"].is_boolean());
+    let after: String = db.query_scalar("SELECT format('state=%s stream_generation=%s frontier=%s', row_to_json(c), t.contract_generation, t.frontier) FROM pgtrickle.pgt_centroid_states c JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) WHERE t.pgt_relid = 'centroid_ahead_live_st'::regclass").await;
+    assert_eq!(
+        before, after,
+        "the failed attempt must not advance either frontier"
+    );
+    let old: String = db
+        .query_scalar("SELECT centroid::text FROM centroid_ahead_live_st")
+        .await;
+    assert_eq!(old, "[1,2]");
+    db.execute(&format!("UPDATE {buffer} SET lsn = '{original_lsn}'::pg_lsn WHERE action = 'D' AND lsn = 'FF/FFFFFFFF'::pg_lsn")).await;
+    db.try_execute_with_config(
+        &settings,
+        "SELECT pgtrickle.refresh_stream_table('centroid_ahead_live_st')",
+    )
+    .await
+    .expect("complete window can be replayed");
+    db.assert_st_matches_query(
+        "centroid_ahead_live_st",
+        "SELECT grp, avg(v)::vector(2) AS centroid FROM centroid_ahead_live_src GROUP BY grp",
+    )
+    .await;
 }
 
 #[tokio::test]

@@ -846,6 +846,12 @@ fn build_source_boundary(
     for member in members {
         for dependency in StDependency::get_for_st(member.pgt_id)? {
             if dependency.source_type == "TABLE" {
+                if dependency.cdc_mode != crate::catalog::CdcMode::Trigger {
+                    return Err(integration_error(
+                        "PGT_EXT_BOUNDARY_UNAVAILABLE",
+                        "graph boundary requires synchronous CDC; WAL and transitioning sources cannot prove a shared live cut",
+                    ));
+                }
                 table_oids.insert(dependency.source_relid.to_u32());
             }
         }
